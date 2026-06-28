@@ -2,6 +2,9 @@
 
 use super::*;
 
+use std::future::Future;
+
+use restate_sdk::context::macro_support::SealedDurableFuture;
 use serde_json::json;
 
 struct ActivePlanTrialWait<F> {
@@ -549,22 +552,61 @@ async fn wait_for_plan_trial_completion<F>(
     active_waits: &mut Vec<ActivePlanTrialWait<F>>,
 ) -> Result<(), HandlerError>
 where
-    F: restate_sdk::context::DurableFuture<Output = Result<String, TerminalError>>,
+    F: restate_sdk::context::DurableFuture<Output = Result<String, TerminalError>>
+        + SealedDurableFuture,
 {
-    let wait = active_waits.remove(0);
-    restate_sdk::select! {
-        trial_key = wait.future => {
-            let trial_key = trial_key?;
-            completion_signal_matches_trial(&wait.trial_key, &trial_key)
-        },
-        _ = ctx.sleep(PLAN_COMPLETION_TIMEOUT) => {
-            Err(TerminalError::new(format!(
-                "experiment plan made no child-trial progress for {} seconds while waiting for {}",
-                PLAN_COMPLETION_TIMEOUT.as_secs(),
-                wait.trial_key
-            )).into())
-        }
+    if active_waits.is_empty() {
+        return Ok(());
     }
+
+    let active_count = active_waits.len();
+    let timeout = ctx.sleep(PLAN_CHILD_COMPLETION_WAIT_TIMEOUT);
+    let inner_context = timeout.inner_context();
+    let mut handles = active_waits
+        .iter()
+        .map(|wait| wait.future.handle())
+        .collect::<Vec<_>>();
+    handles.push(timeout.handle());
+
+    let ready_index = inner_context.select(handles).await?;
+    if ready_index == active_count {
+        timeout.await?;
+        return Err(TerminalError::new(format!(
+            "experiment plan made no child-trial progress for {} seconds while waiting for {} active child trial(s)",
+            PLAN_CHILD_COMPLETION_WAIT_TIMEOUT.as_secs(),
+            active_count
+        ))
+        .into());
+    }
+    let trial_key = resolve_selected_plan_trial_wait(active_waits, ready_index).await?;
+    remove_active_plan_wait_by_trial_key(active_waits, &trial_key);
+    Ok(())
+}
+
+async fn resolve_selected_plan_trial_wait<F>(
+    active_waits: &mut Vec<ActivePlanTrialWait<F>>,
+    ready_index: usize,
+) -> Result<String, HandlerError>
+where
+    F: Future<Output = Result<String, TerminalError>>,
+{
+    if ready_index >= active_waits.len() {
+        return Err(TerminalError::new(format!(
+            "experiment plan child-trial select returned out-of-range index {ready_index}"
+        ))
+        .into());
+    }
+    let wait = active_waits.remove(ready_index);
+    let trial_key = wait.future.await?;
+    completion_signal_matches_trial(&wait.trial_key, &trial_key)?;
+    Ok(trial_key)
+}
+
+fn remove_active_plan_wait_by_trial_key<F>(
+    active_waits: &mut Vec<ActivePlanTrialWait<F>>,
+    trial_key: &str,
+) {
+    active_waits.retain(|wait| wait.trial_key != trial_key);
 }
 
 fn completion_signal_matches_trial(expected: &str, actual: &str) -> Result<(), HandlerError> {
@@ -599,6 +641,7 @@ pub(super) fn plan_revision_uid_from_run(run: &ExperimentRunRecord) -> Option<Uu
 #[cfg(test)]
 mod tests {
     use std::future::Future;
+    use std::pin::Pin;
     use std::time::{Duration, Instant};
 
     use super::*;
@@ -612,6 +655,9 @@ mod tests {
         let actual_trial_key = wait.future.await?;
         completion_signal_matches_trial(&wait.trial_key, &actual_trial_key)
     }
+
+    type BoxedTrialWaitFuture =
+        Pin<Box<dyn Future<Output = Result<String, TerminalError>> + Send + 'static>>;
 
     #[tokio::test]
     async fn plan_trial_completion_awakeable_resolves_before_legacy_poll_interval_offline() {
@@ -633,6 +679,59 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "completion signal path waited like the old polling loop"
         );
+    }
+
+    #[tokio::test]
+    async fn plan_trial_fan_in_accepts_later_child_before_first_child_offline() {
+        // Pins: plan expansion treats any active child completion as progress.
+        let mut waits: Vec<ActivePlanTrialWait<BoxedTrialWaitFuture>> = vec![
+            ActivePlanTrialWait {
+                trial_key: "trial-slow".to_string(),
+                future: Box::pin(std::future::pending()),
+            },
+            ActivePlanTrialWait {
+                trial_key: "trial-fast".to_string(),
+                future: Box::pin(async { Ok::<_, TerminalError>("trial-fast".to_string()) }),
+            },
+        ];
+        let started = Instant::now();
+
+        let completed_trial_key = tokio::time::timeout(
+            Duration::from_millis(100),
+            resolve_selected_plan_trial_wait(&mut waits, 1),
+        )
+        .await
+        .expect("later child completion should not wait on index zero")
+        .expect("selected child completion should resolve");
+        remove_active_plan_wait_by_trial_key(&mut waits, &completed_trial_key);
+
+        assert_eq!(completed_trial_key, "trial-fast");
+        assert_eq!(waits.len(), 1);
+        assert_eq!(waits[0].trial_key, "trial-slow");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "fan-in path waited like the old first-child-only wait"
+        );
+    }
+
+    #[test]
+    fn completed_plan_trial_waits_are_removed_by_trial_key_offline() {
+        // Pins: parent cleanup removes completed child awakeables by trial key.
+        let mut waits: Vec<ActivePlanTrialWait<BoxedTrialWaitFuture>> = vec![
+            ActivePlanTrialWait {
+                trial_key: "trial-a".to_string(),
+                future: Box::pin(std::future::pending()),
+            },
+            ActivePlanTrialWait {
+                trial_key: "trial-b".to_string(),
+                future: Box::pin(std::future::pending()),
+            },
+        ];
+
+        remove_active_plan_wait_by_trial_key(&mut waits, "trial-b");
+
+        assert_eq!(waits.len(), 1);
+        assert_eq!(waits[0].trial_key, "trial-a");
     }
 
     #[test]

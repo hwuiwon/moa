@@ -701,12 +701,15 @@ where
                 created_at: Utc::now(),
             }
         };
-        let version = match self
+        let (version, claim_token) = match self
             .repository
             .claim_document_version_ingestion(sync_run_uid, version)
             .await?
         {
-            DocumentVersionIngestionClaim::Claimed(version) => version,
+            DocumentVersionIngestionClaim::Claimed {
+                version,
+                claim_token,
+            } => (version, claim_token),
             DocumentVersionIngestionClaim::AlreadyInProgress(_version)
             | DocumentVersionIngestionClaim::AlreadyCompleted(_version) => {
                 self.record_step(
@@ -743,11 +746,11 @@ where
             .await;
         if persisted.is_ok() {
             self.repository
-                .complete_document_version_ingestion(sync_run_uid, version_uid)
+                .complete_document_version_ingestion(sync_run_uid, version_uid, claim_token)
                 .await?;
         } else {
             self.repository
-                .fail_document_version_ingestion(sync_run_uid, version_uid)
+                .fail_document_version_ingestion(sync_run_uid, version_uid, claim_token)
                 .await?;
         }
         persisted

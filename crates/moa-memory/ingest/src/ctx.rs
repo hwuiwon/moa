@@ -457,15 +457,19 @@ pub fn install_runtime(
         None => match INGEST_RUNTIME.set(runtime) {
             Ok(()) => Ok(()),
             Err(runtime) => {
-                let installed = INGEST_RUNTIME
-                    .get()
-                    .expect("ingestion runtime should be present after OnceLock set race");
+                let requested = runtime.summary();
+                let Some(installed) = INGEST_RUNTIME.get() else {
+                    return Err(IngestRuntimeInstallError::IncompatibleRuntime {
+                        installed: "<missing after OnceLock set race>".to_string(),
+                        requested,
+                    });
+                };
                 if installed.is_compatible_with(&runtime) {
                     Ok(())
                 } else {
                     Err(IngestRuntimeInstallError::IncompatibleRuntime {
                         installed: installed.summary(),
-                        requested: runtime.summary(),
+                        requested,
                     })
                 }
             }

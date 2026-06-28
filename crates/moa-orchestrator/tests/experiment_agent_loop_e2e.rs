@@ -13,6 +13,9 @@ use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use moa_core::traits::Identity;
+use moa_core::wire::artifacts::{
+    ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest, ArtifactPublishResponse,
+};
 use moa_core::wire::experiments::{
     ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
     ExperimentRunStatusResponse,
@@ -22,7 +25,7 @@ use moa_core::wire::skills::{
 };
 use moa_core::{ActionRuleScope, Event, EventRange, EventRecord, StoragePartitionId, TenantId};
 use moa_test_support::postgres::test_database_url;
-use serde_json::json;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::time::sleep;
 use uuid::Uuid;
@@ -127,8 +130,23 @@ async fn agent_loop_experiment_creates_session_and_persists_scripted_response() 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
         import_support_skill(&client, ingress, &identity, &storage_partition_id).await?;
+        let agent = import_and_publish_artifact(
+            &client,
+            ingress,
+            &identity,
+            &storage_partition_id,
+            support_agent_source(),
+        )
+        .await?;
 
-        let run = run_agent_loop_experiment(&client, ingress, &identity, &storage_partition_id).await?;
+        let run = run_agent_loop_experiment(
+            &client,
+            ingress,
+            &identity,
+            &storage_partition_id,
+            agent.revision_uid,
+        )
+        .await?;
         assert_eq!(run.status, "accepted");
         assert_ne!(run.score_run_id, Uuid::nil());
         assert!(
@@ -196,6 +214,7 @@ async fn run_agent_loop_experiment(
     ingress: &str,
     identity: &Identity,
     storage_partition_id: &StoragePartitionId,
+    agent_revision_uid: Uuid,
 ) -> Result<ExperimentRunResponse> {
     let request = ExperimentRunRequest {
         tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
@@ -205,6 +224,7 @@ async fn run_agent_loop_experiment(
             "kind": "agent_loop",
             "prompt": "A customer says soup spilled across the delivery bag. They have a clear photo and ask whether we can replace the order.",
             "session_id": null,
+            "agent": { "revision_uid": agent_revision_uid },
             "model": "scripted-loadtest",
             "attachments": []
         })),
@@ -229,6 +249,57 @@ async fn run_agent_loop_experiment(
         .json::<ExperimentRunResponse>()
         .await
         .context("deserialize experiment run response")
+}
+
+async fn import_and_publish_artifact(
+    client: &reqwest::Client,
+    ingress: &str,
+    identity: &Identity,
+    storage_partition_id: &StoragePartitionId,
+    source_text: &str,
+) -> Result<ArtifactPublishResponse> {
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
+    };
+    let import_request = ArtifactImportRequest {
+        scope,
+        source_format: "yaml".to_string(),
+        source_text: source_text.to_string(),
+        files: Vec::new(),
+    };
+    let imported = post_json_with_identity(
+        client,
+        ingress,
+        "Artifacts",
+        "import",
+        identity,
+        &import_request,
+    )
+    .await?
+    .json::<ArtifactImportResponse>()
+    .await
+    .context("deserialize artifact import response")?;
+    assert_eq!(imported.status, "draft");
+
+    let publish_request = ArtifactPublishRequest {
+        scope,
+        revision_uid: imported.revision_uid,
+    };
+    let published = post_json_with_identity(
+        client,
+        ingress,
+        "Artifacts",
+        "publish",
+        identity,
+        &publish_request,
+    )
+    .await?
+    .json::<ArtifactPublishResponse>()
+    .await
+    .context("deserialize artifact publish response")?;
+    assert_eq!(published.status, "published");
+    assert_validation_report_has_no_errors(&published.validation_report)?;
+    Ok(published)
 }
 
 async fn wait_for_experiment_status(
@@ -383,6 +454,17 @@ fn summarize_events(events: &[EventRecord]) -> String {
         .join(", ")
 }
 
+fn assert_validation_report_has_no_errors(report: &Value) -> Result<()> {
+    let Some(errors) = report.get("errors").and_then(Value::as_array) else {
+        bail!("validation report did not include an errors array: {report}");
+    };
+    if errors.is_empty() {
+        return Ok(());
+    }
+
+    bail!("published artifact had validation errors: {errors:?}")
+}
+
 fn write_scripted_fixture(path: &Path, final_text: &str) -> Result<()> {
     let fixture = json!({
         "default": {
@@ -450,4 +532,30 @@ When there is a clear customer photo and an order id, recommend a replacement or
         source_uri: Some("test://experiment-agent-loop/delivery-support".to_string()),
         metadata: json!({}),
     }
+}
+
+fn support_agent_source() -> &'static str {
+    r#"
+api_version: moa.artifact/v1
+kind: agent
+metadata:
+  name: delivery-support-agent
+  description: Test support agent for deterministic experiment E2E coverage.
+status: draft
+definition:
+  type: agent
+  spec:
+    display_name: Delivery Support Agent
+    purpose:
+      summary: Resolve damaged or spilled delivery support requests.
+      default_task: Read the delivery support skill and recommend the next support action.
+      expected_outputs:
+        - support next step
+    instruction_policy:
+      system_prompt: You are a delivery support agent. Use available support instructions before giving a resolution.
+    tool_policy:
+      mode: allowlist
+      tools:
+        - file_read
+"#
 }

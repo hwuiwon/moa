@@ -4,23 +4,26 @@
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::config::ComplianceConfig;
 use moa_core::wire::lineage::{
-    LineageExplainRequest, LineageExplainResponse, LineageQueryRequest, LineageQueryResponse,
-    LineageVerifyRequest, LineageVerifyResponse,
+    LineageExplainRequest, LineageExplainResponse, LineageQueryOrder, LineageQueryRequest,
+    LineageQueryResponse, LineageRecordView, LineageVerifyRequest, LineageVerifyResponse,
 };
-use moa_core::{StoragePartitionId, TenantId};
+use moa_core::{RlsContext, SessionId, StoragePartitionId, TenantId, UserId};
 use moa_lineage_audit::SigningKey;
 use moa_lineage_audit::admin as lineage_audit_admin;
 use moa_lineage_sink::admin as lineage_sink_admin;
+use sqlx::{Postgres, QueryBuilder, Row};
 
 use super::{
-    AppState, authenticate_direct_request, load_moa_config, parse_json_body_with_tenant,
-    require_direct_authz, route_error,
+    AppState, authenticate_direct_request, parse_json_body_with_tenant, require_direct_authz,
+    route_error,
 };
+
+const LINEAGE_QUERY_MAX_LIMIT: u32 = 1000;
 
 /// Handles direct lineage explanation reads at the edge.
 #[tracing::instrument(skip(state, headers, body))]
@@ -56,7 +59,7 @@ pub async fn handle_explain(
     }
 }
 
-/// Handles direct lineage SQL reads at the edge.
+/// Handles direct typed lineage reads at the edge.
 #[tracing::instrument(skip(state, headers, body))]
 pub async fn handle_query(
     State(state): State<AppState>,
@@ -116,42 +119,10 @@ pub async fn handle_verify(
     {
         return response;
     }
-    let config = match load_moa_config() {
-        Ok(config) => config.compliance,
-        Err(response) => return response,
-    };
-    match verify_inner(&state.pool, request, config).await {
+    match verify_inner(&state.pool, request, state.config.compliance.clone()).await {
         Ok(response) => Json(response).into_response(),
         Err(response) => response,
     }
-}
-
-/// Rejects lineage export on the direct read surface.
-#[tracing::instrument(skip(state, headers))]
-pub async fn handle_export_deferred(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = authenticate_direct_request(&state, &headers, "/v1/lineage/export").await
-    {
-        return response;
-    }
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        "lineage export is not a direct read handler",
-    )
-        .into_response()
-}
-
-/// Rejects lineage erase on the direct read surface.
-#[tracing::instrument(skip(state, headers))]
-pub async fn handle_erase_deferred(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = authenticate_direct_request(&state, &headers, "/v1/lineage/erase").await
-    {
-        return response;
-    }
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        "lineage erase is not a direct read handler",
-    )
-        .into_response()
 }
 
 async fn explain_inner(
@@ -172,32 +143,21 @@ async fn query_inner(
     pool: &sqlx::PgPool,
     request: LineageQueryRequest,
 ) -> Result<LineageQueryResponse, Response> {
-    if request.cold {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "cold lineage query is not supported until a tenant-admin cold-object API exists",
-        )
-            .into_response());
-    }
-    let prepared = prepare_lineage_sql(&request.sql)?;
     let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
-    let mut tx = pool.begin().await.map_err(route_error)?;
+    let mut tx = moa_db::ScopedConn::begin(pool, &RlsContext::tenant(request.tenant_id))
+        .await
+        .map_err(route_error)?;
     sqlx::query("SET TRANSACTION READ ONLY")
-        .execute(&mut *tx)
+        .execute(tx.as_mut())
         .await
         .map_err(route_error)?;
     sqlx::query("SET LOCAL statement_timeout = '5s'")
-        .execute(&mut *tx)
+        .execute(tx.as_mut())
         .await
         .map_err(route_error)?;
-    let rows = lineage_sink_admin::execute_prepared_lineage_query(
-        &mut tx,
-        &prepared,
-        &storage_partition_id,
-        &request.since,
-    )
-    .await
-    .map_err(route_error)?;
+    let rows = execute_typed_lineage_query(tx.as_mut(), &request, &storage_partition_id)
+        .await
+        .map_err(route_error)?;
     tx.commit().await.map_err(route_error)?;
     Ok(LineageQueryResponse { rows })
 }
@@ -265,42 +225,79 @@ async fn verify_inner(
     })
 }
 
-/// Prepares a read-only logical lineage SQL query against a scoped hot-store subquery.
-pub fn prepare_lineage_sql(sql: &str) -> Result<String, Response> {
-    let trimmed = sql.trim();
-    let lower = trimmed.to_ascii_lowercase();
-    if !(lower.starts_with("select ") || lower.starts_with("with ")) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "only SELECT or WITH queries are permitted",
-        )
-            .into_response());
-    }
-    if trimmed.contains(';') {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "semicolon-separated statements are not permitted",
-        )
-            .into_response());
-    }
-    let Some(idx) = lower.find("from lineage") else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "query must use `FROM lineage` as the source table",
-        )
-            .into_response());
-    };
-    let replacement = "FROM (SELECT * FROM analytics.turn_lineage \
-        WHERE storage_partition_id = $1 AND ts > now() - ($2::text)::interval) lineage";
-    let mut prepared = String::with_capacity(trimmed.len() + replacement.len());
-    prepared.push_str(&trimmed[..idx]);
-    prepared.push_str(replacement);
-    prepared.push_str(&trimmed[idx + "from lineage".len()..]);
-    Ok(prepared)
-}
-
 fn storage_partition_id_for_tenant(tenant_id: TenantId) -> StoragePartitionId {
     StoragePartitionId::for_tenant(tenant_id)
+}
+
+async fn execute_typed_lineage_query(
+    conn: &mut sqlx::PgConnection,
+    request: &LineageQueryRequest,
+    storage_partition_id: &StoragePartitionId,
+) -> Result<Vec<LineageRecordView>, sqlx::Error> {
+    let mut query = QueryBuilder::<Postgres>::new(
+        "SELECT turn_id, session_id, user_id, storage_partition_id, ts, record_kind, payload, answer_text \
+         FROM analytics.turn_lineage WHERE storage_partition_id = ",
+    );
+    query.push_bind(storage_partition_id.as_str());
+    if let Some(turn_id) = request.filters.turn_id {
+        query.push(" AND turn_id = ");
+        query.push_bind(turn_id);
+    }
+    if let Some(session_id) = request.filters.session_id {
+        query.push(" AND session_id = ");
+        query.push_bind(session_id.0);
+    }
+    if let Some(user_id) = request.filters.user_id.as_ref() {
+        query.push(" AND user_id = ");
+        query.push_bind(user_id.as_str());
+    }
+    if let Some(record_kind) = request.filters.record_kind {
+        query.push(" AND record_kind = ");
+        query.push_bind(record_kind);
+    }
+    if let Some(from_time) = request.filters.from_time {
+        query.push(" AND ts >= ");
+        query.push_bind(from_time);
+    }
+    if let Some(to_time) = request.filters.to_time {
+        query.push(" AND ts <= ");
+        query.push_bind(to_time);
+    }
+    match request.order {
+        LineageQueryOrder::TimestampDesc => {
+            query.push(" ORDER BY ts DESC, record_kind ASC, turn_id ASC");
+        }
+        LineageQueryOrder::TimestampAsc => {
+            query.push(" ORDER BY ts ASC, record_kind ASC, turn_id ASC");
+        }
+    }
+    query.push(" LIMIT ");
+    query.push_bind(normalized_query_limit(request.limit));
+
+    let rows = query.build().fetch_all(conn).await?;
+    rows.into_iter()
+        .map(|row| lineage_record_from_row(row, request.tenant_id))
+        .collect()
+}
+
+fn normalized_query_limit(limit: u32) -> i64 {
+    i64::from(limit.clamp(1, LINEAGE_QUERY_MAX_LIMIT))
+}
+
+fn lineage_record_from_row(
+    row: sqlx::postgres::PgRow,
+    tenant_id: TenantId,
+) -> Result<LineageRecordView, sqlx::Error> {
+    Ok(LineageRecordView {
+        turn_id: row.try_get("turn_id")?,
+        session_id: Some(SessionId(row.try_get("session_id")?)),
+        tenant_id: Some(tenant_id),
+        user_id: Some(UserId::new(row.try_get::<String, _>("user_id")?)),
+        ts: row.try_get("ts")?,
+        record_kind: row.try_get("record_kind")?,
+        payload: row.try_get("payload")?,
+        summary: row.try_get("answer_text")?,
+    })
 }
 
 fn configured_audit_root_signing_key(config: &ComplianceConfig) -> Result<SigningKey, Response> {
@@ -368,29 +365,13 @@ fn usize_to_u64(value: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::StatusCode;
-
-    use super::prepare_lineage_sql;
+    use super::normalized_query_limit;
 
     #[test]
-    fn prepare_lineage_sql_scopes_logical_source_to_tenant_and_since() {
-        // Pins: direct lineage query rewrites the logical source to a tenant-scoped hot-store subquery.
-        let sql = prepare_lineage_sql("SELECT count(*) FROM lineage WHERE record_kind = 4")
-            .expect("lineage query should prepare");
-
-        assert!(sql.contains("analytics.turn_lineage"));
-        assert!(sql.contains("storage_partition_id = $1"));
-        assert!(sql.contains("($2::text)::interval"));
-        assert!(sql.contains("record_kind = 4"));
-    }
-
-    #[test]
-    fn prepare_lineage_sql_rejects_mutating_statement() {
-        // Pins: direct lineage query rejects mutating SQL before any database query runs.
-        let error = prepare_lineage_sql("DELETE FROM lineage")
-            .expect_err("mutating lineage query should fail");
-
-        let status = error.status();
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+    fn normalized_query_limit_clamps_to_safe_range() {
+        // Pins: lineage query limits stay bounded before being bound into SQL.
+        assert_eq!(normalized_query_limit(0), 1);
+        assert_eq!(normalized_query_limit(100), 100);
+        assert_eq!(normalized_query_limit(10_000), 1000);
     }
 }

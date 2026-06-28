@@ -1,7 +1,5 @@
 //! End-to-end coverage for behavior-lab trial execution through Restate.
 
-#![cfg(feature = "integration")]
-
 use std::{
     fs,
     path::Path,
@@ -15,7 +13,9 @@ use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_artifacts::validation::validate_for_status;
 use moa_core::{
-    ActionRuleScope, Event, EventRange, EventRecord, ModelId, SessionId, TenantId, traits::Identity,
+    ActionRuleScope, Event, EventRange, EventRecord, ModelId, SessionId, SessionMeta, TenantId,
+    traits::Identity,
+    wire::turn::{TurnOutcome, TurnOutcomeKind},
 };
 use moa_experiments::{
     model::{
@@ -24,14 +24,22 @@ use moa_experiments::{
     },
     store::ExperimentStore,
 };
+use moa_orchestrator::objects::session::{AttachSessionTurnWaiterInput, SessionClient};
 use moa_orchestrator::workflows::experiment_trial_run::{
-    ExperimentTrialRunStatusResponse, ExperimentTrialRunWorkflowRequest, trial_workflow_key,
+    ExperimentTrialRunStatusRequest, ExperimentTrialRunStatusResponse,
+    ExperimentTrialRunWorkflowRequest, trial_workflow_key,
 };
 use moa_test_support::postgres::test_database_url;
+use restate_sdk::prelude::{
+    ContextAwakeables, ContextClient, ContextReadState, ContextWriteState, Endpoint, HandlerResult,
+    HttpServer, Json, SharedWorkflowContext, TerminalError, WorkflowContext,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tempfile::TempDir;
-use tokio::time::sleep;
+use tokio::{net::TcpListener, task::JoinHandle, time::sleep};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::support::{
@@ -70,6 +78,64 @@ mod support {
     }
 }
 
+const K_PROBE_ATTACHED: &str = "attached";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionTurnWaiterProbeInput {
+    session_id: SessionId,
+    turn_id: String,
+}
+
+#[restate_sdk::workflow]
+trait SessionTurnWaiterProbe {
+    async fn run(input: Json<SessionTurnWaiterProbeInput>) -> HandlerResult<Json<TurnOutcome>>;
+
+    #[shared]
+    async fn attached() -> HandlerResult<Json<bool>>;
+}
+
+struct SessionTurnWaiterProbeImpl;
+
+impl SessionTurnWaiterProbe for SessionTurnWaiterProbeImpl {
+    async fn run(
+        &self,
+        ctx: WorkflowContext<'_>,
+        input: Json<SessionTurnWaiterProbeInput>,
+    ) -> HandlerResult<Json<TurnOutcome>> {
+        let input = input.into_inner();
+        let (awakeable_id, completion) = ctx.awakeable::<String>();
+        let attached = ctx
+            .object_client::<SessionClient>(input.session_id.to_string())
+            .attach_turn_waiter(Json::from(AttachSessionTurnWaiterInput {
+                turn_id: input.turn_id,
+                awakeable_id,
+            }))
+            .call()
+            .await?
+            .into_inner();
+        ctx.set(K_PROBE_ATTACHED, Json::from(true));
+
+        if let Some(outcome) = attached.outcome {
+            return Ok(Json::from(outcome));
+        }
+
+        let payload = completion.await?;
+        let outcome = serde_json::from_str::<TurnOutcome>(&payload).map_err(|error| {
+            TerminalError::new(format!("deserialize session turn waiter outcome: {error}"))
+        })?;
+        Ok(Json::from(outcome))
+    }
+
+    async fn attached(&self, ctx: SharedWorkflowContext<'_>) -> HandlerResult<Json<bool>> {
+        let attached = ctx
+            .get::<Json<bool>>(K_PROBE_ATTACHED)
+            .await?
+            .map(Json::into_inner)
+            .unwrap_or(false);
+        Ok(Json::from(attached))
+    }
+}
+
 fn spawn_orchestrator(
     ports: OrchestratorPorts,
     memory_dir: &TempDir,
@@ -101,6 +167,66 @@ fn spawn_orchestrator(
         .stderr(Stdio::null())
         .spawn()
         .context("spawn moa-orchestrator binary for trial e2e")
+}
+
+fn spawn_orchestrator_without_provider_override(
+    ports: OrchestratorPorts,
+    memory_dir: &TempDir,
+    sandbox_dir: &TempDir,
+    database_url: &str,
+) -> Result<Child> {
+    Command::new(env!("CARGO_BIN_EXE_moa-orchestrator-bin"))
+        .arg("--port")
+        .arg(ports.restate.to_string())
+        .arg("--health-port")
+        .arg(ports.health.to_string())
+        .arg("--scim-port")
+        .arg(ports.scim.to_string())
+        .env("MOA_DATABASE_URL", database_url)
+        .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
+        .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
+        .env("MOA_LOCAL_DOCKER_ENABLED", "false")
+        .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
+        .env("MOA_SKIP_FGA", "true")
+        .env_remove("MOA_PROVIDERS_OVERRIDE")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("GOOGLE_API_KEY")
+        .env_remove("COHERE_API_KEY")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("spawn moa-orchestrator binary for session waiter e2e")
+}
+
+struct ProbeEndpoint {
+    cancel: CancellationToken,
+    handle: JoinHandle<()>,
+}
+
+impl ProbeEndpoint {
+    async fn stop(self) {
+        self.cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.handle).await;
+    }
+}
+
+async fn spawn_session_turn_waiter_probe(port: u16) -> Result<ProbeEndpoint> {
+    let listener = TcpListener::bind(("0.0.0.0", port))
+        .await
+        .with_context(|| format!("bind session turn waiter probe endpoint on port {port}"))?;
+    let cancel = CancellationToken::new();
+    let shutdown = cancel.clone();
+    let handle = tokio::spawn(async move {
+        HttpServer::new(
+            Endpoint::builder()
+                .bind(SessionTurnWaiterProbeImpl.serve())
+                .build(),
+        )
+        .serve_with_cancel(listener, shutdown.cancelled_owned())
+        .await;
+    });
+    Ok(ProbeEndpoint { cancel, handle })
 }
 
 #[tokio::test]
@@ -135,17 +261,18 @@ async fn experiment_trial_run_drives_multiturn_scripted_agent_loop() -> Result<(
             .await
             .context("connect to test Postgres")?;
         let store = ExperimentStore::new(pool.clone());
+        let agent_revision_uid = publish_trial_agent(&pool, &scope).await?;
         let run = store
-            .insert_run(&scope, new_parent_run(&identity))
+            .insert_run(&scope, new_parent_run(&identity, agent_revision_uid))
             .await
             .context("seed parent experiment run")?;
-        let plan_revision_uid = publish_trial_plan(&pool, &scope).await?;
+        let plan_revision_uid = publish_trial_plan(&pool, &scope, agent_revision_uid).await?;
         let trial = new_trial(run.run_uid, plan_revision_uid);
         let trial_key = trial.trial_key.clone();
         let workflow_request = ExperimentTrialRunWorkflowRequest {
             tenant_id,
             trial: trial.clone(),
-            target: agent_loop_target(),
+            target: agent_loop_target(agent_revision_uid),
             variant: baseline_variant(),
             identity: identity.clone(),
             completion_awakeable_id: None,
@@ -199,13 +326,14 @@ async fn experiment_trial_run_drives_multiturn_scripted_agent_loop() -> Result<(
             "simulator trial fixture should not expose or exercise target tools"
         );
 
-        let retry = run_trial_workflow(
+        let retry = read_trial_workflow_status(
             &client,
             ingress,
             &identity,
             run.run_uid,
             &trial_key,
-            &workflow_request,
+            tenant_id,
+            first.trial_uid,
         )
         .await?;
         assert_eq!(retry.trial_uid, first.trial_uid);
@@ -233,6 +361,107 @@ async fn experiment_trial_run_drives_multiturn_scripted_agent_loop() -> Result<(
     result
 }
 
+#[tokio::test]
+#[ignore = "requires a local restate-server and Postgres"]
+async fn session_turn_waiter_resolves_recorded_outcome_through_restate_service() -> Result<()> {
+    // Pins: Session attach_turn_waiter -> record_turn_outcome resolves registered awakeables.
+    let _guard = RESTATE_E2E_LOCK.lock().await;
+    let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
+    let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
+    let ports = reserve_orchestrator_ports()?;
+    let probe_ports = reserve_orchestrator_ports()?;
+    let endpoint_url = deployment_endpoint_url(ports.restate);
+    let probe_endpoint_url = deployment_endpoint_url(probe_ports.restate);
+    let ingress = restate_ingress_url();
+    let ingress = ingress.as_str();
+    let client = reqwest::Client::new();
+    let database = IsolatedDatabase::create("session_waiter").await?;
+    let probe_endpoint = match spawn_session_turn_waiter_probe(probe_ports.restate).await {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            database.drop_database().await?;
+            return Err(error);
+        }
+    };
+    let mut orchestrator = match spawn_orchestrator_without_provider_override(
+        ports,
+        &memory_dir,
+        &sandbox_dir,
+        &database.database_url,
+    ) {
+        Ok(child) => child,
+        Err(error) => {
+            probe_endpoint.stop().await;
+            database.drop_database().await?;
+            return Err(error);
+        }
+    };
+
+    let result = async {
+        wait_for_orchestrator_live(&client, ports.health).await?;
+        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+        register_deployment(&restate_admin_url(), probe_endpoint_url.as_str()).await?;
+        let session_id = SessionId::new();
+        let meta = SessionMeta {
+            id: session_id,
+            tenant_id: TenantId::new(),
+            model: ModelId::new("test-model"),
+            ..SessionMeta::default()
+        };
+        post_json(
+            &client,
+            ingress,
+            &format!("Session/{session_id}"),
+            "set_meta",
+            &meta,
+        )
+        .await?;
+
+        let turn_id = format!("service-waiter-turn-{}", Uuid::now_v7());
+        let probe_key = format!("session-waiter-probe-{}", Uuid::now_v7());
+        let mut probe_task =
+            spawn_session_turn_waiter_probe_run(&client, ingress, &probe_key, session_id, &turn_id);
+        if let Err(error) =
+            wait_for_session_turn_waiter_probe_attached(&client, ingress, &probe_key).await
+        {
+            probe_task.abort();
+            return Err(error);
+        }
+
+        let outcome = TurnOutcome {
+            turn_id: turn_id.clone(),
+            kind: TurnOutcomeKind::Completed,
+            message: "service-level waiter completed".to_string(),
+        };
+        post_json(
+            &client,
+            ingress,
+            &format!("Session/{session_id}"),
+            "record_turn_outcome",
+            &outcome,
+        )
+        .await?;
+
+        let resolved = match wait_for_session_turn_waiter_probe_outcome(&mut probe_task).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                probe_task.abort();
+                return Err(error);
+            }
+        };
+        assert_eq!(resolved, outcome);
+        Ok(())
+    }
+    .await;
+
+    let _ = orchestrator.kill();
+    let _ = orchestrator.wait();
+    probe_endpoint.stop().await;
+    database.drop_database().await?;
+
+    result
+}
+
 async fn run_trial_workflow(
     client: &reqwest::Client,
     ingress: &str,
@@ -254,6 +483,34 @@ async fn run_trial_workflow(
     .json::<ExperimentTrialRunStatusResponse>()
     .await
     .context("deserialize ExperimentTrialRun/run response")
+}
+
+async fn read_trial_workflow_status(
+    client: &reqwest::Client,
+    ingress: &str,
+    identity: &Identity,
+    run_uid: Uuid,
+    trial_key: &str,
+    tenant_id: TenantId,
+    trial_uid: Uuid,
+) -> Result<ExperimentTrialRunStatusResponse> {
+    let key = trial_workflow_key(run_uid, trial_key);
+    let request = ExperimentTrialRunStatusRequest {
+        tenant_id,
+        trial_uid,
+    };
+    post_json_with_identity(
+        client,
+        ingress,
+        &format!("ExperimentTrialRun/{key}"),
+        "status",
+        identity,
+        &request,
+    )
+    .await?
+    .json::<ExperimentTrialRunStatusResponse>()
+    .await
+    .context("deserialize ExperimentTrialRun/status response")
 }
 
 async fn wait_for_target_messages(
@@ -296,6 +553,202 @@ async fn fetch_events(
     .json::<Vec<EventRecord>>()
     .await
     .context("deserialize session events")
+}
+
+async fn wait_for_orchestrator_live(client: &reqwest::Client, health_port: u16) -> Result<()> {
+    let url = format!("http://127.0.0.1:{health_port}/_health/live");
+    let mut last_observation = "not yet checked".to_string();
+    for _attempt in 0..120 {
+        match client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => {
+                last_observation = format!("health returned {}", response.status());
+            }
+            Err(error) => {
+                last_observation = error.to_string();
+            }
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
+
+    bail!("timed out waiting for spawned orchestrator health at {url}: {last_observation}")
+}
+
+struct IsolatedDatabase {
+    name: String,
+    maintenance_url: String,
+    database_url: String,
+}
+
+impl IsolatedDatabase {
+    async fn create(label: &str) -> Result<Self> {
+        let base_url = test_database_url();
+        let name = format!("moa_task7_{label}_{}", Uuid::now_v7().simple());
+        let maintenance_url = replace_database_name(&base_url, "postgres")?;
+        let database_url = replace_database_name(&base_url, &name)?;
+        let pool = PgPool::connect(&maintenance_url)
+            .await
+            .context("connect to Postgres maintenance database")?;
+        sqlx::query(&format!("CREATE DATABASE {name}"))
+            .execute(&pool)
+            .await
+            .with_context(|| format!("create isolated database {name}"))?;
+        pool.close().await;
+        Ok(Self {
+            name,
+            maintenance_url,
+            database_url,
+        })
+    }
+
+    async fn drop_database(&self) -> Result<()> {
+        let pool = PgPool::connect(&self.maintenance_url)
+            .await
+            .context("connect to Postgres maintenance database for cleanup")?;
+        sqlx::query(
+            "SELECT pg_terminate_backend(pid) \
+             FROM pg_stat_activity \
+             WHERE datname = $1 AND pid <> pg_backend_pid()",
+        )
+        .bind(&self.name)
+        .execute(&pool)
+        .await
+        .with_context(|| format!("terminate isolated database connections for {}", self.name))?;
+        sqlx::query(&format!("DROP DATABASE IF EXISTS {}", self.name))
+            .execute(&pool)
+            .await
+            .with_context(|| format!("drop isolated database {}", self.name))?;
+        pool.close().await;
+        Ok(())
+    }
+}
+
+fn replace_database_name(database_url: &str, database_name: &str) -> Result<String> {
+    let (prefix, database_and_query) = database_url
+        .rsplit_once('/')
+        .context("database URL should include a database path")?;
+    let query = database_and_query
+        .find('?')
+        .map(|index| &database_and_query[index..])
+        .unwrap_or_default();
+    Ok(format!("{prefix}/{database_name}{query}"))
+}
+
+fn spawn_session_turn_waiter_probe_run(
+    client: &reqwest::Client,
+    ingress: &str,
+    probe_key: &str,
+    session_id: SessionId,
+    turn_id: &str,
+) -> JoinHandle<Result<TurnOutcome>> {
+    let client = client.clone();
+    let ingress = ingress.to_string();
+    let service_or_object = format!("SessionTurnWaiterProbe/{probe_key}");
+    let input = SessionTurnWaiterProbeInput {
+        session_id,
+        turn_id: turn_id.to_string(),
+    };
+    tokio::spawn(async move {
+        post_json(&client, &ingress, &service_or_object, "run", &input)
+            .await?
+            .json::<TurnOutcome>()
+            .await
+            .context("deserialize session turn waiter probe run response")
+    })
+}
+
+async fn wait_for_session_turn_waiter_probe_attached(
+    client: &reqwest::Client,
+    ingress: &str,
+    probe_key: &str,
+) -> Result<()> {
+    let service_or_object = format!("SessionTurnWaiterProbe/{probe_key}");
+    let mut last_observation = "not yet checked".to_string();
+    for _attempt in 0..60 {
+        match post_empty(client, ingress, &service_or_object, "attached").await {
+            Ok(response) => {
+                let attached = response
+                    .json::<bool>()
+                    .await
+                    .context("deserialize session turn waiter probe attached response")?;
+                if attached {
+                    return Ok(());
+                }
+                last_observation = "probe not attached yet".to_string();
+            }
+            Err(error) => {
+                last_observation = error.to_string();
+            }
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
+
+    bail!(
+        "timed out waiting for session turn waiter probe {probe_key} to attach: {last_observation}"
+    )
+}
+
+async fn wait_for_session_turn_waiter_probe_outcome(
+    probe_task: &mut JoinHandle<Result<TurnOutcome>>,
+) -> Result<TurnOutcome> {
+    tokio::time::timeout(Duration::from_secs(30), probe_task)
+        .await
+        .context("timed out waiting for session turn waiter probe outcome")?
+        .context("join session turn waiter probe task")?
+}
+
+async fn post_json<T: serde::Serialize + ?Sized>(
+    client: &reqwest::Client,
+    ingress: &str,
+    service_or_object: &str,
+    handler: &str,
+    request: &T,
+) -> Result<reqwest::Response> {
+    let response = client
+        .post(format!(
+            "{}/{service_or_object}/{handler}",
+            ingress.trim_end_matches('/')
+        ))
+        .json(request)
+        .send()
+        .await
+        .with_context(|| format!("call {service_or_object}/{handler}"))?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| format!("<failed to read body: {error}>"));
+    bail!("{service_or_object}/{handler} returned {status}: {body}")
+}
+
+async fn post_empty(
+    client: &reqwest::Client,
+    ingress: &str,
+    service_or_object: &str,
+    handler: &str,
+) -> Result<reqwest::Response> {
+    let response = client
+        .post(format!(
+            "{}/{service_or_object}/{handler}",
+            ingress.trim_end_matches('/')
+        ))
+        .send()
+        .await
+        .with_context(|| format!("call {service_or_object}/{handler}"))?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| format!("<failed to read body: {error}>"));
+    bail!("{service_or_object}/{handler} returned {status}: {body}")
 }
 
 async fn post_json_with_identity<T: serde::Serialize + ?Sized>(
@@ -379,10 +832,11 @@ fn summarize_events(events: &[EventRecord]) -> String {
         .join(", ")
 }
 
-fn new_parent_run(identity: &Identity) -> NewExperimentRun {
+fn new_parent_run(identity: &Identity, agent_revision_uid: Uuid) -> NewExperimentRun {
     NewExperimentRun {
         name: "scripted trial workflow".to_string(),
-        target: serde_json::from_value(agent_loop_target()).expect("target fixture should parse"),
+        target: serde_json::from_value(agent_loop_target(agent_revision_uid))
+            .expect("target fixture should parse"),
         variant: serde_json::from_value(baseline_variant()).expect("variant fixture should parse"),
         scorecard: ExperimentScorecard {
             score_names: vec!["task_success".to_string()],
@@ -400,8 +854,36 @@ fn new_parent_run(identity: &Identity) -> NewExperimentRun {
     }
 }
 
-async fn publish_trial_plan(pool: &PgPool, scope: &ActionRuleScope) -> Result<Uuid> {
+async fn publish_trial_agent(pool: &PgPool, scope: &ActionRuleScope) -> Result<Uuid> {
     let source = r#"
+api_version: moa.artifact/v1
+kind: agent
+metadata:
+  name: scripted-trial-agent
+  description: Agent fixture for deterministic trial workflow coverage.
+status: draft
+definition:
+  type: agent
+  spec:
+    display_name: Scripted Trial Agent
+    purpose:
+      summary: Handle deterministic trial prompts.
+      default_task: Follow the scripted trial prompt.
+      expected_outputs:
+        - support response
+    instruction_policy:
+      system_prompt: You are a deterministic support agent for trial workflow tests.
+"#;
+    publish_artifact_revision(pool, scope, source, "trial agent").await
+}
+
+async fn publish_trial_plan(
+    pool: &PgPool,
+    scope: &ActionRuleScope,
+    agent_revision_uid: Uuid,
+) -> Result<Uuid> {
+    let source = format!(
+        r#"
 api_version: moa.artifact/v1
 kind: experiment_plan
 metadata:
@@ -435,6 +917,7 @@ definition:
         kind: agent_loop
         config:
           prompt: Start behavior-lab simulation.
+          agent_revision_uid: "{agent_revision_uid}"
     simulator_model: scripted-loadtest
     target_model: scripted-loadtest
     parallelism: 1
@@ -442,11 +925,21 @@ definition:
     budget:
       max_total_cents: 1
       max_trial_tokens: 1000
-"#;
+"#
+    );
+    publish_artifact_revision(pool, scope, source.as_str(), "trial plan").await
+}
+
+async fn publish_artifact_revision(
+    pool: &PgPool,
+    scope: &ActionRuleScope,
+    source: &str,
+    label: &str,
+) -> Result<Uuid> {
     let document = ArtifactDocument::from_yaml(source).context("parse trial plan artifact")?;
     let report = validate_for_status(&document, ArtifactStatus::Published);
     if !report.is_ok() {
-        bail!("trial plan artifact should validate: {:?}", report.errors);
+        bail!("{label} artifact should validate: {:?}", report.errors);
     }
     let registry = ArtifactRegistry::new(pool.clone());
     let draft = registry
@@ -460,11 +953,11 @@ definition:
             },
         )
         .await
-        .context("create trial plan draft")?;
+        .with_context(|| format!("create {label} draft"))?;
     let published = registry
         .publish_revision(scope, draft.revision_uid, &report)
         .await
-        .context("publish trial plan revision")?;
+        .with_context(|| format!("publish {label} revision"))?;
     Ok(published.revision_uid)
 }
 
@@ -493,11 +986,12 @@ fn new_trial(run_uid: Uuid, plan_revision_uid: Uuid) -> NewExperimentTrial {
     }
 }
 
-fn agent_loop_target() -> Value {
+fn agent_loop_target(agent_revision_uid: Uuid) -> Value {
     json!({
         "kind": "agent_loop",
         "prompt": "Run the delayed-order support behavior trial.",
         "session_id": null,
+        "agent": { "revision_uid": agent_revision_uid },
         "model": "scripted-loadtest",
         "attachments": []
     })

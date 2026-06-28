@@ -12,9 +12,8 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::routing::{any, get, patch, post};
 use base64::{Engine as _, engine::general_purpose};
 use futures_util::stream;
-use moa_authz::{AuthzCheckError, FgaClient, FgaConfig, require_authz_with_delegation};
+use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::config::AuthzEngine;
 use moa_core::traits::{AuthProvider, Credential, Identity};
 use moa_core::wire::turn::SessionProgress;
 use moa_core::{
@@ -52,8 +51,12 @@ mod workflows;
 /// Shared edge application state.
 #[derive(Clone)]
 pub struct AppState {
+    /// Loaded edge configuration shared by direct read handlers.
+    pub config: Arc<MoaConfig>,
     /// Credential resolver used for incoming requests.
     pub auth: Arc<dyn AuthProvider>,
+    /// OpenFGA client used for direct edge authorization checks.
+    pub fga: Option<Arc<FgaClient>>,
     /// Shared secret used to verify Auth0 connection-linked webhooks.
     pub auth0_webhook_secret: Option<String>,
     /// Secrets used to verify public tenant-knowledge webhooks at the edge.
@@ -120,8 +123,6 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/lineage/explain", post(lineage::handle_explain))
         .route("/v1/lineage/query", post(lineage::handle_query))
         .route("/v1/lineage/verify", post(lineage::handle_verify))
-        .route("/v1/lineage/export", post(lineage::handle_export_deferred))
-        .route("/v1/lineage/erase", post(lineage::handle_erase_deferred))
         .route(
             "/v1/security/secret-scanning/github",
             post(handle_github_secret_scan),
@@ -369,21 +370,16 @@ pub(super) async fn require_direct_authz(
     object_id: impl std::fmt::Display,
     relation: Relation,
 ) -> Result<(), Response> {
-    let fga = fga_client_from_env()?;
-    require_authz_with_delegation(&fga, identity, object_type, object_id, relation)
-        .await
-        .map_err(|error| authz_error_response(state, error))
-}
-
-pub(super) fn load_moa_config() -> Result<MoaConfig, Response> {
-    MoaConfig::load_from_env().map_err(|error| {
-        tracing::error!(error = %error, "load edge route config failed");
+    let fga = state.fga.as_deref().ok_or_else(|| {
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "configuration unavailable",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "authorization engine unavailable",
         )
             .into_response()
-    })
+    })?;
+    require_authz_with_delegation(fga, identity, object_type, object_id, relation)
+        .await
+        .map_err(|error| authz_error_response(state, error))
 }
 
 pub(super) fn route_error(error: impl std::fmt::Display) -> Response {
@@ -396,39 +392,6 @@ pub(super) fn moa_error_response(error: MoaError) -> Response {
         MoaError::SessionNotFound(_) => (StatusCode::NOT_FOUND, error.to_string()).into_response(),
         other => route_error(other),
     }
-}
-
-fn fga_client_from_env() -> Result<FgaClient, Response> {
-    let config = load_moa_config()?;
-    if config.authz.engine != AuthzEngine::Openfga {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "authorization engine unavailable",
-        )
-            .into_response());
-    }
-    let openfga = config.authz.openfga.ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "authorization engine unavailable",
-        )
-            .into_response()
-    })?;
-    FgaClient::new(FgaConfig {
-        url: openfga.url,
-        preshared_key: openfga.preshared_key,
-        store_id: openfga.store_id,
-        model_id: openfga.model_id,
-        timeout_ms: openfga.timeout_ms,
-    })
-    .map_err(|error| {
-        tracing::error!(error = %error, "build edge FGA client failed");
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "authorization engine unavailable",
-        )
-            .into_response()
-    })
 }
 
 fn authz_error_response(_state: &AppState, error: AuthzCheckError) -> Response {

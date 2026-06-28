@@ -34,7 +34,7 @@ use moa_eval_core::{EvalResult, ReplayConfig, token_f1};
 #[cfg(feature = "internal-eval-runner")]
 use moa_eval_core::{EvalStatus, ExpectedOutput, TestCase};
 #[cfg(feature = "internal-eval-runner")]
-use moa_lineage_core::{LineageEvent, LineageSink};
+use moa_lineage_core::LineageEvent;
 #[cfg(any(feature = "internal-eval-runner", test))]
 use moa_lineage_core::{ScoreRecord, ScoreSource, ScoreTarget, ScoreValue};
 #[cfg(feature = "internal-eval-runner")]
@@ -615,6 +615,10 @@ async fn persist_accepted_eval_run(
     request: &EvalRunRequest,
     response: &EvalRunResponse,
 ) -> Result<(), EvalServiceError> {
+    let scope_context = RlsContext::tenant(request.tenant_id);
+    let mut conn = ScopedConn::begin(pool, &scope_context)
+        .await
+        .map_err(scoped_conn_error)?;
     sqlx::query(
         r#"
         INSERT INTO analytics.eval_run_status (
@@ -639,8 +643,9 @@ async fn persist_accepted_eval_run(
     .bind(response.tenant_id.0)
     .bind(eval_run_status_as_str(response.status))
     .bind(sqlx::types::Json(request.clone()))
-    .execute(pool)
+    .execute(conn.as_mut())
     .await?;
+    conn.commit().await.map_err(scoped_conn_error)?;
     Ok(())
 }
 
@@ -650,6 +655,10 @@ async fn load_eval_run_execution_state(
     tenant_id: TenantId,
     run_id: Uuid,
 ) -> Result<StoredEvalRunExecutionState, EvalServiceError> {
+    let scope_context = RlsContext::tenant(tenant_id);
+    let mut conn = ScopedConn::begin(pool, &scope_context)
+        .await
+        .map_err(scoped_conn_error)?;
     let row = sqlx::query(
         r#"
         SELECT status, response
@@ -659,7 +668,7 @@ async fn load_eval_run_execution_state(
     )
     .bind(run_id)
     .bind(tenant_id.0)
-    .fetch_optional(pool)
+    .fetch_optional(conn.as_mut())
     .await?
     .ok_or(EvalServiceError::RunTenantMismatch {
         run_id,
@@ -668,10 +677,12 @@ async fn load_eval_run_execution_state(
 
     let status: String = row.try_get("status")?;
     let response: Option<sqlx::types::Json<EvalRunResponse>> = row.try_get("response")?;
-    Ok(StoredEvalRunExecutionState {
+    let state = StoredEvalRunExecutionState {
         status: eval_run_status_from_str(&status)?,
         response: response.map(|json| json.0),
-    })
+    };
+    conn.commit().await.map_err(scoped_conn_error)?;
+    Ok(state)
 }
 
 #[cfg(feature = "internal-eval-runner")]
@@ -680,6 +691,10 @@ async fn mark_eval_run_running(
     tenant_id: TenantId,
     run_id: Uuid,
 ) -> Result<(), EvalServiceError> {
+    let scope_context = RlsContext::tenant(tenant_id);
+    let mut conn = ScopedConn::begin(pool, &scope_context)
+        .await
+        .map_err(scoped_conn_error)?;
     let result = sqlx::query(
         r#"
         UPDATE analytics.eval_run_status
@@ -693,7 +708,7 @@ async fn mark_eval_run_running(
     )
     .bind(run_id)
     .bind(tenant_id.0)
-    .execute(pool)
+    .execute(conn.as_mut())
     .await?;
     if result.rows_affected() == 0 {
         return Err(EvalServiceError::RunTenantMismatch {
@@ -701,6 +716,7 @@ async fn mark_eval_run_running(
             request_tenant_id: tenant_id,
         });
     }
+    conn.commit().await.map_err(scoped_conn_error)?;
     Ok(())
 }
 
@@ -709,6 +725,10 @@ async fn persist_terminal_eval_run_response(
     pool: &PgPool,
     response: &EvalRunResponse,
 ) -> Result<(), EvalServiceError> {
+    let scope_context = RlsContext::tenant(response.tenant_id);
+    let mut conn = ScopedConn::begin(pool, &scope_context)
+        .await
+        .map_err(scoped_conn_error)?;
     let result = sqlx::query(
         r#"
         UPDATE analytics.eval_run_status
@@ -724,7 +744,7 @@ async fn persist_terminal_eval_run_response(
     .bind(eval_run_status_as_str(response.status))
     .bind(sqlx::types::Json(response.clone()))
     .bind(response.error.as_deref())
-    .execute(pool)
+    .execute(conn.as_mut())
     .await?;
     if result.rows_affected() == 0 {
         return Err(EvalServiceError::RunTenantMismatch {
@@ -732,6 +752,7 @@ async fn persist_terminal_eval_run_response(
             request_tenant_id: response.tenant_id,
         });
     }
+    conn.commit().await.map_err(scoped_conn_error)?;
     Ok(())
 }
 
@@ -740,6 +761,10 @@ async fn load_eval_run_status_response(
     tenant_id: TenantId,
     run_id: Uuid,
 ) -> Result<EvalRunStatusResponse, EvalServiceError> {
+    let scope_context = RlsContext::tenant(tenant_id);
+    let mut conn = ScopedConn::begin(pool, &scope_context)
+        .await
+        .map_err(scoped_conn_error)?;
     let row = sqlx::query(
         r#"
         SELECT tenant_id, run_id, status, response, error
@@ -749,7 +774,7 @@ async fn load_eval_run_status_response(
     )
     .bind(run_id)
     .bind(tenant_id.0)
-    .fetch_optional(pool)
+    .fetch_optional(conn.as_mut())
     .await?
     .ok_or(EvalServiceError::RunTenantMismatch {
         run_id,
@@ -761,9 +786,11 @@ async fn load_eval_run_status_response(
     let status: String = row.try_get("status")?;
     let response: Option<sqlx::types::Json<EvalRunResponse>> = row.try_get("response")?;
     if let Some(response) = response {
-        return Ok(status_response_from_run_response(&response.0));
+        let status = status_response_from_run_response(&response.0);
+        conn.commit().await.map_err(scoped_conn_error)?;
+        return Ok(status);
     }
-    Ok(EvalRunStatusResponse {
+    let response = EvalRunStatusResponse {
         tenant_id: TenantId::from(stored_tenant_id),
         run_id: stored_run_id,
         status: eval_run_status_from_str(&status)?,
@@ -772,7 +799,15 @@ async fn load_eval_run_status_response(
         summary: None,
         results: Vec::new(),
         error: row.try_get("error")?,
-    })
+    };
+    conn.commit().await.map_err(scoped_conn_error)?;
+    Ok(response)
+}
+
+fn scoped_conn_error(error: moa_core::MoaError) -> EvalServiceError {
+    EvalServiceError::Runtime {
+        message: error.to_string(),
+    }
 }
 
 #[cfg(feature = "internal-eval-runner")]
@@ -1094,7 +1129,7 @@ async fn replay_dataset_for_tenant(
     .await?;
     let report = Box::pin(replay_items_live(
         config,
-        Arc::new(sink) as Arc<dyn LineageSink>,
+        Arc::new(sink),
         replay_config,
         items,
     ))
@@ -1163,7 +1198,7 @@ struct ScopedReplayReport {
 #[cfg(feature = "internal-eval-runner")]
 async fn replay_items_live(
     config: MoaConfig,
-    sink: Arc<dyn LineageSink>,
+    sink: Arc<MpscSink>,
     replay_config: ReplayConfig,
     items: Vec<ScopedDatasetItem>,
 ) -> Result<ScopedReplayReport, EvalServiceError> {
@@ -1210,7 +1245,8 @@ async fn replay_items_live(
         let records = replay_score_records_for_item(item, result, &replay_config, &evaluator);
         report.scores += records.len();
         for record in records {
-            sink.record(LineageEvent::Eval(record));
+            sink.record_durable_event(LineageEvent::Eval(record))
+                .await?;
         }
         report.items += 1;
     }

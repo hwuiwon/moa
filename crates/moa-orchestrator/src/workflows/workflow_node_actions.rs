@@ -70,6 +70,12 @@ pub enum WorkflowNodeActionOutcome {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AgentNodeTurnWait {
+    Outcome(TurnOutcome),
+    Cancelled(String),
+}
+
 async fn workflow_cancel_requested(
     ctx: &WorkflowContext<'_>,
     action_context: &WorkflowNodeActionContext,
@@ -158,7 +164,7 @@ pub async fn execute_workflow_node_action(
         tenant_id: action_context.tenant_id,
         user_id: workflow_user_id(&action_context.identity),
         idempotency_key,
-        trusted_sandbox_files: Vec::new(),
+        trusted_sandbox_manifest: None,
     };
 
     if matches!(prepared_action.effect, ActionPolicyEffect::AdminReview) {
@@ -243,10 +249,13 @@ async fn execute_agent_node(
         });
     };
 
-    let outcome = wait_for_agent_node_turn(ctx, session_id, turn_id.clone()).await?;
-    if let Some(reason) = workflow_cancel_requested(ctx, &action_context).await? {
-        return Ok(WorkflowNodeActionOutcome::Cancelled { reason });
-    }
+    let outcome =
+        match wait_for_agent_node_turn(ctx, &action_context, session_id, turn_id.clone()).await? {
+            AgentNodeTurnWait::Outcome(outcome) => outcome,
+            AgentNodeTurnWait::Cancelled(reason) => {
+                return Ok(WorkflowNodeActionOutcome::Cancelled { reason });
+            }
+        };
     if outcome.kind == TurnOutcomeKind::Completed {
         Ok(WorkflowNodeActionOutcome::Completed {
             output: json!({
@@ -264,9 +273,10 @@ async fn execute_agent_node(
 
 async fn wait_for_agent_node_turn(
     ctx: &WorkflowContext<'_>,
+    action_context: &WorkflowNodeActionContext,
     session_id: SessionId,
     turn_id: String,
-) -> Result<TurnOutcome, HandlerError> {
+) -> Result<AgentNodeTurnWait, HandlerError> {
     let (awakeable_id, completion) = ctx.awakeable::<String>();
     let attached = ctx
         .object_client::<SessionClient>(session_id.to_string())
@@ -278,24 +288,53 @@ async fn wait_for_agent_node_turn(
         .await?
         .into_inner();
     if let Some(outcome) = attached.outcome {
-        return Ok(outcome);
+        return Ok(AgentNodeTurnWait::Outcome(outcome));
+    }
+
+    if let Some(cancel_promise_key) = action_context.cancel_promise_key.as_deref() {
+        return restate_sdk::select! {
+            outcome = completion => {
+                parse_turn_outcome(&outcome?).map(AgentNodeTurnWait::Outcome)
+            },
+            reason = ctx.promise::<String>(cancel_promise_key) => {
+                remove_agent_node_turn_waiter(ctx, session_id, turn_id.clone(), awakeable_id).await?;
+                Ok(AgentNodeTurnWait::Cancelled(reason?))
+            },
+            _ = ctx.sleep(AGENT_NODE_WAIT_TIMEOUT) => {
+                remove_agent_node_turn_waiter(ctx, session_id, turn_id.clone(), awakeable_id).await?;
+                Err(TerminalError::new(format!(
+                    "workflow agent node timed out waiting for turn {turn_id}"
+                )).into())
+            }
+        };
     }
 
     restate_sdk::select! {
         outcome = completion => parse_turn_outcome(&outcome?),
         _ = ctx.sleep(AGENT_NODE_WAIT_TIMEOUT) => {
-            ctx.object_client::<SessionClient>(session_id.to_string())
-                .remove_turn_waiter(Json::from(RemoveSessionTurnWaiterInput {
-                    turn_id: turn_id.clone(),
-                    awakeable_id,
-                }))
-                .call()
-                .await?;
+            remove_agent_node_turn_waiter(ctx, session_id, turn_id.clone(), awakeable_id).await?;
             Err(TerminalError::new(format!(
                 "workflow agent node timed out waiting for turn {turn_id}"
             )).into())
         }
     }
+    .map(AgentNodeTurnWait::Outcome)
+}
+
+async fn remove_agent_node_turn_waiter(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    turn_id: String,
+    awakeable_id: String,
+) -> Result<(), HandlerError> {
+    ctx.object_client::<SessionClient>(session_id.to_string())
+        .remove_turn_waiter(Json::from(RemoveSessionTurnWaiterInput {
+            turn_id,
+            awakeable_id,
+        }))
+        .call()
+        .await?;
+    Ok(())
 }
 
 fn parse_turn_outcome(raw: &str) -> Result<TurnOutcome, HandlerError> {
@@ -343,15 +382,21 @@ async fn execute_sub_agent_node(
         session_id,
         meta: &meta,
     };
-    let spawn_output =
-        match execute_delegation_tool(ctx, parent, DelegationTool::Spawn(spawn_input)).await {
-            Ok(output) => output,
-            Err(error) => {
-                return Ok(WorkflowNodeActionOutcome::Failed {
-                    error: format!("{error:?}"),
-                });
-            }
-        };
+    let spawn_output = match execute_delegation_tool(
+        ctx,
+        parent,
+        DelegationTool::Spawn(spawn_input),
+        None,
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(error) => {
+            return Ok(WorkflowNodeActionOutcome::Failed {
+                error: format!("{error:?}"),
+            });
+        }
+    };
     let Some(spawn) = structured_output::<moa_core::SpawnSubAgentOutput>(&spawn_output) else {
         return Ok(WorkflowNodeActionOutcome::Failed {
             error: "workflow sub_agent node spawn returned no structured output".to_string(),
@@ -371,6 +416,7 @@ async fn execute_sub_agent_node(
             sub_agent_id: spawn.sub_agent_id.clone(),
             timeout_ms: wait_timeout_ms,
         }),
+        None,
     )
     .await
     {
@@ -847,11 +893,33 @@ mod tests {
         attached: AttachSessionTurnWaiterOutput,
         completion: impl Future<Output = Result<String, TerminalError>>,
     ) -> Result<TurnOutcome, HandlerError> {
-        if let Some(outcome) = attached.outcome {
-            return Ok(outcome);
+        match await_agent_turn_or_cancel_after_session_waiter(
+            attached,
+            completion,
+            std::future::pending(),
+        )
+        .await?
+        {
+            AgentNodeTurnWait::Outcome(outcome) => Ok(outcome),
+            AgentNodeTurnWait::Cancelled(reason) => Err(TerminalError::new(format!(
+                "unexpected cancellation while waiting for agent turn: {reason}"
+            ))
+            .into()),
         }
-        let raw = completion.await?;
-        parse_turn_outcome(&raw)
+    }
+
+    async fn await_agent_turn_or_cancel_after_session_waiter(
+        attached: AttachSessionTurnWaiterOutput,
+        completion: impl Future<Output = Result<String, TerminalError>>,
+        cancellation: impl Future<Output = Result<String, TerminalError>>,
+    ) -> Result<AgentNodeTurnWait, HandlerError> {
+        if let Some(outcome) = attached.outcome {
+            return Ok(AgentNodeTurnWait::Outcome(outcome));
+        }
+        tokio::select! {
+            raw = completion => parse_turn_outcome(&raw?).map(AgentNodeTurnWait::Outcome),
+            reason = cancellation => Ok(AgentNodeTurnWait::Cancelled(reason?)),
+        }
     }
 
     #[test]
@@ -941,6 +1009,33 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "agent turn completion path waited like the old polling loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_node_turn_wait_observes_cancellation_before_timeout_offline() {
+        // Pins: workflow agent nodes race cancellation instead of waiting for the 180s timeout.
+        let started = Instant::now();
+
+        let wait = tokio::time::timeout(
+            Duration::from_millis(100),
+            await_agent_turn_or_cancel_after_session_waiter(
+                AttachSessionTurnWaiterOutput { outcome: None },
+                std::future::pending(),
+                async { Ok::<_, TerminalError>("operator cancelled workflow".to_string()) },
+            ),
+        )
+        .await
+        .expect("cancellation should win without waiting for the agent-node timeout")
+        .expect("cancellation wait should resolve");
+
+        assert_eq!(
+            wait,
+            AgentNodeTurnWait::Cancelled("operator cancelled workflow".to_string())
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "agent turn cancellation path waited like the full timeout"
         );
     }
 

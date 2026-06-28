@@ -7,15 +7,19 @@ use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::wire::tools::ToolDescriptor;
 use moa_core::{
-    ActionClass, BuiltInTool, Event, EventRecord, EventType, IdempotencyClass, RiskLevel, TenantId,
-    ToolCallId, ToolCallRequest, ToolContext, ToolDefinition, ToolDiffStrategy, ToolInputShape,
-    ToolOutput, ToolPolicySpec, UserId, read_tool_policy, write_tool_policy,
+    ActionClass, BuiltInTool, Event, EventRecord, EventType, IdempotencyClass, RiskLevel,
+    SandboxFile, TenantId, ToolCallId, ToolCallRequest, ToolContext, ToolDefinition,
+    ToolDiffStrategy, ToolInputShape, ToolOutput, ToolPolicySpec, TrustedSandboxFileEntry,
+    TrustedSandboxFileManifestPayload, TrustedSandboxFileManifestRef, UserId, read_tool_policy,
+    write_tool_policy,
 };
 use moa_hands::{ToolRegistry, ToolRouter};
 use moa_orchestrator::services::tool_executor::{
     ToolExecutorImpl, build_tool_run_plan, has_prior_non_idempotent_result, tool_run_name,
+    trusted_sandbox_files_from_manifest_payload,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 struct CountingTool {
@@ -98,7 +102,7 @@ fn tool_request(
         tenant_id: TenantId::from(Uuid::from_u128(1)),
         user_id: UserId::new("user-1"),
         idempotency_key: idempotency_key.map(ToOwned::to_owned),
-        trusted_sandbox_files: Vec::new(),
+        trusted_sandbox_manifest: None,
     }
 }
 
@@ -136,6 +140,79 @@ fn tool_result_record(tool_call_id: ToolCallId) -> EventRecord {
         hand_id: None,
         token_count: None,
     }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn trusted_manifest_for_payload(
+    payload_text: &str,
+    files: &[SandboxFile],
+) -> TrustedSandboxFileManifestRef {
+    TrustedSandboxFileManifestRef {
+        blob_id: "blob://trusted-files".to_string(),
+        size: payload_text.len(),
+        manifest_sha256: sha256_hex(payload_text.as_bytes()),
+        files: files
+            .iter()
+            .map(|file| TrustedSandboxFileEntry {
+                path: file.path.clone(),
+                content_sha256: sha256_hex(&file.content),
+                size: file.content.len(),
+                executable: file.executable,
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn trusted_sandbox_manifest_payload_rehydrates_files() {
+    // Pins: trusted file request journals carry a durable manifest reference, not raw bytes.
+    let files = vec![SandboxFile {
+        path: ".moa/skills/search/SKILL.md".to_string(),
+        content: b"trusted skill".to_vec(),
+        executable: false,
+    }];
+    let payload = TrustedSandboxFileManifestPayload {
+        files: files.clone(),
+    };
+    let payload_text = serde_json::to_string(&payload).expect("serialize trusted files payload");
+    let manifest = trusted_manifest_for_payload(&payload_text, &files);
+
+    let loaded = trusted_sandbox_files_from_manifest_payload(&manifest, &payload_text)
+        .expect("valid manifest should rehydrate trusted files");
+
+    assert_eq!(loaded, files);
+}
+
+#[test]
+fn trusted_sandbox_manifest_payload_rejects_hash_mismatch() {
+    // Pins: stale or tampered session blob content does not install trusted sandbox files.
+    let files = vec![SandboxFile {
+        path: ".moa/skills/search/SKILL.md".to_string(),
+        content: b"trusted skill".to_vec(),
+        executable: false,
+    }];
+    let payload = TrustedSandboxFileManifestPayload {
+        files: files.clone(),
+    };
+    let mut payload_text =
+        serde_json::to_string(&payload).expect("serialize trusted files payload");
+    let manifest = trusted_manifest_for_payload(&payload_text, &files);
+    payload_text.push(' ');
+
+    let error = trusted_sandbox_files_from_manifest_payload(&manifest, &payload_text)
+        .expect_err("tampered manifest payload should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("trusted sandbox file manifest blob://trusted-files hash mismatch"),
+        "error should name the manifest hash failure: {error}"
+    );
 }
 
 #[test]

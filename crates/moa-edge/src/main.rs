@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
-use moa_core::config::optional_env_secret;
+use moa_authz::{FgaClient, FgaConfig};
+use moa_core::config::{AuthzEngine, optional_env_secret};
 use moa_edge::proxy::OrchestratorProxy;
 use moa_edge::routes::{self, AppState, KnowledgeWebhookEdgeConfig};
 
@@ -52,9 +53,12 @@ async fn main() -> anyhow::Result<()> {
     let pool = Arc::new(pool);
     let providers = moa_auth_providers::build_providers(&moa_config, pool.clone())
         .context("build providers bundle")?;
+    let fga = build_fga_client(&moa_config).context("build edge OpenFGA client")?;
 
     let state = AppState {
+        config: Arc::new(moa_config.clone()),
         auth: providers.auth.clone(),
+        fga: fga.map(Arc::new),
         auth0_webhook_secret: moa_config.auth.auth0_webhook_secret.clone(),
         knowledge_webhooks: knowledge_webhook_edge_config(&moa_config)
             .context("load knowledge webhook verifier secrets")?,
@@ -71,6 +75,24 @@ async fn main() -> anyhow::Result<()> {
         .context("serve moa-edge")?;
 
     Ok(())
+}
+
+fn build_fga_client(config: &moa_core::MoaConfig) -> anyhow::Result<Option<FgaClient>> {
+    if config.authz.engine != AuthzEngine::Openfga {
+        return Ok(None);
+    }
+    let Some(openfga) = config.authz.openfga.as_ref() else {
+        return Ok(None);
+    };
+    FgaClient::new(FgaConfig {
+        url: openfga.url.clone(),
+        preshared_key: openfga.preshared_key.clone(),
+        store_id: openfga.store_id.clone(),
+        model_id: openfga.model_id.clone(),
+        timeout_ms: openfga.timeout_ms,
+    })
+    .map(Some)
+    .map_err(Into::into)
 }
 
 async fn shutdown_signal() {

@@ -267,6 +267,8 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: ${{ steps.image.outputs.image }}
+          build-args: |
+            MOA_ORCHESTRATOR_FEATURES=redis
 
   deploy:
     runs-on: ubuntu-latest

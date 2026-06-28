@@ -12,13 +12,24 @@ pub use redis::RedisRuntimeCacheStore;
 
 use moa_core::config::{RuntimeCacheBackend, RuntimeCacheConfig};
 
+/// Runtime cache backend after `auto` selection has been resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedRuntimeCacheBackend {
+    /// Use a process-local in-memory cache.
+    Memory,
+    /// Use Redis for shared runtime coordination.
+    Redis,
+}
+
 /// Resolves the configured runtime cache backend.
 #[must_use]
-pub fn select_runtime_cache_backend(config: &RuntimeCacheConfig) -> RuntimeCacheBackend {
+pub fn select_runtime_cache_backend(config: &RuntimeCacheConfig) -> ResolvedRuntimeCacheBackend {
     match config.backend {
-        RuntimeCacheBackend::Auto if has_redis_url(config) => RuntimeCacheBackend::Redis,
-        RuntimeCacheBackend::Auto => RuntimeCacheBackend::Memory,
-        backend => backend,
+        RuntimeCacheBackend::Auto if has_redis_url(config) => ResolvedRuntimeCacheBackend::Redis,
+        RuntimeCacheBackend::Auto | RuntimeCacheBackend::Memory => {
+            ResolvedRuntimeCacheBackend::Memory
+        }
+        RuntimeCacheBackend::Redis => ResolvedRuntimeCacheBackend::Redis,
     }
 }
 
@@ -38,7 +49,9 @@ mod tests {
     use moa_core::traits::RuntimeCacheStore;
     use tokio::time::advance;
 
-    use super::{MemoryRuntimeCacheStore, select_runtime_cache_backend};
+    use super::{
+        MemoryRuntimeCacheStore, ResolvedRuntimeCacheBackend, select_runtime_cache_backend,
+    };
 
     #[tokio::test(start_paused = true)]
     async fn memory_store_sets_gets_expires_and_deletes_values() -> Result<()> {
@@ -121,33 +134,33 @@ mod tests {
         let mut config = RuntimeCacheConfig::default();
         assert_eq!(
             select_runtime_cache_backend(&config),
-            RuntimeCacheBackend::Memory
+            ResolvedRuntimeCacheBackend::Memory
         );
 
         config.redis_url = Some("redis://cache.example:6379/0".to_string());
         assert_eq!(
             select_runtime_cache_backend(&config),
-            RuntimeCacheBackend::Redis
+            ResolvedRuntimeCacheBackend::Redis
         );
 
         config.redis_url = Some("   ".to_string());
         assert_eq!(
             select_runtime_cache_backend(&config),
-            RuntimeCacheBackend::Memory
+            ResolvedRuntimeCacheBackend::Memory
         );
 
         config.backend = RuntimeCacheBackend::Memory;
         config.redis_url = Some("redis://cache.example:6379/0".to_string());
         assert_eq!(
             select_runtime_cache_backend(&config),
-            RuntimeCacheBackend::Memory
+            ResolvedRuntimeCacheBackend::Memory
         );
 
         config.backend = RuntimeCacheBackend::Redis;
         config.redis_url = None;
         assert_eq!(
             select_runtime_cache_backend(&config),
-            RuntimeCacheBackend::Redis
+            ResolvedRuntimeCacheBackend::Redis
         );
     }
 }

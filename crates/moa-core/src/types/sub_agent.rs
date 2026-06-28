@@ -6,7 +6,7 @@ use crate::error::{MoaError, Result};
 
 use super::{
     CompletionRequest, CompletionResponse, ModelId, SessionId, SessionMeta, TenantId, ToolCallId,
-    ToolInvocation, ToolOutput, TurnOutcome, UserId,
+    ToolInvocation, ToolOutput, TrustedSandboxFileManifestRef, TurnOutcome, UserId,
 };
 
 /// Stable sub-agent identifier keyed under the parent session or sub-agent.
@@ -42,6 +42,9 @@ pub enum SubAgentMessage {
         user_id: UserId,
         /// Model inherited from the parent.
         model: ModelId,
+        /// Trusted sandbox file manifest inherited from the parent turn.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trusted_sandbox_manifest: Option<TrustedSandboxFileManifestRef>,
     },
     /// Follow-up user-style text delivered from the parent actor.
     FollowUp {
@@ -136,6 +139,9 @@ pub struct SubAgentChildRequest {
     /// Optional maximum autonomous turns for the child.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
+    /// Trusted sandbox file manifest inherited from the parent turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_sandbox_manifest: Option<TrustedSandboxFileManifestRef>,
 }
 
 /// Spawn-tool input.
@@ -499,6 +505,7 @@ impl SubAgentChildRequest {
             tenant_id,
             user_id,
             model,
+            trusted_sandbox_manifest: self.trusted_sandbox_manifest,
         }
     }
 }

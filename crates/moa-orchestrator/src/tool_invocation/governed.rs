@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequest};
 use moa_core::wire::turn::TurnPhase;
 use moa_core::{
-    ActionPolicyEffect, Event, SandboxFile, SessionActorRef, SessionId, SessionMeta, SubAgentId,
-    ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput, UserId,
-    is_delegation_tool_name,
+    ActionPolicyEffect, Event, SessionActorRef, SessionId, SessionMeta, SubAgentId,
+    ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput,
+    TrustedSandboxFileManifestRef, UserId, is_delegation_tool_name,
 };
 use moa_observability::restate_observability::{event_persist_span, tool_dispatch_span};
 use moa_observability::{record_turn_event_persist_duration, record_turn_tool_dispatch_duration};
@@ -67,8 +67,8 @@ pub(crate) struct GovernedInvocationRequest<'a> {
     pub(crate) allowed_tools: &'a BTreeSet<String>,
     /// Active prompt-injection canary marker, when present.
     pub(crate) active_canary: Option<&'a str>,
-    /// Trusted sandbox files selected by the runtime that built this tool call.
-    pub(crate) trusted_sandbox_files: &'a [SandboxFile],
+    /// Trusted sandbox file manifest selected by the runtime that built this tool call.
+    pub(crate) trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
     /// Root or sub-agent origin metadata.
     pub(crate) origin: GovernedInvocationOrigin<'a>,
     /// Caller-owned progress cadence for allowed execution.
@@ -356,7 +356,7 @@ fn tool_call_request(
         tenant_id: request.session.tenant_id,
         user_id: storage_user_id(request.session),
         idempotency_key: invocation.id.clone(),
-        trusted_sandbox_files: request.trusted_sandbox_files.to_vec(),
+        trusted_sandbox_manifest: request.trusted_sandbox_manifest.cloned(),
     }
 }
 
@@ -472,8 +472,9 @@ mod tests {
     use std::collections::BTreeSet;
 
     use moa_core::{
-        ContactId, ContactRef, ContactVerificationState, SandboxFile, SessionActorRef, SessionMeta,
-        TenantId, ToolCallContent, ToolCallId, ToolInvocation, UserId,
+        ContactId, ContactRef, ContactVerificationState, SessionActorRef, SessionMeta, TenantId,
+        ToolCallContent, ToolCallId, ToolInvocation, TrustedSandboxFileEntry,
+        TrustedSandboxFileManifestRef, UserId,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -518,7 +519,7 @@ mod tests {
             tool_call,
             allowed_tools,
             active_canary: Some("canary"),
-            trusted_sandbox_files: &[],
+            trusted_sandbox_manifest: None,
             origin,
             progress: GovernedInvocationProgress {
                 turn_id: "turn-1",
@@ -616,31 +617,37 @@ mod tests {
             tool_request.idempotency_key.as_deref(),
             Some("provider-tool-1")
         );
-        assert!(tool_request.trusted_sandbox_files.is_empty());
+        assert_eq!(tool_request.trusted_sandbox_manifest, None);
     }
 
     #[test]
-    fn tool_request_carries_selected_trusted_sandbox_files() {
-        // Pins: file install intent survives Restate handoff to a different ToolExecutor pod.
+    fn tool_request_carries_selected_trusted_sandbox_manifest() {
+        // Pins: file install intent survives Restate handoff without journaling file bytes per tool.
         let session = test_session_meta();
         let tool_call = tool_call();
         let allowed_tools = BTreeSet::from(["file_read".to_string()]);
-        let files = vec![SandboxFile {
-            path: ".moa/skills/test/SKILL.md".to_string(),
-            content: b"use this skill".to_vec(),
-            executable: false,
-        }];
+        let manifest = TrustedSandboxFileManifestRef {
+            blob_id: "blob-1".to_string(),
+            size: 128,
+            manifest_sha256: "manifest-hash".to_string(),
+            files: vec![TrustedSandboxFileEntry {
+                path: ".moa/skills/test/SKILL.md".to_string(),
+                content_sha256: "content-hash".to_string(),
+                size: 14,
+                executable: false,
+            }],
+        };
         let mut request = request(
             &session,
             &tool_call,
             &allowed_tools,
             GovernedInvocationOrigin::RootTurn,
         );
-        request.trusted_sandbox_files = &files;
+        request.trusted_sandbox_manifest = Some(&manifest);
 
         let tool_request = tool_call_request(&request, &tool_call.invocation);
 
-        assert_eq!(tool_request.trusted_sandbox_files, files);
+        assert_eq!(tool_request.trusted_sandbox_manifest, Some(manifest));
     }
 
     #[test]

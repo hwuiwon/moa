@@ -47,7 +47,9 @@ CREATE TABLE IF NOT EXISTS moa.knowledge_object_ingestion_claims (
     claimed_by_sync_run_id UUID NOT NULL REFERENCES moa.knowledge_sync_runs(sync_run_uid) ON DELETE CASCADE,
     completed_by_sync_run_id UUID REFERENCES moa.knowledge_sync_runs(sync_run_uid) ON DELETE SET NULL,
     status TEXT NOT NULL DEFAULT 'started',
+    claim_token UUID NOT NULL DEFAULT gen_random_uuid(),
     claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    lease_expires_at TIMESTAMPTZ NOT NULL DEFAULT (now() + INTERVAL '15 minutes'),
     completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -56,11 +58,33 @@ CREATE TABLE IF NOT EXISTS moa.knowledge_object_ingestion_claims (
     CHECK (status IN ('started', 'completed', 'failed'))
 );
 
+ALTER TABLE moa.knowledge_object_ingestion_claims
+    ADD COLUMN IF NOT EXISTS claim_token UUID DEFAULT gen_random_uuid();
+ALTER TABLE moa.knowledge_object_ingestion_claims
+    ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ DEFAULT (now() + INTERVAL '15 minutes');
+
+UPDATE moa.knowledge_object_ingestion_claims
+SET claim_token = gen_random_uuid()
+WHERE claim_token IS NULL;
+
+UPDATE moa.knowledge_object_ingestion_claims
+SET lease_expires_at = COALESCE(updated_at, claimed_at, now()) + INTERVAL '15 minutes'
+WHERE lease_expires_at IS NULL;
+
+ALTER TABLE moa.knowledge_object_ingestion_claims
+    ALTER COLUMN claim_token SET NOT NULL;
+ALTER TABLE moa.knowledge_object_ingestion_claims
+    ALTER COLUMN lease_expires_at SET NOT NULL;
+
 CREATE INDEX IF NOT EXISTS knowledge_object_ingestion_claims_version_idx
     ON moa.knowledge_object_ingestion_claims (document_version_id);
 
 CREATE INDEX IF NOT EXISTS knowledge_object_ingestion_claims_status_idx
     ON moa.knowledge_object_ingestion_claims (tenant_id, status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS knowledge_object_ingestion_claims_started_lease_idx
+    ON moa.knowledge_object_ingestion_claims (tenant_id, lease_expires_at)
+    WHERE status = 'started';
 
 DROP TRIGGER IF EXISTS knowledge_object_ingestion_claims_set_tenant_columns
     ON moa.knowledge_object_ingestion_claims;

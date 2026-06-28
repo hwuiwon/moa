@@ -56,7 +56,10 @@ async fn postgres_lineage_sink_writes_rows() -> Result<()> {
         stage: RetrievalStage::Single,
     });
 
-    runtime.handle.record(serde_json::to_value(event)?);
+    runtime
+        .handle
+        .record_durable(serde_json::to_value(event)?)
+        .await?;
     let writer = runtime
         .writer
         .as_ref()

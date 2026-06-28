@@ -58,9 +58,7 @@ const K_SCORE_RUN_ID: &str = "score_run_id";
 const K_STATUS: &str = "status";
 const K_SESSION_ID: &str = "session_id";
 const K_WORKFLOW_RUN_UID: &str = "workflow_run_uid";
-const PLAN_STATUS_MAX_IDLE_POLLS: u32 = 10_800;
-const PLAN_COMPLETION_TIMEOUT: Duration =
-    Duration::from_secs(8 * PLAN_STATUS_MAX_IDLE_POLLS as u64);
+const PLAN_CHILD_COMPLETION_WAIT_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Workflow input for one live behavior experiment run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

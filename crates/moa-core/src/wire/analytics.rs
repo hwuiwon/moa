@@ -84,6 +84,9 @@ pub struct TenantStatsResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolStatsRequest {
     /// Optional tenant filter for the per-tool rollup.
+    ///
+    /// Non-service callers are forced to their authenticated tenant by the
+    /// edge; service callers may omit this for deployment-wide stats.
     pub tenant_id: Option<TenantId>,
 }
 

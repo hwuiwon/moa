@@ -23,8 +23,8 @@ use moa_core::{
 use sqlx::Row;
 
 use super::{
-    AppState, RouteTranslation, authenticate_direct_request, load_moa_config, moa_error_response,
-    parse_json_body, parse_json_body_with_tenant, require_direct_authz, route_error,
+    AppState, RouteTranslation, authenticate_direct_request, moa_error_response, parse_json_body,
+    parse_json_body_with_tenant, require_direct_authz, route_error,
     translate_json_object_with_tenant_id,
 };
 
@@ -55,13 +55,9 @@ pub async fn handle_session_stats(
     {
         return response;
     }
-    let config = match load_moa_config() {
-        Ok(config) => config,
-        Err(response) => return response,
-    };
     match moa_session::analytics::get_session_summary(
         &state.pool,
-        config.database.schema.as_deref(),
+        state.config.database.schema.as_deref(),
         request.session_id,
     )
     .await
@@ -98,13 +94,12 @@ pub async fn handle_tenant_stats(
     {
         return response;
     }
-    let config = match load_moa_config() {
-        Ok(config) => config,
-        Err(response) => return response,
-    };
+    if let Err(response) = refresh_analytics_materialized_views(&state).await {
+        return response;
+    }
     match moa_session::analytics::get_tenant_stats_control_plane(
         &state.pool,
-        config.database.schema.as_deref(),
+        state.config.database.schema.as_deref(),
         &request.tenant_id,
         request.days,
     )
@@ -127,10 +122,13 @@ pub async fn handle_tool_stats(
             Ok(identity) => identity,
             Err(response) => return response,
         };
-    let request: ToolStatsRequest = match parse_json_body_with_tenant(&body, identity.tenant_id) {
+    let mut request: ToolStatsRequest = match parse_json_body(&body) {
         Ok(request) => request,
         Err(response) => return response,
     };
+    if identity.identity_type != IdentityType::Service {
+        request.tenant_id = Some(identity.tenant_id);
+    }
     let tenant_id = match request.tenant_id {
         Some(tenant_id) => {
             if let Err(response) = require_direct_authz(
@@ -168,13 +166,9 @@ pub async fn handle_tool_stats(
             None
         }
     };
-    let config = match load_moa_config() {
-        Ok(config) => config,
-        Err(response) => return response,
-    };
     match moa_session::analytics::list_tool_call_summaries(
         &state.pool,
-        config.database.schema.as_deref(),
+        state.config.database.schema.as_deref(),
         tenant_id.as_ref(),
     )
     .await
@@ -211,13 +205,12 @@ pub async fn handle_cache_stats(
     {
         return response;
     }
-    let config = match load_moa_config() {
-        Ok(config) => config,
-        Err(response) => return response,
-    };
+    if let Err(response) = refresh_analytics_materialized_views(&state).await {
+        return response;
+    }
     let summary = match moa_session::analytics::get_tenant_stats_control_plane(
         &state.pool,
-        config.database.schema.as_deref(),
+        state.config.database.schema.as_deref(),
         &request.tenant_id,
         request.days,
     )
@@ -228,7 +221,7 @@ pub async fn handle_cache_stats(
     };
     match moa_session::analytics::list_cache_daily_metrics_control_plane(
         &state.pool,
-        config.database.schema.as_deref(),
+        state.config.database.schema.as_deref(),
         &request.tenant_id,
         request.days,
     )
@@ -304,13 +297,9 @@ pub async fn handle_learning_candidates(
     {
         return response;
     }
-    let config = match load_moa_config() {
-        Ok(config) => config,
-        Err(response) => return response,
-    };
     match moa_session::analytics::list_learning_candidate_summaries(
         &state.pool,
-        config.database.schema.as_deref(),
+        state.config.database.schema.as_deref(),
         request.tenant_id,
         request.status,
         request.limit,
@@ -354,18 +343,9 @@ pub async fn handle_session_search(
     {
         return response;
     }
-    let config = match load_moa_config() {
-        Ok(config) => config,
-        Err(response) => return response,
-    };
-    let store = match moa_session::PostgresSessionStore::from_existing_pool_with_config(
-        &config,
-        (*state.pool).clone(),
-    )
-    .await
-    {
+    let store = match session_store_from_state(&state).await {
         Ok(store) => store,
-        Err(error) => return moa_error_response(error),
+        Err(response) => return response,
     };
     let events = match store
         .search_events(
@@ -386,6 +366,25 @@ pub async fn handle_session_search(
         Err(error) => return moa_error_response(error),
     };
     Json(session_search_response_from_events(request, events)).into_response()
+}
+
+async fn session_store_from_state(
+    state: &AppState,
+) -> Result<moa_session::PostgresSessionStore, Response> {
+    moa_session::PostgresSessionStore::from_existing_pool_with_config(
+        &state.config,
+        (*state.pool).clone(),
+    )
+    .await
+    .map_err(moa_error_response)
+}
+
+async fn refresh_analytics_materialized_views(state: &AppState) -> Result<(), Response> {
+    session_store_from_state(state)
+        .await?
+        .refresh_analytics_materialized_views()
+        .await
+        .map_err(moa_error_response)
 }
 
 pub(super) fn translate(
@@ -995,13 +994,11 @@ mod tests {
 
     #[test]
     fn lineage_public_routes_do_not_translate_to_restate_handlers() {
-        // Pins: hosted lineage routes no longer forward to the removed LineageAdmin service.
+        // Pins: hosted lineage routes stay on direct edge handlers.
         let paths = [
             "/v1/lineage/explain",
             "/v1/lineage/query",
-            "/v1/lineage/export",
             "/v1/lineage/verify",
-            "/v1/lineage/erase",
         ];
 
         for public_path in paths {

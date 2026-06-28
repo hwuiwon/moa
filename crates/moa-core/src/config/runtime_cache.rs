@@ -23,8 +23,6 @@ pub struct RuntimeCacheConfig {
     pub backend: RuntimeCacheBackend,
     /// Redis URL used when the Redis backend is selected.
     pub redis_url: Option<String>,
-    /// Default TTL for callers that do not carry a domain-specific TTL.
-    pub default_ttl_seconds: u64,
 }
 
 impl Default for RuntimeCacheConfig {
@@ -32,7 +30,6 @@ impl Default for RuntimeCacheConfig {
         Self {
             backend: RuntimeCacheBackend::Auto,
             redis_url: None,
-            default_ttl_seconds: 300,
         }
     }
 }

@@ -43,6 +43,9 @@ pub struct RunSubAgentTurnRequest {
     /// Optional turn-iteration cap for this child turn workflow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
+    /// Trusted sandbox file manifest inherited from the root turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_sandbox_manifest: Option<TrustedSandboxFileManifestRef>,
 }
 
 /// Durable lifecycle phase for one turn workflow.

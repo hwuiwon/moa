@@ -425,6 +425,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use moa_core::Channel;
+    use moa_core::traits::RuntimeCacheStore;
     use moa_runtime_store::MemoryRuntimeCacheStore;
 
     use super::MessagingRateLimiter;
@@ -455,6 +456,42 @@ mod tests {
         assert!(
             started.elapsed() >= Duration::from_millis(25),
             "second limiter did not wait on the shared Slack channel slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_runtime_cache_channel_pacing_records_wall_clock_slot() {
+        // Pins: Redis-selected pacing stores Unix wall-clock slots through shared RuntimeCacheStore CAS.
+        let cache = Arc::new(MemoryRuntimeCacheStore::new());
+        let limiter = MessagingRateLimiter::for_channel(Channel::Slack)
+            .with_per_channel_interval(Duration::from_millis(50))
+            .with_delay_first_send(false)
+            .with_runtime_cache(cache.clone());
+        let before_ms = super::unix_millis_now().expect("wall clock should produce millis");
+
+        limiter
+            .wait_for_channel_slot("Cwall")
+            .await
+            .expect("limiter should reserve one shared wall-clock slot");
+
+        let value = cache
+            .get(&limiter.cache_key("Cwall"))
+            .await
+            .expect("shared runtime cache read should succeed")
+            .expect("shared runtime cache should contain the reserved slot");
+        let slot_ms = std::str::from_utf8(&value)
+            .expect("slot should be stored as UTF-8 millis")
+            .parse::<u64>()
+            .expect("slot should parse as millis");
+        let after_ms = super::unix_millis_now().expect("wall clock should produce millis");
+
+        assert!(
+            slot_ms >= before_ms + 50,
+            "reserved slot {slot_ms} should be at least one interval after {before_ms}"
+        );
+        assert!(
+            slot_ms <= after_ms + 50,
+            "reserved slot {slot_ms} should be based on wall clock, not process Instant {after_ms}"
         );
     }
 }

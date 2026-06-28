@@ -117,12 +117,21 @@ impl DurableJournal {
     }
 
     /// Appends an event to fjall and returns its durable sequence number.
-    pub(crate) fn append_accepted_event(&self, evt: LineageEvent) -> Result<u64> {
-        let (seq, _) = self.append_event_row(evt)?;
+    pub(crate) async fn append_accepted_event(&self, evt: LineageEvent) -> Result<u64> {
+        let journal = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let (seq, _) = journal.append_event_row_sync(evt)?;
+            Ok(seq)
+        })
+        .await?
+    }
+
+    pub(crate) fn append_accepted_event_sync(&self, evt: LineageEvent) -> Result<u64> {
+        let (seq, _) = self.append_event_row_sync(evt)?;
         Ok(seq)
     }
 
-    fn append_event_row(&self, evt: LineageEvent) -> Result<(u64, PendingRow)> {
+    fn append_event_row_sync(&self, evt: LineageEvent) -> Result<(u64, PendingRow)> {
         let row = PendingRow::from_event(evt)?;
         let payload = serde_json::to_vec(&row)?;
         let seq = self.next_seq.fetch_add(1, Ordering::AcqRel);
@@ -131,15 +140,28 @@ impl DurableJournal {
         Ok((seq, row))
     }
 
-    fn replay(&self) -> Result<Vec<(u64, Vec<u8>)>> {
-        self.lock()?.replay()
+    async fn append_event_rows(&self, events: Vec<LineageEvent>) -> Result<Vec<(u64, PendingRow)>> {
+        let journal = self.clone();
+        tokio::task::spawn_blocking(move || {
+            events
+                .into_iter()
+                .map(|event| journal.append_event_row_sync(event))
+                .collect::<Result<Vec<_>>>()
+        })
+        .await?
     }
 
-    fn ack_range(&self, lo: u64, hi: u64) -> Result<()> {
-        self.lock()?.ack_range(lo, hi)
+    async fn replay(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+        let journal = self.clone();
+        tokio::task::spawn_blocking(move || journal.lock()?.replay()).await?
     }
 
-    fn ack_sequences(&self, seqs: &[u64]) -> Result<()> {
+    async fn ack_range(&self, lo: u64, hi: u64) -> Result<()> {
+        let journal = self.clone();
+        tokio::task::spawn_blocking(move || journal.lock()?.ack_range(lo, hi)).await?
+    }
+
+    async fn ack_sequences(&self, seqs: &[u64]) -> Result<()> {
         if seqs.is_empty() {
             return Ok(());
         }
@@ -153,16 +175,21 @@ impl DurableJournal {
                 previous = seq;
                 continue;
             }
-            self.ack_range(range_start, previous)?;
+            self.ack_range(range_start, previous).await?;
             range_start = seq;
             previous = seq;
         }
-        self.ack_range(range_start, previous)
+        self.ack_range(range_start, previous).await
     }
 
     /// Returns the approximate number of unacknowledged journal rows.
     pub(crate) fn approximate_len(&self) -> Result<usize> {
         Ok(self.lock()?.approximate_len())
+    }
+
+    async fn approximate_len_async(&self) -> Result<usize> {
+        let journal = self.clone();
+        tokio::task::spawn_blocking(move || journal.approximate_len()).await?
     }
 
     fn lock(&self) -> Result<StdMutexGuard<'_, Journal>> {
@@ -291,7 +318,7 @@ async fn run_writer(
         }
     }
 
-    record_journal_depth(&stats, journal.approximate_len()? as u64);
+    record_journal_depth(&stats, journal.approximate_len_async().await? as u64);
     Ok(stats.snapshot())
 }
 
@@ -336,7 +363,7 @@ async fn replay_pending(
     pool: &sqlx::PgPool,
     stats: &Arc<SharedWriterStats>,
 ) -> Result<()> {
-    let pending = journal.replay()?;
+    let pending = journal.replay().await?;
     record_journal_depth(stats, pending.len() as u64);
     if pending.is_empty() {
         return Ok(());
@@ -350,12 +377,12 @@ async fn replay_pending(
     if should_ack_journal(disposition)
         && let (Some((lo, _)), Some((hi, _))) = (pending.first(), pending.last())
     {
-        journal.ack_range(*lo, *hi)?;
+        journal.ack_range(*lo, *hi).await?;
     }
     if disposition == WriteDisposition::Written {
         record_flush(stats, rows.len());
     }
-    record_journal_depth(stats, journal.approximate_len()? as u64);
+    record_journal_depth(stats, journal.approximate_len_async().await? as u64);
     Ok(())
 }
 
@@ -372,21 +399,20 @@ async fn flush_events(
     let events = std::mem::take(batch);
     let mut rows = Vec::with_capacity(events.len());
     let mut seqs = Vec::with_capacity(events.len());
-    for evt in events {
-        let (seq, row) = journal.append_event_row(evt)?;
+    for (seq, row) in journal.append_event_rows(events).await? {
         seqs.push(seq);
         rows.push(row);
     }
-    record_journal_depth(stats, journal.approximate_len()? as u64);
+    record_journal_depth(stats, journal.approximate_len_async().await? as u64);
 
     let disposition = write_pending_rows_or_dead_letter(pool, &rows).await?;
     if should_ack_journal(disposition) {
-        journal.ack_sequences(&seqs)?;
+        journal.ack_sequences(&seqs).await?;
     }
     if disposition == WriteDisposition::Written {
         record_flush(stats, rows.len());
     }
-    record_journal_depth(stats, journal.approximate_len()? as u64);
+    record_journal_depth(stats, journal.approximate_len_async().await? as u64);
     Ok(())
 }
 

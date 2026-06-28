@@ -421,10 +421,10 @@ tenant selector is populated from `analytics.turn_lineage`.
 Compliance audit is an opt-in superset of the engineering lineage tier. A
 control-plane enrollment row enables tenant-local BLAKE3 chain links on
 `analytics.turn_lineage`, periodic Merkle roots in `analytics.audit_roots`, PII
-pseudonymization side data in `pii_vault`, and DSAR tooling through the hosted
-`POST /v1/lineage/export`, `POST /v1/lineage/verify`, and
-`POST /v1/lineage/erase` APIs. Tenants that are not enabled keep the L01-L03
-behavior and store `prev_hash = NULL`.
+pseudonymization side data in `pii_vault`, and hosted verification through
+`POST /v1/lineage/verify`. Export and erase side effects stay out of direct edge
+read routes until a durable DSAR workflow owns them. Tenants that are not
+enabled keep the L01-L03 behavior and store `prev_hash = NULL`.
 
 Audit bucket bootstrap lives in `scripts/bootstrap-audit-bucket.sh`. Buckets
 must be created with Object Lock enabled at creation time; production uses

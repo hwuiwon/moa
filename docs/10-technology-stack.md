@@ -56,7 +56,7 @@ The root workspace currently contains:
 | Database | `sqlx` with Postgres for runtime queries; `refinery` for all Postgres schema migrations |
 | Orchestration | `restate-sdk` |
 | Scheduling | Restate `CronJob` virtual object |
-| Runtime cache | in-process memory by default; optional Redis client behind the `redis` feature |
+| Runtime cache | in-process memory for local development; Redis client behind the `redis` feature for cloud coordination |
 | Security | `secrecy`, `shell-words` |
 | Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP transports |
 | Lineage and audit | OTel/OpenInference bridge, Parquet/Arrow cold export, Object Lock audit storage |
@@ -80,6 +80,7 @@ Docker is used by the dev stack and optionally by local hand providers.
 |---|---|
 | Restate | Durable orchestration engine |
 | Postgres/Neon | Product data store |
+| Redis | Shared runtime cache required when `MOA_CLOUD_ENABLED=true` |
 | LLM provider | Model calls and optional embeddings |
 | Hand provider | Daytona, E2B, or configured local/container execution |
 | Kubernetes or equivalent | Hosting Restate and MOA services |
@@ -95,7 +96,7 @@ Docker is used by the dev stack and optionally by local hand providers.
 | Messaging platforms | Slack adapter |
 | Linked integration providers | Nango and Merge for tenant knowledge linked-account flow, sync trigger, changed-record listing, and webhooks |
 | Document parsers | `liteparse` for native local file parsing; LlamaParse, Unstructured, and Reducto for configured external tenant knowledge parsing when native parsing is insufficient |
-| Redis | Optional shared runtime cache for pacing and transient adapter references across replicas |
+| Redis | Optional for local development; required for cloud replicas that set `MOA_CLOUD_ENABLED=true` |
 
 ## Build Targets
 
@@ -172,9 +173,14 @@ OPENAI_API_KEY=... # or another configured provider key
 Configure Redis when runtime cache state should coordinate across replicas:
 
 ```bash
+MOA_CLOUD_ENABLED=true
 MOA_RUNTIME_CACHE_BACKEND=redis
 MOA_RUNTIME_CACHE_REDIS_URL=redis://...
 ```
+
+When `MOA_CLOUD_ENABLED=true`, startup fails if runtime cache resolution lands
+on the in-memory backend. Memory remains the local-development fallback and is
+per-process best effort only.
 
 Optional hand and messaging settings depend on the chosen deployment:
 

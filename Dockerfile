@@ -4,7 +4,7 @@ FROM rust:1.95.0-bookworm AS builder
 WORKDIR /build
 
 COPY . .
-ARG MOA_ORCHESTRATOR_FEATURES=""
+ARG MOA_ORCHESTRATOR_FEATURES="redis"
 RUN if [ -n "${MOA_ORCHESTRATOR_FEATURES}" ]; then \
       cargo build --locked --release -p moa-orchestrator --bin moa-orchestrator-bin --features "${MOA_ORCHESTRATOR_FEATURES}"; \
     else \

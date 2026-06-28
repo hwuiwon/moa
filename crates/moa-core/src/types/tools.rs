@@ -51,6 +51,41 @@ pub struct ToolOutputArtifact {
     pub stderr: Option<ClaimCheck>,
 }
 
+/// Metadata for one trusted sandbox file stored in a durable manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedSandboxFileEntry {
+    /// POSIX relative path inside the sandbox.
+    pub path: String,
+    /// SHA-256 hash of the raw file bytes, encoded as lowercase hex.
+    pub content_sha256: String,
+    /// Raw byte length of the file content.
+    pub size: usize,
+    /// Whether the file should be executable after installation.
+    #[serde(default)]
+    pub executable: bool,
+}
+
+/// Durable reference to trusted sandbox files selected for a turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedSandboxFileManifestRef {
+    /// Content-addressed blob id containing the serialized manifest payload.
+    pub blob_id: String,
+    /// Original serialized manifest size in bytes.
+    pub size: usize,
+    /// SHA-256 hash of the serialized manifest payload, encoded as lowercase hex.
+    pub manifest_sha256: String,
+    /// Per-file metadata used to validate the loaded manifest before installation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<TrustedSandboxFileEntry>,
+}
+
+/// Serialized payload stored behind a trusted sandbox file manifest reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedSandboxFileManifestPayload {
+    /// Trusted files to materialize before hand tool execution.
+    pub files: Vec<SandboxFile>,
+}
+
 impl ToolOutputArtifact {
     /// Returns the claim check for one artifact stream when present.
     pub fn claim_check(&self, stream: ToolArtifactStream) -> Option<&ClaimCheck> {
@@ -377,9 +412,9 @@ pub struct ToolCallRequest {
     /// Explicit idempotency key required by `IdempotentWithKey` tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
-    /// Trusted sandbox files selected during context compilation and required before execution.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub trusted_sandbox_files: Vec<SandboxFile>,
+    /// Durable trusted sandbox file manifest selected during context compilation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_sandbox_manifest: Option<TrustedSandboxFileManifestRef>,
 }
 
 /// Shared metadata that describes one callable tool.

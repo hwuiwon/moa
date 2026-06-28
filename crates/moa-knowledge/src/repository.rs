@@ -24,6 +24,7 @@ use crate::{
 
 const LIST_CONNECTIONS_LIMIT: i64 = 100;
 const LIST_OBJECTS_LIMIT: u32 = 500;
+const INGESTION_CLAIM_LEASE_SECONDS: i64 = 15 * 60;
 
 fn active_sync_run_status_values() -> Vec<String> {
     [
@@ -62,8 +63,13 @@ pub enum SyncRunClaim {
 /// Result of atomically claiming ingestion for one object content version.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DocumentVersionIngestionClaim {
-    /// This caller owns graph/vector writes for the document version.
-    Claimed(DocumentVersion),
+    /// This caller owns graph/vector writes for the document version under the returned token.
+    Claimed {
+        /// Document version to persist into graph and vector storage.
+        version: DocumentVersion,
+        /// Fencing token required to complete or fail this claim.
+        claim_token: Uuid,
+    },
     /// Another worker is currently processing the same document version.
     AlreadyInProgress(DocumentVersion),
     /// The same document version has already completed ingestion.
@@ -204,27 +210,33 @@ pub trait KnowledgeRepository: Send + Sync {
         version: DocumentVersion,
     ) -> Result<DocumentVersionIngestionClaim> {
         let _ = sync_run_uid;
+        let claim_token = Uuid::now_v7();
         self.insert_document_version(version.clone()).await?;
-        Ok(DocumentVersionIngestionClaim::Claimed(version))
+        Ok(DocumentVersionIngestionClaim::Claimed {
+            version,
+            claim_token,
+        })
     }
 
-    /// Marks a claimed document version ingestion as completed.
+    /// Marks a claimed document version ingestion as completed if the claim token still owns it.
     async fn complete_document_version_ingestion(
         &self,
         sync_run_uid: Uuid,
         version_uid: Uuid,
+        claim_token: Uuid,
     ) -> Result<()> {
-        let _ = (sync_run_uid, version_uid);
+        let _ = (sync_run_uid, version_uid, claim_token);
         Ok(())
     }
 
-    /// Marks a claimed document version ingestion as failed so a retry can reclaim it.
+    /// Marks a claimed document version ingestion as failed if the claim token still owns it.
     async fn fail_document_version_ingestion(
         &self,
         sync_run_uid: Uuid,
         version_uid: Uuid,
+        claim_token: Uuid,
     ) -> Result<()> {
-        let _ = (sync_run_uid, version_uid);
+        let _ = (sync_run_uid, version_uid, claim_token);
         Ok(())
     }
 
@@ -1277,6 +1289,7 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         sync_run_uid: Uuid,
         version: DocumentVersion,
     ) -> Result<DocumentVersionIngestionClaim> {
+        let claim_token = Uuid::now_v7();
         let mut conn = self.begin().await?;
         sqlx::query(
             r#"
@@ -1329,10 +1342,12 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             WITH inserted AS (
                 INSERT INTO moa.knowledge_object_ingestion_claims (
                     tenant_id, storage_partition_id, object_id, content_hash,
-                    document_version_id, claimed_by_sync_run_id, status
+                    document_version_id, claimed_by_sync_run_id, status,
+                    claim_token, lease_expires_at
                 )
                 SELECT o.tenant_id, o.storage_partition_id, o.object_uid, $2,
-                       $3, $4, 'started'
+                       $3, $4, 'started', $5,
+                       now() + ($6::BIGINT * INTERVAL '1 second')
                 FROM moa.knowledge_objects o
                 WHERE o.object_uid = $1
                 ON CONFLICT (tenant_id, object_id, content_hash) DO NOTHING
@@ -1345,12 +1360,17 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .bind(&version.content_hash)
         .bind(version.version_uid)
         .bind(sync_run_uid)
+        .bind(claim_token)
+        .bind(INGESTION_CLAIM_LEASE_SECONDS)
         .fetch_one(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
         if inserted {
             conn.commit().await.map_err(map_moa_error)?;
-            return Ok(DocumentVersionIngestionClaim::Claimed(version));
+            return Ok(DocumentVersionIngestionClaim::Claimed {
+                version,
+                claim_token,
+            });
         }
 
         let reclaimed = sqlx::query_scalar::<_, bool>(
@@ -1360,12 +1380,17 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
                 SET status = 'started',
                     claimed_by_sync_run_id = $3,
                     completed_by_sync_run_id = NULL,
+                    claim_token = $4,
                     claimed_at = now(),
+                    lease_expires_at = now() + ($5::BIGINT * INTERVAL '1 second'),
                     completed_at = NULL,
                     updated_at = now()
                 WHERE object_id = $1
                   AND content_hash = $2
-                  AND status = 'failed'
+                  AND (
+                      status = 'failed'
+                      OR (status = 'started' AND lease_expires_at <= now())
+                  )
                 RETURNING 1
             )
             SELECT EXISTS(SELECT 1 FROM reclaimed)
@@ -1374,12 +1399,17 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .bind(version.object_uid)
         .bind(&version.content_hash)
         .bind(sync_run_uid)
+        .bind(claim_token)
+        .bind(INGESTION_CLAIM_LEASE_SECONDS)
         .fetch_one(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
         if reclaimed {
             conn.commit().await.map_err(map_moa_error)?;
-            return Ok(DocumentVersionIngestionClaim::Claimed(version));
+            return Ok(DocumentVersionIngestionClaim::Claimed {
+                version,
+                claim_token,
+            });
         }
 
         let status = sqlx::query_scalar::<_, String>(
@@ -1405,6 +1435,7 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         &self,
         sync_run_uid: Uuid,
         version_uid: Uuid,
+        claim_token: Uuid,
     ) -> Result<()> {
         let mut conn = self.begin().await?;
         let result = sqlx::query(
@@ -1416,11 +1447,13 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
                 updated_at = now()
             WHERE document_version_id = $2
               AND claimed_by_sync_run_id = $1
+              AND claim_token = $3
               AND status = 'started'
             "#,
         )
         .bind(sync_run_uid)
         .bind(version_uid)
+        .bind(claim_token)
         .execute(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
@@ -1435,23 +1468,30 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         &self,
         sync_run_uid: Uuid,
         version_uid: Uuid,
+        claim_token: Uuid,
     ) -> Result<()> {
         let mut conn = self.begin().await?;
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE moa.knowledge_object_ingestion_claims
             SET status = 'failed',
                 updated_at = now()
             WHERE document_version_id = $2
               AND claimed_by_sync_run_id = $1
+              AND claim_token = $3
               AND status = 'started'
             "#,
         )
         .bind(sync_run_uid)
         .bind(version_uid)
+        .bind(claim_token)
         .execute(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
+        ensure_rows_affected(
+            result.rows_affected(),
+            "fail document version ingestion claim",
+        )?;
         conn.commit().await.map_err(map_moa_error)
     }
 

@@ -160,7 +160,7 @@ impl PostgresSessionStore {
         let store = Self {
             url: config.database.url.clone(),
             pool,
-            schema_name: None,
+            schema_name: config.database.schema.clone(),
             blob_store,
             blob_threshold_bytes: config.session.blob_threshold_bytes,
         };

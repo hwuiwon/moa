@@ -58,6 +58,8 @@ spec:
           env:
             - name: RUST_LOG
               value: info
+            - name: MOA_CLOUD_ENABLED
+              value: "true"
             - name: MOA_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -85,6 +87,13 @@ spec:
               value: http://restate.moa-restate.svc.cluster.local:9070
             - name: MOA_RESTATE_INGRESS_URL
               value: http://restate.moa-restate.svc.cluster.local:8080
+            - name: MOA_RUNTIME_CACHE_BACKEND
+              value: redis
+            - name: MOA_RUNTIME_CACHE_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: moa-runtime-cache
+                  key: redis-url
             - name: MOA_OBSERVABILITY_ENABLED
               value: "true"
             - name: MOA_OBSERVABILITY_OTLP_ENDPOINT

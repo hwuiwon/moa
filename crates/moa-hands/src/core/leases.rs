@@ -95,8 +95,8 @@ pub struct HandLease {
     pub provider: String,
     /// Requested sandbox isolation tier.
     pub tier: SandboxTier,
-    /// Serialized hand handle and provider metadata.
-    pub handle: LeaseHandle,
+    /// Serialized hand handle and provider metadata when the row has an active sandbox.
+    pub handle: Option<LeaseHandle>,
     /// Current lease lifecycle state.
     pub status: HandLeaseStatus,
     /// Monotonic fencing generation.
@@ -138,6 +138,15 @@ pub trait HandLeaseStore: Send + Sync {
         expires_at: DateTime<Utc>,
     ) -> Result<()>;
 
+    /// Renews a current active lease if the generation fence still matches.
+    async fn renew_active(
+        &self,
+        session_id: SessionId,
+        provider: &str,
+        generation: i64,
+        expires_at: DateTime<Utc>,
+    ) -> Result<bool>;
+
     /// Marks a claimed generation with a terminal or replaceable status.
     async fn mark_status(
         &self,
@@ -175,13 +184,12 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         let row = sqlx::query(
             r#"
             INSERT INTO moa.hand_leases (
-                session_id, tenant_id, provider, tier, handle, status, generation, expires_at
+                session_id, tenant_id, provider, tier, status, generation, expires_at
             )
-            VALUES ($1, $2, $3, $4, $5, 'provisioning', 1, $6)
+            VALUES ($1, $2, $3, $4, 'provisioning', 1, $5)
             ON CONFLICT (session_id, provider) DO UPDATE
             SET tenant_id = EXCLUDED.tenant_id,
                 tier = EXCLUDED.tier,
-                handle = EXCLUDED.handle,
                 status = 'provisioning',
                 generation = moa.hand_leases.generation + 1,
                 updated_at = now(),
@@ -196,9 +204,6 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         .bind(tenant_id)
         .bind(provider)
         .bind(tier_label(&tier))
-        .bind(Json(LeaseHandle::new(HandHandle::local(
-            std::path::PathBuf::new(),
-        ))))
         .bind(expires_at)
         .fetch_optional(&self.pool)
         .await
@@ -283,6 +288,37 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         }
     }
 
+    async fn renew_active(
+        &self,
+        session_id: SessionId,
+        provider: &str,
+        generation: i64,
+        expires_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let affected = sqlx::query(
+            r#"
+            UPDATE moa.hand_leases
+            SET updated_at = now(),
+                expires_at = $4
+            WHERE session_id = $1
+              AND provider = $2
+              AND generation = $3
+              AND status = 'active'
+              AND expires_at > now()
+            "#,
+        )
+        .bind(session_id)
+        .bind(provider)
+        .bind(generation)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+
+        Ok(affected == 1)
+    }
+
     async fn mark_status(
         &self,
         session_id: SessionId,
@@ -322,9 +358,9 @@ fn hand_lease_from_row(row: &sqlx::postgres::PgRow) -> Result<HandLease> {
                 .as_str(),
         )?,
         handle: row
-            .try_get::<Json<LeaseHandle>, _>("handle")
+            .try_get::<Option<Json<LeaseHandle>>, _>("handle")
             .map_err(map_sqlx_error)?
-            .0,
+            .map(|handle| handle.0),
         status: HandLeaseStatus::from_str(
             row.try_get::<String, _>("status")
                 .map_err(map_sqlx_error)?
@@ -406,7 +442,9 @@ impl HandLeaseStore for MemoryHandLeaseStore {
             tenant_id,
             provider: provider.to_string(),
             tier,
-            handle: LeaseHandle::new(HandHandle::local(std::path::PathBuf::new())),
+            handle: leases
+                .get(&key)
+                .and_then(|existing| existing.handle.clone()),
             status: HandLeaseStatus::Provisioning,
             generation,
             created_at: leases.get(&key).map_or(now, |existing| existing.created_at),
@@ -456,11 +494,34 @@ impl HandLeaseStore for MemoryHandLeaseStore {
                 "hand lease activation lost generation fence".to_string(),
             ));
         }
-        lease.handle = handle;
+        lease.handle = Some(handle);
         lease.status = HandLeaseStatus::Active;
         lease.updated_at = Utc::now();
         lease.expires_at = expires_at;
         Ok(())
+    }
+
+    async fn renew_active(
+        &self,
+        session_id: SessionId,
+        provider: &str,
+        generation: i64,
+        expires_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let mut leases = self.leases.lock().await;
+        let Some(lease) = leases.get_mut(&(session_id, provider.to_string())) else {
+            return Ok(false);
+        };
+        if lease.generation != generation
+            || lease.status != HandLeaseStatus::Active
+            || lease.expires_at <= Utc::now()
+        {
+            return Ok(false);
+        }
+
+        lease.updated_at = Utc::now();
+        lease.expires_at = expires_at;
+        Ok(true)
     }
 
     async fn mark_status(
@@ -587,5 +648,81 @@ mod tests {
             .expect("stale lease should allow replacement");
 
         assert_eq!(replacement.generation, claimed.generation + 1);
+        assert_eq!(
+            replacement.handle,
+            Some(LeaseHandle::new(HandHandle::local(PathBuf::from(
+                "/tmp/moa-hand"
+            )))),
+            "stale reclaim must preserve the real handle until a new activation wins"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_store_provisioning_claim_has_no_placeholder_handle() {
+        // Pins: provisioning claims do not write an empty fake handle over durable state.
+        let store = MemoryHandLeaseStore::shared();
+        let claim = store
+            .claim_for_provisioning(
+                SessionId::new(),
+                TenantId::new(),
+                "local",
+                SandboxTier::Local,
+                Utc::now() + chrono::Duration::minutes(5),
+            )
+            .await
+            .expect("claim should succeed")
+            .expect("claim should be owned");
+
+        assert_eq!(claim.handle, None);
+    }
+
+    #[tokio::test]
+    async fn memory_store_renew_active_is_generation_fenced() {
+        // Pins: lease renewal only extends the current active generation.
+        let store = MemoryHandLeaseStore::shared();
+        let session_id = SessionId::new();
+        let tenant_id = TenantId::new();
+        let first_expiry = Utc::now() + chrono::Duration::minutes(5);
+        let renewed_expiry = Utc::now() + chrono::Duration::minutes(10);
+        let claim = store
+            .claim_for_provisioning(
+                session_id,
+                tenant_id,
+                "local",
+                SandboxTier::Local,
+                first_expiry,
+            )
+            .await
+            .expect("claim should succeed")
+            .expect("claim should be owned");
+        store
+            .activate(
+                session_id,
+                "local",
+                claim.generation,
+                LeaseHandle::new(HandHandle::local(PathBuf::from("/tmp/moa-hand"))),
+                first_expiry,
+            )
+            .await
+            .expect("activate lease");
+
+        assert!(
+            !store
+                .renew_active(session_id, "local", claim.generation + 1, renewed_expiry)
+                .await
+                .expect("wrong generation renewal should not fail storage")
+        );
+        assert!(
+            store
+                .renew_active(session_id, "local", claim.generation, renewed_expiry)
+                .await
+                .expect("current generation renewal should succeed")
+        );
+        let renewed = store
+            .get(session_id, "local")
+            .await
+            .expect("load renewed lease")
+            .expect("lease should exist");
+        assert_eq!(renewed.expires_at, renewed_expiry);
     }
 }

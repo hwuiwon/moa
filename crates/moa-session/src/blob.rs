@@ -82,30 +82,24 @@ impl FileBlobStore {
 #[derive(Debug, Clone)]
 pub struct PostgresBlobStore {
     pool: PgPool,
+    table_name: String,
 }
 
 impl PostgresBlobStore {
-    /// Creates a Postgres blob store and ensures its table exists.
+    /// Creates a Postgres blob store using the pool's current search path.
     pub async fn new(pool: PgPool) -> Result<Self> {
-        let store = Self { pool };
-        store.ensure_table().await?;
-        Ok(store)
+        Ok(Self {
+            pool,
+            table_name: "session_blobs".to_string(),
+        })
     }
 
-    async fn ensure_table(&self) -> Result<()> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS session_blobs (
-                session_id UUID NOT NULL,
-                blob_id TEXT NOT NULL,
-                content BYTEA NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (session_id, blob_id)
-            )",
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-        Ok(())
+    /// Creates a Postgres blob store bound to one configured schema.
+    pub async fn new_in_schema(pool: PgPool, schema_name: &str) -> Result<Self> {
+        Ok(Self {
+            pool,
+            table_name: format!("{}.session_blobs", quote_identifier(schema_name)),
+        })
     }
 }
 
@@ -114,11 +108,12 @@ impl BlobStore for PostgresBlobStore {
     /// Stores a blob under its SHA-256 identifier.
     async fn store(&self, session_id: &SessionId, content: &[u8]) -> Result<String> {
         let blob_id = hex::encode(Sha256::digest(content));
-        sqlx::query(
-            "INSERT INTO session_blobs (session_id, blob_id, content)
+        sqlx::query(&format!(
+            "INSERT INTO {} (session_id, blob_id, content)
              VALUES ($1, $2, $3)
              ON CONFLICT (session_id, blob_id) DO NOTHING",
-        )
+            self.table_name
+        ))
         .bind(session_id.0)
         .bind(&blob_id)
         .bind(content)
@@ -130,34 +125,40 @@ impl BlobStore for PostgresBlobStore {
 
     /// Retrieves a previously stored blob.
     async fn get(&self, session_id: &SessionId, blob_id: &str) -> Result<Vec<u8>> {
-        let row =
-            sqlx::query("SELECT content FROM session_blobs WHERE session_id = $1 AND blob_id = $2")
-                .bind(session_id.0)
-                .bind(blob_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(map_sqlx_error)?;
+        let row = sqlx::query(&format!(
+            "SELECT content FROM {} WHERE session_id = $1 AND blob_id = $2",
+            self.table_name
+        ))
+        .bind(session_id.0)
+        .bind(blob_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
         row.map(|row| row.get::<Vec<u8>, _>("content"))
             .ok_or_else(|| MoaError::BlobNotFound(blob_id.to_string()))
     }
 
     /// Deletes every blob belonging to one session.
     async fn delete_session(&self, session_id: &SessionId) -> Result<()> {
-        sqlx::query("DELETE FROM session_blobs WHERE session_id = $1")
-            .bind(session_id.0)
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?;
+        sqlx::query(&format!(
+            "DELETE FROM {} WHERE session_id = $1",
+            self.table_name
+        ))
+        .bind(session_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
         Ok(())
     }
 
     /// Returns whether the blob already exists.
     async fn exists(&self, session_id: &SessionId, blob_id: &str) -> Result<bool> {
-        let exists = sqlx::query_scalar::<_, bool>(
+        let exists = sqlx::query_scalar::<_, bool>(&format!(
             "SELECT EXISTS (
-                SELECT 1 FROM session_blobs WHERE session_id = $1 AND blob_id = $2
+                SELECT 1 FROM {} WHERE session_id = $1 AND blob_id = $2
             )",
-        )
+            self.table_name
+        ))
         .bind(session_id.0)
         .bind(blob_id)
         .fetch_one(&self.pool)
@@ -174,7 +175,12 @@ pub async fn blob_store_from_config(
 ) -> Result<Arc<dyn BlobStore>> {
     match config.session.blob_backend {
         SessionBlobBackend::Local => Ok(Arc::new(FileBlobStore::from_config(config)?)),
-        SessionBlobBackend::Postgres => Ok(Arc::new(PostgresBlobStore::new(pool).await?)),
+        SessionBlobBackend::Postgres => match config.database.schema.as_deref() {
+            Some(schema_name) => Ok(Arc::new(
+                PostgresBlobStore::new_in_schema(pool, schema_name).await?,
+            )),
+            None => Ok(Arc::new(PostgresBlobStore::new(pool).await?)),
+        },
         SessionBlobBackend::ObjectStore => Err(MoaError::ConfigError(
             "session.blob_backend = object_store is not implemented; use postgres for durable cloud claim-check payloads".to_string(),
         )),
@@ -409,6 +415,10 @@ fn expand_local_path(path: &Path) -> Result<PathBuf> {
     }
 
     Ok(path.to_path_buf())
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 fn map_sqlx_error(error: sqlx::Error) -> MoaError {

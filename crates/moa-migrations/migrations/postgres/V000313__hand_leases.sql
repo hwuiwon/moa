@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS moa.hand_leases (
     tenant_id UUID NOT NULL,
     provider TEXT NOT NULL,
     tier TEXT NOT NULL CHECK (tier IN ('none', 'container', 'microvm', 'local')),
-    handle JSONB NOT NULL,
+    handle JSONB,
     status TEXT NOT NULL CHECK (status IN ('provisioning', 'active', 'stale', 'destroyed', 'failed')),
     generation BIGINT NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

@@ -126,7 +126,8 @@ pub use sub_agent::{
 pub use tools::{
     IdempotencyClass, ToolArtifactStream, ToolCallRequest, ToolContent, ToolDefinition,
     ToolDiffStrategy, ToolInputShape, ToolOutput, ToolOutputArtifact, ToolPolicyInput,
-    ToolPolicySpec, read_tool_policy, write_tool_policy,
+    ToolPolicySpec, TrustedSandboxFileEntry, TrustedSandboxFileManifestPayload,
+    TrustedSandboxFileManifestRef, read_tool_policy, write_tool_policy,
 };
 
 #[cfg(test)]

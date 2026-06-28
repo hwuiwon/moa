@@ -35,6 +35,7 @@ const POSTGRES_MIGRATION_FILES: &[&str] = &[
     "V000313__hand_leases.sql",
     "V000314__eval_run_status.sql",
     "V000315__authz_outbox_claims.sql",
+    "V000316__session_blobs.sql",
     "V000317__knowledge_sync_active_claims.sql",
 ];
 
@@ -157,6 +158,10 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         sql: include_str!(
             "../migrations/postgres/V000312__knowledge_connection_source_selection.sql"
         ),
+    },
+    SchemaMigration {
+        name: "V000316__session_blobs.sql",
+        sql: include_str!("../migrations/postgres/V000316__session_blobs.sql"),
     },
     SchemaMigration {
         name: "V000317__knowledge_sync_active_claims.sql",

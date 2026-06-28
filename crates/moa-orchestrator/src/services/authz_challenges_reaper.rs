@@ -94,6 +94,23 @@ impl AuthzChallengeReaper {
             let decision = decision_from_unresolved_challenge(challenge)?;
             let payload = serde_json::to_value(&decision)?;
             if let Err(error) = resolver.resolve(&challenge.awakeable_id, &payload).await {
+                if missing_awakeable_error(&error) {
+                    let marked = authz_challenge_store::mark_claimed_builtin_challenge_resolved(
+                        &self.pool,
+                        challenge.id,
+                        challenge.resolve_claim_token,
+                    )
+                    .await?;
+                    if marked {
+                        tracing::warn!(
+                            authz_challenge_id = %challenge.id,
+                            awakeable_id = %challenge.awakeable_id,
+                            error = %error,
+                            "suppressing authz challenge retry for missing awakeable"
+                        );
+                    }
+                    continue;
+                }
                 authz_challenge_store::release_builtin_challenge_resolution_claim(
                     &self.pool,
                     challenge.id,
@@ -126,6 +143,16 @@ impl AuthzChallengeReaper {
 
         Ok(resolved_count)
     }
+}
+
+fn missing_awakeable_error(error: &AwakeableResolveError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("missing awakeable")
+        || message.contains("awakeable not found")
+        || message.starts_with("http 404")
+        || message.starts_with("http 410")
+        || message.contains("http 404")
+        || message.contains("http 410")
 }
 
 fn decision_from_unresolved_challenge(

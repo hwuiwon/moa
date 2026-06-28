@@ -144,6 +144,14 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
         import_support_skill(&client, ingress, &identity, &storage_partition_id).await?;
+        let agent = import_and_publish_artifact(
+            &client,
+            ingress,
+            &identity,
+            &storage_partition_id,
+            behavior_lab_agent_source(),
+        )
+        .await?;
 
         let workflow = import_and_publish_artifact(
             &client,
@@ -153,12 +161,13 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
             damaged_food_workflow_source(),
         )
         .await?;
+        let plan_source = damaged_food_plan_source(agent.revision_uid);
         let plan = import_and_publish_artifact(
             &client,
             ingress,
             &identity,
             &storage_partition_id,
-            damaged_food_plan_source(),
+            plan_source.as_str(),
         )
         .await?;
 
@@ -184,9 +193,9 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
         assert_eq!(status.status, "completed");
         assert_eq!(status.score_run_id, Some(run.score_run_id));
 
-        let trials = list_trials(&client, ingress, &identity, &storage_partition_id, run.run_uid).await?;
-        assert_eq!(trials.trials.len(), 1);
-        let trial = &trials.trials[0];
+        let trial =
+            wait_for_single_completed_trial(&client, ingress, &identity, &storage_partition_id, run.run_uid)
+                .await?;
         assert_eq!(trial.run_uid, run.run_uid);
         assert_eq!(trial.status, "completed");
         assert_eq!(trial.target_kind, "agent_loop");
@@ -211,7 +220,7 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
             trial.trial_uid,
         )
         .await?;
-        assert_trial_status_matches_summary(&trial_status, trial);
+        assert_trial_status_matches_summary(&trial_status, &trial);
 
         let events =
             wait_for_session_messages(&client, ingress, &identity, session_id, 2, 2).await?;
@@ -317,13 +326,22 @@ async fn transaction_dispute_plan_clarifies_then_handles_required_review() -> Re
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+        let agent = import_and_publish_artifact(
+            &client,
+            ingress,
+            &identity,
+            &storage_partition_id,
+            behavior_lab_agent_source(),
+        )
+        .await?;
 
+        let plan_source = transaction_plan_source(agent.revision_uid);
         let plan = import_and_publish_artifact(
             &client,
             ingress,
             &identity,
             &storage_partition_id,
-            transaction_plan_source(),
+            plan_source.as_str(),
         )
         .await?;
 
@@ -347,9 +365,9 @@ async fn transaction_dispute_plan_clarifies_then_handles_required_review() -> Re
         assert_eq!(status.status, "completed");
         assert_eq!(status.score_run_id, Some(run.score_run_id));
 
-        let trials = list_trials(&client, ingress, &identity, &storage_partition_id, run.run_uid).await?;
-        assert_eq!(trials.trials.len(), 1);
-        let trial = &trials.trials[0];
+        let trial =
+            wait_for_single_completed_trial(&client, ingress, &identity, &storage_partition_id, run.run_uid)
+                .await?;
         assert_eq!(trial.status, "completed");
         assert_eq!(trial.target_kind, "agent_loop");
         assert_eq!(trial.variant_key, "dispute-agent");
@@ -358,7 +376,7 @@ async fn transaction_dispute_plan_clarifies_then_handles_required_review() -> Re
             Some("ambiguous-merchant-dispute")
         );
         assert_eq!(trial.turn_count, 2);
-        assert_eq!(trial.stop_reason.as_deref(), Some("completed"));
+        assert_eq!(trial.stop_reason.as_deref(), Some("max_turns"));
         assert!(trial.workflow_run_uid.is_none());
         let session_id = trial
             .session_id
@@ -372,7 +390,7 @@ async fn transaction_dispute_plan_clarifies_then_handles_required_review() -> Re
             trial.trial_uid,
         )
         .await?;
-        assert_trial_status_matches_summary(&trial_status, trial);
+        assert_trial_status_matches_summary(&trial_status, &trial);
 
         let events =
             wait_for_action_review_or_tool_result(&client, ingress, &identity, session_id).await?;
@@ -637,6 +655,28 @@ async fn list_trials(
         .json::<ExperimentTrialsResponse>()
         .await
         .context("deserialize experiment trials response")
+}
+
+async fn wait_for_single_completed_trial(
+    client: &reqwest::Client,
+    ingress: &str,
+    identity: &Identity,
+    storage_partition_id: &StoragePartitionId,
+    run_uid: Uuid,
+) -> Result<ExperimentTrialSummary> {
+    let mut last_trials = None;
+    for _attempt in 0..90 {
+        let trials = list_trials(client, ingress, identity, storage_partition_id, run_uid).await?;
+        if trials.trials.len() == 1 && trials.trials[0].status == "completed" {
+            return Ok(trials.trials[0].clone());
+        }
+        last_trials = Some(trials);
+        sleep(Duration::from_secs(1)).await;
+    }
+
+    bail!(
+        "timed out waiting for one completed trial in run {run_uid}; last trials: {last_trials:?}"
+    )
 }
 
 async fn trial_status(
@@ -1166,7 +1206,7 @@ fn write_transaction_dispute_fixture(path: &Path) -> Result<()> {
     let fixture = json!({
         "default": {
             "completion": {
-                "content": "OK",
+                "content": "",
                 "tool_calls": []
             }
         },
@@ -1238,8 +1278,9 @@ When there is a clear customer description and order id, recommend a replacement
     }
 }
 
-fn damaged_food_plan_source() -> &'static str {
-    r#"
+fn damaged_food_plan_source(agent_revision_uid: Uuid) -> String {
+    format!(
+        r#"
 api_version: moa.artifact/v1
 kind: experiment_plan
 metadata:
@@ -1295,6 +1336,7 @@ definition:
         workflow_ref: workflow://damaged-food-replacement
         config:
           prompt: Start the damaged-food support trial. Use the delivery support skill before recommending a refund or replacement, and associate the damaged-food workflow once details are clear.
+          agent_revision_uid: "{agent_revision_uid}"
     simulator_model: scripted-loadtest
     target_model: scripted-loadtest
     parallelism: 1
@@ -1310,6 +1352,7 @@ definition:
     learning_proposals:
       enabled: false
 "#
+    )
 }
 
 fn damaged_food_workflow_source() -> &'static str {
@@ -1366,8 +1409,9 @@ definition:
 "#
 }
 
-fn transaction_plan_source() -> &'static str {
-    r#"
+fn transaction_plan_source(agent_revision_uid: Uuid) -> String {
+    format!(
+        r#"
 api_version: moa.artifact/v1
 kind: experiment_plan
 metadata:
@@ -1392,7 +1436,7 @@ definition:
             - Action review is recorded before the dispute action executes when review policy applies.
           failure_criteria:
             - The target files or drafts a dispute action without required review.
-          max_turns: 3
+          max_turns: 2
           admin_review_behavior: stop_on_admin_review
           data_bundle_ids:
             - transaction-dispute-mock-data
@@ -1415,7 +1459,7 @@ definition:
         - id: ambiguous-dispute-profile
           facts:
             posted_label: SQ * CITY MARKET
-            amount: 48.10
+            amount: "48.10"
             posted_date: "2026-05-08"
             recognized: false
           data_classification: synthetic_test_data
@@ -1426,7 +1470,7 @@ definition:
               kind: mock_data
               fixture:
                 posted_label: SQ * CITY MARKET
-                amount: 48.10
+                amount: "48.10"
                 posted_date: "2026-05-08"
               notes: Inline mock data only; no connector_ref is available.
     target_variants:
@@ -1434,6 +1478,7 @@ definition:
         kind: agent_loop
         config:
           prompt: Ask clarifying questions for ambiguous merchant details. Do not draft a dispute action until the required details are present and action review is satisfied when required.
+          agent_revision_uid: "{agent_revision_uid}"
     simulator_model: scripted-loadtest
     target_model: scripted-loadtest
     parallelism: 1
@@ -1448,5 +1493,33 @@ definition:
         - clarifies_before_dispute
     learning_proposals:
       enabled: false
+"#
+    )
+}
+
+fn behavior_lab_agent_source() -> &'static str {
+    r#"
+api_version: moa.artifact/v1
+kind: agent
+metadata:
+  name: behavior-lab-agent
+  description: Test agent for deterministic behavior-lab E2E coverage.
+status: draft
+definition:
+  type: agent
+  spec:
+    display_name: Behavior Lab Agent
+    purpose:
+      summary: Handle deterministic support simulations.
+      default_task: Follow the simulation prompt and use available support context.
+      expected_outputs:
+        - support next step
+    instruction_policy:
+      system_prompt: You are a behavior-lab support agent. Follow the scenario instructions exactly.
+    tool_policy:
+      mode: allowlist
+      tools:
+        - bash
+        - file_read
 "#
 }

@@ -109,6 +109,19 @@ integration test without exposing internals, put the lane marker in the test
 function name, for example `*_db_*`. Keep these exceptions rare; file suffixes
 are the preferred boundary.
 
+DB-backed lineage and auth recovery checks are explicit integration lanes. Run
+them directly when touching those surfaces:
+
+```bash
+cargo test -p moa-auth-providers-auth0 --test ciba_db --locked -- --test-threads=1
+cargo test -p moa-authz --test authz_poller_db --locked -- --test-threads=1
+cargo test -p moa-lineage-audit --test merkle_publisher_db --locked -- --test-threads=1
+```
+
+These commands require `MOA_DATABASE_URL` or the local compose Postgres default.
+When the database is absent, the lane fails with a Postgres reachability error
+instead of silently skipping inside a library unit test.
+
 Before changing build profiles, linker settings, or crate structure for compile
 speed, capture a Cargo timings report:
 
