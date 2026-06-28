@@ -1351,6 +1351,25 @@ mod tests {
     }
 
     #[test]
+    fn keyword_extraction_handles_empty_unicode_and_over_cap_input() {
+        // Pins: empty input yields nothing; unicode word characters are retained
+        // (only case-folded); and extraction caps at six distinct keywords.
+        assert!(extract_search_keywords("").is_empty());
+
+        assert_eq!(
+            extract_search_keywords("café déjà OAuth"),
+            vec!["café", "déjà", "oauth"]
+        );
+
+        let keywords = extract_search_keywords("alpha bravo charlie delta echo foxtrot golf hotel");
+        assert_eq!(keywords.len(), 6);
+        assert_eq!(
+            keywords,
+            vec!["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"]
+        );
+    }
+
+    #[test]
     fn original_rewrite_metadata_uses_full_query_for_retrieval() {
         // Pins: fail-open rewrites preserve the full semantic query instead of keyword-only fallback.
         let mut ctx = WorkingContext::new(

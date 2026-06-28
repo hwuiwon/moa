@@ -1,0 +1,10 @@
+# Source: Synthetic Anthropic Messages stream with no content blocks, captured offline 2026-06-28.
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":7,"cache_read_input_tokens":3,"cache_creation_input_tokens":0}}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0,"cache_read_input_tokens":3}}
+
+event: message_stop
+data: {"type":"message_stop"}
+

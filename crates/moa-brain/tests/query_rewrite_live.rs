@@ -66,10 +66,24 @@ impl LLMProvider for CapturingProvider {
     }
 }
 
+/// Returns `true` when `name` is set to a common truthy value (`1`, `true`,
+/// `yes`, or `on`, case-insensitively after trimming), matching how live-test
+/// flags are written in a developer's `.env`.
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 #[tokio::test]
 #[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1, provider API key env, and performs live query rewrite calls"]
 async fn live_query_rewrite_gate_matrix() -> moa_core::Result<()> {
-    if std::env::var("MOA_RUN_LIVE_PROVIDER_TESTS").as_deref() != Ok("1") {
+    if !env_flag_enabled("MOA_RUN_LIVE_PROVIDER_TESTS") {
         return Ok(());
     }
 

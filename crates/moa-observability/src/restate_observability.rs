@@ -308,3 +308,141 @@ fn synthetic_session_span_context(session_id: SessionId) -> SpanContext {
         TraceState::default(),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use moa_core::{Channel, ModelId, SessionId, SessionMeta, TenantId};
+    use opentelemetry::Value;
+    use opentelemetry::trace::SpanKind;
+
+    use super::*;
+    use crate::test_capture::{attr_string, capture_spans, find_span};
+
+    fn test_meta() -> SessionMeta {
+        SessionMeta {
+            id: SessionId::new(),
+            tenant_id: TenantId::new(),
+            channel: Channel::Slack,
+            model: ModelId::new("claude-sonnet-4-20250514"),
+            ..SessionMeta::default()
+        }
+    }
+
+    #[test]
+    fn session_turn_span_exports_turn_attributes_and_prompt_trace_name() {
+        // Pins: the per-turn root span exports the prompt-derived trace name plus the
+        // session/tenant/model/turn attributes the orchestrator dashboards key on.
+        let meta = test_meta();
+        let spans = capture_spans(|| {
+            let span = session_turn_span(&meta, Some("Fix the OAuth bug"), 7, Some("production"));
+            span.in_scope(|| {});
+        });
+
+        // `otel.name` overrides the tracing macro name with the prompt-derived trace name.
+        let span = find_span(&spans, "Fix the OAuth bug");
+        let session_id = meta.id.to_string();
+        let tenant_id = meta.tenant_id.to_string();
+        assert_eq!(
+            attr_string(span, "moa.session.id").as_deref(),
+            Some(session_id.as_str())
+        );
+        assert_eq!(
+            attr_string(span, "moa.tenant.id").as_deref(),
+            Some(tenant_id.as_str())
+        );
+        assert_eq!(
+            attr_string(span, "moa.model").as_deref(),
+            Some("claude-sonnet-4-20250514")
+        );
+        assert_eq!(attr_string(span, "moa.turn.number").as_deref(), Some("7"));
+        assert_eq!(attr_string(span, "moa.channel").as_deref(), Some("slack"));
+        assert_eq!(
+            attr_string(span, "moa.environment").as_deref(),
+            Some("production")
+        );
+    }
+
+    #[test]
+    fn llm_call_span_is_client_kind_with_genai_attributes() {
+        // Pins: provider completion spans carry the GenAI semantic-convention attributes
+        // and the OTel client kind so backends classify them as outbound model calls.
+        let meta = test_meta();
+        let spans = capture_spans(|| {
+            let span = llm_call_span(&meta);
+            span.in_scope(|| {});
+        });
+
+        let span = find_span(&spans, "llm_call");
+        assert_eq!(span.span_kind, SpanKind::Client);
+        assert_eq!(
+            attr_string(span, "gen_ai.operation.name").as_deref(),
+            Some("chat")
+        );
+        let model = meta.model.to_string();
+        assert_eq!(
+            attr_string(span, "gen_ai.request.model").as_deref(),
+            Some(model.as_str())
+        );
+        let session_id = meta.id.to_string();
+        assert_eq!(
+            attr_string(span, "moa.session.id").as_deref(),
+            Some(session_id.as_str())
+        );
+    }
+
+    #[test]
+    fn tool_dispatch_span_records_tool_name() {
+        // Pins: tool dispatch spans carry the dispatched tool name.
+        let spans = capture_spans(|| {
+            let span = tool_dispatch_span("bash");
+            span.in_scope(|| {});
+        });
+
+        let span = find_span(&spans, "tool_dispatch");
+        assert_eq!(attr_string(span, "moa.tool.name").as_deref(), Some("bash"));
+    }
+
+    #[test]
+    fn event_persist_span_records_events_written_as_integer() {
+        // Pins: event persistence spans carry the written-event count as an i64 attribute.
+        let spans = capture_spans(|| {
+            let span = event_persist_span(3);
+            span.in_scope(|| {});
+        });
+
+        let span = find_span(&spans, "event_persist");
+        let value = span
+            .attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == "moa.persist.events_written")
+            .map(|kv| kv.value.clone());
+        assert_eq!(value, Some(Value::I64(3)));
+    }
+
+    #[test]
+    fn sub_agent_turn_span_tags_scope_and_identifiers() {
+        // Pins: sub-agent turns reuse the session-turn root but tag the sub-agent id, turn
+        // id, and `sub_agent` scope. `set_attribute("otel.name", ..)` adds an attribute and
+        // does NOT rename the span, so the exported name stays the session-turn name.
+        let meta = test_meta();
+        let spans = capture_spans(|| {
+            let span = sub_agent_turn_span(&meta, "agent-7", "turn-42", 2, Some("staging"));
+            span.in_scope(|| {});
+        });
+
+        let span = find_span(&spans, "MOA turn 2");
+        assert_eq!(
+            attr_string(span, "moa.sub_agent.id").as_deref(),
+            Some("agent-7")
+        );
+        assert_eq!(
+            attr_string(span, "moa.turn.scope").as_deref(),
+            Some("sub_agent")
+        );
+        assert_eq!(attr_string(span, "moa.turn.id").as_deref(), Some("turn-42"));
+        assert_eq!(
+            attr_string(span, "otel.name").as_deref(),
+            Some("MOA sub-agent agent-7 turn 2")
+        );
+    }
+}

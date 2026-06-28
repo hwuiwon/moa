@@ -3313,6 +3313,7 @@ dependencies = [
  "hex",
  "moa-core",
  "moa-messaging",
+ "moa-test-support",
  "rand 0.8.5",
  "serde",
  "serde_json",
@@ -3355,6 +3356,7 @@ dependencies = [
  "metrics",
  "moa-core",
  "sqlx",
+ "tokio",
  "workspace-hack",
 ]
 
@@ -3627,11 +3629,17 @@ dependencies = [
 name = "moa-lineage-otel"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "moa-core",
  "moa-lineage-core",
+ "moa-memory-types",
  "opentelemetry",
+ "opentelemetry_sdk",
  "serde_json",
  "tracing",
  "tracing-opentelemetry",
+ "tracing-subscriber",
+ "uuid",
  "workspace-hack",
 ]
 
@@ -3652,6 +3660,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -4035,6 +4044,7 @@ name = "moa-scoring"
 version = "0.1.0"
 dependencies = [
  "moa-core",
+ "moa-test-support",
  "serde",
  "sqlx",
  "thiserror 2.0.18",
@@ -4488,6 +4498,8 @@ dependencies = [
  "percent-encoding",
  "rand 0.9.2",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

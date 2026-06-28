@@ -140,4 +140,78 @@ mod tests {
             assert_eq!(value.as_str(), label);
         }
     }
+
+    fn valid_options() -> LoadTestOptions {
+        LoadTestOptions {
+            mode: LoadMode::Mock,
+            endpoint: "http://localhost:8080".to_string(),
+            sessions: 4,
+            profile: SessionProfileKind::Short,
+            inter_message_delay: Duration::from_millis(0),
+            target_qps: None,
+            turn_timeout: Duration::from_secs(30),
+            output: OutputFormat::Json,
+            model: None,
+            metrics_endpoint: None,
+        }
+    }
+
+    #[track_caller]
+    fn assert_validation_error(result: Result<()>, needle: &str) {
+        match result {
+            Err(MoaError::ValidationError(message)) => assert!(
+                message.contains(needle),
+                "expected validation error containing {needle:?}, got {message:?}"
+            ),
+            other => panic!("expected a ValidationError containing {needle:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_baseline_options_are_accepted() {
+        // Pins: the baseline used by the rejection tests is itself valid, so each
+        // rejection isolates exactly one mutated field.
+        valid_options()
+            .validate()
+            .expect("baseline options validate");
+    }
+
+    #[test]
+    fn validate_rejects_sessions_outside_supported_range() {
+        // Pins: the harness refuses zero sessions and counts above the 1000 ceiling.
+        let mut zero = valid_options();
+        zero.sessions = 0;
+        assert_validation_error(zero.validate(), "sessions must be between 1 and 1000");
+
+        let mut too_many = valid_options();
+        too_many.sessions = 1_001;
+        assert_validation_error(too_many.validate(), "sessions must be between 1 and 1000");
+    }
+
+    #[test]
+    fn validate_rejects_non_url_endpoint() {
+        // Pins: a non-empty but unparsable endpoint is rejected as an invalid URL.
+        let mut options = valid_options();
+        options.endpoint = "not-a-url".to_string();
+        assert_validation_error(options.validate(), "endpoint is not a valid URL");
+    }
+
+    #[test]
+    fn validate_rejects_blank_metrics_endpoint() {
+        // Pins: an explicitly-set metrics endpoint must carry a value, not whitespace.
+        let mut options = valid_options();
+        options.metrics_endpoint = Some("   ".to_string());
+        assert_validation_error(
+            options.validate(),
+            "metrics_endpoint must be non-empty when set",
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_turn_timeout() {
+        // Pins: a zero per-turn timeout would make every turn time out instantly.
+        let mut options = valid_options();
+        options.turn_timeout = Duration::ZERO;
+        assert_validation_error(options.validate(), "turn_timeout must be greater than zero");
+    }
 }

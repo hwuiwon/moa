@@ -19,4 +19,8 @@ pub(super) struct ResponsesStreamError {
     pub(super) error: MoaError,
     pub(super) retryable: bool,
     pub(super) emitted_content: bool,
+    /// Whether the underlying failure was a provider rate limit, so the retry
+    /// loop can surface a typed `MoaError::RateLimited` once retries are
+    /// exhausted (matching the shared `RetryPolicy` used by other adapters).
+    pub(super) rate_limited: bool,
 }

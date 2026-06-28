@@ -237,9 +237,11 @@ fn headers_from_credential(
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use moa_core::{Credential, CredentialVault, McpCredentialConfig, McpServerConfig, SessionId};
+    use tokio::time::sleep;
     use uuid::Uuid;
 
     use super::{EnvironmentCredentialVault, MCPCredentialProxy};
@@ -334,6 +336,155 @@ mod tests {
 
         assert!(
             matches!(error, moa_core::MoaError::PermissionDenied(message) if message.contains("unknown or expired MCP proxy token"))
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_token_is_rejected_after_ttl_expiry() {
+        // Pins: a session token past its TTL is rejected as unknown-or-expired, never silently honored.
+        let vault: Arc<dyn CredentialVault> = Arc::new(MockVault {
+            values: HashMap::from([(
+                ("github".to_string(), "github".to_string()),
+                Credential::Bearer("secret-token".to_string()),
+            )]),
+        });
+        let proxy = MCPCredentialProxy::new(vault).with_token_ttl(Duration::from_millis(1));
+        let token = proxy
+            .create_session_token(&SessionId::new(), "github", "github")
+            .await
+            .expect("test setup should create an MCP proxy token");
+
+        sleep(Duration::from_millis(25)).await;
+
+        let error = proxy
+            .enrich_headers(&token, None)
+            .await
+            .expect_err("an expired proxy token must not resolve credentials");
+        assert!(
+            matches!(error, moa_core::MoaError::PermissionDenied(message) if message.contains("unknown or expired MCP proxy token"))
+        );
+    }
+
+    #[tokio::test]
+    async fn revoked_proxy_token_is_rejected() {
+        // Pins: revoking a session token before use prevents any later credential resolution.
+        let vault: Arc<dyn CredentialVault> = Arc::new(MockVault {
+            values: HashMap::from([(
+                ("github".to_string(), "github".to_string()),
+                Credential::Bearer("secret-token".to_string()),
+            )]),
+        });
+        let proxy = MCPCredentialProxy::new(vault);
+        let token = proxy
+            .create_session_token(&SessionId::new(), "github", "github")
+            .await
+            .expect("test setup should create an MCP proxy token");
+
+        proxy.revoke_session_token(&token).await;
+
+        let error = proxy
+            .enrich_headers(&token, None)
+            .await
+            .expect_err("a revoked proxy token must not resolve credentials");
+        assert!(
+            matches!(error, moa_core::MoaError::PermissionDenied(message) if message.contains("unknown or expired MCP proxy token"))
+        );
+    }
+
+    #[tokio::test]
+    async fn enrich_headers_shapes_api_key_and_oauth_credentials() {
+        // Pins: ApiKey uses the configured custom header; OAuth maps to an Authorization Bearer header.
+        let vault: Arc<dyn CredentialVault> = Arc::new(MockVault {
+            values: HashMap::from([
+                (
+                    ("api".to_string(), "api".to_string()),
+                    Credential::ApiKey {
+                        header: "X-Credential-Header".to_string(),
+                        value: "api-secret".to_string(),
+                    },
+                ),
+                (
+                    ("oauth".to_string(), "oauth".to_string()),
+                    Credential::OAuth {
+                        access_token: "oauth-secret".to_string(),
+                        refresh_token: None,
+                        expires_at: None,
+                    },
+                ),
+            ]),
+        });
+        let proxy = MCPCredentialProxy::new(vault);
+
+        let api_token = proxy
+            .create_session_token(&SessionId::new(), "api", "api")
+            .await
+            .expect("test setup should create an API key proxy token");
+        let api_headers = proxy
+            .enrich_headers(
+                &api_token,
+                Some(&McpCredentialConfig::ApiKey {
+                    header: "X-Configured-Header".to_string(),
+                    value_env: "UNUSED_AT_CALL_TIME".to_string(),
+                }),
+            )
+            .await
+            .expect("api key enrichment should resolve a custom-header credential");
+        // The configured header wins over the stored credential header, and no Bearer leaks in.
+        assert_eq!(
+            api_headers.get("X-Configured-Header"),
+            Some(&"api-secret".to_string())
+        );
+        assert!(!api_headers.contains_key("Authorization"));
+
+        let oauth_token = proxy
+            .create_session_token(&SessionId::new(), "oauth", "oauth")
+            .await
+            .expect("test setup should create an OAuth proxy token");
+        let oauth_headers = proxy
+            .enrich_headers(&oauth_token, None)
+            .await
+            .expect("oauth enrichment should resolve an Authorization header");
+        assert_eq!(
+            oauth_headers.get("Authorization"),
+            Some(&"Bearer oauth-secret".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn environment_vault_fails_closed_on_missing_env_var() {
+        // Pins: a credentialed MCP server whose token env var is unset fails closed at load, never unauthenticated.
+        let name = format!("MOA_TEST_MISSING_{}", Uuid::now_v7());
+        unsafe { std::env::remove_var(&name) };
+
+        let result = EnvironmentCredentialVault::from_mcp_servers(&[McpServerConfig {
+            name: "custom".to_string(),
+            credentials: Some(McpCredentialConfig::Bearer {
+                token_env: name.clone(),
+            }),
+            ..McpServerConfig::default()
+        }]);
+
+        let Err(error) = result else {
+            panic!("a missing credential env var must fail vault construction");
+        };
+        assert!(
+            matches!(error, moa_core::MoaError::MissingEnvironmentVariable(var) if var == name)
+        );
+    }
+
+    #[tokio::test]
+    async fn environment_vault_rejects_unknown_service_scope() {
+        // Pins: looking up an unconfigured service/scope is a typed error, not an empty credential.
+        let vault = EnvironmentCredentialVault::from_mcp_servers(&[])
+            .expect("an empty server list builds an empty vault");
+
+        let error = vault
+            .get("unknown-service", "unknown-scope")
+            .await
+            .expect_err("an unconfigured service/scope lookup must fail closed");
+
+        assert!(
+            matches!(error, moa_core::MoaError::MissingEnvironmentVariable(message) if message.contains("credential not configured for service unknown-service"))
         );
     }
 

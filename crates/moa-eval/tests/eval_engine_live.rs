@@ -24,7 +24,16 @@ fn live_model() -> Option<&'static str> {
 }
 
 fn live_provider_tests_enabled() -> bool {
-    std::env::var("MOA_RUN_LIVE_PROVIDER_TESTS").as_deref() == Ok("1")
+    // Accept the common truthy spellings (`1`, `true`, `yes`, `on`) so a
+    // developer's `.env` enables the live lane regardless of casing/spacing.
+    std::env::var("MOA_RUN_LIVE_PROVIDER_TESTS")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 #[tokio::test]

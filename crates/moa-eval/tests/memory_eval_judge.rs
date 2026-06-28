@@ -216,6 +216,43 @@ async fn pairwise_llm_judge_returns_no_winner_when_swapped_orders_disagree() -> 
 }
 
 #[tokio::test]
+async fn pairwise_llm_judge_rejects_unrecognized_verdict_responses() {
+    // Pins: a garbage or empty judge response surfaces as InvalidConfig with the offending text,
+    // instead of being silently treated as a tie or a winner.
+    for unparseable in ["", "totally unrelated prose", r#"{"choice":"maybe"}"#] {
+        let provider = ScriptedJudgeProvider::new([unparseable]);
+        let judge = PairwiseLlmJudge::new(Arc::new(provider.clone()));
+        let input = JudgeInput::new(
+            ProbeType::MultiHop,
+            "Deploy to prod-us-east and use RUNBOOK-42.",
+            "Deploy to prod-us-east and use RUNBOOK-42.",
+        )
+        .with_query("Where should the service deploy and which runbook applies?")
+        .with_baseline_answer("Deploy to prod-us-east.");
+
+        let error = judge
+            .judge(&input)
+            .await
+            .expect_err("an unrecognized verdict must not be accepted");
+
+        match error {
+            EvalError::InvalidConfig(message) => {
+                assert!(
+                    message.contains("unrecognized verdict"),
+                    "verdict parse failure should be reported as InvalidConfig: {message}"
+                );
+            }
+            other => panic!("expected EvalError::InvalidConfig, got {other:?}"),
+        }
+        assert_eq!(
+            provider.requests().len(),
+            1,
+            "judging should stop at the first order once its verdict fails to parse"
+        );
+    }
+}
+
+#[tokio::test]
 async fn pairwise_llm_judge_rejects_closed_form_probes_without_provider_calls() {
     // Pins: LLM judging is limited to multi-hop and preference-application probes in code.
     let provider = ScriptedJudgeProvider::new([r#"{"winner":"A"}"#, r#"{"winner":"B"}"#]);
@@ -358,7 +395,17 @@ fn live_judge_credentials_enabled(
     run_flag: Option<&str>,
     openai_api_key: Option<&str>,
 ) -> std::result::Result<bool, String> {
-    if run_flag != Some("1") {
+    // Accept the common truthy spellings (`1`, `true`, `yes`, `on`) so a
+    // developer's `.env` enables the live judge regardless of casing/spacing.
+    let flag_enabled = run_flag
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    if !flag_enabled {
         return Ok(false);
     }
 

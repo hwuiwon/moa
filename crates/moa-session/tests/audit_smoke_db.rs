@@ -7,10 +7,16 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 fn pgaudit_smoke_requested() -> bool {
-    matches!(
-        std::env::var("MOA_RUN_PGAUDIT_SMOKE").as_deref(),
-        Ok("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
-    )
+    // Accept the common truthy spellings (`1`, `true`, `yes`, `on`) so a
+    // developer's `.env` enables the smoke run regardless of casing/spacing.
+    std::env::var("MOA_RUN_PGAUDIT_SMOKE")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 #[tokio::test]
@@ -127,9 +133,13 @@ fn quote_identifier(identifier: &str) -> String {
 #[tokio::test]
 #[ignore = "requires MOA_RUN_PGAUDIT_SMOKE=1 and docker compose postgres with pgaudit logs"]
 async fn audit_writes_log_line() -> Result<(), Box<dyn Error>> {
-    if !pgaudit_smoke_requested() {
-        return Ok(());
-    }
+    // Fail loudly rather than passing vacuously: this test is `#[ignore]`d and only
+    // runs under `--run-ignored`, so reaching it without the smoke flag means the run
+    // was mis-enabled (no pgaudit-configured compose Postgres) and must not be green.
+    assert!(
+        pgaudit_smoke_requested(),
+        "audit_writes_log_line requires MOA_RUN_PGAUDIT_SMOKE=1 (or true/yes/on)"
+    );
 
     let pool = PgPool::connect(&test_database_url()).await?;
     moa_migrations::run(&test_database_url()).await?;

@@ -23,6 +23,9 @@ const TEXT_SPLIT: &str = include_str!("support/fixtures/sse/openai_text_split.ss
 const TOOL_CALL: &str = include_str!("support/fixtures/sse/openai_tool_call.sse");
 const MALFORMED: &str = include_str!("support/fixtures/sse/openai_malformed.sse");
 const DISCONNECT: &str = include_str!("support/fixtures/sse/openai_disconnect.sse");
+const MAX_TOKENS: &str = include_str!("support/fixtures/sse/openai_max_tokens.sse");
+const UNKNOWN_STOP: &str = include_str!("support/fixtures/sse/openai_unknown_stop.sse");
+const EMPTY: &str = include_str!("support/fixtures/sse/openai_empty.sse");
 
 #[tokio::test]
 async fn openai_offline_completion_returns_text_for_minimal_request() {
@@ -174,12 +177,12 @@ async fn openai_offline_malformed_json_response_returns_typed_parse_error() {
         .await
         .expect_err("malformed SSE should fail");
 
+    // A malformed `data: {not json}` frame fails to deserialize into a
+    // ResponseStreamEvent; async-openai surfaces JSONDeserialize, which the
+    // adapter maps to exactly SerializationError (no other variant).
     assert!(
-        matches!(
-            error,
-            MoaError::SerializationError(_) | MoaError::StreamError(_) | MoaError::ProviderError(_)
-        ),
-        "expected typed parse/stream error, got {error:?}"
+        matches!(error, MoaError::SerializationError(_)),
+        "expected SerializationError, got {error:?}"
     );
 }
 
@@ -209,6 +212,116 @@ async fn openai_offline_streaming_disconnect_mid_response_surfaces_typed_error_w
         matches!(error, MoaError::ProviderError(_)),
         "expected ProviderError, got {error:?}"
     );
+}
+
+#[tokio::test]
+async fn openai_offline_incomplete_max_output_tokens_maps_to_max_tokens() {
+    // Pins: a `response.incomplete` with reason `max_output_tokens` surfaces as
+    // StopReason::MaxTokens with the partial text and usage intact.
+    let server = MockServer::start().await;
+    mount_openai_sse(&server, MAX_TOKENS, "truncate me").await;
+    let provider = provider(&server, 0);
+
+    let response = provider
+        .complete(minimal_request("truncate me"))
+        .await
+        .expect("request should start")
+        .collect()
+        .await
+        .expect("stream should complete");
+
+    assert_eq!(response.text, "Partial");
+    assert_eq!(response.stop_reason, StopReason::MaxTokens);
+    assert_eq!(response.usage.output_tokens, 64);
+    assert_eq!(response.usage.input_tokens_cache_read, 4);
+}
+
+#[tokio::test]
+async fn openai_offline_incomplete_unknown_reason_maps_to_other() {
+    // Pins: an `incomplete` reason the adapter does not special-case is preserved
+    // verbatim as StopReason::Other.
+    let server = MockServer::start().await;
+    mount_openai_sse(&server, UNKNOWN_STOP, "stop oddly").await;
+    let provider = provider(&server, 0);
+
+    let response = provider
+        .complete(minimal_request("stop oddly"))
+        .await
+        .expect("request should start")
+        .collect()
+        .await
+        .expect("stream should complete");
+
+    assert_eq!(
+        response.stop_reason,
+        StopReason::Other("content_filter".to_string())
+    );
+}
+
+#[tokio::test]
+async fn openai_offline_empty_completion_yields_empty_text_with_usage() {
+    // Pins: a completed response with no output items returns empty text but real usage/stop.
+    let server = MockServer::start().await;
+    mount_openai_sse(&server, EMPTY, "say nothing").await;
+    let provider = provider(&server, 0);
+
+    let response = provider
+        .complete(minimal_request("say nothing"))
+        .await
+        .expect("request should start")
+        .collect()
+        .await
+        .expect("stream should complete");
+
+    assert_eq!(response.text, "");
+    assert!(response.content.is_empty());
+    assert_eq!(response.stop_reason, StopReason::EndTurn);
+    assert_eq!(response.usage.input_tokens_uncached, 4);
+    assert_eq!(response.usage.input_tokens_cache_read, 3);
+    assert_eq!(response.usage.output_tokens, 0);
+}
+
+#[tokio::test]
+async fn openai_offline_exhausted_429_surfaces_typed_rate_limit_error() {
+    // Pins: a 429 that survives every retry surfaces a typed rate-limit error,
+    // never HttpStatus{429}. Unlike the shared retry policy used by
+    // Anthropic/Gemini, the OpenAI Responses adapter exhausts retries inside its
+    // own stream-consume loop, so the surfaced variant is asserted from the real
+    // path here.
+    tokio::time::pause();
+    let server = MockServer::start().await;
+    mount_always_status(
+        &server,
+        429,
+        r#"{"error":{"message":"rate limit","type":"rate_limit_error","code":"rate_limit_exceeded"}}"#,
+    )
+    .await;
+    let provider = provider(&server, 1);
+
+    let task = tokio::spawn(async move {
+        provider
+            .complete(minimal_request("retry until exhausted"))
+            .await
+            .expect("request should start")
+            .collect()
+            .await
+    });
+    tokio::task::yield_now().await;
+    advance(Duration::from_secs(5)).await;
+    let error = task
+        .await
+        .expect("task should join")
+        .expect_err("exhausted 429 should fail");
+
+    assert!(
+        !matches!(error, MoaError::HttpStatus { status: 429, .. }),
+        "exhausted 429 must not surface as HttpStatus{{429}}, got {error:?}"
+    );
+    assert!(
+        matches!(error, MoaError::RateLimited { .. }),
+        "expected typed RateLimited, got {error:?}"
+    );
+    assert_eq!(request_count(&server).await, 2);
 }
 
 fn provider(server: &MockServer, max_retries: usize) -> OpenAIProvider {

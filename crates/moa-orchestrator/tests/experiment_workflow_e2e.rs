@@ -178,6 +178,71 @@ async fn workflow_experiment_links_queued_artifact_workflow_run() -> Result<()> 
     result
 }
 
+#[tokio::test]
+#[ignore = "requires a local restate-server, Postgres, and OpenFGA"]
+async fn experiments_run_denies_caller_without_tenant_operator() -> Result<()> {
+    // Pins: Experiments/run rejects a caller who holds no Tenant:Operator grant with a 403
+    // before any plan/target processing, instead of admitting an experiment run.
+    let _guard = RESTATE_E2E_LOCK.lock().await;
+
+    let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
+    let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
+    let ports = reserve_orchestrator_ports()?;
+    let endpoint_url = deployment_endpoint_url(ports.restate);
+    let ingress = restate_ingress_url();
+    let ingress = ingress.as_str();
+    let client = reqwest::Client::new();
+    let tenant_id = TenantId::new();
+    // Caller carries the tenant but is never granted Tenant:Operator (or admin).
+    let mut unauthorized = test_user_identity();
+    unauthorized.tenant_id = tenant_id;
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
+    let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
+
+    let result = async {
+        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+        let request = ExperimentRunRequest {
+            tenant_id: tenant_id_from_workspace(&storage_partition_id)?,
+            name: "unauthorized-experiment-run".to_string(),
+            plan_revision_uid: None,
+            target: None,
+            variant: None,
+            scorecard: json!({}),
+            score_run_id: None,
+            idempotency_key: None,
+            agent_revision_variants: Vec::new(),
+        };
+
+        let error = post_json_with_identity(
+            &client,
+            ingress,
+            "Experiments",
+            "run",
+            &unauthorized,
+            &request,
+        )
+        .await
+        .expect_err("a caller without Tenant:Operator must not be admitted to Experiments/run");
+        let message = error.to_string();
+        assert!(
+            message.contains("403")
+                || message.contains("Forbidden")
+                || message.contains("forbidden")
+                || message.contains("authorization")
+                || message.contains("authorized"),
+            "expected a 403/authorization denial, got: {message}"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    let _ = orchestrator.kill();
+    let _ = orchestrator.wait();
+
+    result
+}
+
 async fn import_and_publish_damaged_food_workflow(
     client: &reqwest::Client,
     ingress: &str,

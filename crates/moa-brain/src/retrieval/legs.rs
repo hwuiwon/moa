@@ -644,9 +644,31 @@ mod tests {
 
     use super::{
         GRAPH_WEIGHT, LEXICAL_WEIGHT, LegCandidate, RetrievalRequest, VECTOR_WEIGHT,
-        exact_seed_candidates, lexical_fallback_terms, merge_ordered_uids, rrf_fuse,
-        score_expansion, vector_leg,
+        exact_seed_candidates, lexical_fallback_terms, lexical_or_tsquery, merge_ordered_uids,
+        rrf_fuse, score_expansion, vector_leg,
     };
+
+    #[test]
+    fn lexical_or_tsquery_handles_empty_stopword_and_quoted_input() {
+        // Pins: empty and all-stopword queries produce an empty tsquery, which
+        // makes the lexical leg short-circuit without hitting the database; and
+        // apostrophes in the query never leak into the generated to_tsquery text.
+        assert_eq!(lexical_or_tsquery(""), "");
+        assert_eq!(lexical_or_tsquery("the about from"), "");
+
+        let query = lexical_or_tsquery("user's billing data");
+        assert!(
+            !query.contains("user's"),
+            "apostrophes must be stripped: {query}"
+        );
+        assert_eq!(
+            query.matches('\'').count() % 2,
+            0,
+            "every quote must be a balancing wrapper: {query}"
+        );
+        assert!(query.contains("'user'"), "expected quoted term: {query}");
+        assert!(query.contains("'data'"), "expected quoted term: {query}");
+    }
 
     #[test]
     fn rrf_fuse_tracks_all_contributing_legs() {

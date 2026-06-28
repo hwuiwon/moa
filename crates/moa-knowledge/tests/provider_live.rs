@@ -72,10 +72,23 @@ async fn nango_live_creates_link_token() {
     assert!(!token.token.trim().is_empty());
 }
 
+/// Returns `true` when `name` is set to a common truthy value (`1`, `true`,
+/// `yes`, or `on`, case-insensitively after trimming), matching how live-test
+/// flags are written in a developer's `.env`.
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 fn require_live_flag() {
-    assert_eq!(
-        std::env::var(LIVE_FLAG).as_deref(),
-        Ok("1"),
+    assert!(
+        env_flag_enabled(LIVE_FLAG),
         "{LIVE_FLAG}=1 is required for live provider tests"
     );
 }

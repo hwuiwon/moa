@@ -1,13 +1,171 @@
 use chrono::TimeDelta;
 use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{
-    ArtifactNodeRunStatus, ArtifactNodeRunUpdate, ArtifactRegistry, ArtifactRunStatus,
-    ArtifactRunUpdate, NewArtifactDraft, NewArtifactFile, NewArtifactNodeRun, NewArtifactRun,
+    ArtifactFile, ArtifactNodeRunStatus, ArtifactNodeRunUpdate, ArtifactRegistry,
+    ArtifactRunStatus, ArtifactRunUpdate, MAX_FILE_SIZE_BYTES, NewArtifactDraft, NewArtifactFile,
+    NewArtifactNodeRun, NewArtifactRun,
 };
 use moa_artifacts::validation::validate_for_status;
-use moa_core::{ActionRuleScope, Result, SessionId, TenantId};
+use moa_core::{ActionRuleScope, MoaError, Result, SessionId, TenantId};
 use serde_json::json;
 use uuid::Uuid;
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn registry_missing_id_lookups_return_none_db_memory() -> Result<()> {
+    // Pins: revision/run/published lookups for unknown ids are Ok(None), not errors.
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let registry = ArtifactRegistry::new(store.pool().clone());
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: TenantId::from(Uuid::now_v7()),
+    };
+
+    assert!(
+        registry
+            .load_revision(&scope, Uuid::now_v7())
+            .await?
+            .is_none(),
+        "unknown revision uid should resolve to None"
+    );
+    assert!(
+        registry.load_run(&scope, Uuid::now_v7()).await?.is_none(),
+        "unknown run uid should resolve to None"
+    );
+    assert!(
+        registry
+            .load_visible_published(&scope, ArtifactKind::Skill, "does-not-exist")
+            .await?
+            .is_none(),
+        "unknown published artifact should resolve to None"
+    );
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn registry_round_trips_file_content_type_and_empty_body_db_memory() -> Result<()> {
+    // Pins: explicit content_type and executable flags round-trip, and an empty file body persists as zero bytes.
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let registry = ArtifactRegistry::new(store.pool().clone());
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: TenantId::from(Uuid::now_v7()),
+    };
+    let name = format!("file-roundtrip-{}", Uuid::now_v7());
+    let document = skill_doc(&name, "file round trip");
+    let source = document.to_yaml().expect("serialize doc");
+
+    let files = vec![
+        NewArtifactFile {
+            path: "SKILL.md".to_string(),
+            content: b"# Skill\n".to_vec(),
+            content_type: Some("text/markdown".to_string()),
+            executable: false,
+        },
+        NewArtifactFile {
+            path: "run.sh".to_string(),
+            content: b"#!/bin/sh\necho hi\n".to_vec(),
+            content_type: Some("application/x-sh".to_string()),
+            executable: true,
+        },
+        NewArtifactFile {
+            path: "EMPTY".to_string(),
+            content: Vec::new(),
+            content_type: Some("application/octet-stream".to_string()),
+            executable: false,
+        },
+    ];
+
+    let draft = registry
+        .create_draft(
+            &scope,
+            NewArtifactDraft {
+                document: &document,
+                source_format: "yaml",
+                source_text: source.as_bytes(),
+                files: &files,
+            },
+        )
+        .await?;
+
+    let loaded = registry.load_files(&scope, draft.revision_uid).await?;
+
+    let markdown = file_by_path(&loaded, "SKILL.md");
+    assert_eq!(markdown.content_type.as_deref(), Some("text/markdown"));
+    assert_eq!(markdown.content, b"# Skill\n");
+    assert!(!markdown.executable);
+
+    let script = file_by_path(&loaded, "run.sh");
+    assert_eq!(script.content_type.as_deref(), Some("application/x-sh"));
+    assert!(script.executable);
+
+    let empty = file_by_path(&loaded, "EMPTY");
+    assert_eq!(
+        empty.content_type.as_deref(),
+        Some("application/octet-stream")
+    );
+    assert!(empty.content.is_empty());
+    assert_eq!(empty.file_size_bytes, 0);
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn registry_rejects_oversize_artifact_file_db_memory() -> Result<()> {
+    // Pins: a file larger than MAX_FILE_SIZE_BYTES is rejected with a ValidationError and leaves nothing persisted.
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let registry = ArtifactRegistry::new(store.pool().clone());
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: TenantId::from(Uuid::now_v7()),
+    };
+    let name = format!("oversize-{}", Uuid::now_v7());
+    let document = skill_doc(&name, "oversize file");
+    let source = document.to_yaml().expect("serialize doc");
+    let oversize = vec![0u8; MAX_FILE_SIZE_BYTES + 1];
+
+    let error = registry
+        .create_draft(
+            &scope,
+            NewArtifactDraft {
+                document: &document,
+                source_format: "yaml",
+                source_text: source.as_bytes(),
+                files: &[NewArtifactFile::new("BIG.bin", oversize)],
+            },
+        )
+        .await
+        .expect_err("oversize artifact file must reject");
+    assert!(
+        matches!(error, MoaError::ValidationError(_)),
+        "expected ValidationError, got {error:?}"
+    );
+    assert!(
+        error.to_string().contains("too large"),
+        "unexpected message: {error}"
+    );
+
+    // The failed draft transaction rolled back: nothing for this name is visible.
+    assert!(
+        registry
+            .load_visible(&scope, ArtifactKind::Skill, &name)
+            .await?
+            .is_none(),
+        "rolled-back oversize draft must not persist an artifact"
+    );
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+fn file_by_path<'a>(files: &'a [ArtifactFile], path: &str) -> &'a ArtifactFile {
+    files
+        .iter()
+        .find(|file| file.path == path)
+        .unwrap_or_else(|| panic!("expected stored file at {path}, got {files:?}"))
+}
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
@@ -171,6 +329,7 @@ async fn registry_persists_behavior_lab_artifact_kinds() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn workflow_run_node_projection_db_memory() -> Result<()> {
     // Pins: workflow runs and node-run projections round-trip through the registry schema.
     let (store, database_url, schema_name) =

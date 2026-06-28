@@ -326,4 +326,120 @@ mod tests {
             RewriteDecision::Rewrite(RewriteReason::VectorFirstSemantic)
         );
     }
+
+    /// One row of the gate decision matrix: input shape plus the expected arm.
+    struct GateCase {
+        name: &'static str,
+        query: &'static str,
+        history: Vec<ContextMessage>,
+        config: QueryRewriteConfig,
+        user_message_count: usize,
+        memory_retrieval_available: bool,
+        vector_retrieval_available: bool,
+        circuit_open: bool,
+        expected: RewriteDecision,
+    }
+
+    #[test]
+    fn gate_decision_matrix_covers_each_remaining_arm() {
+        // Pins: every short-circuit arm of `decide` is reachable with the exact
+        // input shape it guards, in priority order. These reasons are emitted as
+        // metric labels and drive whether the billed LLM rewrite runs.
+        let disabled_config = QueryRewriteConfig {
+            enabled: false,
+            ..QueryRewriteConfig::default()
+        };
+        let cases = vec![
+            GateCase {
+                name: "disabled config skips before any other signal",
+                query: "fix that and add tests",
+                history: vec![ContextMessage::user("The bug is in auth/refresh.rs")],
+                config: disabled_config,
+                user_message_count: 2,
+                memory_retrieval_available: true,
+                vector_retrieval_available: true,
+                circuit_open: false,
+                expected: RewriteDecision::Skip(SkipReason::Disabled),
+            },
+            GateCase {
+                name: "open circuit skips even with rewritable coreference",
+                query: "fix that and add tests",
+                history: vec![ContextMessage::user("The bug is in auth/refresh.rs")],
+                config: QueryRewriteConfig::default(),
+                user_message_count: 2,
+                memory_retrieval_available: true,
+                vector_retrieval_available: true,
+                circuit_open: true,
+                expected: RewriteDecision::Skip(SkipReason::CircuitOpen),
+            },
+            GateCase {
+                name: "no graph-memory retrieval skips the rewrite",
+                query: "fix that and add tests",
+                history: vec![ContextMessage::user("The bug is in auth/refresh.rs")],
+                config: QueryRewriteConfig::default(),
+                user_message_count: 2,
+                memory_retrieval_available: false,
+                vector_retrieval_available: true,
+                circuit_open: false,
+                expected: RewriteDecision::Skip(SkipReason::NoMemoryRetrieval),
+            },
+            GateCase {
+                name: "tool-like command verb preserves the literal query",
+                query: "read the auth config file",
+                history: Vec::new(),
+                config: QueryRewriteConfig::default(),
+                user_message_count: 1,
+                memory_retrieval_available: true,
+                vector_retrieval_available: true,
+                circuit_open: false,
+                expected: RewriteDecision::Skip(SkipReason::ToolLikeVerb),
+            },
+            GateCase {
+                name: "explicit short first-turn query with an anchor is left alone",
+                query: "Explain the AuthService startup",
+                history: Vec::new(),
+                config: QueryRewriteConfig::default(),
+                user_message_count: 1,
+                memory_retrieval_available: true,
+                vector_retrieval_available: true,
+                circuit_open: false,
+                expected: RewriteDecision::Skip(SkipReason::FirstTurnExplicit),
+            },
+            GateCase {
+                name: "short anchorless follow-up with history is rewritten",
+                query: "what about the deadlines",
+                history: vec![ContextMessage::user("We discussed the project timeline")],
+                config: QueryRewriteConfig::default(),
+                user_message_count: 2,
+                memory_retrieval_available: true,
+                vector_retrieval_available: true,
+                circuit_open: false,
+                expected: RewriteDecision::Rewrite(RewriteReason::VagueFollowup),
+            },
+            GateCase {
+                name: "multi-hop relation without seeds is rewritten",
+                query: "what services are downstream of the billing pipeline",
+                history: Vec::new(),
+                config: QueryRewriteConfig::default(),
+                user_message_count: 1,
+                memory_retrieval_available: true,
+                vector_retrieval_available: true,
+                circuit_open: false,
+                expected: RewriteDecision::Rewrite(RewriteReason::MultiHopWithoutSeeds),
+            },
+        ];
+
+        for case in cases {
+            let decision = decide(RewriteGateInput {
+                query: case.query,
+                history: &case.history,
+                user_message_count: case.user_message_count,
+                config: &case.config,
+                memory_retrieval_available: case.memory_retrieval_available,
+                vector_retrieval_available: case.vector_retrieval_available,
+                circuit_open: case.circuit_open,
+            });
+            assert_eq!(decision, case.expected, "case: {}", case.name);
+        }
+    }
 }

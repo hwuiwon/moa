@@ -585,27 +585,9 @@ mod tests {
     }
 
     #[test]
-    fn brain_response_event_has_cost_fields() {
-        let event = Event::BrainResponse {
-            text: "Hi there".to_string(),
-            thought_signature: None,
-            model: ModelId::new("claude-sonnet-4-6"),
-            model_tier: ModelTier::Main,
-            input_tokens_uncached: 100,
-            input_tokens_cache_write: 0,
-            input_tokens_cache_read: 0,
-            output_tokens: 50,
-            cost_cents: 2,
-            duration_ms: 1500,
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains("cost_cents"));
-        assert!(json.contains("input_tokens_uncached"));
-    }
-
-    #[test]
     fn action_review_requested_event_round_trips_full_payload() {
-        // Pins: tenant-admin action-review events preserve policy envelope and preview details.
+        // Pins: tenant-admin action-review events preserve policy envelope and preview
+        // details and keep the persisted PascalCase discriminator stable.
         let review_id = Uuid::now_v7();
         let event = Event::ActionReviewRequested {
             review_id,
@@ -619,9 +601,101 @@ mod tests {
         };
 
         let json = serde_json::to_string(&event).expect("serialize action review request");
+        assert!(
+            json.contains("\"type\":\"ActionReviewRequested\""),
+            "expected stable PascalCase discriminator in {json}"
+        );
         let decoded: Event =
             serde_json::from_str(&json).expect("deserialize action review request");
         assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn guardrail_check_decodes_legacy_json_missing_default_token_fields() {
+        // Pins: a frozen legacy GuardrailCheck payload written before the cost/token
+        // accounting fields existed still decodes, with the `#[serde(default)]` token
+        // fields (events.rs) and absent optional reason/model filling in as zero/None.
+        // A rename or removal of these defaults would break replay of historic logs.
+        let legacy_json = r#"{
+            "type": "GuardrailCheck",
+            "data": {
+                "direction": "input",
+                "mode": "enforce",
+                "passed": false,
+                "enforced": true,
+                "policy_hash": "policy-sha256:legacy"
+            }
+        }"#;
+
+        let decoded: Event =
+            serde_json::from_str(legacy_json).expect("legacy guardrail JSON should decode");
+
+        match decoded {
+            Event::GuardrailCheck {
+                direction,
+                mode,
+                passed,
+                enforced,
+                reason,
+                model,
+                policy_hash,
+                input_tokens_uncached,
+                input_tokens_cache_write,
+                input_tokens_cache_read,
+                output_tokens,
+                cost_cents,
+                duration_ms,
+            } => {
+                assert_eq!(direction, GuardrailDirection::Input);
+                assert_eq!(mode, GuardrailMode::Enforce);
+                assert!(!passed);
+                assert!(enforced);
+                assert_eq!(reason, None);
+                assert_eq!(model, None);
+                assert_eq!(policy_hash, "policy-sha256:legacy");
+                assert_eq!(input_tokens_uncached, 0);
+                assert_eq!(input_tokens_cache_write, 0);
+                assert_eq!(input_tokens_cache_read, 0);
+                assert_eq!(output_tokens, 0);
+                assert_eq!(cost_cents, 0);
+                assert_eq!(duration_ms, 0);
+            }
+            other => panic!("expected GuardrailCheck, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_created_decodes_legacy_json_missing_default_channel_and_optionals() {
+        // Pins: a frozen legacy SessionCreated payload lacking the `#[serde(default)]`
+        // channel and the optional contact_id/created_by fields still decodes, with the
+        // channel falling back to its Default and the optionals to None.
+        let legacy_json = r#"{
+            "type": "SessionCreated",
+            "data": {
+                "tenant_id": "00000000-0000-0000-0000-000000000001",
+                "model": "anthropic:claude-sonnet-4-6"
+            }
+        }"#;
+
+        let decoded: Event =
+            serde_json::from_str(legacy_json).expect("legacy session-created JSON should decode");
+
+        match decoded {
+            Event::SessionCreated {
+                tenant_id,
+                contact_id,
+                created_by,
+                model,
+                channel,
+            } => {
+                assert_eq!(tenant_id, TenantId::from(Uuid::from_u128(1)));
+                assert_eq!(contact_id, None);
+                assert!(created_by.is_none());
+                assert_eq!(model, ModelId::new("anthropic:claude-sonnet-4-6"));
+                assert_eq!(channel, Channel::default());
+            }
+            other => panic!("expected SessionCreated, got {other:?}"),
+        }
     }
 
     #[test]

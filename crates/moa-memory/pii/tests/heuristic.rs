@@ -1,5 +1,6 @@
 //! Contract tests for the shared deterministic PII heuristic.
 
+use moa_memory_graph::PiiClass;
 use moa_memory_pii::{PiiCategory, classify_heuristic, redact_text, redaction_replacement};
 
 #[test]
@@ -74,4 +75,75 @@ fn heuristic_classifier_returns_offsets_categories_confidence_and_redactions() {
             "{text}"
         );
     }
+}
+
+#[test]
+fn heuristic_classifier_aggregates_detected_spans_into_privacy_class() {
+    // Pins: the aggregate `PiiResult::class` for each detected category, not just
+    // the span offsets. Secret -> Restricted, SSN -> Phi, every other detected
+    // category -> Pii; this is the privacy class downstream storage trusts.
+    let cases = [
+        ("Email alice@example.com now", PiiClass::Pii),
+        ("Call 555-123-4567 today", PiiClass::Pii),
+        ("SSN 123-45-6789 confirmed", PiiClass::Phi),
+        ("Card 4242-4242-4242-4242 expires", PiiClass::Pii),
+        ("Patient MRN: A12345 checked", PiiClass::Pii),
+        ("Key sk-test-123 is active", PiiClass::Restricted),
+    ];
+
+    for (text, expected_class) in cases {
+        let result = classify_heuristic(text);
+        assert!(!result.spans.is_empty(), "expected a span for {text:?}");
+        assert_eq!(result.class, expected_class, "{text}");
+        assert!(!result.abstained, "{text}");
+    }
+}
+
+#[test]
+fn heuristic_classifier_leaves_non_pii_text_unclassified() {
+    // Pins the privacy NEGATIVE space: clean text must produce zero spans and a
+    // `PiiClass::None` so unredacted, fully-readable memory is not silently
+    // restricted/encrypted. Each case targets a specific historical over-match:
+    //   - "secretary" embeds "secret" but is not a credential.
+    //   - a bare 10-digit order/tracking number is not a phone number.
+    //   - a UUID and a git SHA are opaque identifiers, not PII.
+    let clean_cases = [
+        "Ask the secretary to confirm the meeting",
+        "Order 1234567890 shipped to the warehouse",
+        "Tracking number 9400110200830000000000",
+        "Run id 550e8400-e29b-41d4-a716-446655440000 completed",
+        "Commit da39a3ee5e6b4b0d3255bfef95601890afd80709 reverted",
+    ];
+
+    for text in clean_cases {
+        let result = classify_heuristic(text);
+        assert_eq!(
+            result.spans,
+            Vec::new(),
+            "expected no spans for clean text {text:?}, got {:?}",
+            result.spans
+        );
+        assert_eq!(
+            result.class,
+            PiiClass::None,
+            "expected PiiClass::None for clean text {text:?}",
+        );
+        assert!(!result.abstained, "{text}");
+    }
+}
+
+#[test]
+fn heuristic_classifier_still_detects_secret_keyword_as_standalone_word() {
+    // Pins: the word-boundary fix that suppresses "secretary" must not regress
+    // the real positive — a standalone "secret" credential keyword still maps to
+    // PiiClass::Restricted.
+    let result = classify_heuristic("The deploy secret rotated overnight");
+    assert_eq!(result.class, PiiClass::Restricted, "{result:?}");
+    assert!(
+        result
+            .spans
+            .iter()
+            .any(|span| span.category == PiiCategory::Secret),
+        "{result:?}"
+    );
 }

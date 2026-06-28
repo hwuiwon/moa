@@ -19,11 +19,12 @@ fn test_session_meta(tenant_id: TenantId) -> SessionMeta {
 #[ignore = "requires Postgres and RustFS from docker compose"]
 async fn session_attachment_store_round_trips_uploaded_content_across_instances_docker() {
     // Pins: uploaded session attachments are Postgres-backed and readable from another pod/store instance.
-    if std::env::var("MOA_RUN_SESSION_ATTACHMENT_DOCKER_TESTS")
-        .ok()
-        .as_deref()
-        != Some("1")
-    {
+    // Accept common truthy values (1/true/yes/on, case-insensitive) so a developer's
+    // `.env` enables this docker lane without requiring the literal "1".
+    let docker_tests_enabled = std::env::var("MOA_RUN_SESSION_ATTACHMENT_DOCKER_TESTS")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if !docker_tests_enabled {
         panic!("set MOA_RUN_SESSION_ATTACHMENT_DOCKER_TESTS=1 to run RustFS attachment tests");
     }
 

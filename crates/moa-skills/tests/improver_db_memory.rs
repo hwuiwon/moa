@@ -7,17 +7,56 @@ mod support;
 
 use moa_skills::improver::{ImprovementResult, improve_skill_with_learning};
 use support::{
-    BASELINE_SKILL, IMPROVED_SKILL, REGRESSED_SKILL, SESSION_WITH_5_TOOL_CALLS,
-    active_semantic_version, artifact_revision_count, configured_test_db, learning_store,
-    load_session_fixture, scripted_router, seed_skill, session_storage_partition_id,
-    skill_row_count, tenant_scope, test_config,
+    BASELINE_SKILL, IMPROVED_SKILL, REGRESSED_SKILL, RENAMED_SKILL, SESSION_WITH_5_TOOL_CALLS,
+    active_semantic_version, artifact_revision_count, learning_store, load_session_fixture,
+    scripted_router, seed_skill, session_storage_partition_id, setup_test_db, skill_row_count,
+    tenant_scope, test_config,
 };
 
 #[tokio::test]
-async fn improver_with_changed_body_bumps_minor_version() {
-    let Some(test_db) = configured_test_db().await else {
-        return;
+async fn improver_that_renames_skill_is_rejected() {
+    // Pins: an improvement that changes the skill `name` is rejected before any draft is stored,
+    // and the active skill is left untouched (no new artifact revision).
+    let test_db = setup_test_db().await;
+    let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
+    let (config, _temp_dir) = test_config(&test_db);
+    let storage_partition_id = session_storage_partition_id(&loaded.session);
+    let scope = tenant_scope(&storage_partition_id);
+    let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
+
+    let result = improve_skill_with_learning(
+        &config,
+        &loaded.session,
+        &existing,
+        &loaded.events,
+        scripted_router([RENAMED_SKILL]),
+        Some(learning_store(&test_db)),
+    )
+    .await
+    .expect("rename improvement returns a typed outcome");
+
+    let ImprovementResult::Rejected { reason } = result else {
+        panic!("expected rejection when the improver renames the skill, got {result:?}");
     };
+    assert!(
+        reason.contains("name"),
+        "rejection reason explains the skill-name change: {reason}"
+    );
+    assert_eq!(
+        active_semantic_version(&test_db, &scope, "auth-flow").await,
+        "1.2",
+        "the active skill version is unchanged after a rejected rename"
+    );
+    assert_eq!(
+        artifact_revision_count(&test_db, &storage_partition_id, "auth-flow").await,
+        1,
+        "no new draft revision is stored for a rejected rename"
+    );
+}
+
+#[tokio::test]
+async fn improver_with_changed_body_bumps_minor_version() {
+    let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
     let storage_partition_id = session_storage_partition_id(&loaded.session);
@@ -57,9 +96,7 @@ async fn improver_with_changed_body_bumps_minor_version() {
 
 #[tokio::test]
 async fn improver_with_unchanged_body_returns_unchanged_short_circuit() {
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
     let storage_partition_id = session_storage_partition_id(&loaded.session);
@@ -90,9 +127,7 @@ async fn improver_with_unchanged_body_returns_unchanged_short_circuit() {
 
 #[tokio::test]
 async fn improver_with_breaking_changes_to_skill_signature_bumps_major_version() {
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
     let storage_partition_id = session_storage_partition_id(&loaded.session);
@@ -122,9 +157,7 @@ async fn improver_with_breaking_changes_to_skill_signature_bumps_major_version()
 
 #[tokio::test]
 async fn improver_concurrent_attempts_on_same_skill_reuse_draft_proposal() {
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
     let storage_partition_id = session_storage_partition_id(&loaded.session);
@@ -203,9 +236,7 @@ async fn improver_concurrent_attempts_on_same_skill_reuse_draft_proposal() {
 
 #[tokio::test]
 async fn improver_emits_review_candidate_with_lineage_payload() {
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
     let storage_partition_id = session_storage_partition_id(&loaded.session);

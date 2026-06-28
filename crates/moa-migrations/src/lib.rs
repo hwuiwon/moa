@@ -15,31 +15,6 @@ struct SchemaMigration {
     sql: &'static str,
 }
 
-#[cfg(test)]
-const POSTGRES_MIGRATION_FILES: &[&str] = &[
-    "V000001__session_baseline.sql",
-    "V000101__auth_baseline.sql",
-    "V000201__orchestrator_baseline.sql",
-    "V000301__ocsf_baseline.sql",
-    "V000302__action_policy_auto_mode.sql",
-    "V000303__age_rls_operator_resolution.sql",
-    "V000304__builtin_approvals_resolved_marker.sql",
-    "V000305__retrieval_lineage_turn_id.sql",
-    "V000306__contacts.sql",
-    "V000307__session_channels.sql",
-    "V000308__tenant_configurable_agents.sql",
-    "V000309__tenant_runtime_boundaries.sql",
-    "V000310__graph_changelog_append_only.sql",
-    "V000311__tenant_knowledge_base.sql",
-    "V000312__knowledge_connection_source_selection.sql",
-    "V000313__hand_leases.sql",
-    "V000314__eval_run_status.sql",
-    "V000315__authz_outbox_claims.sql",
-    "V000316__session_blobs.sql",
-    "V000317__knowledge_sync_active_claims.sql",
-    "V000318__session_attachments.sql",
-];
-
 // Schema-isolated session tests do not own artifact/experiment tables. Keep
 // this DDL equal to the session-owned prefix of V000302.
 const ACTION_POLICY_SCHEMA_MIGRATION_SQL: &str = r#"
@@ -208,6 +183,29 @@ pub const PGAUDIT_SCHEMA_DDL: &str = include_str!("../sql/pgaudit.sql");
 
 /// Runs all central refinery migrations.
 pub async fn run(database_url: &str) -> Result<()> {
+    run_embedded_migrations(database_url)
+        .await
+        .map(|_report| ())
+}
+
+/// Runs all central refinery migrations and returns the labels of the migrations
+/// newly applied by this call.
+///
+/// On a database that is already up to date the returned list is empty, which is
+/// the observable signal callers (and idempotency tests) use to confirm a re-run
+/// applied nothing.
+pub async fn run_reporting_applied(database_url: &str) -> Result<Vec<String>> {
+    let report = run_embedded_migrations(database_url).await?;
+    Ok(report
+        .applied_migrations()
+        .iter()
+        .map(|migration| migration.to_string())
+        .collect())
+}
+
+/// Connects to Postgres, takes the refinery advisory lock, runs the embedded
+/// migrations, and returns the refinery report.
+async fn run_embedded_migrations(database_url: &str) -> Result<refinery::Report> {
     let (mut client, connection) = tokio_postgres::connect(database_url, NoTls)
         .await
         .context("connect to Postgres for refinery migrations")?;
@@ -250,7 +248,7 @@ pub async fn run(database_url: &str) -> Result<()> {
 
     drop(client);
     let _ = connection_task.await;
-    Ok(())
+    Ok(report)
 }
 
 /// Runs the session baseline inside an isolated schema.
@@ -385,33 +383,70 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use super::{
-        ACTION_POLICY_SCHEMA_MIGRATION_SQL, ORCHESTRATOR_SCHEMA_MIGRATIONS,
-        POSTGRES_MIGRATION_FILES,
-    };
+    use super::{ACTION_POLICY_SCHEMA_MIGRATION_SQL, ORCHESTRATOR_SCHEMA_MIGRATIONS};
+
+    /// Parses a `V<version>__<name>.sql` migration file stem into its numeric
+    /// version and refinery-style name, matching how refinery itself parses it.
+    fn parse_migration_stem(stem: &str) -> (i64, String) {
+        let (version_part, name) = stem
+            .split_once("__")
+            .unwrap_or_else(|| panic!("migration stem {stem} must contain `__`"));
+        let version = version_part
+            .trim_start_matches(['V', 'v'])
+            .parse::<i64>()
+            .unwrap_or_else(|error| panic!("migration {stem} has non-numeric version: {error}"));
+        (version, name.to_string())
+    }
 
     #[test]
-    fn central_manifest_matches_embedded_postgres_files() {
+    fn embedded_migration_set_matches_on_disk_files_and_versions_increase() {
+        // Pins the migrations refinery will actually embed and run (via
+        // embed_migrations!) against the on-disk directory, rather than a
+        // hand-maintained const. Catches a `.sql` added to disk but not picked up,
+        // a removed/renamed file, and out-of-order or duplicate version numbers
+        // (the checksum/version-drift class) — none of which a string grep saw.
         let migrations_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations/postgres");
-        let mut files = BTreeSet::new();
-        for entry in fs::read_dir(&migrations_dir).expect("read central migrations directory") {
-            let entry = entry.expect("read central migration entry");
-            let path = entry.path();
-            if path.extension().and_then(|extension| extension.to_str()) == Some("sql") {
-                let file_name = path
-                    .file_name()
+        let on_disk: BTreeSet<(i64, String)> = fs::read_dir(&migrations_dir)
+            .expect("read central migrations directory")
+            .map(|entry| entry.expect("read central migration entry").path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
+            .map(|path| {
+                let stem = path
+                    .file_stem()
                     .and_then(|name| name.to_str())
-                    .expect("migration file name is valid UTF-8");
-                files.insert(file_name.to_string());
-            }
-        }
+                    .expect("migration file stem is valid UTF-8");
+                parse_migration_stem(stem)
+            })
+            .collect();
 
-        let manifest = POSTGRES_MIGRATION_FILES
+        let embedded: Vec<(i64, String)> = super::embedded::migrations::runner()
+            .get_migrations()
             .iter()
-            .map(|name| name.to_string())
-            .collect::<BTreeSet<_>>();
+            .map(|migration| (i64::from(migration.version()), migration.name().to_string()))
+            .collect();
 
-        assert_eq!(manifest, files);
+        let embedded_set: BTreeSet<(i64, String)> = embedded.iter().cloned().collect();
+        assert_eq!(
+            embedded_set, on_disk,
+            "refinery's embedded migration set must match the on-disk .sql files"
+        );
+
+        let mut versions: Vec<i64> = embedded.iter().map(|(version, _)| *version).collect();
+        let sorted_unique: Vec<i64> = {
+            let mut copy = versions.clone();
+            copy.sort_unstable();
+            copy.dedup();
+            copy
+        };
+        versions.sort_unstable();
+        assert_eq!(
+            versions, sorted_unique,
+            "embedded migration versions must be unique (no duplicate version numbers)"
+        );
+        assert!(
+            !embedded.is_empty(),
+            "expected at least one embedded central migration"
+        );
     }
 
     #[test]

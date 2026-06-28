@@ -78,7 +78,11 @@ fn neon_live_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 fn live_neon_tests_enabled() -> bool {
-    std::env::var("MOA_RUN_LIVE_NEON_TESTS").as_deref() == Ok("1")
+    // Accept common truthy values (1/true/yes/on, case-insensitive) so a developer's
+    // `.env` (which may set `MOA_RUN_LIVE_NEON_TESTS=true`) enables the live lane.
+    std::env::var("MOA_RUN_LIVE_NEON_TESTS")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 fn require_neon_live_env() -> bool {

@@ -1205,6 +1205,182 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn retrieve_returns_empty_when_k_final_is_zero() {
+        // Pins: a zero-budget retrieval short-circuits before touching any leg.
+        let retriever = lazy_retriever();
+        let hits = retriever
+            .retrieve(empty_corpus_request(0, false))
+            .await
+            .expect("k_final=0 should early-return");
+        assert!(hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn retrieve_returns_empty_for_empty_corpus() {
+        // Pins: when every leg yields nothing the fused set is empty and retrieval
+        // returns [] without hydrating nodes. Hermetic because an empty query and
+        // empty embedding keep all three legs off the database.
+        let retriever = lazy_retriever();
+        let hits = retriever
+            .retrieve(empty_corpus_request(5, false))
+            .await
+            .expect("empty corpus should return []");
+        assert!(hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn retrieve_does_not_invoke_reranker_for_empty_corpus() {
+        // Pins: the billed reranker is not called when no candidates exceed
+        // k_final (here the corpus is empty), even with use_reranker = true.
+        let retriever = lazy_retriever().with_reranker(Arc::new(PanicReranker));
+        let hits = retriever
+            .retrieve(empty_corpus_request(5, true))
+            .await
+            .expect("empty corpus should return [] without reranking");
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn leg_overlap_measures_top_k_set_intersection() {
+        // Pins: dual-read overlap is the top-k uid intersection size over the
+        // larger top-k set, and it honors the k cutoff.
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let c = Uuid::from_u128(3);
+        let d = Uuid::from_u128(4);
+
+        // Disjoint top-k -> zero overlap.
+        assert_eq!(
+            leg_overlap(
+                &[leg_candidate(a), leg_candidate(b)],
+                &[leg_candidate(c), leg_candidate(d)],
+                10,
+            ),
+            0.0
+        );
+        // Identical top-k -> full overlap.
+        assert_eq!(
+            leg_overlap(
+                &[leg_candidate(a), leg_candidate(b)],
+                &[leg_candidate(a), leg_candidate(b)],
+                10,
+            ),
+            1.0
+        );
+        // Partial overlap: {a,b} vs {a,c} over k=2 -> 1/2.
+        assert_eq!(
+            leg_overlap(
+                &[leg_candidate(a), leg_candidate(b)],
+                &[leg_candidate(a), leg_candidate(c)],
+                2,
+            ),
+            0.5
+        );
+        // k cutoff: the lists diverge only past position 2, so the top-2 overlap
+        // is full even though the full lists differ.
+        assert_eq!(
+            leg_overlap(
+                &[leg_candidate(a), leg_candidate(b), leg_candidate(c)],
+                &[leg_candidate(b), leg_candidate(a), leg_candidate(d)],
+                2,
+            ),
+            1.0
+        );
+    }
+
+    #[test]
+    fn is_dual_read_active_respects_state_and_expiry() {
+        // Pins: dual-read is active only in the dual_read state and only while the
+        // dual_read_until deadline is in the future (or unset).
+        let future = Utc::now() + chrono::Duration::hours(1);
+        let past = Utc::now() - chrono::Duration::hours(1);
+
+        assert!(
+            VectorBackendState {
+                vector_backend: "turbopuffer".to_string(),
+                vector_backend_state: "dual_read".to_string(),
+                dual_read_until: Some(future),
+            }
+            .is_dual_read_active(),
+            "dual_read with a future deadline is active"
+        );
+        assert!(
+            VectorBackendState {
+                vector_backend: "turbopuffer".to_string(),
+                vector_backend_state: "dual_read".to_string(),
+                dual_read_until: None,
+            }
+            .is_dual_read_active(),
+            "dual_read with no deadline is active"
+        );
+        assert!(
+            !VectorBackendState {
+                vector_backend: "turbopuffer".to_string(),
+                vector_backend_state: "dual_read".to_string(),
+                dual_read_until: Some(past),
+            }
+            .is_dual_read_active(),
+            "an expired deadline ends dual-read"
+        );
+        assert!(
+            !VectorBackendState {
+                vector_backend: "pgvector".to_string(),
+                vector_backend_state: "steady".to_string(),
+                dual_read_until: Some(future),
+            }
+            .is_dual_read_active(),
+            "the steady state is never dual-read"
+        );
+    }
+
+    fn lazy_retriever() -> HybridRetriever {
+        HybridRetriever::new(
+            PgPool::connect_lazy("postgres://unused")
+                .expect("lazy pool construction should not connect"),
+            Arc::new(EmptyGraph),
+            Arc::new(EmptyVector),
+        )
+    }
+
+    fn empty_corpus_request(k_final: usize, use_reranker: bool) -> RetrievalRequest {
+        RetrievalRequest {
+            seeds: Vec::new(),
+            query_text: String::new(),
+            query_embedding: Vec::new(),
+            scope: tenant_scope(),
+            label_filter: None,
+            max_pii_class: PiiClass::Restricted,
+            k_final,
+            use_reranker,
+            strategy: None,
+            as_of: None,
+            ranking_reference_time: Some(Utc::now()),
+            lineage: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: false,
+        }
+    }
+
+    fn leg_candidate(uid: Uuid) -> LegCandidate {
+        LegCandidate { uid, score: 1.0 }
+    }
+
+    struct PanicReranker;
+
+    #[async_trait]
+    impl Reranker for PanicReranker {
+        async fn rerank(
+            &self,
+            _model: &str,
+            _query: &str,
+            _documents: &[String],
+            _top_n: usize,
+        ) -> moa_core::Result<Vec<RerankHit>> {
+            panic!("reranker must not be called when no candidates exceed k_final");
+        }
+    }
+
     fn hit(uid: Uuid, scope: &str, score: f64) -> RetrievalHit {
         RetrievalHit {
             uid,

@@ -18,7 +18,13 @@ fn session() -> SessionMeta {
 }
 
 #[tokio::test]
-async fn router_discovers_stdio_mcp_tools_from_config() {
+async fn from_config_rejects_stdio_mcp_transport_for_deployment() {
+    // stdio MCP requires a pod-local child process, which a cloud/Kubernetes
+    // deployment must not depend on. `ToolRouter::from_config` (the deployment
+    // entry point) therefore fails closed on a stdio MCP server before
+    // constructing the router. Local-dev stdio support, if any, lives on
+    // `new_local`, which bypasses this validation. HTTP/SSE MCP discovery +
+    // execution through `from_config` is covered by the sibling tests below.
     let dir = tempdir().unwrap();
     let mut config = MoaConfig::default();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
@@ -35,27 +41,17 @@ async fn router_discovers_stdio_mcp_tools_from_config() {
         ..McpServerConfig::default()
     }];
 
-    let router = ToolRouter::from_config(&config).await.unwrap();
-    assert!(
-        router
-            .tool_schemas()
-            .iter()
-            .any(|tool| tool.get("name").and_then(|value| value.as_str()) == Some("echo"))
-    );
-
-    let (_, output) = router
-        .execute_authorized(
-            &session(),
-            &ToolInvocation {
-                id: None,
-                name: "echo".to_string(),
-                input: json!({ "text": "hello" }),
-            },
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(output.to_text(), "hello");
+    let error = match ToolRouter::from_config(&config).await {
+        Ok(_) => panic!("from_config must reject a stdio MCP server in a deployment"),
+        Err(error) => error,
+    };
+    match error {
+        moa_core::MoaError::ConfigError(message) => assert!(
+            message.contains("stdio transport") && message.contains("local development"),
+            "expected the stdio-rejection ConfigError, got: {message}"
+        ),
+        other => panic!("expected ConfigError rejecting stdio transport, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -127,6 +123,49 @@ async fn router_injects_mcp_credentials_via_proxy() {
 
     assert_eq!(output.to_text(), "pong");
     unsafe { std::env::remove_var(token_env) };
+}
+
+#[tokio::test]
+async fn router_fails_closed_when_credentialed_mcp_token_env_is_unset() {
+    // A credentialed MCP server whose token_env is unset must fail credential
+    // resolution (MissingEnvironmentVariable) before the server is ever contacted,
+    // not fall back to an unauthenticated call. The credential vault is built in
+    // load_mcp_servers ahead of MCPClient::connect, so the error surfaces at
+    // construction. The URL points at an address nothing is listening on; if the
+    // router regressed to skip the credential and connect, the failure would be a
+    // connection error rather than MissingEnvironmentVariable.
+    let token_env = format!("MOA_TEST_MCP_UNSET_TOKEN_{}", Uuid::now_v7().simple());
+    assert!(
+        std::env::var(&token_env).is_err(),
+        "token env var must be unset for this fail-closed test"
+    );
+
+    let dir = tempdir().unwrap();
+    let mut config = MoaConfig::default();
+    config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
+    config.mcp_servers = vec![McpServerConfig {
+        name: "secure-api".to_string(),
+        transport: McpTransportConfig::Http,
+        url: Some("http://127.0.0.1:1".to_string()),
+        credentials: Some(McpCredentialConfig::Bearer {
+            token_env: token_env.clone(),
+        }),
+        ..McpServerConfig::default()
+    }];
+
+    let error = match ToolRouter::from_config(&config).await {
+        Ok(_) => panic!("expected from_config to fail closed on the unset MCP token env var"),
+        Err(error) => error,
+    };
+    match error {
+        moa_core::MoaError::MissingEnvironmentVariable(message) => {
+            assert!(
+                message.contains(&token_env),
+                "expected the unset token env var name in the error, got: {message}"
+            );
+        }
+        other => panic!("expected MissingEnvironmentVariable, got {other:?}"),
+    }
 }
 
 #[tokio::test]

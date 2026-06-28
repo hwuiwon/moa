@@ -2424,6 +2424,159 @@ mod tests {
         );
     }
 
+    /// Computes the hex-encoded HMAC-SHA256 of `body` under `key`, mirroring how
+    /// upstream webhook providers sign payloads so the verifier's accept path is
+    /// exercised with a genuinely valid signature rather than a precomputed constant.
+    fn hmac_sha256_hex(key: &[u8], body: &[u8]) -> String {
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("hmac accepts any key length");
+        mac.update(body);
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    #[test]
+    fn verify_hmac_header_accepts_valid_signature_and_rejects_tampering() {
+        // Pins: the webhook HMAC header verifier (the 401 ingress gate) accepts a
+        // correctly signed body, rejects the same signature over a tampered body, and
+        // rejects a request with no signature header.
+        let key = "edge-webhook-secret";
+        let body = br#"{"event":"document.processed"}"#;
+        let header = "x-moa-knowledge-webhook-signature";
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header,
+            hmac_sha256_hex(key.as_bytes(), body)
+                .parse()
+                .expect("hex signature is a valid header value"),
+        );
+
+        // A correctly signed body is accepted.
+        assert!(verify_hmac_header(&headers, body, key, header).is_ok());
+
+        // The same signature over a tampered body is rejected as invalid.
+        let tampered = br#"{"event":"document.deleted!"}"#;
+        assert_eq!(
+            verify_hmac_header(&headers, tampered, key, header),
+            Err((StatusCode::UNAUTHORIZED, "invalid webhook signature"))
+        );
+
+        // A request with no signature header is rejected as missing.
+        assert_eq!(
+            verify_hmac_header(&HeaderMap::new(), body, key, header),
+            Err((StatusCode::UNAUTHORIZED, "missing webhook signature"))
+        );
+    }
+
+    #[test]
+    fn verify_hmac_signature_distinguishes_matching_from_forged_signatures() {
+        // Pins: the raw HMAC-SHA256 comparison accepts the exact signature, rejects a
+        // signature computed over different bytes, and rejects an empty signature.
+        let key = b"shared-secret";
+        let body = b"payload-bytes";
+
+        let valid = {
+            let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("valid key");
+            mac.update(body);
+            mac.finalize().into_bytes()
+        };
+        assert!(verify_hmac_signature(key, body, valid.as_slice()).is_ok());
+
+        // A signature computed over different bytes does not verify.
+        let forged = {
+            let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("valid key");
+            mac.update(b"other-bytes");
+            mac.finalize().into_bytes()
+        };
+        assert_eq!(
+            verify_hmac_signature(key, body, forged.as_slice()),
+            Err((StatusCode::UNAUTHORIZED, "invalid webhook signature"))
+        );
+
+        // An empty signature is rejected.
+        assert_eq!(
+            verify_hmac_signature(key, body, &[]),
+            Err((StatusCode::UNAUTHORIZED, "invalid webhook signature"))
+        );
+    }
+
+    #[test]
+    fn verify_svix_signature_accepts_valid_and_rejects_tampered_or_missing() {
+        // Pins: the Svix-style edge verifier accepts a `v1,` signature over the
+        // `id.timestamp.body` payload, rejects a tampered body, and rejects a request
+        // whose signature header is absent (id + timestamp present).
+        let key = "svix-shared-secret";
+        let message_id = "msg_2abc";
+        let timestamp = Utc::now().timestamp();
+        let body = r#"{"type":"connection.created"}"#;
+        let signed_payload = format!("{message_id}.{timestamp}.{body}");
+
+        let signature = {
+            let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("valid key");
+            mac.update(signed_payload.as_bytes());
+            general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert("svix-id", message_id.parse().expect("valid header value"));
+        headers.insert(
+            "svix-timestamp",
+            timestamp.to_string().parse().expect("valid header value"),
+        );
+        headers.insert(
+            "svix-signature",
+            format!("v1,{signature}")
+                .parse()
+                .expect("valid header value"),
+        );
+
+        // A correctly signed payload is accepted.
+        assert!(verify_svix_signature_at_edge(&headers, body.as_bytes(), key).is_ok());
+
+        // A tampered body no longer matches the signed payload.
+        assert_eq!(
+            verify_svix_signature_at_edge(&headers, b"{}", key),
+            Err((StatusCode::UNAUTHORIZED, "invalid webhook signature"))
+        );
+
+        // A request missing only the signature header is rejected as missing.
+        let mut without_sig = HeaderMap::new();
+        without_sig.insert("svix-id", message_id.parse().expect("valid header value"));
+        without_sig.insert(
+            "svix-timestamp",
+            timestamp.to_string().parse().expect("valid header value"),
+        );
+        assert_eq!(
+            verify_svix_signature_at_edge(&without_sig, body.as_bytes(), key),
+            Err((StatusCode::UNAUTHORIZED, "missing webhook signature"))
+        );
+    }
+
+    #[cfg(feature = "auth0")]
+    #[test]
+    fn verify_auth0_signature_accepts_valid_and_rejects_tampered_or_missing() {
+        // Pins: the Auth0 webhook verifier accepts a `sha256=` hex HMAC of the body,
+        // rejects a tampered body, and rejects a request with no Auth0-Signature header.
+        let secret = "auth0-webhook-secret";
+        let body = br#"{"type":"user.created"}"#;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "auth0-signature",
+            format!("sha256={}", hmac_sha256_hex(secret.as_bytes(), body))
+                .parse()
+                .expect("valid header value"),
+        );
+
+        // A correctly signed body is accepted.
+        assert!(verify_auth0_signature(&headers, body, secret));
+
+        // A tampered body is rejected.
+        assert!(!verify_auth0_signature(&headers, b"{}", secret));
+
+        // A request with no Auth0-Signature header is rejected.
+        assert!(!verify_auth0_signature(&HeaderMap::new(), body, secret));
+    }
+
     #[test]
     fn session_message_stream_cursor_starts_after_latest_event() {
         // Pins: a fresh browser message stream does not replay old session history.

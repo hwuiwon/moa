@@ -1288,10 +1288,26 @@ mod tests {
     }
 
     #[test]
-    fn experiment_metric_descriptions_exist_and_labels_stay_bounded() {
-        // Pins: experiment metrics remain an aggregate dashboard surface, not a drilldown ID index.
-        let source = include_str!("runtime_metrics.rs");
-        for metric in [
+    fn experiment_metrics_export_descriptions_and_bounded_labels() {
+        // Pins: every experiment/simulation metric exports a HELP description and only
+        // bounded dashboard labels. Asserted against rendered Prometheus output (the real
+        // exported descriptors), not the crate's own source text.
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            register_metric_descriptions();
+            record_experiment_run("accepted", "agent_loop");
+            record_experiment_trial("completed", Some("max_turns"), "agent_loop");
+            record_experiment_trial_duration("agent_loop", "completed", Duration::from_millis(7));
+            record_simulation_turn("agent_loop");
+            record_simulation_tokens("simulator", 16);
+            record_simulation_cost_cents("simulator", 1);
+            record_experiment_score_rows("scores", 3);
+            record_experiment_learning_candidates("proposed", 1);
+        });
+        let rendered = handle.render();
+
+        let experiment_metrics = [
             "moa_experiment_runs_total",
             "moa_experiment_trials_total",
             "moa_experiment_trial_duration_seconds",
@@ -1300,22 +1316,40 @@ mod tests {
             "moa_simulation_cost_cents_total",
             "moa_experiment_score_rows_total",
             "moa_experiment_learning_candidates_total",
-        ] {
-            let described = source.contains(&format!("describe_counter!(\n        \"{metric}\""))
-                || source.contains(&format!("describe_histogram!(\n        \"{metric}\""));
+        ];
+        for metric in experiment_metrics {
             assert!(
-                described,
-                "runtime metric {metric} should have a description"
+                rendered.contains(&format!("# HELP {metric} ")),
+                "metric {metric} should export a HELP description; rendered:\n{rendered}"
             );
         }
 
-        let experiment_metrics_source = source
-            .split("pub fn record_experiment_run")
-            .nth(1)
-            .expect("experiment metric helpers should exist")
-            .split("#[cfg(tokio_unstable)]")
-            .next()
-            .expect("experiment metric helper section should end before runtime publisher");
+        // Bounded labels that SHOULD appear on the exported series.
+        for label in [
+            "status=",
+            "target_kind=",
+            "stop_reason=",
+            "source=",
+            "role=",
+        ] {
+            assert!(
+                rendered.contains(label),
+                "expected bounded experiment label `{label}` in rendered output:\n{rendered}"
+            );
+        }
+
+        let experiment_series = rendered
+            .lines()
+            .filter(|line| {
+                experiment_metrics
+                    .iter()
+                    .any(|metric| line.starts_with(metric))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !experiment_series.is_empty(),
+            "experiment metric series should be exported:\n{rendered}"
+        );
         for forbidden in [
             "run_uid",
             "trial_uid",
@@ -1332,46 +1366,72 @@ mod tests {
             "connector",
             "model_output",
         ] {
-            assert!(
-                !experiment_metrics_source.contains(forbidden),
-                "experiment metric helpers must not use high-cardinality label `{forbidden}`"
-            );
+            for line in &experiment_series {
+                assert!(
+                    !line.contains(forbidden),
+                    "experiment series `{line}` must not carry high-cardinality label `{forbidden}`"
+                );
+            }
         }
     }
 
     #[test]
-    fn knowledge_metrics_have_descriptions_and_low_cardinality_labels() {
-        // Pins: tenant knowledge metrics use the Task 13 names without tenant, source, object, contact, or error-message labels.
-        let source = include_str!("runtime_metrics.rs");
+    fn knowledge_metrics_export_descriptions_and_low_cardinality_labels() {
+        // Pins: tenant knowledge metrics export HELP descriptions and only the bounded
+        // Task-13 label set (no tenant, source, object, contact, or error-message labels).
+        // Asserted against rendered Prometheus output, not the crate's own source text.
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            register_metric_descriptions();
+            record_knowledge_sync_run("github", "succeeded");
+            record_knowledge_records("github", "upserted", 5);
+            record_knowledge_ingestion_step_duration(
+                "github",
+                "pdf",
+                "parse",
+                "ok",
+                Duration::from_millis(3),
+            );
+            record_knowledge_parse_job("pdf", "ok");
+            record_knowledge_chunks("created", 7);
+            record_knowledge_embeddings("ok", 7);
+            record_knowledge_graph_write("node", "ok", 4);
+            record_knowledge_retrieval_duration("vector", "ok", Duration::from_millis(2));
+            record_knowledge_retrieval_hits("graph", "dense", 2);
+        });
+        let rendered = handle.render();
+
         for metric in knowledge_metric_names() {
-            let described = source.contains(&format!("describe_counter!(\n        \"{metric}\""))
-                || source.contains(&format!("describe_histogram!(\n        \"{metric}\""));
             assert!(
-                described,
-                "runtime metric {metric} should have a description"
+                rendered.contains(&format!("# HELP {metric} ")),
+                "knowledge metric {metric} should export a HELP description; rendered:\n{rendered}"
             );
         }
 
-        let knowledge_metrics_source = source
-            .split("pub fn record_knowledge_sync_run")
-            .nth(1)
-            .expect("knowledge metric helper section should exist")
-            .split("/// Records live broadcast events dropped")
-            .next()
-            .expect("knowledge metric helper section should end before broadcast metrics");
+        // Only the metric series lines carry labels; `# HELP`/`# TYPE` lines start with `#`.
+        let knowledge_series = rendered
+            .lines()
+            .filter(|line| line.starts_with("moa_knowledge_"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !knowledge_series.is_empty(),
+            "knowledge metric series should be exported:\n{rendered}"
+        );
         for required_label in [
-            "\"provider\"",
-            "\"status\"",
-            "\"action\"",
-            "\"parser\"",
-            "\"stage\"",
-            "\"kind\"",
-            "\"source_tier\"",
-            "\"leg\"",
+            "provider=",
+            "status=",
+            "action=",
+            "parser=",
+            "stage=",
+            "kind=",
+            "source_tier=",
+            "leg=",
         ] {
             assert!(
-                knowledge_metrics_source.contains(required_label),
-                "knowledge metric helper section should include label {required_label}"
+                knowledge_series.contains(required_label),
+                "knowledge series should include bounded label `{required_label}`:\n{knowledge_series}"
             );
         }
         for forbidden in [
@@ -1389,8 +1449,8 @@ mod tests {
             "api_key",
         ] {
             assert!(
-                !knowledge_metrics_source.contains(forbidden),
-                "knowledge metric helpers must not use high-cardinality label `{forbidden}`"
+                !knowledge_series.contains(forbidden),
+                "knowledge series must not carry high-cardinality label `{forbidden}`:\n{knowledge_series}"
             );
         }
     }

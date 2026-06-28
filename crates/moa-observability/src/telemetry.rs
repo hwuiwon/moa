@@ -296,7 +296,21 @@ mod tests {
         ]))
         .expect("metadata should build");
 
-        assert!(metadata.get("authorization").is_some());
-        assert!(metadata.get("x-moa-tenant").is_some());
+        assert_eq!(
+            metadata
+                .get("authorization")
+                .expect("authorization header present")
+                .to_str()
+                .expect("authorization header is valid ASCII"),
+            "Basic cGstbGYteHh4eHg6c2stbGYteHh4eHg="
+        );
+        assert_eq!(
+            metadata
+                .get("x-moa-tenant")
+                .expect("tenant header present")
+                .to_str()
+                .expect("tenant header is valid ASCII"),
+            "tenant-a"
+        );
     }
 }

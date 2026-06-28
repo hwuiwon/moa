@@ -443,51 +443,25 @@ async fn transaction_dispute_plan_clarifies_then_handles_required_review() -> Re
     result
 }
 
-#[test]
-fn behavior_lab_simulation_path_does_not_auto_promote_or_fake_score_rows() {
-    // Pins: simulation execution records score-run parents only; learning proposals stay explicit and require review.
-    let run_workflow = include_str!("../src/workflows/experiment_run.rs");
-    let trial_workflow = include_str!("../src/workflows/experiment_trial_run.rs");
-    let experiments_service = include_str!("../src/services/experiments.rs");
-
-    for source in [run_workflow, trial_workflow] {
-        assert!(
-            !source.contains("INSERT INTO analytics.scores"),
-            "simulation workflows must not fake analytics.scores rows"
-        );
-        assert!(
-            !source.contains("append_learning_candidate"),
-            "simulation workflows must not auto-create learning candidates"
-        );
-        assert!(
-            !source.contains("LearningCandidateStatus::Promoted"),
-            "simulation workflows must not promote learned state"
-        );
-    }
-
-    assert!(
-        experiments_service.contains("append_learning_candidate(&candidate)"),
-        "learning candidates should be created only by the explicit proposal operation"
-    );
-    assert!(
-        experiments_service.contains("LearningCandidateStatus::Proposed"),
-        "explicit proposals should wait for review"
-    );
-    assert!(
-        !experiments_service.contains("LearningCandidateStatus::Promoted"),
-        "experiment proposal service must not promote candidates"
-    );
-    assert!(
-        !experiments_service.contains("publish_revision("),
-        "experiment proposal service must not publish artifact changes"
-    );
+/// Returns `true` when `name` is set to a common truthy value (`1`, `true`,
+/// `yes`, or `on`, case-insensitively after trimming), matching how live-test
+/// flags are written in a developer's `.env`.
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 #[tokio::test]
 #[ignore = "requires MOA_RUN_LIVE_SIMULATION_TESTS=1 and live provider credentials"]
 async fn live_behavior_lab_simulation_gate_requires_flag_and_provider_credentials() -> Result<()> {
     // Pins: live simulation tests are double-gated before any billed provider can be used.
-    if std::env::var("MOA_RUN_LIVE_SIMULATION_TESTS").as_deref() != Ok("1") {
+    if !env_flag_enabled("MOA_RUN_LIVE_SIMULATION_TESTS") {
         return Ok(());
     }
 

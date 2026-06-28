@@ -31,11 +31,25 @@ async fn test_pool() -> PgPool {
     pool
 }
 
+/// Returns `true` when `name` is set to a common truthy value (`1`, `true`,
+/// `yes`, or `on`, case-insensitively after trimming), matching how live-test
+/// flags are written in a developer's `.env`.
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 #[tokio::test]
 #[ignore = "requires MOA_RUN_LIVE_OPENFGA_TESTS=1 and live OpenFGA"]
 async fn poller_drains_write_to_fga() {
     // Pins: the poller applies a queued tenant-operator tuple to live OpenFGA.
-    if std::env::var("MOA_RUN_LIVE_OPENFGA_TESTS").as_deref() != Ok("1") {
+    if !env_flag_enabled("MOA_RUN_LIVE_OPENFGA_TESTS") {
         return;
     }
 

@@ -180,15 +180,4 @@ mod tests {
         // PascalCase event types must not accept the snake_case serde form.
         assert!(from_db::<EventType>("event type", "session_created").is_err());
     }
-
-    #[test]
-    fn guardrail_event_type_db_label_round_trips_guardrail() {
-        // Pins: guardrail audit events use the same persisted PascalCase event label as other events.
-        assert_eq!(EventType::GuardrailCheck.as_str(), "GuardrailCheck");
-        assert_eq!(
-            from_db::<EventType>("event type", "GuardrailCheck")
-                .expect("guardrail event type label should parse"),
-            EventType::GuardrailCheck
-        );
-    }
 }

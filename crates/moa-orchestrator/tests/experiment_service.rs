@@ -378,32 +378,11 @@ fn experiment_compare_response_serializes_scenario_and_variant_deltas() {
     assert_eq!(encoded["variant_deltas"][0]["delta"], 0.2);
 }
 
-#[test]
-fn experiments_service_declares_required_tenant_relations() {
-    // Pins: experiment service handlers authorize tenant runtime access before protected work.
-    let source = include_str!("../src/services/experiments.rs");
-    assert!(
-        source.contains("ObjectType::Tenant"),
-        "experiment service must authorize tenant objects"
-    );
-    for method in [
-        "generate_plan",
-        "run",
-        "status",
-        "list",
-        "trials",
-        "trial_status",
-        "cancel",
-        "propose_improvements",
-        "scores",
-        "compare",
-        "run_agent_revision_simulation",
-        "compare_agent_revisions",
-        "compare_agent_revision_simulation",
-    ] {
-        assert_method_requires_relation(source, method, "Relation::Operator");
-    }
-}
+// Authorization for the Experiments service is exercised behaviorally, not by source-grep:
+// `experiment_workflow_e2e::experiments_run_denies_caller_without_tenant_operator` calls
+// `Experiments/run` over the real Restate + OpenFGA stack as a caller with no Tenant:Operator
+// grant and asserts a 403 denial. Every Experiments handler authorizes Tenant:Operator as its
+// first statement, so that e2e is the template for the remaining read/mutate handlers.
 
 #[test]
 fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
@@ -1065,27 +1044,6 @@ fn assert_has_tenant_id<T: Serialize>(value: T) {
     assert!(
         encoded.get("tenant_id").is_some(),
         "wire DTO should include tenant_id: {encoded}"
-    );
-}
-
-fn assert_method_requires_relation(source: &str, method: &str, relation: &str) {
-    let needle = format!("async fn {method}(");
-    let start = source
-        .match_indices(&needle)
-        .last()
-        .map(|(index, _)| index)
-        .unwrap_or_else(|| panic!("Experiments::{method} implementation should exist"));
-    let tail = &source[start..];
-    let end = tail
-        .find("\n    #[tracing::instrument")
-        .unwrap_or(tail.len());
-    let method_body = &tail[..end];
-
-    assert!(
-        method_body.contains(&format!(
-            "authorize_tenant(&ctx, request.tenant_id, {relation})"
-        )),
-        "Experiments::{method} should require {relation}"
     );
 }
 

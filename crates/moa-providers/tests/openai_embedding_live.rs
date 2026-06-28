@@ -9,10 +9,16 @@ use moa_providers::OpenAIEmbedding;
 const LIVE_DIMENSIONS: usize = 1536;
 
 fn live_openai_embedding_requested() -> bool {
-    matches!(
-        std::env::var("MOA_RUN_LIVE_OPENAI_EMBEDDING_TESTS").as_deref(),
-        Ok("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
-    )
+    // Accept the common truthy spellings (`1`, `true`, `yes`, `on`) so a
+    // developer's `.env` enables the live lane regardless of casing/spacing.
+    std::env::var("MOA_RUN_LIVE_OPENAI_EMBEDDING_TESTS")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn live_openai_key() -> Option<String> {

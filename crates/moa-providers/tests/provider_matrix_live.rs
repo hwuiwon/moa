@@ -40,8 +40,48 @@ fn looks_like_four_answer(text: &str) -> bool {
     normalized.contains('4') || normalized.contains("four")
 }
 
+/// Returns `true` when a raw flag value is a common truthy token (`1`, `true`,
+/// `yes`, or `on`), case-insensitively and ignoring surrounding whitespace, so
+/// a `.env` written as `MOA_RUN_LIVE_PROVIDER_TESTS=true` enables the live lane.
+fn flag_value_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Returns `true` when the named env var is set to a truthy value (see
+/// [`flag_value_enabled`]); unset or any other value is treated as disabled.
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| flag_value_enabled(&value))
+        .unwrap_or(false)
+}
+
 fn live_provider_tests_enabled() -> bool {
-    std::env::var("MOA_RUN_LIVE_PROVIDER_TESTS").as_deref() == Ok("1")
+    env_flag_enabled("MOA_RUN_LIVE_PROVIDER_TESTS")
+}
+
+#[test]
+fn truthy_flag_values_enable_the_live_lane() {
+    // Pins: live gating accepts the truthy spellings a developer's `.env` uses,
+    // and rejects falsey/unset values so billed lanes never run by accident.
+    for value in ["1", "true", "TRUE", "Yes", " on "] {
+        assert!(
+            flag_value_enabled(value),
+            "{value:?} should enable live tests"
+        );
+    }
+    for value in ["0", "false", "", "  ", "off"] {
+        assert!(
+            !flag_value_enabled(value),
+            "{value:?} should not enable live tests"
+        );
+    }
+    // An unset env var resolves to disabled without mutating shared process state.
+    assert!(!env_flag_enabled(
+        "MOA_RUN_LIVE_PROVIDER_TESTS_UNSET_PROBE_0a7e3750"
+    ));
 }
 
 fn available_live_providers() -> Vec<LiveProvider> {

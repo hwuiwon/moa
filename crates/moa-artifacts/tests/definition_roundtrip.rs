@@ -288,33 +288,36 @@ definition:
     let document = ArtifactDocument::from_yaml(yaml).expect("parse invalid agent artifact");
     let report = validate_for_status(&document, ArtifactStatus::Draft);
 
-    assert!(
-        report
-            .errors
-            .iter()
-            .any(|error| error.path == "definition.spec.display_name"),
-        "expected display_name error: {report:?}"
+    assert_error(
+        &report,
+        "definition.spec.display_name",
+        "agent display_name must not be empty",
     );
-    assert!(
-        report
-            .errors
-            .iter()
-            .any(|error| error.path == "definition.spec.purpose.summary"),
-        "expected purpose summary error: {report:?}"
+    assert_error(
+        &report,
+        "definition.spec.purpose.summary",
+        "agent purpose summary must not be empty",
     );
-    assert!(
-        report
-            .errors
-            .iter()
-            .any(|error| error.path == "definition.spec.skill_policy.refs"),
-        "expected skill allowlist error: {report:?}"
+    assert_error(
+        &report,
+        "definition.spec.skill_policy.refs",
+        "non-auto skill policy must include at least one reference",
     );
+    assert_error(
+        &report,
+        "definition.spec.tool_policy.tools",
+        "non-auto tool policy must include at least one tool",
+    );
+}
+
+fn assert_error(report: &moa_artifacts::validation::ValidationReport, path: &str, message: &str) {
     assert!(
         report
             .errors
             .iter()
-            .any(|error| error.path == "definition.spec.tool_policy.tools"),
-        "expected tool allowlist error: {report:?}"
+            .any(|error| error.path == path && error.message == message),
+        "expected validation error at {path} with message {message:?}, got {:?}",
+        report.errors
     );
 }
 

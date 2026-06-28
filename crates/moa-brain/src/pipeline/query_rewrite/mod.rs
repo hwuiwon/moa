@@ -529,7 +529,13 @@ mod tests {
 
     #[tokio::test]
     async fn default_timeout_allows_segment_transition_rewrite_latency() {
-        // Pins: the default timeout allows a live-like rewriter call that reports a segment transition.
+        // Pins: the default timeout is generous enough to admit a live-like
+        // rewriter call (historically ~600ms) and the rewrite completes within
+        // it. The config bound is asserted directly so the test stays fast.
+        assert!(
+            QueryRewriteConfig::default().timeout_ms >= 600,
+            "default timeout must tolerate live-like rewrite latency"
+        );
         let calls = Arc::new(AtomicUsize::new(0));
         let provider = MockProvider {
             response: Arc::new(std::sync::Mutex::new(
@@ -540,7 +546,7 @@ mod tests {
                 })
                 .to_string(),
             )),
-            delay: Duration::from_millis(600),
+            delay: Duration::from_millis(5),
             calls: calls.clone(),
         };
         let rewriter = QueryRewriter::new(QueryRewriteConfig::default(), Arc::new(provider))
@@ -699,11 +705,20 @@ mod tests {
 
     #[test]
     fn circuit_breaker_resets_after_cooldown() {
-        let breaker = CircuitBreaker::new(0.05, 60, 1);
+        // Pins: the breaker fails open once the cooldown elapses. Driven by an
+        // injected clock so the reset is deterministic and instant (no sleep).
+        let clock = Arc::new(std::sync::atomic::AtomicU64::new(1_000));
+        let clock_for_breaker = clock.clone();
+        let breaker = CircuitBreaker::with_clock(
+            0.05,
+            60,
+            1,
+            Arc::new(move || clock_for_breaker.load(Ordering::Relaxed)),
+        );
         breaker.record_failure();
         assert!(breaker.is_open());
 
-        std::thread::sleep(Duration::from_millis(1_100));
+        clock.fetch_add(1_100, Ordering::Relaxed);
 
         assert!(!breaker.is_open());
     }

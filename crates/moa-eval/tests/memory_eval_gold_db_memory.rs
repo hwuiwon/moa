@@ -21,9 +21,13 @@ async fn gold_resolution_reports_partial_and_full_ingestion_coverage() -> TestRe
 #[tokio::test]
 async fn memory_retrieval_eval_runner_writes_report_from_cached_embeddings() -> TestResult {
     // Pins: retrieval eval uses cached embeddings, resolves gold nodes, collects top-25 candidates, and writes the report sections.
-    if std::env::var_os("MOA_DATABASE_URL").is_none() {
-        return Ok(());
-    }
+    // Fail clearly instead of passing vacuously when the db-memory lane runs this without Postgres,
+    // matching the sibling `gold_resolution_*` test that requires a live database.
+    assert!(
+        std::env::var_os("MOA_DATABASE_URL").is_some(),
+        "memory_retrieval_eval_runner_writes_report_from_cached_embeddings requires MOA_DATABASE_URL \
+         (run via `cargo nextest run -p moa-eval --profile db-memory` with Postgres)"
+    );
 
     let _guard = GOLD_RESOLUTION_TEST_LOCK.lock().await;
     let corpus = generate_memory_eval_corpus(CorpusProfile::Pr, vec![1, 2, 3])

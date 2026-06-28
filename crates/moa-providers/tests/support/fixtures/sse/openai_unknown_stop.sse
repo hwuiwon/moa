@@ -1,0 +1,7 @@
+# Source: Synthetic OpenAI Responses stream stopped for an unmodeled reason, captured offline 2026-06-28.
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_1","object":"response","created_at":1,"model":"gpt-5.4","output":[],"status":"in_progress"}}
+
+data: {"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_1","output_index":0,"content_index":0,"delta":"Filtered","logprobs":null}
+
+data: {"type":"response.incomplete","sequence_number":2,"response":{"id":"resp_1","object":"response","created_at":1,"model":"gpt-5.4","output":[],"status":"incomplete","incomplete_details":{"reason":"content_filter"},"usage":{"input_tokens":6,"input_tokens_details":{"cached_tokens":0},"output_tokens":3,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":9}}}
+

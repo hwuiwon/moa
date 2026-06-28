@@ -5,7 +5,7 @@ mod support;
 
 use moa_core::{Channel, ChannelRef};
 use moa_messaging::slack;
-use support::{assert_typed_messaging_error, fixture_text};
+use support::{assert_serde_json_error, assert_validation_error, fixture_text};
 
 #[test]
 fn slack_event_normalizes_to_canonical_inbound_with_thread_ts_preserved() {
@@ -28,8 +28,33 @@ fn slack_event_normalizes_to_canonical_inbound_with_thread_ts_preserved() {
 }
 
 #[test]
-fn slack_normalization_rejects_malformed_payloads_with_typed_errors() {
-    assert_typed_messaging_error(slack::normalize_event_json(
+fn slack_normalization_rejects_unparseable_payload_with_serde_error() {
+    // Pins: a payload missing the required Slack push-event envelope fields fails to deserialize,
+    // surfacing as the exact `SerdeJson` variant (not collapsed with the validation path).
+    assert_serde_json_error(slack::normalize_event_json(
         r#"{"event":{"type":"message"}}"#,
     ));
+}
+
+#[test]
+fn slack_normalization_rejects_message_without_channel_with_validation_error() {
+    // Pins: a well-formed `message` event that lacks a channel deserializes cleanly but is not a
+    // supported user message, so the normalizer returns the exact `ValidationError` variant rather
+    // than a deserialization error.
+    let missing_channel = r#"{
+        "token": "verification-token",
+        "team_id": "T12345",
+        "api_app_id": "A12345",
+        "event": {
+            "type": "message",
+            "user": "U12345",
+            "text": "hello",
+            "ts": "1700000000.000200",
+            "event_ts": "1700000000.000200"
+        },
+        "type": "event_callback",
+        "event_id": "Ev12346",
+        "event_time": 1700000000
+    }"#;
+    assert_validation_error(slack::normalize_event_json(missing_channel));
 }

@@ -384,3 +384,41 @@ fn is_idempotent_tuple_error(status: u16, body: &str) -> bool {
     let lowercase = body.to_lowercase();
     lowercase.contains("already exists") || lowercase.contains("does not exist")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::is_idempotent_tuple_error;
+
+    #[test]
+    fn idempotent_tuple_error_swallows_converged_write_and_delete_conflicts() {
+        // Pins: a duplicate write (400 "already exists") and a missing-tuple delete
+        // (409 "does not exist") are treated as already-converged so the outbox can
+        // mark the row succeeded; any other status/body is a real failure that must
+        // surface, otherwise a failed FGA write would be silently dropped.
+        let cases = [
+            // Converged: re-applying an existing tuple.
+            (400, "cannot write a tuple which already exists", true),
+            (409, "cannot write a tuple which already exists", true),
+            // Converged: deleting a tuple that is already gone.
+            (400, "cannot delete a tuple which does not exist", true),
+            (409, "tuple does not exist", true),
+            // Case-insensitive matching on the FGA message.
+            (400, "Tuple ALREADY EXISTS", true),
+            // Right status but a genuinely different error must not be swallowed.
+            (400, "invalid authorization model id", false),
+            (409, "write conflict on transaction", false),
+            // Non-conflict statuses are never idempotent, even with matching text.
+            (500, "already exists", false),
+            (200, "already exists", false),
+            (404, "does not exist", false),
+        ];
+
+        for (status, body, expected) in cases {
+            assert_eq!(
+                is_idempotent_tuple_error(status, body),
+                expected,
+                "status={status} body={body:?} should map to {expected}"
+            );
+        }
+    }
+}

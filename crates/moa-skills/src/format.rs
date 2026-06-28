@@ -316,6 +316,76 @@ Broken
     }
 
     #[test]
+    fn rejects_unsupported_moa_metadata_key() {
+        // Pins: only the known moa-* metadata keys are accepted so a typo cannot silently persist.
+        let invalid = r#"---
+name: typo-skill
+description: "Skill with an unknown MOA metadata key"
+metadata:
+  moa-version: "1.0"
+  moa-unknown: "oops"
+  moa-estimated-tokens: "100"
+---
+
+# Typo skill
+"#;
+
+        let error = parse_skill_markdown(invalid)
+            .expect_err("unsupported moa- metadata key must be rejected");
+        assert!(
+            error.to_string().contains("moa-unknown"),
+            "error names the unsupported key: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_estimated_tokens() {
+        // Pins: an explicit zero moa-estimated-tokens is rejected so skill budgeting stays positive.
+        let invalid = r#"---
+name: zero-token-skill
+description: "Skill that declares zero estimated tokens"
+metadata:
+  moa-estimated-tokens: "0"
+---
+
+# Zero token skill
+"#;
+
+        let error =
+            parse_skill_markdown(invalid).expect_err("zero estimated tokens must be rejected");
+        assert!(
+            error.to_string().contains("greater than zero"),
+            "error explains the token floor: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_markdown_without_closing_frontmatter_delimiter() {
+        // Pins: frontmatter without a closing delimiter is a hard parse error, not a silent empty body.
+        let invalid = "---\nname: unterminated\ndescription: \"No closing delimiter\"\n\n# Body without a fence\n";
+
+        let error = parse_skill_markdown(invalid)
+            .expect_err("missing closing frontmatter delimiter must be rejected");
+        assert!(
+            error.to_string().contains("closing delimiter"),
+            "error names the missing closing delimiter: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_markdown_without_frontmatter() {
+        // Pins: a document with no YAML frontmatter is rejected before any YAML parsing.
+        let invalid = "# Just a heading\n\nNo frontmatter here.\n";
+
+        let error = parse_skill_markdown(invalid)
+            .expect_err("markdown without frontmatter must be rejected");
+        assert!(
+            error.to_string().contains("frontmatter"),
+            "error mentions frontmatter: {error}"
+        );
+    }
+
+    #[test]
     fn slugifies_skill_names_consistently() {
         assert_eq!(slugify_skill_name("Deploy to Fly.io"), "deploy-to-fly-io");
     }

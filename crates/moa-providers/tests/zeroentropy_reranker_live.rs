@@ -8,10 +8,16 @@
 use moa_providers::{Reranker, ZEROENTROPY_DEFAULT_RERANK_MODEL, ZeroEntropyReranker};
 
 fn live_zeroentropy_requested() -> bool {
-    matches!(
-        std::env::var("MOA_RUN_LIVE_ZEROENTROPY_TESTS").as_deref(),
-        Ok("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
-    )
+    // Accept the common truthy spellings (`1`, `true`, `yes`, `on`) so a
+    // developer's `.env` enables the live lane regardless of casing/spacing.
+    std::env::var("MOA_RUN_LIVE_ZEROENTROPY_TESTS")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn live_zeroentropy_key() -> Option<String> {

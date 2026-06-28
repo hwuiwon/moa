@@ -377,4 +377,47 @@ mod tests {
             Some("session ended in status Failed".to_string())
         );
     }
+
+    #[test]
+    fn cancelled_status_is_failure_status_even_after_all_planned_turns() {
+        // Pins: a remote session cancelled mid-load is a failure regardless of turn progress.
+        assert_eq!(
+            session_status_failure_reason(&SessionStatus::Cancelled, 5, 5),
+            Some("session ended in status Cancelled".to_string())
+        );
+    }
+
+    #[test]
+    fn merge_failure_reason_drops_segments_duplicating_an_existing_part() {
+        // Pins: identical primary/secondary/note strings collapse to one segment instead of
+        // repeating the same reason in the merged failure string.
+        let merged = merge_failure_reason(
+            Some("session ended in status Failed".to_string()),
+            Some("session ended in status Failed".to_string()),
+            Some("session ended in status Failed".to_string()),
+        );
+
+        assert_eq!(merged, Some("session ended in status Failed".to_string()));
+    }
+
+    #[test]
+    fn merge_failure_reason_joins_distinct_parts_with_note_prefix() {
+        // Pins: distinct reasons are joined in order and the session note keeps its prefix.
+        let merged = merge_failure_reason(
+            Some("primary failure".to_string()),
+            Some("secondary failure".to_string()),
+            Some("worker drained".to_string()),
+        );
+
+        assert_eq!(
+            merged,
+            Some("primary failure | secondary failure | session note: worker drained".to_string())
+        );
+    }
+
+    #[test]
+    fn merge_failure_reason_is_none_when_no_parts_present() {
+        // Pins: a fully-successful session produces no synthesized failure reason.
+        assert_eq!(merge_failure_reason(None, None, None), None);
+    }
 }

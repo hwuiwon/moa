@@ -194,7 +194,43 @@ fn is_secret_value(value: &str) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::normalize_source_selection;
+    use super::{normalize_source_selection, normalize_text, redact_provider_metadata};
+
+    #[test]
+    fn normalize_text_preserves_fenced_code_block_whitespace_verbatim() {
+        // Pins: content inside ``` fenced blocks keeps internal indentation/spacing
+        // verbatim while surrounding prose is whitespace-collapsed.
+        let input = "Prose   with     spaces.\n```\n    indented = 1\n    nested   spacing\n```\nMore    prose.";
+        assert_eq!(
+            normalize_text(input),
+            "Prose with spaces.\n```\n    indented = 1\n    nested   spacing\n```\nMore prose."
+        );
+    }
+
+    #[test]
+    fn normalize_text_preserves_markdown_table_column_whitespace() {
+        // Pins: pipe table rows keep their column padding via is_table_sensitive_line
+        // while non-table prose is still collapsed.
+        let input =
+            "Intro    text.\n| Col A    | Col B   |\n| ---      | ---     |\nOutro    text.";
+        assert_eq!(
+            normalize_text(input),
+            "Intro text.\n| Col A    | Col B   |\n| ---      | ---     |\nOutro text."
+        );
+    }
+
+    #[test]
+    fn redact_provider_metadata_keeps_token_count_but_drops_token_suffixed_keys() {
+        // Pins: is_secret_key's `token_count` carve-out keeps the safe key while
+        // `_token`-suffixed keys are redacted (dropped entirely).
+        assert_eq!(
+            redact_provider_metadata(json!({
+                "token_count": 42,
+                "session_token": "must-redact"
+            })),
+            json!({ "token_count": 42 })
+        );
+    }
 
     #[test]
     fn normalize_source_selection_defaults_to_empty_and_redacts_nested_secrets() {

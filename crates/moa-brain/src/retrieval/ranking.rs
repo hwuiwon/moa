@@ -216,7 +216,17 @@ pub fn normalize_tokens(text: &str) -> BTreeSet<String> {
 /// Returns a stable hash over the ranking pipeline version and configuration.
 #[must_use]
 pub fn ranking_fingerprint(config: &RankingConfig) -> [u8; 32] {
-    let mut canonical = format!("version={RANKING_PIPELINE_VERSION}|");
+    ranking_fingerprint_for_version(RANKING_PIPELINE_VERSION, config)
+}
+
+/// Returns the ranking fingerprint for an explicit pipeline version.
+///
+/// Production always uses [`RANKING_PIPELINE_VERSION`] via [`ranking_fingerprint`];
+/// this version-parameterized form exists so tests can prove that bumping the
+/// pipeline version changes the fingerprint (and therefore the cache key).
+#[must_use]
+pub(crate) fn ranking_fingerprint_for_version(version: u32, config: &RankingConfig) -> [u8; 32] {
+    let mut canonical = format!("version={version}|");
     canonical.push_str(
         &serde_json::to_string(config)
             .expect("ranking config contains only serializable primitive fields"),
@@ -303,6 +313,25 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn normalize_tokens_handles_unicode_and_empty_input() {
+        // Pins: tokenization splits on non-ASCII-alphanumeric boundaries, so
+        // accented/CJK characters drop while the ASCII core survives and is
+        // stemmed; digit-bearing tokens are kept verbatim even when short.
+        fn tokens(values: &[&str]) -> BTreeSet<String> {
+            values.iter().map(|value| (*value).to_string()).collect()
+        }
+
+        // The umlaut splits the word; the ASCII tail "rich" survives and stems.
+        assert_eq!(normalize_tokens("Zürich"), tokens(&["rich"]));
+        // CJK characters are non-ASCII and drop out; the ASCII word is stemmed.
+        assert_eq!(normalize_tokens("深圳 deploys"), tokens(&["deploy"]));
+        // Empty input yields no tokens.
+        assert!(normalize_tokens("").is_empty());
+        // Sub-3-char tokens are dropped unless they carry a digit identifier.
+        assert_eq!(normalize_tokens("a2 to"), tokens(&["a2"]));
+    }
 
     #[test]
     fn feature_score_promotes_recent_fact_over_stale_duplicate() {

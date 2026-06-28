@@ -324,6 +324,111 @@ async fn delegated_agent_still_requires_can_act_as() {
 }
 
 #[tokio::test]
+async fn delegated_agent_acts_as_agent_subject_not_user() {
+    // Pins: a granted can_act_as lets the delegated agent through, but the resource
+    // check still runs as agent:<id> — delegation must NOT borrow the user's perms.
+    let server = MockServer::start();
+    let agent_id =
+        Uuid::parse_str("66666666-6666-6666-6666-666666666666").expect("valid agent uuid");
+    let user_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("valid user uuid");
+    let session_id = "22222222-2222-2222-2222-222222222222";
+
+    let can_act_as = server.mock(|when, then| {
+        when.method(POST)
+            .path("/stores/store-1/check")
+            .json_body(check_body(
+                "user:11111111-1111-1111-1111-111111111111",
+                "can_act_as",
+                "agent:66666666-6666-6666-6666-666666666666",
+            ));
+        then.status(200).json_body(json!({ "allowed": true }));
+    });
+    // The resource check must be made as the agent subject.
+    let resource_as_agent = server.mock(|when, then| {
+        when.method(POST)
+            .path("/stores/store-1/check")
+            .json_body(check_body(
+                "agent:66666666-6666-6666-6666-666666666666",
+                "participant",
+                "session:22222222-2222-2222-2222-222222222222",
+            ));
+        then.status(200).json_body(json!({ "allowed": true }));
+    });
+    // If delegation wrongly borrowed the user's permissions this would be hit; it
+    // is allowed here precisely so a regression that checks the user subject would
+    // still surface (hits stay at 0).
+    let resource_as_user = server.mock(|when, then| {
+        when.method(POST)
+            .path("/stores/store-1/check")
+            .json_body(check_body(
+                "user:11111111-1111-1111-1111-111111111111",
+                "participant",
+                "session:22222222-2222-2222-2222-222222222222",
+            ));
+        then.status(200).json_body(json!({ "allowed": true }));
+    });
+
+    require_authz_with_delegation(
+        &fga_client(&server),
+        &agent_identity(agent_id, Some(user_id)),
+        ObjectType::Session,
+        session_id,
+        Relation::Participant,
+    )
+    .await
+    .expect("granted can_act_as agent should pass the resource check as itself");
+
+    can_act_as.assert_hits(1);
+    resource_as_agent.assert_hits(1);
+    resource_as_user.assert_hits(0);
+}
+
+#[tokio::test]
+async fn non_agent_identity_cannot_claim_delegation() {
+    // Pins: only Agent identities may carry acting_on_behalf_of. A user smuggling a
+    // delegation field is rejected before any FGA call is made.
+    let server = MockServer::start();
+    let user_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("valid user uuid");
+    let other_user =
+        Uuid::parse_str("77777777-7777-7777-7777-777777777777").expect("valid user uuid");
+    let mut identity = user_identity(user_id);
+    identity.acting_on_behalf_of = Some(other_user);
+    // Any FGA traffic at all means the guard let a forged delegation through.
+    let any_check = server.mock(|when, then| {
+        when.method(POST).path("/stores/store-1/check");
+        then.status(200).json_body(json!({ "allowed": true }));
+    });
+
+    let error = require_authz_with_delegation(
+        &fga_client(&server),
+        &identity,
+        ObjectType::Session,
+        "22222222-2222-2222-2222-222222222222",
+        Relation::Participant,
+    )
+    .await
+    .expect_err("a non-agent identity claiming delegation must be forbidden");
+
+    match error {
+        AuthzCheckError::Forbidden {
+            subject,
+            object_type,
+            object_id,
+            relation,
+        } => {
+            assert_eq!(subject, "user:11111111-1111-1111-1111-111111111111");
+            assert_eq!(object_type, ObjectType::Agent);
+            assert_eq!(object_id, user_id.to_string());
+            assert_eq!(relation, Relation::CanActAs);
+        }
+        AuthzCheckError::Engine(engine) => {
+            panic!("expected Forbidden, got Engine({engine})");
+        }
+    }
+    any_check.assert_hits(0);
+}
+
+#[tokio::test]
 async fn require_authz_engine_error_propagates() {
     // Pins: OpenFGA transport/server errors become Engine errors, not allows.
     let server = MockServer::start();

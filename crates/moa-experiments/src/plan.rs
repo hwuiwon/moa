@@ -606,6 +606,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn expand_plan_trials_rejects_agent_loop_without_target_model_offline() {
+        // Pins: agent-loop plan fanout refuses to admit trials with no target model to drive.
+        let mut definition = fixture_plan();
+        definition.target_model = None;
+
+        let error = expand_plan_trials(fixture_uuid(2), fixture_uuid(1), &definition)
+            .expect_err("agent-loop plan without target_model should fail expansion");
+
+        assert!(matches!(error, PlanExpansionError::MissingTargetModel));
+    }
+
+    #[test]
+    fn expand_plan_trials_rejects_workflow_variant_without_workflow_ref_offline() {
+        // Pins: workflow target variants cannot expand without a workflow reference to invoke.
+        let mut definition = fixture_plan();
+        definition.target_variants[0].kind = ExperimentTargetKind::Workflow;
+        definition.target_variants[0].workflow_ref = None;
+
+        let error = expand_plan_trials(fixture_uuid(2), fixture_uuid(1), &definition)
+            .expect_err("workflow variant without workflow_ref should fail expansion");
+
+        assert!(matches!(error, PlanExpansionError::MissingWorkflowRef));
+    }
+
+    #[test]
+    fn expand_plan_trials_rejects_out_of_range_simulator_temperature_offline() {
+        // Pins: a simulator_temperature that cannot be represented as a finite f32 is rejected
+        // before any trial row is emitted (JSON cannot carry NaN/Inf, so an out-of-f32-range
+        // finite value drives the same guard).
+        let mut definition = fixture_plan();
+        definition.target_variants[0].config =
+            json!({"prompt": "start", "simulator_temperature": 1e40});
+
+        let error = expand_plan_trials(fixture_uuid(2), fixture_uuid(1), &definition)
+            .expect_err("out-of-f32-range simulator temperature should fail expansion");
+
+        assert!(matches!(
+            error,
+            PlanExpansionError::InvalidSimulatorTemperature
+        ));
+    }
+
+    #[test]
+    fn expand_plan_trials_rejects_unparsable_agent_selector_offline() {
+        // Pins: a malformed `agent` selector in variant config surfaces as a validation error,
+        // not a panic or a silently dropped selector.
+        let mut definition = fixture_plan();
+        definition.target_variants[0].config =
+            json!({"prompt": "start", "agent": "not-a-selector"});
+
+        let error = expand_plan_trials(fixture_uuid(2), fixture_uuid(1), &definition)
+            .expect_err("malformed agent selector should fail expansion");
+
+        assert!(matches!(
+            error,
+            PlanExpansionError::InvalidAgentSelector { .. }
+        ));
+    }
+
     fn fixture_plan() -> ExperimentPlanDefinition {
         ExperimentPlanDefinition {
             simulation: ExperimentSimulationDefinition {

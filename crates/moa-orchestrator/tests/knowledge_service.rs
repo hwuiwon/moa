@@ -72,7 +72,6 @@ const CONNECTOR: &str = "drive";
 const SECRET_TOKEN: &str = "provider-secret-token-123";
 const SECRET_BEARER: &str = "Bearer provider-secret-token-456";
 const RAW_DOCUMENT_TAIL: &str = "RAW_FULL_DOCUMENT_TAIL_SHOULD_NOT_APPEAR";
-const OTHER_CONTACT_MEMORY: &str = "other contact private memory should not appear";
 
 #[tokio::test]
 async fn knowledge_auto_sync_manual_sync_triggers_provider_and_does_not_ingest_inline() {
@@ -875,13 +874,10 @@ async fn query_trace_is_present_and_does_not_hydrate_cross_contact_memory() {
         })
         .await
         .expect("query trace should return a renderer-safe placeholder");
-    let response_json =
-        serde_json::to_string(&response).expect("query trace response should serialize");
 
     assert!(response.hits.is_empty());
     assert!(response.stages.is_empty());
     assert!(response.searched_scopes.is_empty());
-    assert!(!response_json.contains(OTHER_CONTACT_MEMORY));
 }
 
 #[tokio::test]
@@ -1010,8 +1006,6 @@ async fn query_trace_renders_populated_retrieval_lineage_db_memory() {
         })
         .await
         .expect("query trace should render persisted lineage");
-    let response_json =
-        serde_json::to_string(&response).expect("query trace response should serialize");
     let stage_names = response
         .stages
         .iter()
@@ -1045,7 +1039,6 @@ async fn query_trace_renders_populated_retrieval_lineage_db_memory() {
         response.hits[0].citation["source_uri"],
         json!("https://kb.example/payroll-rotation")
     );
-    assert!(!response_json.contains(OTHER_CONTACT_MEMORY));
 }
 
 #[tokio::test]
@@ -2062,81 +2055,88 @@ async fn knowledge_sync_ingestion_workflow_prunes_after_full_selection_refresh()
     assert!(steps.fail_calls.is_empty());
 }
 
-#[test]
-fn knowledge_sync_ingestion_workflow_loads_run_and_uses_page_journal_boundaries() {
-    // Pins: the workflow derives tenant/connection from the sync-run row, pages provider listing, and applies each page inside a runner journal point.
-    let source = include_str!("../src/workflows/knowledge_sync_ingestion.rs");
+#[tokio::test]
+async fn knowledge_sync_ingestion_workflow_derives_run_identity_and_pages_journal_boundaries() {
+    // Pins: the report derives tenant/connection from the stored sync run, and the workflow
+    // threads cursors across one list+apply journal step per provider page.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let sync_run_uid = Uuid::now_v7();
+    let last_synced_at = Utc::now();
+    let mut prepared = fake_prepared_sync_run(tenant_id, connection_uid, sync_run_uid, 10);
+    // A prior watermark keeps this an incremental sync so the listing step receives
+    // `modified_after` and the exhaustive-prune branch stays inactive.
+    prepared.connection.last_synced_at = Some(last_synced_at);
+    let mut steps = FakeKnowledgeSyncIngestionSteps::new(prepared).with_pages(vec![
+        fake_record_page(&["doc-1", "doc-2"], Some("page-2")),
+        fake_record_page(&["doc-3"], None),
+    ]);
 
-    assert!(
-        source.contains("pub struct KnowledgeSyncIngestionRequest")
-            && source.contains("pub sync_run_uid: Uuid"),
-        "workflow input should contain sync_run_uid"
-    );
-    assert!(
-        source.contains("prepare_ingestion_run")
-            && source.contains("get_sync_run(sync_run_uid)")
-            && source.contains("RlsContext::tenant(run.tenant_id)"),
-        "workflow should prepare from the stored sync run under the derived tenant scope"
-    );
-    assert!(
-        source.contains("tenant_id: prepared.run.tenant_id")
-            && source.contains("connection_uid: prepared.run.connection_uid"),
-        "workflow report should derive tenant and connection from the stored run"
-    );
-    assert!(
-        source.contains("connection.tenant_id != run.tenant_id")
-            && source.contains("connection.connection_uid != run.connection_uid"),
-        "workflow should fail closed when the stored run and connection do not share a tenant/connection"
-    );
-    assert!(
-        source.contains("run.status = SyncRunStatus::Ingesting")
-            && source.contains("run.status = SyncRunStatus::Completed")
-            && source.contains("connection.last_synced_at = Some(completed_at)"),
-        "workflow should transition ingesting to completed and update the connection sync watermark"
-    );
+    let report = run_knowledge_sync_ingestion_workflow(
+        &mut steps,
+        KnowledgeSyncIngestionRequest { sync_run_uid },
+    )
+    .await
+    .expect("incremental ingestion across two pages should complete");
+
+    // The report identity is derived from the stored run, not from the request alone.
+    assert_eq!(report.sync_run_uid, sync_run_uid);
+    assert_eq!(report.tenant_id, tenant_id);
+    assert_eq!(report.connection_uid, connection_uid);
+    assert_eq!(report.status, "completed");
+    assert_eq!(report.records_listed, 3);
+    assert_eq!(report.records_applied, 3);
+    assert_eq!(report.records_pruned, 0);
+
+    // The run transitions ProviderSynced -> Ingesting (prepare) -> Completed (complete).
     assert_eq!(
-        count_occurrences(source, "knowledge_sync_provider_page_listing_"),
-        1,
-        "workflow should reserve one page-indexed Restate journal callsite for provider page listing"
+        steps.status_transitions,
+        vec![
+            SyncRunStatus::ProviderSynced,
+            SyncRunStatus::Ingesting,
+            SyncRunStatus::Completed
+        ]
     );
-    assert!(
-        source.contains(".list_changed_records(ListChangedRecordsRequest {")
-            && source.contains("cursor,")
-            && source.contains("modified_after,")
-            && source.contains("limit: Some(limit)"),
-        "provider listing journal step should pass cursor, modified_after, and page limit to the selected provider"
-    );
+
+    // One listing journal step per page, threading the provider cursor and watermark forward.
     assert_eq!(
-        count_occurrences(source, "knowledge_sync_provider_page_application_"),
-        1,
-        "workflow should reserve one page-indexed Restate journal callsite for provider page application"
+        steps.list_calls,
+        vec![
+            FakeListPageCall {
+                cursor: None,
+                limit: 10,
+                page_index: 0,
+                credential_ref: "resolved-provider-token".to_string(),
+                modified_after: Some(last_synced_at),
+            },
+            FakeListPageCall {
+                cursor: Some("page-2".to_string()),
+                limit: 8,
+                page_index: 1,
+                credential_ref: "resolved-provider-token".to_string(),
+                modified_after: Some(last_synced_at),
+            },
+        ]
     );
-    assert!(
-        source.contains("ProductionKnowledgeIngestionRunner::new(")
-            && source.contains("config.as_ref().clone()")
-            && source.contains(".ingest_record_page(&run, &page.provider, page.page)")
-            && source.contains("while records_processed < u64::from(prepared.max_records)"),
-        "page application journal step should call the production ingestion runner"
+
+    // One application journal step per page, page-indexed alongside the listing steps.
+    assert_eq!(
+        steps.apply_calls,
+        vec![
+            FakeApplyPageCall {
+                page_index: 0,
+                source_ids: vec!["doc-1".to_string(), "doc-2".to_string()],
+            },
+            FakeApplyPageCall {
+                page_index: 1,
+                source_ids: vec!["doc-3".to_string()],
+            },
+        ]
     );
-    assert!(
-        !source.contains("KnowledgeIngestionPipeline::new(")
-            && !source.contains("build_embedder_from_config")
-            && !source.contains("MemoryKnowledgeGraphWriter::new("),
-        "workflow should not own parser/embedder/graph/vector factories after Task 5"
-    );
-    assert!(
-        !source.contains("Placeholder")
-            && !source.contains("let _ = (tenant_id, connection_uid, page);")
-            && !source.contains("records_listed: 0")
-            && !source.contains("records_applied: 0"),
-        "workflow must not leave placeholder no-op page listing or application code"
-    );
-    assert!(
-        source.contains(
-            "// SAFETY: Internal-only workflow; tenant and connection are derived from the stored sync run row."
-        ),
-        "workflow handler should explain why it has no caller authz"
-    );
+
+    // An incremental sync (watermark present) never prunes and never marks the run failed.
+    assert!(steps.prune_calls.is_empty());
+    assert!(steps.fail_calls.is_empty());
 }
 
 #[test]

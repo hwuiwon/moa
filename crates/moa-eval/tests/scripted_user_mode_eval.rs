@@ -20,6 +20,16 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 const RESPONSIVENESS_CLARIFICATION: &str = "What should I change? Point me at the file, message, object, or output and the specific fix you want.";
 
+/// Fails clearly when a `#[ignore]`d Postgres-backed scripted-user test is forced
+/// to run without `MOA_DATABASE_URL`, instead of passing vacuously.
+fn require_database_url(test_name: &str) {
+    assert!(
+        std::env::var_os("MOA_DATABASE_URL").is_some(),
+        "{test_name} requires MOA_DATABASE_URL; run it via the eval-recorded lane with Postgres \
+         (e.g. `cargo test -p moa-eval --test scripted_user_mode_eval -- --ignored`)"
+    );
+}
+
 #[test]
 fn long_case_accepts_scripted_user_without_transcript() {
     let raw = r#"
@@ -105,10 +115,9 @@ async fn scripted_user_script_reads_turns_fragments_and_probe_ids() -> TestResul
 }
 
 #[tokio::test]
+#[ignore = "requires MOA_DATABASE_URL"]
 async fn scripted_user_runner_drives_tool_turn_and_checks_final_answer() -> TestResult {
-    if std::env::var_os("MOA_DATABASE_URL").is_none() {
-        return Ok(());
-    }
+    require_database_url("scripted_user_runner_drives_tool_turn_and_checks_final_answer");
 
     let temp = tempdir()?;
     let goal_card_path = temp.path().join("goal_card.md");
@@ -285,11 +294,12 @@ fn assert_tool_turn_lineage_is_captured(
 }
 
 #[tokio::test]
+#[ignore = "requires MOA_DATABASE_URL"]
 async fn offline_scripted_user_replays_distilled_dispute_failure_without_live_simulation()
 -> TestResult {
-    if std::env::var_os("MOA_DATABASE_URL").is_none() {
-        return Ok(());
-    }
+    require_database_url(
+        "offline_scripted_user_replays_distilled_dispute_failure_without_live_simulation",
+    );
 
     let temp = tempdir()?;
     let goal_card_path = temp.path().join("goal_card.md");
@@ -369,10 +379,9 @@ async fn offline_scripted_user_replays_distilled_dispute_failure_without_live_si
 }
 
 #[tokio::test]
+#[ignore = "requires MOA_DATABASE_URL"]
 async fn responsiveness_scripted_user_replays_vague_fix_this_clarification() -> TestResult {
-    if std::env::var_os("MOA_DATABASE_URL").is_none() {
-        return Ok(());
-    }
+    require_database_url("responsiveness_scripted_user_replays_vague_fix_this_clarification");
 
     let scenario_dir = responsiveness_fixture_dir();
     let temp = tempdir()?;

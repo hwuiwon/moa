@@ -98,3 +98,39 @@ impl Default for RetrievalCoreMetrics {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_total_with_zero_denominator_is_zero_not_nan() {
+        // Pins: a zero denominator yields a finite 0.0 mean instead of a NaN division.
+        let summary = MetricSummary::from_total(7.0, 0);
+        assert_eq!(summary.value, 0.0);
+        assert!(
+            summary.value.is_finite(),
+            "zero-denominator mean must be finite"
+        );
+        assert_eq!(summary.numerator, 7.0);
+        assert_eq!(summary.denominator, 0);
+    }
+
+    #[test]
+    fn from_counts_with_zero_denominator_is_zero_not_nan() {
+        // Pins: the count-based constructor inherits the zero-denominator guard.
+        let summary = MetricSummary::from_counts(3, 0);
+        assert_eq!(summary.value, 0.0);
+        assert!(
+            summary.value.is_finite(),
+            "zero-denominator ratio must be finite"
+        );
+    }
+
+    #[test]
+    fn from_total_divides_when_denominator_is_nonzero() {
+        // Pins: a non-zero denominator divides exactly so the guard is not masking real math.
+        assert_eq!(MetricSummary::from_total(3.0, 4).value, 0.75);
+        assert_eq!(MetricSummary::from_counts(3, 4).value, 0.75);
+    }
+}

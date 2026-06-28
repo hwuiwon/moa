@@ -614,6 +614,231 @@ fn bad_request(message: impl Into<String>) -> SkillReviewError {
 mod tests {
     use super::*;
     use moa_core::LearningRiskClass;
+    use std::sync::Mutex;
+
+    /// In-memory [`LearningReviewStore`] that records the status updates it receives.
+    ///
+    /// Only the pool-free review paths (`reject_learning_candidate`,
+    /// `get_learning_candidate_for_review`) are exercised hermetically; the in-transaction
+    /// methods belong to the pool-backed promote path and must never be reached here.
+    #[derive(Default)]
+    struct RecordingReviewStore {
+        candidate: Option<LearningCandidate>,
+        status_change_applies: bool,
+        recorded_update: Mutex<Option<(LearningCandidateStatusUpdate, LearningCandidateStatus)>>,
+    }
+
+    impl LearningReviewStore for RecordingReviewStore {
+        fn get_learning_candidate<'a>(
+            &'a self,
+            _tenant_id: &'a TenantId,
+            _candidate_id: Uuid,
+        ) -> LearningReviewStoreFuture<'a, Option<LearningCandidate>> {
+            let candidate = self.candidate.clone();
+            Box::pin(async move { Ok(candidate) })
+        }
+
+        fn update_learning_candidate_status_from<'a>(
+            &'a self,
+            update: &'a LearningCandidateStatusUpdate,
+            expected_status: LearningCandidateStatus,
+        ) -> LearningReviewStoreFuture<'a, bool> {
+            let applies = self.status_change_applies;
+            *self
+                .recorded_update
+                .lock()
+                .expect("record candidate status update") = Some((update.clone(), expected_status));
+            Box::pin(async move { Ok(applies) })
+        }
+
+        fn update_learning_candidate_status_from_in_tx<'a>(
+            &'a self,
+            _conn: &'a mut PgConnection,
+            _update: &'a LearningCandidateStatusUpdate,
+            _expected_status: LearningCandidateStatus,
+        ) -> LearningReviewStoreFuture<'a, bool> {
+            Box::pin(async move {
+                unreachable!("in-tx status update is only used by the pool-backed promote path")
+            })
+        }
+
+        fn append_learning<'a>(
+            &'a self,
+            _entry: &'a LearningEntry,
+        ) -> LearningReviewStoreFuture<'a, ()> {
+            Box::pin(async move {
+                unreachable!("append_learning is only used by the pool-backed promote path")
+            })
+        }
+
+        fn append_learning_in_tx<'a>(
+            &'a self,
+            _conn: &'a mut PgConnection,
+            _entry: &'a LearningEntry,
+        ) -> LearningReviewStoreFuture<'a, ()> {
+            Box::pin(async move {
+                unreachable!("append_learning_in_tx is only used by the pool-backed promote path")
+            })
+        }
+    }
+
+    fn proposed_skill_candidate(payload: Value) -> LearningCandidate {
+        LearningCandidate {
+            id: Uuid::from_u128(42),
+            tenant_id: TenantId::from(Uuid::from_u128(1)),
+            user_id: None,
+            candidate_type: LearningCandidateType::Skill,
+            status: LearningCandidateStatus::Proposed,
+            target_id: None,
+            target_label: None,
+            task_fingerprint: None,
+            task_facets: None,
+            payload,
+            evaluation_payload: None,
+            source_experience_ids: Vec::new(),
+            confidence: None,
+            risk_class: LearningRiskClass::Medium,
+            promotion_requirements: Vec::new(),
+            status_reason: None,
+            batch_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn reject_request(reason: Option<&str>) -> SkillReviewRequest {
+        SkillReviewRequest {
+            tenant_id: TenantId::from(Uuid::from_u128(1)),
+            candidate_id: Uuid::from_u128(42),
+            action: SkillReviewAction::Reject,
+            reviewer_subject: "user:reviewer".to_string(),
+            reason: reason.map(ToString::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn reject_learning_candidate_marks_candidate_rejected_and_preserves_draft() {
+        // Pins: rejecting a proposed candidate compare-and-sets Proposed -> Rejected and keeps
+        // the linked draft/artifact references so the draft is preserved, not deleted.
+        let draft_uid = Uuid::from_u128(77);
+        let artifact_uid = Uuid::from_u128(88);
+        let store = RecordingReviewStore {
+            candidate: Some(proposed_skill_candidate(json!({
+                "draft_artifact_revision_uid": draft_uid.to_string(),
+                "artifact_uid": artifact_uid.to_string(),
+            }))),
+            status_change_applies: true,
+            recorded_update: Mutex::new(None),
+        };
+        let request = reject_request(Some("not reusable"));
+
+        let outcome = reject_learning_candidate(&store, &request)
+            .await
+            .expect("reject succeeds");
+
+        assert_eq!(outcome.status, LearningCandidateStatus::Rejected);
+        assert_eq!(outcome.candidate_id, Uuid::from_u128(42));
+        assert_eq!(outcome.draft_artifact_revision_uid, Some(draft_uid));
+        assert_eq!(outcome.artifact_uid, Some(artifact_uid));
+        assert_eq!(outcome.published_artifact_revision_uid, None);
+
+        let recorded = store
+            .recorded_update
+            .lock()
+            .expect("lock recorded update")
+            .clone()
+            .expect("a status update was applied");
+        assert_eq!(
+            recorded.1,
+            LearningCandidateStatus::Proposed,
+            "reject must compare-and-set against the Proposed status"
+        );
+        assert_eq!(recorded.0.status, LearningCandidateStatus::Rejected);
+        assert_eq!(recorded.0.status_reason.as_deref(), Some("not reusable"));
+    }
+
+    #[tokio::test]
+    async fn reject_learning_candidate_conflicts_when_status_changed() {
+        // Pins: a compare-and-set miss (another writer moved the candidate first) surfaces as a
+        // Conflict instead of silently succeeding.
+        let store = RecordingReviewStore {
+            candidate: Some(proposed_skill_candidate(json!({}))),
+            status_change_applies: false,
+            recorded_update: Mutex::new(None),
+        };
+        let request = reject_request(None);
+
+        let error = reject_learning_candidate(&store, &request)
+            .await
+            .expect_err("expected-status mismatch must conflict");
+
+        assert!(
+            matches!(error, SkillReviewError::Conflict(_)),
+            "expected Conflict, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reject_learning_candidate_rejects_non_proposed_candidate() {
+        // Pins: a candidate that already left the Proposed state cannot be rejected, and the guard
+        // fires before any status write is attempted.
+        let mut candidate = proposed_skill_candidate(json!({}));
+        candidate.status = LearningCandidateStatus::Promoted;
+        let store = RecordingReviewStore {
+            candidate: Some(candidate),
+            status_change_applies: true,
+            recorded_update: Mutex::new(None),
+        };
+        let request = reject_request(None);
+
+        let error = reject_learning_candidate(&store, &request)
+            .await
+            .expect_err("a promoted candidate cannot be rejected");
+
+        assert!(
+            matches!(error, SkillReviewError::BadRequest(_)),
+            "expected BadRequest, got {error:?}"
+        );
+        assert!(
+            store
+                .recorded_update
+                .lock()
+                .expect("lock recorded update")
+                .is_none(),
+            "the proposed-state guard must reject before any status write"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_learning_candidate_for_review_missing_candidate_is_not_found() {
+        // Pins: a missing candidate maps to NotFound rather than a panic or empty success.
+        let store = RecordingReviewStore::default();
+        let tenant = TenantId::from(Uuid::from_u128(1));
+
+        let error = get_learning_candidate_for_review(&store, &tenant, Uuid::from_u128(42))
+            .await
+            .expect_err("a missing candidate is not found");
+
+        assert!(
+            matches!(error, SkillReviewError::NotFound(_)),
+            "expected NotFound, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn accepted_learning_type_accepts_known_skill_operations() {
+        // Pins: promotion appends a learning-log entry for both create and improve operations.
+        for (operation, expected) in [
+            ("skill_created", "skill_created"),
+            ("skill_improved", "skill_improved"),
+        ] {
+            let candidate = proposed_skill_candidate(json!({ "operation": operation }));
+            assert_eq!(
+                accepted_learning_type(&candidate).expect("known operation is accepted"),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn accepted_learning_type_rejects_unknown_operations() {

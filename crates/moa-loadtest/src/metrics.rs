@@ -316,4 +316,45 @@ moa_turn_step_duration_seconds_count{step="llm_call"} 4
 
         assert!(reports.is_empty());
     }
+
+    #[test]
+    fn summarize_percentiles_uses_nearest_rank_over_sorted_sample() {
+        // Pins: p50/p95/p99 use the nearest-rank index `((n-1)*q).round()` over the
+        // sorted sample, and `summarize_percentiles` sorts its input before ranking.
+        // The sample is 1.0..=100.0 supplied in reverse to prove the sort happens; for
+        // this sample the value equals (index + 1).
+        let samples: Vec<f64> = (1..=100).rev().map(|value| value as f64).collect();
+
+        let summary = summarize_percentiles(&samples);
+
+        assert_eq!(summary.min, 1.0);
+        assert_eq!(summary.max, 100.0);
+        assert_eq!(summary.mean, 50.5);
+        // index = ((100 - 1) * 0.50).round() = 50 -> sorted[50] = 51.0
+        assert_eq!(summary.p50, 51.0);
+        // index = ((100 - 1) * 0.95).round() = 94 -> sorted[94] = 95.0
+        assert_eq!(summary.p95, 95.0);
+        // index = ((100 - 1) * 0.99).round() = 98 -> sorted[98] = 99.0
+        assert_eq!(summary.p99, 99.0);
+    }
+
+    #[test]
+    fn summarize_percentiles_on_empty_sample_is_all_zero_not_nan() {
+        // Pins: the empty-sample guard returns zeros, never a divide-by-zero NaN mean.
+        let summary = summarize_percentiles(&[]);
+
+        assert_eq!(summary.min, 0.0);
+        assert_eq!(summary.mean, 0.0);
+        assert_eq!(summary.p50, 0.0);
+        assert_eq!(summary.p95, 0.0);
+        assert_eq!(summary.p99, 0.0);
+        assert_eq!(summary.max, 0.0);
+        assert!(!summary.mean.is_nan());
+    }
+
+    #[test]
+    fn percentile_on_empty_slice_returns_zero() {
+        // Pins: the percentile() empty-slice guard avoids indexing an empty slice.
+        assert_eq!(percentile(&[], 0.95), 0.0);
+    }
 }

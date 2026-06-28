@@ -169,6 +169,19 @@ impl MoaConfig {
             ));
         }
 
+        if self.general.default_provider.trim().is_empty() {
+            return Err(MoaError::ConfigError(
+                "general.default_provider is required and must be a non-empty provider key"
+                    .to_string(),
+            ));
+        }
+
+        if self.models.main.trim().is_empty() {
+            return Err(MoaError::ConfigError(
+                "models.main is required and must be a non-empty model identifier".to_string(),
+            ));
+        }
+
         if self.database.neon.enabled && self.database.neon.max_checkpoints == 0 {
             return Err(MoaError::ConfigError(
                 "database.neon.max_checkpoints must be greater than zero when Neon checkpointing is enabled"
@@ -437,5 +450,48 @@ mod tests {
         let config = MoaConfig::load_from_env().expect("load config from env");
 
         assert_eq!(config.learning.skills.min_tool_calls, 7);
+    }
+
+    #[test]
+    fn model_for_task_falls_back_to_main_when_auxiliary_is_unset() {
+        // Pins: auxiliary tasks route to models.auxiliary when set and otherwise
+        // fall back to models.main; the main loop always uses models.main.
+        let auxiliary_tasks = [
+            crate::ModelTask::Summarization,
+            crate::ModelTask::Consolidation,
+            crate::ModelTask::SkillDistillation,
+            crate::ModelTask::Subagent,
+        ];
+
+        let mut config = MoaConfig::default();
+        config.models.main = "main-model".to_string();
+        config.models.auxiliary = None;
+
+        assert_eq!(
+            config.model_for_task(crate::ModelTask::MainLoop),
+            "main-model"
+        );
+        for task in auxiliary_tasks {
+            assert_eq!(
+                config.model_for_task(task),
+                "main-model",
+                "auxiliary task {task:?} must fall back to models.main"
+            );
+        }
+
+        config.models.auxiliary = Some("aux-model".to_string());
+
+        assert_eq!(
+            config.model_for_task(crate::ModelTask::MainLoop),
+            "main-model",
+            "main loop must keep using models.main even when auxiliary is set"
+        );
+        for task in auxiliary_tasks {
+            assert_eq!(
+                config.model_for_task(task),
+                "aux-model",
+                "auxiliary task {task:?} must use models.auxiliary when set"
+            );
+        }
     }
 }

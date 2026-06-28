@@ -15,6 +15,13 @@ use crate::canonical::canonical_hash;
 use crate::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use crate::validation::{ValidationReport, validate_for_status};
 
+/// Maximum size, in bytes, accepted for a single stored artifact package file.
+///
+/// Artifact files are skill/agent package assets (instructions, configs, small
+/// scripts), so a 10 MiB ceiling rejects abusive uploads long before the
+/// `i64` byte-count conversion could overflow.
+pub const MAX_FILE_SIZE_BYTES: usize = 10 * 1024 * 1024;
+
 /// Artifact storage columns derived from artifact inheritance scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactScopeParts {
@@ -1252,6 +1259,13 @@ async fn insert_files(
     files: &[NewArtifactFile],
 ) -> Result<()> {
     for file in files {
+        if file.content.len() > MAX_FILE_SIZE_BYTES {
+            return Err(MoaError::ValidationError(format!(
+                "artifact file {} is too large: {} bytes exceeds the {MAX_FILE_SIZE_BYTES}-byte limit",
+                file.path,
+                file.content.len(),
+            )));
+        }
         let digest = Sha256::digest(&file.content).to_vec();
         let file_size_bytes = i64::try_from(file.content.len()).map_err(|_| {
             MoaError::ValidationError(format!("artifact file {} is too large", file.path))
