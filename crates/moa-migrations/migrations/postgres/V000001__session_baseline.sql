@@ -872,32 +872,9 @@ SELECT moa.apply_three_tier_rls('context_snapshots'::REGCLASS);
 SELECT moa.apply_three_tier_rls('task_segments'::REGCLASS);
 SELECT moa.apply_three_tier_rls('learning_log'::REGCLASS);
 
--- Source: V000013__session_age_bootstrap.sql
+-- Source: V000013__session_graph_label_helpers.sql
 
-CREATE EXTENSION IF NOT EXISTS age;
-LOAD 'age';
-SET search_path = ag_catalog, "$user", public;
-SELECT pg_advisory_xact_lock(hashtext('moa_age_bootstrap')::BIGINT);
-
-DO $$
-BEGIN
-    IF to_regnamespace('moa_graph') IS NULL THEN
-        PERFORM ag_catalog.create_graph('moa_graph'::NAME);
-    END IF;
-END $$;
-
-CREATE OR REPLACE FUNCTION moa.age_property(
-    properties ag_catalog.agtype,
-    property_key TEXT
-) RETURNS ag_catalog.agtype
-LANGUAGE SQL IMMUTABLE
-AS $$
-    SELECT ag_catalog.agtype_access_operator(
-        VARIADIC ARRAY[properties, ('"' || property_key || '"')::ag_catalog.agtype]
-    );
-$$;
-
-CREATE OR REPLACE FUNCTION moa.age_vertex_labels() RETURNS TEXT[]
+CREATE OR REPLACE FUNCTION moa.graph_node_labels() RETURNS TEXT[]
 LANGUAGE SQL IMMUTABLE
 AS $$
     SELECT ARRAY[
@@ -914,7 +891,7 @@ AS $$
     ]::TEXT[];
 $$;
 
-CREATE OR REPLACE FUNCTION moa.age_edge_labels() RETURNS TEXT[]
+CREATE OR REPLACE FUNCTION moa.graph_edge_labels() RETURNS TEXT[]
 LANGUAGE SQL IMMUTABLE
 AS $$
     SELECT ARRAY[
@@ -933,206 +910,12 @@ AS $$
     ]::TEXT[];
 $$;
 
-CREATE OR REPLACE FUNCTION moa.age_base_labels() RETURNS TEXT[]
-LANGUAGE SQL IMMUTABLE
-AS $$
-    SELECT ARRAY['_ag_label_vertex', '_ag_label_edge']::TEXT[];
-$$;
-
-CREATE OR REPLACE FUNCTION moa.apply_age_three_tier_rls(target_table REGCLASS) RETURNS VOID
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', target_table);
-    EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', target_table);
-
-    EXECUTE format('DROP POLICY IF EXISTS rd_global ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS rd_tenant ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS rd_user ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS wr_tenant ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS wr_user ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS wr_global_promoter ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS owner_dev_access ON %s', target_table);
-
-    EXECUTE format(
-        'CREATE POLICY rd_global ON %s FOR SELECT TO moa_app
-         USING (moa.age_property(properties, ''scope'') = ''"global"''::ag_catalog.agtype
-                AND moa.current_scope_tier() IS NOT NULL)',
-        target_table
-    );
-    EXECUTE format(
-        'CREATE POLICY rd_tenant ON %s FOR SELECT TO moa_app
-         USING (moa.age_property(properties, ''scope'') = ''"tenant"''::ag_catalog.agtype
-                AND moa.age_property(properties, ''storage_partition_id'')
-                    = (''"'' || moa.current_storage_partition() || ''"'')::ag_catalog.agtype)',
-        target_table
-    );
-    EXECUTE format(
-        'CREATE POLICY rd_user ON %s FOR SELECT TO moa_app
-         USING (moa.age_property(properties, ''scope'') = ''"contact"''::ag_catalog.agtype
-                AND moa.age_property(properties, ''storage_partition_id'')
-                    = (''"'' || moa.current_storage_partition() || ''"'')::ag_catalog.agtype
-                AND moa.age_property(properties, ''user_id'')
-                    = (''"'' || moa.current_user_id() || ''"'')::ag_catalog.agtype)',
-        target_table
-    );
-    EXECUTE format(
-        'CREATE POLICY wr_tenant ON %s FOR ALL TO moa_app
-         USING (moa.age_property(properties, ''scope'') = ''"tenant"''::ag_catalog.agtype
-                AND moa.age_property(properties, ''storage_partition_id'')
-                    = (''"'' || moa.current_storage_partition() || ''"'')::ag_catalog.agtype)
-         WITH CHECK (moa.age_property(properties, ''scope'') = ''"tenant"''::ag_catalog.agtype
-                     AND moa.age_property(properties, ''storage_partition_id'')
-                         = (''"'' || moa.current_storage_partition() || ''"'')::ag_catalog.agtype)',
-        target_table
-    );
-    EXECUTE format(
-        'CREATE POLICY wr_user ON %s FOR ALL TO moa_app
-         USING (moa.age_property(properties, ''scope'') = ''"contact"''::ag_catalog.agtype
-                AND moa.age_property(properties, ''storage_partition_id'')
-                    = (''"'' || moa.current_storage_partition() || ''"'')::ag_catalog.agtype
-                AND moa.age_property(properties, ''user_id'')
-                    = (''"'' || moa.current_user_id() || ''"'')::ag_catalog.agtype)
-         WITH CHECK (moa.age_property(properties, ''scope'') = ''"contact"''::ag_catalog.agtype
-                     AND moa.age_property(properties, ''storage_partition_id'')
-                         = (''"'' || moa.current_storage_partition() || ''"'')::ag_catalog.agtype
-                     AND moa.age_property(properties, ''user_id'')
-                         = (''"'' || moa.current_user_id() || ''"'')::ag_catalog.agtype)',
-        target_table
-    );
-    EXECUTE format(
-        'CREATE POLICY wr_global_promoter ON %s FOR ALL TO moa_promoter
-         USING (moa.age_property(properties, ''scope'') = ''"global"''::ag_catalog.agtype)
-         WITH CHECK (moa.age_property(properties, ''scope'') = ''"global"''::ag_catalog.agtype)',
-        target_table
-    );
-    EXECUTE format(
-        'CREATE POLICY owner_dev_access ON %s FOR ALL TO %I
-         USING (true) WITH CHECK (true)',
-        target_table,
-        pg_get_userbyid((SELECT relowner FROM pg_class WHERE oid = target_table))
-    );
-
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO moa_app', target_table);
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO moa_promoter', target_table);
-END;
-$$;
-
-DO $$
-DECLARE
-    label_name TEXT;
-BEGIN
-    FOREACH label_name IN ARRAY moa.age_vertex_labels() LOOP
-        IF to_regclass(format('%I.%I', 'moa_graph', label_name)) IS NULL THEN
-            EXECUTE format('SELECT ag_catalog.create_vlabel(%L, %L)', 'moa_graph', label_name);
-        END IF;
-    END LOOP;
-
-    FOREACH label_name IN ARRAY moa.age_edge_labels() LOOP
-        IF to_regclass(format('%I.%I', 'moa_graph', label_name)) IS NULL THEN
-            EXECUTE format('SELECT ag_catalog.create_elabel(%L, %L)', 'moa_graph', label_name);
-        END IF;
-    END LOOP;
-END $$;
-
-DO $$
-DECLARE
-    label_name TEXT;
-BEGIN
-    FOREACH label_name IN ARRAY (moa.age_vertex_labels() || ARRAY['_ag_label_vertex']::TEXT[]) LOOP
-        EXECUTE format(
-            'CREATE INDEX IF NOT EXISTS %I ON moa_graph.%I USING BTREE (id)',
-            label_name || '_id_idx',
-            label_name
-        );
-        EXECUTE format(
-            'CREATE INDEX IF NOT EXISTS %I ON moa_graph.%I USING BTREE
-             ((ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, ''"uid"''::ag_catalog.agtype])))',
-            label_name || '_uid_idx',
-            label_name
-        );
-        EXECUTE format(
-            'CREATE INDEX IF NOT EXISTS %I ON moa_graph.%I USING BTREE
-             ((ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, ''"storage_partition_id"''::ag_catalog.agtype])))',
-            label_name || '_storage_partition_idx',
-            label_name
-        );
-        EXECUTE format(
-            'CREATE INDEX IF NOT EXISTS %I ON moa_graph.%I USING BTREE
-             ((ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, ''"scope"''::ag_catalog.agtype])))',
-            label_name || '_scope_idx',
-            label_name
-        );
-        EXECUTE format(
-            'CREATE INDEX IF NOT EXISTS %I ON moa_graph.%I USING BTREE
-             ((ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, ''"valid_to"''::ag_catalog.agtype])))
-             WHERE (ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, ''"valid_to"''::ag_catalog.agtype])) IS NULL',
-            label_name || '_validto_partial_idx',
-            label_name
-        );
-        EXECUTE format(
-            'CREATE INDEX IF NOT EXISTS %I ON moa_graph.%I USING GIN (properties)',
-            label_name || '_props_gin',
-            label_name
-        );
-    END LOOP;
-END $$;
-
-DO $$
-DECLARE
-    label_name TEXT;
-BEGIN
-    FOREACH label_name IN ARRAY (moa.age_edge_labels() || ARRAY['_ag_label_edge']::TEXT[]) LOOP
-        EXECUTE format(
-            'CREATE INDEX IF NOT EXISTS %I ON moa_graph.%I USING BTREE (start_id)',
-            label_name || '_start_idx',
-            label_name
-        );
-        EXECUTE format(
-            'CREATE INDEX IF NOT EXISTS %I ON moa_graph.%I USING BTREE (end_id)',
-            label_name || '_end_idx',
-            label_name
-        );
-        EXECUTE format(
-            'CREATE INDEX IF NOT EXISTS %I ON moa_graph.%I USING BTREE
-             ((ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, ''"storage_partition_id"''::ag_catalog.agtype])))',
-            label_name || '_storage_partition_idx',
-            label_name
-        );
-    END LOOP;
-END $$;
-
-GRANT USAGE ON SCHEMA ag_catalog TO moa_app, moa_promoter;
-GRANT USAGE ON SCHEMA moa_graph TO moa_app, moa_promoter;
-
-DO $$
-DECLARE
-    label_name TEXT;
-BEGIN
-    FOREACH label_name IN ARRAY (
-        moa.age_vertex_labels() || moa.age_edge_labels() || moa.age_base_labels()
-    ) LOOP
-        PERFORM moa.apply_age_three_tier_rls(format('%I.%I', 'moa_graph', label_name)::REGCLASS);
-    END LOOP;
-END $$;
-
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA moa_graph TO moa_app, moa_promoter;
-
-SELECT pg_catalog.set_config(
-    'search_path',
-    COALESCE(
-        NULLIF(pg_catalog.current_setting('moa.migration_search_path', true), ''),
-        '"$user", public'
-    ),
-    false
-);
-
 -- Source: V000014__session_node_index.sql
 
 CREATE TABLE IF NOT EXISTS moa.node_index (
     uid UUID PRIMARY KEY,
     gid BIGINT,
-    label TEXT NOT NULL CHECK (label = ANY(moa.age_vertex_labels())),
+    label TEXT NOT NULL CHECK (label = ANY(moa.graph_node_labels())),
     storage_partition_id TEXT,
     user_id TEXT,
     scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
@@ -1178,6 +961,39 @@ CREATE INDEX IF NOT EXISTS node_index_lastaccess_idx
 GRANT USAGE ON SCHEMA moa TO moa_app, moa_promoter;
 SELECT moa.apply_three_tier_rls('moa.node_index'::REGCLASS);
 
+-- Source: V000014__session_edge_index.sql
+
+CREATE TABLE IF NOT EXISTS moa.edge_index (
+    uid UUID PRIMARY KEY,
+    label TEXT NOT NULL CHECK (label = ANY(moa.graph_edge_labels())),
+    start_uid UUID NOT NULL REFERENCES moa.node_index(uid) ON DELETE CASCADE,
+    end_uid UUID NOT NULL REFERENCES moa.node_index(uid) ON DELETE CASCADE,
+    storage_partition_id TEXT,
+    user_id TEXT,
+    tenant_id UUID,
+    contact_id UUID,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
+    properties JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (scope IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS edge_index_ws_scope_label
+    ON moa.edge_index (storage_partition_id, scope, label);
+CREATE INDEX IF NOT EXISTS edge_index_start_label
+    ON moa.edge_index (start_uid, label);
+CREATE INDEX IF NOT EXISTS edge_index_end_label
+    ON moa.edge_index (end_uid, label);
+CREATE INDEX IF NOT EXISTS edge_index_start_end_label
+    ON moa.edge_index (start_uid, end_uid, label);
+CREATE INDEX IF NOT EXISTS edge_index_ws_start
+    ON moa.edge_index (storage_partition_id, start_uid);
+CREATE INDEX IF NOT EXISTS edge_index_ws_end
+    ON moa.edge_index (storage_partition_id, end_uid);
+
+GRANT USAGE ON SCHEMA moa TO moa_app, moa_promoter;
+SELECT moa.apply_three_tier_rls('moa.edge_index'::REGCLASS);
+
 -- Source: V000015__session_embeddings.sql
 
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
@@ -1189,7 +1005,7 @@ CREATE TABLE IF NOT EXISTS moa.embeddings (
     storage_partition_id TEXT,
     user_id TEXT,
     scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
-    label TEXT NOT NULL CHECK (label = ANY(moa.age_vertex_labels())),
+    label TEXT NOT NULL CHECK (label = ANY(moa.graph_node_labels())),
     pii_class TEXT NOT NULL DEFAULT 'none'
         CHECK (pii_class IN ('none', 'pii', 'phi', 'restricted')),
     embedding public.halfvec(1024) NOT NULL,
@@ -1250,8 +1066,8 @@ CREATE TABLE IF NOT EXISTS moa.graph_changelog (
     target_kind TEXT NOT NULL CHECK (target_kind IN ('node', 'edge', 'contact')),
     target_label TEXT NOT NULL
         CHECK (
-            target_label = ANY(moa.age_vertex_labels())
-            OR target_label = ANY(moa.age_edge_labels())
+            target_label = ANY(moa.graph_node_labels())
+            OR target_label = ANY(moa.graph_edge_labels())
         ),
     target_uid UUID NOT NULL,
     payload JSONB NOT NULL,
@@ -1578,8 +1394,8 @@ ALTER TABLE moa.graph_changelog
     ADD CONSTRAINT graph_changelog_target_label_check
     CHECK (
         target_label = 'User'
-        OR target_label = ANY(moa.age_vertex_labels())
-        OR target_label = ANY(moa.age_edge_labels())
+        OR target_label = ANY(moa.graph_node_labels())
+        OR target_label = ANY(moa.graph_edge_labels())
     );
 
 CREATE TABLE IF NOT EXISTS moa.audit_jti_used (
@@ -2035,29 +1851,6 @@ CREATE TABLE IF NOT EXISTS analytics.lineage_dead_letters (
 CREATE INDEX IF NOT EXISTS lineage_dead_letters_created_idx
     ON analytics.lineage_dead_letters (created_at DESC);
 
--- Source: V000032__session_age_owned_by_edge.sql
-
--- Add the ownership-flavored graph edge label used by entity-resolution v2.
-
-DO $$
-BEGIN
-    IF to_regclass(format('%I.%I', 'moa_graph', 'OWNED_BY')) IS NULL THEN
-        EXECUTE format('SELECT ag_catalog.create_elabel(%L, %L)', 'moa_graph', 'OWNED_BY');
-    END IF;
-END $$;
-
-CREATE INDEX IF NOT EXISTS OWNED_BY_start_idx ON moa_graph."OWNED_BY" USING BTREE (start_id);
-CREATE INDEX IF NOT EXISTS OWNED_BY_end_idx ON moa_graph."OWNED_BY" USING BTREE (end_id);
-CREATE INDEX IF NOT EXISTS OWNED_BY_storage_partition_idx ON moa_graph."OWNED_BY" USING BTREE
-    ((ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '"storage_partition_id"'::ag_catalog.agtype])));
-
-GRANT SELECT, INSERT, UPDATE, DELETE ON moa_graph."OWNED_BY" TO moa_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON moa_graph."OWNED_BY" TO moa_promoter;
-
-SELECT moa.apply_age_three_tier_rls('moa_graph."OWNED_BY"'::REGCLASS);
-
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA moa_graph TO moa_app, moa_promoter;
-
 -- Source: V000033__session_memory_digests.sql
 
 CREATE TABLE IF NOT EXISTS moa.memory_digests (
@@ -2329,17 +2122,6 @@ SELECT moa.apply_three_tier_rls('experience_attributions'::REGCLASS);
 SELECT moa.apply_three_tier_rls('learning_candidates'::REGCLASS);
 
 -- Source: V000037__session_public_experience_learning.sql
-
--- Repair databases where the AGE bootstrap migration left search_path on
--- ag_catalog before 035_experience_learning.sql ran.
-SELECT pg_catalog.set_config(
-    'search_path',
-    CASE
-        WHEN pg_catalog.current_schema() = 'ag_catalog' THEN 'public'
-        ELSE pg_catalog.quote_ident(pg_catalog.current_schema()) || ', public'
-    END,
-    false
-);
 
 CREATE TABLE IF NOT EXISTS experience_records (
     id UUID PRIMARY KEY,

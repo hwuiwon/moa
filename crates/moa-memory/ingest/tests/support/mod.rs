@@ -9,7 +9,7 @@ use moa_core::RlsContext;
 use moa_core::{ContactId, SessionId, TenantId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
-    AgeGraphStore, GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent, PiiClass, cypher,
+    GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore,
 };
 use moa_memory_ingest::{IngestCtx, RrfPlusJudgeDetector, SessionTurn};
 use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
@@ -136,7 +136,8 @@ pub(crate) async fn ingest_ctx_with_pii(
     let scope = RlsContext::tenant(TenantId::from(storage_partition_id));
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     let graph = Arc::new(
-        AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(vector.clone()),
+        PostgresGraphStore::scoped_for_app_role(pool.clone(), scope)
+            .with_vector_store(vector.clone()),
     );
     IngestCtx::new(
         pool.clone(),
@@ -183,8 +184,8 @@ pub(crate) fn fact_intent(
         uid: Uuid::now_v7(),
         label: NodeLabel::Fact,
         storage_partition_id: Some(storage_partition_id.to_string()),
-        contact_id: None,
-        scope: "tenant".to_string(),
+        contact_id: Some(SLOW_PATH_CONTACT_ID.to_string()),
+        scope: "contact".to_string(),
         name: name.to_string(),
         properties: json!({
             "summary": name,
@@ -199,6 +200,7 @@ pub(crate) fn fact_intent(
         embedding: Some(deterministic_vector(name)),
         embedding_model: Some("mock-slow-embedder".to_string()),
         embedding_model_version: Some(11),
+        embedding_text: None,
         actor_id: "slow-path-test".to_string(),
         actor_kind: "system".to_string(),
     }
@@ -211,10 +213,10 @@ pub(crate) async fn create_fact(
     valid_from: DateTime<Utc>,
 ) -> Uuid {
     seed_workspace_embedder_state(pool, storage_partition_id).await;
-    let ctx = RlsContext::tenant(TenantId::from(storage_partition_id));
+    let ctx = RlsContext::contact(TenantId::from(storage_partition_id), slow_path_contact_id());
     let vector = PgvectorStore::new_for_app_role(pool.clone(), ctx.clone());
-    let graph =
-        AgeGraphStore::scoped_for_app_role(pool.clone(), ctx).with_vector_store(Arc::new(vector));
+    let graph = PostgresGraphStore::scoped_for_app_role(pool.clone(), ctx)
+        .with_vector_store(Arc::new(vector));
     graph
         .create_node(fact_intent(storage_partition_id, name, valid_from))
         .await
@@ -412,7 +414,7 @@ pub(crate) async fn node_valid_to(
     storage_partition_id: Uuid,
     uid: Uuid,
 ) -> Option<DateTime<Utc>> {
-    let mut conn = scoped_conn(pool, storage_partition_id).await;
+    let mut conn = user_scoped_conn(pool, storage_partition_id).await;
     let valid_to = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
         "SELECT valid_to FROM moa.node_index WHERE uid = $1",
     )
@@ -477,16 +479,24 @@ pub(crate) async fn supersedes_edge_exists(
     new_uid: Uuid,
 ) -> bool {
     let mut conn = user_scoped_conn(pool, storage_partition_id).await;
-    let row = cypher::edge::SUPERSEDES_EXISTS
-        .execute(&json!({
-            "old_uid": old_uid.to_string(),
-            "new_uid": new_uid.to_string(),
-        }))
-        .fetch_optional(conn.as_mut())
-        .await
-        .expect("query supersedes edge");
+    let exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS ( \
+             SELECT 1 \
+             FROM moa.edge_index \
+             WHERE label = 'SUPERSEDES' \
+               AND start_uid = $1 \
+               AND end_uid = $2 \
+               AND storage_partition_id = $3 \
+         )",
+    )
+    .bind(new_uid)
+    .bind(old_uid)
+    .bind(storage_partition_id.to_string())
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("query supersedes edge");
     conn.commit().await.expect("commit supersedes edge read");
-    row.is_some()
+    exists
 }
 
 pub(crate) async fn relates_to_edges(

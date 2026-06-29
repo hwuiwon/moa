@@ -10,7 +10,7 @@ use moa_loadtest::scenarios::{mock_smoke::MockSmokeConfig, retrieval::PerfGateCo
 /// Perf gate profile registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Profile {
-    /// Graph-memory retrieval gate backed by Postgres, AGE, pgvector, and Cohere.
+    /// Graph-memory retrieval gate backed by Postgres, relational graph tables, pgvector, and Cohere.
     Retrieval,
     /// Short mock loadtest smoke profile with no real LLM calls.
     MockShort,

@@ -3,7 +3,7 @@
 use chrono::Utc;
 use moa_core::{ContactId, RlsContext, StoragePartitionId, TenantId};
 use moa_db::ScopedConn;
-use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
 use moa_memory_pii::erasure::{
     GraphErasureAudit, enumerate_erase_candidates, hard_purge_erase_candidates,
 };
@@ -31,6 +31,7 @@ fn contact_node(tenant_id: TenantId, contact_id: ContactId, uid: Uuid) -> NodeWr
         embedding: None,
         embedding_model: None,
         embedding_model_version: None,
+        embedding_text: None,
         actor_id: contact_id.to_string(),
         actor_kind: "contact".to_string(),
     }
@@ -47,7 +48,7 @@ async fn hard_purge_contact_candidates_writes_summary_under_app_role_db_memory()
     let tenant_id = TenantId::from(Uuid::now_v7());
     let contact_id = ContactId::new();
     let subject_user_id = format!("contact:{contact_id}");
-    let graph = AgeGraphStore::scoped_for_app_role(
+    let graph = PostgresGraphStore::scoped_for_app_role(
         session_store.pool().clone(),
         RlsContext::contact(tenant_id, contact_id),
     );

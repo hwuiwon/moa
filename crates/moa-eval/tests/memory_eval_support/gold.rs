@@ -11,11 +11,11 @@ use moa_eval::memory_eval::{
     BootstrapConfig, CorpusProfile, GoldPiiStatus, GoldResolutionStatus, LedgerFact,
     MemoryRetrievalEvalOptions, RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K,
     SyntheticSession, SyntheticTurn, build_cached_embedding_fixtures, generate_memory_eval_corpus,
-    read_gold_nodes_jsonl, resolve_gold_nodes, run_memory_retrieval_eval, stable_uuid_from_label,
+    read_gold_nodes_jsonl, resolve_gold_nodes, run_memory_retrieval_eval,
     tenant_id_from_storage_partition_id, write_embeddings_jsonl, write_gold_nodes_jsonl,
     write_memory_eval_corpus,
 };
-use moa_memory_graph::{AgeGraphStore, NodeLabel, PiiClass};
+use moa_memory_graph::{PostgresGraphStore, NodeLabel, PiiClass};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, IngestCtx, IngestError,
 };
@@ -125,7 +125,7 @@ impl GoldResolutionStack {
             scope.clone(),
         ));
         let graph = Arc::new(
-            AgeGraphStore::scoped_for_app_role(self.pool.clone(), scope)
+            PostgresGraphStore::scoped_for_app_role(self.pool.clone(), scope)
                 .with_vector_store(vector.clone()),
         );
         Ok(IngestCtx::new(
@@ -143,6 +143,8 @@ impl GoldResolutionStack {
         scope: &RlsContext,
         storage_partition_id: &StoragePartitionId,
     ) -> TestResult {
+        let runtime_storage_partition_id =
+            tenant_id_from_storage_partition_id(storage_partition_id).to_string();
         let mut conn = ScopedConn::begin(&self.pool, scope).await?;
         sqlx::query("SET LOCAL ROLE moa_app")
             .execute(conn.as_mut())
@@ -157,9 +159,9 @@ impl GoldResolutionStack {
                     embedding_model_version = EXCLUDED.embedding_model_version,
                     embedding_dimension = EXCLUDED.embedding_dimension,
                     reembed_state = 'steady'
-            "#,
+        "#,
         )
-        .bind(storage_partition_id.as_str())
+        .bind(&runtime_storage_partition_id)
         .bind(GOLD_RESOLUTION_EMBEDDER_MODEL)
         .bind(GOLD_RESOLUTION_EMBEDDER_VERSION)
         .bind(VECTOR_DIMENSION as i32)
@@ -177,14 +179,15 @@ impl GoldResolutionStack {
     }
 
     fn storage_partition_ids(&self) -> Vec<String> {
-        vec![
-            gold_resolution_storage_partition_id("explicit", &self.schema_name)
-                .as_str()
-                .to_string(),
-            gold_resolution_storage_partition_id("partial", &self.schema_name)
-                .as_str()
-                .to_string(),
+        [
+            gold_resolution_storage_partition_id("explicit", &self.schema_name),
+            gold_resolution_storage_partition_id("partial", &self.schema_name),
         ]
+        .iter()
+        .map(|storage_partition_id| {
+            tenant_id_from_storage_partition_id(storage_partition_id).to_string()
+        })
+        .collect()
     }
 }
 
@@ -192,7 +195,10 @@ async fn cleanup_gold_resolution_rows(
     pool: &PgPool,
     storage_partition_ids: &[String],
 ) -> TestResult {
-    cleanup_gold_resolution_age_rows(pool, storage_partition_ids).await?;
+    sqlx::query("DELETE FROM moa.edge_index WHERE storage_partition_id = ANY($1)")
+        .bind(storage_partition_ids)
+        .execute(pool)
+        .await?;
     for table in [
         "embeddings",
         "ingest_dlq",
@@ -211,56 +217,6 @@ async fn cleanup_gold_resolution_rows(
     }
     Ok(())
 }
-
-async fn cleanup_gold_resolution_age_rows(
-    pool: &PgPool,
-    storage_partition_ids: &[String],
-) -> TestResult {
-    for label in GOLD_RESOLUTION_AGE_EDGE_LABELS {
-        cleanup_gold_resolution_age_table(pool, label, storage_partition_ids).await?;
-    }
-    for label in GOLD_RESOLUTION_AGE_NODE_LABELS {
-        cleanup_gold_resolution_age_table(pool, label, storage_partition_ids).await?;
-    }
-    Ok(())
-}
-
-async fn cleanup_gold_resolution_age_table(
-    pool: &PgPool,
-    label: &str,
-    storage_partition_ids: &[String],
-) -> TestResult {
-    let sql = format!(
-        r#"
-        DELETE FROM moa_graph."{label}"
-        WHERE trim(both '"' from moa.age_property(properties, 'storage_partition_id')::text) = $1
-        "#
-    );
-    for storage_partition_id in storage_partition_ids {
-        sqlx::query(&sql)
-            .bind(storage_partition_id)
-            .execute(pool)
-            .await?;
-    }
-    Ok(())
-}
-
-const GOLD_RESOLUTION_AGE_NODE_LABELS: &[&str] = &[
-    "Entity", "Concept", "Decision", "Incident", "Lesson", "Fact", "Source",
-];
-
-const GOLD_RESOLUTION_AGE_EDGE_LABELS: &[&str] = &[
-    "RELATES_TO",
-    "DEPENDS_ON",
-    "OWNED_BY",
-    "SUPERSEDES",
-    "CONTRADICTS",
-    "DERIVED_FROM",
-    "MENTIONED_IN",
-    "CAUSED",
-    "LEARNED_FROM",
-    "APPLIES_TO",
-];
 
 async fn run_explicit_gold_resolution_case(stack: &GoldResolutionStack) -> TestResult {
     let (ledger, sessions) = explicit_gold_resolution_corpus(&stack.schema_name);
@@ -303,6 +259,8 @@ async fn run_explicit_gold_resolution_case(stack: &GoldResolutionStack) -> TestR
         Some("tenant"),
         "gold_nodes should record actual stored node_index.scope"
     );
+    assert_resolved_node_uses_runtime_storage_partition(stack, &storage_partition_id, tenant_fact)
+        .await?;
 
     let contact_fact = report
         .records
@@ -347,6 +305,37 @@ async fn run_explicit_gold_resolution_case(stack: &GoldResolutionStack) -> TestR
         );
     }
 
+    Ok(())
+}
+
+async fn assert_resolved_node_uses_runtime_storage_partition(
+    stack: &GoldResolutionStack,
+    ledger_storage_partition_id: &StoragePartitionId,
+    record: &moa_eval::memory_eval::GoldNodeRecord,
+) -> TestResult {
+    let runtime_storage_partition_id =
+        tenant_id_from_storage_partition_id(ledger_storage_partition_id).to_string();
+    assert_ne!(
+        ledger_storage_partition_id.as_str(),
+        runtime_storage_partition_id,
+        "fixture must use a ledger label so gold resolution proves runtime partition mapping"
+    );
+    let node_uid = record
+        .node_uids
+        .first()
+        .copied()
+        .expect("resolved gold record includes one node uid");
+    let stored_storage_partition_id: Option<String> =
+        sqlx::query_scalar("SELECT storage_partition_id FROM moa.node_index WHERE uid = $1")
+            .bind(node_uid)
+            .fetch_optional(&stack.pool)
+            .await?;
+
+    assert_eq!(
+        stored_storage_partition_id.as_deref(),
+        Some(runtime_storage_partition_id.as_str()),
+        "resolved gold node should be stored under the mapped runtime tenant UUID"
+    );
     Ok(())
 }
 
@@ -499,10 +488,7 @@ fn partial_gold_resolution_corpus(tenant_suffix: &str) -> (Vec<LedgerFact>, Vec<
 }
 
 fn gold_resolution_storage_partition_id(kind: &str, tenant_suffix: &str) -> StoragePartitionId {
-    storage_partition(
-        &stable_uuid_from_label(&format!("gold-resolution-{kind}-tenant-{tenant_suffix}"))
-            .to_string(),
-    )
+    storage_partition(&format!("gold-resolution-{kind}-tenant-{tenant_suffix}"))
 }
 
 struct GoldFactSpec {

@@ -16,7 +16,7 @@ use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage,
     RetrievalSelectedHit, RetrievalStage, StageTimings, TurnId, VecHit,
 };
-use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, PiiClass};
+use moa_memory_graph::{GraphStore, NodeLabel, PiiClass, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::PgvectorStore;
 use moa_observability::record_memory_operation;
@@ -254,8 +254,8 @@ fn memory_stack(scope: &MemoryScope) -> (Arc<dyn GraphStore>, Arc<HybridRetrieve
     (graph, Arc::new(retriever))
 }
 
-fn graph_store(scope: &MemoryScope) -> AgeGraphStore {
-    AgeGraphStore::scoped_for_app_role(
+fn graph_store(scope: &MemoryScope) -> PostgresGraphStore {
+    PostgresGraphStore::scoped_for_app_role(
         OrchestratorCtx::current_graph_pool(),
         scope.to_rls_context(),
     )

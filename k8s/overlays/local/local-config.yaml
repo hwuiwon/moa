@@ -5,7 +5,6 @@ metadata:
   namespace: moa-system
 data:
   001-enable-extensions.sql: |
-    CREATE EXTENSION IF NOT EXISTS age;
     CREATE EXTENSION IF NOT EXISTS vector;
     CREATE EXTENSION IF NOT EXISTS pgaudit;
   002-create-openfga-db.sql: |

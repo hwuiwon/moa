@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use moa_eval::memory_eval::{
-    EvalLane, MemoryEvalExtractorMode, MemoryRetrievalEvalOptions, QueryRewritePolicy,
-    RankingConfig, run_memory_retrieval_eval,
+    EvalLane, GraphExpansionEvalPolicy, MemoryEvalExtractorMode, MemoryRetrievalEvalOptions,
+    QueryRewritePolicy, RankingConfig, run_memory_retrieval_eval,
 };
 
 /// Runs the hermetic memory retrieval evaluation command.
@@ -26,6 +26,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
                 .with_consolidation(options.consolidate)
                 .with_digests(options.digests)
                 .with_inverted_quality_priors(options.invert_quality_priors)
+                .with_graph_expansion_policy(options.graph_expansion_policy)
                 .apply_budget_usd(options.budget_usd)
                 .apply_extractions_path(options.extractions_path.clone())
                 .apply_merges_path(options.merges_path.clone()),
@@ -44,11 +45,12 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         .map(str::to_string)
         .unwrap_or_else(|| format!("{:?}", options.extractor_mode));
     println!(
-        "wrote memory retrieval eval report: output={} probes={} lane={:?} rewrite_policy={:?} rewrite_calls={} rewrite_skips={} rewrite_call_rate={:.3} reranker={} extractor={} consolidate={} digests={} merged={} duplicates_remaining={} digests_rebuilt={} est_usd={:.4} aborted_over_budget={} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} preference_context_rate={:.3} p95_retrieval_latency_ms={} retrieval_plus_rewrite_p95_latency_ms={}",
+        "wrote memory retrieval eval report: output={} probes={} lane={:?} rewrite_policy={:?} graph_expansion_policy={} rewrite_calls={} rewrite_skips={} rewrite_call_rate={:.3} reranker={} extractor={} consolidate={} digests={} merged={} duplicates_remaining={} digests_rebuilt={} est_usd={:.4} aborted_over_budget={} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} preference_context_rate={:.3} p95_retrieval_latency_ms={} retrieval_plus_rewrite_p95_latency_ms={}",
         options.output.display(),
         report.probe_results.len(),
         options.lane,
         options.rewrite_policy,
+        options.graph_expansion_policy.as_str(),
         report.query_rewrite_call_count,
         report.query_rewrite_skip_count,
         report.query_rewrite_call_rate,
@@ -96,6 +98,7 @@ struct Options {
     consolidate: bool,
     digests: bool,
     invert_quality_priors: bool,
+    graph_expansion_policy: GraphExpansionEvalPolicy,
 }
 
 impl Options {
@@ -113,6 +116,7 @@ impl Options {
         let mut consolidate = false;
         let mut digests = false;
         let mut invert_quality_priors = false;
+        let mut graph_expansion_policy = GraphExpansionEvalPolicy::Current;
         let mut extractor_specified = false;
         let mut args = args.peekable();
 
@@ -154,6 +158,12 @@ impl Options {
                 }
                 "--invert-quality-priors" => {
                     invert_quality_priors = true;
+                }
+                "--graph-expansion-policy" => {
+                    let value = args
+                        .next()
+                        .context("--graph-expansion-policy requires current|skip-exact-direct")?;
+                    graph_expansion_policy = parse_graph_expansion_policy(&value)?;
                 }
                 "--extractor" => {
                     let value = args
@@ -253,12 +263,13 @@ impl Options {
             consolidate,
             digests,
             invert_quality_priors,
+            graph_expansion_policy,
         })
     }
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--consolidate] [--digests] [--invert-quality-priors] [--rewrite-policy off|always|gated] [--reranker off|on] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--quality-weight N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
+    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--consolidate] [--digests] [--invert-quality-priors] [--graph-expansion-policy current|skip-exact-direct] [--rewrite-policy off|always|gated] [--reranker off|on] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--quality-weight N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
 }
 
 fn parse_reranker(value: &str) -> Result<bool> {
@@ -283,6 +294,16 @@ fn parse_rewrite_policy(value: &str) -> Result<QueryRewritePolicy> {
         "always" => Ok(QueryRewritePolicy::Always),
         "gated" => Ok(QueryRewritePolicy::Gated),
         other => bail!("unsupported --rewrite-policy value `{other}`; expected off|always|gated"),
+    }
+}
+
+fn parse_graph_expansion_policy(value: &str) -> Result<GraphExpansionEvalPolicy> {
+    match value {
+        "current" => Ok(GraphExpansionEvalPolicy::Current),
+        "skip-exact-direct" => Ok(GraphExpansionEvalPolicy::SkipExactDirect),
+        other => bail!(
+            "unsupported --graph-expansion-policy value `{other}`; expected current|skip-exact-direct"
+        ),
     }
 }
 

@@ -2,6 +2,9 @@
 
 Promote a tenant from pgvector to Turbopuffer when the tenant grows past the
 local HNSW operating range or needs namespace-level backend isolation.
+Only vector records move during promotion. Graph nodes and edges remain in
+Postgres relational storage (`moa.node_index` and `moa.edge_index`);
+Turbopuffer is not graph storage.
 
 ## API Request
 

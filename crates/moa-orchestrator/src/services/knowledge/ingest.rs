@@ -19,7 +19,7 @@ use moa_knowledge::{
     },
     repository::PostgresKnowledgeRepository,
 };
-use moa_memory_graph::AgeGraphStore;
+use moa_memory_graph::PostgresGraphStore;
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{PgvectorStore, VectorStore};
 use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
@@ -113,7 +113,7 @@ type ProductionKnowledgeIngestionPipeline = KnowledgeIngestionPipeline<
     PostgresKnowledgeRepository,
     ProductionDocumentParser,
     SharedEmbeddingProvider,
-    MemoryKnowledgeGraphWriter<AgeGraphStore>,
+    MemoryKnowledgeGraphWriter<PostgresGraphStore>,
     MetricsIngestionObserver,
 >;
 
@@ -136,7 +136,8 @@ fn build_ingestion_pipeline(
     ));
     let vector_store: Arc<dyn VectorStore> =
         Arc::new(PgvectorStore::new(pool.clone(), scope.clone()));
-    let graph_store = Arc::new(AgeGraphStore::scoped(pool, scope).with_vector_store(vector_store));
+    let graph_store =
+        Arc::new(PostgresGraphStore::scoped(pool, scope).with_vector_store(vector_store));
     let graph = Arc::new(MemoryKnowledgeGraphWriter::new(
         graph_store,
         MemoryScope::Tenant { tenant_id },

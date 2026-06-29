@@ -28,7 +28,7 @@ subsystem.
 | Crate | Owns |
 |---|---|
 | `moa-memory/types` | Memory-specific runtime scopes such as `MemoryScope` and `ScopeTier`, plus conversion into `moa-core::RlsContext` at memory boundaries |
-| `moa-memory/graph` | Graph-primary storage, `GraphStore`, `AgeGraphStore`, node/edge labels, write intents, `PiiClass`, changelog rows, lexical index types |
+| `moa-memory/graph` | Relational graph-primary storage, `GraphStore`, `PostgresGraphStore`, node/edge labels, write intents, `PiiClass`, changelog rows, lexical index types |
 | `moa-memory/vector` | Embedding and vector-index abstractions, `VectorStore`, `PgvectorStore`, `TurbopufferStore`, vector query/result DTOs |
 | `moa-memory/pii` | Privacy classification and redaction clients, `PiiClassifier`, `PiiResult`, `PiiSpan`, `PiiCategory` |
 | `moa-memory/ingest` | Ingestion DTOs, `IngestionVO`, fast memory writes, contradiction detection |

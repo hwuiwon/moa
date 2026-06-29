@@ -98,10 +98,6 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         sql: ACTION_POLICY_SCHEMA_MIGRATION_SQL,
     },
     SchemaMigration {
-        name: "V000303__age_rls_operator_resolution.sql",
-        sql: include_str!("../migrations/postgres/V000303__age_rls_operator_resolution.sql"),
-    },
-    SchemaMigration {
         name: "V000305__retrieval_lineage_turn_id.sql",
         sql: include_str!("../migrations/postgres/V000305__retrieval_lineage_turn_id.sql"),
     },
@@ -146,6 +142,12 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
     SchemaMigration {
         name: "V000318__session_attachments.sql",
         sql: include_str!("../migrations/postgres/V000318__session_attachments.sql"),
+    },
+    SchemaMigration {
+        name: "V000319__knowledge_visibility_cache_invalidation.sql",
+        sql: include_str!(
+            "../migrations/postgres/V000319__knowledge_visibility_cache_invalidation.sql"
+        ),
     },
 ];
 
@@ -335,14 +337,10 @@ async fn run_schema_migrations_locked(
         .context("install pgcrypto extension")?;
 
     if install_session_extensions {
-        raw_sql(
-            "CREATE EXTENSION IF NOT EXISTS age; \
-             LOAD 'age'; \
-             CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;",
-        )
-        .execute(&mut *conn)
-        .await
-        .context("install session migration extensions")?;
+        raw_sql("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;")
+            .execute(&mut *conn)
+            .await
+            .context("install session migration extensions")?;
     }
 
     let mut tx = conn

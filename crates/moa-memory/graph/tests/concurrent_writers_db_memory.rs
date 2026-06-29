@@ -6,7 +6,7 @@ use chrono::{DateTime, Duration, Utc};
 use moa_core::RlsContext;
 use moa_core::TenantId;
 use moa_db::ScopedConn;
-use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use proptest::strategy::{Strategy, ValueTree};
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
@@ -60,8 +60,11 @@ fn scope(storage_partition_id: &str) -> RlsContext {
     tenant_scope(storage_partition_id)
 }
 
-fn graph_store(test_db: &TestDb, storage_partition_id: &str) -> AgeGraphStore {
-    AgeGraphStore::scoped_for_app_role(test_db.store().pool().clone(), scope(storage_partition_id))
+fn graph_store(test_db: &TestDb, storage_partition_id: &str) -> PostgresGraphStore {
+    PostgresGraphStore::scoped_for_app_role(
+        test_db.store().pool().clone(),
+        scope(storage_partition_id),
+    )
 }
 
 fn node_intent(
@@ -85,6 +88,7 @@ fn node_intent(
         embedding: None,
         embedding_model: None,
         embedding_model_version: None,
+        embedding_text: None,
         actor_id: Uuid::now_v7().to_string(),
         actor_kind: "system".to_string(),
     }
@@ -182,7 +186,7 @@ fn assert_changelog_forms_dag(edges: &[ChangelogEdge]) {
 }
 
 async fn create_seed(
-    graph: &AgeGraphStore,
+    graph: &PostgresGraphStore,
     storage_partition_id: &str,
     name: &str,
     t0: DateTime<Utc>,
@@ -201,7 +205,7 @@ async fn concurrent_supersedes_of_same_node_serialize_with_monotonic_changelog_v
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let storage_partition_id = format!("concurrent-chain-{}", Uuid::now_v7().simple());
+    let storage_partition_id = Uuid::now_v7().to_string();
     let graph = graph_store(&test_db, &storage_partition_id);
     let t0 = Utc::now();
     let old_uid = create_seed(&graph, &storage_partition_id, "chain node", t0).await;
@@ -252,7 +256,7 @@ async fn concurrent_writes_to_different_nodes_in_same_workspace_do_not_interfere
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let storage_partition_id = format!("concurrent-different-{}", Uuid::now_v7().simple());
+    let storage_partition_id = Uuid::now_v7().to_string();
     let graph = graph_store(&test_db, &storage_partition_id);
     let t0 = Utc::now();
 
@@ -304,8 +308,8 @@ async fn concurrent_writes_to_same_node_across_workspaces_isolate_via_rls() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_a = format!("concurrent-rls-a-{}", Uuid::now_v7().simple());
-    let workspace_b = format!("concurrent-rls-b-{}", Uuid::now_v7().simple());
+    let workspace_a = Uuid::now_v7().to_string();
+    let workspace_b = Uuid::now_v7().to_string();
     let graph_a = graph_store(&test_db, &workspace_a);
     let graph_b = graph_store(&test_db, &workspace_b);
     let t0 = Utc::now();
@@ -375,7 +379,7 @@ async fn concurrent_supersede_with_contradicting_facts_chooses_one_deterministic
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let storage_partition_id = format!("concurrent-conflict-{}", Uuid::now_v7().simple());
+    let storage_partition_id = Uuid::now_v7().to_string();
     let graph = graph_store(&test_db, &storage_partition_id);
     let t0 = Utc::now();
     let old_uid = create_seed(&graph, &storage_partition_id, "conflicting node", t0).await;
@@ -465,7 +469,7 @@ async fn proptest_arbitrary_concurrent_supersedes_yield_valid_dag() {
 }
 
 async fn run_concurrent_case(test_db: &TestDb, case_index: usize, writes_per_node: &[usize]) {
-    let storage_partition_id = format!("concurrent-prop-{case_index}-{}", Uuid::now_v7().simple());
+    let storage_partition_id = Uuid::now_v7().to_string();
     let graph = graph_store(test_db, &storage_partition_id);
     let t0 = Utc::now();
     let mut seed_by_node = HashMap::new();

@@ -12,8 +12,8 @@ use std::time::Duration;
 use chrono::Utc;
 use moa_core::{SessionId, StoragePartitionId, TenantId, UserId};
 use moa_lineage_core::{
-    AgeIntrospection, BackendIntrospection, ContextChunk, ContextLineage, GenerationLineage,
-    GenerationTokenUsage, PgvectorIntrospection, RetrievalLineage, RetrievalStage, StageTimings,
+    BackendIntrospection, ContextChunk, ContextLineage, GenerationLineage, GenerationTokenUsage,
+    GraphIntrospection, PgvectorIntrospection, RetrievalLineage, RetrievalStage, StageTimings,
     TruncationEvent, TurbopufferIntrospection, TurnId, VecHit,
 };
 use moa_lineage_otel::{emit_context_attrs, emit_generation_attrs, emit_retrieval_attrs};
@@ -125,7 +125,7 @@ fn emit_retrieval_attrs_snapshots_core_attributes_and_caps_documents_at_20() {
             planning_ms: None,
             execution_ms: None,
         }),
-        age: Some(AgeIntrospection {
+        graph: Some(GraphIntrospection {
             max_path_length: 4,
             edges_walked: 12,
             paths_returned: 5,
@@ -149,8 +149,8 @@ fn emit_retrieval_attrs_snapshots_core_attributes_and_caps_documents_at_20() {
     // Introspection branches.
     assert_attr(&attrs, "moa.pgvector.ef_search", Value::from(64_i64));
     assert_attr(&attrs, "moa.pgvector.buffers_hit", Value::from(10_i64));
-    assert_attr(&attrs, "moa.age.path_length", Value::from(4_i64));
-    assert_attr(&attrs, "moa.age.edges_walked", Value::from(12_i64));
+    assert_attr(&attrs, "moa.graph.path_length", Value::from(4_i64));
+    assert_attr(&attrs, "moa.graph.edges_walked", Value::from(12_i64));
     assert_attr(&attrs, "moa.tpuf.namespace", Value::from("ns-otel"));
     assert_attr(&attrs, "moa.tpuf.consistency", Value::from("strong"));
 

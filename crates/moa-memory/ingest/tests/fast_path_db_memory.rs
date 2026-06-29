@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use moa_core::RlsContext;
 use moa_core::{ContactId, TenantId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
-use moa_memory_graph::{AgeGraphStore, NodeLabel, PiiClass, cypher};
+use moa_memory_graph::{NodeLabel, PiiClass, PostgresGraphStore};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, FastError, FastPathCtx,
     FastRememberRequest, ForgetPattern, IngestError, RrfPlusJudgeDetector, fast_forget,
@@ -17,7 +17,6 @@ use moa_memory_ingest::{
 use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_session::testing;
-use serde_json::json;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -175,7 +174,7 @@ fn test_ctx_for_scope_with_embedder(
 ) -> FastPathCtx {
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     let graph = Arc::new(
-        AgeGraphStore::scoped_for_app_role(pool.clone(), scope.clone())
+        PostgresGraphStore::scoped_for_app_role(pool.clone(), scope.clone())
             .with_vector_store(vector.clone()),
     );
     FastPathCtx::new(
@@ -313,15 +312,23 @@ async fn node_valid_to_for_contact(
 
 async fn supersedes_edge_exists(pool: &PgPool, tenant_id: Uuid, old_uid: Uuid, new_uid: Uuid) {
     let mut conn = tenant_scoped_conn(pool, tenant_id).await;
-    let row = cypher::edge::SUPERSEDES_EXISTS
-        .execute(&json!({
-            "old_uid": old_uid.to_string(),
-            "new_uid": new_uid.to_string(),
-        }))
-        .fetch_optional(conn.as_mut())
-        .await
-        .expect("query supersedes edge");
-    assert!(row.is_some(), "SUPERSEDES edge should exist");
+    let exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS ( \
+             SELECT 1 \
+             FROM moa.edge_index \
+             WHERE label = 'SUPERSEDES' \
+               AND start_uid = $1 \
+               AND end_uid = $2 \
+               AND storage_partition_id = $3 \
+         )",
+    )
+    .bind(new_uid)
+    .bind(old_uid)
+    .bind(tenant_id.to_string())
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("query supersedes edge");
+    assert!(exists, "SUPERSEDES edge should exist");
     conn.commit().await.expect("commit edge check");
 }
 

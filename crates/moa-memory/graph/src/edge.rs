@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{GraphError, Result};
 
-/// Supported Apache AGE edge labels for graph memory.
+/// Supported edge labels for graph memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "text", rename_all = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -39,7 +39,7 @@ pub enum EdgeLabel {
 }
 
 impl EdgeLabel {
-    /// Every supported AGE edge label.
+    /// Every supported graph edge label.
     pub const ALL: [Self; 12] = [
         Self::RelatesTo,
         Self::DependsOn,
@@ -55,7 +55,7 @@ impl EdgeLabel {
         Self::AppliesTo,
     ];
 
-    /// Returns the canonical AGE label string.
+    /// Returns the canonical SQL label string.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RelatesTo => "RELATES_TO",
@@ -96,18 +96,18 @@ impl FromStr for EdgeLabel {
     }
 }
 
-/// Intent to create one AGE relationship between two graph nodes.
+/// Intent to create one relationship between two graph nodes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EdgeWriteIntent {
     /// Stable external edge identity.
     pub uid: Uuid,
-    /// AGE edge label.
+    /// Graph edge label.
     pub label: EdgeLabel,
     /// Start node uid.
     pub start_uid: Uuid,
     /// End node uid.
     pub end_uid: Uuid,
-    /// Relationship properties serialized into AGE `agtype`.
+    /// Relationship properties stored in the relational edge row.
     pub properties: serde_json::Value,
     /// Storage partition scope for tenant and contact rows.
     pub storage_partition_id: Option<String>,

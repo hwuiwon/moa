@@ -224,6 +224,7 @@ impl EntityResolver {
                 embedding,
                 embedding_model,
                 embedding_model_version,
+                embedding_text: None,
                 actor_id: request.actor_id.to_string(),
                 actor_kind: request.actor_kind.to_string(),
             })

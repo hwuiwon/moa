@@ -118,6 +118,12 @@ owner = "moa-memory/graph"
 readers = ["moa-memory/lifecycle", "moa-memory/vector", "moa-brain", "moa-knowledge"]
 
 [[table]]
+name = "moa.edge_index"
+schema = "moa"
+owner = "moa-memory/graph"
+readers = ["moa-memory/lifecycle", "moa-brain", "moa-knowledge"]
+
+[[table]]
 name = "moa.embeddings"
 schema = "moa"
 owner = "moa-memory/vector"

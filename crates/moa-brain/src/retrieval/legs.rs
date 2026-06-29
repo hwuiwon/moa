@@ -11,7 +11,7 @@ use moa_memory_graph::{
     push_validity_filter,
 };
 use moa_memory_types::MemoryScope;
-use moa_memory_vector::{VectorQuery, VectorStore};
+use moa_memory_vector::{TurbopufferStore, TurbopufferTextQuery, VectorQuery, VectorStore};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
@@ -35,8 +35,10 @@ pub const LEXICAL_BUDGET: Duration = Duration::from_secs(1);
 
 const GRAPH_HOPS: u8 = 3;
 const GRAPH_EXPANSION_DECAY: f64 = 0.5;
+const GRAPH_TEMPORAL_HALF_LIFE_DAYS: f64 = 30.0;
 const VECTOR_LIMIT: usize = 20;
 const LEXICAL_LIMIT: i64 = 20;
+const LEXICAL_LIMIT_USIZE: usize = 20;
 
 /// One ranked candidate from an individual retrieval leg.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -120,8 +122,10 @@ pub fn score_expansion(
         if path_weight <= 0.0 {
             continue;
         }
-        let activation =
-            seed_strength * path_weight * GRAPH_EXPANSION_DECAY.powi(i32::from(hit.hop));
+        let activation = seed_strength
+            * path_weight
+            * GRAPH_EXPANSION_DECAY.powi(i32::from(hit.hop))
+            * temporal_coherence(hit.seed_valid_from, hit.valid_from);
         if activation <= 0.0 {
             continue;
         }
@@ -164,6 +168,15 @@ fn edge_weight(edge: EdgeLabel, as_of: Option<DateTime<Utc>>) -> f64 {
         EdgeLabel::Supersedes if as_of.is_some() => 0.6,
         EdgeLabel::Supersedes | EdgeLabel::Contradicts => 0.0,
     }
+}
+
+fn temporal_coherence(seed_valid_from: DateTime<Utc>, hit_valid_from: DateTime<Utc>) -> f64 {
+    let distance_days = seed_valid_from
+        .signed_duration_since(hit_valid_from)
+        .num_seconds()
+        .unsigned_abs() as f64
+        / 86_400.0;
+    2.0_f64.powf(-(distance_days / GRAPH_TEMPORAL_HALF_LIFE_DAYS))
 }
 
 fn exact_seed_candidates(
@@ -231,6 +244,27 @@ pub async fn vector_leg(
     Ok(rank_uids(hits.into_iter().map(|hit| hit.uid).collect()))
 }
 
+/// Runs the Turbopuffer BM25 lexical leg.
+pub async fn turbopuffer_bm25_leg(
+    turbopuffer: &TurbopufferStore,
+    req: &RetrievalRequest,
+) -> Result<Vec<LegCandidate>> {
+    if req.query_text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let hits = turbopuffer
+        .bm25(&TurbopufferTextQuery {
+            query_text: req.query_text.clone(),
+            k: LEXICAL_LIMIT_USIZE,
+            label_filter: Some(effective_label_filter_values(req.label_filter.as_deref())),
+            max_pii_class: req.max_pii_class.as_str().to_string(),
+            include_global: true,
+        })
+        .await?;
+    Ok(rank_uids(hits.into_iter().map(|hit| hit.uid).collect()))
+}
+
 /// Runs the Postgres tsvector lexical leg over `moa.node_index`.
 ///
 /// The query matches ANY extracted term (plus stemmed variants) and orders
@@ -288,15 +322,25 @@ pub async fn lexical_leg(
         .fetch_all(conn.as_mut())
         .await?;
     conn.commit().await?;
-    if !rows.is_empty() {
-        return Ok(rank_uids(rows));
-    }
 
     let terms = lexical_fallback_terms(&req.query_text);
     if terms.is_empty() {
-        return Ok(Vec::new());
+        return Ok(rank_uids(rows));
     }
-    lexical_fallback_leg(pool, req, assume_app_role, &terms).await
+    if !should_run_lexical_fallback(!rows.is_empty(), &terms) {
+        return Ok(rank_uids(rows));
+    }
+    let fallback = lexical_fallback_leg(pool, req, assume_app_role, &terms).await?;
+    let fallback_uids = fallback
+        .into_iter()
+        .map(|candidate| candidate.uid)
+        .collect::<Vec<_>>();
+    let uids = if prefer_lexical_fallback_first(&terms) {
+        merge_ordered_uids(fallback_uids, rows)
+    } else {
+        merge_ordered_uids(rows, fallback_uids)
+    };
+    Ok(rank_uids(uids))
 }
 
 /// Builds an OR `to_tsquery` input from query terms and their stems.
@@ -389,7 +433,50 @@ fn lexical_fallback_terms(query: &str) -> Vec<String> {
         }
         terms.push(term);
     }
+    if terms
+        .iter()
+        .any(|term| term == "prefer" || term == "format" || term == "style")
+    {
+        push_term(&mut terms, "response_style");
+    }
+    if terms.iter().any(|term| term == "private") && terms.iter().any(|term| term == "repository") {
+        push_term(&mut terms, "private_repository");
+    }
+    if terms.iter().any(|term| term == "runbook")
+        && terms
+            .iter()
+            .any(|term| term == "required" || term == "require")
+    {
+        push_term(&mut terms, "require_runbook");
+    }
     terms
+}
+
+fn push_term(terms: &mut Vec<String>, term: &str) {
+    if !terms.iter().any(|existing| existing == term) {
+        terms.push(term.to_string());
+    }
+}
+
+fn should_run_lexical_fallback(primary_found: bool, terms: &[String]) -> bool {
+    !primary_found || terms.iter().any(|term| is_structured_lookup_term(term))
+}
+
+fn prefer_lexical_fallback_first(terms: &[String]) -> bool {
+    terms.iter().any(|term| {
+        matches!(
+            term.as_str(),
+            "private_repository" | "response_style" | "require_runbook"
+        ) || (term.contains('-') && term.chars().any(|ch| ch.is_ascii_digit()))
+    })
+}
+
+fn is_structured_lookup_term(term: &str) -> bool {
+    matches!(
+        term,
+        "private_repository" | "response_style" | "require_runbook"
+    ) || term.contains('_')
+        || (term.contains('-') && term.chars().any(|ch| ch.is_ascii_digit()))
 }
 
 fn push_accessed_ordering(
@@ -454,10 +541,28 @@ pub async fn bump_last_accessed(
     }
 
     let mut conn = begin_scoped(&pool, &scope, assume_app_role).await?;
-    sqlx::query("UPDATE moa.node_index SET last_accessed_at = now() WHERE uid = ANY($1)")
-        .bind(&uids)
-        .execute(conn.as_mut())
-        .await?;
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "UPDATE moa.node_index SET last_accessed_at = now() WHERE uid = ANY(",
+    );
+    builder.push_bind(&uids);
+    builder.push(")");
+    match &scope {
+        MemoryScope::Tenant { tenant_id } => {
+            builder.push(" AND storage_partition_id = ");
+            builder.push_bind(tenant_id.to_string());
+            builder.push(" AND contact_id IS NULL");
+        }
+        MemoryScope::Contact {
+            tenant_id,
+            contact_id,
+        } => {
+            builder.push(" AND storage_partition_id = ");
+            builder.push_bind(tenant_id.to_string());
+            builder.push(" AND contact_id = ");
+            builder.push_bind(contact_id.0);
+        }
+    }
+    builder.build().execute(conn.as_mut()).await?;
     conn.commit().await?;
     Ok(())
 }
@@ -645,7 +750,8 @@ mod tests {
     use super::{
         GRAPH_WEIGHT, LEXICAL_WEIGHT, LegCandidate, RetrievalRequest, VECTOR_WEIGHT,
         exact_seed_candidates, lexical_fallback_terms, lexical_or_tsquery, merge_ordered_uids,
-        rrf_fuse, score_expansion, vector_leg,
+        prefer_lexical_fallback_first, rrf_fuse, score_expansion, should_run_lexical_fallback,
+        vector_leg,
     };
 
     #[test]
@@ -716,6 +822,25 @@ mod tests {
     }
 
     #[test]
+    fn lexical_fallback_terms_add_structured_memory_aliases() {
+        // Pins: conversational first-person memory queries search structured
+        // predicate fields even when name_tsv returns generic rows.
+        let private_terms = lexical_fallback_terms(
+            "Using exact memory id \"pr-s02-t00-u04-private-repository\", Which private work repository should you use for me?",
+        );
+        assert!(private_terms.contains(&"private_repository".to_string()));
+
+        let preference_terms =
+            lexical_fallback_terms("Format your next implementation answer the way I prefer.");
+        assert!(preference_terms.contains(&"response_style".to_string()));
+
+        assert!(should_run_lexical_fallback(true, &private_terms));
+        assert!(should_run_lexical_fallback(true, &preference_terms));
+        assert!(prefer_lexical_fallback_first(&private_terms));
+        assert!(prefer_lexical_fallback_first(&preference_terms));
+    }
+
+    #[test]
     fn score_expansion_decays_activation_by_half_per_hop() {
         // Pins: a one-hop path outranks a two-hop path with the same seed strength and edge weight.
         let seed = uid(1);
@@ -758,6 +883,44 @@ mod tests {
         );
 
         assert_eq!(ordered[0], summed);
+    }
+
+    #[test]
+    fn score_expansion_prefers_temporally_near_fact_for_equal_paths() {
+        // Pins: multi-hop owner facts tied by path strength stay aligned with
+        // the exact dependency seed instead of newer same-library facts.
+        let seed = uid(1);
+        let near = uid(2);
+        let stale = uid(3);
+        let seed_valid_from = chrono::Utc
+            .with_ymd_and_hms(2026, 1, 10, 0, 0, 0)
+            .single()
+            .expect("test timestamp should be valid");
+        let ordered = score_expansion(
+            &[
+                expansion_hit_with_validity(
+                    seed,
+                    stale,
+                    2,
+                    vec![EdgeLabel::DependsOn, EdgeLabel::RelatesTo],
+                    seed_valid_from,
+                    seed_valid_from + chrono::Duration::days(70),
+                ),
+                expansion_hit_with_validity(
+                    seed,
+                    near,
+                    2,
+                    vec![EdgeLabel::DependsOn, EdgeLabel::RelatesTo],
+                    seed_valid_from,
+                    seed_valid_from + chrono::Duration::days(1),
+                ),
+            ],
+            &strengths(&[(seed, 1.0)]),
+            None,
+            None,
+        );
+
+        assert_eq!(ordered, vec![near, stale]);
     }
 
     #[test]

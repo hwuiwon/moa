@@ -9,7 +9,7 @@ use moa_memory_types::MemoryScope;
 use serde::{Deserialize, Serialize};
 
 /// Ranking pipeline version included in cache fingerprints.
-pub const RANKING_PIPELINE_VERSION: u32 = 7;
+pub const RANKING_PIPELINE_VERSION: u32 = 8;
 
 /// Weights used by the FeatureV1 deterministic scorer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -153,6 +153,7 @@ impl<'a> FeatureRanker<'a> {
             weights.access_half_life_days,
         );
         let subject = subject_match_score(query_tokens, &row.name);
+        let predicate = predicate_match_score(query_tokens, row);
         let overlap = overlap_score(query_tokens, row);
         let user_scope_weight = if self.first_person_query {
             weights.scope_user * 2.0
@@ -170,6 +171,7 @@ impl<'a> FeatureRanker<'a> {
             + weights.recency * recency
             + weights.access * access
             + weights.subject_match * subject
+            + weights.subject_match * predicate
             + weights.overlap * overlap
             + weights.quality * (row.quality_score - 0.5) * 2.0
             + scope_term
@@ -250,6 +252,11 @@ fn subject_match_score(query_tokens: &BTreeSet<String>, name: &str) -> f64 {
     if name_tokens.is_empty() {
         return 0.0;
     }
+    if query_tokens.iter().any(|token| has_digit(token))
+        && !name_tokens.iter().any(|token| has_digit(token))
+    {
+        return 0.0;
+    }
     if name_tokens.iter().all(|token| query_tokens.contains(token))
         || name_tokens
             .iter()
@@ -263,6 +270,38 @@ fn subject_match_score(query_tokens: &BTreeSet<String>, name: &str) -> f64 {
 
 fn is_identifier_token(token: &str) -> bool {
     token.len() >= 3 && token.chars().any(|ch| ch.is_ascii_digit())
+}
+
+fn has_digit(token: &str) -> bool {
+    token.chars().any(|ch| ch.is_ascii_digit())
+}
+
+fn predicate_match_score(query_tokens: &BTreeSet<String>, row: &NodeIndexRow) -> f64 {
+    if query_tokens.is_empty() {
+        return 0.0;
+    }
+    let Some(predicate) = row
+        .properties_summary
+        .as_ref()
+        .and_then(|value| value.get("predicate"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return 0.0;
+    };
+    let predicate_tokens = normalize_tokens(predicate);
+    if predicate_tokens.is_empty() {
+        return 0.0;
+    }
+    let matched_fraction =
+        predicate_tokens.intersection(query_tokens).count() as f64 / predicate_tokens.len() as f64;
+    if predicate == "owned_by"
+        && (query_tokens.contains("own")
+            || query_tokens.contains("owner")
+            || query_tokens.contains("team"))
+    {
+        return matched_fraction.max(1.5);
+    }
+    matched_fraction
 }
 
 fn overlap_score(query_tokens: &BTreeSet<String>, row: &NodeIndexRow) -> f64 {
@@ -466,6 +505,128 @@ mod tests {
         assert!(
             ranker.score(1.0, 1.0, &query_tokens, &exact)
                 > ranker.score(1.0, 1.0, &query_tokens, &sibling)
+        );
+    }
+
+    #[test]
+    fn feature_score_exact_numeric_subject_beats_parent_service_name() {
+        // Pins: exact dependency identifiers must not give their parent service
+        // facts the same subject-match boost.
+        let reference_time = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .single()
+            .expect("test timestamp should be valid");
+        let mut config = RankingConfig::default();
+        config.weights.rrf = 0.0;
+        config.weights.recency = 0.0;
+        config.weights.access = 0.0;
+        config.weights.overlap = 0.0;
+        config.weights.scope_tenant = 0.0;
+        let ranker = FeatureRanker::new(&config, reference_time);
+        let query_tokens =
+            normalize_tokens("Which team owns the library that catalog-sync-dep-0-0-1 depends on?");
+        let exact = row(
+            "workspace",
+            "catalog-sync-dep-0-0-1",
+            reference_time,
+            reference_time,
+            None,
+        );
+        let parent_service = row(
+            "workspace",
+            "catalog-sync",
+            reference_time,
+            reference_time,
+            None,
+        );
+
+        assert!(
+            ranker.score(1.0, 1.0, &query_tokens, &exact)
+                > ranker.score(1.0, 1.0, &query_tokens, &parent_service)
+        );
+    }
+
+    #[test]
+    fn feature_score_predicate_match_promotes_owner_intent() {
+        // Pins: multi-hop owner queries promote owned_by facts over unrelated
+        // same-tenant facts that share only parent service text.
+        let reference_time = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .single()
+            .expect("test timestamp should be valid");
+        let mut config = RankingConfig::default();
+        config.weights.rrf = 0.0;
+        config.weights.recency = 0.0;
+        config.weights.access = 0.0;
+        config.weights.overlap = 0.0;
+        config.weights.scope_tenant = 0.0;
+        let ranker = FeatureRanker::new(&config, reference_time);
+        let query_tokens =
+            normalize_tokens("Which team owns the library that catalog-sync-dep-0-0-1 depends on?");
+        let owner = row(
+            "workspace",
+            "lib-audit-wire",
+            reference_time,
+            reference_time,
+            Some(
+                json!({"predicate": "owned_by", "summary": "lib-audit-wire owned_by is policy-runtime"}),
+            ),
+        );
+        let cache = row(
+            "workspace",
+            "catalog-sync",
+            reference_time,
+            reference_time,
+            Some(
+                json!({"predicate": "cache_backend_conflict", "summary": "catalog-sync cache backend cache_backend_conflict is read-through-cache"}),
+            ),
+        );
+
+        assert!(
+            ranker.score(1.0, 1.0, &query_tokens, &owner)
+                > ranker.score(1.0, 1.0, &query_tokens, &cache)
+        );
+    }
+
+    #[test]
+    fn feature_score_owner_intent_beats_dependency_constraint_predicate() {
+        // Pins: in owner multi-hop queries, depends_on is the traversal
+        // constraint and owned_by is the answer predicate.
+        let reference_time = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .single()
+            .expect("test timestamp should be valid");
+        let mut config = RankingConfig::default();
+        config.weights.rrf = 0.0;
+        config.weights.recency = 0.0;
+        config.weights.access = 0.0;
+        config.weights.overlap = 0.0;
+        config.weights.scope_tenant = 0.0;
+        let ranker = FeatureRanker::new(&config, reference_time);
+        let query_tokens =
+            normalize_tokens("Which team owns the library that catalog-sync-dep-0-0-1 depends on?");
+        let owner = row(
+            "workspace",
+            "lib-audit-wire",
+            reference_time,
+            reference_time,
+            Some(
+                json!({"predicate": "owned_by", "summary": "lib-audit-wire owned_by is policy-runtime"}),
+            ),
+        );
+        let dependency = row(
+            "workspace",
+            "lib-audit-wire",
+            reference_time,
+            reference_time,
+            Some(
+                json!({"predicate": "depends_on", "summary": "catalog-sync-dep-0-0-1 depends_on is lib-audit-wire"}),
+            ),
+        );
+
+        assert!(
+            ranker.score(1.0, 1.0, &query_tokens, &owner)
+                > ranker.score(1.0, 1.0, &query_tokens, &dependency)
         );
     }
 

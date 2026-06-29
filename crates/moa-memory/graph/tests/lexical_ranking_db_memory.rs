@@ -4,7 +4,7 @@ use chrono::{DateTime, Duration, Utc};
 use moa_core::RlsContext;
 use moa_core::TenantId;
 use moa_memory_graph::{
-    AgeGraphStore, GraphStore, LexicalStore, NodeLabel, NodeWriteIntent, PiiClass,
+    GraphStore, LexicalStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore,
 };
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::json;
@@ -50,8 +50,11 @@ fn scope(storage_partition_id: &str) -> RlsContext {
     tenant_scope(storage_partition_id)
 }
 
-fn graph_store(test_db: &TestDb, storage_partition_id: &str) -> AgeGraphStore {
-    AgeGraphStore::scoped_for_app_role(test_db.store().pool().clone(), scope(storage_partition_id))
+fn graph_store(test_db: &TestDb, storage_partition_id: &str) -> PostgresGraphStore {
+    PostgresGraphStore::scoped_for_app_role(
+        test_db.store().pool().clone(),
+        scope(storage_partition_id),
+    )
 }
 
 fn lexical_store(test_db: &TestDb, storage_partition_id: &str) -> LexicalStore {
@@ -82,13 +85,14 @@ fn fact(
         embedding: None,
         embedding_model: None,
         embedding_model_version: None,
+        embedding_text: None,
         actor_id: Uuid::now_v7().to_string(),
         actor_kind: "system".to_string(),
     }
 }
 
 async fn insert_fact(
-    graph: &AgeGraphStore,
+    graph: &PostgresGraphStore,
     storage_partition_id: &str,
     valid_from: DateTime<Utc>,
     confidence: f64,

@@ -1,8 +1,8 @@
 {
   "uid_seed": "45",
   "label": "Fact",
-  "name": "fact45 alice stack-choice alice picked apache age for relationship traversal",
-  "summary": "fact45 alice stack-choice alice picked apache age for relationship traversal",
+  "name": "fact45 alice stack-choice alice picked relational graph tables for relationship traversal",
+  "summary": "fact45 alice stack-choice alice picked relational graph tables for relationship traversal",
   "entity_uids": [
     "alice",
     "stack-choice"

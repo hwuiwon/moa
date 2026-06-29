@@ -3,16 +3,30 @@
 use chrono::{DateTime, Utc};
 use moa_core::RlsContext;
 use moa_core::TenantId;
+use moa_db::ScopedConn;
 use moa_memory_graph::{
-    AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
+    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
+    PostgresGraphStore,
 };
 use moa_session::testing;
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+#[derive(Debug, PartialEq)]
+struct EdgeIndexRow {
+    uid: Uuid,
+    label: String,
+    start_uid: Uuid,
+    end_uid: Uuid,
+    storage_partition_id: Option<String>,
+    user_id: Option<String>,
+    scope: String,
+    properties: serde_json::Value,
+}
 
 fn tenant_scope(storage_partition_id: impl AsRef<str>) -> RlsContext {
     let storage_partition_id = storage_partition_id.as_ref();
@@ -64,6 +78,7 @@ fn node_intent(
         embedding: None,
         embedding_model: None,
         embedding_model_version: None,
+        embedding_text: None,
         actor_id: Uuid::now_v7().to_string(),
         actor_kind: "system".to_string(),
     }
@@ -89,31 +104,54 @@ fn edge_intent(
     }
 }
 
-async fn rls_policy_names(pool: &PgPool, label: &str) -> Vec<String> {
-    sqlx::query_scalar::<_, String>(
+async fn set_app_role(conn: &mut sqlx::PgConnection) {
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(conn)
+        .await
+        .expect("set app role");
+}
+
+async fn edge_index_row(pool: &PgPool, storage_partition_id: &str, uid: Uuid) -> EdgeIndexRow {
+    let ctx = tenant_scope(storage_partition_id);
+    let mut conn = ScopedConn::begin(pool, &ctx)
+        .await
+        .expect("begin scoped edge_index read");
+    set_app_role(conn.as_mut()).await;
+    let row = sqlx::query(
         r#"
-        SELECT policyname
-        FROM pg_policies
-        WHERE schemaname = 'moa_graph'
-          AND tablename = $1
-        ORDER BY policyname
+        SELECT uid, label, start_uid, end_uid, storage_partition_id, user_id, scope, properties
+        FROM moa.edge_index
+        WHERE uid = $1
         "#,
     )
-    .bind(label)
-    .fetch_all(pool)
+    .bind(uid)
+    .fetch_one(conn.as_mut())
     .await
-    .expect("read AGE label RLS policies")
+    .expect("read edge_index row by uid");
+    conn.commit().await.expect("commit edge_index read");
+    EdgeIndexRow {
+        uid: row.try_get("uid").expect("decode edge uid"),
+        label: row.try_get("label").expect("decode edge label"),
+        start_uid: row.try_get("start_uid").expect("decode edge start"),
+        end_uid: row.try_get("end_uid").expect("decode edge end"),
+        storage_partition_id: row
+            .try_get("storage_partition_id")
+            .expect("decode edge storage partition"),
+        user_id: row.try_get("user_id").expect("decode edge user id"),
+        scope: row.try_get("scope").expect("decode edge scope"),
+        properties: row.try_get("properties").expect("decode edge properties"),
+    }
 }
 
 #[tokio::test]
 async fn knowledge_graph_labels_create_read_and_delete() {
-    // Pins: tenant-knowledge labels route through real AGE tables, RLS, read expansion, and purge.
+    // Pins: tenant-knowledge labels route through relational sidecars, read expansion, and purge.
     let _guard = TEST_LOCK.lock().await;
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
     let storage_partition_id = Uuid::now_v7().to_string();
-    let graph = AgeGraphStore::scoped_for_app_role(
+    let graph = PostgresGraphStore::scoped_for_app_role(
         session_store.pool().clone(),
         tenant_scope(storage_partition_id.clone()),
     );
@@ -158,15 +196,25 @@ async fn knowledge_graph_labels_create_read_and_delete() {
         (EdgeLabel::MemberOf, entity_uid, contact_group_uid),
         (EdgeLabel::DerivedFrom, contact_group_uid, source_uid),
     ] {
+        let intent = edge_intent(&storage_partition_id, label, start_uid, end_uid);
+        let edge_uid = intent.uid;
+        let expected_properties = intent.properties.clone();
         graph
-            .create_edge(edge_intent(
-                &storage_partition_id,
-                label,
-                start_uid,
-                end_uid,
-            ))
+            .create_edge(intent)
             .await
             .unwrap_or_else(|error| panic!("create {} edge: {error}", label.as_str()));
+        let row = edge_index_row(session_store.pool(), &storage_partition_id, edge_uid).await;
+        assert_eq!(row.uid, edge_uid);
+        assert_eq!(row.label, label.as_str());
+        assert_eq!(row.start_uid, start_uid);
+        assert_eq!(row.end_uid, end_uid);
+        assert_eq!(
+            row.storage_partition_id.as_deref(),
+            Some(storage_partition_id.as_str())
+        );
+        assert_eq!(row.user_id, None);
+        assert_eq!(row.scope, "tenant");
+        assert_eq!(row.properties, expected_properties);
     }
 
     let source_hits = graph
@@ -200,24 +248,6 @@ async fn knowledge_graph_labels_create_read_and_delete() {
             && hit.label == NodeLabel::ContactGroup
             && hit.edges == vec![EdgeLabel::MemberOf]
     }));
-
-    for label in ["Document", "Chunk", "ContactGroup", "CONTAINS", "MEMBER_OF"] {
-        let policy_names = rls_policy_names(session_store.pool(), label).await;
-        for expected in [
-            "owner_dev_access",
-            "rd_global",
-            "rd_tenant",
-            "rd_user",
-            "wr_global_promoter",
-            "wr_tenant",
-            "wr_user",
-        ] {
-            assert!(
-                policy_names.iter().any(|name| name == expected),
-                "{label} should include {expected} AGE RLS policy: {policy_names:?}"
-            );
-        }
-    }
 
     for uid in [
         source_uid,

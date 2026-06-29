@@ -46,6 +46,23 @@ pub struct PerLegRecall {
     pub lexical: MetricSummary,
 }
 
+/// Recall summaries split by lexical backend.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct PerLexicalBackendRecall {
+    /// Recall for facts reached by Postgres `tsvector` lexical search.
+    pub postgres_tsvector: MetricSummary,
+    /// Recall for facts reached by Turbopuffer BM25 lexical search.
+    pub turbopuffer_bm25: MetricSummary,
+    /// Recall for facts reached by a mixed BM25 and Postgres lexical route.
+    pub mixed: MetricSummary,
+}
+
+impl PerLexicalBackendRecall {
+    fn is_empty(value: &Self) -> bool {
+        *value == Self::default()
+    }
+}
+
 /// Suite-agnostic metrics every retrieval suite reports.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetrievalCoreMetrics {
@@ -61,6 +78,9 @@ pub struct RetrievalCoreMetrics {
     pub zero_recall_rate: MetricSummary,
     /// Recall by contributing retrieval leg.
     pub per_leg_recall: PerLegRecall,
+    /// Recall by lexical backend for candidates with lexical attribution.
+    #[serde(default, skip_serializing_if = "PerLexicalBackendRecall::is_empty")]
+    pub per_lexical_backend_recall: PerLexicalBackendRecall,
     /// p50 end-to-end retrieval latency in milliseconds.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub p50_retrieval_latency_ms: u64,
@@ -91,6 +111,7 @@ impl Default for RetrievalCoreMetrics {
                 vector: MetricSummary::default(),
                 lexical: MetricSummary::default(),
             },
+            per_lexical_backend_recall: PerLexicalBackendRecall::default(),
             p50_retrieval_latency_ms: 0,
             p95_retrieval_latency_ms: 0,
             cross_user_leak_count: 0,

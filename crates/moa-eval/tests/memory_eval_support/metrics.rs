@@ -5,15 +5,15 @@ use std::error::Error;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use moa_brain::retrieval::{LegSources, RetrievalHit, SourceTier};
+use moa_brain::retrieval::{LegSources, LexicalBackend, RetrievalHit, SourceTier};
 use moa_eval::kernel::{CostLedger, ProviderProvenance};
 use moa_eval::memory_eval::runner::QueryRewriteClassMetrics;
 use moa_eval::memory_eval::{
     BinaryProbeOutcome, BootstrapConfig, CORPUS_SCHEMA_VERSION, CandidateLegs, CorpusManifest,
     CorpusProfile, EntityFragmentationCounts, ExtractionPrecisionCounts, GoldNodeRecord,
-    GoldPiiStatus, GoldResolutionReport, GoldResolutionStatus, MemoryRetrievalEvalReport,
-    MetricSummary, ProbeResult, ProbeType, QueryRewritePolicy, RETRIEVAL_EVAL_CANDIDATE_K,
-    RETRIEVAL_EVAL_FINAL_K, RetrievedCandidate, TranscriptStyle,
+    GoldPiiStatus, GoldResolutionReport, GoldResolutionStatus, GraphExpansionEvalPolicy,
+    MemoryRetrievalEvalReport, MetricSummary, ProbeResult, ProbeType, QueryRewritePolicy,
+    RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K, RetrievedCandidate, TranscriptStyle,
     aggregate_retrieval_eval_from_counts, aggregate_retrieval_eval_from_diagnostic_counts,
     aggregate_retrieval_eval_with_diagnostics,
     aggregate_retrieval_eval_with_extraction_precision, benjamini_hochberg,
@@ -236,6 +236,7 @@ fn metric_candidates(base: u128, specs: &[CandidateSpec]) -> Vec<RetrievedCandid
                 uid,
                 score: 1.0 / (index + 1) as f64,
                 legs: spec.legs,
+                lexical_backend: None,
                 source_tier: SourceTier::UserMemory,
                 knowledge_chunk: None,
                 node: metric_node(uid),
@@ -363,6 +364,7 @@ fn memory_budget_report_with_reranker(
         final_k: RETRIEVAL_EVAL_FINAL_K,
         reranker_enabled,
         query_rewrite_policy: QueryRewritePolicy::Gated,
+        graph_expansion_policy: GraphExpansionEvalPolicy::Current,
         query_rewrite_call_count: 0,
         query_rewrite_skip_count: 0,
         query_rewrite_call_rate: 0.0,

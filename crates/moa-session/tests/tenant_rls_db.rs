@@ -278,6 +278,92 @@ async fn contact_rls_blocks_other_contact_memory_reads_db() {
 
 #[tokio::test]
 #[ignore]
+async fn contact_rls_includes_tenant_shared_memory_rows_db() {
+    // Pins: contact-scoped graph-memory reads include tenant-shared rows and that contact's rows.
+    let test_db = bootstrap_test_db().await.expect("bootstrap test db");
+    let tenant = tenant_id();
+    let contact_a = Uuid::now_v7();
+    let contact_b = Uuid::now_v7();
+    let tenant_shared_uid = Uuid::now_v7();
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.node_index
+            (uid, label, storage_partition_id, tenant_id, contact_id, name, pii_class, confidence, properties_summary)
+        VALUES
+            ($1, 'Fact', $4, $5, NULL, 'tenant shared memory', 'none', 0.9, $8),
+            ($2, 'Fact', $4, $5, $6, 'contact A private memory', 'none', 0.9, $9),
+            ($3, 'Fact', $4, $5, $7, 'contact B private memory', 'none', 0.9, $10)
+        "#,
+    )
+    .bind(tenant_shared_uid)
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .bind(tenant.to_string())
+    .bind(tenant.0)
+    .bind(contact_a)
+    .bind(contact_b)
+    .bind(Json(serde_json::json!({"owner": "tenant"})))
+    .bind(Json(serde_json::json!({"owner": "contact-a"})))
+    .bind(Json(serde_json::json!({"owner": "contact-b"})))
+    .execute(test_db.store().pool())
+    .await
+    .expect("seed tenant and contact memory rows");
+
+    let visible = count_as_app_role(
+        &test_db,
+        Some(tenant),
+        Some(contact_a),
+        false,
+        "SELECT COUNT(*) FROM moa.node_index WHERE name LIKE '% memory'",
+    )
+    .await;
+    let tenant_only_visible = count_as_app_role(
+        &test_db,
+        Some(tenant),
+        None,
+        false,
+        "SELECT COUNT(*) FROM moa.node_index WHERE name LIKE '% memory'",
+    )
+    .await;
+
+    assert_eq!(visible, 2);
+    assert_eq!(tenant_only_visible, 1);
+
+    let mut tx = begin_app_role_tx(
+        test_db.store().pool(),
+        test_db.schema_name(),
+        Some(tenant),
+        Some(contact_a),
+        false,
+    )
+    .await;
+    let update_result =
+        sqlx::query("UPDATE moa.node_index SET last_accessed_at = now() WHERE uid = $1")
+            .bind(tenant_shared_uid)
+            .execute(&mut *tx)
+            .await;
+    assert!(
+        update_result.is_err(),
+        "contact-scoped updates must not rehome tenant-shared memory rows"
+    );
+    tx.rollback()
+        .await
+        .expect("rollback failed contact-scoped update");
+
+    let shared_contact_id = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT contact_id FROM moa.node_index WHERE uid = $1",
+    )
+    .bind(tenant_shared_uid)
+    .fetch_one(test_db.store().pool())
+    .await
+    .expect("read tenant-shared memory contact id");
+
+    assert_eq!(shared_contact_id, None);
+}
+
+#[tokio::test]
+#[ignore]
 async fn workspace_control_plane_scope_can_read_all_tenants_db() {
     // Pins: explicit control-plane scope can read tenant rows across tenant boundaries.
     let test_db = bootstrap_test_db().await.expect("bootstrap test db");

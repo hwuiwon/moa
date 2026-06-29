@@ -20,14 +20,12 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: moa-postgres-age:kind
+          image: moa-postgres:kind
           imagePullPolicy: Never
           args:
             - postgres
             - -c
-            - shared_preload_libraries=age,pgaudit
-            - -c
-            - session_preload_libraries=age
+            - shared_preload_libraries=pgaudit
             - -c
             - wal_level=logical
             - -c

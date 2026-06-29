@@ -15,7 +15,7 @@ use moa_core::RlsContext;
 use moa_core::{MoaConfig, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
-    AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent,
+    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore,
 };
 use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiClassifier, PiiResult, PiiSpan, classify_heuristic,
@@ -726,8 +726,8 @@ fn graph_store(
     scope: RlsContext,
     fact: &EmbeddedFact,
     entity_vector: Option<Arc<dyn VectorStore>>,
-) -> AgeGraphStore {
-    let store = AgeGraphStore::scoped_for_app_role(pool.clone(), scope.clone());
+) -> PostgresGraphStore {
+    let store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope.clone());
     if fact.embedding.is_some() {
         store.with_vector_store(Arc::new(PgvectorStore::new_for_app_role(pool, scope)))
     } else if let Some(vector) = entity_vector {
@@ -778,6 +778,7 @@ fn node_intent(
         embedding: fact.embedding.clone(),
         embedding_model: fact.embedding_model.clone(),
         embedding_model_version: fact.embedding_model_version,
+        embedding_text: None,
         actor_id: turn_actor_id(turn),
         actor_kind: turn_actor_kind(turn).to_string(),
     }

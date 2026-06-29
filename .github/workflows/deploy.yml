@@ -32,7 +32,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Start Postgres AGE test stack
+      - name: Start Postgres test stack
         run: docker compose up -d postgres
 
       - name: Wait for Postgres
@@ -141,7 +141,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Start Postgres AGE test stack
+      - name: Start Postgres test stack
         run: docker compose up -d postgres
 
       - name: Wait for Postgres
@@ -184,7 +184,7 @@ jobs:
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     services:
       postgres:
-        image: ghcr.io/hwuiwon/moa-postgres-age:17.6-age1.7.0
+        image: pgvector/pgvector:pg17
         ports:
           - "5432:5432"
         env:

@@ -75,6 +75,7 @@ fn item(
         embedding,
         embedding_model: model.to_string(),
         embedding_model_version: version,
+        search_text: None,
         valid_to: None,
     }
 }

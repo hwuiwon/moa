@@ -16,7 +16,7 @@ The root workspace currently contains:
 | `moa-runtime-store` | Runtime cache implementations for process-local memory and optional Redis-backed coordination |
 | `moa-migrations` | Central refinery migrations, schema-isolated test replay helpers, and database DDL guardrails |
 | `moa-knowledge` | Tenant knowledge linked connectors, provider sync, parsing, normalization, block/chunk derivation, sync-run inspection, and graph ingestion assembly |
-| `moa-memory/graph` (`moa-memory-graph`) | Graph-memory sidecar tables, RLS, changelog, and AGE projection helpers |
+| `moa-memory/graph` (`moa-memory-graph`) | Relational graph-memory node and edge tables, sidecar indexes, RLS, and changelog |
 | `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path graph-memory ingestion DTOs and deterministic helpers |
 | `moa-memory/pii` (`moa-memory-pii`) | PII classification client and privacy-class aggregation helpers |
 | `moa-memory/vector` (`moa-memory-vector`) | VectorStore trait, Gemini/Cohere embedders, pgvector halfvec backend, and Turbopuffer opt-in backend |
@@ -67,7 +67,7 @@ The root workspace currently contains:
 
 | Service | Purpose |
 |---|---|
-| Postgres 17.6+ with Apache AGE, pgvector, and pgaudit | Session store, graph memory, event search, sidecar indexes, embeddings, learning tables |
+| Postgres 17.6+ with pgaudit; pgvector when the pgvector backend is enabled | Session store, relational graph memory, event search, sidecar indexes, embeddings, learning tables |
 | OpenFGA v1.8 | Authorization engine. Postgres-backed. Self-hosted by default; Auth0 FGA is a future managed swap-in. |
 | Redis or Valkey | Shared runtime cache for pacing and cross-replica transient references |
 | `moa-pii-service` | Out-of-process `openai/privacy-filter` inference for memory privacy classification |
@@ -80,7 +80,7 @@ Docker is used by the dev stack and optionally by local hand providers.
 | Service | Purpose |
 |---|---|
 | Restate | Durable orchestration engine |
-| Postgres/Neon | Product data store |
+| Postgres/Neon | Product data store and relational graph storage; pgvector is required when using the pgvector vector backend |
 | Redis or Valkey | Shared runtime cache for orchestrator replicas |
 | AWS S3 or GCS | Session attachment byte storage in cloud |
 | LLM provider | Model calls and optional embeddings |
@@ -149,7 +149,7 @@ Implemented architectural pillars:
 - Postgres session store with tenant-isolated event log, analytics, task segments, and learning log.
 - Postgres hand leases and Postgres-backed claim-check blobs for cross-pod sandbox and replay correctness.
 - Redis-backed runtime cache for the production orchestrator; the in-memory implementation is limited to isolated non-orchestrator tests and embeddings.
-- Graph memory with Postgres sidecar search, AGE projection helpers, pgvector semantic search, and privacy filtering.
+- Graph memory with relational Postgres nodes and edges, sidecar search, configured vector retrieval, and privacy filtering.
 - Query rewriting, segment creation, automated segment assessment, and tenant-level skill resolution-rate ranking.
 - Draft-only tenant skill distillation/improvement proposals with explicit review acceptance before learning-log emission; tenant learning remains tenant-local.
 - Lineage, eval score storage, cold export support, and opt-in compliance audit tables.

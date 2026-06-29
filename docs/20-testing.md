@@ -84,7 +84,7 @@ suffixes as they are touched.
 | --- | --- | --- |
 | Fast PR | `make test-fast` | none beyond local mock servers and tempdirs |
 | DB session | `make test-db-session` | Postgres only; schema isolation |
-| DB memory | `make test-db-memory` | Postgres with AGE/pgvector; currently serial until physical DB isolation lands |
+| DB memory | `make test-db-memory` | Postgres with relational graph/vector state; currently serial until physical DB isolation lands |
 | Authz pentest | `make test-authz-pentest` | Postgres with graph/vector state; writes the pentest report |
 | Service E2E | `make test-service-e2e` | clean Postgres/OpenFGA/Restate/PII harness with deterministic providers |
 | Provider E2E | `make test-provider-e2e` | service E2E harness plus live/billed provider credentials |

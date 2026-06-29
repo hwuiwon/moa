@@ -1,6 +1,6 @@
 # 04 — Memory Architecture
 
-_Graph memory, privacy filtering, sidecar indexes, pgvector semantic retrieval, and consolidation._
+_Relational graph memory, privacy filtering, sidecar indexes, vector retrieval, and consolidation._
 
 ## Principles
 
@@ -63,13 +63,17 @@ raw source payloads are never graph properties.
 
 ## Sidecar And Vector Indexes
 
-`moa-memory-graph` owns the graph tables and SQL sidecars used by operational reads. The sidecars provide fast filters for labels, names, scopes, timestamps, and active validity windows.
+`moa-memory-graph` owns relational Postgres graph storage. Nodes live in
+`moa.node_index`; edges live in `moa.edge_index`; SQL sidecars provide fast
+filters for labels, names, scopes, timestamps, active validity windows, ranking,
+and source hydration.
 
 `moa-memory-vector` owns vector storage for semantic retrieval. Embeddings are
 written for graph nodes that should participate in retrieval, and hybrid
 retrieval fuses graph/sidecar candidates with vector hits. The default backend
 is pgvector; large or isolation-sensitive tenants can opt into Turbopuffer
-namespaces through the tenant vector backend setting.
+namespaces through the tenant vector backend setting. Turbopuffer is a vector
+backend only; graph storage stays in relational Postgres nodes and edges.
 
 `moa.node_index` also carries derived ranking metadata. `quality_score` is a
 neutral-by-default `0.5` prior that FeatureV1 centers to zero contribution; a
@@ -86,12 +90,10 @@ the caller's stored facts. The lexical leg matches an OR `to_tsquery` over
 extracted terms plus stems and ranks by `ts_rank`; the prior AND semantics
 meant conversational queries almost never matched short fact names.
 
-Known scaling caveat: graph expansion scans the AGE vertex union under RLS
-policies that evaluate `moa.age_property` per row, so its cost grows with
-total graph size across tenants rather than with the caller's tenant. A
-sidecar vertex-id column on `moa.node_index` would let expansion drive from
-the RLS-filtered sidecar instead; until then the 250ms graph budget bounds the
-latency and silently trims as-of expansion on large shared databases.
+Known scaling caveat: graph expansion uses bounded recursive SQL over
+`moa.node_index` and `moa.edge_index` under RLS, so cost grows with the caller's
+tenant graph degree and traversal depth. The 250ms graph budget bounds latency
+and silently trims as-of expansion on large shared databases.
 
 Embedder selection is per tenant and uses a single `provider:model` selector,
 for example `cohere:embed-v4.0` or `gemini:gemini-embedding-2`.

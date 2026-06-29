@@ -352,6 +352,7 @@ impl EmbeddingRow {
             embedding,
             embedding_model: self.embedding_model.clone(),
             embedding_model_version: self.embedding_model_version,
+            search_text: None,
             valid_to: self.valid_to,
         })
     }

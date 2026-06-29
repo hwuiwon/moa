@@ -3,9 +3,9 @@
 /// Error returned by the graph-memory crate.
 #[derive(Debug, thiserror::Error)]
 pub enum GraphError {
-    /// An Apache AGE Cypher query failed or returned an unexpected shape.
-    #[error("cypher: {0}")]
-    Cypher(String),
+    /// A relational graph query failed or returned an unexpected shape.
+    #[error("graph query: {0}")]
+    GraphQuery(String),
     /// A SQL sidecar query failed.
     #[error("sidecar: {0}")]
     Sidecar(#[from] sqlx::Error),

@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: ghcr.io/hwuiwon/moa-postgres-age:17.6-age1.7.0
+        image: ghcr.io/hwuiwon/moa-postgres:pg17-pgvector0.8.2-pgaudit
         ports:
           - "5432:5432"
         env:

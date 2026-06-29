@@ -8,7 +8,8 @@ use moa_core::RlsContext;
 use moa_core::{ContactId, SessionId, TenantId};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
-    AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
+    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
+    PostgresGraphStore,
 };
 use moa_memory_ingest::{
     ExtractedFact, ExtractedFactScopeHint, IngestCtx, RrfPlusJudgeDetector, ScriptedFactExtractor,
@@ -23,6 +24,8 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use tokio::sync::Mutex;
 use uuid::Uuid;
+use wiremock::matchers::{body_string_contains, method};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use moa_brain::planning::{PlanningCtx, QueryPlanner, QueryRetrievalCtx};
 use moa_brain::retrieval::{
@@ -93,7 +96,7 @@ async fn query_retrieval_ctx_defaults_reranker_off_and_requires_explicit_opt_in(
         PgvectorStore::new_for_app_role(pool.clone(), scope_context.clone()),
     );
     let graph: Arc<dyn GraphStore> = Arc::new(
-        AgeGraphStore::scoped_for_app_role(pool.clone(), scope_context)
+        PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_context)
             .with_vector_store(vector.clone()),
     );
     let hybrid = Arc::new(
@@ -171,16 +174,20 @@ fn utc(value: &str) -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
-fn graph_store(pool: &PgPool, storage_partition_id: &str) -> AgeGraphStore {
+fn graph_store(pool: &PgPool, storage_partition_id: &str) -> PostgresGraphStore {
     let scope = tenant_scope(storage_partition_id);
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
-    AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
+    PostgresGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
 }
 
-fn user_graph_store(pool: &PgPool, storage_partition_id: &str, user_id: &str) -> AgeGraphStore {
+fn user_graph_store(
+    pool: &PgPool,
+    storage_partition_id: &str,
+    user_id: &str,
+) -> PostgresGraphStore {
     let scope = contact_scope(storage_partition_id, user_id);
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
-    AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
+    PostgresGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
 }
 
 fn scripted_user_fact(summary: &str) -> ExtractedFact {
@@ -227,6 +234,7 @@ fn node_intent(
         embedding,
         embedding_model: Some("test-model".to_string()),
         embedding_model_version: Some(1),
+        embedding_text: None,
         actor_id: Uuid::now_v7().to_string(),
         actor_kind: "system".to_string(),
     }
@@ -332,6 +340,109 @@ async fn set_workspace_embedder_state(pool: &PgPool, storage_partition_id: &str,
     conn.commit()
         .await
         .expect("commit workspace embedder transaction");
+}
+
+async fn seed_knowledge_document_chunks(
+    pool: &PgPool,
+    storage_partition_id: &str,
+    object_slug: &str,
+    title: &str,
+    source_uri: &str,
+    chunks: &[(Uuid, String)],
+) {
+    let tenant_id = tenant_id_from_storage_partition_id(storage_partition_id);
+    let connection_uid = Uuid::now_v7();
+    let object_uid = Uuid::now_v7();
+    let version_uid = Uuid::now_v7();
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_connections (
+            connection_uid, tenant_id, storage_partition_id, provider, provider_config_key,
+            provider_connection_id, connector, credential_ref, status, metadata
+        )
+        VALUES ($1, $2, $3, 'merge', $4, $5, 'drive',
+                'vault://hybrid-duplicate-test', 'active', '{}'::jsonb)
+        "#,
+    )
+    .bind(connection_uid)
+    .bind(tenant_id.0)
+    .bind(storage_partition_id)
+    .bind(format!("duplicate-crowding-{object_slug}"))
+    .bind(format!("acct-{object_slug}"))
+    .execute(pool)
+    .await
+    .expect("insert duplicate-crowding knowledge connection");
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_objects (
+            object_uid, tenant_id, storage_partition_id, connection_id, object_type,
+            external_object_id, title, change_token, source_uri, status, metadata
+        )
+        VALUES ($1, $2, $3, $4, 'document', $5, $6,
+                'etag-1', $7, 'active', '{}'::jsonb)
+        "#,
+    )
+    .bind(object_uid)
+    .bind(tenant_id.0)
+    .bind(storage_partition_id)
+    .bind(connection_uid)
+    .bind(object_slug)
+    .bind(title)
+    .bind(source_uri)
+    .execute(pool)
+    .await
+    .expect("insert duplicate-crowding knowledge object");
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_document_versions (
+            document_version_uid, tenant_id, storage_partition_id, object_id,
+            parser_provider, parser_job_id, content_hash, metadata
+        )
+        VALUES ($1, $2, $3, $4, 'native', 'native-job-duplicate-crowding', $5, '{}'::jsonb)
+        "#,
+    )
+    .bind(version_uid)
+    .bind(tenant_id.0)
+    .bind(storage_partition_id)
+    .bind(object_uid)
+    .bind(format!("content-{object_slug}"))
+    .execute(pool)
+    .await
+    .expect("insert duplicate-crowding document version");
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        r#"
+        INSERT INTO moa.knowledge_chunks (
+            chunk_uid, tenant_id, storage_partition_id, document_version_id, graph_node_uid,
+            chunk_hash, block_hashes, heading_path, text, ordinal, token_count, metadata
+        )
+        "#,
+    );
+    builder.push_values(
+        chunks.iter().enumerate(),
+        |mut row, (index, (graph_uid, text))| {
+            row.push_bind(Uuid::now_v7())
+                .push_bind(tenant_id.0)
+                .push_bind(storage_partition_id)
+                .push_bind(version_uid)
+                .push_bind(*graph_uid)
+                .push_bind(format!("chunk-{object_slug}-{index}"))
+                .push_bind(vec![format!("block-{object_slug}-{index}")])
+                .push_bind(vec!["Diagnostics".to_string(), title.to_string()])
+                .push_bind(text)
+                .push_bind(i32::try_from(index).expect("test chunk ordinal fits in i32"))
+                .push_bind(i32::try_from(text.len() / 4).expect("test token count fits in i32"))
+                .push_bind(json!({}));
+        },
+    );
+    builder
+        .build()
+        .execute(pool)
+        .await
+        .expect("insert duplicate-crowding knowledge chunks");
 }
 
 #[tokio::test]
@@ -511,6 +622,121 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
 }
 
 #[tokio::test]
+async fn duplicate_crowding_keeps_distinct_supporting_knowledge_chunk() {
+    // Pins: duplicate-heavy tenant knowledge from one document must not crowd
+    // a distinct supporting chunk out of the final context window.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool().clone();
+    let storage_partition_id = test_storage_partition_id();
+    let graph = graph_store(&pool, &storage_partition_id);
+    let query = "duplicate crowding diagnostic primary mitigation escalation owner";
+    let duplicate_text = "duplicate crowding diagnostic primary mitigation rerank cap";
+    let distinct_text = "duplicate crowding diagnostic escalation owner retrieval team";
+    let reference_time = utc("2026-06-01T00:00:00Z");
+
+    set_workspace_embedder_state(&pool, &storage_partition_id, "test-model").await;
+
+    let mut duplicate_chunks = Vec::new();
+    let mut duplicate_uids = Vec::new();
+    for index in 0..5 {
+        let text = format!("{duplicate_text} duplicate paragraph {}", index + 1);
+        let mut intent = node_intent(
+            &storage_partition_id,
+            NodeLabel::Chunk,
+            &text,
+            Some(deterministic_vector(query)),
+        );
+        intent.valid_from = reference_time - chrono::Duration::days(1);
+        let uid = graph
+            .create_node(intent)
+            .await
+            .expect("create duplicate chunk node");
+        duplicate_uids.push(uid);
+        duplicate_chunks.push((uid, text));
+    }
+    seed_knowledge_document_chunks(
+        &pool,
+        &storage_partition_id,
+        "duplicate-diagnostic-source",
+        "Duplicate Diagnostic Source",
+        "https://example.test/duplicate-diagnostic",
+        &duplicate_chunks,
+    )
+    .await;
+
+    let mut distinct = node_intent(
+        &storage_partition_id,
+        NodeLabel::Chunk,
+        distinct_text,
+        Some(deterministic_vector(query)),
+    );
+    distinct.valid_from = reference_time - chrono::Duration::days(180);
+    let distinct_uid = graph
+        .create_node(distinct)
+        .await
+        .expect("create distinct supporting chunk node");
+    seed_knowledge_document_chunks(
+        &pool,
+        &storage_partition_id,
+        "distinct-supporting-source",
+        "Distinct Supporting Source",
+        "https://example.test/distinct-supporting",
+        &[(distinct_uid, distinct_text.to_string())],
+    )
+    .await;
+
+    let vector = PgvectorStore::new_for_app_role(pool.clone(), tenant_scope(&storage_partition_id));
+    let retriever = HybridRetriever::new(pool.clone(), Arc::new(graph.clone()), Arc::new(vector))
+        .with_assume_app_role(true);
+    let hits = retriever
+        .retrieve(RetrievalRequest {
+            seeds: Vec::new(),
+            query_text: query.to_string(),
+            query_embedding: deterministic_vector(query),
+            scope: tenant_memory_scope(&storage_partition_id),
+            label_filter: Some(vec![NodeLabel::Chunk]),
+            max_pii_class: PiiClass::Restricted,
+            k_final: 3,
+            use_reranker: false,
+            strategy: None,
+            as_of: None,
+            ranking_reference_time: Some(reference_time),
+            lineage: None,
+            disable_leg_timeouts: true,
+            disable_graph_expansion: true,
+        })
+        .await
+        .expect("retrieve duplicate-heavy knowledge chunks");
+
+    assert_eq!(hits.len(), 3, "{hits:#?}");
+    let duplicate_count = hits
+        .iter()
+        .filter(|hit| duplicate_uids.contains(&hit.uid))
+        .count();
+    assert!(
+        hits.iter().any(|hit| hit.uid == distinct_uid),
+        "distinct supporting chunk was crowded out; duplicate_count={duplicate_count}; hits={hits:#?}"
+    );
+    assert!(
+        duplicate_count <= 2,
+        "one duplicate source exceeded the final-hit cap: {hits:#?}"
+    );
+
+    for uid in duplicate_uids.into_iter().chain([distinct_uid]) {
+        let _ = graph
+            .hard_purge(uid, "redacted:hybrid-duplicate-crowding-test")
+            .await;
+    }
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
 #[ignore = "requires Postgres test database"]
 async fn user_scope_fact_invisible_to_other_user_at_any_k() {
     // Pins: contact-scoped facts written by ingestion are structurally hidden from other contacts.
@@ -528,7 +754,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
         workspace_scope.clone(),
     ));
     let ingest_graph = Arc::new(
-        AgeGraphStore::scoped_for_app_role(pool.clone(), workspace_scope)
+        PostgresGraphStore::scoped_for_app_role(pool.clone(), workspace_scope)
             .with_vector_store(ingest_vector.clone()),
     );
     let summary = "The user prefers the private green deployment dashboard";
@@ -800,6 +1026,282 @@ async fn temporal_turbopuffer_unsupported_as_of_falls_back_to_pgvector() {
 
     let _ = graph
         .hard_purge(fact_uid, "redacted:hybrid-temporal-test")
+        .await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn turbopuffer_backend_uses_bm25_for_lexical_candidates_db_memory() {
+    // Pins: active Turbopuffer storage partitions use the Turbopuffer BM25 leg
+    // for lexical candidates when the request has no historical as_of filter.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = test_storage_partition_id();
+    let graph = graph_store(session_store.pool(), &storage_partition_id);
+    set_workspace_embedder_state(session_store.pool(), &storage_partition_id, "test-model").await;
+    let fact = "turbopuffer bm25 exact identifier abc-123";
+    let fact_uid = graph
+        .create_node(node_intent(
+            &storage_partition_id,
+            NodeLabel::Chunk,
+            fact,
+            None,
+        ))
+        .await
+        .expect("create lexical fact");
+    set_storage_partition_vector_backend(
+        session_store.pool(),
+        &storage_partition_id,
+        "turbopuffer",
+    )
+    .await;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("BM25"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rows": [{ "id": fact_uid.to_string(), "$score": 5.0 }]
+        })))
+        .mount(&server)
+        .await;
+
+    let vector = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(&storage_partition_id),
+    );
+    let turbopuffer = TurbopufferStore::new(
+        server.uri(),
+        SecretString::from("unused-key"),
+        "bm25-routing",
+        false,
+    )
+    .expect("build Turbopuffer store");
+    let retriever = HybridRetriever::new(
+        session_store.pool().clone(),
+        Arc::new(graph.clone()),
+        Arc::new(vector),
+    )
+    .with_turbopuffer(Some(Arc::new(turbopuffer)))
+    .with_assume_app_role(true);
+
+    let hits = retriever
+        .retrieve(RetrievalRequest {
+            seeds: Vec::new(),
+            query_text: "abc-123".to_string(),
+            query_embedding: Vec::new(),
+            scope: tenant_memory_scope(&storage_partition_id),
+            label_filter: Some(vec![NodeLabel::Chunk]),
+            max_pii_class: PiiClass::Restricted,
+            k_final: 5,
+            use_reranker: false,
+            strategy: None,
+            as_of: None,
+            ranking_reference_time: None,
+            lineage: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: true,
+        })
+        .await
+        .expect("retrieve through Turbopuffer BM25");
+
+    assert_eq!(hits.first().map(|hit| hit.uid), Some(fact_uid));
+    assert!(hits[0].legs.lexical, "{hits:?}");
+    assert!(!hits[0].legs.vector, "{hits:?}");
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose captured requests");
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("BM25 body is JSON");
+    assert_eq!(body["rank_by"], json!(["content", "BM25", "abc-123"]));
+
+    let _ = graph
+        .hard_purge(fact_uid, "redacted:hybrid-bm25-test")
+        .await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn turbopuffer_backend_keeps_postgres_lexical_for_fact_candidates_db_memory() {
+    // Pins: BM25 is dark for non-chunk rows, so Turbopuffer-backed tenants keep
+    // using Postgres lexical for fact/entity style graph memory.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = test_storage_partition_id();
+    let graph = graph_store(session_store.pool(), &storage_partition_id);
+    set_workspace_embedder_state(session_store.pool(), &storage_partition_id, "test-model").await;
+    let fact = "turbopuffer fact exact identifier fact-456";
+    let fact_uid = graph
+        .create_node(node_intent(
+            &storage_partition_id,
+            NodeLabel::Fact,
+            fact,
+            None,
+        ))
+        .await
+        .expect("create fact node");
+    set_storage_partition_vector_backend(
+        session_store.pool(),
+        &storage_partition_id,
+        "turbopuffer",
+    )
+    .await;
+
+    let server = MockServer::start().await;
+    let vector = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(&storage_partition_id),
+    );
+    let turbopuffer = TurbopufferStore::new(
+        server.uri(),
+        SecretString::from("unused-key"),
+        "bm25-fact-postgres",
+        false,
+    )
+    .expect("build Turbopuffer store");
+    let retriever = HybridRetriever::new(
+        session_store.pool().clone(),
+        Arc::new(graph.clone()),
+        Arc::new(vector),
+    )
+    .with_turbopuffer(Some(Arc::new(turbopuffer)))
+    .with_assume_app_role(true);
+
+    let hits = retriever
+        .retrieve(RetrievalRequest {
+            seeds: Vec::new(),
+            query_text: "fact-456".to_string(),
+            query_embedding: Vec::new(),
+            scope: tenant_memory_scope(&storage_partition_id),
+            label_filter: Some(vec![NodeLabel::Fact]),
+            max_pii_class: PiiClass::Restricted,
+            k_final: 5,
+            use_reranker: false,
+            strategy: None,
+            as_of: None,
+            ranking_reference_time: None,
+            lineage: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: true,
+        })
+        .await
+        .expect("retrieve fact through Postgres lexical");
+
+    assert_eq!(hits.first().map(|hit| hit.uid), Some(fact_uid));
+    assert!(hits[0].legs.lexical, "{hits:?}");
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose captured requests");
+    assert_eq!(requests.len(), 0, "fact lexical must not call BM25");
+
+    let _ = graph
+        .hard_purge(fact_uid, "redacted:hybrid-bm25-fact-postgres-test")
+        .await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn turbopuffer_bm25_error_falls_back_to_postgres_lexical_db_memory() {
+    // Pins: BM25 provider errors fail open to the existing Postgres lexical leg
+    // without losing lexical attribution.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = test_storage_partition_id();
+    let graph = graph_store(session_store.pool(), &storage_partition_id);
+    set_workspace_embedder_state(session_store.pool(), &storage_partition_id, "test-model").await;
+    let fact = "fallback postgres lexical token xyz-987";
+    let fact_uid = graph
+        .create_node(node_intent(
+            &storage_partition_id,
+            NodeLabel::Chunk,
+            fact,
+            None,
+        ))
+        .await
+        .expect("create lexical fact");
+    set_storage_partition_vector_backend(
+        session_store.pool(),
+        &storage_partition_id,
+        "turbopuffer",
+    )
+    .await;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("BM25"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "status": "error",
+            "error": "bm25 unavailable"
+        })))
+        .mount(&server)
+        .await;
+
+    let vector = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(&storage_partition_id),
+    );
+    let turbopuffer = TurbopufferStore::new(
+        server.uri(),
+        SecretString::from("unused-key"),
+        "bm25-fallback",
+        false,
+    )
+    .expect("build Turbopuffer store");
+    let retriever = HybridRetriever::new(
+        session_store.pool().clone(),
+        Arc::new(graph.clone()),
+        Arc::new(vector),
+    )
+    .with_turbopuffer(Some(Arc::new(turbopuffer)))
+    .with_assume_app_role(true);
+
+    let hits = retriever
+        .retrieve(RetrievalRequest {
+            seeds: Vec::new(),
+            query_text: "xyz-987".to_string(),
+            query_embedding: Vec::new(),
+            scope: tenant_memory_scope(&storage_partition_id),
+            label_filter: Some(vec![NodeLabel::Chunk]),
+            max_pii_class: PiiClass::Restricted,
+            k_final: 5,
+            use_reranker: false,
+            strategy: None,
+            as_of: None,
+            ranking_reference_time: None,
+            lineage: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: true,
+        })
+        .await
+        .expect("retrieve through Postgres lexical fallback");
+
+    assert_eq!(hits.first().map(|hit| hit.uid), Some(fact_uid));
+    assert!(hits[0].legs.lexical, "{hits:?}");
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose captured requests");
+    assert_eq!(requests.len(), 1);
+
+    let _ = graph
+        .hard_purge(fact_uid, "redacted:hybrid-bm25-fallback-test")
         .await;
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)

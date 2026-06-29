@@ -23,7 +23,7 @@ pub struct ChangelogRecord {
     pub op: String,
     /// Target kind: `node` or `edge`.
     pub target_kind: String,
-    /// AGE label of the node or edge that changed.
+    /// Graph label of the node or edge that changed.
     pub target_label: String,
     /// Stable external target identity.
     pub target_uid: Uuid,

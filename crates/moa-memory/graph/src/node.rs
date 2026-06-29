@@ -1,4 +1,4 @@
-//! SQL projection helpers for AGE graph nodes.
+//! SQL projection helpers for graph nodes.
 
 use std::str::FromStr;
 
@@ -12,9 +12,9 @@ use crate::{GraphError, Result};
 /// One projected row from `moa.node_index`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeIndexRow {
-    /// Stable external graph-node identity, mirrored from the AGE `uid` property.
+    /// Stable external graph-node identity.
     pub uid: Uuid,
-    /// AGE vertex label.
+    /// Graph node label.
     pub label: NodeLabel,
     /// Storage partition owner for tenant and contact scoped rows.
     pub storage_partition_id: Option<String>,
@@ -59,35 +59,35 @@ impl<'r> FromRow<'r, PgRow> for NodeIndexRow {
     }
 }
 
-/// Supported AGE vertex labels for graph memory nodes.
+/// Supported graph node labels for graph memory nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "text", rename_all = "PascalCase")]
 #[serde(rename_all = "PascalCase")]
 pub enum NodeLabel {
-    /// Entity vertex label.
+    /// Entity node label.
     Entity,
-    /// Concept vertex label.
+    /// Concept node label.
     Concept,
-    /// Decision vertex label.
+    /// Decision node label.
     Decision,
-    /// Incident vertex label.
+    /// Incident node label.
     Incident,
-    /// Lesson vertex label.
+    /// Lesson node label.
     Lesson,
-    /// Fact vertex label.
+    /// Fact node label.
     Fact,
-    /// Source vertex label.
+    /// Source node label.
     Source,
-    /// Tenant knowledge document vertex label.
+    /// Tenant knowledge document node label.
     Document,
-    /// Tenant knowledge chunk vertex label.
+    /// Tenant knowledge chunk node label.
     Chunk,
-    /// Tenant knowledge contact-group vertex label.
+    /// Tenant knowledge contact-group node label.
     ContactGroup,
 }
 
 impl NodeLabel {
-    /// Returns the canonical SQL and AGE label string.
+    /// Returns the canonical SQL label string.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Entity => "Entity",
@@ -170,7 +170,7 @@ impl FromStr for PiiClass {
 pub struct NodeWriteIntent {
     /// Stable external graph-node identity.
     pub uid: Uuid,
-    /// AGE vertex label.
+    /// Graph node label.
     pub label: NodeLabel,
     /// Storage partition scope for tenant and contact rows.
     pub storage_partition_id: Option<String>,
@@ -180,7 +180,7 @@ pub struct NodeWriteIntent {
     pub scope: String,
     /// Human-readable node name projected into `moa.node_index`.
     pub name: String,
-    /// Node properties serialized into AGE `agtype`.
+    /// Node properties stored in the relational projection.
     pub properties: serde_json::Value,
     /// PII handling class for retrieval filtering.
     pub pii_class: PiiClass,
@@ -194,6 +194,9 @@ pub struct NodeWriteIntent {
     pub embedding_model: Option<String>,
     /// Optional embedding model version.
     pub embedding_model_version: Option<i32>,
+    /// Retrieval-safe source text used to create the embedding, when it may be indexed for search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_text: Option<String>,
     /// Principal identifier that triggered the mutation.
     pub actor_id: String,
     /// Principal kind written to the graph changelog.
@@ -205,7 +208,7 @@ pub struct NodeWriteIntent {
 pub struct NodePropertyUpdateIntent {
     /// Stable graph-node identity to update.
     pub uid: Uuid,
-    /// Replacement node properties serialized into AGE and the SQL sidecar.
+    /// Replacement node properties stored in the SQL sidecar.
     pub properties: serde_json::Value,
     /// Replacement confidence. `None` preserves the existing sidecar confidence.
     pub confidence: Option<f64>,

@@ -102,7 +102,7 @@ async fn slow_path_ingests_simple_document_and_writes_expected_facts_to_graph() 
             node_confidence(test_db.store().pool(), storage_partition_id, row.uid).await,
             expected.confidence
         );
-        assert_eq!(row.scope.as_str(), "user");
+        assert_eq!(row.scope.as_str(), "contact");
         assert_eq!(row.contact_id.as_deref(), Some(SLOW_PATH_CONTACT_ID));
     }
     assert_eq!(
@@ -333,13 +333,13 @@ async fn slow_path_ingests_supersession_when_new_fact_replaces_existing() {
         fact_rows(test_db.store().pool(), storage_partition_id)
             .await
             .len(),
-        1
+        0
     );
     assert_eq!(
         user_fact_rows(test_db.store().pool(), storage_partition_id)
             .await
             .len(),
-        1
+        2
     );
     let active_user_rows =
         active_user_fact_rows(test_db.store().pool(), storage_partition_id).await;

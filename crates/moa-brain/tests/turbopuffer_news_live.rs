@@ -9,7 +9,7 @@ use moa_brain::retrieval::{HybridRetriever, RetrievalRequest};
 use moa_core::RlsContext;
 use moa_core::{ContactId, SessionId, StoragePartitionId, TenantId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
-use moa_memory_graph::{AgeGraphStore, PiiClass};
+use moa_memory_graph::{PiiClass, PostgresGraphStore};
 use moa_memory_ingest::{SessionTurn, ingest_turn_direct_with_pool};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{
@@ -162,7 +162,7 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
         pool.clone(),
         contact_scope.clone(),
     ));
-    let graph = Arc::new(AgeGraphStore::scoped_for_app_role(
+    let graph = Arc::new(PostgresGraphStore::scoped_for_app_role(
         pool.clone(),
         contact_scope,
     ));

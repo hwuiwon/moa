@@ -13,7 +13,7 @@ use moa_core::{
 };
 use moa_db::ScopedConn;
 use moa_memory_graph::{
-    AgeGraphStore, GraphError, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
+    GraphError, GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore,
 };
 use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiClassifier, PiiError, PiiResult, redact_text,
@@ -388,6 +388,7 @@ fn build_intent(
         embedding: Some(embedding.to_vec()),
         embedding_model: Some(embedding_model.to_string()),
         embedding_model_version: Some(embedding_model_version),
+        embedding_text: None,
         actor_id: req.actor_id.to_string(),
         actor_kind: req.actor_kind.clone(),
     }
@@ -651,7 +652,7 @@ fn runtime_fast_ctx(scope: RlsContext) -> Result<FastPathCtx, FastError> {
     let pool = runtime.pool().clone();
     let vector: Arc<dyn VectorStore> = Arc::new(PgvectorStore::new(pool.clone(), scope.clone()));
     let graph = Arc::new(
-        AgeGraphStore::scoped(pool.clone(), scope.clone()).with_vector_store(vector.clone()),
+        PostgresGraphStore::scoped(pool.clone(), scope.clone()).with_vector_store(vector.clone()),
     );
     let embedder = Arc::new(
         CohereV4Embedder::new(cohere_api_key(runtime.cohere_api_key())?)

@@ -9,7 +9,7 @@ use moa_core::RlsContext;
 use moa_core::wire::privacy::ContactErasureScope;
 use moa_core::{ContactId, TenantId};
 use moa_lineage_audit::PiiVault;
-use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
 use moa_memory_pii::erasure::begin_app_scoped_tx;
 use moa_memory_vector::PgvectorStore;
 use moa_orchestrator::services::privacy::repository::collect_privacy_export_data_sections;
@@ -79,10 +79,10 @@ fn tenant_workspace() -> (Uuid, String) {
     (tenant_id, tenant_id.to_string())
 }
 
-fn erase_test_graph(pool: &PgPool, tenant_id: Uuid, contact_id: Uuid) -> AgeGraphStore {
+fn erase_test_graph(pool: &PgPool, tenant_id: Uuid, contact_id: Uuid) -> PostgresGraphStore {
     let scope = RlsContext::contact(TenantId::from(tenant_id), ContactId(contact_id));
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
-    AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
+    PostgresGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
 }
 
 fn erase_test_intent(storage_partition_id: &str, user_id: &str, name: &str) -> NodeWriteIntent {
@@ -101,6 +101,7 @@ fn erase_test_intent(storage_partition_id: &str, user_id: &str, name: &str) -> N
         embedding: Some(basis_vector()),
         embedding_model: Some("test-model".to_string()),
         embedding_model_version: Some(1),
+        embedding_text: None,
         actor_id: user_id.to_string(),
         actor_kind: "contact".to_string(),
     }

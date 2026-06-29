@@ -42,7 +42,7 @@ impl Stack {
                 self.pool.clone(),
                 scope.clone(),
             ));
-            let graph = AgeGraphStore::scoped_for_app_role(self.pool.clone(), scope)
+            let graph = PostgresGraphStore::scoped_for_app_role(self.pool.clone(), scope)
                 .with_vector_store(vector);
 
             let fact_texts = (0..cfg.facts_per_tenant)
@@ -79,6 +79,7 @@ impl Stack {
                         embedding: Some(embedding),
                         embedding_model: Some(self.embedder.model_name().to_string()),
                         embedding_model_version: Some(self.embedder.model_version()),
+                        embedding_text: None,
                         actor_id: Uuid::now_v7().to_string(),
                         actor_kind: "system".to_string(),
                     })
@@ -130,7 +131,7 @@ impl TenantRetriever {
             scope_ctx.clone(),
         ));
         let graph = Arc::new(
-            AgeGraphStore::scoped_for_app_role(pool.clone(), scope_ctx)
+            PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_ctx)
                 .with_vector_store(vector.clone()),
         );
         let hybrid = HybridRetriever::new(pool.clone(), graph, vector).with_assume_app_role(true);

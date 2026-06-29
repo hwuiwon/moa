@@ -7,8 +7,8 @@ use moa_core::RlsContext;
 use moa_core::TenantId;
 use moa_db::ScopedConn;
 use moa_memory_graph::{
-    AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
-    cypher,
+    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
+    PostgresGraphStore,
 };
 use moa_memory_vector::{PgvectorStore, VectorQuery, VectorStore};
 use moa_session::testing;
@@ -18,6 +18,18 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+#[derive(Debug, PartialEq)]
+struct EdgeIndexRow {
+    uid: Uuid,
+    label: String,
+    start_uid: Uuid,
+    end_uid: Uuid,
+    storage_partition_id: Option<String>,
+    user_id: Option<String>,
+    scope: String,
+    properties: serde_json::Value,
+}
 
 fn tenant_scope(storage_partition_id: impl AsRef<str>) -> RlsContext {
     let storage_partition_id = storage_partition_id.as_ref();
@@ -49,10 +61,10 @@ fn basis_vector(index: usize) -> Vec<f32> {
     vector
 }
 
-fn graph_store(pool: &PgPool, storage_partition_id: &str) -> AgeGraphStore {
+fn graph_store(pool: &PgPool, storage_partition_id: &str) -> PostgresGraphStore {
     let scope = tenant_scope(storage_partition_id);
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
-    AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
+    PostgresGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
 }
 
 fn node_intent(
@@ -76,6 +88,7 @@ fn node_intent(
         embedding,
         embedding_model: Some("test-model".to_string()),
         embedding_model_version: Some(1),
+        embedding_text: None,
         actor_id: Uuid::now_v7().to_string(),
         actor_kind: "system".to_string(),
     }
@@ -178,23 +191,103 @@ async fn node_valid_to(
     valid_to
 }
 
-async fn supersedes_edge_exists(
+async fn edge_index_row(pool: &PgPool, storage_partition_id: &str, uid: Uuid) -> EdgeIndexRow {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
+    let row = sqlx::query(
+        r#"
+        SELECT uid, label, start_uid, end_uid, storage_partition_id, user_id, scope, properties
+        FROM moa.edge_index
+        WHERE uid = $1
+        "#,
+    )
+    .bind(uid)
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("read edge_index row by uid");
+    conn.commit().await.expect("commit edge_index row read");
+    EdgeIndexRow {
+        uid: row.try_get("uid").expect("decode edge uid"),
+        label: row.try_get("label").expect("decode edge label"),
+        start_uid: row.try_get("start_uid").expect("decode edge start"),
+        end_uid: row.try_get("end_uid").expect("decode edge end"),
+        storage_partition_id: row
+            .try_get("storage_partition_id")
+            .expect("decode edge storage partition"),
+        user_id: row.try_get("user_id").expect("decode edge user id"),
+        scope: row.try_get("scope").expect("decode edge scope"),
+        properties: row.try_get("properties").expect("decode edge properties"),
+    }
+}
+
+async fn assert_edge_index_row(
+    pool: &PgPool,
+    storage_partition_id: &str,
+    uid: Uuid,
+    label: EdgeLabel,
+    start_uid: Uuid,
+    end_uid: Uuid,
+    properties: serde_json::Value,
+) {
+    let row = edge_index_row(pool, storage_partition_id, uid).await;
+    assert_eq!(row.uid, uid);
+    assert_eq!(row.label, label.as_str());
+    assert_eq!(row.start_uid, start_uid);
+    assert_eq!(row.end_uid, end_uid);
+    assert_eq!(
+        row.storage_partition_id.as_deref(),
+        Some(storage_partition_id)
+    );
+    assert_eq!(row.user_id, None);
+    assert_eq!(row.scope, "tenant");
+    assert_eq!(row.properties, properties);
+}
+
+async fn assert_supersedes_edge_index_row(
     pool: &PgPool,
     storage_partition_id: &str,
     old_uid: Uuid,
     new_uid: Uuid,
 ) {
     let mut conn = scoped_conn(pool, storage_partition_id).await;
-    let row = cypher::edge::SUPERSEDES_EXISTS
-        .execute(&json!({
-            "old_uid": old_uid.to_string(),
-            "new_uid": new_uid.to_string(),
-        }))
-        .fetch_optional(conn.as_mut())
-        .await
-        .expect("query SUPERSEDES edge");
-    assert!(row.is_some());
+    let edge_uid = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT uid
+        FROM moa.edge_index
+        WHERE label = $1
+          AND start_uid = $2
+          AND end_uid = $3
+        "#,
+    )
+    .bind(EdgeLabel::Supersedes.as_str())
+    .bind(new_uid)
+    .bind(old_uid)
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("read SUPERSEDES edge uid");
     conn.commit().await.expect("commit edge read");
+    assert_edge_index_row(
+        pool,
+        storage_partition_id,
+        edge_uid,
+        EdgeLabel::Supersedes,
+        new_uid,
+        old_uid,
+        json!({}),
+    )
+    .await;
+}
+
+async fn incident_edge_count(pool: &PgPool, storage_partition_id: &str, uid: Uuid) -> i64 {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM moa.edge_index WHERE start_uid = $1 OR end_uid = $1",
+    )
+    .bind(uid)
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("count incident edge_index rows");
+    conn.commit().await.expect("commit incident edge count");
+    count
 }
 
 async fn linked_supersede_rows(
@@ -339,7 +432,7 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
             .all(|row| row.uid != old_uid),
         "superseded pgvector row is deleted, so old uid should not be returned"
     );
-    supersedes_edge_exists(
+    assert_supersedes_edge_index_row(
         session_store.pool(),
         &storage_partition_id,
         old_uid,
@@ -358,16 +451,28 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
         4
     );
 
+    let relates_edge = edge_intent(
+        &storage_partition_id,
+        EdgeLabel::RelatesTo,
+        new_uid,
+        target_uid,
+        0,
+    );
+    let relates_edge_uid = relates_edge.uid;
     graph
-        .create_edge(edge_intent(
-            &storage_partition_id,
-            EdgeLabel::RelatesTo,
-            new_uid,
-            target_uid,
-            0,
-        ))
+        .create_edge(relates_edge.clone())
         .await
         .expect("create graph edge");
+    assert_edge_index_row(
+        session_store.pool(),
+        &storage_partition_id,
+        relates_edge_uid,
+        EdgeLabel::RelatesTo,
+        new_uid,
+        target_uid,
+        relates_edge.properties,
+    )
+    .await;
     assert_eq!(
         workspace_version(session_store.pool(), &storage_partition_id).await,
         5
@@ -390,11 +495,19 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
         workspace_version(session_store.pool(), &storage_partition_id).await,
         6
     );
+    assert_eq!(
+        incident_edge_count(session_store.pool(), &storage_partition_id, new_uid).await,
+        2
+    );
 
     graph
         .hard_purge(new_uid, "redacted:test")
         .await
         .expect("hard purge node");
+    assert_eq!(
+        incident_edge_count(session_store.pool(), &storage_partition_id, new_uid).await,
+        0
+    );
     assert!(
         graph
             .get_node(new_uid)
@@ -418,7 +531,7 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
 
 #[tokio::test]
 async fn write_protocol_creates_every_edge_label() {
-    // Pins: every static AGE edge template can create its canonical label.
+    // Pins: every supported graph edge label is persisted in the relational sidecar.
     let _guard = TEST_LOCK.lock().await;
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
@@ -451,11 +564,22 @@ async fn write_protocol_creates_every_edge_label() {
     for (index, label) in labels.iter().copied().enumerate() {
         let intent = edge_intent(&storage_partition_id, label, start_uid, end_uid, index);
         let expected_uid = intent.uid;
+        let expected_properties = intent.properties.clone();
         let actual_uid = graph
             .create_edge(intent)
             .await
             .unwrap_or_else(|error| panic!("create {} edge: {error}", label.as_str()));
         assert_eq!(actual_uid, expected_uid);
+        assert_edge_index_row(
+            session_store.pool(),
+            &storage_partition_id,
+            expected_uid,
+            label,
+            start_uid,
+            end_uid,
+            expected_properties,
+        )
+        .await;
     }
     assert_eq!(
         workspace_version(session_store.pool(), &storage_partition_id).await,
@@ -469,7 +593,7 @@ async fn write_protocol_creates_every_edge_label() {
 }
 
 #[tokio::test]
-async fn rollback_on_failure_removes_age_and_sidecar_rows() {
+async fn rollback_on_failure_removes_relational_sidecar_rows() {
     let _guard = TEST_LOCK.lock().await;
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
@@ -499,13 +623,14 @@ async fn rollback_on_failure_removes_age_and_sidecar_rows() {
             .await
             .expect("count sidecar rows after rollback");
     assert_eq!(sidecar_count, 0);
-    let age_row = cypher::node::GET_ENTITY_UID
-        .execute(&json!({ "uid": uid.to_string() }))
-        .fetch_optional(conn.as_mut())
-        .await
-        .expect("query AGE row after rollback");
-    assert!(age_row.is_none());
     conn.commit().await.expect("commit rollback verification");
+    assert!(
+        graph
+            .get_node(uid)
+            .await
+            .expect("get rolled-back node")
+            .is_none()
+    );
 
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)

@@ -35,8 +35,8 @@ use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::sync::{Mutex, OnceCell};
 use uuid::Uuid;
 
-const POSTGRES_IMAGE: &str = "moa-postgres-age";
-const POSTGRES_TAG: &str = "pg17-age1.7.0";
+const POSTGRES_IMAGE: &str = "moa-postgres";
+const POSTGRES_TAG: &str = "pg17-pgvector0.8.2-pgaudit";
 const POSTGRES_DB: &str = "moa_test";
 const POSTGRES_USER: &str = "moa_owner";
 const POSTGRES_PASSWORD: &str = "dev";

@@ -116,6 +116,7 @@ where
             }
             let properties = compact_properties(node.properties.clone());
             let embedding = embeddings.get(&node.uid).cloned();
+            let embedding_text = embedding.as_ref().and_then(|_| node.embedding_text.clone());
             self.graph
                 .create_node(NodeWriteIntent {
                     uid: node.uid,
@@ -135,6 +136,7 @@ where
                     embedding_model_version: embeddings
                         .contains_key(&node.uid)
                         .then_some(embedding_model_version),
+                    embedding_text,
                     actor_id: self.actor_id.clone(),
                     actor_kind: "system".to_string(),
                 })

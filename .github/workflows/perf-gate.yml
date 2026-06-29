@@ -14,7 +14,7 @@ jobs:
       RUSTC_WRAPPER: sccache
     services:
       postgres:
-        image: ghcr.io/hwuiwon/moa-postgres-age:17.6-age1.7.0
+        image: pgvector/pgvector:pg17
         ports:
           - "5432:5432"
         env:
@@ -50,7 +50,7 @@ jobs:
       RUSTC_WRAPPER: sccache
     services:
       postgres:
-        image: ghcr.io/hwuiwon/moa-postgres-age:17.6-age1.7.0
+        image: pgvector/pgvector:pg17
         ports:
           - "5432:5432"
         env:

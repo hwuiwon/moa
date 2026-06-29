@@ -3,6 +3,7 @@ CREATE EXTENSION IF NOT EXISTS pgaudit;
 DO $$
 BEGIN
     EXECUTE 'SECURITY LABEL FOR pgaudit ON TABLE moa.node_index IS ''READ, WRITE''';
+    EXECUTE 'SECURITY LABEL FOR pgaudit ON TABLE moa.edge_index IS ''READ, WRITE''';
     EXECUTE 'SECURITY LABEL FOR pgaudit ON TABLE moa.embeddings IS ''READ, WRITE''';
     EXECUTE 'SECURITY LABEL FOR pgaudit ON TABLE moa.graph_changelog IS ''READ, WRITE''';
 EXCEPTION
@@ -15,6 +16,7 @@ END $$;
 GRANT USAGE ON SCHEMA moa TO moa_auditor;
 GRANT SELECT ON moa.graph_changelog TO moa_auditor;
 GRANT SELECT ON moa.node_index TO moa_auditor;
+GRANT SELECT ON moa.edge_index TO moa_auditor;
 GRANT SELECT ON moa.embeddings TO moa_auditor;
 
 CREATE OR REPLACE VIEW moa.audit_logs AS

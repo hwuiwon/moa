@@ -10,8 +10,8 @@ pub use cache::{
     RetrievalBackend,
 };
 pub use hybrid::{
-    HybridRetriever, KnowledgeChunkHydration, LegSources, LineageContext, Result, RetrievalError,
-    RetrievalHit, RetrievalRequest, SourceTier,
+    HybridRetriever, KnowledgeChunkHydration, LegSources, LexicalBackend, LineageContext, Result,
+    RetrievalError, RetrievalHit, RetrievalRequest, SourceTier,
 };
 pub use legs::{GRAPH_WEIGHT, LEXICAL_WEIGHT, RRF_K, VECTOR_WEIGHT, rrf_fuse};
 pub use ranking::{
