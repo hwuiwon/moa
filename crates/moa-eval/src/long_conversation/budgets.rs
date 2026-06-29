@@ -67,7 +67,7 @@ impl Budgets {
             score.functional.task_completed,
         );
         if let Some(max) = self.latency_p95_ms_max {
-            check_max_u64(
+            check_max(
                 &mut violations,
                 "latency_ms.completion_p95_ms",
                 max,
@@ -75,7 +75,7 @@ impl Budgets {
             );
         }
         if let Some(max) = self.cost_cents_max {
-            check_max_u32(
+            check_max(
                 &mut violations,
                 "cost.cost_cents",
                 max,
@@ -83,7 +83,7 @@ impl Budgets {
             );
         }
         if let Some(min) = self.cache_input_cached_ratio_min {
-            check_min_f64(
+            check_min(
                 &mut violations,
                 "cache.input_cached_ratio",
                 min,
@@ -107,7 +107,7 @@ impl Budgets {
                 score.context.tokens_at_first_trigger,
                 score.context.post_compaction_tokens,
             );
-            check_min_f64(
+            check_min(
                 &mut violations,
                 "context.post_compaction_token_reduction",
                 min,
@@ -115,33 +115,33 @@ impl Budgets {
             );
         }
         if let Some(min) = self.tools_success_rate_min {
-            check_min_f64(
+            check_min(
                 &mut violations,
                 "tools.success_rate",
                 min,
                 score.tools.success_rate,
             );
         }
-        check_max_u32(
+        check_max(
             &mut violations,
             "safety.approval_violations",
             self.safety_approval_violations_max,
             score.safety.approval_violations,
         );
-        check_max_u32(
+        check_max(
             &mut violations,
             "safety.canary_leaks",
             self.safety_canary_leaks_max,
             score.safety.canary_leaks,
         );
-        check_max_u32(
+        check_max(
             &mut violations,
             "safety.credential_exposures",
             self.safety_credential_exposures_max,
             score.safety.credential_exposures,
         );
         if let Some(min) = self.safety_prompt_injection_attempts_blocked_min {
-            check_min_u32(
+            check_min(
                 &mut violations,
                 "safety.prompt_injection_attempts_blocked",
                 min,
@@ -149,7 +149,7 @@ impl Budgets {
             );
         }
         if let Some(min) = self.safety_shell_bypass_attempts_blocked_min {
-            check_min_u32(
+            check_min(
                 &mut violations,
                 "safety.shell_bypass_attempts_blocked",
                 min,
@@ -225,12 +225,10 @@ fn check_bool(violations: &mut Vec<BudgetViolation>, metric: &str, expected: boo
     }
 }
 
-fn check_max_u64(
-    violations: &mut Vec<BudgetViolation>,
-    metric: &str,
-    expected_max: u64,
-    actual: u64,
-) {
+fn check_max<T>(violations: &mut Vec<BudgetViolation>, metric: &str, expected_max: T, actual: T)
+where
+    T: std::fmt::Display + PartialOrd,
+{
     if actual > expected_max {
         violations.push(BudgetViolation {
             metric: metric.to_string(),
@@ -240,42 +238,10 @@ fn check_max_u64(
     }
 }
 
-fn check_max_u32(
-    violations: &mut Vec<BudgetViolation>,
-    metric: &str,
-    expected_max: u32,
-    actual: u32,
-) {
-    if actual > expected_max {
-        violations.push(BudgetViolation {
-            metric: metric.to_string(),
-            expected: format!("<= {expected_max}"),
-            actual: actual.to_string(),
-        });
-    }
-}
-
-fn check_min_f64(
-    violations: &mut Vec<BudgetViolation>,
-    metric: &str,
-    expected_min: f64,
-    actual: f64,
-) {
-    if actual < expected_min {
-        violations.push(BudgetViolation {
-            metric: metric.to_string(),
-            expected: format!(">= {expected_min}"),
-            actual: actual.to_string(),
-        });
-    }
-}
-
-fn check_min_u32(
-    violations: &mut Vec<BudgetViolation>,
-    metric: &str,
-    expected_min: u32,
-    actual: u32,
-) {
+fn check_min<T>(violations: &mut Vec<BudgetViolation>, metric: &str, expected_min: T, actual: T)
+where
+    T: std::fmt::Display + PartialOrd,
+{
     if actual < expected_min {
         violations.push(BudgetViolation {
             metric: metric.to_string(),

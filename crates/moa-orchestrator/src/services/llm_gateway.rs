@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::{
     CompletionRequest, CompletionResponse, ContactId, DEFER_BRAIN_RESPONSE_METADATA_KEY, Event,
-    MoaError, ModelId, ModelTier, SessionId, TenantId, TokenPricing, TokenUsage,
-    genai_operation_name, genai_provider_name,
+    ModelId, ModelTier, SessionId, TenantId, TokenPricing, TokenUsage, genai_operation_name,
+    genai_provider_name,
 };
 use moa_memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
 use moa_observability::record_llm_cost_cents;
@@ -19,6 +19,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 use crate::services::session_store::RestateSessionStoreClient;
+use crate::workflows::errors::moa_error_to_handler_error;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 
 /// Restate service surface for journaled LLM completions.
@@ -72,7 +73,7 @@ impl LLMGateway for LLMGatewayImpl {
         let (provider_id, _) = self
             .providers
             .resolve_provider_id(request.model.as_ref().map(ModelId::as_str))
-            .map_err(to_handler_error)?;
+            .map_err(moa_error_to_handler_error)?;
         let request_for_run = request.clone();
         let service = self.clone();
         let response = ctx
@@ -81,7 +82,7 @@ impl LLMGateway for LLMGatewayImpl {
                     .complete_buffered(request_for_run)
                     .await
                     .map(Json::from)
-                    .map_err(to_handler_error)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("llm_complete")
             .retry_policy(llm_run_retry_policy())
@@ -207,14 +208,6 @@ fn llm_run_retry_policy() -> RunRetryPolicy {
         .exponentiation_factor(2.0)
         .max_delay(Duration::from_secs(30))
         .max_attempts(5)
-}
-
-fn to_handler_error(error: MoaError) -> HandlerError {
-    if error.is_fatal() {
-        return TerminalError::new(error.to_string()).into();
-    }
-
-    HandlerError::from(error)
 }
 
 fn session_id_from_request(request: &CompletionRequest) -> Option<SessionId> {

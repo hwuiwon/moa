@@ -307,17 +307,6 @@ impl FgaClient {
         self.apply_raw(body).await
     }
 
-    /// Apply a tuple operation and attach the caller's idempotency key to logs.
-    #[tracing::instrument(skip(self, tuple), fields(store_id = %self.inner.store_id, op = %op, idempotency_key = %idempotency_key))]
-    pub async fn apply_with_idempotency(
-        &self,
-        op: TupleOp,
-        tuple: &TupleKey,
-        idempotency_key: &str,
-    ) -> Result<(), AuthzError> {
-        self.apply(op, tuple).await
-    }
-
     /// Apply a pre-built OpenFGA `/write` request body.
     pub async fn apply_raw(&self, body: serde_json::Value) -> Result<(), AuthzError> {
         let response = self

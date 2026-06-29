@@ -67,7 +67,7 @@ pub(super) fn configured_model_capabilities(
 ) -> Result<ModelCapabilities, HandlerError> {
     OrchestratorCtx::current_provider_registry()
         .capabilities_for_model(Some(model.as_str()))
-        .map_err(to_handler_error)
+        .map_err(moa_error_to_handler_error)
 }
 
 pub(super) fn synthetic_session_meta(state: &SubAgentVoState) -> Result<SessionMeta, HandlerError> {

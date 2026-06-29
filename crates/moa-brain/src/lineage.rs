@@ -2,7 +2,7 @@
 
 use moa_core::{
     CompletionContent, CompletionResponse, ContextMessage, EventRecord, LineageHandle, MessageRole,
-    SessionMeta, StoragePartitionId, UserId, WorkingContext,
+    SessionMeta, StoragePartitionId, UserId, WorkingContext, estimate_text_tokens,
 };
 use moa_lineage_citation::{CascadeConfig, CascadeVerifier, ChunkRef, NliVerifier};
 use moa_lineage_core::{
@@ -92,7 +92,7 @@ fn context_chunk(session: &SessionMeta, idx: usize, message: &ContextMessage) ->
         chunk_id: uuid::Uuid::now_v7(),
         source_uid,
         position: idx.min(u16::MAX as usize) as u16,
-        estimated_tokens: estimate_tokens(&message.content),
+        estimated_tokens: estimate_text_tokens(&message.content) as u32,
         role: format!("{:?}", message.role).to_ascii_lowercase(),
         source_refs: message.source_refs.clone(),
     }
@@ -144,15 +144,6 @@ fn is_citable_source_message(message: &ContextMessage) -> bool {
     matches!(message.role, MessageRole::Tool)
         || content.contains("<memory-reminder>")
         || content.contains("<graph_memory>")
-}
-
-fn estimate_tokens(text: &str) -> u32 {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        0
-    } else {
-        trimmed.chars().count().div_ceil(4).min(u32::MAX as usize) as u32
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

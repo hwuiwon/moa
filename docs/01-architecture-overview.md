@@ -138,13 +138,16 @@ tenant-local and never globally promoted. Skills and policies are tenant-owned.
 
 ## Core Traits
 
-Current trait definitions live under `crates/moa-core/src/traits/` and
+Most trait definitions live under `crates/moa-core/src/traits/` and
 `crates/moa-core/src/traits/mod.rs`; shared DTOs live under
-`crates/moa-core/src/types/`.
+`crates/moa-core/src/types/`. A few traits are owned by the crate that
+implements them: `Reranker` in `moa-providers`, and `LinkedIntegrationProvider`
+and `DocumentParser` in `moa-knowledge`. Session orchestration is not a trait —
+it is realized as Restate services and virtual objects in `moa-orchestrator`
+(see `docs/12-restate-architecture.md`).
 
 | Trait | Purpose | Main implementations |
 |---|---|---|
-| `BrainOrchestrator` | Start, resume, signal, list, observe sessions; schedule background work | Restate services/objects through `moa-orchestrator` |
 | `SessionStore` | Append-only event log, sessions, pending signals, snapshots, task segments, experience records, learning candidates, analytics, skill rates | `PostgresSessionStore` |
 | `BlobStore` | Claim-check storage for large session artifacts | `PostgresBlobStore` by default; explicit `FileBlobStore` for local or mounted-path use |
 | `RuntimeCacheStore` | Short-lived runtime coordination/cache values with TTL | in-process memory fallback; optional Redis backend |
@@ -155,7 +158,7 @@ Current trait definitions live under `crates/moa-core/src/traits/` and
 | `Reranker` | Shared reranking interface | Noop, Cohere Rerank, and ZeroEntropy rerank through `moa-providers` |
 | `ChannelAdapter` | Channel inbound/outbound normalization | Slack |
 | `BuiltInTool` | Built-in tool execution | memory/search/web and other built-ins |
-| `ContextProcessor` | One stage in context compilation | identity, instructions, tools, query rewrite, skills, memory, history, runtime context, compactor |
+| `ContextProcessor` | One stage in context compilation | identity, agent instructions, instructions, tools, query rewrite, skills, digest, memory, history, runtime context, compactor |
 | `LinkedIntegrationProvider` | Tenant knowledge linked-account flow, provider sync trigger, changed-record listing, and webhook verification | Nango and Merge adapters in `moa-knowledge` |
 | `DocumentParser` | Structure-aware parsing into normalized document elements for tenant knowledge ingestion | Native parser backed by `liteparse` for local file parsing, plus LlamaParse, Unstructured, and Reducto adapters in `moa-knowledge` |
 | `CredentialVault` | Secret storage and retrieval | environment-backed MCP vault |

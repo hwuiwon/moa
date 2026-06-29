@@ -10,14 +10,14 @@ use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::turn::{QueueMessageRequest, TurnOutcome, TurnOutcomeKind};
 use moa_core::{
     ActionRuleScope, AgentSessionSelection, Channel, CompletionRequest, ContextMessage, Event,
-    EventRange, EventRecord, EventType, MoaError, ModelId, SessionActorRef, SessionId, SessionMeta,
+    EventRange, EventRecord, EventType, ModelId, SessionActorRef, SessionId, SessionMeta,
     SessionStatus, TenantId,
 };
 use moa_experiments::model::{
     ExperimentTarget, ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason,
     ExperimentVariant, NewExperimentTrial,
 };
-use moa_experiments::plan::{PlanExpansionError, PlanSimulationSelection, select_simulation};
+use moa_experiments::plan::{PlanSimulationSelection, select_simulation};
 use moa_experiments::store::ExperimentStore;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_observability::{
@@ -41,7 +41,12 @@ use crate::services::session_store::inner::{
 use crate::workflows::artifact_workflow_execution::{
     ArtifactWorkflowExecutionClient, RunArtifactWorkflowRequest,
 };
-use crate::workflows::errors::workflow_handler_error;
+use crate::workflows::errors::{
+    bad_request, handler_error_message, moa_error_to_handler_error, workflow_handler_error,
+};
+use crate::workflows::experiment_errors::{
+    non_retryable_handler_error, plan_expansion_error_to_handler_error,
+};
 
 mod status;
 mod target_execution;
@@ -380,31 +385,6 @@ fn artifact_revision_not_found(revision_uid: Uuid) -> HandlerError {
 
 fn trial_not_found(trial_uid: Uuid) -> HandlerError {
     TerminalError::new_with_code(404, format!("experiment trial {trial_uid} not found")).into()
-}
-
-fn bad_request(message: impl Into<String>) -> HandlerError {
-    TerminalError::new_with_code(400, message.into()).into()
-}
-
-fn moa_error_to_handler_error(error: MoaError) -> HandlerError {
-    if error.is_fatal() {
-        return TerminalError::new(error.to_string()).into();
-    }
-
-    HandlerError::from(error)
-}
-
-fn plan_expansion_error_to_handler_error(error: PlanExpansionError) -> HandlerError {
-    bad_request(error.to_string())
-}
-
-fn non_retryable_handler_error(error: HandlerError) -> HandlerError {
-    TerminalError::new(handler_error_message(&error)).into()
-}
-
-fn handler_error_message(error: &HandlerError) -> String {
-    let error_ref = <HandlerError as AsRef<dyn std::error::Error + Send + Sync>>::as_ref(error);
-    error_ref.to_string()
 }
 
 #[cfg(test)]

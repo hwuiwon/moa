@@ -111,19 +111,22 @@ Enterprise behavior is tenant-controlled:
 
 Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
 
+Session orchestration is not a `moa-core` trait: it is realized as Restate
+services and virtual objects in `moa-orchestrator` (see sections 5–6 and
+`docs/12-restate-architecture.md`).
+
 | Trait | Responsibility | Current implementations |
 |---|---|---|
-| `BrainOrchestrator` | Start, resume, signal, list, and observe sessions | Restate objects/services |
 | `SessionStore` | Append-only event log, sessions, signals, snapshots, task segments, analytics, learning | `PostgresSessionStore` |
 | `BlobStore` | Claim-check storage for large session artifacts | `FileBlobStore` |
 | `BranchManager` | Optional database checkpoint branches | `NeonBranchManager` |
 | `LLMProvider` | Completion and streaming provider interface | Anthropic, OpenAI, Gemini, scripted tests |
-| `EmbeddingProvider` | Shared embedding interface | OpenAI embedding, Cohere v4, Gemini embedding, mock/test embedding |
+| `EmbeddingProvider` | Shared embedding interface | OpenAI embedding, Cohere v4, Gemini embedding, ZeroEntropy embedding, mock/test embedding |
 | `HandProvider` | Provision, execute, pause, resume, destroy execution environments | local, Docker, Daytona, E2B |
 | `BuiltInTool` | In-process tools with policy and schema metadata | memory, file/search/read/write, shell helpers |
 | `PlatformAdapter` | Messaging normalization/rendering | Slack |
-| `ContextProcessor` | Ordered context-pipeline stage | identity, instructions, tools, skills, query rewrite, memory, history, runtime context, compactor, cache |
-| `CredentialVault` | Secret storage abstraction | encrypted local file vault, environment-backed MCP vault |
+| `ContextProcessor` | Ordered context-pipeline stage | identity, agent instructions, instructions, tools, query rewrite, skills, digest, memory, history, runtime context, compactor |
+| `CredentialVault` | Secret storage abstraction | environment-backed MCP vault, environment-backed delivery vault |
 | `AuthProvider` | Resolve API keys or bearer JWTs to MOA identities | local API keys, disabled local/test mode, optional Auth0/OIDC |
 | `TokenVaultProvider` | Retrieve third-party OAuth tokens for linked user connections | null provider, optional Auth0 Token Vault |
 | `AsyncAuthzProvider` | Request durable human approvals | builtin approvals, optional Auth0 CIBA |
@@ -137,16 +140,23 @@ Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
 |---|---|
 | `moa-core` | Shared types, traits, config, events, telemetry, analytics DTOs |
 | `moa-brain` | Context pipeline, retrieval, turn harness, approvals, resolution scoring, lineage emission |
+| `moa-db` | Database helpers shared by MOA storage crates (pools, scoped connections, RLS) |
 | `moa-session` | Postgres session store, event log, snapshots, task segments, learning log, analytics |
-| `moa-memory/graph` (`moa-memory-graph`) | Graph memory, AGE projection helpers, sidecars, RLS, changelog |
+| `moa-runtime-store` | Runtime cache store implementations (in-memory and Redis/Valkey) |
+| `moa-migrations` | Central Postgres migrations and schema runners |
+| `moa-memory/graph` (`moa-memory-graph`) | Graph memory, relational node/edge tables, sidecars, RLS, changelog |
 | `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path ingestion and fast memory write APIs |
+| `moa-memory/lifecycle` (`moa-memory-lifecycle`) | Memory consolidation, quality scoring, and digest generation |
 | `moa-memory/pii` (`moa-memory-pii`) | PII classification and memory privacy helpers |
+| `moa-memory/types` (`moa-memory-types`) | Shared memory domain types across the memory subcrates |
 | `moa-memory/vector` (`moa-memory-vector`) | pgvector and Turbopuffer vector stores |
+| `moa-knowledge` | Tenant knowledge-base domain, providers, parsers, and ingestion seams |
 | `moa-lineage-core` | Lineage record types and score records |
 | `moa-lineage-citation` | Provider citation normalization and answer-source verification |
 | `moa-lineage-sink` | Async lineage sink writers |
 | `moa-lineage-otel` | OTel/OpenInference bridge |
 | `moa-lineage-audit` | Compliance audit hashes, roots, signing, and DSAR support |
+| `moa-observability` | Runtime metrics, tracing bootstrap, and Restate observability helpers |
 | `moa-auth/authz-schema` (`moa-authz-schema`) | Typed OpenFGA tuple keys and model constants |
 | `moa-auth/authz` (`moa-authz`) | OpenFGA client, authz checks, transactional outbox, and poller |
 | `moa-auth/providers` (`moa-auth-providers`) | Local API keys, disabled auth, builtin approvals, null token vault, and provider bundle |
@@ -155,13 +165,21 @@ Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
 | `moa-edge` | Public HTTP edge for authn, identity headers, and Auth0 webhooks |
 | `moa-ocsf` | OCSF v1.3 security-event types, signing, and persistence |
 | `moa-hands` | Tool router and execution adapters |
-| `moa-providers` | Provider core and vendor adapters |
+| `moa-providers` | Provider core and vendor adapters (LLM, embedding, rerank) |
 | `moa-orchestrator` | Restate objects, services, workflows, and `moa-orchestrator-bin` |
+| `moa-agents` | Tenant-configurable agent resolution and runtime policy locking |
+| `moa-contacts` | Contact identity domain and persistence helpers |
+| `moa-workflows` | Workflow runtime logic for artifact-backed workflow definitions |
+| `moa-artifacts` | Canonical artifact definitions for agents, skills, connectors, actions, workflows, and experiment plans |
+| `moa-experiments` | Domain types for experiment runs and scorecard configuration |
+| `moa-scoring` | Shared score-run storage and score summary queries |
 | `moa-messaging` | Messaging adapters, platform renderers, and notification connectors |
 | `moa-security` | Vaults, MCP credential proxy, policies, prompt-injection controls |
 | `moa-skills` | Agent Skills parsing, distillation, improvement, and regression generation |
+| `moa-eval/core` (`moa-eval-core`) | Shared evaluation engine types and scoring primitives |
 | `moa-eval` | Evaluation harness |
 | `moa-loadtest` | Direct HTTP load-test harness |
+| `moa-test-support` | Shared test fixtures, pricing tables, and Postgres helpers |
 | `workspace-hack` | Generated `cargo-hakari` feature unification crate |
 | `xtask` | Repo-local audit and maintenance commands |
 
@@ -180,7 +198,7 @@ moa-edge / Restate ingress
   -> local/Docker hands and configured providers
 ```
 
-Local development uses `make dev` for Postgres 17 with AGE, pgvector, pgaudit,
+Local development uses `make dev` for Postgres 17 with pgvector and pgaudit,
 OpenFGA, Restate, the PII service, and the audit shipper. Environment variables
 and service config files configure the hosted runtime. This is the fastest way to
 test the enterprise runtime without a managed cloud control plane.

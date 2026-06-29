@@ -3,15 +3,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use moa_core::{Credential, CredentialVault, MessagingConfig, MoaError, Result};
-use reqwest::{
-    StatusCode,
-    header::{HeaderMap, RETRY_AFTER},
-};
+use reqwest::{StatusCode, header::HeaderMap};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use tracing::{Instrument, field};
+
+use crate::provider_http::{
+    is_retryable_http_status, optional_field, record_api_error, required_field, response_text,
+    retry_after_delay,
+};
 
 const TWILIO_MESSAGES_PATH_PREFIX: &str = "/2010-04-01/Accounts/";
 const DEFAULT_RATE_LIMIT_RETRIES: usize = 3;
@@ -118,11 +119,6 @@ impl TwilioSmsSendResult {
     pub fn delivery_failure(&self) -> Option<TwilioSmsDeliveryFailure> {
         classify_delivery_failure(&self.status, self.error_code, self.error_message.as_deref())
     }
-
-    /// Returns true when Twilio has confirmed the SMS reached a carrier or handset.
-    pub fn is_handed_off_or_delivered(&self) -> bool {
-        matches!(self.status.as_str(), "sent" | "delivered" | "read")
-    }
 }
 
 /// Retry classification for a Twilio SMS delivery failure.
@@ -213,15 +209,6 @@ impl TwilioSmsClient {
         Self::new(account_sid.clone(), account_sid, auth_token)
     }
 
-    /// Creates a Twilio client using an API key SID and API key secret.
-    pub fn from_api_key(
-        account_sid: impl Into<String>,
-        api_key_sid: impl Into<String>,
-        api_key_secret: impl Into<String>,
-    ) -> Self {
-        Self::new(account_sid, api_key_sid, api_key_secret)
-    }
-
     /// Creates a Twilio client from a configured credential vault.
     pub async fn from_vault(
         vault: Arc<dyn CredentialVault>,
@@ -233,7 +220,7 @@ impl TwilioSmsClient {
         let api_key_secret =
             optional_vault_string(&vault, TWILIO_API_KEY_SECRET_SERVICE, scope).await?;
         let mut client = match (api_key_sid, api_key_secret) {
-            (Some(sid), Some(secret)) => Self::from_api_key(account_sid, sid, secret),
+            (Some(sid), Some(secret)) => Self::new(account_sid, sid, secret),
             (Some(_), None) => {
                 return Err(MoaError::ConfigError(
                     "twilio api key sid requires twilio api key secret".to_string(),
@@ -334,7 +321,7 @@ impl TwilioSmsClient {
     /// Fetches the latest Twilio status for a message SID.
     pub async fn fetch_sms(&self, message_sid: &str) -> Result<TwilioSmsSendResult> {
         async {
-            let sid = required_field("message_sid", message_sid)?;
+            let sid = required_field("twilio sms", "message_sid", message_sid)?;
             tracing::Span::current().record("twilio.message_sid", sid.as_str());
             let url = self.message_url(&sid);
             self.send_twilio_request("fetch_sms", || {
@@ -381,7 +368,7 @@ impl TwilioSmsClient {
                 Ok(response) => response,
                 Err(error) => {
                     let message = error.to_string();
-                    record_api_error(None, None, None, false, &message);
+                    record_api_error("twilio", None, None, None, false, &message);
                     tracing::warn!(
                         messaging.system = "twilio",
                         messaging.operation = operation,
@@ -399,6 +386,7 @@ impl TwilioSmsClient {
             if status == StatusCode::TOO_MANY_REQUESTS && retries < self.max_rate_limit_retries {
                 let delay = retry_after_delay(&headers).unwrap_or(self.rate_limit_backoff);
                 record_api_error(
+                    "twilio",
                     Some(status),
                     parse_twilio_error_code(&body),
                     Some(delay),
@@ -434,6 +422,7 @@ fn decode_twilio_response(
         let retry_after = retry_after_delay(headers);
         let retryable = is_retryable_http_status(status);
         record_api_error(
+            "twilio",
             Some(status),
             parse_twilio_error_code(&body),
             retry_after,
@@ -465,13 +454,6 @@ fn decode_twilio_response(
     let result = TwilioSmsSendResult::from(result);
     record_twilio_result(&result);
     Ok(result)
-}
-
-async fn response_text(response: reqwest::Response) -> String {
-    response
-        .text()
-        .await
-        .unwrap_or_else(|error| format!("failed to read response body: {error}"))
 }
 
 fn twilio_span(name: &'static str, operation: &'static str) -> tracing::Span {
@@ -521,61 +503,6 @@ fn record_twilio_result(result: &TwilioSmsSendResult) {
             "twilio sms reached a terminal delivery failure"
         );
     }
-}
-
-fn record_api_error(
-    status: Option<StatusCode>,
-    error_code: Option<i64>,
-    retry_after: Option<Duration>,
-    retryable: bool,
-    message: &str,
-) {
-    let span = tracing::Span::current();
-    if let Some(status) = status {
-        span.record("http.status_code", status.as_u16());
-    }
-    if let Some(error_code) = error_code {
-        span.record("twilio.error_code", error_code);
-    }
-    if let Some(retry_after) = retry_after {
-        span.record("twilio.retry_after_ms", retry_after.as_millis() as u64);
-    }
-    let failure_class = if retryable {
-        TwilioSmsFailureClass::Retryable
-    } else {
-        TwilioSmsFailureClass::Permanent
-    };
-    span.record("twilio.failure_class", failure_class.label());
-    span.record("twilio.retryable", retryable);
-    span.record("error", message);
-}
-
-fn is_retryable_http_status(status: StatusCode) -> bool {
-    matches!(
-        status,
-        StatusCode::TOO_MANY_REQUESTS
-            | StatusCode::INTERNAL_SERVER_ERROR
-            | StatusCode::BAD_GATEWAY
-            | StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT
-    )
-}
-
-fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
-    let value = headers.get(RETRY_AFTER)?.to_str().ok()?;
-    parse_retry_after(value)
-}
-
-fn parse_retry_after(value: &str) -> Option<Duration> {
-    if let Ok(seconds) = value.trim().parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
-    }
-
-    let reset_at = DateTime::parse_from_rfc2822(value).ok()?;
-    let reset_at = reset_at.with_timezone(&Utc);
-    let remaining = reset_at.signed_duration_since(Utc::now());
-    let millis = remaining.num_milliseconds().max(0) as u64;
-    Some(Duration::from_millis(millis))
 }
 
 fn parse_twilio_error_code(body: &str) -> Option<i64> {
@@ -657,8 +584,8 @@ impl TwilioSmsMessage {
         default_from: Option<&str>,
         default_messaging_service_sid: Option<&str>,
     ) -> Result<TwilioSmsRequest> {
-        let to = required_field("to", &self.to)?;
-        let body = required_field("body", &self.body)?;
+        let to = required_field("twilio sms", "to", &self.to)?;
+        let body = required_field("twilio sms", "body", &self.body)?;
         if body.chars().count() > 1600 {
             return Err(MoaError::ValidationError(
                 "twilio sms body cannot exceed 1600 characters".to_string(),
@@ -781,25 +708,6 @@ fn twilio_string_from_credential(service: &str, credential: Credential) -> Resul
         Credential::OAuth { .. } => Err(MoaError::ConfigError(format!(
             "{service} credential must be bearer or api_key"
         ))),
-    }
-}
-
-fn required_field(name: &str, value: &str) -> Result<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(MoaError::ValidationError(format!(
-            "twilio sms {name} is required"
-        )));
-    }
-    Ok(trimmed.to_string())
-}
-
-fn optional_field(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
     }
 }
 

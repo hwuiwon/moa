@@ -1,7 +1,6 @@
 //! Restate service for agent-facing contact identity operations.
 
-use moa_authz::require_authz_with_delegation;
-use moa_authz_schema::{ObjectType, Relation};
+use moa_authz_schema::Relation;
 use moa_contacts::ContactError;
 use moa_contacts::domain::{
     contact_id_from_claims, low_assurance_scopes, require_contact_agent_permission,
@@ -33,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::OrchestratorCtx;
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::authorize_tenant;
 use crate::objects::session::SessionClient;
 use crate::restate_identity::with_identity_headers;
 use crate::services::session_store::inner::resolve_agent_context_for_session;
@@ -101,8 +100,7 @@ impl Contacts for ContactsImpl {
     ) -> Result<Json<ContactTokenIssueResponse>, HandlerError> {
         annotate_restate_handler_span("Contacts", "issue_token");
         let request = request.into_inner();
-        let identity = require_identity(&ctx)?;
-        authorize_tenant_operator(&identity, request.tenant_id).await?;
+        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let tenant_id = request.tenant_id;
         let token_issuer = contact_token_issuer()?;
         let pool = OrchestratorCtx::current_graph_pool();
@@ -909,22 +907,6 @@ fn contact_identity(contact_id: ContactId, tenant_id: TenantId) -> Identity {
         api_key_id: None,
         acting_on_behalf_of: None,
     }
-}
-
-async fn authorize_tenant_operator(
-    identity: &Identity,
-    tenant_id: TenantId,
-) -> Result<(), HandlerError> {
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        identity,
-        ObjectType::Tenant,
-        tenant_id,
-        Relation::Operator,
-    )
-    .await
-    .map_err(translate_authz_error)
 }
 
 fn verify_contact_token(

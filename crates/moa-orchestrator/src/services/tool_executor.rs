@@ -23,6 +23,8 @@ use uuid::Uuid;
 
 use crate::OrchestratorCtx;
 use crate::services::session_store::RestateSessionStoreClient;
+use crate::turn::util::{blocked_canary_message, blocked_canary_tool_output};
+use crate::workflows::errors::moa_error_to_handler_error;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -165,7 +167,7 @@ impl ToolExecutor for ToolExecutorImpl {
         annotate_tool_execution_span(&session, &request);
 
         let serialized_input = serde_json::to_string(&request.input)
-            .map_err(|error| to_handler_error(error.into()))?;
+            .map_err(|error| moa_error_to_handler_error(error.into()))?;
         if matches!(
             screen_tool_input_for_canary(request.active_canary.as_deref(), &serialized_input),
             ToolInputCanaryScreening::Blocked(_)
@@ -174,7 +176,7 @@ impl ToolExecutor for ToolExecutorImpl {
                 append_tool_call_event(&ctx, &request).await?;
             }
             append_tool_canary_block_events(&ctx, &request).await?;
-            return Ok(Json::from(blocked_canary_output(&request.tool_name)));
+            return Ok(Json::from(blocked_canary_tool_output(&request.tool_name)));
         }
 
         if !prior_tool_call_event_exists(&ctx, &session, &request).await? {
@@ -214,7 +216,8 @@ impl ToolExecutor for ToolExecutorImpl {
             .into());
         }
 
-        let run_plan = build_tool_run_plan(&definition, &request).map_err(to_handler_error)?;
+        let run_plan =
+            build_tool_run_plan(&definition, &request).map_err(moa_error_to_handler_error)?;
         let request_for_run = request.clone();
         let session_for_run = session.clone();
         let service = self.clone();
@@ -225,7 +228,7 @@ impl ToolExecutor for ToolExecutorImpl {
                     .execute_buffered(&session_for_run, &request_for_run)
                     .await
                     .map(Json::from)
-                    .map_err(to_handler_error)
+                    .map_err(moa_error_to_handler_error)
             })
             .name(run_plan.name)
             .retry_policy(tool_run_retry_policy(definition.idempotency_class))
@@ -510,7 +513,7 @@ async fn prior_non_idempotent_result_exists(
     request: &ToolCallRequest,
 ) -> Result<bool, HandlerError> {
     let session_id = request.session_id.ok_or_else(|| {
-        to_handler_error(MoaError::ValidationError(format!(
+        moa_error_to_handler_error(MoaError::ValidationError(format!(
             "tool {} requires session_id because it is non-idempotent",
             request.tool_name
         )))
@@ -723,14 +726,6 @@ async fn append_agent_tool_policy_denied_event(
     Ok(())
 }
 
-fn blocked_canary_output(tool_name: &str) -> ToolOutput {
-    ToolOutput::error(blocked_canary_message(tool_name), Duration::ZERO)
-}
-
-fn blocked_canary_message(tool_name: &str) -> String {
-    format!("tool {tool_name} blocked because it leaked a protected canary token")
-}
-
 fn tool_run_retry_policy(idempotency_class: IdempotencyClass) -> RunRetryPolicy {
     let max_attempts = retry_max_attempts_for(idempotency_class);
     match idempotency_class {
@@ -746,14 +741,6 @@ fn tool_run_retry_policy(idempotency_class: IdempotencyClass) -> RunRetryPolicy 
 fn retry_max_attempts_for(idempotency_class: IdempotencyClass) -> u32 {
     let _ = idempotency_class;
     1
-}
-
-fn to_handler_error(error: MoaError) -> HandlerError {
-    if error.is_fatal() {
-        return TerminalError::new(error.to_string()).into();
-    }
-
-    HandlerError::from(error)
 }
 
 #[cfg(test)]
@@ -776,7 +763,7 @@ mod tests {
 
     use super::{
         ToolExecutorImpl, TrustedSandboxFileManifestStore, agent_tool_policy_denied_output,
-        blocked_canary_output, has_prior_tool_call_event, synthetic_session_id,
+        blocked_canary_tool_output, has_prior_tool_call_event, synthetic_session_id,
     };
 
     #[derive(Default)]
@@ -898,12 +885,12 @@ mod tests {
     #[test]
     fn canary_block_output_is_terminal_tool_error() {
         // Pins: ToolExecutor reports blocked canary input as a tool error before backend execution.
-        let output = blocked_canary_output("bash");
+        let output = blocked_canary_tool_output("bash");
 
         assert!(output.is_error);
         assert_eq!(
             output.to_text(),
-            "tool bash blocked because it leaked a protected canary token"
+            "Tool bash blocked because it leaked a protected canary token."
         );
         assert_eq!(output.duration, std::time::Duration::ZERO);
     }

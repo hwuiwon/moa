@@ -9,7 +9,7 @@ use crate::{
     error::{Error, Result},
     normalize::normalize_text,
     parser::DocumentParser,
-    providers::http,
+    providers::http::{self, string_field, value_field},
 };
 
 const POLL_ATTEMPTS: usize = 30;
@@ -61,7 +61,7 @@ impl ReductoParser {
     ) -> Self {
         Self {
             client,
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url: http::trim_base_url(base_url.into()),
             api_key: api_key.into(),
             parse_mode: parse_mode.into(),
             async_enabled,
@@ -71,7 +71,7 @@ impl ReductoParser {
     }
 
     fn url(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+        http::join_url(&self.base_url, path)
     }
 }
 
@@ -368,14 +368,10 @@ fn block_layout(block: &Value) -> Option<ElementLayout> {
     })
 }
 
+const REDUCTO_STATUS_POINTERS: &[&str] = &["/status", "/result/status"];
+
 fn ensure_reducto_not_failed(value: &Value) -> Result<()> {
-    let status = value
-        .get("status")
-        .or_else(|| value.pointer("/result/status"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if matches!(status.as_str(), "error" | "failed" | "failure") {
+    if http::status_failed(&http::parse_status(value, REDUCTO_STATUS_POINTERS)) {
         return Err(Error::parser("reducto", "parse job failed"));
     }
     if value.get("errors").is_some() || value.pointer("/result/errors").is_some() {
@@ -385,16 +381,7 @@ fn ensure_reducto_not_failed(value: &Value) -> Result<()> {
 }
 
 fn is_pending_status(value: &Value) -> bool {
-    let status = value
-        .get("status")
-        .or_else(|| value.pointer("/result/status"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    matches!(
-        status.as_str(),
-        "pending" | "queued" | "running" | "processing"
-    )
+    http::status_pending(&http::parse_status(value, REDUCTO_STATUS_POINTERS))
 }
 
 fn validate_result_url(base_url: &str, result_url: &str) -> Result<()> {
@@ -422,28 +409,4 @@ fn map_kind(raw: &str) -> DocumentElementKind {
         "list" | "list_item" => DocumentElementKind::ListItem,
         _ => DocumentElementKind::Paragraph,
     }
-}
-
-fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        let mut current = value;
-        for segment in key.split('.') {
-            current = current.get(segment)?;
-        }
-        current.as_str().map(ToOwned::to_owned)
-    })
-}
-
-fn value_field(value: &Value, keys: &[&str]) -> Option<Value> {
-    keys.iter().find_map(|key| {
-        let mut current = value;
-        for segment in key.split('.') {
-            current = current.get(segment)?;
-        }
-        if current.is_null() {
-            None
-        } else {
-            Some(current.clone())
-        }
-    })
 }

@@ -69,16 +69,6 @@ impl RecordedScriptedProvider {
         }
     }
 
-    /// Creates a provider that only checks transcript turn count.
-    #[must_use]
-    pub fn with_loose_matching(transcript: Transcript) -> Self {
-        Self {
-            transcript: Arc::new(transcript),
-            cursor: Arc::new(Mutex::new(0)),
-            strict_matching: false,
-        }
-    }
-
     /// Returns whether request/user strict matching is enabled.
     #[must_use]
     pub const fn strict_matching(&self) -> bool {

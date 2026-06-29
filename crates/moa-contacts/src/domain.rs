@@ -59,7 +59,7 @@ pub fn verified_scopes() -> Vec<String> {
 
 /// Bounds requested scopes to an allowed static allowlist.
 #[must_use]
-pub fn bounded_scopes(requested_scopes: &[String], allowed: &[&str]) -> Vec<String> {
+pub(crate) fn bounded_scopes(requested_scopes: &[String], allowed: &[&str]) -> Vec<String> {
     if requested_scopes.is_empty() {
         return allowed.iter().map(|scope| (*scope).to_string()).collect();
     }
@@ -261,18 +261,24 @@ pub fn hash_verification_code(challenge_id: ContactVerificationChallengeId, code
         .to_string()
 }
 
+/// Parses a persisted enum value, surfacing a uniform terminal error on failure.
+fn parse_stored<T>(value: &str, message: &'static str) -> Result<T>
+where
+    T: std::str::FromStr,
+{
+    value
+        .parse::<T>()
+        .map_err(|_| ContactError::terminal(500, message))
+}
+
 /// Parses a persisted contact state.
 pub fn parse_contact_state(value: &str) -> Result<ContactVerificationState> {
-    value
-        .parse::<ContactVerificationState>()
-        .map_err(|_| ContactError::terminal(500, "invalid stored contact state"))
+    parse_stored(value, "invalid stored contact state")
 }
 
 /// Parses a persisted contact point kind.
 pub fn parse_contact_point_kind(value: &str) -> Result<ContactPointKind> {
-    value
-        .parse::<ContactPointKind>()
-        .map_err(|_| ContactError::terminal(500, "invalid stored contact point kind"))
+    parse_stored(value, "invalid stored contact point kind")
 }
 
 #[cfg(test)]

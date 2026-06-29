@@ -176,23 +176,13 @@ impl PostgresSessionStore {
 
         row.map(|row| {
             Ok(SegmentBaseline {
-                sample_count: row
-                    .try_get::<i64, _>("sample_count")
-                    .map_err(map_sqlx_error)? as usize,
-                avg_turns: row.try_get::<f64, _>("avg_turns").map_err(map_sqlx_error)?,
-                stddev_turns: row
-                    .try_get::<Option<f64>, _>("stddev_turns")
-                    .map_err(map_sqlx_error)?,
-                avg_cost: row.try_get::<f64, _>("avg_cost").map_err(map_sqlx_error)?,
-                stddev_cost: row
-                    .try_get::<Option<f64>, _>("stddev_cost")
-                    .map_err(map_sqlx_error)?,
-                avg_duration_secs: row
-                    .try_get::<f64, _>("avg_duration_secs")
-                    .map_err(map_sqlx_error)?,
-                stddev_duration_secs: row
-                    .try_get::<Option<f64>, _>("stddev_duration_secs")
-                    .map_err(map_sqlx_error)?,
+                sample_count: row.col::<i64>("sample_count")? as usize,
+                avg_turns: row.col::<f64>("avg_turns")?,
+                stddev_turns: row.col::<Option<f64>>("stddev_turns")?,
+                avg_cost: row.col::<f64>("avg_cost")?,
+                stddev_cost: row.col::<Option<f64>>("stddev_cost")?,
+                avg_duration_secs: row.col::<f64>("avg_duration_secs")?,
+                stddev_duration_secs: row.col::<Option<f64>>("stddev_duration_secs")?,
             })
         })
         .transpose()
@@ -218,19 +208,11 @@ impl PostgresSessionStore {
         rows.iter()
             .map(|row| {
                 Ok(SkillResolutionRate {
-                    skill_name: row
-                        .try_get::<String, _>("skill_name")
-                        .map_err(map_sqlx_error)?,
-                    uses: row.try_get::<i64, _>("uses").map_err(map_sqlx_error)? as u64,
-                    resolution_rate: row
-                        .try_get::<f64, _>("resolution_rate")
-                        .map_err(map_sqlx_error)?,
-                    avg_token_cost: row
-                        .try_get::<f64, _>("avg_token_cost")
-                        .map_err(map_sqlx_error)?,
-                    avg_turn_count: row
-                        .try_get::<f64, _>("avg_turn_count")
-                        .map_err(map_sqlx_error)?,
+                    skill_name: row.col::<String>("skill_name")?,
+                    uses: row.col::<i64>("uses")? as u64,
+                    resolution_rate: row.col::<f64>("resolution_rate")?,
+                    avg_token_cost: row.col::<f64>("avg_token_cost")?,
+                    avg_turn_count: row.col::<f64>("avg_turn_count")?,
                 })
             })
             .collect()

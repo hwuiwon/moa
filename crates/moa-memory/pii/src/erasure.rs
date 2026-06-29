@@ -128,10 +128,7 @@ pub async fn begin_app_scoped_tx<'a>(
     subject_user_id: &str,
 ) -> Result<ScopedConn<'a>> {
     let scope = contact_scope_from_subject(tenant_id, subject_user_id)?;
-    let mut tx = ScopedConn::begin(pool, &scope).await?;
-    sqlx::query("SET LOCAL ROLE moa_app")
-        .execute(tx.as_mut())
-        .await?;
+    let tx = ScopedConn::begin_as_app(pool, &scope, true).await?;
     Ok(tx)
 }
 

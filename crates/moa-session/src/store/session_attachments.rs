@@ -3,7 +3,6 @@
 use async_trait::async_trait;
 use moa_core::{Attachment, SessionAttachmentId, SessionAttachmentStore};
 use sha2::{Digest, Sha256};
-use sqlx::Row;
 
 use super::*;
 
@@ -86,9 +85,7 @@ impl SessionAttachmentStore for PostgresSessionStore {
         .map_err(map_sqlx_error)?
         .ok_or(MoaError::SessionAttachmentNotFound(attachment_id))?;
 
-        let object_key = row
-            .try_get::<String, _>("object_key")
-            .map_err(map_sqlx_error)?;
+        let object_key = row.col::<String>("object_key")?;
         let content = self.attachment_store.get(&object_key).await?;
         Ok((attachment_from_row(&row)?, content))
     }
@@ -153,10 +150,7 @@ impl SessionAttachmentStore for PostgresSessionStore {
         .await
         .map_err(map_sqlx_error)?
         .into_iter()
-        .map(|row| {
-            row.try_get::<String, _>("object_key")
-                .map_err(map_sqlx_error)
-        })
+        .map(|row| row.col::<String>("object_key"))
         .collect::<Result<Vec<_>>>()?;
 
         for object_key in &object_keys {
@@ -168,30 +162,18 @@ impl SessionAttachmentStore for PostgresSessionStore {
 }
 
 fn attachment_from_row(row: &sqlx::postgres::PgRow) -> Result<Attachment> {
-    let session_id = SessionId(
-        row.try_get::<uuid::Uuid, _>("session_id")
-            .map_err(map_sqlx_error)?,
-    );
-    let tenant_id = TenantId(
-        row.try_get::<uuid::Uuid, _>("tenant_id")
-            .map_err(map_sqlx_error)?,
-    );
-    let attachment_id =
-        SessionAttachmentId(row.try_get::<uuid::Uuid, _>("id").map_err(map_sqlx_error)?);
-    let size_bytes = row
-        .try_get::<i64, _>("size_bytes")
-        .map_err(map_sqlx_error)?;
+    let session_id = SessionId(row.col::<uuid::Uuid>("session_id")?);
+    let tenant_id = TenantId(row.col::<uuid::Uuid>("tenant_id")?);
+    let attachment_id = SessionAttachmentId(row.col::<uuid::Uuid>("id")?);
+    let size_bytes = row.col::<i64>("size_bytes")?;
     let size_bytes = u64::try_from(size_bytes)
         .map_err(|_| MoaError::StorageError("session attachment size was negative".to_string()))?;
 
     Ok(Attachment {
         id: Some(attachment_id),
-        name: row.try_get::<String, _>("name").map_err(map_sqlx_error)?,
-        mime_type: Some(
-            row.try_get::<String, _>("mime_type")
-                .map_err(map_sqlx_error)?,
-        ),
-        sha256: Some(row.try_get::<String, _>("sha256").map_err(map_sqlx_error)?),
+        name: row.col::<String>("name")?,
+        mime_type: Some(row.col::<String>("mime_type")?),
+        sha256: Some(row.col::<String>("sha256")?),
         url: Some(format!(
             "/v1/sessions/{session_id}/attachments/{attachment_id}?tenant_id={tenant_id}"
         )),

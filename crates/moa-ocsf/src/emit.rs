@@ -56,15 +56,15 @@ impl ActorInput {
     /// Build an actor from an authenticated MOA identity.
     #[must_use]
     pub fn from_identity(identity: &Identity) -> Self {
-        let prefix = match identity.identity_type {
-            IdentityType::User => "user",
-            IdentityType::Contact => "contact",
-            IdentityType::Agent => "agent",
-            IdentityType::Service => "service",
+        let (prefix, type_id) = match identity.identity_type {
+            IdentityType::User => ("user", 1),
+            IdentityType::Contact => ("contact", 2),
+            IdentityType::Agent => ("agent", 3),
+            IdentityType::Service => ("service", 4),
         };
         Self {
             uid: format!("{prefix}:{}", identity.id),
-            type_id: type_id_for_identity(identity.identity_type),
+            type_id,
         }
     }
 
@@ -74,33 +74,6 @@ impl ActorInput {
         Self {
             uid: format!("user:{user_id}"),
             type_id: 1,
-        }
-    }
-
-    /// Build an agent actor.
-    #[must_use]
-    pub fn agent(agent_id: Uuid) -> Self {
-        Self {
-            uid: format!("agent:{agent_id}"),
-            type_id: 2,
-        }
-    }
-
-    /// Build a service actor.
-    #[must_use]
-    pub fn service(service_id: Uuid) -> Self {
-        Self {
-            uid: format!("service:{service_id}"),
-            type_id: 3,
-        }
-    }
-
-    /// Build an unknown actor.
-    #[must_use]
-    pub fn unknown() -> Self {
-        Self {
-            uid: "unknown".to_string(),
-            type_id: 0,
         }
     }
 }
@@ -196,19 +169,6 @@ pub async fn emit_authz_decision(
     insert_pool(pool, tenant_id.0, &event, Some(object_uid)).await
 }
 
-/// Emit an API-key creation event.
-pub async fn emit_api_key_created(
-    pool: &PgPool,
-    tenant_id: Uuid,
-    identity: &Identity,
-    api_key_id: Uuid,
-) -> Result<Uuid, EmitError> {
-    let mut tx = pool.begin().await?;
-    let id = emit_api_key_created_tx(&mut tx, tenant_id, identity, api_key_id).await?;
-    tx.commit().await?;
-    Ok(id)
-}
-
 /// Emit an API-key creation event in an existing transaction.
 pub async fn emit_api_key_created_tx(
     tx: &mut Transaction<'_, Postgres>,
@@ -230,20 +190,6 @@ pub async fn emit_api_key_created_tx(
         },
     )
     .await
-}
-
-/// Emit an API-key revocation event.
-pub async fn emit_api_key_revoked(
-    pool: &PgPool,
-    tenant_id: Uuid,
-    actor: ActorInput,
-    api_key_id: Uuid,
-    reason: Option<&str>,
-) -> Result<Uuid, EmitError> {
-    let mut tx = pool.begin().await?;
-    let id = emit_api_key_revoked_tx(&mut tx, tenant_id, actor, api_key_id, reason).await?;
-    tx.commit().await?;
-    Ok(id)
 }
 
 /// Emit an API-key revocation event in an existing transaction.
@@ -270,19 +216,6 @@ pub async fn emit_api_key_revoked_tx(
     .await
 }
 
-/// Emit an agent registration event.
-pub async fn emit_agent_registered(
-    pool: &PgPool,
-    tenant_id: Uuid,
-    identity: &Identity,
-    agent_id: Uuid,
-) -> Result<Uuid, EmitError> {
-    let mut tx = pool.begin().await?;
-    let id = emit_agent_registered_tx(&mut tx, tenant_id, identity, agent_id).await?;
-    tx.commit().await?;
-    Ok(id)
-}
-
 /// Emit an agent registration event in an existing transaction.
 pub async fn emit_agent_registered_tx(
     tx: &mut Transaction<'_, Postgres>,
@@ -300,19 +233,6 @@ pub async fn emit_agent_registered_tx(
         2,
     )
     .await
-}
-
-/// Emit an agent deactivation event.
-pub async fn emit_agent_deactivated(
-    pool: &PgPool,
-    tenant_id: Uuid,
-    identity: &Identity,
-    agent_id: Uuid,
-) -> Result<Uuid, EmitError> {
-    let mut tx = pool.begin().await?;
-    let id = emit_agent_deactivated_tx(&mut tx, tenant_id, identity, agent_id).await?;
-    tx.commit().await?;
-    Ok(id)
 }
 
 /// Emit an agent deactivation event in an existing transaction.
@@ -412,19 +332,6 @@ pub async fn emit_scim_user_updated_tx(
     .await
 }
 
-/// Emit a user-creation event.
-pub async fn emit_user_created(
-    pool: &PgPool,
-    tenant_id: Uuid,
-    actor: ActorInput,
-    user_id: Uuid,
-) -> Result<Uuid, EmitError> {
-    let mut tx = pool.begin().await?;
-    let id = emit_scim_user_created_tx(&mut tx, tenant_id, actor, user_id).await?;
-    tx.commit().await?;
-    Ok(id)
-}
-
 /// Emit a user-deactivation event in an existing transaction.
 pub async fn emit_user_deactivated_tx(
     tx: &mut Transaction<'_, Postgres>,
@@ -442,16 +349,6 @@ pub async fn emit_user_deactivated_tx(
         1,
     )
     .await
-}
-
-/// Emit a SCIM user-deactivation event in an existing transaction.
-pub async fn emit_scim_user_deactivated_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    tenant_id: Uuid,
-    actor: ActorInput,
-    user_id: Uuid,
-) -> Result<Uuid, EmitError> {
-    emit_user_deactivated_tx(tx, tenant_id, actor, user_id).await
 }
 
 /// Emit a SCIM user-delete event in an existing transaction.
@@ -812,15 +709,6 @@ fn metadata() -> Metadata {
             vendor_name: std::env::var("MOA_VENDOR_NAME").unwrap_or_else(|_| "MOA".to_string()),
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
-    }
-}
-
-fn type_id_for_identity(identity_type: IdentityType) -> i32 {
-    match identity_type {
-        IdentityType::User => 1,
-        IdentityType::Contact => 2,
-        IdentityType::Agent => 3,
-        IdentityType::Service => 4,
     }
 }
 

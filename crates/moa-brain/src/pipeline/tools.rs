@@ -3,10 +3,9 @@
 use async_trait::async_trait;
 use moa_core::{
     AgentToolPolicy, ContextProcessor, ExcludedItem, ProcessorOutput, Result, WorkingContext,
+    estimate_text_tokens,
 };
 use serde_json::Value;
-
-use super::{estimate_tokens, sort_json_keys};
 
 // WARNING: Tool schemas live in the cached prompt prefix.
 // Keep ordering deterministic and do not inject workspace- or turn-specific metadata here.
@@ -62,7 +61,7 @@ impl ContextProcessor for ToolDefinitionProcessor {
 
         let tokens_added = tool_schemas
             .iter()
-            .map(|schema| estimate_tokens(&schema.to_string()))
+            .map(|schema| estimate_text_tokens(&schema.to_string()))
             .sum();
         let items_included = tool_schemas
             .iter()
@@ -95,6 +94,34 @@ fn agent_allows_tool(tool_policy: Option<&AgentToolPolicy>, tool_name: &str) -> 
 
 fn tool_name(schema: &Value) -> &str {
     schema.get("name").and_then(Value::as_str).unwrap_or("")
+}
+
+/// Recursively sorts object keys so serialized tool schemas are deterministic.
+fn sort_json_keys(value: &mut Value) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                sort_json_keys(item);
+            }
+        }
+        Value::Object(map) => {
+            let mut ordered = map
+                .iter()
+                .map(|(key, value)| {
+                    let mut value = value.clone();
+                    sort_json_keys(&mut value);
+                    (key.clone(), value)
+                })
+                .collect::<Vec<_>>();
+            ordered.sort_by(|left, right| left.0.cmp(&right.0));
+
+            map.clear();
+            for (key, value) in ordered {
+                map.insert(key, value);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]

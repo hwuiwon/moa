@@ -16,7 +16,10 @@ use crate::{
     },
     error::{Error, Result},
     normalize::redact_provider_metadata,
-    providers::{LinkedIntegrationProvider, http},
+    providers::{
+        LinkedIntegrationProvider,
+        http::{self, string_field, trim_base_url},
+    },
 };
 
 /// HTTP client for Merge tenant knowledge connections.
@@ -62,14 +65,14 @@ impl MergeProvider {
     }
 
     fn url(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+        http::join_url(&self.base_url, path)
     }
 
     fn verify_signature(&self, headers: &HeaderMap, body: &[u8]) -> Result<()> {
         let signature_key = self.webhook_signature_key.as_deref().ok_or_else(|| {
             Error::Config("Merge webhook signature key is not configured".to_string())
         })?;
-        let signature = header_value(headers, "x-merge-webhook-signature")?;
+        let signature = http::header_value("merge", headers, "x-merge-webhook-signature")?;
         let signature = decode_signature(signature)?;
         let mut mac =
             Hmac::<Sha256>::new_from_slice(signature_key.as_bytes()).map_err(|error| {
@@ -141,7 +144,9 @@ impl LinkedIntegrationProvider for MergeProvider {
             id: Option<String>,
             integration: Option<Value>,
         }
-        let mut url = parse_url(&self.url("/api/integrations/account-token"))?;
+        let mut url = http::parse_url(&self.url("/api/integrations/account-token"), |m| {
+            Error::provider("merge", m)
+        })?;
         append_path_segment(&mut url, &req.public_token)?;
         let response = self
             .client
@@ -185,7 +190,9 @@ impl LinkedIntegrationProvider for MergeProvider {
     }
 
     async fn list_changed_records(&self, req: ListChangedRecordsRequest) -> Result<RecordPage> {
-        let mut url = parse_url(&self.url("/api/knowledgebase/v1/articles"))?;
+        let mut url = http::parse_url(&self.url("/api/knowledgebase/v1/articles"), |m| {
+            Error::provider("merge", m)
+        })?;
         if let Some(cursor) = &req.cursor {
             url.query_pairs_mut().append_pair("cursor", cursor);
         }
@@ -259,20 +266,6 @@ fn value_to_provider_record(value: &Value) -> ProviderRecord {
     }
 }
 
-fn trim_base_url(value: String) -> String {
-    value.trim_end_matches('/').to_string()
-}
-
-fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str> {
-    headers
-        .get(name)
-        .ok_or_else(|| Error::provider("merge", format!("webhook missing `{name}` header")))?
-        .to_str()
-        .map_err(|error| {
-            Error::provider("merge", format!("webhook header `{name}` failed: {error}"))
-        })
-}
-
 fn decode_signature(value: &str) -> Result<Vec<u8>> {
     general_purpose::URL_SAFE
         .decode(value.trim())
@@ -288,21 +281,6 @@ fn decode_signature(value: &str) -> Result<Vec<u8>> {
 
 fn stable_id(value: &str) -> String {
     blake3::hash(value.as_bytes()).to_hex().to_string()
-}
-
-fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        let mut current = value;
-        for segment in key.split('.') {
-            current = current.get(segment)?;
-        }
-        current.as_str().map(ToOwned::to_owned)
-    })
-}
-
-fn parse_url(value: &str) -> Result<reqwest::Url> {
-    reqwest::Url::parse(value)
-        .map_err(|error| Error::provider("merge", format!("invalid URL `{value}`: {error}")))
 }
 
 fn append_path_segment(url: &mut reqwest::Url, segment: &str) -> Result<()> {

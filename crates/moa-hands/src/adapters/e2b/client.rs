@@ -5,7 +5,7 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use moa_core::{HandStatus, MoaError, Result, ToolFailureClass, ToolOutput, classify_tool_error};
-use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
 
 use super::{ConnectedSandbox, DEFAULT_ENVD_PORT};
@@ -45,53 +45,6 @@ pub(super) fn envd_headers(sandbox_id: &str, sandbox: &ConnectedSandbox) -> Resu
         })?,
     );
     Ok(headers)
-}
-
-pub(super) fn build_url(base: &str, params: &[(&str, &str)]) -> Result<reqwest::Url> {
-    let mut url = reqwest::Url::parse(base)
-        .map_err(|error| MoaError::ValidationError(format!("invalid E2B URL {base}: {error}")))?;
-    {
-        let mut query = url.query_pairs_mut();
-        for (key, value) in params {
-            query.append_pair(key, value);
-        }
-    }
-    Ok(url)
-}
-
-pub(super) async fn expect_success_json(response: reqwest::Response) -> Result<Value> {
-    if !response.status().is_success() {
-        return Err(http_error(response).await);
-    }
-    response
-        .json::<Value>()
-        .await
-        .map_err(|error| MoaError::ProviderError(format!("invalid E2B JSON response: {error}")))
-}
-
-pub(super) async fn expect_success(response: reqwest::Response) -> Result<()> {
-    if !response.status().is_success() {
-        return Err(http_error(response).await);
-    }
-    Ok(())
-}
-
-pub(super) async fn http_error(response: reqwest::Response) -> MoaError {
-    let status = response.status().as_u16();
-    let retry_after = response
-        .headers()
-        .get(RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(parse_retry_after);
-    let message = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "failed to read response body".to_string());
-    MoaError::HttpStatus {
-        status,
-        retry_after,
-        message,
-    }
 }
 
 pub(super) fn encode_connect_request(value: &Value) -> Result<Vec<u8>> {
@@ -226,10 +179,6 @@ pub(super) fn classify_error(
     }
 }
 
-fn parse_retry_after(value: &str) -> Option<Duration> {
-    value.trim().parse::<u64>().ok().map(Duration::from_secs)
-}
-
 fn decode_stream_chunk(value: &str) -> String {
     BASE64
         .decode(value)
@@ -261,13 +210,6 @@ fn extract_exit_code(end: &serde_json::Map<String, Value>) -> i32 {
         return 1;
     }
     0
-}
-
-pub(super) fn required_string_field<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .ok_or_else(|| MoaError::ValidationError(format!("missing string field `{field}`")))
 }
 
 pub(super) fn shell_escape(value: &str) -> String {

@@ -2,15 +2,13 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use moa_authz::require_authz_with_delegation;
-use moa_authz_schema::{ObjectType, Relation};
-use moa_core::traits::Identity;
+use moa_authz_schema::Relation;
 use moa_core::wire::skills::{
     SkillExportRequest, SkillExportResponse, SkillImportRequest, SkillImportResponse,
     SkillListRequest, SkillListResponse, SkillPackageDocument, SkillPackageDocumentFile,
     SkillSummary,
 };
-use moa_core::{ActionRuleScope, MoaError, TenantId};
+use moa_core::{ActionRuleScope, TenantId};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_skills::package::{SkillPackage, SkillPackageFile};
 use moa_skills::registry::{NewSkill, Skill, SkillRegistry, StoredSkillPackage};
@@ -18,7 +16,8 @@ use restate_sdk::prelude::*;
 
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::authorize_tenant;
+use crate::workflows::errors::moa_error_to_status_handler_error;
 
 /// Restate service surface for protected skill operations.
 #[restate_sdk::service]
@@ -119,7 +118,7 @@ async fn export_inner(request: SkillExportRequest) -> Result<SkillExportResponse
     let packages = registry
         .load_packages_for_scope(&scope)
         .await
-        .map_err(skill_handler_error)?;
+        .map_err(moa_error_to_status_handler_error)?;
     let packages = packages
         .into_iter()
         .map(skill_package_document_from_stored)
@@ -142,7 +141,7 @@ async fn import_inner(
         registry
             .upsert_by_name(skill)
             .await
-            .map_err(skill_handler_error)?;
+            .map_err(moa_error_to_status_handler_error)?;
         imported = imported.saturating_add(1);
     }
     Ok(SkillImportResponse { scope, imported })
@@ -156,7 +155,7 @@ async fn list_inner(request: SkillListRequest) -> Result<SkillListResponse, Hand
     let skills = registry
         .load_for_scope(&scope)
         .await
-        .map_err(skill_handler_error)?;
+        .map_err(moa_error_to_status_handler_error)?;
     let skills = skills
         .into_iter()
         .map(skill_summary_from_skill)
@@ -178,19 +177,6 @@ async fn authorized_import_scope(
         }
     }
     Ok(scope)
-}
-
-async fn authorize_tenant(
-    ctx: &impl RequestHeaders,
-    tenant_id: TenantId,
-    relation: Relation,
-) -> Result<Identity, HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
-        .await
-        .map_err(translate_authz_error)?;
-    Ok(identity)
 }
 
 fn reject_user_scoped_skill() -> HandlerError {
@@ -269,17 +255,4 @@ fn decode_skill_package_files(
 
 fn memory_scope_from_skill(skill: &Skill) -> Result<ActionRuleScope, HandlerError> {
     skill_scope_from_stored_parts(&skill.scope, skill.tenant_id)
-}
-
-fn skill_handler_error(error: MoaError) -> HandlerError {
-    match error {
-        MoaError::ValidationError(_) | MoaError::SerializationError(_) | MoaError::Uuid(_) => {
-            TerminalError::new_with_code(400, error.to_string()).into()
-        }
-        MoaError::Unsupported(_) | MoaError::NotImplemented(_) => {
-            TerminalError::new_with_code(501, error.to_string()).into()
-        }
-        other if other.is_fatal() => TerminalError::new(other.to_string()).into(),
-        other => HandlerError::from(other),
-    }
 }

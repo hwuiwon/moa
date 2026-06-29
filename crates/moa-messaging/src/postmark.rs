@@ -6,13 +6,15 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use moa_core::{Credential, CredentialVault, MessagingConfig, MoaError, Result};
-use reqwest::{
-    StatusCode,
-    header::{HeaderMap, RETRY_AFTER},
-};
+use reqwest::{StatusCode, header::HeaderMap};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tracing::{Instrument, field};
+
+use crate::provider_http::{
+    is_retryable_http_status, optional_field, record_api_error, required_field, response_text,
+    retry_after_delay,
+};
 
 const POSTMARK_EMAIL_PATH: &str = "/email";
 const DEFAULT_RATE_LIMIT_RETRIES: usize = 3;
@@ -148,11 +150,6 @@ impl PostmarkEmailSendResult {
     /// Returns Postmark API failure details when `ErrorCode` reports a send rejection.
     pub fn send_failure(&self) -> Option<PostmarkEmailFailure> {
         classify_postmark_failure(self.error_code, &self.message)
-    }
-
-    /// Returns true when Postmark accepted the email for delivery processing.
-    pub fn is_accepted(&self) -> bool {
-        self.error_code == 0 && !self.message_id.trim().is_empty()
     }
 }
 
@@ -317,7 +314,7 @@ impl PostmarkEmailClient {
                 Ok(response) => response,
                 Err(error) => {
                     let message = error.to_string();
-                    record_postmark_api_error(None, None, None, false, &message);
+                    record_api_error("postmark", None, None, None, false, &message);
                     tracing::warn!(
                         messaging.system = "postmark",
                         messaging.operation = "send_email",
@@ -334,7 +331,8 @@ impl PostmarkEmailClient {
 
             if status == StatusCode::TOO_MANY_REQUESTS && retries < self.max_rate_limit_retries {
                 let delay = retry_after_delay(&headers).unwrap_or(self.rate_limit_backoff);
-                record_postmark_api_error(
+                record_api_error(
+                    "postmark",
                     Some(status),
                     parse_postmark_error_code(&body),
                     Some(delay),
@@ -369,7 +367,8 @@ fn decode_postmark_response(
     if !status.is_success() {
         let retry_after = retry_after_delay(headers);
         let retryable = is_retryable_http_status(status);
-        record_postmark_api_error(
+        record_api_error(
+            "postmark",
             Some(status),
             parse_postmark_error_code(&body),
             retry_after,
@@ -404,13 +403,6 @@ fn decode_postmark_response(
         return Err(postmark_failure_error(&failure));
     }
     Ok(result)
-}
-
-async fn response_text(response: reqwest::Response) -> String {
-    response
-        .text()
-        .await
-        .unwrap_or_else(|error| format!("failed to read response body: {error}"))
 }
 
 fn postmark_span(name: &'static str, operation: &'static str) -> tracing::Span {
@@ -454,33 +446,6 @@ fn record_postmark_result(result: &PostmarkEmailSendResult) {
     }
 }
 
-fn record_postmark_api_error(
-    status: Option<StatusCode>,
-    error_code: Option<i64>,
-    retry_after: Option<Duration>,
-    retryable: bool,
-    message: &str,
-) {
-    let span = tracing::Span::current();
-    if let Some(status) = status {
-        span.record("http.status_code", status.as_u16());
-    }
-    if let Some(error_code) = error_code {
-        span.record("postmark.error_code", error_code);
-    }
-    if let Some(retry_after) = retry_after {
-        span.record("postmark.retry_after_ms", retry_after.as_millis() as u64);
-    }
-    let failure_class = if retryable {
-        PostmarkEmailFailureClass::Retryable
-    } else {
-        PostmarkEmailFailureClass::Permanent
-    };
-    span.record("postmark.failure_class", failure_class.label());
-    span.record("postmark.retryable", retryable);
-    span.record("error", message);
-}
-
 fn postmark_failure_error(failure: &PostmarkEmailFailure) -> MoaError {
     let message = format!(
         "postmark email {} failure ErrorCode {}: {}",
@@ -492,34 +457,6 @@ fn postmark_failure_error(failure: &PostmarkEmailFailure) -> MoaError {
         PostmarkEmailFailureClass::Retryable => MoaError::ProviderQuirk(message),
         PostmarkEmailFailureClass::Permanent => MoaError::ProviderError(message),
     }
-}
-
-fn is_retryable_http_status(status: StatusCode) -> bool {
-    matches!(
-        status,
-        StatusCode::TOO_MANY_REQUESTS
-            | StatusCode::INTERNAL_SERVER_ERROR
-            | StatusCode::BAD_GATEWAY
-            | StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT
-    )
-}
-
-fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
-    let value = headers.get(RETRY_AFTER)?.to_str().ok()?;
-    parse_retry_after(value)
-}
-
-fn parse_retry_after(value: &str) -> Option<Duration> {
-    if let Ok(seconds) = value.trim().parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
-    }
-
-    let reset_at = DateTime::parse_from_rfc2822(value).ok()?;
-    let reset_at = reset_at.with_timezone(&Utc);
-    let remaining = reset_at.signed_duration_since(Utc::now());
-    let millis = remaining.num_milliseconds().max(0) as u64;
-    Some(Duration::from_millis(millis))
 }
 
 fn parse_postmark_error_code(body: &str) -> Option<i64> {
@@ -582,8 +519,8 @@ fn classify_postmark_failure(error_code: i64, error_message: &str) -> Option<Pos
 
 impl PostmarkEmailMessage {
     fn to_request(&self, default_message_stream: Option<&str>) -> Result<PostmarkEmailRequest> {
-        let from = required_field("from", &self.from)?;
-        let subject = required_field("subject", &self.subject)?;
+        let from = required_field("postmark email", "from", &self.from)?;
+        let subject = required_field("postmark email", "subject", &self.subject)?;
         let to = recipients("to", &self.to)?;
         let text_body = self.text_body.as_deref().and_then(optional_field);
         let html_body = self.html_body.as_deref().and_then(optional_field);
@@ -624,25 +561,6 @@ fn postmark_token_from_credential(credential: Credential) -> Result<String> {
         Credential::OAuth { .. } => Err(MoaError::ConfigError(
             "postmark server token credential must be bearer or api_key".to_string(),
         )),
-    }
-}
-
-fn required_field(name: &str, value: &str) -> Result<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(MoaError::ValidationError(format!(
-            "postmark email {name} is required"
-        )));
-    }
-    Ok(trimmed.to_string())
-}
-
-fn optional_field(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
     }
 }
 

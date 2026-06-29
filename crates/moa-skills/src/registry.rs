@@ -6,7 +6,6 @@ use moa_artifacts::registry::{
     ArtifactFile, ArtifactRegistry, ArtifactScopeParts, NewPublishedArtifactRevision,
     StoredArtifactRevision, insert_published_revision,
 };
-use moa_core::RlsContext;
 use moa_core::{ActionRuleScope, MoaError, Result, SkillMetadata, TenantId, UserId};
 use moa_db::ScopedConn;
 use moa_memory_types::MemoryScope;
@@ -21,6 +20,7 @@ use crate::package::{
     SKILL_MD_PATH, SkillPackage, SkillPackageFile, SkillPackageManifest, ValidatedSkillPackage,
     ValidatedSkillPackageFile,
 };
+use crate::util::{artifact_scope_context, tenant_artifact_scope};
 
 /// One active or historical skill package loaded from a skill artifact revision.
 #[derive(Debug, Clone, PartialEq)]
@@ -305,18 +305,8 @@ async fn publish_skill_revision(pool: &PgPool, skill: &ValidatedNewSkill) -> Res
     Ok(revision_uid)
 }
 
-pub(crate) fn tenant_artifact_scope(tenant_id: TenantId) -> ActionRuleScope {
-    ActionRuleScope::Tenant { tenant_id }
-}
-
 fn tenant_memory_scope(tenant_id: TenantId) -> MemoryScope {
     MemoryScope::Tenant { tenant_id }
-}
-
-fn artifact_scope_context(scope: &ActionRuleScope) -> RlsContext {
-    match scope {
-        ActionRuleScope::Tenant { tenant_id } => RlsContext::tenant(*tenant_id),
-    }
 }
 
 async fn insert_skill_artifact(

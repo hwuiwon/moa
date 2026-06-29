@@ -17,6 +17,7 @@ use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
+use crate::workflows::errors::handler_error_message;
 use crate::{
     OrchestratorCtx,
     services::knowledge::{
@@ -628,11 +629,6 @@ fn classify_workflow_failure(
         moa_knowledge::Error::Repository(error_message)
     };
     classify_failure(stage, &error)
-}
-
-fn handler_error_message(error: &HandlerError) -> String {
-    let error_ref = <HandlerError as AsRef<dyn std::error::Error + Send + Sync>>::as_ref(error);
-    error_ref.to_string()
 }
 
 fn knowledge_ingestion_error(error: moa_knowledge::Error) -> HandlerError {

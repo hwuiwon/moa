@@ -60,24 +60,3 @@ pub fn compute_prefix_stability(turns: &[CompiledRequest]) -> bool {
 
     true
 }
-
-/// Computes the longest common byte prefix shared by every compiled request.
-#[must_use]
-pub fn compute_stable_prefix_bytes(turns: &[CompiledRequest]) -> usize {
-    let Some(first) = turns.first() else {
-        return 0;
-    };
-    let mut prefix_len = first.bytes.len();
-
-    for turn in &turns[1..] {
-        let shared = first
-            .bytes
-            .iter()
-            .zip(turn.bytes.iter())
-            .take_while(|(left, right)| left == right)
-            .count();
-        prefix_len = prefix_len.min(shared);
-    }
-
-    prefix_len
-}

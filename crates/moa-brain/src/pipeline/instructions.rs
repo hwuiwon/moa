@@ -1,9 +1,9 @@
 //! Stage 2: injects workspace and user instructions from configuration and workspace discovery.
 
 use async_trait::async_trait;
-use moa_core::{ContextProcessor, MoaConfig, ProcessorOutput, Result, WorkingContext};
-
-use super::estimate_tokens;
+use moa_core::{
+    ContextProcessor, MoaConfig, ProcessorOutput, Result, WorkingContext, estimate_text_tokens,
+};
 
 const DISCOVERED_AGENTS_NOTICE: &str = "\
 The workspace root AGENTS.md has already been loaded for this session. \
@@ -90,7 +90,7 @@ impl ContextProcessor for InstructionProcessor {
         }
 
         let content = sections.join("\n\n");
-        let tokens_added = estimate_tokens(&content);
+        let tokens_added = estimate_text_tokens(&content);
         ctx.append_system(content);
 
         Ok(ProcessorOutput {

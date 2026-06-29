@@ -8,7 +8,7 @@ use crate::{
     error::{Error, Result},
     normalize::normalize_text,
     parser::DocumentParser,
-    providers::http,
+    providers::http::{self, string_field},
 };
 
 /// HTTP adapter for Unstructured partitioning.
@@ -49,7 +49,7 @@ impl UnstructuredParser {
     ) -> Self {
         Self {
             client,
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url: http::trim_base_url(base_url.into()),
             api_key: api_key.into(),
             strategy: strategy.into(),
             chunking_strategy: chunking_strategy.into(),
@@ -57,7 +57,7 @@ impl UnstructuredParser {
     }
 
     fn url(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+        http::join_url(&self.base_url, path)
     }
 }
 
@@ -272,12 +272,7 @@ fn map_kind(raw: &str) -> DocumentElementKind {
 }
 
 fn ensure_unstructured_not_failed(value: &Value) -> Result<()> {
-    let status = value
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if matches!(status.as_str(), "error" | "failed" | "failure") {
+    if http::status_failed(&http::parse_status(value, &["/status"])) {
         return Err(Error::parser("unstructured", "partition job failed"));
     }
     if value.get("errors").is_some() {
@@ -327,9 +322,4 @@ fn coordinates_to_layout(metadata: &Value) -> Option<ElementLayout> {
             .and_then(Value::as_f64)
             .map(|value| value as f32),
     })
-}
-
-fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| value.get(*key)?.as_str().map(ToOwned::to_owned))
 }

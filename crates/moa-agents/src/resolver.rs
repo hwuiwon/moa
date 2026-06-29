@@ -369,7 +369,7 @@ fn instructions_from_definition(definition: &AgentDefinition) -> Vec<String> {
 fn model_policy_from_definition(definition: &ModelPolicy) -> AgentModelPolicy {
     AgentModelPolicy {
         default_model: definition.default_model.clone(),
-        allowed_models: sorted_strings(&definition.allowed_models),
+        allowed_models: sorted_unique(&definition.allowed_models),
         fallback_model: definition.fallback_model.clone(),
     }
 }
@@ -388,22 +388,27 @@ fn knowledge_policy_from_definition(definition: &AgentDefinition) -> AgentKnowle
 
 fn skill_policy_from_definition(definition: &SkillPolicy) -> AgentSkillPolicy {
     AgentSkillPolicy {
-        mode: skill_mode_from_definition(definition.mode),
-        refs: sorted_ref_strings(&definition.refs),
+        mode: match definition.mode {
+            SkillPolicyMode::Auto => AgentSkillPolicyMode::Auto,
+            SkillPolicyMode::Allowlist => AgentSkillPolicyMode::Allowlist,
+            SkillPolicyMode::Pinned => AgentSkillPolicyMode::Pinned,
+            SkillPolicyMode::Denylist => AgentSkillPolicyMode::Denylist,
+        },
+        refs: sorted_unique(&definition.refs),
         max_visible: definition.max_visible,
     }
 }
 
 fn workflow_policy_from_definition(definition: &WorkflowPolicy) -> AgentWorkflowPolicy {
     AgentWorkflowPolicy {
-        allowed: sorted_ref_strings(&definition.allowed),
+        allowed: sorted_unique(&definition.allowed),
     }
 }
 
 fn action_policy_from_definition(definition: &ActionPolicy) -> AgentActionPolicy {
     AgentActionPolicy {
-        allowed: sorted_ref_strings(&definition.allowed),
-        require_admin_review: sorted_ref_strings(&definition.require_admin_review),
+        allowed: sorted_unique(&definition.allowed),
+        require_admin_review: sorted_unique(&definition.require_admin_review),
     }
 }
 
@@ -414,8 +419,8 @@ fn tool_policy_from_definition(definition: &AgentDefinition) -> AgentToolPolicy 
             ToolPolicyMode::Allowlist => AgentToolPolicyMode::Allowlist,
             ToolPolicyMode::Denylist => AgentToolPolicyMode::Denylist,
         },
-        tools: sorted_strings(&definition.tool_policy.tools),
-        denied_tools: sorted_strings(&definition.tool_policy.denied_tools),
+        tools: sorted_unique(&definition.tool_policy.tools),
+        denied_tools: sorted_unique(&definition.tool_policy.denied_tools),
     }
 }
 
@@ -452,24 +457,8 @@ fn guardrail_stage_policy_from_definition(
     }
 }
 
-fn skill_mode_from_definition(mode: SkillPolicyMode) -> AgentSkillPolicyMode {
-    match mode {
-        SkillPolicyMode::Auto => AgentSkillPolicyMode::Auto,
-        SkillPolicyMode::Allowlist => AgentSkillPolicyMode::Allowlist,
-        SkillPolicyMode::Pinned => AgentSkillPolicyMode::Pinned,
-        SkillPolicyMode::Denylist => AgentSkillPolicyMode::Denylist,
-    }
-}
-
-fn sorted_ref_strings(refs: &[ArtifactRef]) -> Vec<String> {
-    let mut values = refs.iter().map(ToString::to_string).collect::<Vec<_>>();
-    values.sort();
-    values.dedup();
-    values
-}
-
-fn sorted_strings(values: &[String]) -> Vec<String> {
-    let mut values = values.to_vec();
+fn sorted_unique<T: ToString>(values: &[T]) -> Vec<String> {
+    let mut values = values.iter().map(ToString::to_string).collect::<Vec<_>>();
     values.sort();
     values.dedup();
     values

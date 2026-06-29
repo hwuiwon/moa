@@ -8,21 +8,20 @@ use moa_artifacts::registry::{
 };
 use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::validate_for_status;
-use moa_authz::require_authz_with_delegation;
-use moa_authz_schema::{ObjectType, Relation};
-use moa_core::traits::Identity;
+use moa_authz_schema::Relation;
+use moa_core::ActionRuleScope;
 use moa_core::wire::artifacts::{
     ArtifactExportRequest, ArtifactExportResponse, ArtifactFileDocument, ArtifactImportRequest,
     ArtifactImportResponse, ArtifactListRequest, ArtifactListResponse, ArtifactPublishRequest,
     ArtifactPublishResponse, ArtifactSummary, ArtifactValidateRequest, ArtifactValidateResponse,
 };
-use moa_core::{ActionRuleScope, MoaError, TenantId};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::authorize_tenant;
+use crate::workflows::errors::moa_error_to_status_handler_error;
 
 /// Restate service surface for protected artifact operations.
 #[restate_sdk::service]
@@ -163,7 +162,7 @@ async fn import_inner(
             },
         )
         .await
-        .map_err(artifact_handler_error)?;
+        .map_err(moa_error_to_status_handler_error)?;
 
     Ok(ArtifactImportResponse {
         artifact_uid: stored.artifact_uid,
@@ -182,12 +181,12 @@ async fn export_inner(
     let stored = registry
         .load_visible(&scope, kind, &request.name)
         .await
-        .map_err(artifact_handler_error)?
+        .map_err(moa_error_to_status_handler_error)?
         .ok_or_else(|| TerminalError::new_with_code(404, "artifact not found"))?;
     let files = registry
         .load_files(&scope, stored.revision_uid)
         .await
-        .map_err(artifact_handler_error)?
+        .map_err(moa_error_to_status_handler_error)?
         .into_iter()
         .map(|file| ArtifactFileDocument {
             path: file.path,
@@ -220,7 +219,7 @@ async fn list_inner(
     let artifacts = artifact_registry()
         .list_visible(&scope, kind, status)
         .await
-        .map_err(artifact_handler_error)?
+        .map_err(moa_error_to_status_handler_error)?
         .into_iter()
         .map(|summary| ArtifactSummary {
             artifact_uid: summary.artifact_uid,
@@ -266,13 +265,13 @@ async fn publish_inner(
     let stored = registry
         .load_revision(&scope, request.revision_uid)
         .await
-        .map_err(artifact_handler_error)?
+        .map_err(moa_error_to_status_handler_error)?
         .ok_or_else(|| TerminalError::new_with_code(404, "artifact revision not found"))?;
     let mut document = stored.document.clone();
     document.reference_resolutions = ArtifactResolver::new(artifact_registry())
         .resolve_document(&scope, &document)
         .await
-        .map_err(artifact_handler_error)?;
+        .map_err(moa_error_to_status_handler_error)?;
     let report = validate_for_status(&document, ArtifactStatus::Published);
     if !report.is_ok() {
         return Err(
@@ -283,7 +282,7 @@ async fn publish_inner(
     let published = registry
         .publish_revision(&scope, request.revision_uid, &report)
         .await
-        .map_err(artifact_handler_error)?;
+        .map_err(moa_error_to_status_handler_error)?;
     let validation_report = serde_json::to_value(report)
         .map_err(|error| TerminalError::new_with_code(500, error.to_string()))?;
     Ok(publish_response(published, validation_report))
@@ -379,30 +378,4 @@ async fn authorize_read_scope(
         }
     }
     Ok(())
-}
-
-async fn authorize_tenant(
-    ctx: &impl RequestHeaders,
-    tenant_id: TenantId,
-    relation: Relation,
-) -> Result<Identity, HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
-        .await
-        .map_err(translate_authz_error)?;
-    Ok(identity)
-}
-
-fn artifact_handler_error(error: MoaError) -> HandlerError {
-    match error {
-        MoaError::ValidationError(_) | MoaError::SerializationError(_) | MoaError::Uuid(_) => {
-            TerminalError::new_with_code(400, error.to_string()).into()
-        }
-        MoaError::Unsupported(_) | MoaError::NotImplemented(_) => {
-            TerminalError::new_with_code(501, error.to_string()).into()
-        }
-        other if other.is_fatal() => TerminalError::new(other.to_string()).into(),
-        other => HandlerError::from(other),
-    }
 }

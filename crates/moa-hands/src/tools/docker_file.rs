@@ -267,7 +267,8 @@ fn stderr_or_status(output: &std::process::Output) -> String {
     }
 }
 
-async fn stop_container(container_id: &str) -> Result<()> {
+/// Stops a running Docker sandbox container during cancellation.
+pub(crate) async fn stop_container(container_id: &str) -> Result<()> {
     let output = Command::new("docker")
         .args(["stop", "-t", "2", container_id])
         .output()

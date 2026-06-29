@@ -8,6 +8,9 @@ through refinery.
 
 ## Files
 
+`migrations/postgres/` holds the full ordered migration sequence — the baselines
+below plus forward migrations (`V000302__...` onward). Key entry points:
+
 - `migrations/postgres/V000001__session_baseline.sql`
 - `migrations/postgres/V000101__auth_baseline.sql`
 - `migrations/postgres/V000201__orchestrator_baseline.sql`

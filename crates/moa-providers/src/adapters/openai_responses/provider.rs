@@ -205,13 +205,7 @@ impl LLMProvider for OpenAIProvider {
 }
 
 pub(crate) fn canonical_model_id(model: &str) -> Result<String> {
-    if models::find_for_provider_model(PROVIDER_OPENAI, model).is_some() {
-        return Ok(model.to_string());
-    }
-
-    Err(MoaError::Unsupported(format!(
-        "unsupported OpenAI model '{model}'"
-    )))
+    models::canonical_model_id(PROVIDER_OPENAI, "OpenAI", model)
 }
 
 pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {

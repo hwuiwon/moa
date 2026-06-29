@@ -38,7 +38,7 @@ use crate::blob::{
 };
 use crate::queries::{
     EVENT_COLUMNS, EXPERIENCE_ATTRIBUTION_COLUMNS, EXPERIENCE_RECORD_COLUMNS,
-    LEARNING_CANDIDATE_COLUMNS, LEARNING_ENTRY_COLUMNS, SESSION_INSERT_COLUMNS,
+    LEARNING_CANDIDATE_COLUMNS, LEARNING_ENTRY_COLUMNS, RowExt, SESSION_INSERT_COLUMNS,
     SESSION_SELECT_COLUMNS, SESSION_SUMMARY_COLUMNS, TASK_SEGMENT_COLUMNS,
     TASK_STRATEGY_SUCCESS_RATE_COLUMNS, action_policy_rule_from_row,
     experience_attribution_from_row, experience_record_from_row, from_db,
@@ -458,7 +458,11 @@ impl PostgresSessionStore {
 
     fn table_name(&self, table_name: &str) -> String {
         match &self.schema_name {
-            Some(schema_name) => qualified_name(schema_name, table_name),
+            Some(schema_name) => format!(
+                "{}.{}",
+                quote_identifier(schema_name),
+                quote_identifier(table_name)
+            ),
             None => table_name.to_string(),
         }
     }

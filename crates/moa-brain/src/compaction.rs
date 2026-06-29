@@ -2,13 +2,12 @@
 
 use std::borrow::Cow;
 
+use moa_core::estimate_text_tokens;
 use moa_core::{
     CompactionConfig, CompletionRequest, ContextMessage, Event, EventRecord, LLMProvider,
     ModelTier, Result, SessionId, SessionStore, TokenPricing,
 };
 use tracing::Instrument;
-
-use crate::pipeline::estimate_tokens;
 
 /// Latest checkpoint summary state derived from the append-only event log.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,7 +88,7 @@ pub(crate) fn should_compact(
             .fold(
                 (0usize, 0usize),
                 |(count, tokens), record| match event_summary_line(record) {
-                    Some(line) => (count + 1, tokens + estimate_tokens(&line)),
+                    Some(line) => (count + 1, tokens + estimate_text_tokens(&line)),
                     None => (count, tokens),
                 },
             );
@@ -147,7 +146,7 @@ pub(crate) async fn maybe_compact_events(
                 Event::Checkpoint {
                     summary: summary.clone(),
                     events_summarized: summarized_events as u64,
-                    token_count: estimate_tokens(&summary),
+                    token_count: estimate_text_tokens(&summary),
                     model: response.model.clone(),
                     model_tier,
                     input_tokens: usage.total_input_tokens(),

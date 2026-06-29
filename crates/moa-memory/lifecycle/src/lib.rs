@@ -1,8 +1,19 @@
 //! Maintenance passes for graph-memory lifecycle management.
 
+use serde_json::Value;
+
 pub mod consolidate;
 pub mod digest;
 pub mod quality;
+
+/// Extracts a string field from an optional JSON properties object.
+pub(crate) fn property_string(properties: &Option<Value>, key: &str) -> Option<String> {
+    properties
+        .as_ref()
+        .and_then(|properties| properties.get(key))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
 
 pub use consolidate::{
     BackfillStats, ConsolidationOptions, ConsolidationOutcome, DecayStats, MergeStats, Result,

@@ -44,5 +44,5 @@ pub use traits::{
     MemoryToolExecutor, NULL_LINEAGE_HANDLE, NullLineageHandle, SegmentStore,
     SessionAttachmentStore, SessionStore, ToolContext,
 };
-pub use truncation::{truncate_head_tail, truncate_head_tail_lines};
+pub use truncation::truncate_head_tail;
 pub use types::*;

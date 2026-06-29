@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use moa_core::{Event, EventFilter, EventType, SessionId, SessionStore, ToolCallId};
+use moa_core::{Event, EventFilter, SessionId, SessionStore, ToolCallId};
 
 /// Scenario expectations needed for memory-recall scoring.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -108,20 +108,6 @@ pub fn count_consolidation_outcomes(events: &[Event]) -> ConsolidationOutcomes {
         }
     }
     outcomes
-}
-
-/// Returns an event-type filter for memory-recall queries.
-#[must_use]
-pub fn memory_event_types() -> Vec<EventType> {
-    vec![
-        EventType::MemoryRead,
-        EventType::MemoryWrite,
-        EventType::MemoryIngest,
-        EventType::ToolCall,
-        EventType::ToolResult,
-        EventType::ToolError,
-        EventType::BrainResponse,
-    ]
 }
 
 fn successful_tool_ids(events: &[Event]) -> HashSet<ToolCallId> {

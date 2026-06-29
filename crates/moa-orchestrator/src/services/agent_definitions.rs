@@ -22,7 +22,10 @@ use uuid::Uuid;
 
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::{
+    authorize_tenant, require_fga_client, require_identity, translate_authz_error,
+};
+use crate::workflows::errors::{bad_request, moa_error_to_handler_error};
 
 const DEFAULT_DEPLOYMENT_LIST_LIMIT: i64 = 50;
 
@@ -686,23 +689,6 @@ fn parse_status(status: &str) -> Result<ArtifactStatus, HandlerError> {
         .map_err(|error| TerminalError::new_with_code(400, error.to_string()).into())
 }
 
-fn bad_request(message: impl Into<String>) -> HandlerError {
-    TerminalError::new_with_code(400, message.into()).into()
-}
-
-async fn authorize_tenant(
-    ctx: &impl RequestHeaders,
-    tenant_id: TenantId,
-    relation: Relation,
-) -> Result<Identity, HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
-        .await
-        .map_err(translate_authz_error)?;
-    Ok(identity)
-}
-
 async fn authorize_agent_operator(
     ctx: &impl RequestHeaders,
     agent_id: Uuid,
@@ -718,13 +704,6 @@ async fn authorize_agent_operator(
     )
     .await
     .map_err(translate_authz_error)
-}
-
-fn moa_error_to_handler_error(error: MoaError) -> HandlerError {
-    if error.is_fatal() {
-        return TerminalError::new(error.to_string()).into();
-    }
-    HandlerError::from(error)
 }
 
 fn sqlx_handler_error(error: sqlx::Error) -> HandlerError {

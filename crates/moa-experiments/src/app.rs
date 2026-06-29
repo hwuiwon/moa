@@ -39,7 +39,7 @@ use crate::model::{
     ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentTarget,
     ExperimentTrialRecord, ExperimentTrialStatus, ExperimentVariant, NewExperimentRun,
 };
-use crate::plan::{PlanExpansionError, project_plan_run};
+use crate::plan::project_plan_run;
 use crate::store::ExperimentStore;
 
 const DEFAULT_LIST_LIMIT: i64 = 50;
@@ -139,7 +139,7 @@ pub async fn store_generated_plan(
 ) -> Result<ExperimentGeneratePlanResponse> {
     let document = parse_generated_plan_document(completion_text)?;
     require_valid_generated_plan(&document)?;
-    let source_text = document.to_json().map_err(artifact_doc_error)?;
+    let source_text = document.to_json().map_err(bad_request_from)?;
     let document_value =
         serde_json::to_value(&document).map_err(|error| serialization_error(error.to_string()))?;
     let scope = tenant_scope(request.tenant_id);
@@ -235,7 +235,7 @@ pub async fn list_runs(
         .list_runs(&scope, status, limit)
         .await?
         .into_iter()
-        .map(record_value)
+        .map(|run| serialized_payload("run", &run))
         .collect::<Result<Vec<_>>>()?;
 
     Ok(ExperimentListResponse {
@@ -674,7 +674,7 @@ async fn plan_run_inputs(
         ));
     };
     let mut projection = project_plan_run(definition, plan_revision_uid, &plan.name, run_name)
-        .map_err(plan_expansion_error)?;
+        .map_err(bad_request_from)?;
     if !agent_revision_variants.is_empty() {
         let variants = serde_json::to_value(agent_revision_variants)
             .map_err(|error| serialization_error(error.to_string()))?;
@@ -1069,11 +1069,6 @@ fn run_response_from_record(
     }
 }
 
-fn record_value(run: ExperimentRunRecord) -> Result<Value> {
-    serde_json::to_value(run)
-        .map_err(|error| serialization_error(format!("serialize experiment run failed: {error}")))
-}
-
 fn trial_status_response_from_summary(
     summary: ExperimentTrialSummary,
 ) -> ExperimentTrialStatusResponse {
@@ -1201,11 +1196,8 @@ fn serialization_error(message: impl Into<String>) -> ExperimentAppError {
     ExperimentAppError::Serialization(message.into())
 }
 
-fn artifact_doc_error(error: moa_artifacts::Error) -> ExperimentAppError {
-    bad_request(error.to_string())
-}
-
-fn plan_expansion_error(error: PlanExpansionError) -> ExperimentAppError {
+/// Maps any displayable upstream error into a `BadRequest` app error.
+fn bad_request_from(error: impl std::fmt::Display) -> ExperimentAppError {
     bad_request(error.to_string())
 }
 

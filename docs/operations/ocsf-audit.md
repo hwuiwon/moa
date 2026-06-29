@@ -51,7 +51,7 @@ and requests Object Lock COMPLIANCE retention on each object.
 ## Verify An Event
 
 ```sh
-curl -X POST http://localhost:8080/v1/audit/verify \
+curl -X POST http://localhost:10000/v1/audit/verify \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <edge-token>" \
   --data '{"event_id":"<event_uuid>","tenant_id":"<tenant_uuid>"}'

@@ -131,7 +131,7 @@ impl EnvironmentCredentialVault {
                 continue;
             };
             let credential = credential_from_env(config)?;
-            credentials.insert((server.name.clone(), default_scope_for(server)), credential);
+            credentials.insert((server.name.clone(), server.name.clone()), credential);
         }
         Ok(Self {
             credentials: RwLock::new(credentials),
@@ -180,10 +180,6 @@ impl CredentialVault for EnvironmentCredentialVault {
             .map(|(service, _)| service.clone())
             .collect())
     }
-}
-
-fn default_scope_for(server: &McpServerConfig) -> String {
-    server.name.clone()
 }
 
 fn credential_from_env(config: &McpCredentialConfig) -> Result<Credential> {

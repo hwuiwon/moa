@@ -14,15 +14,3 @@ pub trait LineageSink: Send + Sync + 'static {
     /// Returns the number of events dropped due to buffer pressure.
     fn dropped_count(&self) -> u64;
 }
-
-/// Disabled-cost fallback for lineage capture.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NullSink;
-
-impl LineageSink for NullSink {
-    fn record(&self, _evt: LineageEvent) {}
-
-    fn dropped_count(&self) -> u64 {
-        0
-    }
-}

@@ -33,7 +33,6 @@ pub fn control_action_for_inbound(
                 attachments: inbound.attachments.clone(),
             })),
             acknowledgement: acknowledgement(
-                &channel,
                 "Queued - will be picked up after current task",
                 false,
             ),
@@ -57,7 +56,6 @@ fn command_action(channel: Channel, text: &str) -> MessagingControlAction {
                     SessionSignal::SoftCancel
                 }),
                 acknowledgement: acknowledgement(
-                    &channel,
                     if force {
                         "Stopping immediately..."
                     } else {
@@ -73,7 +71,6 @@ fn command_action(channel: Channel, text: &str) -> MessagingControlAction {
                 attachments: Vec::<Attachment>::new(),
             })),
             acknowledgement: acknowledgement(
-                &channel,
                 "Queued - will be picked up after current task",
                 channel == Channel::Slack,
             ),
@@ -81,7 +78,6 @@ fn command_action(channel: Channel, text: &str) -> MessagingControlAction {
         _ => MessagingControlAction {
             signal: None,
             acknowledgement: acknowledgement(
-                &channel,
                 "Unknown command. Valid commands: /stop, /stop --force, /queue <message>",
                 channel == Channel::Slack,
             ),
@@ -89,7 +85,7 @@ fn command_action(channel: Channel, text: &str) -> MessagingControlAction {
     }
 }
 
-fn acknowledgement(_channel: &Channel, text: &str, ephemeral: bool) -> OutboundMessage {
+fn acknowledgement(text: &str, ephemeral: bool) -> OutboundMessage {
     OutboundMessage {
         content: MessageContent::Text(text.to_string()),
         buttons: Vec::new(),

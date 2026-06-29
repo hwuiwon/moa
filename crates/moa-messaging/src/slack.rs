@@ -1092,28 +1092,16 @@ fn slack_channel_ref(
     thread_ts: Option<&str>,
     user_id: &str,
 ) -> ChannelRef {
-    if channel_id.starts_with('D') {
-        return ChannelRef::Slack {
-            team_id: team_id.map(ToOwned::to_owned),
-            slack_channel_id: Some(channel_id.to_string()),
-            thread_ts: None,
-            user_id: Some(user_id.to_string()),
-        };
-    }
-
-    if let Some(thread_ts) = thread_ts {
-        return ChannelRef::Slack {
-            team_id: team_id.map(ToOwned::to_owned),
-            slack_channel_id: Some(channel_id.to_string()),
-            thread_ts: Some(thread_ts.to_string()),
-            user_id: Some(user_id.to_string()),
-        };
-    }
-
     ChannelRef::Slack {
         team_id: team_id.map(ToOwned::to_owned),
         slack_channel_id: Some(channel_id.to_string()),
-        thread_ts: None,
+        // Direct-message channels never thread their replies; channel posts carry
+        // the originating thread when one is present.
+        thread_ts: if channel_id.starts_with('D') {
+            None
+        } else {
+            thread_ts.map(ToOwned::to_owned)
+        },
         user_id: Some(user_id.to_string()),
     }
 }

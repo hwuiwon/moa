@@ -23,6 +23,7 @@ use crate::candidates::{
 use crate::distiller::DistillationSkipReason;
 use crate::package::ValidatedSkillPackage;
 use crate::regression::GeneratedSkillSuite;
+use crate::util::map_sqlx_error;
 
 /// Reviewable draft proposal generated from skill self-learning.
 #[derive(Debug, Clone, PartialEq)]
@@ -198,10 +199,6 @@ fn proposal_advisory_lock_key(candidate_id: Uuid) -> i64 {
         bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
     ]);
     high ^ low
-}
-
-fn map_sqlx_error(error: sqlx::Error) -> MoaError {
-    MoaError::StorageError(error.to_string())
 }
 
 impl SkillProposalOperation {

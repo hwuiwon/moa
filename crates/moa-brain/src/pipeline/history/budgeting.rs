@@ -1,6 +1,6 @@
 //! Token-budget allocation for history replay.
 
-use crate::pipeline::estimate_tokens;
+use moa_core::estimate_text_tokens;
 
 use super::conversion::CompiledRecordMessage;
 
@@ -15,7 +15,7 @@ pub(super) fn keep_budgeted_older_messages(
     let mut kept_older_reversed = Vec::new();
 
     for compiled in older_messages.iter().rev() {
-        let message_tokens = estimate_tokens(&compiled.message.content);
+        let message_tokens = estimate_text_tokens(&compiled.message.content);
         if tokens_used + message_tokens > remaining_budget {
             break;
         }

@@ -245,13 +245,9 @@ impl PostgresSessionStore {
             return Ok(None);
         };
         let binding_id = row
-            .try_get::<Uuid, _>("id")
-            .map(moa_core::SessionChannelBindingId)
-            .map_err(map_sqlx_error)?;
-        let channel_ref = row
-            .try_get::<Json<ChannelRef>, _>("route")
-            .map(|route| route.0)
-            .map_err(map_sqlx_error)?;
+            .col::<Uuid>("id")
+            .map(moa_core::SessionChannelBindingId)?;
+        let channel_ref = row.col::<Json<ChannelRef>>("route").map(|route| route.0)?;
         Ok(Some(SessionChannelBinding {
             binding_id,
             channel_ref,
@@ -432,47 +428,28 @@ impl SessionEventLookupStore for PostgresSessionStore {
 }
 
 fn agent_context_from_row(row: &sqlx::postgres::PgRow) -> Result<Option<moa_core::AgentContext>> {
-    let Some(revision_uid) = row
-        .try_get::<Option<Uuid>, _>("agent_revision_uid")
-        .map_err(map_sqlx_error)?
-    else {
+    let Some(revision_uid) = row.col::<Option<Uuid>>("agent_revision_uid")? else {
         return Ok(None);
     };
 
     let artifact_dependencies = row
-        .try_get::<Json<Vec<moa_core::ResolvedArtifactRevisionRef>>, _>("artifact_dependencies")
-        .map_err(map_sqlx_error)?
+        .col::<Json<Vec<moa_core::ResolvedArtifactRevisionRef>>>("artifact_dependencies")?
         .0;
     let tool_dependencies = row
-        .try_get::<Json<Vec<moa_core::LockedToolRef>>, _>("tool_dependencies")
-        .map_err(map_sqlx_error)?
+        .col::<Json<Vec<moa_core::LockedToolRef>>>("tool_dependencies")?
         .0;
 
     Ok(Some(moa_core::AgentContext {
-        agent_id: row
-            .try_get::<Option<Uuid>, _>("agent_id")
-            .map_err(map_sqlx_error)?,
-        installation_uid: row
-            .try_get::<Option<Uuid>, _>("installation_uid")
-            .map_err(map_sqlx_error)?,
-        deployment_uid: row
-            .try_get::<Option<Uuid>, _>("deployment_uid")
-            .map_err(map_sqlx_error)?,
-        definition_ref: row
-            .try_get::<String, _>("agent_definition_ref")
-            .map_err(map_sqlx_error)?,
+        agent_id: row.col::<Option<Uuid>>("agent_id")?,
+        installation_uid: row.col::<Option<Uuid>>("installation_uid")?,
+        deployment_uid: row.col::<Option<Uuid>>("deployment_uid")?,
+        definition_ref: row.col::<String>("agent_definition_ref")?,
         revision_uid,
-        policy_hash: row
-            .try_get::<String, _>("policy_hash")
-            .map_err(map_sqlx_error)?,
-        display_name: row
-            .try_get::<String, _>("display_name")
-            .map_err(map_sqlx_error)?,
+        policy_hash: row.col::<String>("policy_hash")?,
+        display_name: row.col::<String>("display_name")?,
         artifact_dependencies,
         tool_dependencies,
-        policy_snapshot: row
-            .try_get::<serde_json::Value, _>("policy_snapshot")
-            .map_err(map_sqlx_error)?,
+        policy_snapshot: row.col::<serde_json::Value>("policy_snapshot")?,
     }))
 }
 
@@ -588,21 +565,11 @@ impl SessionStore for PostgresSessionStore {
         .await
         .map_err(map_sqlx_error)?
         .ok_or(MoaError::SessionNotFound(session_id))?;
-        let sequence_num = locked_session
-            .try_get::<i64, _>("event_count")
-            .map_err(map_sqlx_error)? as u64;
-        let tenant_id = locked_session
-            .try_get::<Uuid, _>("tenant_id")
-            .map_err(map_sqlx_error)?;
-        let storage_partition_id = locked_session
-            .try_get::<String, _>("storage_partition_id")
-            .map_err(map_sqlx_error)?;
-        let actor_storage_key = locked_session
-            .try_get::<String, _>("user_id")
-            .map_err(map_sqlx_error)?;
-        let contact_id = locked_session
-            .try_get::<Option<Uuid>, _>("contact_id")
-            .map_err(map_sqlx_error)?;
+        let sequence_num = locked_session.col::<i64>("event_count")? as u64;
+        let tenant_id = locked_session.col::<Uuid>("tenant_id")?;
+        let storage_partition_id = locked_session.col::<String>("storage_partition_id")?;
+        let actor_storage_key = locked_session.col::<String>("user_id")?;
+        let contact_id = locked_session.col::<Option<Uuid>>("contact_id")?;
 
         sqlx::query(&format!(
             "INSERT INTO {events} \
@@ -888,9 +855,8 @@ impl SessionStore for PostgresSessionStore {
         .map_err(map_sqlx_error)?;
 
         row.map(|row| {
-            row.try_get::<Json<ContextSnapshot>, _>("payload")
+            row.col::<Json<ContextSnapshot>>("payload")
                 .map(|payload| payload.0)
-                .map_err(map_sqlx_error)
         })
         .transpose()
     }
@@ -1120,10 +1086,7 @@ impl SessionStore for PostgresSessionStore {
         .await
         .map_err(map_sqlx_error)?
         .into_iter()
-        .map(|row| {
-            row.try_get::<String, _>("object_key")
-                .map_err(map_sqlx_error)
-        })
+        .map(|row| row.col::<String>("object_key"))
         .collect::<Result<Vec<_>>>()?;
         let deleted = sqlx::query(&format!("DELETE FROM {sessions} WHERE id = $1"))
             .bind(session_id.0)

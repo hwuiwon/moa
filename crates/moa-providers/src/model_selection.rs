@@ -30,10 +30,7 @@ pub(crate) fn split_explicit_provider_model<'a>(
     Ok(Some(ExplicitProviderModel { provider, model }))
 }
 
-/// Returns the model segment from `provider:model`, or the trimmed value when no prefix exists.
-pub(crate) fn model_without_provider_prefix(value: &str) -> &str {
-    value
-        .trim()
-        .split_once(':')
-        .map_or_else(|| value.trim(), |(_provider, model)| model.trim())
+/// Normalizes a provider name to lowercase with `-` separators for selector matching.
+pub(crate) fn normalize_provider_name(name: &str) -> String {
+    name.trim().to_ascii_lowercase().replace('_', "-")
 }

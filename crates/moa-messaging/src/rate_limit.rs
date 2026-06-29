@@ -52,7 +52,7 @@ impl MessagingSendResponse {
             return None;
         }
 
-        let retry_after = self.retry_after_for_channel_opt(channel);
+        let retry_after = self.retry_after_opt();
         let class = if is_retryable_status(self.status) {
             MessagingFailureClass::Retryable
         } else {
@@ -66,12 +66,12 @@ impl MessagingSendResponse {
         })
     }
 
-    fn retry_after_for_channel(&self, channel: Channel) -> Duration {
-        self.retry_after_for_channel_opt(channel)
+    fn retry_after(&self) -> Duration {
+        self.retry_after_opt()
             .unwrap_or_else(|| Duration::from_secs(1))
     }
 
-    fn retry_after_for_channel_opt(&self, _channel: Channel) -> Option<Duration> {
+    fn retry_after_opt(&self) -> Option<Duration> {
         let retry_after = self.header("retry-after");
         retry_after
             .and_then(|value| value.parse::<f64>().ok())
@@ -301,7 +301,7 @@ impl MessagingRateLimiter {
             }
 
             retries += 1;
-            let retry_after = response.retry_after_for_channel(self.channel);
+            let retry_after = response.retry_after();
             tracing::warn!(
                 messaging.channel = %self.channel,
                 http.status_code = response.status,

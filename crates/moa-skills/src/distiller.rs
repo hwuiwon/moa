@@ -4,9 +4,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use moa_core::{
-    AttributionEffect, AttributionSubjectType, CompletionRequest, ContextMessage, Event,
-    EventRecord, ExperienceAttribution, ExperienceRecord, MoaConfig, ModelTask, Result,
-    SegmentEvidenceKind, SegmentEvidencePolarity, SegmentOutcome, SessionMeta, SkillMetadata,
+    AttributionEffect, AttributionSubjectType, CompletionRequest, Event, EventRecord,
+    ExperienceAttribution, ExperienceRecord, MoaConfig, ModelTask, Result, SegmentEvidenceKind,
+    SegmentEvidencePolarity, SegmentOutcome, SessionMeta, SkillMetadata,
 };
 use moa_providers::ModelRouter;
 use moa_session::{PostgresSessionStore, create_session_store};
@@ -343,18 +343,10 @@ Learn only durable workflow structure. Do not copy secrets, transient IDs, or on
 the path is essential to the workflow.";
 
 fn build_distillation_request(task_summary: &str, events: &[EventRecord]) -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        messages: vec![
-            ContextMessage::system(SKILL_DISTILLATION_SYSTEM_PROMPT),
-            ContextMessage::user(build_distillation_user_prompt(task_summary, events)),
-        ],
-        tools: Vec::new(),
-        max_output_tokens: None,
-        temperature: None,
-        response_format: None,
-        metadata: Default::default(),
-    }
+    crate::util::completion_request(
+        SKILL_DISTILLATION_SYSTEM_PROMPT,
+        build_distillation_user_prompt(task_summary, events),
+    )
 }
 
 fn build_distillation_user_prompt(task_summary: &str, events: &[EventRecord]) -> String {
@@ -366,18 +358,10 @@ fn build_distillation_user_prompt(task_summary: &str, events: &[EventRecord]) ->
 }
 
 fn build_experience_distillation_request(input: &ExperienceDistillationInput) -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        messages: vec![
-            ContextMessage::system(SKILL_DISTILLATION_SYSTEM_PROMPT),
-            ContextMessage::user(build_experience_distillation_user_prompt(input)),
-        ],
-        tools: Vec::new(),
-        max_output_tokens: None,
-        temperature: None,
-        response_format: None,
-        metadata: Default::default(),
-    }
+    crate::util::completion_request(
+        SKILL_DISTILLATION_SYSTEM_PROMPT,
+        build_experience_distillation_user_prompt(input),
+    )
 }
 
 fn build_experience_distillation_user_prompt(input: &ExperienceDistillationInput) -> String {

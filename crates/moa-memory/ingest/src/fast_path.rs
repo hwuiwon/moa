@@ -428,12 +428,7 @@ async fn active_uids_for_pattern(
 }
 
 async fn begin_scoped(ctx: &FastPathCtx) -> Result<ScopedConn<'_>, FastError> {
-    let mut conn = ScopedConn::begin(&ctx.pool, &ctx.scope).await?;
-    if ctx.assume_app_role {
-        sqlx::query("SET LOCAL ROLE moa_app")
-            .execute(conn.as_mut())
-            .await?;
-    }
+    let conn = ScopedConn::begin_as_app(&ctx.pool, &ctx.scope, ctx.assume_app_role).await?;
     Ok(conn)
 }
 

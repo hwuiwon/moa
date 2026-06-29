@@ -16,8 +16,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use moa_authz::require_authz_with_delegation;
-use moa_authz_schema::{ObjectType, Relation};
+use moa_authz_schema::Relation;
 use moa_core::RlsContext;
 use moa_core::{
     Credential, CredentialVault, MoaConfig, MoaError, TenantId,
@@ -46,7 +45,6 @@ use uuid::Uuid;
 use crate::{
     OrchestratorCtx,
     ctx::RequestHeaders,
-    handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error},
     workflows::knowledge_sync_ingestion::{
         KnowledgeSyncIngestionClient, KnowledgeSyncIngestionRequest,
     },
@@ -896,17 +894,8 @@ async fn authorize_tenant(
     ctx: &impl RequestHeaders,
     tenant_id: TenantId,
 ) -> Result<(), HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Tenant,
-        tenant_id,
-        Relation::Operator,
-    )
-    .await
-    .map_err(translate_authz_error)
+    crate::handlers::authz_shim::authorize_tenant(ctx, tenant_id, Relation::Operator).await?;
+    Ok(())
 }
 
 fn knowledge_handler_error(error: KnowledgeServiceError) -> HandlerError {

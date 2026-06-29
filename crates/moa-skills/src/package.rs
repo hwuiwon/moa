@@ -10,6 +10,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::format::{SkillDocument, parse_skill_markdown};
+use crate::util::empty_object;
 
 /// Required root file for every skill package.
 pub const SKILL_MD_PATH: &str = "SKILL.md";
@@ -237,10 +238,10 @@ pub struct SkillPackageManifest {
     #[serde(default = "default_artifact_kind")]
     pub artifact_kind: String,
     /// Canonical input schema declared by `skill.moa.yaml`.
-    #[serde(default = "empty_json_object")]
+    #[serde(default = "empty_object")]
     pub inputs_schema: Value,
     /// Canonical output schema declared by `skill.moa.yaml`.
-    #[serde(default = "empty_json_object")]
+    #[serde(default = "empty_object")]
     pub outputs_schema: Value,
     /// Canonical action definitions exposed by this skill.
     #[serde(default)]
@@ -249,7 +250,7 @@ pub struct SkillPackageManifest {
     #[serde(default)]
     pub connectors: Vec<ArtifactRef>,
     /// Builder-owned UI metadata declared by `skill.moa.yaml`.
-    #[serde(default = "empty_json_object")]
+    #[serde(default = "empty_object")]
     pub ui: Value,
     /// Deterministically sorted package files.
     pub files: Vec<SkillPackageManifestFile>,
@@ -293,10 +294,6 @@ fn default_artifact_schema_version() -> String {
 
 fn default_artifact_kind() -> String {
     "skill".to_string()
-}
-
-fn empty_json_object() -> Value {
-    Value::Object(serde_json::Map::new())
 }
 
 /// Serializable metadata for one package file.

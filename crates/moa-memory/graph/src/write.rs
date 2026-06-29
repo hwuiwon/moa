@@ -57,7 +57,7 @@ pub async fn supersede_node(
     validate_node_scope(&new)?;
     let mut conn = store.begin_required().await?;
     let (current_uid, old) = fetch_current_supersession_target(conn.as_mut(), old_uid).await?;
-    validate_new_node_scope_against_stored(&new, &old)?;
+    ensure_same_scope(&new, &old, "supersession nodes must share the same scope")?;
     if new.valid_from <= old.valid_from {
         new.valid_from = old.valid_from + Duration::microseconds(1);
     }
@@ -207,7 +207,11 @@ pub async fn close_existing_node_with_supersession(
             intent.replacement_uid
         )));
     }
-    validate_same_scope(&old, &replacement)?;
+    ensure_same_scope(
+        &old,
+        &replacement,
+        "supersession nodes must share the same scope",
+    )?;
 
     close_node_index(
         conn.as_mut(),
@@ -595,9 +599,9 @@ async fn validate_edge_endpoints(conn: &mut PgConnection, intent: &EdgeWriteInte
             intent.end_uid
         )));
     }
-    validate_edge_scope_matches_stored(intent, &start)?;
-    validate_edge_scope_matches_stored(intent, &end)?;
-    validate_same_scope(&start, &end)
+    ensure_same_scope(intent, &start, "edge endpoints must share the edge scope")?;
+    ensure_same_scope(intent, &end, "edge endpoints must share the edge scope")?;
+    ensure_same_scope(&start, &end, "supersession nodes must share the same scope")
 }
 
 fn validate_node_scope(intent: &NodeWriteIntent) -> Result<()> {
@@ -628,21 +632,30 @@ fn validate_edge_scope(intent: &EdgeWriteIntent) -> Result<()> {
     Ok(())
 }
 
+/// Returns the expected scope tier for a storage-partition/contact pair.
+///
+/// Returns `None` for the invalid combination of a contact without a storage
+/// partition; callers map that to their own error.
+pub(crate) fn expected_scope_tier(
+    storage_partition_id: Option<&str>,
+    contact_id: Option<&str>,
+) -> Option<&'static str> {
+    match (storage_partition_id, contact_id) {
+        (None, None) => Some("global"),
+        (Some(_), None) => Some("tenant"),
+        (Some(_), Some(_)) => Some("contact"),
+        (None, Some(_)) => None,
+    }
+}
+
 fn validate_scope_shape(
     storage_partition_id: Option<&str>,
     contact_id: Option<&str>,
     scope: &str,
 ) -> Result<()> {
-    let expected = match (storage_partition_id, contact_id) {
-        (None, None) => "global",
-        (Some(_), None) => "tenant",
-        (Some(_), Some(_)) => "contact",
-        (None, Some(_)) => {
-            return Err(GraphError::Conflict(
-                "contact scope requires storage partition".to_string(),
-            ));
-        }
-    };
+    let expected = expected_scope_tier(storage_partition_id, contact_id).ok_or_else(|| {
+        GraphError::Conflict("contact scope requires storage partition".to_string())
+    })?;
     if scope == expected {
         Ok(())
     } else {
@@ -652,45 +665,48 @@ fn validate_scope_shape(
     }
 }
 
-fn validate_same_scope(old: &StoredNode, replacement: &StoredNode) -> Result<()> {
-    if old.storage_partition_id == replacement.storage_partition_id
-        && old.contact_id == replacement.contact_id
-        && old.scope == replacement.scope
-    {
-        Ok(())
-    } else {
-        Err(GraphError::Conflict(
-            "supersession nodes must share the same scope".to_string(),
-        ))
+/// Provides the `(storage_partition_id, contact_id, scope)` tuple used for
+/// scope-equality checks across nodes and edges.
+trait ScopeTriple {
+    fn scope_triple(&self) -> (Option<&str>, Option<&str>, &str);
+}
+
+impl ScopeTriple for StoredNode {
+    fn scope_triple(&self) -> (Option<&str>, Option<&str>, &str) {
+        (
+            self.storage_partition_id.as_deref(),
+            self.contact_id.as_deref(),
+            self.scope.as_str(),
+        )
     }
 }
 
-fn validate_new_node_scope_against_stored(
-    intent: &NodeWriteIntent,
-    stored: &StoredNode,
-) -> Result<()> {
-    if intent.storage_partition_id == stored.storage_partition_id
-        && intent.contact_id == stored.contact_id
-        && intent.scope == stored.scope
-    {
-        Ok(())
-    } else {
-        Err(GraphError::Conflict(
-            "supersession nodes must share the same scope".to_string(),
-        ))
+impl ScopeTriple for NodeWriteIntent {
+    fn scope_triple(&self) -> (Option<&str>, Option<&str>, &str) {
+        (
+            self.storage_partition_id.as_deref(),
+            self.contact_id.as_deref(),
+            self.scope.as_str(),
+        )
     }
 }
 
-fn validate_edge_scope_matches_stored(intent: &EdgeWriteIntent, node: &StoredNode) -> Result<()> {
-    if intent.storage_partition_id == node.storage_partition_id
-        && intent.contact_id == node.contact_id
-        && intent.scope == node.scope
-    {
+impl ScopeTriple for EdgeWriteIntent {
+    fn scope_triple(&self) -> (Option<&str>, Option<&str>, &str) {
+        (
+            self.storage_partition_id.as_deref(),
+            self.contact_id.as_deref(),
+            self.scope.as_str(),
+        )
+    }
+}
+
+/// Returns a [`GraphError::Conflict`] with `message` when the two scope triples differ.
+fn ensure_same_scope(a: &impl ScopeTriple, b: &impl ScopeTriple, message: &str) -> Result<()> {
+    if a.scope_triple() == b.scope_triple() {
         Ok(())
     } else {
-        Err(GraphError::Conflict(
-            "edge endpoints must share the edge scope".to_string(),
-        ))
+        Err(GraphError::Conflict(message.to_string()))
     }
 }
 

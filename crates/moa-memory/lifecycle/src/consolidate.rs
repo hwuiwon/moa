@@ -391,16 +391,16 @@ fn duplicate_groups(rows: &[LifecycleNodeRow]) -> Vec<Vec<LifecycleNodeRow>> {
             .push(row.clone());
     }
 
-    let mut values = groups
+    // `into_values()` already yields groups in ascending `DuplicateKey` order, so
+    // no further sort across groups is required for deterministic output.
+    groups
         .into_values()
         .filter(|group| group.len() > 1)
         .map(|mut group| {
             group.sort_by_key(|row| (row.valid_from, row.uid));
             group
         })
-        .collect::<Vec<_>>();
-    values.sort_by_key(|left| duplicate_group_key(left));
-    values
+        .collect()
 }
 
 fn contradiction_groups(rows: &[LifecycleNodeRow]) -> Vec<Vec<LifecycleNodeRow>> {
@@ -428,7 +428,9 @@ fn contradiction_groups(rows: &[LifecycleNodeRow]) -> Vec<Vec<LifecycleNodeRow>>
             .push(row.clone().with_cached_object(object));
     }
 
-    let mut values = groups
+    // `into_values()` already yields groups in ascending `ContradictionKey` order,
+    // so no further sort across groups is required for deterministic output.
+    groups
         .into_values()
         .filter(|group| {
             group
@@ -442,9 +444,7 @@ fn contradiction_groups(rows: &[LifecycleNodeRow]) -> Vec<Vec<LifecycleNodeRow>>
             group.sort_by_key(|row| (std::cmp::Reverse(row.valid_from), row.uid));
             group
         })
-        .collect::<Vec<_>>();
-    values.sort_by_key(|left| contradiction_group_key(left));
-    values
+        .collect()
 }
 
 fn is_sweepable_contradiction_predicate(predicate: &str) -> bool {
@@ -701,27 +701,6 @@ fn normalized_entity_name(entity: &LifecycleNodeRow) -> String {
         .unwrap_or_else(|| normalize_entity_name(&entity.name))
 }
 
-fn duplicate_group_key(group: &[LifecycleNodeRow]) -> DuplicateKey {
-    let row = &group[0];
-    DuplicateKey {
-        tenant_id: row.tenant_id,
-        contact_id: row.contact_id,
-        scope: row.scope.clone(),
-        fact_hash: row.property_text("fact_hash").unwrap_or_default(),
-    }
-}
-
-fn contradiction_group_key(group: &[LifecycleNodeRow]) -> ContradictionKey {
-    let row = &group[0];
-    ContradictionKey {
-        tenant_id: row.tenant_id,
-        contact_id: row.contact_id,
-        scope: row.scope.clone(),
-        subject: row.property_text("subject").unwrap_or_default(),
-        predicate: row.property_text("predicate").unwrap_or_default(),
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 struct LifecycleNodeRow {
     uid: Uuid,
@@ -742,11 +721,7 @@ struct LifecycleNodeRow {
 
 impl LifecycleNodeRow {
     fn property_text(&self, key: &str) -> Option<String> {
-        self.properties
-            .as_ref()
-            .and_then(|properties| properties.get(key))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
+        crate::property_string(&self.properties, key)
     }
 
     fn properties_object(&self) -> serde_json::Map<String, Value> {

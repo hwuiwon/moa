@@ -1,4 +1,4 @@
-# 11 — Tenant Knowledge Base
+# 21 — Tenant Knowledge Base
 
 _Linked connector ingestion, parsing, graph writes, retrieval policy, and inspection._
 

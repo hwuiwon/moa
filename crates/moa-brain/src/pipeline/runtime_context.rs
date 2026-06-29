@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
     ContextMessage, ContextProcessor, MessageRole, ProcessorOutput, Result, WorkingContext,
+    estimate_text_tokens,
 };
 use tokio::process::Command;
 
-use super::estimate_tokens;
 use super::memory::MEMORY_REMINDER_PREFIX;
 
 pub(crate) const WORKSPACE_ROOT_METADATA_KEY: &str = "_moa.runtime.workspace_root";
@@ -90,7 +90,7 @@ impl ContextProcessor for RuntimeContextProcessor {
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
         let reminder = build_runtime_reminder(self.clock.now(), ctx).await;
         let insertion_index = runtime_context_insertion_index(&ctx.messages);
-        let tokens_added = estimate_tokens(&reminder);
+        let tokens_added = estimate_text_tokens(&reminder);
         ctx.insert_message(insertion_index, ContextMessage::user(reminder));
 
         Ok(ProcessorOutput {

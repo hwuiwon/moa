@@ -6,6 +6,7 @@ use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use crate::domain::{KnowledgeObject, ObjectStatus, ProviderRecord};
+use crate::graph_delta::stable_uid;
 
 /// Normalizes source text for deterministic block identities.
 #[must_use]
@@ -126,7 +127,7 @@ pub fn normalize_provider_record(
     connection_uid: Uuid,
     record: ProviderRecord,
 ) -> KnowledgeObject {
-    let object_uid = stable_object_uid(tenant_object_seed, &record.source_id);
+    let object_uid = stable_uid(&format!("{tenant_object_seed}:{}", record.source_id));
     KnowledgeObject {
         object_uid,
         tenant_id,
@@ -146,13 +147,6 @@ pub fn normalize_provider_record(
         source_updated_at: record.source_updated_at,
         deleted_at: record.deleted.then(Utc::now),
     }
-}
-
-fn stable_object_uid(seed: &str, source_id: &str) -> Uuid {
-    let hash = blake3::hash(format!("{seed}:{source_id}").as_bytes());
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[0..16]);
-    Uuid::from_bytes(bytes)
 }
 
 fn is_secret_key(key: &str) -> bool {

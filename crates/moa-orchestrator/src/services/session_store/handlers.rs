@@ -3,7 +3,9 @@
 use super::inner::{create_agent_session_for_identity, create_session_for_identity};
 use super::*;
 use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::{
+    authorize_tenant, require_fga_client, require_identity, translate_authz_error,
+};
 use moa_authz::{
     AuthzCheckError, OutboxPoller, PollerConfig, fga_subject, require_authz_with_delegation,
 };
@@ -663,17 +665,8 @@ async fn authorize_tenant_read(
     ctx: &impl RequestHeaders,
     tenant_id: moa_core::TenantId,
 ) -> Result<(), HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Tenant,
-        tenant_id,
-        Relation::Operator,
-    )
-    .await
-    .map_err(translate_authz_error)
+    authorize_tenant(ctx, tenant_id, Relation::Operator).await?;
+    Ok(())
 }
 
 fn tenant_id_for_session_listing(
@@ -689,17 +682,8 @@ async fn authorize_tenant_admin(
     ctx: &impl RequestHeaders,
     tenant_id: moa_core::TenantId,
 ) -> Result<(), HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Tenant,
-        tenant_id,
-        Relation::Admin,
-    )
-    .await
-    .map_err(translate_authz_error)
+    authorize_tenant(ctx, tenant_id, Relation::Admin).await?;
+    Ok(())
 }
 
 async fn ensure_session_authz_visible(

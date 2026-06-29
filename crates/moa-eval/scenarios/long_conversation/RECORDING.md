@@ -3,7 +3,7 @@
 Recorded long-conversation scenarios replay provider calls deterministically in PR CI. Each transcript is JSONL:
 
 1. The first line is metadata:
-   `{"version":1,"scenario":"<name>","recorded_at":"<iso8601>","provider":"anthropic","model":"claude-sonnet-4"}`
+   `{"version":1,"scenario":"<name>","recorded_at":"<iso8601>","provider":"recorded","model":"recorded-scripted"}`
 2. Each following line is one provider call, not necessarily one user turn.
 3. When the brain calls a tool and then asks the provider to continue the same turn, record another line with the same `user.text`. The smoke runner treats adjacent duplicate `user.text` records as provider continuations inside one user turn.
 

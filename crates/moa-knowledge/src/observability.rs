@@ -102,6 +102,7 @@ impl FailureClassification {
 #[must_use]
 pub fn classify_failure(stage: &str, error: &Error) -> FailureClassification {
     let prefix = failure_prefix(stage);
+    let codes = stage_failure_codes(prefix);
     match error {
         Error::UnsupportedFormat(_) => FailureClassification {
             error_code: "parser_unsupported_format",
@@ -109,16 +110,16 @@ pub fn classify_failure(stage: &str, error: &Error) -> FailureClassification {
         },
         Error::HttpStatus { status, .. } if retryable_http_status(*status) => {
             FailureClassification {
-                error_code: retryable_http_code(prefix),
+                error_code: codes.http_retryable,
                 retryable: true,
             }
         }
         Error::HttpStatus { .. } => FailureClassification {
-            error_code: terminal_http_code(prefix),
+            error_code: codes.http_terminal,
             retryable: false,
         },
         Error::Transport(_) => FailureClassification {
-            error_code: retryable_transport_code(prefix),
+            error_code: codes.transport_retryable,
             retryable: true,
         },
         Error::Provider { message, .. } if message.contains("materializable text") => {
@@ -136,11 +137,11 @@ pub fn classify_failure(stage: &str, error: &Error) -> FailureClassification {
             retryable: true,
         },
         Error::Decode(_) => FailureClassification {
-            error_code: terminal_decode_code(prefix),
+            error_code: codes.decode_terminal,
             retryable: false,
         },
         Error::Config(_) => FailureClassification {
-            error_code: terminal_config_code(prefix),
+            error_code: codes.config_terminal,
             retryable: false,
         },
         Error::Repository(_) if prefix == "graph" => FailureClassification {
@@ -437,52 +438,33 @@ fn retryable_http_status(status: u16) -> bool {
     matches!(status, 408 | 409 | 425 | 429 | 500..=599)
 }
 
-fn retryable_http_code(prefix: &str) -> &'static str {
-    match prefix {
-        "provider" => "provider_http_retryable",
-        "parser" => "parser_http_retryable",
-        "embedder" => "embedder_http_retryable",
-        "graph" => "graph_http_retryable",
-        _ => "knowledge_http_retryable",
-    }
+/// Stage-prefixed failure codes selected by [`classify_failure`].
+struct StageFailureCodes {
+    http_retryable: &'static str,
+    http_terminal: &'static str,
+    transport_retryable: &'static str,
+    decode_terminal: &'static str,
+    config_terminal: &'static str,
 }
 
-fn terminal_http_code(prefix: &str) -> &'static str {
-    match prefix {
-        "provider" => "provider_http_terminal",
-        "parser" => "parser_http_terminal",
-        "embedder" => "embedder_http_terminal",
-        "graph" => "graph_http_terminal",
-        _ => "knowledge_http_terminal",
+/// Returns the failure-code set for a stage prefix, defaulting to `knowledge`.
+fn stage_failure_codes(prefix: &str) -> StageFailureCodes {
+    macro_rules! stage_codes {
+        ($prefix:literal) => {
+            StageFailureCodes {
+                http_retryable: concat!($prefix, "_http_retryable"),
+                http_terminal: concat!($prefix, "_http_terminal"),
+                transport_retryable: concat!($prefix, "_transport_retryable"),
+                decode_terminal: concat!($prefix, "_decode_terminal"),
+                config_terminal: concat!($prefix, "_config_terminal"),
+            }
+        };
     }
-}
-
-fn retryable_transport_code(prefix: &str) -> &'static str {
     match prefix {
-        "provider" => "provider_transport_retryable",
-        "parser" => "parser_transport_retryable",
-        "embedder" => "embedder_transport_retryable",
-        "graph" => "graph_transport_retryable",
-        _ => "knowledge_transport_retryable",
-    }
-}
-
-fn terminal_decode_code(prefix: &str) -> &'static str {
-    match prefix {
-        "provider" => "provider_decode_terminal",
-        "parser" => "parser_decode_terminal",
-        "embedder" => "embedder_decode_terminal",
-        "graph" => "graph_decode_terminal",
-        _ => "knowledge_decode_terminal",
-    }
-}
-
-fn terminal_config_code(prefix: &str) -> &'static str {
-    match prefix {
-        "provider" => "provider_config_terminal",
-        "parser" => "parser_config_terminal",
-        "embedder" => "embedder_config_terminal",
-        "graph" => "graph_config_terminal",
-        _ => "knowledge_config_terminal",
+        "provider" => stage_codes!("provider"),
+        "parser" => stage_codes!("parser"),
+        "embedder" => stage_codes!("embedder"),
+        "graph" => stage_codes!("graph"),
+        _ => stage_codes!("knowledge"),
     }
 }

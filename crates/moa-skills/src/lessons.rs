@@ -7,8 +7,9 @@ use moa_db::ScopedConn;
 use moa_memory_graph::{NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
 use serde_json::json;
-use sqlx::PgConnection;
 use uuid::Uuid;
+
+use crate::util::set_app_role;
 
 /// Context needed to write a learned lesson into the graph.
 #[derive(Clone)]
@@ -106,23 +107,11 @@ pub async fn learn_lesson(
     Ok(lesson_uid)
 }
 
-async fn set_app_role(conn: &mut PgConnection) -> Result<()> {
-    sqlx::query("SET LOCAL ROLE moa_app")
-        .execute(conn)
-        .await
-        .map_err(map_sqlx_error)?;
-    Ok(())
-}
-
 fn lesson_name(summary: &str) -> String {
     summary.chars().take(80).collect()
 }
 
 fn map_graph_error(error: moa_memory_graph::GraphError) -> MoaError {
-    MoaError::StorageError(error.to_string())
-}
-
-fn map_sqlx_error(error: sqlx::Error) -> MoaError {
     MoaError::StorageError(error.to_string())
 }
 

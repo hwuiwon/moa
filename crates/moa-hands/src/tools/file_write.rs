@@ -1,6 +1,5 @@
 //! `file_write` tool implementation.
 
-use std::io::ErrorKind;
 use std::path::Path;
 use std::time::Duration;
 
@@ -15,6 +14,7 @@ use crate::tools::docker_file::{
 };
 use crate::tools::edit_output::{ExistingFileContent, build_file_write_output};
 use crate::tools::file_read::resolve_writable_sandbox_path;
+use crate::tools::fs_util::read_optional_file_bytes;
 
 /// Executes the `file_write` tool against a sandbox directory.
 pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
@@ -89,13 +89,12 @@ pub(crate) async fn execute_docker_bind_mount(
 }
 
 async fn read_existing_file_content(path: &Path) -> Result<ExistingFileContent> {
-    match fs::read(path).await {
-        Ok(bytes) => match String::from_utf8(bytes) {
+    match read_optional_file_bytes(path).await? {
+        Some(bytes) => match String::from_utf8(bytes) {
             Ok(content) => Ok(ExistingFileContent::Text(content)),
             Err(_) => Ok(ExistingFileContent::Binary),
         },
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(ExistingFileContent::Missing),
-        Err(error) => Err(error.into()),
+        None => Ok(ExistingFileContent::Missing),
     }
 }
 

@@ -6,9 +6,7 @@ use moa_core::{
     ActionPolicyEffect, MoaError, Result, SandboxTier, SessionMeta, ToolInvocation, ToolOutput,
     TraceContext,
 };
-use moa_observability::{
-    apply_trace_context_to_span, record_tool_call, record_tool_output_truncated_metric,
-};
+use moa_observability::{apply_trace_context_to_span, record_tool_call};
 use opentelemetry::trace::Status;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -92,10 +90,6 @@ pub(super) fn record_tool_execution_result(
             record_tool_call(tool_name, "error", duration);
         }
     }
-}
-
-pub(super) fn record_tool_output_truncated(tool_name: &str) {
-    record_tool_output_truncated_metric(tool_name);
 }
 
 fn sandbox_tier_label(tier: &SandboxTier) -> &'static str {

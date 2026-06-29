@@ -370,21 +370,6 @@ pub fn candidates_from_retrieval_hits(
         .collect()
 }
 
-/// Aggregates retrieval metrics using gold-resolution ingestion coverage.
-#[must_use]
-pub fn aggregate_retrieval_eval(
-    gold_resolution: &GoldResolutionReport,
-    probe_results: Vec<ProbeResult>,
-    bootstrap_config: BootstrapConfig,
-) -> RetrievalEvalReport {
-    aggregate_retrieval_eval_with_extraction_precision(
-        gold_resolution,
-        probe_results,
-        bootstrap_config,
-        ExtractionPrecisionCounts::default(),
-    )
-}
-
 /// Aggregates retrieval metrics with stored-Fact extraction precision counts.
 #[must_use]
 pub fn aggregate_retrieval_eval_with_extraction_precision(

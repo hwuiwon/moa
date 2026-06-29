@@ -60,7 +60,8 @@ pub(crate) fn build_text_edit_output(
     }
 }
 
-fn count_lines(content: &str) -> usize {
+/// Counts the lines in `content`, treating empty input as zero lines.
+pub(crate) fn count_lines(content: &str) -> usize {
     if content.is_empty() {
         0
     } else {

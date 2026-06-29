@@ -35,40 +35,23 @@ impl PostgresSessionStore {
         &self,
         row: &sqlx::postgres::PgRow,
     ) -> Result<EventRecord> {
-        let event_type_text = row
-            .try_get::<String, _>("event_type")
-            .map_err(map_sqlx_error)?;
-        let payload = row
-            .try_get::<serde_json::Value, _>("payload")
-            .map_err(map_sqlx_error)?;
-        let session_id = moa_core::SessionId(
-            row.try_get::<Uuid, _>("session_id")
-                .map_err(map_sqlx_error)?,
-        );
+        let event_type_text = row.col::<String>("event_type")?;
+        let payload = row.col::<serde_json::Value>("payload")?;
+        let session_id = moa_core::SessionId(row.col::<Uuid>("session_id")?);
         let event =
             decode_event_from_storage(self.blob_store.as_ref(), &session_id, payload).await?;
 
         Ok(EventRecord {
-            id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
+            id: row.col::<Uuid>("id")?,
             session_id,
-            sequence_num: row
-                .try_get::<i64, _>("sequence_num")
-                .map_err(map_sqlx_error)? as u64,
+            sequence_num: row.col::<i64>("sequence_num")? as u64,
             event_type: from_db("event type", &event_type_text)?,
             event,
-            timestamp: row
-                .try_get::<chrono::DateTime<Utc>, _>("timestamp")
-                .map_err(map_sqlx_error)?,
-            brain_id: row
-                .try_get::<Option<Uuid>, _>("brain_id")
-                .map_err(map_sqlx_error)?
-                .map(moa_core::BrainId),
-            hand_id: row
-                .try_get::<Option<String>, _>("hand_id")
-                .map_err(map_sqlx_error)?,
+            timestamp: row.col::<chrono::DateTime<Utc>>("timestamp")?,
+            brain_id: row.col::<Option<Uuid>>("brain_id")?.map(moa_core::BrainId),
+            hand_id: row.col::<Option<String>>("hand_id")?,
             token_count: row
-                .try_get::<Option<i32>, _>("token_count")
-                .map_err(map_sqlx_error)?
+                .col::<Option<i32>>("token_count")?
                 .map(|value| value as usize),
         })
     }
@@ -106,14 +89,6 @@ pub(super) fn serialize_segment_assessment(
 
 pub(super) fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
-}
-
-pub(super) fn qualified_name(schema_name: &str, table_name: &str) -> String {
-    format!(
-        "{}.{}",
-        quote_identifier(schema_name),
-        quote_identifier(table_name)
-    )
 }
 
 #[cfg(test)]

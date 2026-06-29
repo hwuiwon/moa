@@ -29,10 +29,11 @@ crate, translate it to `crates/<name>/...`.
 
 | Area | Crates |
 |---|---|
-| Core runtime | `moa-core` traits/types/config/events, `moa-brain` context pipeline, `moa-session` Postgres event store, `moa-orchestrator` Restate services/workflows, `moa-edge` public HTTP edge |
-| Memory and learning | `moa-memory-*` graph/ingest/lifecycle/PII/vector, `moa-skills` registry/distillation/improvement |
-| Tools and providers | `moa-hands` tool routing and sandboxes, `moa-providers` LLM/embedding providers, `moa-messaging` Slack and notification adapters, `moa-security` vault/policy/MCP proxy |
-| Auth, audit, lineage | `moa-auth/*` identity/authz/OpenFGA bootstrap, `moa-ocsf` security events, `moa-lineage/*` citation, sinks, OTel, audit chain |
+| Core runtime | `moa-core` traits/types/config/events, `moa-brain` context pipeline, `moa-db` shared storage helpers, `moa-session` Postgres event store, `moa-orchestrator` Restate services/workflows, `moa-runtime-store` runtime cache, `moa-edge` public HTTP edge, `moa-migrations` Postgres migrations |
+| Memory and learning | `moa-memory-*` graph/ingest/lifecycle/PII/types/vector, `moa-knowledge` tenant knowledge base, `moa-skills` registry/distillation/improvement |
+| Agents, workflows, artifacts | `moa-agents` agent resolution/policy, `moa-contacts` contact identity, `moa-workflows` workflow runtime, `moa-artifacts` artifact definitions, `moa-experiments` experiment runs, `moa-scoring` score storage |
+| Tools and providers | `moa-hands` tool routing and sandboxes, `moa-providers` LLM/embedding/rerank providers, `moa-messaging` Slack and notification adapters, `moa-security` vault/policy/MCP proxy |
+| Auth, audit, lineage, observability | `moa-auth/*` identity/authz/OpenFGA bootstrap, `moa-ocsf` security events, `moa-lineage/*` citation, sinks, OTel, audit chain, `moa-observability` metrics/tracing |
 | Eval and dev tooling | `moa-eval-core`, `moa-eval`, `moa-loadtest`, `moa-test-support`, `xtask`, `workspace-hack` |
 
 ## Rust Rules
@@ -42,8 +43,8 @@ crate, translate it to `crates/<name>/...`.
 3. Use `tracing` for logging; never `println!`/`eprintln!` in library code.
 4. Use `tokio`; all I/O must be async.
 5. No `unwrap()` in library code. Use `?` or explicit handling.
-6. Optional dependencies are controlled by feature flags such as `slack` and
-   `cloud`.
+6. Optional dependencies are controlled by feature flags such as `slack`,
+   `skill-learning`, and `experiments`.
 7. Prefer direct imports from the owning crate/module. Do not add compatibility
    shims, wrapper functions, or `pub use` re-exports just to preserve old paths.
 

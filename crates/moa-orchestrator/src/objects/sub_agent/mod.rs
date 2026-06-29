@@ -32,7 +32,8 @@ mod persistence;
 mod request;
 mod state;
 
-use persistence::{persist_parent_session_event, render_user_message, to_handler_error};
+use crate::workflows::errors::moa_error_to_handler_error;
+use persistence::{persist_parent_session_event, render_user_message};
 use request::{build_completion_request, synthetic_session_meta};
 use state::MAX_TURNS_PER_POST;
 pub use state::SubAgentVoState;

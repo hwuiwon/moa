@@ -491,6 +491,14 @@ pub fn estimate_text_tokens(text: &str) -> usize {
     }
 }
 
+/// Sums estimated token usage across a slice of context messages.
+pub fn sum_message_tokens(messages: &[ContextMessage]) -> usize {
+    messages
+        .iter()
+        .map(|message| estimate_text_tokens(&message.content))
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ContextMessage, ContextSourceKind, ContextSourceRef, MessageRole};

@@ -129,7 +129,7 @@ pub async fn execute_docker(
     .await?;
     matches = matches
         .into_iter()
-        .filter(|path| !should_skip_search_path(Path::new(path), extra_skips))
+        .filter(|path| !should_skip_search_path_static(Path::new(path), extra_skips))
         .collect::<Vec<_>>();
     let hit_limit = matches.len() > MAX_FILE_SEARCH_MATCHES;
     matches.truncate(MAX_FILE_SEARCH_MATCHES);
@@ -173,7 +173,7 @@ async fn collect_matches(
         };
 
         if file_type.is_dir() {
-            if should_skip_search_path(relative_path, extra_skips) {
+            if should_skip_search_path_static(relative_path, extra_skips) {
                 continue;
             }
             if Box::pin(collect_matches(root, &path, matcher, extra_skips, matches)).await? {
@@ -184,7 +184,7 @@ async fn collect_matches(
         if !file_type.is_file() {
             continue;
         }
-        if should_skip_search_path(relative_path, extra_skips) {
+        if should_skip_search_path_static(relative_path, extra_skips) {
             continue;
         }
 
@@ -216,10 +216,6 @@ pub fn should_skip_search_path_static(path: &Path, extra_skips: &[String]) -> bo
         }
         _ => false,
     })
-}
-
-fn should_skip_search_path(path: &Path, extra_skips: &[String]) -> bool {
-    should_skip_search_path_static(path, extra_skips)
 }
 
 fn build_file_search_output(

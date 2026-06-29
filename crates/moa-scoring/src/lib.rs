@@ -50,166 +50,101 @@ FULL OUTER JOIN new USING (name)
 ORDER BY name
 "#;
 
+/// Builds a tenant-scoped per-run score query that joins `moa.experiment_trial`
+/// rows to their `analytics.scores`, aggregating numeric means and boolean
+/// rates. Callers supply the `SELECT` projection, `GROUP BY`, and `ORDER BY`
+/// clauses; the shared `FROM`/`JOIN`/`WHERE` skeleton lives here so every rollup
+/// query stays consistent (`$1` = run uid, `$2` = storage partition id).
+macro_rules! scores_by_experiment_run_sql {
+    ($select:literal, $group:literal, $order:literal $(,)?) => {
+        concat!(
+            "\n",
+            $select,
+            "FROM moa.experiment_trial AS trial\n",
+            "JOIN analytics.scores AS score\n",
+            "  ON score.run_id = trial.score_run_id\n",
+            " AND score.storage_partition_id = $2\n",
+            "WHERE trial.run_uid = $1\n",
+            "  AND trial.scope = 'tenant'\n",
+            "  AND trial.storage_partition_id = $2\n",
+            "  AND trial.user_id IS NULL\n",
+            $group,
+            $order,
+        )
+    };
+}
+
+/// Builds a tenant-scoped comparison query between two experiment runs (`$1` =
+/// base run uid, `$2` = new run uid, `$3` = storage partition id). Callers
+/// supply the shared CTE `SELECT`/`GROUP BY` and the final projection; the
+/// per-run numeric score skeleton is centralised here.
+macro_rules! compare_scores_by_experiment_run_sql {
+    ($cte_select:literal, $cte_group:literal, $final:literal $(,)?) => {
+        concat!(
+            "\nWITH base AS (\n",
+            $cte_select,
+            "    FROM moa.experiment_trial AS trial\n",
+            "    JOIN analytics.scores AS score\n",
+            "      ON score.run_id = trial.score_run_id\n",
+            "     AND score.storage_partition_id = $3\n",
+            "    WHERE trial.run_uid = $1\n",
+            "      AND trial.scope = 'tenant'\n",
+            "      AND trial.storage_partition_id = $3\n",
+            "      AND trial.user_id IS NULL\n",
+            "      AND score.value_type = 'numeric'\n",
+            $cte_group,
+            "),\nnew AS (\n",
+            $cte_select,
+            "    FROM moa.experiment_trial AS trial\n",
+            "    JOIN analytics.scores AS score\n",
+            "      ON score.run_id = trial.score_run_id\n",
+            "     AND score.storage_partition_id = $3\n",
+            "    WHERE trial.run_uid = $2\n",
+            "      AND trial.scope = 'tenant'\n",
+            "      AND trial.storage_partition_id = $3\n",
+            "      AND trial.user_id IS NULL\n",
+            "      AND score.value_type = 'numeric'\n",
+            $cte_group,
+            ")\n",
+            $final,
+        )
+    };
+}
+
 /// Tenant-scoped aggregate score SQL across trial-level score runs for an experiment run.
-pub const TRIAL_ROLLUP_SCORES_BY_EXPERIMENT_RUN_SQL: &str = r#"
-SELECT score.name,
-       score.value_type,
-       COUNT(*)::BIGINT AS n,
-       AVG(score.value_numeric) AS numeric_mean,
-       AVG(CASE WHEN score.value_boolean THEN 1.0 ELSE 0.0 END)::DOUBLE PRECISION AS boolean_rate
-FROM moa.experiment_trial AS trial
-JOIN analytics.scores AS score
-  ON score.run_id = trial.score_run_id
- AND score.storage_partition_id = $2
-WHERE trial.run_uid = $1
-  AND trial.scope = 'tenant'
-  AND trial.storage_partition_id = $2
-  AND trial.user_id IS NULL
-GROUP BY score.name, score.value_type
-ORDER BY score.name, score.value_type
-"#;
+pub const TRIAL_ROLLUP_SCORES_BY_EXPERIMENT_RUN_SQL: &str = scores_by_experiment_run_sql!(
+    "SELECT score.name,\n       score.value_type,\n       COUNT(*)::BIGINT AS n,\n       AVG(score.value_numeric) AS numeric_mean,\n       AVG(CASE WHEN score.value_boolean THEN 1.0 ELSE 0.0 END)::DOUBLE PRECISION AS boolean_rate\n",
+    "GROUP BY score.name, score.value_type\n",
+    "ORDER BY score.name, score.value_type\n",
+);
 
 /// Tenant-scoped per-trial score SQL for an experiment run.
-pub const TRIAL_SCORES_BY_EXPERIMENT_RUN_SQL: &str = r#"
-SELECT trial.trial_uid,
-       trial.trial_key,
-       trial.score_run_id,
-       trial.variant_key,
-       trial.scenario_id,
-       score.name,
-       score.value_type,
-       COUNT(*)::BIGINT AS n,
-       AVG(score.value_numeric) AS numeric_mean,
-       AVG(CASE WHEN score.value_boolean THEN 1.0 ELSE 0.0 END)::DOUBLE PRECISION AS boolean_rate
-FROM moa.experiment_trial AS trial
-JOIN analytics.scores AS score
-  ON score.run_id = trial.score_run_id
- AND score.storage_partition_id = $2
-WHERE trial.run_uid = $1
-  AND trial.scope = 'tenant'
-  AND trial.storage_partition_id = $2
-  AND trial.user_id IS NULL
-GROUP BY trial.trial_uid,
-         trial.trial_key,
-         trial.score_run_id,
-         trial.variant_key,
-         trial.scenario_id,
-         score.name,
-         score.value_type
-ORDER BY trial.variant_key,
-         trial.scenario_id ASC NULLS FIRST,
-         trial.trial_key,
-         score.name,
-         score.value_type
-"#;
+pub const TRIAL_SCORES_BY_EXPERIMENT_RUN_SQL: &str = scores_by_experiment_run_sql!(
+    "SELECT trial.trial_uid,\n       trial.trial_key,\n       trial.score_run_id,\n       trial.variant_key,\n       trial.scenario_id,\n       score.name,\n       score.value_type,\n       COUNT(*)::BIGINT AS n,\n       AVG(score.value_numeric) AS numeric_mean,\n       AVG(CASE WHEN score.value_boolean THEN 1.0 ELSE 0.0 END)::DOUBLE PRECISION AS boolean_rate\n",
+    "GROUP BY trial.trial_uid,\n         trial.trial_key,\n         trial.score_run_id,\n         trial.variant_key,\n         trial.scenario_id,\n         score.name,\n         score.value_type\n",
+    "ORDER BY trial.variant_key,\n         trial.scenario_id ASC NULLS FIRST,\n         trial.trial_key,\n         score.name,\n         score.value_type\n",
+);
 
 /// Tenant-scoped per-scenario score SQL for an experiment run.
-pub const SCENARIO_SCORES_BY_EXPERIMENT_RUN_SQL: &str = r#"
-SELECT trial.scenario_id,
-       score.name,
-       score.value_type,
-       COUNT(*)::BIGINT AS n,
-       AVG(score.value_numeric) AS numeric_mean,
-       AVG(CASE WHEN score.value_boolean THEN 1.0 ELSE 0.0 END)::DOUBLE PRECISION AS boolean_rate
-FROM moa.experiment_trial AS trial
-JOIN analytics.scores AS score
-  ON score.run_id = trial.score_run_id
- AND score.storage_partition_id = $2
-WHERE trial.run_uid = $1
-  AND trial.scope = 'tenant'
-  AND trial.storage_partition_id = $2
-  AND trial.user_id IS NULL
-GROUP BY trial.scenario_id, score.name, score.value_type
-ORDER BY trial.scenario_id ASC NULLS FIRST,
-         score.name,
-         score.value_type
-"#;
+pub const SCENARIO_SCORES_BY_EXPERIMENT_RUN_SQL: &str = scores_by_experiment_run_sql!(
+    "SELECT trial.scenario_id,\n       score.name,\n       score.value_type,\n       COUNT(*)::BIGINT AS n,\n       AVG(score.value_numeric) AS numeric_mean,\n       AVG(CASE WHEN score.value_boolean THEN 1.0 ELSE 0.0 END)::DOUBLE PRECISION AS boolean_rate\n",
+    "GROUP BY trial.scenario_id, score.name, score.value_type\n",
+    "ORDER BY trial.scenario_id ASC NULLS FIRST,\n         score.name,\n         score.value_type\n",
+);
 
 /// Tenant-scoped numeric scenario comparison SQL for two experiment runs.
-pub const COMPARE_SCENARIO_SCORES_BY_EXPERIMENT_RUN_SQL: &str = r#"
-WITH base AS (
-    SELECT trial.scenario_id,
-           score.name,
-           AVG(score.value_numeric) AS mean
-    FROM moa.experiment_trial AS trial
-    JOIN analytics.scores AS score
-      ON score.run_id = trial.score_run_id
-     AND score.storage_partition_id = $3
-    WHERE trial.run_uid = $1
-      AND trial.scope = 'tenant'
-      AND trial.storage_partition_id = $3
-      AND trial.user_id IS NULL
-      AND score.value_type = 'numeric'
-    GROUP BY trial.scenario_id, score.name
-),
-new AS (
-    SELECT trial.scenario_id,
-           score.name,
-           AVG(score.value_numeric) AS mean
-    FROM moa.experiment_trial AS trial
-    JOIN analytics.scores AS score
-      ON score.run_id = trial.score_run_id
-     AND score.storage_partition_id = $3
-    WHERE trial.run_uid = $2
-      AND trial.scope = 'tenant'
-      AND trial.storage_partition_id = $3
-      AND trial.user_id IS NULL
-      AND score.value_type = 'numeric'
-    GROUP BY trial.scenario_id, score.name
-)
-SELECT COALESCE(base.scenario_id, new.scenario_id) AS scenario_id,
-       COALESCE(base.name, new.name) AS name,
-       base.mean AS base_mean,
-       new.mean AS new_mean,
-       new.mean - base.mean AS delta
-FROM base
-FULL OUTER JOIN new
-  ON base.name = new.name
- AND base.scenario_id IS NOT DISTINCT FROM new.scenario_id
-ORDER BY scenario_id ASC NULLS FIRST, name
-"#;
+pub const COMPARE_SCENARIO_SCORES_BY_EXPERIMENT_RUN_SQL: &str = compare_scores_by_experiment_run_sql!(
+    "    SELECT trial.scenario_id,\n           score.name,\n           AVG(score.value_numeric) AS mean\n",
+    "    GROUP BY trial.scenario_id, score.name\n",
+    "SELECT COALESCE(base.scenario_id, new.scenario_id) AS scenario_id,\n       COALESCE(base.name, new.name) AS name,\n       base.mean AS base_mean,\n       new.mean AS new_mean,\n       new.mean - base.mean AS delta\nFROM base\nFULL OUTER JOIN new\n  ON base.name = new.name\n AND base.scenario_id IS NOT DISTINCT FROM new.scenario_id\nORDER BY scenario_id ASC NULLS FIRST, name\n",
+);
 
 /// Tenant-scoped numeric variant comparison SQL for two experiment runs.
-pub const COMPARE_VARIANT_SCORES_BY_EXPERIMENT_RUN_SQL: &str = r#"
-WITH base AS (
-    SELECT trial.variant_key,
-           score.name,
-           AVG(score.value_numeric) AS mean
-    FROM moa.experiment_trial AS trial
-    JOIN analytics.scores AS score
-      ON score.run_id = trial.score_run_id
-     AND score.storage_partition_id = $3
-    WHERE trial.run_uid = $1
-      AND trial.scope = 'tenant'
-      AND trial.storage_partition_id = $3
-      AND trial.user_id IS NULL
-      AND score.value_type = 'numeric'
-    GROUP BY trial.variant_key, score.name
-),
-new AS (
-    SELECT trial.variant_key,
-           score.name,
-           AVG(score.value_numeric) AS mean
-    FROM moa.experiment_trial AS trial
-    JOIN analytics.scores AS score
-      ON score.run_id = trial.score_run_id
-     AND score.storage_partition_id = $3
-    WHERE trial.run_uid = $2
-      AND trial.scope = 'tenant'
-      AND trial.storage_partition_id = $3
-      AND trial.user_id IS NULL
-      AND score.value_type = 'numeric'
-    GROUP BY trial.variant_key, score.name
-)
-SELECT COALESCE(base.variant_key, new.variant_key) AS variant_key,
-       COALESCE(base.name, new.name) AS name,
-       base.mean AS base_mean,
-       new.mean AS new_mean,
-       new.mean - base.mean AS delta
-FROM base
-FULL OUTER JOIN new USING (variant_key, name)
-ORDER BY variant_key, name
-"#;
+pub const COMPARE_VARIANT_SCORES_BY_EXPERIMENT_RUN_SQL: &str = compare_scores_by_experiment_run_sql!(
+    "    SELECT trial.variant_key,\n           score.name,\n           AVG(score.value_numeric) AS mean\n",
+    "    GROUP BY trial.variant_key, score.name\n",
+    "SELECT COALESCE(base.variant_key, new.variant_key) AS variant_key,\n       COALESCE(base.name, new.name) AS name,\n       base.mean AS base_mean,\n       new.mean AS new_mean,\n       new.mean - base.mean AS delta\nFROM base\nFULL OUTER JOIN new USING (variant_key, name)\nORDER BY variant_key, name\n",
+);
 
 /// Error type for score storage and query helpers.
 #[derive(Debug, thiserror::Error)]
@@ -432,18 +367,10 @@ pub async fn score_summaries_for_tenant(
         .fetch_all(pool)
         .await?;
 
-    let mut summaries = Vec::with_capacity(rows.len());
-    for row in rows {
-        let n: i64 = row.try_get("n")?;
-        let numeric_mean: Option<f64> = row.try_get("numeric_mean")?;
-        let boolean_rate: Option<f64> = row.try_get("boolean_rate")?;
-        summaries.push(ScoreSummaryRow {
-            name: row.try_get("name")?,
-            value_type: row.try_get("value_type")?,
-            n: u64::try_from(n).map_err(|_| ScoringError::IntegerTooLarge { field: "n" })?,
-            mean_or_rate: numeric_mean.or(boolean_rate),
-        });
-    }
+    let summaries = rows
+        .iter()
+        .map(score_summary_row_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(ScoreSummary {
         tenant_id: request.tenant_id,
@@ -476,7 +403,10 @@ pub async fn experiment_score_breakdown_for_tenant(
     Ok(ExperimentScoreBreakdown {
         tenant_id: request.tenant_id,
         run_uid: request.run_uid,
-        trial_rollup_rows: score_summary_rows_from_rows(&aggregate_rows)?,
+        trial_rollup_rows: aggregate_rows
+            .iter()
+            .map(score_summary_row_from_row)
+            .collect::<Result<Vec<_>, _>>()?,
         trials: trial_score_summaries_from_rows(&trial_rows)?,
         scenarios: scenario_score_summaries_from_rows(&scenario_rows)?,
     })
@@ -588,10 +518,6 @@ pub async fn ensure_score_run_parent(
         });
     };
     validate_score_run_parent(&row, &parts, score_run_id, source)
-}
-
-fn score_summary_rows_from_rows(rows: &[PgRow]) -> Result<Vec<ScoreSummaryRow>, ScoringError> {
-    rows.iter().map(score_summary_row_from_row).collect()
 }
 
 fn score_summary_row_from_row(row: &PgRow) -> Result<ScoreSummaryRow, ScoringError> {

@@ -466,7 +466,7 @@ async fn load_progress_events(
                     .get_events(session_id, range)
                     .await
                     .map(Json::from)
-                    .map_err(to_handler_error)
+                    .map_err(moa_error_to_handler_error)
             }
         })
         .name("session_progress_load_events")
@@ -481,7 +481,9 @@ async fn start_turn_inner(
     let session_id = parse_session_key(ctx.key())?;
     let identity = require_session_participant(ctx, session_id).await?;
     let mut state = SessionVoState::load_from(ctx).await?;
-    let meta = state.ensure_initialized().map_err(to_handler_error)?;
+    let meta = state
+        .ensure_initialized()
+        .map_err(moa_error_to_handler_error)?;
     let contact = admitted_contact_for_turn(request.contact, meta)?;
     let mut pending_state = load_pending_state(ctx).await?;
 

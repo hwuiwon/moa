@@ -18,8 +18,9 @@ cache-write pricing remain provider-owned behavior.
 The long-lived static prefix is produced by the byte-stable pipeline stages:
 
 1. `IdentityProcessor`
-2. `InstructionProcessor`
-3. `ToolDefinitionProcessor`
+2. `AgentInstructionProcessor`
+3. `InstructionProcessor`
+4. `ToolDefinitionProcessor`
 
 These stages must not render per-turn dynamic values such as:
 

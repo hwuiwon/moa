@@ -70,7 +70,7 @@ pub use contact::{
 };
 pub use context::{
     ContextMessage, ContextSourceKind, ContextSourceRef, ExcludedItem, MessageRole,
-    ProcessorOutput, WorkingContext, estimate_text_tokens,
+    ProcessorOutput, WorkingContext, estimate_text_tokens, sum_message_tokens,
 };
 pub use events_stream::{ClaimCheck, EventFilter, EventRange, EventRecord, SequenceNum};
 pub use experience::{

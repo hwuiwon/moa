@@ -28,7 +28,9 @@ use crate::core::http::build_http_client;
 use crate::core::instrumentation::LLMSpanRecorder;
 use crate::core::provider_tools::enabled_native_tools;
 use crate::core::retry::RetryPolicy;
-use crate::core::streaming::parse_sse_json;
+use crate::core::streaming::{
+    finalize_streamed_completion, parse_sse_json, send_with_transport_phase,
+};
 
 pub(crate) mod model;
 mod request;
@@ -227,27 +229,18 @@ impl LLMProvider for GeminiProvider {
                     resolved_model
                 );
 
-                span_recorder.set_phase("transport");
-                let response = retry_policy
-                    .send(|| {
-                        client
-                            .post(&url)
-                            .header("x-goog-api-key", &*api_key)
-                            .header(ACCEPT, "text/event-stream")
-                            .header(CONTENT_TYPE, "application/json")
-                            .json(&request_body)
-                    })
-                    .await;
-                let response = match response {
-                    Ok(response) => response,
-                    Err(error) => {
-                        span_recorder.fail_at_stage("transport", &error);
-                        return Err(error);
-                    }
-                };
+                let response = send_with_transport_phase(&span_recorder, &retry_policy, || {
+                    client
+                        .post(&url)
+                        .header("x-goog-api-key", &*api_key)
+                        .header(ACCEPT, "text/event-stream")
+                        .header(CONTENT_TYPE, "application/json")
+                        .json(&request_body)
+                })
+                .await?;
 
                 span_recorder.set_phase("stream");
-                let response = consume_sse_events(
+                let consumed = consume_sse_events(
                     response.bytes_stream().eventsource(),
                     tx,
                     resolved_model,
@@ -256,17 +249,7 @@ impl LLMProvider for GeminiProvider {
                 )
                 .await;
 
-                match response {
-                    Ok(response) => {
-                        span_recorder.set_phase("finalize");
-                        span_recorder.finish(&response);
-                        Ok(response)
-                    }
-                    Err(error) => {
-                        span_recorder.fail_at_stage("stream", &error);
-                        Err(error)
-                    }
-                }
+                finalize_streamed_completion(&span_recorder, consumed)
             }
             .instrument(span),
         );

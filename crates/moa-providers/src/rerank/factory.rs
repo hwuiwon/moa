@@ -9,7 +9,7 @@ use super::cohere::COHERE_DEFAULT_RERANK_MODEL;
 use super::zeroentropy::ZEROENTROPY_DEFAULT_RERANK_MODEL;
 use super::zeroentropy::ZeroEntropyRerankLatency;
 use super::{CohereReranker, NOOP_RERANK_MODEL, NoopReranker, Reranker, ZeroEntropyReranker};
-use crate::model_selection::split_explicit_provider_model;
+use crate::model_selection::{normalize_provider_name, split_explicit_provider_model};
 
 const COHERE_PROVIDER_NAME: &str = "cohere";
 const ZEROENTROPY_PROVIDER_NAME: &str = "zeroentropy";
@@ -161,18 +161,15 @@ fn ensure_no_zeroentropy_latency(config: &MoaConfig, provider: RerankerProviderK
     Ok(())
 }
 
-fn normalize_provider_name(name: &str) -> String {
-    name.trim().to_ascii_lowercase().replace('_', "-")
-}
-
 #[cfg(test)]
 mod tests {
     use moa_core::MoaConfig;
 
     use super::{
         COHERE_DEFAULT_RERANK_MODEL, RerankerProviderKind, ZEROENTROPY_DEFAULT_RERANK_MODEL,
-        build_reranker_from_config, normalize_provider_name, resolve_reranker_model,
+        build_reranker_from_config, resolve_reranker_model,
     };
+    use crate::model_selection::normalize_provider_name;
 
     #[test]
     fn reranker_provider_kind_accepts_supported_provider_prefixes() {

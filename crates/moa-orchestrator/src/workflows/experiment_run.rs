@@ -13,14 +13,14 @@ use moa_core::wire::experiments::{
 };
 use moa_core::wire::turn::QueueMessageRequest;
 use moa_core::{
-    ActionRuleScope, AgentSessionSelection, Channel, MoaError, ModelId, SessionActorRef, SessionId,
+    ActionRuleScope, AgentSessionSelection, Channel, ModelId, SessionActorRef, SessionId,
     SessionMeta, SessionStatus, TenantId,
 };
 use moa_experiments::model::{
     ExperimentRunRecord, ExperimentRunStatus, ExperimentTarget, ExperimentTrialRecord,
     ExperimentTrialStatus, ExperimentVariant, NewExperimentTrial,
 };
-use moa_experiments::plan::{ExpandedPlanTrial, PlanExpansionError, expand_plan_trials};
+use moa_experiments::plan::{ExpandedPlanTrial, expand_plan_trials};
 use moa_experiments::store::ExperimentStore;
 use moa_observability::record_experiment_run;
 use moa_observability::restate_observability::annotate_restate_handler_span;
@@ -40,7 +40,13 @@ use crate::services::session_store::inner::{
 use crate::workflows::artifact_workflow_execution::{
     ArtifactWorkflowExecutionClient, RunArtifactWorkflowRequest,
 };
-use crate::workflows::errors::workflow_handler_error;
+use crate::workflows::durable_utc_now;
+use crate::workflows::errors::{
+    bad_request, handler_error_message, moa_error_to_handler_error, workflow_handler_error,
+};
+use crate::workflows::experiment_errors::{
+    non_retryable_handler_error, plan_expansion_error_to_handler_error,
+};
 use crate::workflows::experiment_trial_run::{
     ExperimentTrialRunClient, ExperimentTrialRunWorkflowRequest, trial_workflow_key,
 };
@@ -125,7 +131,7 @@ impl ExperimentRun for ExperimentRunImpl {
             Err(error) => {
                 let message = handler_error_message(&error);
                 ctx.set(K_STATUS, Json(ExperimentRunStatus::Failed));
-                let failed_at = durable_utc_now(&ctx).await?;
+                let failed_at = durable_utc_now(&ctx, "experiment_utc_now").await?;
                 if let Err(update_error) = persist_run_status(
                     &ctx,
                     request.tenant_id,
@@ -239,14 +245,6 @@ async fn persist_attached_session(
     .name("experiment_attach_session")
     .await?;
     Ok(())
-}
-
-async fn durable_utc_now(ctx: &WorkflowContext<'_>) -> Result<chrono::DateTime<Utc>, HandlerError> {
-    Ok(ctx
-        .run(|| async { Ok::<_, HandlerError>(Json::from(Utc::now())) })
-        .name("experiment_utc_now")
-        .await?
-        .into_inner())
 }
 
 async fn update_run_status(
@@ -407,33 +405,8 @@ where
     })
 }
 
-fn bad_request(message: impl Into<String>) -> HandlerError {
-    TerminalError::new_with_code(400, message.into()).into()
-}
-
 fn run_not_found(run_uid: Uuid) -> HandlerError {
     TerminalError::new_with_code(404, format!("experiment run {run_uid} not found")).into()
-}
-
-fn moa_error_to_handler_error(error: MoaError) -> HandlerError {
-    if error.is_fatal() {
-        return TerminalError::new(error.to_string()).into();
-    }
-
-    HandlerError::from(error)
-}
-
-fn plan_expansion_error_to_handler_error(error: PlanExpansionError) -> HandlerError {
-    bad_request(error.to_string())
-}
-
-fn non_retryable_handler_error(error: HandlerError) -> HandlerError {
-    TerminalError::new(handler_error_message(&error)).into()
-}
-
-fn handler_error_message(error: &HandlerError) -> String {
-    let error_ref = <HandlerError as AsRef<dyn std::error::Error + Send + Sync>>::as_ref(error);
-    error_ref.to_string()
 }
 
 #[cfg(test)]

@@ -1,7 +1,6 @@
 //! Tool input normalization, action-review summaries, and local path helpers.
 
 use std::env;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use moa_core::shell::split_shell_chain;
@@ -10,9 +9,9 @@ use moa_core::{
     ToolInvocation,
 };
 use serde_json::Value;
-use tokio::fs;
 
 use crate::tools::file_read::resolve_sandbox_path;
+use crate::tools::fs_util::read_optional_file_bytes;
 use crate::tools::sandbox_descriptor::{
     SandboxActionPattern, SandboxReviewPreviewMetadata, sandbox_tool_descriptor,
 };
@@ -433,11 +432,9 @@ fn cap_review_text(value: String) -> String {
 }
 
 async fn read_existing_text_file(path: &Path) -> Result<Option<String>> {
-    match fs::read(path).await {
-        Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
+    Ok(read_optional_file_bytes(path)
+        .await?
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 fn language_hint_for_path(path: &str) -> Option<String> {

@@ -1,9 +1,8 @@
 //! Lexical lookup over the `moa.node_index` sidecar.
 
-use chrono::{DateTime, Utc};
 use moa_core::RlsContext;
 use moa_db::ScopedConn;
-use sqlx::{PgPool, Postgres, QueryBuilder};
+use sqlx::PgPool;
 
 use crate::{GraphError, NodeIndexRow};
 
@@ -59,70 +58,12 @@ impl LexicalStore {
         }
 
         let Some(scope) = &self.scope else {
-            return lookup_seed_rows(&self.pool, name, limit, None).await;
+            return crate::node::lookup_seed_by_name(&self.pool, name, limit, None).await;
         };
 
-        let mut conn = ScopedConn::begin(&self.pool, scope).await?;
-        if self.assume_app_role {
-            sqlx::query("SET LOCAL ROLE moa_app")
-                .execute(conn.as_mut())
-                .await?;
-        }
+        let mut conn = ScopedConn::begin_as_app(&self.pool, scope, self.assume_app_role).await?;
         let rows = crate::node::lookup_seed_by_name(conn.as_mut(), name, limit, None).await?;
         conn.commit().await?;
         Ok(rows)
     }
-}
-
-pub(crate) async fn lookup_seed_rows(
-    pool: &PgPool,
-    name: &str,
-    limit: i64,
-    as_of: Option<DateTime<Utc>>,
-) -> Result<Vec<NodeIndexRow>, GraphError> {
-    if limit <= 0 {
-        return Ok(Vec::new());
-    }
-
-    let mut builder = QueryBuilder::<Postgres>::new(
-        r#"
-        SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
-               valid_to, valid_from, properties_summary, last_accessed_at,
-               COALESCE(quality_score, 0.5) AS quality_score
-        FROM moa.node_index
-        WHERE "#,
-    );
-    crate::push_validity_filter(&mut builder, None, as_of);
-    builder.push(
-        r#"
-          AND name_tsv @@ plainto_tsquery('simple', "#,
-    );
-    builder.push_bind(name);
-    builder.push(
-        r#")
-        ORDER BY (LOWER(name) = LOWER("#,
-    );
-    builder.push_bind(name);
-    builder.push(
-        r#")) DESC,
-                 ts_rank(name_tsv, plainto_tsquery('simple', "#,
-    );
-    builder.push_bind(name);
-    builder.push(
-        r#")) DESC,
-                 (
-                   0.55 * (1.0 / (1.0 + GREATEST(EXTRACT(EPOCH FROM (now() - valid_from)) / 86400.0, 0.0))) +
-                   0.35 * LEAST(GREATEST(COALESCE(confidence, 0.0), 0.0), 1.0) +
-                   0.10 * (LN(LEAST(reference_count, 100)::DOUBLE PRECISION + 1.0) / LN(101.0))
-                 ) DESC,
-                 uid ASC
-        LIMIT "#,
-    );
-    builder.push_bind(limit);
-
-    builder
-        .build_query_as::<NodeIndexRow>()
-        .fetch_all(pool)
-        .await
-        .map_err(GraphError::from)
 }

@@ -1,8 +1,7 @@
 //! Restate service adapter for artifact-backed workflow run lifecycle operations.
 
 use moa_artifacts::registry::ArtifactRegistry;
-use moa_authz::require_authz_with_delegation;
-use moa_authz_schema::{ObjectType, Relation};
+use moa_authz_schema::Relation;
 use moa_core::ActionRuleScope;
 use moa_core::wire::workflows::{
     WorkflowCancelRequest, WorkflowCancelResponse, WorkflowNodeRunSummary,
@@ -16,8 +15,7 @@ use moa_workflows::runtime::{StartWorkflowRun, WorkflowRuntime};
 use restate_sdk::prelude::*;
 
 use crate::OrchestratorCtx;
-use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::authorize_tenant;
 use crate::workflows::artifact_workflow_execution::{
     ArtifactWorkflowExecutionClient, RunArtifactWorkflowRequest, validate_workflow_review_decision,
     validate_workflow_signal,
@@ -265,17 +263,4 @@ async fn cancel_inner(
 
 fn workflow_runtime() -> WorkflowRuntime {
     WorkflowRuntime::new(ArtifactRegistry::new(OrchestratorCtx::current_graph_pool()))
-}
-
-async fn authorize_tenant(
-    ctx: &impl RequestHeaders,
-    tenant_id: moa_core::TenantId,
-    relation: Relation,
-) -> Result<moa_core::traits::Identity, HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
-        .await
-        .map_err(translate_authz_error)?;
-    Ok(identity)
 }

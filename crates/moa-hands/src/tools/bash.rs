@@ -8,6 +8,8 @@ use serde::Deserialize;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
+use crate::tools::docker_file::stop_container;
+
 /// Executes the `bash` tool in a local sandbox directory.
 pub async fn execute_local(
     sandbox_dir: &Path,
@@ -54,7 +56,7 @@ pub async fn execute_local(
             })??
     };
 
-    Ok(build_bash_output(
+    Ok(ToolOutput::from_process(
         String::from_utf8_lossy(&output.stdout).to_string(),
         String::from_utf8_lossy(&output.stderr).to_string(),
         output.status.code().unwrap_or(-1),
@@ -108,7 +110,7 @@ pub async fn execute_docker(
             })??
     };
 
-    Ok(build_bash_output(
+    Ok(ToolOutput::from_process(
         String::from_utf8_lossy(&output.stdout).to_string(),
         String::from_utf8_lossy(&output.stderr).to_string(),
         output.status.code().unwrap_or(-1),
@@ -131,36 +133,11 @@ impl BashToolInput {
     }
 }
 
-fn build_bash_output(
-    stdout: String,
-    stderr: String,
-    exit_code: i32,
-    duration: Duration,
-) -> ToolOutput {
-    ToolOutput::from_process(stdout, stderr, exit_code, duration)
-}
-
-async fn stop_container(container_id: &str) -> Result<()> {
-    let output = Command::new("docker")
-        .args(["stop", "-t", "2", container_id])
-        .output()
-        .await?;
-    if output.status.success()
-        || String::from_utf8_lossy(&output.stderr).contains("No such container")
-    {
-        return Ok(());
-    }
-    Err(MoaError::ProviderError(format!(
-        "failed to stop docker sandbox during cancellation: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    )))
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use super::build_bash_output;
+    use moa_core::ToolOutput;
 
     #[test]
     fn bash_output_preserves_full_process_streams() {
@@ -169,7 +146,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let output = build_bash_output(stdout, String::new(), 0, Duration::from_secs(1));
+        let output = ToolOutput::from_process(stdout, String::new(), 0, Duration::from_secs(1));
         let text = output.to_text();
 
         assert!(!output.truncated);
@@ -179,7 +156,7 @@ mod tests {
 
     #[test]
     fn bash_output_small_streams_are_not_truncated() {
-        let output = build_bash_output(
+        let output = ToolOutput::from_process(
             "out".to_string(),
             "err".to_string(),
             0,

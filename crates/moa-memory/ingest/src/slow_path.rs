@@ -6,10 +6,9 @@ use std::time::Duration;
 use crate::{
     ClassifiedFact, Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact,
     EntityResolutionRequest, EntityResolver, ExtractedFact, ExtractedFactScopeHint, FactExtractor,
-    HeuristicFactExtractor, IngestApplyReport, IngestCtx, IngestDecision, IngestError,
-    ResolvedEntity, RrfPlusJudgeDetector, SessionTurn, chunk_turn, current_runtime,
-    extraction_confidence_hint, fact_hash, fact_uid_from_hash, scoped_fact_uid,
-    should_ingest_degraded,
+    HeuristicFactExtractor, IngestApplyReport, IngestCtx, IngestDecision, ResolvedEntity,
+    RrfPlusJudgeDetector, SessionTurn, chunk_turn, current_runtime, extraction_confidence_hint,
+    fact_hash, fact_uid_from_hash, scoped_fact_uid, should_ingest_degraded,
 };
 use moa_core::RlsContext;
 use moa_core::{MoaConfig, traits::EmbeddingProvider};
@@ -526,7 +525,7 @@ async fn detect_contradictions_with(
     let mut decisions = Vec::with_capacity(embedded.len());
 
     for fact in embedded {
-        let scope = fact_scope(turn, fact).map_err(HandlerError::from)?;
+        let scope = fact_scope(turn, fact);
         let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
         let ctx = ContradictionContext::for_app_role(pool.clone(), scope, vector);
         let conflict = detector
@@ -583,30 +582,27 @@ fn decision_from_conflict(conflict: Conflict, fact: EmbeddedFact) -> IngestDecis
     }
 }
 
-fn decision_scope(
-    turn: &SessionTurn,
-    decision: &IngestDecision,
-) -> Result<RlsContext, IngestError> {
+fn decision_scope(turn: &SessionTurn, decision: &IngestDecision) -> RlsContext {
     match decision_fact(decision) {
         Some(fact) => fact_scope(turn, fact),
         None => turn_default_scope(turn),
     }
 }
 
-fn fact_scope(turn: &SessionTurn, fact: &EmbeddedFact) -> Result<RlsContext, IngestError> {
+fn fact_scope(turn: &SessionTurn, fact: &EmbeddedFact) -> RlsContext {
     match fact.classified.fact.scope_hint {
         ExtractedFactScopeHint::Contact => turn_default_scope(turn),
         ExtractedFactScopeHint::Tenant => turn_tenant_scope(turn),
     }
 }
 
-fn turn_tenant_scope(turn: &SessionTurn) -> Result<RlsContext, IngestError> {
-    Ok(RlsContext::tenant(turn.tenant_id))
+fn turn_tenant_scope(turn: &SessionTurn) -> RlsContext {
+    RlsContext::tenant(turn.tenant_id)
 }
 
-fn turn_default_scope(turn: &SessionTurn) -> Result<RlsContext, IngestError> {
+fn turn_default_scope(turn: &SessionTurn) -> RlsContext {
     match turn.contact_id {
-        Some(contact_id) => Ok(RlsContext::contact(turn.tenant_id, contact_id)),
+        Some(contact_id) => RlsContext::contact(turn.tenant_id, contact_id),
         None => turn_tenant_scope(turn),
     }
 }
@@ -621,7 +617,7 @@ async fn apply_decisions(
     let mut report = IngestApplyReport::default();
 
     for decision in decisions {
-        let scope = decision_scope(turn, decision).map_err(HandlerError::from)?;
+        let scope = decision_scope(turn, decision);
         match apply_one_decision(
             pool,
             &scope,
@@ -946,7 +942,7 @@ fn fact_entity_edge_intent(
 }
 
 fn fact_object_edge_label(predicate: &str) -> EdgeLabel {
-    let normalized = normalize_predicate(predicate);
+    let normalized = crate::entity_resolution::normalize_entity_name(predicate);
     let tokens = normalized.split_whitespace().collect::<Vec<_>>();
     if tokens
         .iter()
@@ -962,22 +958,6 @@ fn fact_object_edge_label(predicate: &str) -> EdgeLabel {
         return EdgeLabel::OwnedBy;
     }
     EdgeLabel::RelatesTo
-}
-
-fn normalize_predicate(predicate: &str) -> String {
-    let mut tokens = Vec::new();
-    let mut token = String::new();
-    for character in predicate.chars() {
-        if character.is_alphanumeric() {
-            token.extend(character.to_lowercase());
-        } else if !token.is_empty() {
-            tokens.push(std::mem::take(&mut token));
-        }
-    }
-    if !token.is_empty() {
-        tokens.push(token);
-    }
-    tokens.join(" ")
 }
 
 fn entity_edge_properties(
@@ -1004,7 +984,7 @@ async fn storage_partition_degraded(
     pool: &PgPool,
     turn: &SessionTurn,
 ) -> Result<bool, HandlerError> {
-    let scope = turn_tenant_scope(turn).map_err(HandlerError::from)?;
+    let scope = turn_tenant_scope(turn);
     let mut conn = ScopedConn::begin(pool, &scope)
         .await
         .map_err(HandlerError::from)?;
@@ -1276,7 +1256,7 @@ mod tests {
     fn subject_edge_stays_relates_to_object_edge_gets_typed_label() {
         // Pins: predicate semantics live only on the Fact-to-object edge.
         let turn = test_turn();
-        let scope = turn_tenant_scope(&turn).expect("test turn carries tenant UUID scope");
+        let scope = turn_tenant_scope(&turn);
         let entity_uid = uuid::Uuid::now_v7();
         let fact_uid = uuid::Uuid::now_v7();
 

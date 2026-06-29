@@ -1,9 +1,7 @@
 //! Tenant-admin action review queue and decision service.
 
 use chrono::{DateTime, Utc};
-use moa_authz::require_authz_with_delegation;
-use moa_authz_schema::{ObjectType, Relation};
-use moa_core::traits::Identity;
+use moa_authz_schema::Relation;
 use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::{
     ActionClass, ActionEnvelope, ActionReviewPreview, ActionReviewStatus, Event, EventType,
@@ -17,8 +15,7 @@ use uuid::Uuid;
 
 use crate::OrchestratorCtx;
 use crate::action_reviews::app as action_review_app;
-use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::authorize_tenant;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::services::tool_executor::ToolExecutorClient;
 
@@ -363,19 +360,6 @@ async fn prior_action_review_event_exists(
         .name("action_reviews_event_exists")
         .await?
         .into_inner())
-}
-
-async fn authorize_tenant(
-    ctx: &impl RequestHeaders,
-    tenant_id: TenantId,
-    relation: Relation,
-) -> Result<Identity, HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
-        .await
-        .map_err(translate_authz_error)?;
-    Ok(identity)
 }
 
 fn storage_partition_id(tenant_id: TenantId) -> StoragePartitionId {

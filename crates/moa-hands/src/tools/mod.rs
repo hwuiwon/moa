@@ -7,6 +7,7 @@ pub mod file_outline;
 pub mod file_read;
 pub mod file_search;
 pub mod file_write;
+pub(crate) mod fs_util;
 pub mod grep;
 pub mod memory;
 pub(crate) mod sandbox_descriptor;

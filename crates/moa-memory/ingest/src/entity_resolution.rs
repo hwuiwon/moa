@@ -129,12 +129,6 @@ impl EntityResolver {
         self
     }
 
-    /// Returns whether this resolver can create and query entity embeddings.
-    #[must_use]
-    pub fn embedding_blocking_enabled(&self) -> bool {
-        self.embedding_blocker.is_some()
-    }
-
     /// Resolves one entity mention, creating an `Entity` node when no active match exists.
     pub async fn resolve(
         &self,
@@ -247,12 +241,7 @@ impl EntityResolver {
     ) -> Result<Vec<NodeIndexRow>> {
         let storage_partition_id = Some(scope.tenant_id().to_string());
         let user_id = scope.contact_id().map(|contact_id| contact_id.to_string());
-        let mut conn = ScopedConn::begin(pool, scope).await?;
-        if self.assume_app_role {
-            sqlx::query("SET LOCAL ROLE moa_app")
-                .execute(conn.as_mut())
-                .await?;
-        }
+        let mut conn = ScopedConn::begin_as_app(pool, scope, self.assume_app_role).await?;
         let rows = sqlx::query_as::<_, NodeIndexRow>(
             r#"
             SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
@@ -321,12 +310,7 @@ impl EntityResolver {
             .iter()
             .map(|candidate| candidate.uid)
             .collect::<Vec<_>>();
-        let mut conn = ScopedConn::begin(pool, scope).await?;
-        if self.assume_app_role {
-            sqlx::query("SET LOCAL ROLE moa_app")
-                .execute(conn.as_mut())
-                .await?;
-        }
+        let mut conn = ScopedConn::begin_as_app(pool, scope, self.assume_app_role).await?;
         let rows = sqlx::query_as::<_, NodeIndexRow>(
             r#"
             SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,

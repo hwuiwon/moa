@@ -7,12 +7,12 @@ use moa_artifacts::document::{
 use moa_artifacts::registry::{ArtifactFile, NewArtifactFile, StoredArtifactRevision};
 use moa_artifacts::skill::{SkillDefinition, SkillInstructionSource};
 use moa_core::{MoaError, Result};
-use serde_json::Value;
 
 use crate::format::SkillDocument;
 use crate::package::{
     SKILL_MD_PATH, SkillPackage, SkillPackageFile, ValidatedSkillPackage, ValidatedSkillPackageFile,
 };
+use crate::util::empty_object;
 
 /// Optional package file containing canonical skill artifact metadata.
 pub const SKILL_ARTIFACT_PATH: &str = "skill.moa.yaml";
@@ -190,8 +190,4 @@ fn yaml_mapping_contains(value: &serde_yaml::Value, key: &str) -> bool {
         .as_mapping()
         .map(|mapping| mapping.contains_key(serde_yaml::Value::String(key.to_string())))
         .unwrap_or(false)
-}
-
-fn empty_object() -> Value {
-    Value::Object(serde_json::Map::new())
 }

@@ -54,19 +54,19 @@ These caveats are deliberate security trade-offs where the current implementatio
 
 ### MCP remote auth applies only to HTTP/SSE transports
 
-- `crates/moa-security/src/mcp_proxy.rs` issues session-scoped opaque tokens and injects real credentials only when a remote MCP call is dispatched. `crates/moa-hands/src/mcp.rs` supports stdio and remote JSON-RPC transports, with SSE response parsing for remote endpoints.
+- `crates/moa-security/src/mcp_proxy.rs` issues session-scoped opaque tokens and injects real credentials only when a remote MCP call is dispatched. `crates/moa-hands/src/adapters/mcp/mod.rs` supports stdio and remote JSON-RPC transports, with SSE response parsing for remote endpoints.
 - Remote MCP servers receive credentials without exposing them to the brain or to serialized tool arguments. Session-scoped auth is enforced at the router/proxy seam.
 - Stdio MCP auth is still process/env based; the proxy does not inject credentials into subprocess transports. The credential flow is strongest for HTTP/SSE MCP servers and weaker for stdio servers that need secrets at startup.
 
 ### Local Docker hardening disables container network access entirely
 
-- `crates/moa-hands/src/local.rs` starts Docker sandboxes with read-only root filesystem, tmpfs scratch mounts, `cap-drop=ALL`, `no-new-privileges:true`, `pids-limit=256`, and Docker seccomp active. The implementation uses `--network none` to block the cloud metadata endpoint.
+- `crates/moa-hands/src/adapters/local/mod.rs` starts Docker sandboxes with read-only root filesystem, tmpfs scratch mounts, `cap-drop=ALL`, `no-new-privileges:true`, `pids-limit=256`, and Docker seccomp active. The implementation uses `--network none` to block the cloud metadata endpoint.
 - This is stricter than the original spec: local Docker sandboxes are fully offline, not just metadata-blocked.
 - If we later need outbound network for local containerized tools, we will need a narrower metadata-blocking mechanism than `--network none`.
 
 ### Repeated malicious tool loops are still model-driven
 
-- `crates/moa-brain/src/harness.rs` injects a per-turn canary into tool-enabled requests. Tool invocations are blocked if they leak the active canary or any `moa_canary_*` marker. Tool outputs are wrapped in `<untrusted_tool_output>` with an explicit instruction not to follow embedded instructions. Suspicious output produces `Warning` events.
+- `crates/moa-brain/src/harness/` injects a per-turn canary into tool-enabled requests. Tool invocations are blocked if they leak the active canary or any `moa_canary_*` marker. Tool outputs are wrapped in `<untrusted_tool_output>` by `moa_security::wrap_untrusted_tool_output` (applied in `crates/moa-brain/src/pipeline/history/`) with an explicit instruction not to follow embedded instructions. Suspicious output produces `Warning` events.
 - The instruction hierarchy is materially stronger and regression tests cover both canary leakage and malicious tool-output containment.
 - If a model keeps emitting fresh malicious tool calls after seeing the resulting `ToolError`/`Warning`, the retry behavior is still governed by the turn loop rather than a dedicated security circuit breaker. The next seam to tighten is the orchestrator/harness retry policy.
 
@@ -110,11 +110,3 @@ These caveats relate to the gap between "cloud build succeeds" and "cloud deploy
   geometry can produce a different candidate set at the 0.80 threshold. Prompt
   08's live lane should report `entity_fragmentation` so the threshold can be
   calibrated against live vectors.
-
-### Cloud handler startup requires explicit database, Restate, and provider configuration
-
-- `Dockerfile` builds `moa-orchestrator-bin` and installs it as `/usr/local/bin/moa-orchestrator`.
-- The orchestrator process loads shared `MoaConfig` from flat `MOA_...` environment variables such as `MOA_DATABASE_URL`, `MOA_RESTATE_ADMIN_URL`, `MOA_RESTATE_INGRESS_URL`, `MOA_LOCAL_SANDBOX_DIR`, `MOA_LOCAL_MEMORY_DIR`, `MOA_LOCAL_DOCKER_ENABLED`, observability settings, and metrics settings.
-- Provider registration is environment-backed. Health readiness validates Postgres and optional Restate registration, not provider reachability; real LLM requests still need a configured key such as `MOA_OPENAI_API_KEY`, `MOA_ANTHROPIC_API_KEY`, or `MOA_GOOGLE_API_KEY`.
-- `fly.toml` carries flat `MOA_...` settings. Kubernetes and Fly deployments should use environment variables for runtime configuration.
-- In live validation, a manually stopped machine took roughly 6 seconds to answer the next `/health` request, while a suspended machine resumed in about 1.29 seconds — close to, but not consistently below, the sub-second resume target from the step spec.

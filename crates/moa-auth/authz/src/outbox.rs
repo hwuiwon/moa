@@ -20,24 +20,16 @@ where
     Executor: PgExecutor<'executor>,
 {
     let idempotency_key = tuple.idempotency_key(op, MODEL_VERSION);
-    sqlx::query(
-        r#"
-        INSERT INTO authz_outbox
-            (idempotency_key, op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT (idempotency_key) DO NOTHING
-        "#,
+    insert_outbox(
+        exec,
+        op,
+        &idempotency_key,
+        &tuple.user_wire(),
+        &tuple.relation.to_string(),
+        &tuple.object_wire(),
+        tenant_id,
     )
-    .bind(&idempotency_key)
-    .bind(op.to_string())
-    .bind(tuple.user_wire())
-    .bind(tuple.relation.to_string())
-    .bind(tuple.object_wire())
-    .bind(MODEL_VERSION as i32)
-    .bind(tenant_id)
-    .execute(exec)
-    .await?;
-    Ok(())
+    .await
 }
 
 /// Enqueue a tuple operation using OpenFGA wire strings directly.
@@ -57,6 +49,34 @@ where
     Executor: PgExecutor<'executor>,
 {
     let idempotency_key = format!("{op}-{object_wire}-{relation}-{user_wire}-v{MODEL_VERSION}");
+    insert_outbox(
+        exec,
+        op,
+        &idempotency_key,
+        user_wire,
+        relation,
+        object_wire,
+        tenant_id,
+    )
+    .await
+}
+
+/// Insert one `authz_outbox` row, leaving an existing row untouched on conflict.
+///
+/// Shared by [`enqueue`] and [`enqueue_raw`], which differ only in how they
+/// derive the idempotency key and wire strings.
+async fn insert_outbox<'executor, Executor>(
+    exec: Executor,
+    op: TupleOp,
+    idempotency_key: &str,
+    user_wire: &str,
+    relation: &str,
+    object_wire: &str,
+    tenant_id: Option<Uuid>,
+) -> Result<(), AuthzError>
+where
+    Executor: PgExecutor<'executor>,
+{
     sqlx::query(
         r#"
         INSERT INTO authz_outbox
@@ -65,7 +85,7 @@ where
         ON CONFLICT (idempotency_key) DO NOTHING
         "#,
     )
-    .bind(&idempotency_key)
+    .bind(idempotency_key)
     .bind(op.to_string())
     .bind(user_wire)
     .bind(relation)

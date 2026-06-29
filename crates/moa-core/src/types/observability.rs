@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::{
     Channel, CompletionRequest, ContactId, MessageRole, ModelId, SessionActorRef, SessionId,
-    SessionMeta, TenantId, estimate_text_tokens,
+    SessionMeta, TenantId, estimate_text_tokens, sum_message_tokens,
 };
 
 /// Durable summary of one provider request's cache plan and observed cache usage.
@@ -95,15 +95,9 @@ impl CacheReport {
             .iter()
             .map(|tool| estimate_text_tokens(&tool.to_string()))
             .sum::<usize>();
-        let stable_message_tokens_estimate = request.messages[..stable_message_count]
-            .iter()
-            .map(|message| estimate_text_tokens(&message.content))
-            .sum::<usize>();
-        let total_message_tokens_estimate = request
-            .messages
-            .iter()
-            .map(|message| estimate_text_tokens(&message.content))
-            .sum::<usize>();
+        let stable_message_tokens_estimate =
+            sum_message_tokens(&request.messages[..stable_message_count]);
+        let total_message_tokens_estimate = sum_message_tokens(&request.messages);
         let stable_total_tokens_estimate = tool_tokens_estimate + stable_message_tokens_estimate;
         let total_tokens_estimate = tool_tokens_estimate + total_message_tokens_estimate;
         let dynamic_tokens_estimate =

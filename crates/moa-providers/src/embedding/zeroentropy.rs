@@ -1,17 +1,18 @@
 //! ZeroEntropy embedding provider client.
 
-use std::env;
-
 use async_trait::async_trait;
 use moa_core::traits::EmbeddingProvider;
 use moa_core::{MoaConfig, MoaError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use super::model_from_config_with_provider_default;
-use crate::core::http::build_http_client;
+use crate::core::http::{
+    build_http_client, post_json, validate_embedding_count, validate_embedding_dimension,
+};
 
 const ZEROENTROPY_EMBEDDINGS_URL: &str = "https://api.zeroentropy.dev/v1/models/embed";
+/// Default ZeroEntropy embedding model id, used as a fixture by selector tests.
+#[cfg(test)]
 pub(super) const ZEROENTROPY_DEFAULT_MODEL: &str = "zembed-1";
 const ZEROENTROPY_DEFAULT_INPUT_TYPE: &str = "document";
 const ZEROENTROPY_DEFAULT_DIMENSIONS: usize = 1_280;
@@ -42,20 +43,8 @@ impl ZeroEntropyEmbedding {
         })
     }
 
-    /// Creates a ZeroEntropy embedding client from the loaded MOA config.
-    pub fn from_config(config: &MoaConfig) -> Result<Self> {
-        Self::from_config_with_model_env(
-            config,
-            model_from_config_with_provider_default(config, ZEROENTROPY_DEFAULT_MODEL),
-            &|name| env::var(name),
-        )
-    }
-
-    pub(super) fn from_config_with_model_env(
-        config: &MoaConfig,
-        model: String,
-        _env_lookup: &impl Fn(&str) -> std::result::Result<String, env::VarError>,
-    ) -> Result<Self> {
+    /// Creates a ZeroEntropy embedding client from config using an explicit model id.
+    pub(super) fn from_config_with_model(config: &MoaConfig, model: String) -> Result<Self> {
         let api_key = moa_core::config::required_config_secret(
             "MOA_ZEROENTROPY_API_KEY",
             &config.providers.zeroentropy.api_key,
@@ -68,20 +57,6 @@ impl ZeroEntropyEmbedding {
     pub fn with_embeddings_url(mut self, embeddings_url: impl Into<String>) -> Self {
         self.embeddings_url = embeddings_url.into();
         self
-    }
-
-    /// Overrides the ZeroEntropy input type used for all calls made by this client.
-    pub fn with_input_type(mut self, input_type: impl Into<String>) -> Result<Self> {
-        let input_type = input_type.into();
-        match input_type.as_str() {
-            "query" | "document" => {
-                self.input_type = input_type;
-                Ok(self)
-            }
-            other => Err(MoaError::ConfigError(format!(
-                "zeroentropy embedding input_type must be query or document, got `{other}`"
-            ))),
-        }
     }
 
     /// Overrides the fixed output dimensionality expected from ZeroEntropy.
@@ -97,44 +72,20 @@ impl ZeroEntropyEmbedding {
     }
 
     async fn embed_chunk(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
-        let response = self
-            .client
-            .post(&self.embeddings_url)
-            .bearer_auth(&self.api_key)
-            .json(&ZeroEntropyEmbeddingRequest {
+        let payload: ZeroEntropyEmbeddingResponse = post_json(
+            &self.client,
+            &self.embeddings_url,
+            &self.api_key,
+            &ZeroEntropyEmbeddingRequest {
                 model: self.model.clone(),
                 input_type: self.input_type.clone(),
                 input: inputs.to_vec(),
                 dimensions: self.dimensions,
                 encoding_format: ZEROENTROPY_FLOAT_ENCODING.to_string(),
-            })
-            .send()
-            .await
-            .map_err(|error| MoaError::ProviderError(error.to_string()))?;
-        let status = response.status();
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|error| format!("failed to read error body: {error}"));
-            return Err(MoaError::HttpStatus {
-                status: status.as_u16(),
-                retry_after: None,
-                message,
-            });
-        }
-
-        let payload: ZeroEntropyEmbeddingResponse = response
-            .json()
-            .await
-            .map_err(|error| MoaError::ProviderError(error.to_string()))?;
-        if payload.results.len() != inputs.len() {
-            return Err(MoaError::ProviderError(format!(
-                "embedding response length mismatch: expected {}, got {}",
-                inputs.len(),
-                payload.results.len()
-            )));
-        }
+            },
+        )
+        .await?;
+        validate_embedding_count(inputs.len(), payload.results.len())?;
 
         let embeddings: Vec<Vec<f32>> = payload
             .results
@@ -142,13 +93,7 @@ impl ZeroEntropyEmbedding {
             .map(|result| result.embedding)
             .collect();
         for embedding in &embeddings {
-            if embedding.len() != self.dimensions {
-                return Err(MoaError::ProviderError(format!(
-                    "embedding dimension mismatch: expected {}, got {}",
-                    self.dimensions,
-                    embedding.len()
-                )));
-            }
+            validate_embedding_dimension(self.dimensions, embedding)?;
         }
         Ok(embeddings)
     }

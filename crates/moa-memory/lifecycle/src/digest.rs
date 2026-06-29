@@ -333,11 +333,7 @@ fn digest_fact_row_from_sql(row: sqlx::postgres::PgRow) -> Result<DigestFactRow>
 }
 
 fn property_text(properties: &Option<Value>, key: &str) -> Result<String> {
-    properties
-        .as_ref()
-        .and_then(|properties| properties.get(key))
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
+    crate::property_string(properties, key)
         .ok_or_else(|| Error::InvalidRow(format!("Fact node is missing properties.{key}")))
 }
 

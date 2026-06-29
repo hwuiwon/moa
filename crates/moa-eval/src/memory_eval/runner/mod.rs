@@ -64,6 +64,8 @@ use crate::kernel::{
 };
 use moa_eval_core::{EvalError, Result};
 
+use super::io::io_error;
+
 mod report;
 mod rewrite;
 
@@ -228,13 +230,6 @@ impl MemoryRetrievalEvalOptions {
         self
     }
 
-    /// Overrides the FeatureV1 quality term weight for A/B evaluation.
-    #[must_use]
-    pub fn with_quality_weight(mut self, quality_weight: f64) -> Self {
-        self.ranking_config.weights.quality = quality_weight;
-        self
-    }
-
     /// Inverts synthetic quality priors for the negative-control eval lane.
     #[must_use]
     pub fn with_inverted_quality_priors(mut self, invert_quality_priors: bool) -> Self {
@@ -277,24 +272,6 @@ impl MemoryRetrievalEvalOptions {
     #[must_use]
     pub fn rewrite_policy(&self) -> QueryRewritePolicy {
         self.rewrite_policy
-    }
-
-    /// Returns the configured eval extractor mode.
-    #[must_use]
-    pub fn extractor_mode(&self) -> MemoryEvalExtractorMode {
-        self.extractor_mode
-    }
-
-    /// Returns the selected eval lane.
-    #[must_use]
-    pub fn lane(&self) -> EvalLane {
-        self.lane
-    }
-
-    /// Returns the explicitly configured cost budget, when present.
-    #[must_use]
-    pub fn budget_usd(&self) -> Option<f64> {
-        self.budget_usd
     }
 
     /// Returns whether the eval should run graph-memory consolidation before probes.
@@ -2360,13 +2337,6 @@ impl ContradictionDetector for InsertOnlyContradictionDetector {
         _ctx: &ContradictionContext,
     ) -> std::result::Result<Conflict, IngestError> {
         Ok(Conflict::Insert)
-    }
-}
-
-fn io_error(path: &Path, source: std::io::Error) -> EvalError {
-    EvalError::Io {
-        path: path.to_path_buf(),
-        source,
     }
 }
 

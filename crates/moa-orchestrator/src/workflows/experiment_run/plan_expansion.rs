@@ -89,7 +89,7 @@ async fn dispatch_plan_trials(
                 request.run_uid,
                 aggregate.status,
                 aggregate.error.clone(),
-                Some(durable_utc_now(ctx).await?),
+                Some(durable_utc_now(ctx, "experiment_utc_now").await?),
             )
             .await?;
             return workflow_status_response(
@@ -168,7 +168,7 @@ async fn dispatch_plan_trials(
                 request.run_uid,
                 ExperimentRunStatus::Failed,
                 Some(reason),
-                Some(durable_utc_now(ctx).await?),
+                Some(durable_utc_now(ctx, "experiment_utc_now").await?),
             )
             .await?;
             return workflow_status_response(

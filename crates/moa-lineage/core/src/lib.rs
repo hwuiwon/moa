@@ -19,4 +19,4 @@ pub use records::{
     ScoreSource, ScoreTarget, ScoreValue, StageTimings, ToolCallSummary, TruncationEvent,
     TurbopufferIntrospection, VecHit, VerifierResult,
 };
-pub use sink::{LineageSink, NullSink};
+pub use sink::LineageSink;
