@@ -640,6 +640,7 @@ async fn seed_other_tenant_vector_noise(
             embedding: vec![0.0; VECTOR_DIMENSION],
             embedding_model: "pipeline-stage-test".to_string(),
             embedding_model_version: 1,
+            search_text: None,
             valid_to: None,
         }])
         .await

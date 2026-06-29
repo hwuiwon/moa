@@ -23,9 +23,9 @@ use uuid::Uuid;
 
 use crate::planning::Strategy;
 use crate::retrieval::legs::{
-    GRAPH_BUDGET, GRAPH_WEIGHT, LEXICAL_BUDGET, LEXICAL_WEIGHT, LegCandidate, VECTOR_BUDGET,
+    GRAPH_BUDGET, GRAPH_WEIGHT, LEXICAL_BUDGET, LEXICAL_WEIGHT, LegCandidate, RRF_K, VECTOR_BUDGET,
     VECTOR_WEIGHT, bump_last_accessed, graph_expansion_leg, hydrate_nodes, lexical_leg, rrf_fuse,
-    timed_leg, vector_leg as run_vector_leg, write_retrieval_lineage,
+    timed_leg, turbopuffer_bm25_leg, vector_leg as run_vector_leg, write_retrieval_lineage,
 };
 use crate::retrieval::ranking::{
     FeatureRanker, RankingConfig, normalize_tokens, ranking_fingerprint,
@@ -34,6 +34,7 @@ use crate::retrieval::ranking::{
 const FUSED_CANDIDATE_LIMIT: usize = 26;
 const PHASE_ONE_GRAPH_SEED_LIMIT: usize = FUSED_CANDIDATE_LIMIT;
 const PHASE_ONE_SEED_DECAY: f64 = 0.85;
+const MAX_FINAL_HITS_PER_KNOWLEDGE_OBJECT: usize = 2;
 
 /// Result type returned by hybrid retrieval.
 pub type Result<T> = std::result::Result<T, RetrievalError>;
@@ -113,6 +114,30 @@ pub struct LegSources {
     pub lexical: bool,
 }
 
+/// Lexical retrieval backend that produced lexical candidate attribution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LexicalBackend {
+    /// Postgres `tsvector` search over the graph sidecar.
+    PostgresTsvector,
+    /// Turbopuffer BM25 search over indexed tenant knowledge chunks.
+    TurbopufferBm25,
+    /// A merged lexical candidate list from Turbopuffer BM25 and Postgres `tsvector`.
+    Mixed,
+}
+
+impl LexicalBackend {
+    /// Returns the stable label used in metrics and reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PostgresTsvector => "postgres_tsvector",
+            Self::TurbopufferBm25 => "turbopuffer_bm25",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
 /// Source tier represented by a retrieval hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -172,6 +197,8 @@ pub struct RetrievalHit {
     pub score: f64,
     /// Source legs that contributed to the score.
     pub legs: LegSources,
+    /// Lexical backend selected for this hit when `legs.lexical` is true.
+    pub lexical_backend: Option<LexicalBackend>,
     /// Source tier used for context assembly and query tracing.
     pub source_tier: SourceTier,
     /// Full tenant knowledge chunk payload when the hit is a knowledge chunk.
@@ -294,22 +321,32 @@ impl HybridRetriever {
         }
 
         let strategy = req.strategy.unwrap_or(Strategy::Both);
+        let backend_state = if retrieval_needs_backend_state(&req) {
+            self.vector_backend_state(&req).await?
+        } else {
+            VectorBackendState::default()
+        };
         let vector_future = run_leg(
             req.disable_leg_timeouts,
             "vector",
             VECTOR_BUDGET,
-            self.vector_leg(&req),
+            self.vector_leg(&req, &backend_state),
         );
         let lexical_future = run_leg(
             req.disable_leg_timeouts,
             "lexical",
             LEXICAL_BUDGET,
-            lexical_leg(&self.pool, &req, self.assume_app_role),
+            self.lexical_leg(&req, &backend_state),
         );
         let (vector_hits, lexical_hits) = tokio::join!(vector_future, lexical_future);
         let vector_hits = vector_hits?;
         let lexical_hits = lexical_hits?;
-        let interim = rrf_fuse(&[], &vector_hits, &lexical_hits, weights_for(strategy));
+        let interim = rrf_fuse(
+            &[],
+            &vector_hits,
+            &lexical_hits.candidates,
+            weights_for(strategy),
+        );
         let graph_seed_rows =
             hydrate_graph_seed_rows(&self.pool, &req, &interim, self.assume_app_role).await?;
         let graph_seed_strengths = if req.disable_graph_expansion {
@@ -333,7 +370,7 @@ impl HybridRetriever {
         let mut fused = rrf_fuse(
             &graph_hits,
             &vector_hits,
-            &lexical_hits,
+            &lexical_hits.candidates,
             weights_for(strategy),
         );
         fused.truncate(FUSED_CANDIDATE_LIMIT);
@@ -351,12 +388,14 @@ impl HybridRetriever {
         )
         .await?;
         let mut hits = build_hits(fused, nodes);
+        annotate_lexical_backend(&mut hits, lexical_hits.backend);
         hydrate_knowledge_chunks(&self.pool, &req.scope, &mut hits, self.assume_app_role).await?;
         rank_hydrated_hits(&mut hits, &self.ranking_config, &req);
         let final_hits = if req.use_reranker && hits.len() > req.k_final {
-            self.rerank_hits(&req, &hits).await?
+            let reranked = self.rerank_hits(&req, &hits).await?;
+            select_final_hits(reranked, &hits, req.k_final)
         } else {
-            hits.into_iter().take(req.k_final).collect()
+            select_final_hits(hits, &[], req.k_final)
         };
         metrics::histogram!("moa_retrieval_rrf_rerank_seconds")
             .record(fusion_started.elapsed().as_secs_f64());
@@ -401,13 +440,16 @@ impl HybridRetriever {
         Ok(final_hits)
     }
 
-    async fn vector_leg(&self, req: &RetrievalRequest) -> Result<Vec<LegCandidate>> {
+    async fn vector_leg(
+        &self,
+        req: &RetrievalRequest,
+        state: &VectorBackendState,
+    ) -> Result<Vec<LegCandidate>> {
         if req.query_embedding.is_empty() {
             return Ok(Vec::new());
         }
 
         let tenant_id = req.scope.tenant_id();
-        let state = self.vector_backend_state(req).await?;
         if state.is_dual_read_active() {
             return self.dual_read_vector_leg(req).await;
         }
@@ -432,6 +474,60 @@ impl HybridRetriever {
         }
 
         run_vector_leg(self.vector.as_ref(), req).await
+    }
+
+    async fn lexical_leg(
+        &self,
+        req: &RetrievalRequest,
+        state: &VectorBackendState,
+    ) -> Result<LexicalLegOutput> {
+        if state.uses_turbopuffer_backend()
+            && req.as_of.is_none()
+            && request_allows_tenant_chunk_bm25(req)
+        {
+            if let Some(turbopuffer) = &self.turbopuffer {
+                let scoped_turbopuffer = turbopuffer.scoped_to_tenant(req.scope.tenant_id());
+                match turbopuffer_bm25_leg(&scoped_turbopuffer, req).await {
+                    Ok(hits) => {
+                        if request_is_tenant_chunk_only(req) {
+                            record_lexical_backend(LexicalBackend::TurbopufferBm25, "success");
+                            return Ok(LexicalLegOutput::new(
+                                hits,
+                                LexicalBackend::TurbopufferBm25,
+                            ));
+                        }
+                        let postgres_hits =
+                            lexical_leg(&self.pool, req, self.assume_app_role).await?;
+                        record_lexical_backend(LexicalBackend::Mixed, "success");
+                        return Ok(LexicalLegOutput::new(
+                            merge_lexical_candidates(hits, postgres_hits),
+                            LexicalBackend::Mixed,
+                        ));
+                    }
+                    Err(error) => {
+                        record_lexical_backend(LexicalBackend::TurbopufferBm25, "fallback");
+                        tracing::warn!(
+                            error = %error,
+                            tenant_id = %req.scope.tenant_id(),
+                            "Turbopuffer BM25 lexical leg failed; falling back to Postgres lexical"
+                        );
+                    }
+                }
+            } else {
+                record_lexical_backend(LexicalBackend::TurbopufferBm25, "missing_client");
+                tracing::warn!(
+                    tenant_id = %req.scope.tenant_id(),
+                    "tenant is configured for Turbopuffer BM25 but no client is configured; falling back to Postgres lexical"
+                );
+            }
+        }
+
+        let hits = lexical_leg(&self.pool, req, self.assume_app_role).await?;
+        record_lexical_backend(LexicalBackend::PostgresTsvector, "success");
+        Ok(LexicalLegOutput::new(
+            hits,
+            LexicalBackend::PostgresTsvector,
+        ))
     }
 
     async fn dual_read_vector_leg(&self, req: &RetrievalRequest) -> Result<Vec<LegCandidate>> {
@@ -538,6 +634,21 @@ struct VectorBackendState {
     dual_read_until: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct LexicalLegOutput {
+    candidates: Vec<LegCandidate>,
+    backend: Option<LexicalBackend>,
+}
+
+impl LexicalLegOutput {
+    fn new(candidates: Vec<LegCandidate>, backend: LexicalBackend) -> Self {
+        Self {
+            candidates,
+            backend: Some(backend),
+        }
+    }
+}
+
 impl Default for VectorBackendState {
     fn default() -> Self {
         Self {
@@ -553,6 +664,52 @@ impl VectorBackendState {
         self.vector_backend_state == "dual_read"
             && self.dual_read_until.is_none_or(|until| until > Utc::now())
     }
+
+    fn uses_turbopuffer_backend(&self) -> bool {
+        self.vector_backend == "turbopuffer"
+    }
+}
+
+fn retrieval_needs_backend_state(req: &RetrievalRequest) -> bool {
+    !req.query_embedding.is_empty() || !req.query_text.trim().is_empty()
+}
+
+fn request_allows_tenant_chunk_bm25(req: &RetrievalRequest) -> bool {
+    req.label_filter
+        .as_deref()
+        .is_some_and(|labels| labels.contains(&NodeLabel::Chunk))
+}
+
+fn request_is_tenant_chunk_only(req: &RetrievalRequest) -> bool {
+    req.label_filter
+        .as_deref()
+        .is_some_and(|labels| labels == [NodeLabel::Chunk])
+}
+
+fn merge_lexical_candidates(
+    primary: Vec<LegCandidate>,
+    fallback: Vec<LegCandidate>,
+) -> Vec<LegCandidate> {
+    let mut seen = HashSet::new();
+    primary
+        .into_iter()
+        .chain(fallback)
+        .filter_map(|candidate| seen.insert(candidate.uid).then_some(candidate.uid))
+        .enumerate()
+        .map(|(index, uid)| LegCandidate {
+            uid,
+            score: 1.0 / (RRF_K + index as f64 + 1.0),
+        })
+        .collect()
+}
+
+fn record_lexical_backend(backend: LexicalBackend, outcome: &'static str) {
+    metrics::counter!(
+        "moa_retrieval_lexical_backend_total",
+        "backend" => backend.as_str(),
+        "outcome" => outcome
+    )
+    .increment(1);
 }
 
 fn leg_overlap(left: &[LegCandidate], right: &[LegCandidate], k: usize) -> f64 {
@@ -699,12 +856,21 @@ fn build_hits(fused: Vec<(Uuid, f64, LegSources)>, nodes: Vec<NodeIndexRow>) -> 
                 uid,
                 score,
                 legs,
+                lexical_backend: None,
                 source_tier: source_tier_for_node(&node),
                 knowledge_chunk: None,
                 node,
             })
         })
         .collect()
+}
+
+fn annotate_lexical_backend(hits: &mut [RetrievalHit], backend: Option<LexicalBackend>) {
+    for hit in hits {
+        if hit.legs.lexical {
+            hit.lexical_backend = backend;
+        }
+    }
 }
 
 async fn hydrate_knowledge_chunks(
@@ -827,6 +993,62 @@ fn is_tenant_knowledge_label(label: NodeLabel) -> bool {
 
 fn rank_hydrated_hits(hits: &mut [RetrievalHit], config: &RankingConfig, req: &RetrievalRequest) {
     apply_feature_ranking(hits, config, req);
+}
+
+fn select_final_hits(
+    primary: Vec<RetrievalHit>,
+    fallback: &[RetrievalHit],
+    k_final: usize,
+) -> Vec<RetrievalHit> {
+    let mut selected = Vec::with_capacity(k_final);
+    let mut selected_uids = HashSet::new();
+    let mut object_counts = HashMap::<Uuid, usize>::new();
+    for hit in primary {
+        push_capped_hit(
+            hit,
+            &mut selected,
+            &mut selected_uids,
+            &mut object_counts,
+            k_final,
+        );
+        if selected.len() == k_final {
+            return selected;
+        }
+    }
+    for hit in fallback {
+        push_capped_hit(
+            hit.clone(),
+            &mut selected,
+            &mut selected_uids,
+            &mut object_counts,
+            k_final,
+        );
+        if selected.len() == k_final {
+            break;
+        }
+    }
+    selected
+}
+
+fn push_capped_hit(
+    hit: RetrievalHit,
+    selected: &mut Vec<RetrievalHit>,
+    selected_uids: &mut HashSet<Uuid>,
+    object_counts: &mut HashMap<Uuid, usize>,
+    k_final: usize,
+) {
+    if selected.len() == k_final || !selected_uids.insert(hit.uid) {
+        return;
+    }
+    if let Some(object_uid) = hit.knowledge_chunk.as_ref().map(|chunk| chunk.object_uid) {
+        let count = object_counts.entry(object_uid).or_default();
+        if *count >= MAX_FINAL_HITS_PER_KNOWLEDGE_OBJECT {
+            selected_uids.remove(&hit.uid);
+            return;
+        }
+        *count += 1;
+    }
+    selected.push(hit);
 }
 
 fn apply_feature_ranking(
@@ -1372,6 +1594,7 @@ mod tests {
                 vector: true,
                 lexical: false,
             },
+            lexical_backend: None,
             source_tier: SourceTier::UserMemory,
             knowledge_chunk: None,
             node: NodeIndexRow {

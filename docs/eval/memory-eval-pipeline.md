@@ -295,7 +295,11 @@ cargo run -p xtask -- compare-eval-reports \
 This gate proves mechanism and weight magnitude, not production prior quality.
 The priors are synthetic by design. Production quality is owned by live lineage
 data and task-segment outcomes after `memory.retrieval.lineage_enabled` is
-enabled.
+enabled. Quality scores are an outcome-gated ranking prior: no lineage row
+contributes until it maps to a persisted task-segment outcome, and only
+`resolved` outcomes count as successes. The scorer does not create learning
+candidates, publish skills, cache retrieval results, or autonomously promote
+memory; it updates only the sidecar `moa.node_index.quality_score` field.
 
 Lineage capture is dark by default. When
 `memory.retrieval.lineage_enabled = true`, retrieval writes best-effort rows to
@@ -308,10 +312,11 @@ cargo run -p xtask -- compute-memory-quality-scores --tenant-id <tenant-uuid>
 ```
 
 It applies Beta(1,1) smoothing, `(1 + successes) / (2 + uses)`, over lineage
-rows joined to persisted task segments. If no outcome source is present, the
-job logs a structured warning, reports `skipped_no_outcome_source`, and writes
-nothing. It is not scheduled; production enablement also needs a lineage
-pruning policy.
+rows joined to persisted task segments with non-null outcomes. Lineage for
+pending segments or turns that cannot be mapped to an outcome is skipped rather
+than counted as a failed use. If no outcome source is present, the job logs a
+structured warning, reports `skipped_no_outcome_source`, and writes nothing.
+It is not scheduled; production enablement also needs a lineage pruning policy.
 
 Extraction fixtures are keyed by the SHA-256 hex hash of the raw chunk text the
 extractor saw. The file name and every record carry the extraction prompt

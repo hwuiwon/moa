@@ -1371,6 +1371,7 @@ fn print_failures(failures: &[ScenarioFailure]) {
 mod tests {
     use super::*;
     use moa_eval::kernel::RetrievalCoreMetrics;
+    use moa_eval::memory_eval::GraphExpansionEvalPolicy;
     use moa_eval::memory_eval::runner::QueryRewriteClassMetrics;
     use moa_eval::memory_eval::{
         CorpusManifest, GoldResolutionReport, MetricSummary, PerLegRecall, RetrievalMetrics,
@@ -1581,6 +1582,7 @@ mod tests {
             final_k: 4,
             reranker_enabled: false,
             query_rewrite_policy: policy,
+            graph_expansion_policy: GraphExpansionEvalPolicy::Current,
             query_rewrite_call_count: call_count,
             query_rewrite_skip_count: skip_count,
             query_rewrite_call_rate: if call_count + skip_count == 0 {

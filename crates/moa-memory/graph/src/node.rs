@@ -194,6 +194,9 @@ pub struct NodeWriteIntent {
     pub embedding_model: Option<String>,
     /// Optional embedding model version.
     pub embedding_model_version: Option<i32>,
+    /// Retrieval-safe source text used to create the embedding, when it may be indexed for search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_text: Option<String>,
     /// Principal identifier that triggered the mutation.
     pub actor_id: String,
     /// Principal kind written to the graph changelog.

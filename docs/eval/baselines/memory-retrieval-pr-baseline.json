@@ -15,6 +15,7 @@
   "final_k": 4,
   "reranker_enabled": false,
   "query_rewrite_policy": "gated",
+  "graph_expansion_policy": "current",
   "cost": {
     "pricing_as_of": "2026-06-11",
     "embed_input_tokens": 0,

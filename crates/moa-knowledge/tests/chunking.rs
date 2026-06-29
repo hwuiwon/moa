@@ -100,6 +100,66 @@ fn heading_path_does_not_participate_in_chunk_hash() {
 }
 
 #[test]
+fn chunks_keep_version_ordinals_and_heading_paths_for_neighbor_lookup() {
+    // Pins: chunk rows carry enough structure to resolve one previous and one next chunk by version and ordinal.
+    let version_uid = Uuid::from_u128(14);
+    let blocks = elements_to_blocks(
+        version_uid,
+        &[
+            element(0, "eligibility alpha", vec!["Policy", "Eligibility"]),
+            element(1, "approval bravo", vec!["Policy", "Approval"]),
+            element(2, "carryover charlie", vec!["Policy", "Carryover"]),
+        ],
+    );
+
+    let chunks = blocks_to_chunks(
+        version_uid,
+        &blocks,
+        ChunkingConfig {
+            target_tokens: 1,
+            max_tokens: 8,
+            min_tokens: 1,
+        },
+    );
+
+    assert_eq!(chunks.len(), 3);
+    assert_eq!(
+        chunks
+            .iter()
+            .map(|chunk| chunk.version_uid)
+            .collect::<Vec<_>>(),
+        vec![version_uid, version_uid, version_uid]
+    );
+    assert_eq!(
+        chunks.iter().map(|chunk| chunk.ordinal).collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert_eq!(
+        chunks
+            .iter()
+            .map(|chunk| chunk.heading_path.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            vec!["Policy".to_string(), "Eligibility".to_string()],
+            vec!["Policy".to_string(), "Approval".to_string()],
+            vec!["Policy".to_string(), "Carryover".to_string()],
+        ]
+    );
+
+    let anchor = &chunks[1];
+    let adjacent = chunks
+        .iter()
+        .filter(|chunk| chunk.version_uid == anchor.version_uid)
+        .filter(|chunk| chunk.ordinal.abs_diff(anchor.ordinal) <= 1)
+        .map(|chunk| chunk.text.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        adjacent,
+        vec!["eligibility alpha", "approval bravo", "carryover charlie"]
+    );
+}
+
+#[test]
 fn oversized_single_block_is_split_with_parent_provenance() {
     // Pins: oversized blocks split deterministically and carry parent block provenance in chunk metadata.
     let version_uid = Uuid::from_u128(13);

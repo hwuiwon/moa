@@ -9,9 +9,13 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_brain::planning::{
-    PlanningCtx, QueryPlanner, QueryRetrievalCtx, parse_temporal, retrieve_for_query,
+    PlannedQuery, PlanningCtx, QueryPlanner, QueryRetrievalCtx, parse_temporal, retrieve_for_query,
+    should_skip_graph_expansion_for_direct_lookup,
 };
-use moa_brain::retrieval::{CachedHybridRetriever, HybridRetriever, RankingConfig, RetrievalHit};
+use moa_brain::retrieval::{
+    CachedHybridRetriever, HybridRetriever, PlannedRetriever, RankingConfig, RetrievalHit,
+    RetrievalRequest,
+};
 use moa_core::RlsContext;
 use moa_core::{
     ContactId, MemoryDigestConfig, UserId, config::MemoryExtractionConfig,
@@ -94,6 +98,29 @@ pub struct MemoryRetrievalEvalOptions {
     consolidate: bool,
     digests: bool,
     invert_quality_priors: bool,
+    graph_expansion_policy: GraphExpansionEvalPolicy,
+}
+
+/// Eval-only graph expansion policy used for memory-retrieval A/B runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GraphExpansionEvalPolicy {
+    /// Preserve production retrieval behavior.
+    #[default]
+    Current,
+    /// Disable graph expansion only for direct exact-anchor non-temporal probes.
+    SkipExactDirect,
+}
+
+impl GraphExpansionEvalPolicy {
+    /// Returns the stable CLI label for this eval policy.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::SkipExactDirect => "skip-exact-direct",
+        }
+    }
 }
 
 impl MemoryRetrievalEvalOptions {
@@ -120,6 +147,7 @@ impl MemoryRetrievalEvalOptions {
             consolidate: false,
             digests: false,
             invert_quality_priors: false,
+            graph_expansion_policy: GraphExpansionEvalPolicy::Current,
         }
     }
 
@@ -211,6 +239,13 @@ impl MemoryRetrievalEvalOptions {
     #[must_use]
     pub fn with_inverted_quality_priors(mut self, invert_quality_priors: bool) -> Self {
         self.invert_quality_priors = invert_quality_priors;
+        self
+    }
+
+    /// Overrides the eval-only graph expansion policy.
+    #[must_use]
+    pub fn with_graph_expansion_policy(mut self, policy: GraphExpansionEvalPolicy) -> Self {
+        self.graph_expansion_policy = policy;
         self
     }
 
@@ -526,6 +561,7 @@ async fn run_memory_retrieval_eval_in_store(
             entity_fragmentation,
             reranker_enabled: options.reranker_enabled(),
             rewrite_summary: QueryRewriteSummary::empty(options.rewrite_policy()),
+            graph_expansion_policy: options.graph_expansion_policy,
             aborted_over_budget: true,
             cost: Some(cost_snapshot(&providers.ledger).await),
             providers: Some(providers.provenance),
@@ -560,6 +596,7 @@ async fn run_memory_retrieval_eval_in_store(
                 ranking_config: options.ranking_config().clone(),
                 ranking_reference_time: Some(ranking_reference_time),
                 deterministic_replay: providers.deterministic_replay,
+                graph_expansion_policy: options.graph_expansion_policy,
             },
         )
         .await?;
@@ -600,6 +637,7 @@ async fn run_memory_retrieval_eval_in_store(
                 entity_fragmentation,
                 reranker_enabled: options.reranker_enabled(),
                 rewrite_summary: rewrite_accounting.summary(),
+                graph_expansion_policy: options.graph_expansion_policy,
                 aborted_over_budget: true,
                 cost: Some(cost_snapshot(&providers.ledger).await),
                 providers: Some(providers.provenance),
@@ -621,6 +659,7 @@ async fn run_memory_retrieval_eval_in_store(
             entity_fragmentation,
             reranker_enabled: options.reranker_enabled(),
             rewrite_summary: rewrite_accounting.summary(),
+            graph_expansion_policy: options.graph_expansion_policy,
             aborted_over_budget: true,
             cost: Some(cost_snapshot(&providers.ledger).await),
             providers: Some(providers.provenance),
@@ -640,6 +679,7 @@ async fn run_memory_retrieval_eval_in_store(
         entity_fragmentation,
         reranker_enabled: options.reranker_enabled(),
         rewrite_summary: rewrite_accounting.summary(),
+        graph_expansion_policy: options.graph_expansion_policy,
         aborted_over_budget: false,
         cost: Some(cost_snapshot(&providers.ledger).await),
         providers: Some(providers.provenance),
@@ -1174,6 +1214,7 @@ async fn retrieve_probe(
         ranking_config,
         ranking_reference_time,
         deterministic_replay,
+        graph_expansion_policy,
     } = options;
     let started = Instant::now();
     let scope = MemoryScope::Contact {
@@ -1195,14 +1236,21 @@ async fn retrieve_probe(
             .with_reranker(reranker)
             .with_assume_app_role(true),
     );
-    let cached = CachedHybridRetriever::new_for_app_role(hybrid, pool.clone());
+    let cached = Arc::new(CachedHybridRetriever::new_for_app_role(
+        hybrid,
+        pool.clone(),
+    ));
+    let retrieval = GraphExpansionPolicyRetriever {
+        inner: cached,
+        policy: graph_expansion_policy,
+    };
     let planning = PlanningCtx::new(scope, graph);
 
     let pre_rerank_hits = retrieve_probe_hits(
         planner,
         &planning,
         embedder,
-        &cached,
+        &retrieval,
         probe,
         ProbeHitOptions {
             k_final: RETRIEVAL_EVAL_CANDIDATE_K,
@@ -1216,7 +1264,7 @@ async fn retrieve_probe(
             planner,
             &planning,
             embedder,
-            &cached,
+            &retrieval,
             probe,
             ProbeHitOptions {
                 k_final: RETRIEVAL_EVAL_FINAL_K,
@@ -1249,18 +1297,47 @@ struct ProbeRetrieveOptions {
     ranking_config: RankingConfig,
     ranking_reference_time: Option<DateTime<Utc>>,
     deterministic_replay: bool,
+    graph_expansion_policy: GraphExpansionEvalPolicy,
+}
+
+struct GraphExpansionPolicyRetriever {
+    inner: Arc<CachedHybridRetriever>,
+    policy: GraphExpansionEvalPolicy,
+}
+
+#[async_trait]
+impl PlannedRetriever for GraphExpansionPolicyRetriever {
+    async fn retrieve(
+        &self,
+        planned: &PlannedQuery,
+        mut req: RetrievalRequest,
+    ) -> moa_brain::retrieval::Result<Vec<RetrievalHit>> {
+        if self.policy == GraphExpansionEvalPolicy::SkipExactDirect
+            && should_skip_graph_expansion_for_exact_direct_probe(planned, &req)
+        {
+            req.disable_graph_expansion = true;
+        }
+        self.inner.retrieve(planned, req).await
+    }
+}
+
+fn should_skip_graph_expansion_for_exact_direct_probe(
+    planned: &PlannedQuery,
+    req: &RetrievalRequest,
+) -> bool {
+    req.as_of.is_none() && should_skip_graph_expansion_for_direct_lookup(planned, &req.query_text)
 }
 
 async fn retrieve_probe_hits(
     planner: &QueryPlanner,
     planning: &PlanningCtx,
     embedder: &dyn EmbeddingProvider,
-    cached: &CachedHybridRetriever,
+    retriever: &dyn PlannedRetriever,
     probe: &Probe,
     options: ProbeHitOptions,
 ) -> Result<Vec<RetrievalHit>> {
     let mut retrieval_ctx =
-        QueryRetrievalCtx::new(planner, planning, embedder, cached, PiiClass::Restricted)
+        QueryRetrievalCtx::new(planner, planning, embedder, retriever, PiiClass::Restricted)
             .with_k_final(options.k_final)
             .with_reranker(options.use_reranker);
     if let Some(ranking_reference_time) = options.ranking_reference_time {
@@ -2299,7 +2376,8 @@ mod tests {
     use crate::memory_eval::{
         CorpusProfile, generate_memory_eval_corpus, write_memory_eval_corpus,
     };
-    use moa_core::{SessionId, StoragePartitionId};
+    use moa_brain::planning::Strategy;
+    use moa_core::{SessionId, StoragePartitionId, TenantId};
 
     #[derive(Debug)]
     struct PrDeterministicEmbedder;
@@ -2320,6 +2398,89 @@ mod tests {
 
         async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
             Ok(vec![vec![0.0; VECTOR_DIMENSION]; inputs.len()])
+        }
+    }
+
+    #[test]
+    fn graph_expansion_policy_skips_only_exact_direct_non_temporal_probes() {
+        // Pins: the A/B policy only disables graph expansion for direct exact-anchor lookups.
+        let planned = planned_for_policy(Strategy::Both, None);
+        let req = request_for_policy("Who owns incident INC-123?");
+
+        assert!(should_skip_graph_expansion_for_exact_direct_probe(
+            &planned, &req
+        ));
+    }
+
+    #[test]
+    fn graph_expansion_policy_keeps_graph_first_and_temporal_probes() {
+        // Pins: multi-hop and historical probes still run graph expansion in the A/B lane.
+        let graph_first = planned_for_policy(Strategy::GraphFirst, None);
+        let temporal = planned_for_policy(
+            Strategy::Both,
+            Some(
+                DateTime::parse_from_rfc3339("2026-03-01T00:00:00Z")
+                    .expect("test timestamp should parse")
+                    .with_timezone(&Utc),
+            ),
+        );
+        let req = request_for_policy("What depends on incident INC-123?");
+
+        assert!(!should_skip_graph_expansion_for_exact_direct_probe(
+            &graph_first,
+            &req
+        ));
+        assert!(!should_skip_graph_expansion_for_exact_direct_probe(
+            &temporal, &req
+        ));
+    }
+
+    #[test]
+    fn graph_expansion_policy_does_not_treat_contractions_as_exact_anchors() {
+        // Pins: natural prose with apostrophes is not an exact-anchor lookup.
+        let planned = planned_for_policy(Strategy::Both, None);
+        let req = request_for_policy("What's failing in the deploy flow?");
+
+        assert!(!should_skip_graph_expansion_for_exact_direct_probe(
+            &planned, &req
+        ));
+    }
+
+    fn planned_for_policy(
+        strategy: Strategy,
+        temporal_filter: Option<DateTime<Utc>>,
+    ) -> PlannedQuery {
+        let scope = MemoryScope::Tenant {
+            tenant_id: TenantId::new(),
+        };
+        PlannedQuery {
+            strategy,
+            seeds: Vec::new(),
+            label_hint: None,
+            scope: scope.clone(),
+            scope_ancestors: scope.ancestors(),
+            temporal_filter,
+        }
+    }
+
+    fn request_for_policy(query_text: &str) -> RetrievalRequest {
+        RetrievalRequest {
+            seeds: Vec::new(),
+            query_text: query_text.to_string(),
+            query_embedding: vec![0.0; VECTOR_DIMENSION],
+            scope: MemoryScope::Tenant {
+                tenant_id: TenantId::new(),
+            },
+            label_filter: None,
+            max_pii_class: PiiClass::Restricted,
+            k_final: RETRIEVAL_EVAL_FINAL_K,
+            use_reranker: false,
+            strategy: Some(Strategy::Both),
+            as_of: None,
+            ranking_reference_time: None,
+            lineage: None,
+            disable_leg_timeouts: true,
+            disable_graph_expansion: false,
         }
     }
 

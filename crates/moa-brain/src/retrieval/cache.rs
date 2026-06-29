@@ -680,6 +680,7 @@ mod tests {
                     vector: false,
                     lexical: false,
                 },
+                lexical_backend: None,
                 source_tier: crate::retrieval::SourceTier::UserMemory,
                 knowledge_chunk: None,
                 node: NodeIndexRow {

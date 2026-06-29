@@ -79,6 +79,7 @@ impl Stack {
                         embedding: Some(embedding),
                         embedding_model: Some(self.embedder.model_name().to_string()),
                         embedding_model_version: Some(self.embedder.model_version()),
+                        embedding_text: None,
                         actor_id: Uuid::now_v7().to_string(),
                         actor_kind: "system".to_string(),
                     })

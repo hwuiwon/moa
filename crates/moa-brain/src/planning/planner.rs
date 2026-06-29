@@ -289,11 +289,23 @@ pub async fn retrieve_for_query(
     request.ranking_reference_time = ctx.ranking_reference_time;
     request.lineage = ctx.lineage;
     request.disable_leg_timeouts = ctx.disable_leg_timeouts;
-    request.disable_graph_expansion = ctx.disable_graph_expansion;
+    request.disable_graph_expansion = ctx.disable_graph_expansion
+        || should_skip_graph_expansion_for_direct_lookup(&planned, &request.query_text);
     ctx.hybrid
         .retrieve(&planned, request)
         .await
         .map_err(PlanError::from)
+}
+
+/// Returns whether graph expansion should be skipped for a direct exact-anchor lookup.
+#[must_use]
+pub fn should_skip_graph_expansion_for_direct_lookup(
+    planned: &PlannedQuery,
+    query_text: &str,
+) -> bool {
+    planned.strategy == Strategy::Both
+        && planned.temporal_filter.is_none()
+        && has_exact_anchor(query_text)
 }
 
 /// Classifies the retrieval strategy using explicit v1 heuristics.
@@ -482,11 +494,49 @@ fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
 }
 
+fn has_exact_anchor(query: &str) -> bool {
+    query.contains("://")
+        || query.contains('/')
+        || query.contains('"')
+        || query.split_whitespace().any(|token| {
+            let token = token.trim_matches(|ch: char| ch.is_ascii_punctuation());
+            looks_like_uuid(token) || looks_like_issue_id(token) || looks_like_path_token(token)
+        })
+}
+
+fn looks_like_uuid(token: &str) -> bool {
+    let parts = token.split('-').collect::<Vec<_>>();
+    parts.len() == 5
+        && [8, 4, 4, 4, 12]
+            .into_iter()
+            .zip(parts)
+            .all(|(len, part)| part.len() == len && part.chars().all(|ch| ch.is_ascii_hexdigit()))
+}
+
+fn looks_like_issue_id(token: &str) -> bool {
+    token
+        .strip_prefix('#')
+        .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit()))
+        || token.contains('-') && token.chars().any(|ch| ch.is_ascii_digit())
+}
+
+fn looks_like_path_token(token: &str) -> bool {
+    token.contains('.')
+        && token
+            .chars()
+            .any(|ch| ch.is_ascii_alphabetic() || ch.is_ascii_digit())
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, Utc};
 
-    use super::{NodeLabel, Strategy, classify_strategy, infer_label_hint, parse_temporal};
+    use super::{
+        NodeLabel, PlannedQuery, Strategy, classify_strategy, infer_label_hint, parse_temporal,
+        should_skip_graph_expansion_for_direct_lookup,
+    };
+    use moa_core::TenantId;
+    use moa_memory_types::MemoryScope;
 
     fn utc(value: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(value)
@@ -513,6 +563,51 @@ mod tests {
     #[test]
     fn planner_classify_defaults_to_both() {
         assert_eq!(classify_strategy("tell me about deploys"), Strategy::Both);
+    }
+
+    #[test]
+    fn direct_lookup_policy_skips_exact_anchor_non_temporal_queries() {
+        // Pins: exact identifiers are answered by phase-one vector/lexical evidence
+        // without paying graph-expansion latency.
+        let planned = planned_for_graph_policy(Strategy::Both, None);
+
+        assert!(should_skip_graph_expansion_for_direct_lookup(
+            &planned,
+            "Who owns incident INC-123?"
+        ));
+    }
+
+    #[test]
+    fn direct_lookup_policy_keeps_graph_for_graph_first_queries() {
+        // Pins: relationship queries still use graph expansion even when they mention IDs.
+        let planned = planned_for_graph_policy(Strategy::GraphFirst, None);
+
+        assert!(!should_skip_graph_expansion_for_direct_lookup(
+            &planned,
+            "What depends on incident INC-123?"
+        ));
+    }
+
+    #[test]
+    fn direct_lookup_policy_keeps_graph_for_temporal_queries() {
+        // Pins: historical queries keep graph expansion so as_of traversal semantics remain intact.
+        let planned = planned_for_graph_policy(Strategy::Both, Some(utc("2026-03-01T00:00:00Z")));
+
+        assert!(!should_skip_graph_expansion_for_direct_lookup(
+            &planned,
+            "Who owned incident INC-123 as of March 2026?"
+        ));
+    }
+
+    #[test]
+    fn direct_lookup_policy_does_not_treat_contractions_as_exact_anchors() {
+        // Pins: plain natural-language prose with apostrophes is not a direct lookup.
+        let planned = planned_for_graph_policy(Strategy::Both, None);
+
+        assert!(!should_skip_graph_expansion_for_direct_lookup(
+            &planned,
+            "What's failing in the deploy flow?"
+        ));
     }
 
     #[test]
@@ -615,5 +710,22 @@ mod tests {
             parse_temporal("who was primary on-call back in March 2026?"),
             Some(utc("2026-03-01T00:00:00Z"))
         );
+    }
+
+    fn planned_for_graph_policy(
+        strategy: Strategy,
+        temporal_filter: Option<DateTime<Utc>>,
+    ) -> PlannedQuery {
+        let scope = MemoryScope::Tenant {
+            tenant_id: TenantId::new(),
+        };
+        PlannedQuery {
+            strategy,
+            seeds: Vec::new(),
+            label_hint: None,
+            scope: scope.clone(),
+            scope_ancestors: scope.ancestors(),
+            temporal_filter,
+        }
     }
 }

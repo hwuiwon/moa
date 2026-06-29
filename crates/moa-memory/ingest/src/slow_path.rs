@@ -778,6 +778,7 @@ fn node_intent(
         embedding: fact.embedding.clone(),
         embedding_model: fact.embedding_model.clone(),
         embedding_model_version: fact.embedding_model_version,
+        embedding_text: None,
         actor_id: turn_actor_id(turn),
         actor_kind: turn_actor_kind(turn).to_string(),
     }

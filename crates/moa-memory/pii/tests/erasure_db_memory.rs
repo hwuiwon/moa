@@ -31,6 +31,7 @@ fn contact_node(tenant_id: TenantId, contact_id: ContactId, uid: Uuid) -> NodeWr
         embedding: None,
         embedding_model: None,
         embedding_model_version: None,
+        embedding_text: None,
         actor_id: contact_id.to_string(),
         actor_kind: "contact".to_string(),
     }

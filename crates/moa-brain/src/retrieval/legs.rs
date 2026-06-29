@@ -11,7 +11,7 @@ use moa_memory_graph::{
     push_validity_filter,
 };
 use moa_memory_types::MemoryScope;
-use moa_memory_vector::{VectorQuery, VectorStore};
+use moa_memory_vector::{TurbopufferStore, TurbopufferTextQuery, VectorQuery, VectorStore};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
@@ -38,6 +38,7 @@ const GRAPH_EXPANSION_DECAY: f64 = 0.5;
 const GRAPH_TEMPORAL_HALF_LIFE_DAYS: f64 = 30.0;
 const VECTOR_LIMIT: usize = 20;
 const LEXICAL_LIMIT: i64 = 20;
+const LEXICAL_LIMIT_USIZE: usize = 20;
 
 /// One ranked candidate from an individual retrieval leg.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -238,6 +239,27 @@ pub async fn vector_leg(
             max_pii_class: req.max_pii_class.as_str().to_string(),
             include_global: true,
             as_of: req.as_of,
+        })
+        .await?;
+    Ok(rank_uids(hits.into_iter().map(|hit| hit.uid).collect()))
+}
+
+/// Runs the Turbopuffer BM25 lexical leg.
+pub async fn turbopuffer_bm25_leg(
+    turbopuffer: &TurbopufferStore,
+    req: &RetrievalRequest,
+) -> Result<Vec<LegCandidate>> {
+    if req.query_text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let hits = turbopuffer
+        .bm25(&TurbopufferTextQuery {
+            query_text: req.query_text.clone(),
+            k: LEXICAL_LIMIT_USIZE,
+            label_filter: Some(effective_label_filter_values(req.label_filter.as_deref())),
+            max_pii_class: req.max_pii_class.as_str().to_string(),
+            include_global: true,
         })
         .await?;
     Ok(rank_uids(hits.into_iter().map(|hit| hit.uid).collect()))

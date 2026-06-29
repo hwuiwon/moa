@@ -143,6 +143,12 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         name: "V000318__session_attachments.sql",
         sql: include_str!("../migrations/postgres/V000318__session_attachments.sql"),
     },
+    SchemaMigration {
+        name: "V000319__knowledge_visibility_cache_invalidation.sql",
+        sql: include_str!(
+            "../migrations/postgres/V000319__knowledge_visibility_cache_invalidation.sql"
+        ),
+    },
 ];
 
 const AUTH_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[

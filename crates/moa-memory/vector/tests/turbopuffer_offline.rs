@@ -1,7 +1,8 @@
 //! Wiremock offline counterpart for Turbopuffer vector-store live coverage.
 
 use moa_memory_vector::{
-    Error, TurbopufferStore, VECTOR_DIMENSION, VectorItem, VectorQuery, VectorStore,
+    Error, TurbopufferStore, TurbopufferTextQuery, VECTOR_DIMENSION, VectorItem, VectorQuery,
+    VectorStore,
 };
 use secrecy::SecretString;
 use serde_json::json;
@@ -42,10 +43,7 @@ async fn turbopuffer_offline_round_trip() {
     let store = TurbopufferStore::new(server.uri(), SecretString::from("test-key"), "test", false)
         .expect("store")
         .with_storage_partition_id(storage_partition_id.clone());
-    store
-        .upsert(&[test_item(uid, &storage_partition_id)])
-        .await
-        .expect("upsert");
+    store.upsert(&[test_item(uid)]).await.expect("upsert");
     let matches = store
         .knn(&VectorQuery {
             embedding: basis_vector(0),
@@ -164,8 +162,167 @@ async fn turbopuffer_offline_query_enforces_pii_ceiling_and_excludes_global_scop
     );
 }
 
-fn test_item(uid: Uuid, storage_partition_id: &str) -> VectorItem {
-    let _ = storage_partition_id;
+#[tokio::test]
+async fn turbopuffer_bm25_upsert_indexes_only_admitted_chunk_text() {
+    // Pins: Turbopuffer FTS content is only written for tenant knowledge chunks
+    // with admitted retrieval text; contact/session memory and non-chunk rows
+    // cannot accidentally become BM25-searchable.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("upsert_rows"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rows_affected": 3,
+            "rows_upserted": 3
+        })))
+        .mount(&server)
+        .await;
+
+    let store = TurbopufferStore::new(server.uri(), SecretString::from("test-key"), "test", false)
+        .expect("store")
+        .with_storage_partition_id(Uuid::now_v7().to_string());
+    let admitted_chunk = VectorItem {
+        label: "Chunk".to_string(),
+        search_text: Some("deployment runbook abc-123".to_string()),
+        ..test_item(Uuid::now_v7())
+    };
+    let fact_with_text = VectorItem {
+        label: "Fact".to_string(),
+        search_text: Some("fact text must not be indexed".to_string()),
+        ..test_item(Uuid::now_v7())
+    };
+    let contact_chunk = VectorItem {
+        label: "Chunk".to_string(),
+        user_id: Some("contact-1".to_string()),
+        search_text: Some("contact memory must not be indexed".to_string()),
+        ..test_item(Uuid::now_v7())
+    };
+
+    store
+        .upsert(&[admitted_chunk, fact_with_text, contact_chunk])
+        .await
+        .expect("upsert");
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose captured requests");
+    let body: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("upsert body is JSON");
+    assert_eq!(
+        body.get("schema"),
+        Some(&json!({
+            "content": {
+                "type": "string",
+                "full_text_search": true
+            }
+        })),
+        "upsert body should enable FTS only when admitted content exists"
+    );
+    let rows = body["upsert_rows"]
+        .as_array()
+        .expect("upsert rows should be an array");
+    let content_rows = rows
+        .iter()
+        .filter_map(|row| row.get("content"))
+        .collect::<Vec<_>>();
+    assert_eq!(content_rows, vec![&json!("deployment runbook abc-123")]);
+}
+
+#[tokio::test]
+async fn turbopuffer_bm25_query_uses_content_rank_by_and_privacy_filters() {
+    // Pins: BM25 requests rank over the `content` field and carry the same
+    // validity, PII, scope, and label filters as vector KNN requests.
+    let server = MockServer::start().await;
+    let uid = Uuid::now_v7();
+    Mock::given(method("POST"))
+        .and(body_string_contains("BM25"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rows": [{ "id": uid.to_string(), "$score": 3.25 }]
+        })))
+        .mount(&server)
+        .await;
+
+    let store = TurbopufferStore::new(server.uri(), SecretString::from("test-key"), "test", false)
+        .expect("store")
+        .with_storage_partition_id(Uuid::now_v7().to_string());
+    let matches = store
+        .bm25(&TurbopufferTextQuery {
+            query_text: "abc-123 deployment runbook".to_string(),
+            k: 7,
+            label_filter: Some(vec!["Chunk".to_string()]),
+            max_pii_class: "phi".to_string(),
+            include_global: false,
+        })
+        .await
+        .expect("bm25 query");
+
+    assert_eq!(
+        matches,
+        vec![moa_memory_vector::VectorMatch { uid, score: 3.25 }]
+    );
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose captured requests");
+    let body: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("query body is JSON");
+    assert_eq!(
+        body["rank_by"],
+        json!(["content", "BM25", "abc-123 deployment runbook"])
+    );
+    assert_eq!(body["top_k"], json!(7));
+
+    let filters = body
+        .get("filters")
+        .expect("BM25 body carries a filters clause")
+        .to_string();
+    assert!(
+        filters.contains(r#"["pii_rank","Lte",2]"#),
+        "filters must cap pii_rank at the requested ceiling: {filters}"
+    );
+    assert!(
+        filters.contains(r#"["valid_to","Eq","open"]"#),
+        "filters must reject invalidated rows: {filters}"
+    );
+    assert!(
+        filters.contains(r#"["scope","NotEq","global"]"#),
+        "filters must exclude global scope when include_global=false: {filters}"
+    );
+    assert!(
+        filters.contains(r#"["label","Eq","Chunk"]"#),
+        "filters must carry the label allowlist: {filters}"
+    );
+}
+
+#[tokio::test]
+async fn turbopuffer_bm25_empty_query_returns_empty_without_http_request() {
+    // Pins: empty lexical text has the same short-circuit behavior as an empty
+    // vector query budget and does not spend a provider request.
+    let server = MockServer::start().await;
+    let store = TurbopufferStore::new(server.uri(), SecretString::from("test-key"), "test", false)
+        .expect("store")
+        .with_storage_partition_id(Uuid::now_v7().to_string());
+
+    let matches = store
+        .bm25(&TurbopufferTextQuery {
+            query_text: "  ".to_string(),
+            k: 10,
+            label_filter: Some(vec!["Chunk".to_string()]),
+            max_pii_class: "restricted".to_string(),
+            include_global: false,
+        })
+        .await
+        .expect("empty BM25 query should short-circuit");
+
+    assert!(matches.is_empty());
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose captured requests");
+    assert_eq!(requests.len(), 0);
+}
+
+fn test_item(uid: Uuid) -> VectorItem {
     VectorItem {
         uid,
         user_id: None,
@@ -174,6 +331,7 @@ fn test_item(uid: Uuid, storage_partition_id: &str) -> VectorItem {
         embedding: basis_vector(0),
         embedding_model: "test-embed".to_string(),
         embedding_model_version: 1,
+        search_text: None,
         valid_to: None,
     }
 }

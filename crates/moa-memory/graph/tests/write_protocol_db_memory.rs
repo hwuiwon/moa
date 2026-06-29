@@ -88,6 +88,7 @@ fn node_intent(
         embedding,
         embedding_model: Some("test-model".to_string()),
         embedding_model_version: Some(1),
+        embedding_text: None,
         actor_id: Uuid::now_v7().to_string(),
         actor_kind: "system".to_string(),
     }

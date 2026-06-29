@@ -6,7 +6,10 @@ use moa_memory_lifecycle::ConsolidationOutcome;
 use serde::{Deserialize, Serialize};
 
 use super::rewrite::QueryRewriteSummary;
-use super::{QueryRewritePolicy, RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K};
+use super::{
+    GraphExpansionEvalPolicy, QueryRewritePolicy, RETRIEVAL_EVAL_CANDIDATE_K,
+    RETRIEVAL_EVAL_FINAL_K,
+};
 use crate::kernel::{CostLedger, ProviderProvenance};
 use crate::memory_eval::{
     BootstrapConfig, ClusterBootstrapReport, CorpusManifest, EntityFragmentationCounts,
@@ -28,6 +31,9 @@ pub struct MemoryRetrievalEvalReport {
     /// Query rewrite policy used by this run.
     #[serde(default)]
     pub query_rewrite_policy: QueryRewritePolicy,
+    /// Eval-only graph expansion policy used by this run.
+    #[serde(default)]
+    pub graph_expansion_policy: GraphExpansionEvalPolicy,
     /// Number of probes whose retrieval query came from a rewrite fixture.
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub query_rewrite_call_count: usize,
@@ -104,6 +110,7 @@ pub(super) struct ReportBuildInput {
     pub(super) entity_fragmentation: EntityFragmentationCounts,
     pub(super) reranker_enabled: bool,
     pub(super) rewrite_summary: QueryRewriteSummary,
+    pub(super) graph_expansion_policy: GraphExpansionEvalPolicy,
     pub(super) aborted_over_budget: bool,
     pub(super) cost: Option<CostLedger>,
     pub(super) providers: Option<ProviderProvenance>,
@@ -130,6 +137,7 @@ pub(super) fn build_eval_report(input: ReportBuildInput) -> MemoryRetrievalEvalR
         final_k: RETRIEVAL_EVAL_FINAL_K,
         reranker_enabled: input.reranker_enabled,
         query_rewrite_policy: input.rewrite_summary.policy,
+        graph_expansion_policy: input.graph_expansion_policy,
         query_rewrite_call_count: input.rewrite_summary.call_count,
         query_rewrite_skip_count: input.rewrite_summary.skip_count,
         query_rewrite_call_rate: input.rewrite_summary.call_rate(),

@@ -357,6 +357,7 @@ pub async fn upsert_node_embedding(
                 embedding: intent.embedding,
                 embedding_model: intent.embedding_model.clone(),
                 embedding_model_version: intent.embedding_model_version,
+                search_text: None,
                 valid_to: None,
             }],
         )
@@ -832,6 +833,7 @@ fn vector_item_from_intent(intent: &NodeWriteIntent) -> Result<Option<VectorItem
         embedding,
         embedding_model,
         embedding_model_version,
+        search_text: intent.embedding_text.clone(),
         valid_to: None,
     }))
 }

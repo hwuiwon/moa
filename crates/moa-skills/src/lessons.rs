@@ -93,6 +93,7 @@ pub async fn learn_lesson(
         embedding: None,
         embedding_model: None,
         embedding_model_version: None,
+        embedding_text: None,
         actor_id: actor.to_string(),
         actor_kind: "agent".to_string(),
     };

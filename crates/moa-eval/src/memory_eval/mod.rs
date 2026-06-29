@@ -53,9 +53,9 @@ pub use recording::{
     MemoryMergeRecordingReport, record_memory_extractions, record_memory_merges,
 };
 pub use runner::{
-    EvalLane, MemoryEvalExtractorMode, MemoryRetrievalEvalOptions, MemoryRetrievalEvalReport,
-    QueryRewritePolicy, RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K,
-    run_memory_retrieval_eval,
+    EvalLane, GraphExpansionEvalPolicy, MemoryEvalExtractorMode, MemoryRetrievalEvalOptions,
+    MemoryRetrievalEvalReport, QueryRewritePolicy, RETRIEVAL_EVAL_CANDIDATE_K,
+    RETRIEVAL_EVAL_FINAL_K, run_memory_retrieval_eval,
 };
 pub use scope::{
     stable_uuid_from_label, tenant_id_from_label, tenant_id_from_storage_partition,

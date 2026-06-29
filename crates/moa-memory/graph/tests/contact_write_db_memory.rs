@@ -39,6 +39,7 @@ fn node_intent(tenant_id: TenantId, name: &str) -> NodeWriteIntent {
         embedding: None,
         embedding_model: None,
         embedding_model_version: None,
+        embedding_text: None,
         actor_id: Uuid::now_v7().to_string(),
         actor_kind: "user".to_string(),
     }

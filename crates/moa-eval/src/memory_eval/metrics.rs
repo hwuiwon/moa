@@ -3,13 +3,13 @@
 use std::collections::{BTreeSet, HashMap};
 use std::ops::{Deref, DerefMut};
 
-use moa_brain::retrieval::{LegSources, RetrievalHit};
+use moa_brain::retrieval::{LegSources, LexicalBackend, RetrievalHit};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::kernel::{
     BootstrapConfig, ClusterBootstrapReport, ClusterObservation, MetricSummary, PerLegRecall,
-    RetrievalCoreMetrics, cluster_bootstrap_mean_by_user,
+    PerLexicalBackendRecall, RetrievalCoreMetrics, cluster_bootstrap_mean_by_user,
 };
 
 use super::ProbeType;
@@ -27,6 +27,9 @@ pub struct CandidateLegs {
     pub vector: bool,
     /// Candidate came from lexical search.
     pub lexical: bool,
+    /// Lexical backend selected for this candidate when it came from lexical search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lexical_backend: Option<LexicalBackend>,
 }
 
 impl From<LegSources> for CandidateLegs {
@@ -35,6 +38,22 @@ impl From<LegSources> for CandidateLegs {
             graph: value.graph,
             vector: value.vector,
             lexical: value.lexical,
+            lexical_backend: None,
+        }
+    }
+}
+
+impl From<&RetrievalHit> for CandidateLegs {
+    fn from(value: &RetrievalHit) -> Self {
+        Self {
+            graph: value.legs.graph,
+            vector: value.legs.vector,
+            lexical: value.legs.lexical,
+            lexical_backend: value
+                .legs
+                .lexical
+                .then_some(value.lexical_backend)
+                .flatten(),
         }
     }
 }
@@ -346,7 +365,7 @@ pub fn candidates_from_retrieval_hits(
                 .get(&hit.uid)
                 .cloned()
                 .unwrap_or_default(),
-            legs: CandidateLegs::from(hit.legs),
+            legs: CandidateLegs::from(hit),
         })
         .collect()
 }
@@ -514,6 +533,7 @@ fn aggregate_metrics(
                 probe.zero_recall().map(bool_value)
             }),
             per_leg_recall: per_leg_recall(probe_results),
+            per_lexical_backend_recall: per_lexical_backend_recall(probe_results),
             p50_retrieval_latency_ms: p50_retrieval_latency_ms(probe_results),
             p95_retrieval_latency_ms: p95_retrieval_latency_ms(probe_results),
             cross_user_leak_count: cross_user_leak_count(probe_results),
@@ -684,6 +704,50 @@ fn per_leg_recall(probe_results: &[ProbeResult]) -> PerLegRecall {
     }
 }
 
+fn per_lexical_backend_recall(probe_results: &[ProbeResult]) -> PerLexicalBackendRecall {
+    let mut expected_fact_count = 0_usize;
+    let mut postgres_tsvector = 0_usize;
+    let mut turbopuffer_bm25 = 0_usize;
+    let mut mixed = 0_usize;
+    let mut saw_backend_attribution = false;
+
+    for probe in probe_results {
+        let expected = probe.expected_fact_set();
+        if expected.is_empty() {
+            continue;
+        }
+        expected_fact_count += expected.len();
+        saw_backend_attribution |= probe
+            .candidates
+            .iter()
+            .any(|candidate| candidate.legs.lexical && candidate.legs.lexical_backend.is_some());
+        postgres_tsvector +=
+            retrieved_expected_fact_ids(&probe.candidates, RECALL_AT_25, &expected, |legs| {
+                legs.lexical && legs.lexical_backend == Some(LexicalBackend::PostgresTsvector)
+            })
+            .len();
+        turbopuffer_bm25 +=
+            retrieved_expected_fact_ids(&probe.candidates, RECALL_AT_25, &expected, |legs| {
+                legs.lexical && legs.lexical_backend == Some(LexicalBackend::TurbopufferBm25)
+            })
+            .len();
+        mixed += retrieved_expected_fact_ids(&probe.candidates, RECALL_AT_25, &expected, |legs| {
+            legs.lexical && legs.lexical_backend == Some(LexicalBackend::Mixed)
+        })
+        .len();
+    }
+
+    if !saw_backend_attribution {
+        return PerLexicalBackendRecall::default();
+    }
+
+    PerLexicalBackendRecall {
+        postgres_tsvector: MetricSummary::from_counts(postgres_tsvector, expected_fact_count),
+        turbopuffer_bm25: MetricSummary::from_counts(turbopuffer_bm25, expected_fact_count),
+        mixed: MetricSummary::from_counts(mixed, expected_fact_count),
+    }
+}
+
 fn bootstrap_reports(
     probe_results: &[ProbeResult],
     bootstrap_config: BootstrapConfig,
@@ -849,6 +913,7 @@ mod tests {
                     graph: true,
                     vector: false,
                     lexical: false,
+                    lexical_backend: None,
                 },
             }],
             post_rerank_candidates: None,

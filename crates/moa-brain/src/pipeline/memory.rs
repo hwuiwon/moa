@@ -1180,6 +1180,7 @@ mod tests {
                 vector: false,
                 lexical: true,
             },
+            lexical_backend: Some(crate::retrieval::LexicalBackend::PostgresTsvector),
             source_tier,
             knowledge_chunk: None,
             node: NodeIndexRow {

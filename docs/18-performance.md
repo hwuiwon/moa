@@ -39,6 +39,54 @@ First green run on CI hardware floor:
 Update the baseline only for intentional architectural shifts. Do not update it
 to absorb regressions.
 
+## Memory Retrieval Baseline - 2026-06-29
+
+Task 0 of the final low-latency RAG plan refreshed the hermetic PR memory eval
+baseline on branch `remove-apache-age` with local compose Postgres at
+`postgres://moa_owner:dev@127.0.0.1:10040/moa`.
+
+```bash
+cargo run -p xtask -- generate-memory-eval-corpus --profile pr --seed 1 --seed 2 --seed 3 --output target/memory-eval/final-rag-pr
+cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/final-rag-pr --output target/memory-eval/final-rag-baseline.json
+jq '.metrics | {recall_at_4, mrr, ndcg_at_4, zero_recall_rate, p95_retrieval_latency_ms, cross_user_leak_count, pii_unredacted_count, per_leg_recall}' target/memory-eval/final-rag-baseline.json
+```
+
+The current report schema stores retrieval metrics under `.metrics`.
+
+| Metric | Value |
+|---|---:|
+| recall_at_4 | 0.9325 |
+| mrr | 0.8743 |
+| ndcg_at_4 | 0.8719 |
+| zero_recall_rate | 0.0317 |
+| p50_retrieval_latency_ms | 682 |
+| p95_retrieval_latency_ms | 900 |
+| cross_user_leak_count | 0 |
+| pii_unredacted_count | 0 |
+| per_leg_recall.graph | 0.7778 |
+| per_leg_recall.vector | 0.5617 |
+| per_leg_recall.lexical | 0.7901 |
+
+Lexical miss analysis was computed by joining `probe_results` leg attribution in
+`target/memory-eval/final-rag-baseline.json` with the generated probes and
+ledger rows in `target/memory-eval/final-rag-pr`.
+
+| Lexical slice | Expected facts | Lexical misses | Final misses | Notes |
+|---|---:|---:|---:|---|
+| Exact identifiers | 15 | 4 | 4 | All misses are private-repository exact-memory-id probes for seed 2 users. |
+| Product/SKU-like strings | 0 | 0 | 0 | No PR-profile probes or facts cover this slice. |
+| Quoted errors | 0 | 0 | 0 | No PR-profile probes or facts cover this slice. |
+| Document titles | 0 | 0 | 0 | No PR-profile document-title probes are present. |
+| Runbook path proxy | 6 | 0 | 0 | `runbook/...` path-style exact tokens are clean in this run. |
+| Structured tokens | 162 | 34 | 13 | Misses are dominated by multi-hop `owned_by` facts; graph/vector usually recover them, but exact-id misses do not recover. |
+
+BM25 gate: proceed only if the next task directly targets the observed exact
+identifier and structured-token lexical gaps. Do not justify BM25 with
+product/SKU, quoted-error, or document-title claims until a corpus/report
+actually contains those probes and shows a miss or latency bottleneck. Do not
+implement later final-RAG tasks unless they address an observed gap in this
+baseline or in a newer measured baseline.
+
 ## Turn-Step Loadtest
 
 `moa-loadtest` can collect p50, p95, and p99 latency for the documented turn

@@ -200,6 +200,7 @@ pub(crate) fn fact_intent(
         embedding: Some(deterministic_vector(name)),
         embedding_model: Some("mock-slow-embedder".to_string()),
         embedding_model_version: Some(11),
+        embedding_text: None,
         actor_id: "slow-path-test".to_string(),
         actor_kind: "system".to_string(),
     }

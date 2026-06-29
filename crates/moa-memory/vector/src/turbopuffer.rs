@@ -37,6 +37,21 @@ pub struct TurbopufferStore {
     storage_partition_id: Option<String>,
 }
 
+/// Turbopuffer full-text BM25 query parameters.
+#[derive(Debug, Clone)]
+pub struct TurbopufferTextQuery {
+    /// Natural-language or exact-token text to rank with BM25.
+    pub query_text: String,
+    /// Number of matching rows to return.
+    pub k: usize,
+    /// Optional graph label allowlist.
+    pub label_filter: Option<Vec<String>>,
+    /// Maximum allowed PII class using the hierarchy `none < pii < phi < restricted`.
+    pub max_pii_class: String,
+    /// Whether global rows should remain eligible after RLS has scoped visibility.
+    pub include_global: bool,
+}
+
 impl TurbopufferStore {
     /// Creates a Turbopuffer store from shared MOA config.
     pub fn from_config(config: &MoaConfig) -> Result<Self> {
@@ -201,6 +216,38 @@ impl TurbopufferStore {
         Ok(())
     }
 
+    /// Runs a Turbopuffer BM25 full-text query against the scoped namespace.
+    pub async fn bm25(&self, query: &TurbopufferTextQuery) -> Result<Vec<VectorMatch>> {
+        if query.query_text.trim().is_empty() || query.k == 0 {
+            return Ok(Vec::new());
+        }
+        if query.k > 10_000 {
+            return Err(Error::QueryLimitTooLarge(query.k));
+        }
+
+        let storage_partition_id = self.storage_partition_id("bm25")?;
+        let namespace = self.namespace_for_storage_partition(storage_partition_id)?;
+        self.ensure_namespace(&namespace).await?;
+
+        let mut body = json!({
+            "rank_by": ["content", "BM25", query.query_text],
+            "top_k": query.k,
+            "include_attributes": ["id"],
+        });
+        if let Some(filters) = filter_expr(
+            query.label_filter.as_deref(),
+            &query.max_pii_class,
+            query.include_global,
+        )? {
+            body["filters"] = filters;
+        }
+
+        let value = self
+            .request_value_no_retry(Method::POST, query_path(&namespace), body)
+            .await?;
+        parse_matches(value)
+    }
+
     async fn request_value(&self, method: Method, path: String, body: Value) -> Result<Value> {
         let backoff = ExponentialBuilder::default()
             .with_min_delay(RETRY_MIN_DELAY)
@@ -217,6 +264,16 @@ impl TurbopufferStore {
         .retry(backoff)
         .when(is_retryable)
         .await
+    }
+
+    async fn request_value_no_retry(
+        &self,
+        method: Method,
+        path: String,
+        body: Value,
+    ) -> Result<Value> {
+        let url = format!("{}{}", self.base_url, path);
+        self.request_value_once(method, &url, body).await
     }
 
     async fn request_value_once(&self, method: Method, url: &str, body: Value) -> Result<Value> {
@@ -268,10 +325,14 @@ impl VectorStore for TurbopufferStore {
         let namespace = self.namespace_for_storage_partition(storage_partition_id)?;
         self.ensure_namespace(&namespace).await?;
         let upsert_rows = items.iter().map(upsert_row).collect::<Result<Vec<_>>>()?;
-        let body = json!({
+        let has_search_text = upsert_rows.iter().any(|row| row.get("content").is_some());
+        let mut body = json!({
             "upsert_rows": upsert_rows,
             "distance_metric": "cosine_distance",
         });
+        if has_search_text {
+            body["schema"] = bm25_schema();
+        }
         self.request_value(Method::POST, write_path(&namespace), body)
             .await?;
 
@@ -301,7 +362,11 @@ impl VectorStore for TurbopufferStore {
             "top_k": query.k,
             "include_attributes": ["id"],
         });
-        if let Some(filters) = filter_expr(query)? {
+        if let Some(filters) = filter_expr(
+            query.label_filter.as_deref(),
+            &query.max_pii_class,
+            query.include_global,
+        )? {
             body["filters"] = filters;
         }
 
@@ -328,7 +393,7 @@ fn upsert_row(item: &VectorItem) -> Result<Value> {
     } else {
         "tenant"
     };
-    Ok(json!({
+    let mut row = json!({
         "id": item.uid.to_string(),
         "vector": item.embedding,
         "label": item.label,
@@ -341,23 +406,27 @@ fn upsert_row(item: &VectorItem) -> Result<Value> {
         "scope": scope,
         "embedding_model": item.embedding_model,
         "embedding_model_version": item.embedding_model_version,
-    }))
+    });
+    if let Some(text) = admitted_search_text(item) {
+        row["content"] = json!(text);
+    }
+    Ok(row)
 }
 
-fn filter_expr(query: &VectorQuery) -> Result<Option<Value>> {
+fn filter_expr(
+    label_filter: Option<&[String]>,
+    max_pii_class: &str,
+    include_global: bool,
+) -> Result<Option<Value>> {
     let mut terms = vec![
-        json!(["pii_rank", "Lte", pii_rank(&query.max_pii_class)?]),
+        json!(["pii_rank", "Lte", pii_rank(max_pii_class)?]),
         json!(["valid_to", "Eq", "open"]),
     ];
 
-    if !query.include_global {
+    if !include_global {
         terms.push(json!(["scope", "NotEq", "global"]));
     }
-    if let Some(labels) = query
-        .label_filter
-        .as_ref()
-        .filter(|labels| !labels.is_empty())
-    {
+    if let Some(labels) = label_filter.filter(|labels| !labels.is_empty()) {
         if labels.len() == 1 {
             terms.push(json!(["label", "Eq", labels[0]]));
         } else {
@@ -378,6 +447,25 @@ fn filter_expr(query: &VectorQuery) -> Result<Option<Value>> {
     })
 }
 
+fn admitted_search_text(item: &VectorItem) -> Option<&str> {
+    if item.user_id.is_some() || item.label != "Chunk" {
+        return None;
+    }
+    item.search_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
+fn bm25_schema() -> Value {
+    json!({
+        "content": {
+            "type": "string",
+            "full_text_search": true,
+        }
+    })
+}
+
 fn parse_matches(value: Value) -> Result<Vec<VectorMatch>> {
     let response: QueryResponse = serde_json::from_value(value)?;
     response
@@ -394,11 +482,10 @@ fn parse_matches(value: Value) -> Result<Vec<VectorMatch>> {
                     )));
                 }
             };
-            let distance = row.distance.unwrap_or(0.0);
-            Ok(VectorMatch {
-                uid,
-                score: (1.0 - distance).clamp(-1.0, 1.0),
-            })
+            let score = row
+                .score
+                .unwrap_or_else(|| (1.0 - row.distance.unwrap_or(0.0)).clamp(-1.0, 1.0));
+            Ok(VectorMatch { uid, score })
         })
         .collect()
 }
@@ -448,6 +535,8 @@ struct QueryRow {
     id: Value,
     #[serde(rename = "$dist")]
     distance: Option<f32>,
+    #[serde(rename = "$score")]
+    score: Option<f32>,
 }
 
 #[cfg(test)]
@@ -541,6 +630,7 @@ mod tests {
             embedding: basis_vector(0),
             embedding_model: "test-embed".to_string(),
             embedding_model_version: 1,
+            search_text: None,
             valid_to: None,
         }
     }

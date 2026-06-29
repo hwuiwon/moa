@@ -40,6 +40,7 @@ async fn turbopuffer_live_round_trip() {
         embedding: basis_vector(7),
         embedding_model: "live-test".to_string(),
         embedding_model_version: 1,
+        search_text: None,
         valid_to: None,
     };
 

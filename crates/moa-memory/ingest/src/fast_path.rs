@@ -388,6 +388,7 @@ fn build_intent(
         embedding: Some(embedding.to_vec()),
         embedding_model: Some(embedding_model.to_string()),
         embedding_model_version: Some(embedding_model_version),
+        embedding_text: None,
         actor_id: req.actor_id.to_string(),
         actor_kind: req.actor_kind.clone(),
     }

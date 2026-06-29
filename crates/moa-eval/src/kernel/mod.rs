@@ -10,7 +10,9 @@ pub mod counting;
 pub mod fixtures;
 pub mod stats;
 
-pub use core_metrics::{MetricSummary, PerLegRecall, RetrievalCoreMetrics};
+pub use core_metrics::{
+    MetricSummary, PerLegRecall, PerLexicalBackendRecall, RetrievalCoreMetrics,
+};
 pub use cost::{CostError, CostLedger, ProviderProvenance};
 pub use counting::{
     CountingEmbedder, CountingExtractor, CountingMergeVerifier, CountingReranker, SharedCostLedger,

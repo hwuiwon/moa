@@ -62,6 +62,7 @@ fn retrieval_metrics_aggregate_exact_small_fixture() {
             graph: true,
             vector: true,
             lexical: false,
+            lexical_backend: None,
         },
         "candidate conversion must copy RetrievalHit.legs into serializable output"
     );
@@ -76,6 +77,97 @@ fn retrieval_metrics_aggregate_exact_small_fixture() {
     assert_eq!(recall_bootstrap.cluster_count, 3);
     assert_eq!(recall_bootstrap.observation_count, 5);
     assert_close(recall_bootstrap.mean, 0.6);
+}
+
+#[test]
+fn retrieval_metrics_report_lexical_backend_recall_split() -> TestResult {
+    // Pins: eval reports distinguish the lexical backend without changing lexical-leg recall.
+    let report = aggregate_retrieval_eval_from_counts(
+        3,
+        3,
+        vec![
+            backend_probe(
+                "probe-postgres",
+                "fact-postgres",
+                LexicalBackend::PostgresTsvector,
+                0x1_200,
+            ),
+            backend_probe(
+                "probe-turbopuffer",
+                "fact-turbopuffer",
+                LexicalBackend::TurbopufferBm25,
+                0x1_300,
+            ),
+            backend_probe("probe-mixed", "fact-mixed", LexicalBackend::Mixed, 0x1_400),
+        ],
+        BootstrapConfig {
+            resamples: 25,
+            seed: 29,
+        },
+    );
+
+    assert_metric(report.metrics.per_leg_recall.lexical, 3.0, 3, 1.0);
+    assert_metric(
+        report.metrics.per_lexical_backend_recall.postgres_tsvector,
+        1.0,
+        3,
+        1.0 / 3.0,
+    );
+    assert_metric(
+        report.metrics.per_lexical_backend_recall.turbopuffer_bm25,
+        1.0,
+        3,
+        1.0 / 3.0,
+    );
+    assert_metric(
+        report.metrics.per_lexical_backend_recall.mixed,
+        1.0,
+        3,
+        1.0 / 3.0,
+    );
+
+    let value = serde_json::to_value(&report)?;
+    assert_eq!(
+        value["probe_results"][0]["candidates"][0]["legs"]["lexical_backend"],
+        "postgres_tsvector"
+    );
+    assert_eq!(
+        value["metrics"]["per_lexical_backend_recall"]["turbopuffer_bm25"]["numerator"],
+        1.0
+    );
+    Ok(())
+}
+
+fn backend_probe(probe_id: &str, fact_id: &str, backend: LexicalBackend, uid: u128) -> ProbeResult {
+    ProbeResult {
+        probe_id: probe_id.to_string(),
+        user_id: "user-backend".to_string(),
+        probe_type: ProbeType::PointRecall,
+        expected_fact_ids: fact_ids(&[fact_id]),
+        blocked_fact_ids: Vec::new(),
+        candidates: vec![RetrievedCandidate {
+            uid: Uuid::from_u128(uid),
+            rank: 1,
+            score: 1.0,
+            fact_id: Some(fact_id.to_string()),
+            equivalent_fact_ids: Vec::new(),
+            legs: CandidateLegs {
+                graph: false,
+                vector: false,
+                lexical: true,
+                lexical_backend: Some(backend),
+            },
+        }],
+        post_rerank_candidates: None,
+        retrieval_latency_ms: 0,
+        answer_faithful: Some(true),
+        abstention_correct: None,
+        pii_redacted: None,
+        temporal_as_of_correct: None,
+        temporal_filter_parsed: None,
+        temporal_filter_matches_as_of: None,
+        preference_context_hit: None,
+    }
 }
 
 #[test]
@@ -472,6 +564,7 @@ fn report_serializes_cost_and_providers_sections() -> TestResult {
 
     let value = serde_json::to_value(&report)?;
 
+    assert_eq!(value["graph_expansion_policy"], "current");
     assert_eq!(value["cost"]["budget_usd"], 5.0);
     assert_eq!(value["providers"]["lane"], "live");
     assert_eq!(value["providers"]["embedding_model"], "embed-v4.0");

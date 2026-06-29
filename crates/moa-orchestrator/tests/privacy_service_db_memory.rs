@@ -101,6 +101,7 @@ fn erase_test_intent(storage_partition_id: &str, user_id: &str, name: &str) -> N
         embedding: Some(basis_vector()),
         embedding_model: Some("test-model".to_string()),
         embedding_model_version: Some(1),
+        embedding_text: None,
         actor_id: user_id.to_string(),
         actor_kind: "contact".to_string(),
     }

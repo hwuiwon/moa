@@ -5,15 +5,21 @@ use std::sync::{Arc, Mutex as StdMutex};
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_brain::pipeline::memory::GraphMemoryRetriever;
+use moa_brain::planning::{PlannedQuery, Strategy};
+use moa_brain::retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalRequest};
 use moa_core::RlsContext;
 use moa_core::{
     Channel, ContactId, ContactRef, ContactVerificationState, ContextMessage, ContextProcessor,
     LineageHandle, ModelCapabilities, ModelId, SessionId, SessionMeta, TenantId, TokenPricing,
     ToolCallFormat, traits::EmbeddingProvider,
 };
+use moa_db::ScopedConn;
 use moa_lineage_core::{LineageEvent, RetrievalLineage};
 use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
-use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
+use moa_memory_types::MemoryScope;
+use moa_memory_vector::{
+    PgvectorStore, PromotionOptions, VECTOR_DIMENSION, VectorPartitionPromotion, VectorStore,
+};
 use moa_session::testing;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -275,6 +281,337 @@ async fn mock_tenant_and_contact_retrieval() {
         .expect("drop isolated schema");
 }
 
+#[tokio::test]
+async fn retrieval_cache_invalidates_when_knowledge_object_deactivates() {
+    // Pins: knowledge object visibility changes bump the tenant cache version,
+    // so a warmed retrieval cache cannot keep returning hydrated deleted-object
+    // chunks.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool().clone();
+    let tenant_id = TenantId::new();
+    seed_storage_partition_embedder_state(&pool, tenant_id)
+        .await
+        .expect("seed tenant vector embedder state");
+    let tenant_graph = graph_store(pool.clone(), RlsContext::tenant(tenant_id));
+    let chunk_graph_uid = tenant_graph
+        .create_node(node_intent(
+            tenant_id,
+            None,
+            NodeLabel::Chunk,
+            "cache object deactivation pto answer",
+            json!({ "summary": "cache object deactivation pto answer" }),
+        ))
+        .await
+        .expect("create tenant chunk graph node");
+    let knowledge = seed_knowledge_chunk_with_text(
+        &pool,
+        tenant_id,
+        chunk_graph_uid,
+        "cache-object",
+        "Hydrated cache object deactivation text.",
+    )
+    .await
+    .expect("seed tenant knowledge rows");
+    let cached = cached_retriever(&pool, tenant_id, &tenant_graph);
+    let planned = planned_chunk_query(tenant_id, "cache object deactivation pto answer");
+    let request = tenant_chunk_request(tenant_id, "cache object deactivation pto answer");
+
+    let first = cached
+        .retrieve(&planned, request.clone())
+        .await
+        .expect("warm cache retrieval should succeed");
+    assert_eq!(
+        knowledge_text(&first, chunk_graph_uid),
+        Some("Hydrated cache object deactivation text."),
+        "{first:?}"
+    );
+    let before_version = storage_partition_version(&pool, tenant_id).await;
+
+    sqlx::query(
+        "UPDATE moa.knowledge_objects SET status = 'deleted', updated_at = now() WHERE object_uid = $1",
+    )
+    .bind(knowledge.object_uid)
+    .execute(&pool)
+    .await
+    .expect("deactivate knowledge object");
+
+    let after_version = storage_partition_version(&pool, tenant_id).await;
+    assert!(
+        after_version > before_version,
+        "object deactivation must bump retrieval cache version: before={before_version}, after={after_version}"
+    );
+    let second = cached
+        .retrieve(&planned, request)
+        .await
+        .expect("post-deactivation retrieval should succeed");
+    assert_eq!(
+        knowledge_text(&second, chunk_graph_uid),
+        None,
+        "stale cache hit would keep returning hydrated deleted-object text: {second:?}"
+    );
+
+    let _ = tenant_graph
+        .hard_purge(chunk_graph_uid, "redacted:retrieval-cache-object-test")
+        .await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn retrieval_cache_invalidates_when_knowledge_chunk_tombstones() {
+    // Pins: chunk-level visibility changes bump the tenant cache version, so a
+    // warmed retrieval cache cannot keep returning hydrated tombstoned chunks.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool().clone();
+    let tenant_id = TenantId::new();
+    seed_storage_partition_embedder_state(&pool, tenant_id)
+        .await
+        .expect("seed tenant vector embedder state");
+    let tenant_graph = graph_store(pool.clone(), RlsContext::tenant(tenant_id));
+    let chunk_graph_uid = tenant_graph
+        .create_node(node_intent(
+            tenant_id,
+            None,
+            NodeLabel::Chunk,
+            "cache chunk tombstone pto answer",
+            json!({ "summary": "cache chunk tombstone pto answer" }),
+        ))
+        .await
+        .expect("create tenant chunk graph node");
+    let knowledge = seed_knowledge_chunk_with_text(
+        &pool,
+        tenant_id,
+        chunk_graph_uid,
+        "cache-chunk",
+        "Hydrated cache chunk tombstone text.",
+    )
+    .await
+    .expect("seed tenant knowledge rows");
+    let cached = cached_retriever(&pool, tenant_id, &tenant_graph);
+    let planned = planned_chunk_query(tenant_id, "cache chunk tombstone pto answer");
+    let request = tenant_chunk_request(tenant_id, "cache chunk tombstone pto answer");
+
+    let first = cached
+        .retrieve(&planned, request.clone())
+        .await
+        .expect("warm cache retrieval should succeed");
+    assert_eq!(
+        knowledge_text(&first, chunk_graph_uid),
+        Some("Hydrated cache chunk tombstone text."),
+        "{first:?}"
+    );
+    let before_version = storage_partition_version(&pool, tenant_id).await;
+
+    sqlx::query(
+        r#"
+        UPDATE moa.knowledge_chunks
+        SET metadata = jsonb_set(metadata, '{active}', 'false'::jsonb, true),
+            updated_at = now()
+        WHERE chunk_uid = $1
+        "#,
+    )
+    .bind(knowledge.chunk_uid)
+    .execute(&pool)
+    .await
+    .expect("tombstone knowledge chunk");
+
+    let after_version = storage_partition_version(&pool, tenant_id).await;
+    assert!(
+        after_version > before_version,
+        "chunk tombstone must bump retrieval cache version: before={before_version}, after={after_version}"
+    );
+    let second = cached
+        .retrieve(&planned, request)
+        .await
+        .expect("post-tombstone retrieval should succeed");
+    assert_eq!(
+        knowledge_text(&second, chunk_graph_uid),
+        None,
+        "stale cache hit would keep returning hydrated tombstoned chunk text: {second:?}"
+    );
+
+    let _ = tenant_graph
+        .hard_purge(chunk_graph_uid, "redacted:retrieval-cache-chunk-test")
+        .await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn retrieval_cache_invalidates_when_graph_node_invalidates() {
+    // Pins: graph node invalidation already flows through graph_changelog and
+    // the tenant cache version, so a warmed retrieval cache cannot keep
+    // returning an invalidated graph node.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool().clone();
+    let tenant_id = TenantId::new();
+    seed_storage_partition_embedder_state(&pool, tenant_id)
+        .await
+        .expect("seed tenant vector embedder state");
+    let tenant_graph = graph_store(pool.clone(), RlsContext::tenant(tenant_id));
+    let chunk_graph_uid = tenant_graph
+        .create_node(node_intent(
+            tenant_id,
+            None,
+            NodeLabel::Chunk,
+            "cache graph invalidation pto answer",
+            json!({ "summary": "cache graph invalidation pto answer" }),
+        ))
+        .await
+        .expect("create tenant chunk graph node");
+    seed_knowledge_chunk_with_text(
+        &pool,
+        tenant_id,
+        chunk_graph_uid,
+        "cache-graph",
+        "Hydrated cache graph invalidation text.",
+    )
+    .await
+    .expect("seed tenant knowledge rows");
+    let cached = cached_retriever(&pool, tenant_id, &tenant_graph);
+    let planned = planned_chunk_query(tenant_id, "cache graph invalidation pto answer");
+    let request = tenant_chunk_request(tenant_id, "cache graph invalidation pto answer");
+
+    let first = cached
+        .retrieve(&planned, request.clone())
+        .await
+        .expect("warm cache retrieval should succeed");
+    assert_eq!(
+        knowledge_text(&first, chunk_graph_uid),
+        Some("Hydrated cache graph invalidation text."),
+        "{first:?}"
+    );
+    let before_version = storage_partition_version(&pool, tenant_id).await;
+
+    tenant_graph
+        .invalidate_node(chunk_graph_uid, "retrieval_cache_audit")
+        .await
+        .expect("invalidate graph chunk node");
+
+    let after_version = storage_partition_version(&pool, tenant_id).await;
+    assert!(
+        after_version > before_version,
+        "graph invalidation must bump retrieval cache version: before={before_version}, after={after_version}"
+    );
+    let second = cached
+        .retrieve(&planned, request)
+        .await
+        .expect("post-graph-invalidation retrieval should succeed");
+    assert!(
+        second.iter().all(|hit| hit.uid != chunk_graph_uid),
+        "stale cache hit would keep returning invalidated node: {second:?}"
+    );
+
+    let _ = tenant_graph
+        .hard_purge(chunk_graph_uid, "redacted:retrieval-cache-graph-test")
+        .await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn vector_promotion_bumps_retrieval_cache_version() {
+    // Pins: vector backend promotion is a real freshness boundary for cached
+    // hybrid retrieval because vector candidate generation changes by backend
+    // state even when graph rows are unchanged.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool().clone();
+    let tenant_id = TenantId::new();
+    seed_storage_partition_embedder_state(&pool, tenant_id)
+        .await
+        .expect("seed tenant vector embedder state");
+    let tenant_graph = graph_store(pool.clone(), RlsContext::tenant(tenant_id));
+    let chunk_graph_uid = tenant_graph
+        .create_node(node_intent(
+            tenant_id,
+            None,
+            NodeLabel::Chunk,
+            "cache vector promotion pto answer",
+            json!({ "summary": "cache vector promotion pto answer" }),
+        ))
+        .await
+        .expect("create tenant chunk graph node");
+    seed_knowledge_chunk_with_text(
+        &pool,
+        tenant_id,
+        chunk_graph_uid,
+        "cache-vector",
+        "Hydrated cache vector promotion text.",
+    )
+    .await
+    .expect("seed tenant knowledge rows");
+    let cached = cached_retriever(&pool, tenant_id, &tenant_graph);
+    let planned = planned_chunk_query(tenant_id, "cache vector promotion pto answer");
+    let request = tenant_chunk_request(tenant_id, "cache vector promotion pto answer");
+
+    let first = cached
+        .retrieve(&planned, request.clone())
+        .await
+        .expect("warm cache retrieval should succeed");
+    assert_eq!(
+        knowledge_text(&first, chunk_graph_uid),
+        Some("Hydrated cache vector promotion text."),
+        "{first:?}"
+    );
+    let before_version = storage_partition_version(&pool, tenant_id).await;
+
+    let source: Arc<dyn VectorStore> = Arc::new(PgvectorStore::new_for_app_role(
+        pool.clone(),
+        RlsContext::tenant(tenant_id),
+    ));
+    let promotion = VectorPartitionPromotion::new(pool.clone(), source.clone(), source);
+    promotion
+        .promote(PromotionOptions {
+            storage_partition_id: tenant_id.to_string(),
+            target_backend: "turbopuffer".to_string(),
+            validate_percent: 100,
+            dual_read_hours: 1,
+        })
+        .await
+        .expect("promote vector backend");
+
+    let after_version = storage_partition_version(&pool, tenant_id).await;
+    assert!(
+        after_version > before_version,
+        "vector promotion must bump retrieval cache version: before={before_version}, after={after_version}"
+    );
+    let second = cached
+        .retrieve(&planned, request)
+        .await
+        .expect("post-promotion retrieval should succeed");
+    assert_eq!(
+        knowledge_text(&second, chunk_graph_uid),
+        Some("Hydrated cache vector promotion text."),
+        "{second:?}"
+    );
+
+    let _ = tenant_graph
+        .hard_purge(chunk_graph_uid, "redacted:retrieval-cache-vector-test")
+        .await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
 fn graph_store(pool: PgPool, scope: RlsContext) -> PostgresGraphStore {
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     PostgresGraphStore::scoped_for_app_role(pool, scope).with_vector_store(vector)
@@ -333,6 +670,7 @@ fn node_intent(
         embedding: Some(test_embedding(name)),
         embedding_model: Some("embed-v4.0".to_string()),
         embedding_model_version: Some(1),
+        embedding_text: None,
         actor_id: Uuid::now_v7().to_string(),
         actor_kind: "system".to_string(),
     }
@@ -395,11 +733,34 @@ impl LineageHandle for CapturedLineage {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct KnowledgeSeed {
+    object_uid: Uuid,
+    chunk_uid: Uuid,
+}
+
 async fn seed_knowledge_chunk(
     pool: &PgPool,
     tenant_id: TenantId,
     graph_node_uid: Uuid,
-) -> sqlx::Result<()> {
+) -> sqlx::Result<KnowledgeSeed> {
+    seed_knowledge_chunk_with_text(
+        pool,
+        tenant_id,
+        graph_node_uid,
+        "pto-runbook",
+        "Hydrated tenant PTO policy chunk text. The runbook answer is owner approval.",
+    )
+    .await
+}
+
+async fn seed_knowledge_chunk_with_text(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    graph_node_uid: Uuid,
+    external_id: &str,
+    text: &str,
+) -> sqlx::Result<KnowledgeSeed> {
     let connection_uid = Uuid::now_v7();
     let object_uid = Uuid::now_v7();
     let version_uid = Uuid::now_v7();
@@ -411,13 +772,14 @@ async fn seed_knowledge_chunk(
             connection_uid, tenant_id, storage_partition_id, provider, provider_config_key,
             provider_connection_id, connector, credential_ref, status, metadata
         )
-        VALUES ($1, $2, $3, 'merge', 'test-config', 'acct-tenant-contact', 'drive',
+        VALUES ($1, $2, $3, 'merge', 'test-config', $4, 'drive',
                 'vault://tenant-contact-test', 'active', '{}'::jsonb)
         "#,
     )
     .bind(connection_uid)
     .bind(tenant_id.0)
     .bind(&storage_partition_id)
+    .bind(format!("acct-tenant-contact-{external_id}"))
     .execute(pool)
     .await?;
     sqlx::query(
@@ -426,14 +788,16 @@ async fn seed_knowledge_chunk(
             object_uid, tenant_id, storage_partition_id, connection_id, object_type,
             external_object_id, title, change_token, source_uri, status, metadata
         )
-        VALUES ($1, $2, $3, $4, 'document', 'pto-runbook', 'PTO Runbook',
-                'etag-1', 'https://example.test/pto-runbook', 'active', '{}'::jsonb)
+        VALUES ($1, $2, $3, $4, 'document', $5, 'PTO Runbook',
+                'etag-1', $6, 'active', '{}'::jsonb)
         "#,
     )
     .bind(object_uid)
     .bind(tenant_id.0)
     .bind(&storage_partition_id)
     .bind(connection_uid)
+    .bind(external_id)
+    .bind(format!("https://example.test/{external_id}"))
     .execute(pool)
     .await?;
     sqlx::query(
@@ -457,9 +821,9 @@ async fn seed_knowledge_chunk(
             chunk_uid, tenant_id, storage_partition_id, document_version_id, graph_node_uid,
             chunk_hash, block_hashes, heading_path, text, ordinal, token_count, metadata
         )
-        VALUES ($1, $2, $3, $4, $5, 'chunk-hash-1', ARRAY['block-hash-1']::text[],
+        VALUES ($1, $2, $3, $4, $5, $6, ARRAY[$7]::text[],
                 ARRAY['People', 'PTO']::text[],
-                'Hydrated tenant PTO policy chunk text. The runbook answer is owner approval.',
+                $8,
                 0, 13, '{}'::jsonb)
         "#,
     )
@@ -468,9 +832,97 @@ async fn seed_knowledge_chunk(
     .bind(&storage_partition_id)
     .bind(version_uid)
     .bind(graph_node_uid)
+    .bind(format!("chunk-hash-{external_id}"))
+    .bind(format!("block-hash-{external_id}"))
+    .bind(text)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(KnowledgeSeed {
+        object_uid,
+        chunk_uid,
+    })
+}
+
+fn cached_retriever(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    graph: &PostgresGraphStore,
+) -> CachedHybridRetriever {
+    let vector: Arc<dyn VectorStore> = Arc::new(PgvectorStore::new_for_app_role(
+        pool.clone(),
+        RlsContext::tenant(tenant_id),
+    ));
+    let hybrid = Arc::new(
+        HybridRetriever::new(pool.clone(), Arc::new(graph.clone()), vector)
+            .with_assume_app_role(true),
+    );
+    CachedHybridRetriever::new_for_app_role(hybrid, pool.clone())
+}
+
+fn planned_chunk_query(tenant_id: TenantId, _query: &str) -> PlannedQuery {
+    let scope = tenant_memory_scope(tenant_id);
+    let scope_ancestors = scope.ancestors();
+    PlannedQuery {
+        strategy: Strategy::Both,
+        seeds: Vec::new(),
+        label_hint: Some(vec![NodeLabel::Chunk]),
+        scope,
+        scope_ancestors,
+        temporal_filter: None,
+    }
+}
+
+fn tenant_chunk_request(tenant_id: TenantId, query: &str) -> RetrievalRequest {
+    RetrievalRequest {
+        seeds: Vec::new(),
+        query_text: query.to_string(),
+        query_embedding: test_embedding(query),
+        scope: tenant_memory_scope(tenant_id),
+        label_filter: Some(vec![NodeLabel::Chunk]),
+        max_pii_class: PiiClass::Restricted,
+        k_final: 5,
+        use_reranker: false,
+        strategy: Some(Strategy::Both),
+        as_of: None,
+        ranking_reference_time: None,
+        lineage: None,
+        disable_leg_timeouts: false,
+        disable_graph_expansion: false,
+    }
+}
+
+fn tenant_memory_scope(tenant_id: TenantId) -> MemoryScope {
+    MemoryScope::Tenant { tenant_id }
+}
+
+fn knowledge_text(
+    hits: &[moa_brain::retrieval::RetrievalHit],
+    graph_node_uid: Uuid,
+) -> Option<&str> {
+    hits.iter()
+        .find(|hit| hit.uid == graph_node_uid)
+        .and_then(|hit| hit.knowledge_chunk.as_ref())
+        .map(|chunk| chunk.text.as_str())
+}
+
+async fn storage_partition_version(pool: &PgPool, tenant_id: TenantId) -> i64 {
+    let mut conn = ScopedConn::begin(pool, &RlsContext::tenant(tenant_id))
+        .await
+        .expect("begin cache version read");
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(conn.as_mut())
+        .await
+        .expect("set app role for cache version read");
+    let version = sqlx::query_scalar::<_, i64>(
+        "SELECT changelog_version FROM moa.storage_partition_state WHERE tenant_id = $1",
+    )
+    .bind(tenant_id.0)
+    .fetch_optional(conn.as_mut())
+    .await
+    .expect("read storage partition version")
+    .unwrap_or(0);
+    conn.commit().await.expect("commit cache version read");
+    version
 }
 
 fn contact_session(tenant_id: TenantId, contact_id: ContactId) -> SessionMeta {

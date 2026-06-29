@@ -16,7 +16,7 @@ pub use promotion::{
     PROMOTION_BATCH_SIZE, PROMOTION_OVERLAP_THRESHOLD, PromotionOptions, PromotionReport,
     VectorPartitionPromotion, finalize_promotion, rollback_promotion,
 };
-pub use turbopuffer::TurbopufferStore;
+pub use turbopuffer::{TurbopufferStore, TurbopufferTextQuery};
 
 /// Fixed graph-memory embedding dimensionality.
 pub const VECTOR_DIMENSION: usize = 1024;
@@ -220,6 +220,8 @@ pub struct VectorItem {
     pub embedding_model: String,
     /// Embedding model version for dual-write upgrades.
     pub embedding_model_version: i32,
+    /// Retrieval-safe text admitted for backend-local full-text indexes.
+    pub search_text: Option<String>,
     /// End of validity for soft-deleted or superseded embeddings.
     pub valid_to: Option<DateTime<Utc>>,
 }

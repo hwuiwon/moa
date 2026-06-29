@@ -93,6 +93,7 @@ fn vector_item(
         embedding,
         embedding_model: "test-model".to_string(),
         embedding_model_version: 1,
+        search_text: None,
         valid_to: None,
     }
 }

@@ -72,7 +72,7 @@ pub async fn compute_quality_scores(
                 COUNT(*)::bigint AS uses,
                 COUNT(*) FILTER (WHERE segment_ranges.outcome = 'resolved')::bigint AS successes
             FROM moa.retrieval_lineage AS lineage
-            LEFT JOIN segment_ranges
+            JOIN segment_ranges
               ON segment_ranges.storage_partition_id = lineage.storage_partition_id
              AND segment_ranges.session_id = lineage.session_id
              AND lineage.turn_seq BETWEEN segment_ranges.start_turn AND segment_ranges.end_turn
@@ -122,8 +122,15 @@ pub async fn compute_quality_scores(
 async fn task_segment_outcome_source_exists(pool: &PgPool) -> Result<bool> {
     let row = sqlx::query(
         r#"
-        SELECT to_regclass('task_segments') IS NOT NULL
-            OR to_regclass('public.task_segments') IS NOT NULL AS exists
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_catalog.pg_class AS class
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = class.relnamespace
+            WHERE namespace.nspname = current_schema()
+              AND class.relname = 'task_segments'
+              AND class.relkind IN ('r', 'p', 'v', 'm', 'f')
+        ) AS exists
         "#,
     )
     .fetch_one(pool)

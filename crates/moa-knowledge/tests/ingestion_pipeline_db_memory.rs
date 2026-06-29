@@ -434,6 +434,177 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
 }
 
 #[tokio::test]
+async fn ingestion_preserves_chunk_structure_for_bounded_neighbor_context_db_memory() {
+    // Pins: ingested chunks preserve document version, ordinal, heading path, and active status for bounded neighbor lookup.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated Postgres");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let scope = RlsContext::tenant(tenant_id);
+    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        scope,
+    ));
+    let parser = Arc::new(ParagraphParser);
+    let embedder = Arc::new(CountingEmbedder::default());
+    let graph = Arc::new(FakeGraphWriter::default());
+    let observer = Arc::new(MetricsIngestionObserver);
+    let pipeline = KnowledgeIngestionPipeline::new(
+        repository.clone(),
+        parser,
+        embedder,
+        graph,
+        observer,
+        KnowledgeIngestionPipelineConfig {
+            chunking: ChunkingConfig {
+                target_tokens: 1,
+                max_tokens: 16,
+                min_tokens: 1,
+            },
+            provider: "test_provider".to_string(),
+            parser_label: "test_parser".to_string(),
+        },
+    );
+
+    repository
+        .upsert_connection(KnowledgeConnection {
+            connection_uid,
+            tenant_id,
+            provider: "test_provider".to_string(),
+            connector: "docs".to_string(),
+            provider_account_id: "acct_structure_audit".to_string(),
+            credential_ref: "vault://knowledge/structure-audit".to_string(),
+            status: ConnectionStatus::Active,
+            metadata: json!({}),
+            source_selection: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_synced_at: None,
+        })
+        .await
+        .expect("upsert connection");
+    let sync_run_uid = create_run(&repository, tenant_id, connection_uid).await;
+    pipeline
+        .ingest_record_page(
+            sync_run_uid,
+            connection_uid,
+            tenant_id,
+            RecordPage {
+                records: vec![record(
+                    "structure-token",
+                    false,
+                    "Eligibility alpha.\n\nApproval bravo.\n\nCarryover charlie.",
+                )],
+                next_cursor: None,
+            },
+        )
+        .await
+        .expect("ingest structure audit record");
+
+    let object_uid = object_uid(connection_uid);
+    let version = repository
+        .latest_document_version(object_uid)
+        .await
+        .expect("load latest version")
+        .expect("ingestion should create a document version");
+    let chunks = repository
+        .chunks_for_version(version.version_uid)
+        .await
+        .expect("load chunks for version");
+    assert_eq!(chunks.len(), 3);
+    assert_eq!(
+        chunks
+            .iter()
+            .map(|chunk| chunk.version_uid)
+            .collect::<Vec<_>>(),
+        vec![
+            version.version_uid,
+            version.version_uid,
+            version.version_uid
+        ]
+    );
+    assert_eq!(
+        chunks.iter().map(|chunk| chunk.ordinal).collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert!(
+        chunks.iter().all(|chunk| chunk.graph_node_uid.is_some()),
+        "{chunks:?}"
+    );
+    assert!(
+        chunks
+            .iter()
+            .all(|chunk| chunk.metadata["active"] == json!(true)),
+        "{chunks:?}"
+    );
+    assert_eq!(
+        chunks
+            .iter()
+            .map(|chunk| chunk.heading_path.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            vec!["Alpha Plan".to_string()],
+            vec!["Alpha Plan".to_string()],
+            vec!["Alpha Plan".to_string()],
+        ]
+    );
+
+    let adjacent = active_adjacent_chunk_rows(&pool, chunks[1].chunk_uid).await;
+    assert_eq!(
+        adjacent.iter().map(|row| row.ordinal).collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert!(
+        adjacent
+            .iter()
+            .all(|row| row.version_uid == version.version_uid),
+        "{adjacent:?}"
+    );
+    assert!(
+        adjacent
+            .iter()
+            .all(|row| row.heading_path == vec!["Alpha Plan".to_string()]),
+        "{adjacent:?}"
+    );
+    assert!(
+        adjacent.iter().all(|row| row.active == "true"),
+        "{adjacent:?}"
+    );
+    assert_eq!(
+        adjacent
+            .iter()
+            .map(|row| row.text.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "Eligibility alpha.",
+            "Approval bravo.",
+            "Carryover charlie."
+        ]
+    );
+
+    repository
+        .tombstone_chunks(&[chunks[0].chunk_uid])
+        .await
+        .expect("tombstone previous chunk");
+    let active_after_tombstone = active_adjacent_chunk_rows(&pool, chunks[1].chunk_uid).await;
+    assert_eq!(
+        active_after_tombstone
+            .iter()
+            .map(|row| row.ordinal)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert!(
+        active_after_tombstone
+            .iter()
+            .all(|row| row.active == "true"),
+        "{active_after_tombstone:?}"
+    );
+}
+
+#[tokio::test]
 async fn ingestion_pipeline_replaying_same_page_keeps_counters_and_identities_once() {
     // Pins: replaying one provider page for the same sync run does not duplicate step counters or graph identities.
     let db = postgres::bootstrap_test_db()
@@ -1502,6 +1673,54 @@ async fn document_version_claim_status(pool: &sqlx::PgPool, version_uid: Uuid) -
     .fetch_one(pool)
     .await
     .expect("read ingestion claim status")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AdjacentChunkAuditRow {
+    version_uid: Uuid,
+    ordinal: i32,
+    heading_path: Vec<String>,
+    active: String,
+    text: String,
+}
+
+async fn active_adjacent_chunk_rows(
+    pool: &sqlx::PgPool,
+    anchor_chunk_uid: Uuid,
+) -> Vec<AdjacentChunkAuditRow> {
+    sqlx::query_as::<_, (Uuid, i32, Vec<String>, String, String)>(
+        r#"
+        WITH anchor AS (
+            SELECT document_version_id, ordinal
+            FROM moa.knowledge_chunks
+            WHERE chunk_uid = $1
+        )
+        SELECT c.document_version_id, c.ordinal, c.heading_path,
+               COALESCE(c.metadata->>'active', 'unset') AS active,
+               c.text
+        FROM moa.knowledge_chunks c
+        JOIN anchor a
+          ON a.document_version_id = c.document_version_id
+        WHERE c.ordinal BETWEEN a.ordinal - 1 AND a.ordinal + 1
+          AND c.metadata->>'active' IS DISTINCT FROM 'false'
+        ORDER BY c.ordinal ASC
+        "#,
+    )
+    .bind(anchor_chunk_uid)
+    .fetch_all(pool)
+    .await
+    .expect("load active adjacent chunks")
+    .into_iter()
+    .map(
+        |(version_uid, ordinal, heading_path, active, text)| AdjacentChunkAuditRow {
+            version_uid,
+            ordinal,
+            heading_path,
+            active,
+            text,
+        },
+    )
+    .collect()
 }
 
 #[derive(Debug, PartialEq, Eq)]
