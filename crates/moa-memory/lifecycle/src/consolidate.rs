@@ -9,8 +9,8 @@ use moa_core::{
     ContactId, MemoryDigestConfig, StoragePartitionId, TenantId, traits::EmbeddingProvider,
 };
 use moa_memory_graph::{
-    AgeGraphStore, ExistingSupersessionIntent, GraphError, NodeEmbeddingIntent, NodeLabel,
-    NodePropertyUpdateIntent, PiiClass,
+    ExistingSupersessionIntent, GraphError, NodeEmbeddingIntent, NodeLabel,
+    NodePropertyUpdateIntent, PiiClass, PostgresGraphStore,
 };
 use moa_memory_ingest::normalize_entity_name;
 use moa_memory_vector::PgvectorStore;
@@ -685,10 +685,10 @@ fn lifecycle_row_from_sql(
     })
 }
 
-fn scoped_graph(pool: &PgPool, row: &LifecycleNodeRow) -> AgeGraphStore {
+fn scoped_graph(pool: &PgPool, row: &LifecycleNodeRow) -> PostgresGraphStore {
     let scope = row.scope_context();
     let vector = Arc::new(PgvectorStore::new(pool.clone(), scope.clone()));
-    AgeGraphStore::scoped(pool.clone(), scope).with_vector_store(vector)
+    PostgresGraphStore::scoped(pool.clone(), scope).with_vector_store(vector)
 }
 
 fn normalized_entity_name(entity: &LifecycleNodeRow) -> String {

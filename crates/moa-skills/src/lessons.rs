@@ -4,7 +4,7 @@ use chrono::Utc;
 use moa_core::RlsContext;
 use moa_core::{MoaError, Result, StoragePartitionId};
 use moa_db::ScopedConn;
-use moa_memory_graph::{AgeGraphStore, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_graph::{NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
 use serde_json::json;
 use sqlx::PgConnection;
@@ -13,13 +13,13 @@ use uuid::Uuid;
 /// Context needed to write a learned lesson into the graph.
 #[derive(Clone)]
 pub struct LessonContext {
-    graph: AgeGraphStore,
+    graph: PostgresGraphStore,
     assume_app_role: bool,
 }
 
 impl LessonContext {
-    /// Creates a lesson context backed by an AGE graph store.
-    pub fn new(graph: AgeGraphStore) -> Self {
+    /// Creates a lesson context backed by a Postgres graph store.
+    pub fn new(graph: PostgresGraphStore) -> Self {
         Self {
             graph,
             assume_app_role: false,
@@ -29,7 +29,7 @@ impl LessonContext {
     /// Creates a lesson context that assumes `moa_app` inside each transaction.
     ///
     /// Tests use this when connecting as `moa_owner` while exercising application RLS policies.
-    pub fn for_app_role(graph: AgeGraphStore) -> Self {
+    pub fn for_app_role(graph: PostgresGraphStore) -> Self {
         Self {
             graph,
             assume_app_role: true,
@@ -37,7 +37,7 @@ impl LessonContext {
     }
 
     /// Returns the graph store used for lesson nodes.
-    pub fn graph(&self) -> &AgeGraphStore {
+    pub fn graph(&self) -> &PostgresGraphStore {
         &self.graph
     }
 }
@@ -140,7 +140,7 @@ mod tests {
         let scope = MemoryScope::Tenant {
             tenant_id: TenantId::from(Uuid::nil()),
         };
-        let graph = AgeGraphStore::scoped_for_app_role(pool, RlsContext::from(scope.clone()));
+        let graph = PostgresGraphStore::scoped_for_app_role(pool, RlsContext::from(scope.clone()));
         (LessonContext::new(graph), scope)
     }
 

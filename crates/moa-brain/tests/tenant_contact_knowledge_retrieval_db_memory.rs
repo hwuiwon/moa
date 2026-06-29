@@ -12,7 +12,7 @@ use moa_core::{
     ToolCallFormat, traits::EmbeddingProvider,
 };
 use moa_lineage_core::{LineageEvent, RetrievalLineage};
-use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_session::testing;
 use serde_json::{Value, json};
@@ -275,9 +275,9 @@ async fn mock_tenant_and_contact_retrieval() {
         .expect("drop isolated schema");
 }
 
-fn graph_store(pool: PgPool, scope: RlsContext) -> AgeGraphStore {
+fn graph_store(pool: PgPool, scope: RlsContext) -> PostgresGraphStore {
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
-    AgeGraphStore::scoped_for_app_role(pool, scope).with_vector_store(vector)
+    PostgresGraphStore::scoped_for_app_role(pool, scope).with_vector_store(vector)
 }
 
 async fn seed_storage_partition_embedder_state(

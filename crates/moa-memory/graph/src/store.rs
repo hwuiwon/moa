@@ -1,4 +1,4 @@
-//! Apache AGE-backed `GraphStore` implementation.
+//! Relational Postgres-backed `GraphStore` implementation.
 
 use std::sync::Arc;
 
@@ -12,17 +12,17 @@ use crate::{
     NodeWriteIntent,
 };
 
-/// Graph store backed by Apache AGE plus SQL sidecar tables.
+/// Graph store backed by relational node, edge, changelog, and vector tables.
 #[derive(Clone)]
-pub struct AgeGraphStore {
+pub struct PostgresGraphStore {
     pub(crate) pool: PgPool,
     pub(crate) scope: Option<RlsContext>,
     pub(crate) assume_app_role: bool,
     pub(crate) vector: Option<Arc<dyn VectorStore>>,
 }
 
-impl AgeGraphStore {
-    /// Creates an AGE graph store using the provided Postgres pool.
+impl PostgresGraphStore {
+    /// Creates a graph store using the provided Postgres pool.
     ///
     /// This constructor does not install request-scope GUCs. Use `scoped` for tenant-context
     /// application paths.
@@ -35,7 +35,7 @@ impl AgeGraphStore {
         }
     }
 
-    /// Creates an AGE graph store that installs scope GUCs for each operation.
+    /// Creates a graph store that installs scope GUCs for each operation.
     pub fn scoped(pool: PgPool, scope: RlsContext) -> Self {
         Self {
             pool,
@@ -115,6 +115,7 @@ impl AgeGraphStore {
         crate::write::upsert_node_embedding(self, intent).await
     }
 
+    /// Begins a scoped transaction when this store has an RLS context.
     pub(crate) async fn begin(&self) -> Result<Option<ScopedConn<'_>>, GraphError> {
         let Some(scope) = &self.scope else {
             return Ok(None);
@@ -129,6 +130,7 @@ impl AgeGraphStore {
         Ok(Some(conn))
     }
 
+    /// Begins a scoped transaction and fails when this store has no RLS context.
     pub(crate) async fn begin_required(&self) -> Result<ScopedConn<'_>, GraphError> {
         self.begin().await?.ok_or(GraphError::MissingScope)
     }

@@ -63,18 +63,18 @@ pub fn emit_retrieval_attrs(span: &Span, record: &RetrievalLineage) {
             );
         }
     }
-    if let Some(age) = &record.introspection.age {
+    if let Some(graph) = &record.introspection.graph {
         span.set_attribute(
-            "moa.age.path_length",
-            Value::from(i64::from(age.max_path_length)),
+            "moa.graph.path_length",
+            Value::from(i64::from(graph.max_path_length)),
         );
         span.set_attribute(
-            "moa.age.edges_walked",
-            Value::from(i64::from(age.edges_walked)),
+            "moa.graph.edges_walked",
+            Value::from(i64::from(graph.edges_walked)),
         );
         span.set_attribute(
-            "moa.age.paths_returned",
-            Value::from(i64::from(age.paths_returned)),
+            "moa.graph.paths_returned",
+            Value::from(i64::from(graph.paths_returned)),
         );
     }
     if let Some(turbopuffer) = &record.introspection.turbopuffer {

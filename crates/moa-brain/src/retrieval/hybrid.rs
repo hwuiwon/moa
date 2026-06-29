@@ -592,11 +592,15 @@ fn interim_graph_seed_strengths(
     }
 
     let exact_seed_uids = exact_phase_one_seed_uids(phase_one_rows, query_text);
+    let use_broad_phase_one = planner_seeds.is_empty() && exact_seed_uids.is_empty();
     let mut phase_one = interim
         .iter()
         .take(PHASE_ONE_GRAPH_SEED_LIMIT)
         .enumerate()
-        .map(|(index, (uid, _, _))| (*uid, index, exact_seed_uids.contains(uid)))
+        .filter_map(|(index, (uid, _, _))| {
+            let is_exact = exact_seed_uids.contains(uid);
+            (is_exact || use_broad_phase_one).then_some((*uid, index, is_exact))
+        })
         .collect::<Vec<_>>();
     phase_one.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.1.cmp(&right.1)));
     for (index, (uid, _, _)) in phase_one.into_iter().enumerate() {
@@ -1081,8 +1085,8 @@ mod tests {
     }
 
     #[test]
-    fn interim_seed_selection_caps_at_configured_limit_and_keeps_ner_strength_on_collision() {
-        // Pins: phase-one seeds are capped and planner NER seeds keep strength 1.0 on collision.
+    fn interim_seed_selection_keeps_planner_strength_without_broad_phase_one_fallback() {
+        // Pins: planner NER seeds keep strength 1.0 and suppress broad phase-one fallback.
         let collision = Uuid::from_u128(1);
         let interim = (1_u128..=(PHASE_ONE_GRAPH_SEED_LIMIT as u128 + 4))
             .map(|value| (Uuid::from_u128(value), 1.0, LegSources::default()))
@@ -1090,8 +1094,20 @@ mod tests {
 
         let strengths = interim_graph_seed_strengths(&[collision], &interim, &[], "");
 
+        assert_eq!(strengths, vec![(collision, 1.0)]);
+    }
+
+    #[test]
+    fn graph_seed_selection_caps_broad_phase_one_when_planner_and_exact_seeds_empty() {
+        // Pins: graph expansion can still run when NER finds no planner seeds.
+        let interim = (1_u128..=(PHASE_ONE_GRAPH_SEED_LIMIT as u128 + 4))
+            .map(|value| (Uuid::from_u128(value), 1.0, LegSources::default()))
+            .collect::<Vec<_>>();
+
+        let strengths = interim_graph_seed_strengths(&[], &interim, &[], "");
+
         assert_eq!(strengths.len(), PHASE_ONE_GRAPH_SEED_LIMIT);
-        assert_eq!(strengths[0], (collision, 1.0));
+        assert_eq!(strengths[0], (Uuid::from_u128(1), 1.0));
         assert_eq!(strengths[1], (Uuid::from_u128(2), 0.85));
         let (last_uid, last_strength) = strengths.last().expect("last seed should exist");
         assert_eq!(
@@ -1103,31 +1119,11 @@ mod tests {
                 .abs()
                 < f64::EPSILON
         );
-        assert!(
-            strengths
-                .iter()
-                .all(|(uid, strength)| *uid != collision || *strength == 1.0)
-        );
     }
 
     #[test]
-    fn graph_seed_selection_uses_phase_one_when_planner_seeds_empty() {
-        // Pins: graph expansion can still run when NER finds no planner seeds.
-        let first = Uuid::from_u128(10);
-        let second = Uuid::from_u128(11);
-        let interim = vec![
-            (first, 1.0, LegSources::default()),
-            (second, 0.5, LegSources::default()),
-        ];
-
-        let strengths = interim_graph_seed_strengths(&[], &interim, &[], "");
-
-        assert_eq!(strengths, vec![(first, 1.0), (second, 0.85)]);
-    }
-
-    #[test]
-    fn interim_seed_selection_promotes_exact_phase_one_subject_match() {
-        // Pins: graph expansion starts from the exact entity mention before same-shape siblings.
+    fn interim_seed_selection_uses_exact_phase_one_subject_match_without_broad_siblings() {
+        // Pins: exact entity mentions seed graph expansion without same-shape siblings.
         let sibling = Uuid::from_u128(10);
         let exact = Uuid::from_u128(11);
         let interim = vec![
@@ -1146,7 +1142,32 @@ mod tests {
             "Which team owns the library that audit-shipper-dep-0-0-0 depends on?",
         );
 
-        assert_eq!(strengths, vec![(exact, 1.0), (sibling, 0.85)]);
+        assert_eq!(strengths, vec![(exact, 1.0)]);
+    }
+
+    #[test]
+    fn interim_seed_selection_keeps_planner_first_and_exact_phase_one_only() {
+        // Pins: planner seeds stay first while exact phase-one subjects pass through alone.
+        let planner = Uuid::from_u128(9);
+        let sibling = Uuid::from_u128(10);
+        let exact = Uuid::from_u128(11);
+        let interim = vec![
+            (sibling, 1.0, LegSources::default()),
+            (exact, 0.9, LegSources::default()),
+        ];
+        let rows = vec![
+            node_row(sibling, "audit-shipper-dep-0-4-0"),
+            node_row(exact, "audit-shipper-dep-0-0-0"),
+        ];
+
+        let strengths = interim_graph_seed_strengths(
+            &[planner],
+            &interim,
+            &rows,
+            "Which team owns the library that audit-shipper-dep-0-0-0 depends on?",
+        );
+
+        assert_eq!(strengths, vec![(planner, 1.0), (exact, 1.0)]);
     }
 
     #[test]

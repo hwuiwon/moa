@@ -236,8 +236,8 @@ pub struct StageTimings {
 pub struct BackendIntrospection {
     /// pgvector details.
     pub pgvector: Option<PgvectorIntrospection>,
-    /// Apache AGE details.
-    pub age: Option<AgeIntrospection>,
+    /// Relational graph traversal details.
+    pub graph: Option<GraphIntrospection>,
     /// Turbopuffer details.
     pub turbopuffer: Option<TurbopufferIntrospection>,
 }
@@ -259,9 +259,9 @@ pub struct PgvectorIntrospection {
     pub execution_ms: Option<f32>,
 }
 
-/// AGE introspection details.
+/// Relational graph introspection details.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AgeIntrospection {
+pub struct GraphIntrospection {
     /// Maximum graph path length.
     pub max_path_length: u8,
     /// Number of edges walked.

@@ -1,6 +1,6 @@
 //! Behavioral coverage for the txn-local row-level-security GUCs that
 //! `ScopedConn` installs. These pin the crate's sole responsibility: every scoped
-//! transaction must set `moa.tenant_id`/`search_path` for the duration of the
+//! transaction must set MOA RLS GUCs for the duration of the
 //! transaction and never leak that scope to a later transaction on the same
 //! pooled connection. The policy-protected fixture table proves the GUCs are
 //! consumed by Postgres RLS under the app role.
@@ -107,9 +107,9 @@ async fn drop_schema(pool: &sqlx::PgPool, schema_name: &str) {
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn scoped_conn_installs_tenant_gucs_that_are_transaction_local_db() {
-    // Pins: begin_tenant sets moa.tenant_id, moa.storage_partition_id and the AGE
-    // search_path for the scoped transaction, marks it as not control-plane, and the
-    // scope is gone on the next transaction over the same pooled connection.
+    // Pins: begin_tenant sets the MOA tenant/storage GUCs for the scoped
+    // transaction, marks it as not control-plane, and the scope is gone on the
+    // next transaction over the same pooled connection.
     // A single connection forces the post-commit read onto the same backend, so this
     // proves the GUCs are transaction-local (set_config is_local=true), not leaked.
     let pool = PgPoolOptions::new()
@@ -147,14 +147,6 @@ async fn scoped_conn_installs_tenant_gucs_that_are_transaction_local_db() {
             Some("false"),
             "tenant scope must not be flagged as control-plane"
         );
-        let search_path = read_guc(scoped.as_mut(), "search_path")
-            .await
-            .unwrap_or_default();
-        assert!(
-            search_path.contains("ag_catalog"),
-            "search_path must include ag_catalog for AGE, got {search_path:?}"
-        );
-
         scoped.commit().await.expect("commit scoped transaction");
     }
 

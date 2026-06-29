@@ -109,8 +109,7 @@ impl<'p> ScopedConn<'p> {
                 pg_catalog.set_config('moa.tenant_id', $1, true),
                 pg_catalog.set_config('moa.storage_partition_id', $2, true),
                 pg_catalog.set_config('moa.contact_id', $3, true),
-                pg_catalog.set_config('moa.control_plane', $4, true),
-                pg_catalog.set_config('search_path', 'ag_catalog, "$user", public', true)
+                pg_catalog.set_config('moa.control_plane', $4, true)
             "#,
         )
         .bind(gucs.tenant_id.as_deref().unwrap_or(""))

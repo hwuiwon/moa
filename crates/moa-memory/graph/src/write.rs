@@ -1,4 +1,4 @@
-//! Atomic graph write protocol for AGE, sidecar rows, vectors, and changelog records.
+//! Atomic graph write protocol for relational rows, vectors, and changelog records.
 
 use std::collections::HashSet;
 
@@ -10,10 +10,8 @@ use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
 use crate::{
-    GraphError, Result,
-    age::AgeGraphStore,
+    GraphError, PostgresGraphStore, Result,
     changelog::{ChangelogRecord, write_and_bump},
-    cypher::{self, Cypher},
     edge::{EdgeLabel, EdgeWriteIntent},
     node::{
         ExistingSupersessionIntent, NodeEmbeddingIntent, NodeLabel, NodePropertyUpdateIntent,
@@ -22,7 +20,7 @@ use crate::{
 };
 
 /// Creates a graph node, sidecar row, optional vector, and changelog row atomically.
-pub async fn create_node(store: &AgeGraphStore, intent: NodeWriteIntent) -> Result<Uuid> {
+pub async fn create_node(store: &PostgresGraphStore, intent: NodeWriteIntent) -> Result<Uuid> {
     let mut conn = store.begin_required().await?;
     let uid = create_node_in_conn(store, conn.as_mut(), intent).await?;
     conn.commit().await?;
@@ -31,20 +29,13 @@ pub async fn create_node(store: &AgeGraphStore, intent: NodeWriteIntent) -> Resu
 
 /// Creates a graph node, sidecar row, optional vector, and changelog row in a caller-owned tx.
 pub async fn create_node_in_conn(
-    store: &AgeGraphStore,
+    store: &PostgresGraphStore,
     conn: &mut PgConnection,
     intent: NodeWriteIntent,
 ) -> Result<Uuid> {
     validate_node_scope(&intent)?;
     let vector_item = vector_item_from_intent(&intent)?;
-    let created_at = Utc::now();
-    let params = node_params(&intent, created_at);
 
-    node_create_template(intent.label)
-        .execute(&params)
-        .execute(&mut *conn)
-        .await
-        .map_err(|error| GraphError::Cypher(error.to_string()))?;
     insert_node_index(store, &mut *conn, &intent).await?;
     if let Some(item) = vector_item.as_ref() {
         let vector = require_vector_store(store)?;
@@ -59,34 +50,20 @@ pub async fn create_node_in_conn(
 
 /// Supersedes one active graph node with a replacement node atomically.
 pub async fn supersede_node(
-    store: &AgeGraphStore,
+    store: &PostgresGraphStore,
     old_uid: Uuid,
     mut new: NodeWriteIntent,
 ) -> Result<Uuid> {
     validate_node_scope(&new)?;
     let mut conn = store.begin_required().await?;
     let (current_uid, old) = fetch_current_supersession_target(conn.as_mut(), old_uid).await?;
+    validate_new_node_scope_against_stored(&new, &old)?;
     if new.valid_from <= old.valid_from {
         new.valid_from = old.valid_from + Duration::microseconds(1);
     }
     let vector_item = vector_item_from_intent(&new)?;
 
     let now = Utc::now();
-    let mut params = node_params(&new, now);
-    let object = params
-        .as_object_mut()
-        .ok_or_else(|| GraphError::Conflict("node params must be an object".to_string()))?;
-    object.insert("old_uid".to_string(), json!(current_uid.to_string()));
-    object.insert("valid_to".to_string(), json!(new.valid_from.to_rfc3339()));
-    object.insert("invalidated_at".to_string(), json!(now.to_rfc3339()));
-    object.insert("actor".to_string(), json!(new.actor_id.clone()));
-    object.insert("edge_uid".to_string(), json!(Uuid::now_v7().to_string()));
-
-    cypher::node::SUPERSEDE
-        .execute(&params)
-        .execute(conn.as_mut())
-        .await
-        .map_err(|error| GraphError::Cypher(error.to_string()))?;
     close_node_index(
         conn.as_mut(),
         current_uid,
@@ -97,6 +74,16 @@ pub async fn supersede_node(
     )
     .await?;
     insert_node_index(store, conn.as_mut(), &new).await?;
+    insert_supersedes_edge_index(
+        store,
+        conn.as_mut(),
+        new.uid,
+        current_uid,
+        new.storage_partition_id.as_deref(),
+        new.contact_id.as_deref(),
+        &new.scope,
+    )
+    .await?;
 
     if let Some(vector) = store.vector() {
         vector.delete_in_tx(conn.as_mut(), &[current_uid]).await?;
@@ -142,7 +129,7 @@ pub async fn supersede_node(
 }
 
 /// Soft-invalidates one graph node and removes its vector projection atomically.
-pub async fn invalidate_node(store: &AgeGraphStore, uid: Uuid, reason: &str) -> Result<()> {
+pub async fn invalidate_node(store: &PostgresGraphStore, uid: Uuid, reason: &str) -> Result<()> {
     let mut conn = store.begin_required().await?;
     let old = fetch_stored_node(conn.as_mut(), uid)
         .await?
@@ -155,16 +142,6 @@ pub async fn invalidate_node(store: &AgeGraphStore, uid: Uuid, reason: &str) -> 
 
     let now = Utc::now();
     let (actor_id, actor_kind) = mutation_actor(store);
-    cypher::node::INVALIDATE
-        .execute(&json!({
-            "uid": uid.to_string(),
-            "now": now.to_rfc3339(),
-            "actor": actor_id.clone().unwrap_or_default(),
-            "reason": reason,
-        }))
-        .execute(conn.as_mut())
-        .await
-        .map_err(|error| GraphError::Cypher(error.to_string()))?;
     close_node_index(
         conn.as_mut(),
         uid,
@@ -208,7 +185,7 @@ pub async fn invalidate_node(store: &AgeGraphStore, uid: Uuid, reason: &str) -> 
 
 /// Closes one active graph node into an already-existing replacement node atomically.
 pub async fn close_existing_node_with_supersession(
-    store: &AgeGraphStore,
+    store: &PostgresGraphStore,
     intent: ExistingSupersessionIntent,
 ) -> Result<()> {
     let mut conn = store.begin_required().await?;
@@ -232,22 +209,6 @@ pub async fn close_existing_node_with_supersession(
     }
     validate_same_scope(&old, &replacement)?;
 
-    cypher::node::CLOSE_WITH_SUPERSESSION
-        .execute(&json!({
-            "old_uid": intent.old_uid.to_string(),
-            "new_uid": intent.replacement_uid.to_string(),
-            "valid_to": intent.valid_to.to_rfc3339(),
-            "invalidated_at": intent.invalidated_at.to_rfc3339(),
-            "actor": intent.actor_id.clone(),
-            "reason": intent.reason.clone(),
-            "edge_uid": Uuid::now_v7().to_string(),
-            "storage_partition_id": old.storage_partition_id.clone().unwrap_or_default(),
-            "user_id": old.contact_id.clone().unwrap_or_default(),
-            "scope": old.scope.clone(),
-        }))
-        .execute(conn.as_mut())
-        .await
-        .map_err(|error| GraphError::Cypher(error.to_string()))?;
     close_node_index(
         conn.as_mut(),
         intent.old_uid,
@@ -255,6 +216,16 @@ pub async fn close_existing_node_with_supersession(
         intent.invalidated_at,
         actor_uuid(&intent.actor_id),
         &intent.reason,
+    )
+    .await?;
+    insert_supersedes_edge_index(
+        store,
+        conn.as_mut(),
+        intent.replacement_uid,
+        intent.old_uid,
+        old.storage_partition_id.as_deref(),
+        old.contact_id.as_deref(),
+        &old.scope,
     )
     .await?;
     if let Some(vector) = store.vector() {
@@ -294,7 +265,7 @@ pub async fn close_existing_node_with_supersession(
 
 /// Updates one active graph node's mutable properties atomically.
 pub async fn update_node_properties(
-    store: &AgeGraphStore,
+    store: &PostgresGraphStore,
     intent: NodePropertyUpdateIntent,
 ) -> Result<()> {
     if !intent.properties.is_object() {
@@ -313,31 +284,24 @@ pub async fn update_node_properties(
             intent.uid
         )));
     }
-    let confidence = intent.confidence.or(old.confidence);
-    cypher::node::UPDATE_PROPERTIES
-        .execute(&json!({
-            "uid": intent.uid.to_string(),
-            "properties": intent.properties.clone(),
-        }))
-        .execute(conn.as_mut())
-        .await
-        .map_err(|error| GraphError::Cypher(error.to_string()))?;
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         UPDATE moa.node_index
-        SET properties_summary = $1,
-            confidence = $2,
-            reference_count = $3
-        WHERE uid = $4
+        SET properties_summary = $1
+        WHERE uid = $2
           AND valid_to IS NULL
         "#,
     )
     .bind(&intent.properties)
-    .bind(confidence)
-    .bind(reference_count_from_properties(&intent.properties))
     .bind(intent.uid)
     .execute(conn.as_mut())
     .await?;
+    if result.rows_affected() == 0 {
+        return Err(GraphError::BiTemporal(format!(
+            "{} is not active",
+            intent.uid
+        )));
+    }
     write_and_bump(
         conn.as_mut(),
         ChangelogRecord {
@@ -353,7 +317,6 @@ pub async fn update_node_properties(
             payload: json!({
                 "before": old.properties_summary,
                 "after": intent.properties,
-                "confidence": confidence,
             }),
             redaction_marker: None,
             pii_class: old.pii_class.as_str().to_string(),
@@ -369,7 +332,7 @@ pub async fn update_node_properties(
 
 /// Attaches a vector embedding to one active graph node atomically.
 pub async fn upsert_node_embedding(
-    store: &AgeGraphStore,
+    store: &PostgresGraphStore,
     intent: NodeEmbeddingIntent,
 ) -> Result<()> {
     let mut conn = store.begin_required().await?;
@@ -427,13 +390,17 @@ pub async fn upsert_node_embedding(
 }
 
 /// Hard-purges one graph node while preserving a redacted audit changelog row.
-pub async fn hard_purge(store: &AgeGraphStore, uid: Uuid, redaction_marker: &str) -> Result<()> {
+pub async fn hard_purge(
+    store: &PostgresGraphStore,
+    uid: Uuid,
+    redaction_marker: &str,
+) -> Result<()> {
     hard_purge_with_audit(store, uid, redaction_marker, None).await
 }
 
 /// Hard-purges one graph node with explicit audit metadata on the erase changelog row.
 pub async fn hard_purge_with_audit(
-    store: &AgeGraphStore,
+    store: &PostgresGraphStore,
     uid: Uuid,
     redaction_marker: &str,
     audit_metadata: Option<Value>,
@@ -470,7 +437,10 @@ pub async fn hard_purge_with_audit(
         },
     )
     .await?;
-    delete_age_node(conn.as_mut(), old.label, uid).await?;
+    sqlx::query("DELETE FROM moa.edge_index WHERE start_uid = $1 OR end_uid = $1")
+        .bind(uid)
+        .execute(conn.as_mut())
+        .await?;
     if let Some(vector) = store.vector() {
         vector.delete_in_tx(conn.as_mut(), &[uid]).await?;
     }
@@ -483,19 +453,19 @@ pub async fn hard_purge_with_audit(
     Ok(())
 }
 
-/// Creates an AGE edge and changelog row atomically.
-pub async fn create_edge(store: &AgeGraphStore, intent: EdgeWriteIntent) -> Result<Uuid> {
+/// Creates a graph edge and changelog row atomically.
+pub async fn create_edge(store: &PostgresGraphStore, intent: EdgeWriteIntent) -> Result<Uuid> {
     validate_edge_scope(&intent)?;
     let mut conn = store.begin_required().await?;
-    if edge_exists(conn.as_mut(), intent.label, intent.uid).await? {
+    if edge_exists(conn.as_mut(), intent.uid).await? {
         conn.commit().await?;
         return Ok(intent.uid);
     }
-    edge_create_template(intent.label)
-        .execute(&edge_params(&intent))
-        .execute(conn.as_mut())
-        .await
-        .map_err(|error| GraphError::Cypher(error.to_string()))?;
+    validate_edge_endpoints(conn.as_mut(), &intent).await?;
+    if !insert_edge_index(store, conn.as_mut(), &intent).await? {
+        conn.commit().await?;
+        return Ok(intent.uid);
+    }
     write_and_bump(
         conn.as_mut(),
         ChangelogRecord {
@@ -525,23 +495,108 @@ pub async fn create_edge(store: &AgeGraphStore, intent: EdgeWriteIntent) -> Resu
     Ok(intent.uid)
 }
 
-async fn edge_exists(conn: &mut PgConnection, label: EdgeLabel, uid: Uuid) -> Result<bool> {
-    let edge_table = age_edge_table(label);
-    let sql = format!(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM {edge_table}
-            WHERE moa.age_property(properties, 'uid') =
-                  ('"' || $1 || '"')::ag_catalog.agtype
-        )
-        "#
-    );
-    sqlx::query_scalar::<_, bool>(&sql)
-        .bind(uid.to_string())
+async fn edge_exists(conn: &mut PgConnection, uid: Uuid) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM moa.edge_index WHERE uid = $1)")
+        .bind(uid)
         .fetch_one(conn)
         .await
         .map_err(GraphError::from)
+}
+
+async fn insert_edge_index(
+    store: &PostgresGraphStore,
+    conn: &mut PgConnection,
+    intent: &EdgeWriteIntent,
+) -> Result<bool> {
+    let (tenant_id, contact_id) = runtime_ids_from_parts(
+        store,
+        intent.storage_partition_id.as_deref(),
+        intent.contact_id.as_deref(),
+        "edges",
+    )?;
+    let result = sqlx::query(
+        r#"
+        INSERT INTO moa.edge_index
+            (uid, label, start_uid, end_uid, storage_partition_id, user_id, tenant_id, contact_id,
+             properties)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT (uid) DO NOTHING
+        "#,
+    )
+    .bind(intent.uid)
+    .bind(intent.label.as_str())
+    .bind(intent.start_uid)
+    .bind(intent.end_uid)
+    .bind(intent.storage_partition_id.as_deref())
+    .bind(intent.contact_id.as_deref())
+    .bind(tenant_id)
+    .bind(contact_id)
+    .bind(&intent.properties)
+    .execute(conn)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+async fn insert_supersedes_edge_index(
+    store: &PostgresGraphStore,
+    conn: &mut PgConnection,
+    replacement_uid: Uuid,
+    old_uid: Uuid,
+    storage_partition_id: Option<&str>,
+    contact_id: Option<&str>,
+    scope: &str,
+) -> Result<()> {
+    validate_scope_shape(storage_partition_id, contact_id, scope)?;
+    let (tenant_id, contact_uuid) = runtime_ids_from_parts(
+        store,
+        storage_partition_id,
+        contact_id,
+        "supersession edges",
+    )?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.edge_index
+            (uid, label, start_uid, end_uid, storage_partition_id, user_id, tenant_id, contact_id,
+             properties)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{}'::jsonb)
+        ON CONFLICT (uid) DO NOTHING
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(EdgeLabel::Supersedes.as_str())
+    .bind(replacement_uid)
+    .bind(old_uid)
+    .bind(storage_partition_id)
+    .bind(contact_id)
+    .bind(tenant_id)
+    .bind(contact_uuid)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+async fn validate_edge_endpoints(conn: &mut PgConnection, intent: &EdgeWriteIntent) -> Result<()> {
+    let start = fetch_stored_node(conn, intent.start_uid)
+        .await?
+        .ok_or(GraphError::NotFound(intent.start_uid))?;
+    let end = fetch_stored_node(conn, intent.end_uid)
+        .await?
+        .ok_or(GraphError::NotFound(intent.end_uid))?;
+    if start.valid_to.is_some() {
+        return Err(GraphError::BiTemporal(format!(
+            "{} is not active",
+            intent.start_uid
+        )));
+    }
+    if end.valid_to.is_some() {
+        return Err(GraphError::BiTemporal(format!(
+            "{} is not active",
+            intent.end_uid
+        )));
+    }
+    validate_edge_scope_matches_stored(intent, &start)?;
+    validate_edge_scope_matches_stored(intent, &end)?;
+    validate_same_scope(&start, &end)
 }
 
 fn validate_node_scope(intent: &NodeWriteIntent) -> Result<()> {
@@ -609,66 +664,37 @@ fn validate_same_scope(old: &StoredNode, replacement: &StoredNode) -> Result<()>
     }
 }
 
-fn node_create_template(label: NodeLabel) -> &'static Cypher {
-    match label {
-        NodeLabel::Entity => &cypher::node::CREATE_ENTITY,
-        NodeLabel::Concept => &cypher::node::CREATE_CONCEPT,
-        NodeLabel::Decision => &cypher::node::CREATE_DECISION,
-        NodeLabel::Incident => &cypher::node::CREATE_INCIDENT,
-        NodeLabel::Lesson => &cypher::node::CREATE_LESSON,
-        NodeLabel::Fact => &cypher::node::CREATE_FACT,
-        NodeLabel::Source => &cypher::node::CREATE_SOURCE,
-        NodeLabel::Document => &cypher::node::CREATE_DOCUMENT,
-        NodeLabel::Chunk => &cypher::node::CREATE_CHUNK,
-        NodeLabel::ContactGroup => &cypher::node::CREATE_CONTACT_GROUP,
+fn validate_new_node_scope_against_stored(
+    intent: &NodeWriteIntent,
+    stored: &StoredNode,
+) -> Result<()> {
+    if intent.storage_partition_id == stored.storage_partition_id
+        && intent.contact_id == stored.contact_id
+        && intent.scope == stored.scope
+    {
+        Ok(())
+    } else {
+        Err(GraphError::Conflict(
+            "supersession nodes must share the same scope".to_string(),
+        ))
     }
 }
 
-fn edge_create_template(label: EdgeLabel) -> &'static Cypher {
-    match label {
-        EdgeLabel::RelatesTo => &cypher::edge::CREATE_RELATES_TO,
-        EdgeLabel::DependsOn => &cypher::edge::CREATE_DEPENDS_ON,
-        EdgeLabel::OwnedBy => &cypher::edge::CREATE_OWNED_BY,
-        EdgeLabel::Supersedes => &cypher::edge::CREATE_SUPERSEDES,
-        EdgeLabel::Contradicts => &cypher::edge::CREATE_CONTRADICTS,
-        EdgeLabel::DerivedFrom => &cypher::edge::CREATE_DERIVED_FROM,
-        EdgeLabel::Contains => &cypher::edge::CREATE_CONTAINS,
-        EdgeLabel::MentionedIn => &cypher::edge::CREATE_MENTIONED_IN,
-        EdgeLabel::MemberOf => &cypher::edge::CREATE_MEMBER_OF,
-        EdgeLabel::Caused => &cypher::edge::CREATE_CAUSED,
-        EdgeLabel::LearnedFrom => &cypher::edge::CREATE_LEARNED_FROM,
-        EdgeLabel::AppliesTo => &cypher::edge::CREATE_APPLIES_TO,
+fn validate_edge_scope_matches_stored(intent: &EdgeWriteIntent, node: &StoredNode) -> Result<()> {
+    if intent.storage_partition_id == node.storage_partition_id
+        && intent.contact_id == node.contact_id
+        && intent.scope == node.scope
+    {
+        Ok(())
+    } else {
+        Err(GraphError::Conflict(
+            "edge endpoints must share the edge scope".to_string(),
+        ))
     }
-}
-
-fn node_params(intent: &NodeWriteIntent, created_at: DateTime<Utc>) -> Value {
-    json!({
-        "uid": intent.uid.to_string(),
-        "storage_partition_id": intent.storage_partition_id.clone().unwrap_or_default(),
-        "user_id": intent.contact_id.clone().unwrap_or_default(),
-        "scope": intent.scope,
-        "name": intent.name,
-        "pii_class": intent.pii_class.as_str(),
-        "valid_from": intent.valid_from.to_rfc3339(),
-        "created_at": created_at.to_rfc3339(),
-        "properties": intent.properties,
-    })
-}
-
-fn edge_params(intent: &EdgeWriteIntent) -> Value {
-    json!({
-        "uid": intent.uid.to_string(),
-        "start_uid": intent.start_uid.to_string(),
-        "end_uid": intent.end_uid.to_string(),
-        "storage_partition_id": intent.storage_partition_id.clone().unwrap_or_default(),
-        "user_id": intent.contact_id.clone().unwrap_or_default(),
-        "scope": intent.scope,
-        "properties": intent.properties,
-    })
 }
 
 async fn insert_node_index(
-    store: &AgeGraphStore,
+    store: &PostgresGraphStore,
     conn: &mut PgConnection,
     intent: &NodeWriteIntent,
 ) -> Result<()> {
@@ -699,7 +725,7 @@ async fn insert_node_index(
 }
 
 fn runtime_ids_for_node(
-    store: &AgeGraphStore,
+    store: &PostgresGraphStore,
     intent: &NodeWriteIntent,
 ) -> Result<(Uuid, Option<Uuid>)> {
     if let Some(scope) = store.scope() {
@@ -711,12 +737,38 @@ fn runtime_ids_for_node(
             "tenant-owned graph nodes require tenant scope".to_string(),
         ));
     };
-    let tenant_id = Uuid::parse_str(storage_partition_id).map_err(|error| {
-        GraphError::Conflict(format!(
-            "storage partition `{storage_partition_id}` cannot be used as tenant_id: {error}"
-        ))
-    })?;
+    let tenant_id = parse_uuid(storage_partition_id, "storage partition", "tenant_id")?;
     Ok((tenant_id, None))
+}
+
+fn runtime_ids_from_parts(
+    store: &PostgresGraphStore,
+    storage_partition_id: Option<&str>,
+    contact_id: Option<&str>,
+    target: &str,
+) -> Result<(Uuid, Option<Uuid>)> {
+    if let Some(scope) = store.scope() {
+        return Ok((scope.tenant_id().0, scope.contact_id().map(|id| id.0)));
+    }
+
+    let Some(storage_partition_id) = storage_partition_id else {
+        return Err(GraphError::Conflict(format!(
+            "tenant-owned graph {target} require tenant scope"
+        )));
+    };
+    let tenant_id = parse_uuid(storage_partition_id, "storage partition", "tenant_id")?;
+    let contact_id = contact_id
+        .map(|value| parse_uuid(value, "contact", "contact_id"))
+        .transpose()?;
+    Ok((tenant_id, contact_id))
+}
+
+fn parse_uuid(value: &str, value_kind: &str, column: &str) -> Result<Uuid> {
+    Uuid::parse_str(value).map_err(|error| {
+        GraphError::Conflict(format!(
+            "{value_kind} `{value}` cannot be used as {column}: {error}"
+        ))
+    })
 }
 
 fn reference_count_from_properties(properties: &Value) -> i64 {
@@ -784,7 +836,7 @@ fn vector_item_from_intent(intent: &NodeWriteIntent) -> Result<Option<VectorItem
     }))
 }
 
-fn require_vector_store(store: &AgeGraphStore) -> Result<&dyn VectorStore> {
+fn require_vector_store(store: &PostgresGraphStore) -> Result<&dyn VectorStore> {
     store.vector().ok_or_else(|| {
         GraphError::Conflict("embedding provided but no vector store is configured".to_string())
     })
@@ -809,7 +861,7 @@ fn create_changelog(intent: &NodeWriteIntent, cause_change_id: Option<i64>) -> C
     }
 }
 
-fn mutation_actor(store: &AgeGraphStore) -> (Option<String>, String) {
+fn mutation_actor(store: &PostgresGraphStore) -> (Option<String>, String) {
     store
         .scope()
         .and_then(|scope| scope.contact_id())
@@ -829,8 +881,8 @@ fn hash_properties(properties: Option<&Value>) -> Result<String> {
 async fn fetch_stored_node(conn: &mut PgConnection, uid: Uuid) -> Result<Option<StoredNode>> {
     let row = sqlx::query(
         r#"
-        SELECT label, storage_partition_id, user_id, scope, pii_class, confidence,
-               valid_from, valid_to, properties_summary
+        SELECT label, storage_partition_id, user_id, scope, pii_class, valid_from,
+               valid_to, properties_summary
         FROM moa.node_index
         WHERE uid = $1
         FOR UPDATE
@@ -888,76 +940,6 @@ async fn fetch_current_supersession_target(
     }
 }
 
-async fn delete_age_node(conn: &mut PgConnection, label: NodeLabel, uid: Uuid) -> Result<()> {
-    let vertex_table = age_vertex_table(label);
-    for edge_label in EdgeLabel::ALL {
-        let sql = format!(
-            r#"
-            WITH victim AS (
-                SELECT id
-                FROM {vertex_table}
-                WHERE moa.age_property(properties, 'uid') =
-                      ('"' || $1 || '"')::ag_catalog.agtype
-            )
-            DELETE FROM {edge_table} edge_row
-            USING victim
-            WHERE edge_row.start_id = victim.id
-               OR edge_row.end_id = victim.id
-            "#,
-            edge_table = age_edge_table(edge_label),
-        );
-        sqlx::query(&sql)
-            .bind(uid.to_string())
-            .execute(&mut *conn)
-            .await?;
-    }
-
-    let sql = format!(
-        r#"
-        DELETE FROM {vertex_table}
-        WHERE moa.age_property(properties, 'uid') =
-              ('"' || $1 || '"')::ag_catalog.agtype
-        "#
-    );
-    sqlx::query(&sql)
-        .bind(uid.to_string())
-        .execute(conn)
-        .await?;
-    Ok(())
-}
-
-fn age_vertex_table(label: NodeLabel) -> &'static str {
-    match label {
-        NodeLabel::Entity => r#"moa_graph."Entity""#,
-        NodeLabel::Concept => r#"moa_graph."Concept""#,
-        NodeLabel::Decision => r#"moa_graph."Decision""#,
-        NodeLabel::Incident => r#"moa_graph."Incident""#,
-        NodeLabel::Lesson => r#"moa_graph."Lesson""#,
-        NodeLabel::Fact => r#"moa_graph."Fact""#,
-        NodeLabel::Source => r#"moa_graph."Source""#,
-        NodeLabel::Document => r#"moa_graph."Document""#,
-        NodeLabel::Chunk => r#"moa_graph."Chunk""#,
-        NodeLabel::ContactGroup => r#"moa_graph."ContactGroup""#,
-    }
-}
-
-fn age_edge_table(label: EdgeLabel) -> &'static str {
-    match label {
-        EdgeLabel::RelatesTo => r#"moa_graph."RELATES_TO""#,
-        EdgeLabel::DependsOn => r#"moa_graph."DEPENDS_ON""#,
-        EdgeLabel::OwnedBy => r#"moa_graph."OWNED_BY""#,
-        EdgeLabel::Supersedes => r#"moa_graph."SUPERSEDES""#,
-        EdgeLabel::Contradicts => r#"moa_graph."CONTRADICTS""#,
-        EdgeLabel::DerivedFrom => r#"moa_graph."DERIVED_FROM""#,
-        EdgeLabel::Contains => r#"moa_graph."CONTAINS""#,
-        EdgeLabel::MentionedIn => r#"moa_graph."MENTIONED_IN""#,
-        EdgeLabel::MemberOf => r#"moa_graph."MEMBER_OF""#,
-        EdgeLabel::Caused => r#"moa_graph."CAUSED""#,
-        EdgeLabel::LearnedFrom => r#"moa_graph."LEARNED_FROM""#,
-        EdgeLabel::AppliesTo => r#"moa_graph."APPLIES_TO""#,
-    }
-}
-
 fn stored_node_from_row(row: sqlx::postgres::PgRow) -> Result<StoredNode> {
     let label_text: String = row.try_get("label")?;
     let pii_class_text: String = row.try_get("pii_class")?;
@@ -967,7 +949,6 @@ fn stored_node_from_row(row: sqlx::postgres::PgRow) -> Result<StoredNode> {
         contact_id: row.try_get("user_id")?,
         scope: row.try_get("scope")?,
         pii_class: pii_class_text.parse()?,
-        confidence: row.try_get("confidence")?,
         valid_from: row.try_get("valid_from")?,
         valid_to: row.try_get("valid_to")?,
         properties_summary: row.try_get("properties_summary")?,
@@ -981,7 +962,6 @@ struct StoredNode {
     contact_id: Option<String>,
     scope: String,
     pii_class: PiiClass,
-    confidence: Option<f64>,
     valid_from: DateTime<Utc>,
     valid_to: Option<DateTime<Utc>>,
     properties_summary: Option<Value>,

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use moa_core::RlsContext;
 use moa_core::{ContactId, UserId};
-use moa_memory_graph::{AgeGraphStore, NodeIndexRow, NodeLabel, PiiClass};
+use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass, PostgresGraphStore};
 use moa_memory_ingest::{
     FactExtractor, IngestApplyReport, IngestCtx, SessionTurn, chunk_turn, fact_hash,
     ingest_turn_direct_with_ctx,
@@ -359,6 +359,7 @@ async fn resolve_fact_nodes(
 }
 
 async fn fetch_source_candidates(ctx: &IngestCtx, fact: &LedgerFact) -> Result<Vec<NodeIndexRow>> {
+    let storage_partition_id = runtime_storage_partition_id(fact);
     sqlx::query_as::<_, NodeIndexRow>(
         r#"
         SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
@@ -372,7 +373,7 @@ async fn fetch_source_candidates(ctx: &IngestCtx, fact: &LedgerFact) -> Result<V
         ORDER BY uid
         "#,
     )
-    .bind(fact.storage_partition_id.to_string())
+    .bind(storage_partition_id)
     .bind(fact.source_session_id.to_string())
     .bind(fact.source_turn_seq.to_string())
     .fetch_all(&ctx.pool)
@@ -384,6 +385,7 @@ async fn fetch_tenant_fact_candidates(
     ctx: &IngestCtx,
     fact: &LedgerFact,
 ) -> Result<Vec<NodeIndexRow>> {
+    let storage_partition_id = runtime_storage_partition_id(fact);
     sqlx::query_as::<_, NodeIndexRow>(
         r#"
         SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
@@ -395,10 +397,14 @@ async fn fetch_tenant_fact_candidates(
         ORDER BY uid
         "#,
     )
-    .bind(fact.storage_partition_id.to_string())
+    .bind(storage_partition_id)
     .fetch_all(&ctx.pool)
     .await
     .map_err(EvalError::from)
+}
+
+fn runtime_storage_partition_id(fact: &LedgerFact) -> String {
+    tenant_id_from_storage_partition_id(&fact.storage_partition_id).to_string()
 }
 
 fn match_by_hash(candidates: &[NodeIndexRow], hashes: &BTreeSet<String>) -> Vec<NodeIndexRow> {
@@ -664,7 +670,7 @@ fn ingest_ctx_for_turn(base: &IngestCtx, turn: &SessionTurn) -> IngestCtx {
         scope.clone(),
     ));
     let graph = Arc::new(
-        AgeGraphStore::scoped_for_app_role(base.pool.clone(), scope)
+        PostgresGraphStore::scoped_for_app_role(base.pool.clone(), scope)
             .with_vector_store(vector.clone()),
     );
     IngestCtx::new(

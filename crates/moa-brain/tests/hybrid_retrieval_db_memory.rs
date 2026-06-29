@@ -8,7 +8,8 @@ use moa_core::RlsContext;
 use moa_core::{ContactId, SessionId, TenantId};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
-    AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
+    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
+    PostgresGraphStore,
 };
 use moa_memory_ingest::{
     ExtractedFact, ExtractedFactScopeHint, IngestCtx, RrfPlusJudgeDetector, ScriptedFactExtractor,
@@ -93,7 +94,7 @@ async fn query_retrieval_ctx_defaults_reranker_off_and_requires_explicit_opt_in(
         PgvectorStore::new_for_app_role(pool.clone(), scope_context.clone()),
     );
     let graph: Arc<dyn GraphStore> = Arc::new(
-        AgeGraphStore::scoped_for_app_role(pool.clone(), scope_context)
+        PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_context)
             .with_vector_store(vector.clone()),
     );
     let hybrid = Arc::new(
@@ -171,16 +172,20 @@ fn utc(value: &str) -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
-fn graph_store(pool: &PgPool, storage_partition_id: &str) -> AgeGraphStore {
+fn graph_store(pool: &PgPool, storage_partition_id: &str) -> PostgresGraphStore {
     let scope = tenant_scope(storage_partition_id);
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
-    AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
+    PostgresGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
 }
 
-fn user_graph_store(pool: &PgPool, storage_partition_id: &str, user_id: &str) -> AgeGraphStore {
+fn user_graph_store(
+    pool: &PgPool,
+    storage_partition_id: &str,
+    user_id: &str,
+) -> PostgresGraphStore {
     let scope = contact_scope(storage_partition_id, user_id);
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
-    AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
+    PostgresGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
 }
 
 fn scripted_user_fact(summary: &str) -> ExtractedFact {
@@ -528,7 +533,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
         workspace_scope.clone(),
     ));
     let ingest_graph = Arc::new(
-        AgeGraphStore::scoped_for_app_role(pool.clone(), workspace_scope)
+        PostgresGraphStore::scoped_for_app_role(pool.clone(), workspace_scope)
             .with_vector_store(ingest_vector.clone()),
     );
     let summary = "The user prefers the private green deployment dashboard";

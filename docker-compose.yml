@@ -7,9 +7,8 @@ services:
       context: .
       dockerfile: docker/postgres/Dockerfile
       args:
-        AGE_REF: release/PG17/1.7.0
         PGVECTOR_REF: v0.8.2
-    image: moa-postgres-age:pg17-age1.7.0
+    image: moa-postgres:pg17-pgvector0.8.2-pgaudit
     container_name: moa-postgres
     restart: unless-stopped
     environment:
@@ -19,9 +18,7 @@ services:
     command:
       - postgres
       - -c
-      - shared_preload_libraries=age,pgaudit
-      - -c
-      - session_preload_libraries=age
+      - shared_preload_libraries=pgaudit
       - -c
       - wal_level=logical
       - -c

@@ -17,7 +17,8 @@ use moa_core::{
     ContactId, MemoryDigestConfig, UserId, config::MemoryExtractionConfig,
     traits::EmbeddingProvider,
 };
-use moa_memory_graph::{AgeGraphStore, GraphStore, NodeIndexRow, PiiClass};
+use moa_db::ScopedConn;
+use moa_memory_graph::{GraphStore, NodeIndexRow, PiiClass, PostgresGraphStore};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, DeterministicEntityMergeVerifier,
     EXTRACTION_PROMPT_VERSION, EmbeddedFact, EntityMergeFixtureRecord, EntityMergeVerifier,
@@ -29,7 +30,7 @@ use moa_memory_ingest::{
 use moa_memory_lifecycle::{ConsolidationOptions, ConsolidationOutcome, beta_smoothed_quality};
 use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan, redact_text};
 use moa_memory_types::{MemoryScope, ScopeTier};
-use moa_memory_vector::{PgvectorStore, VectorStore};
+use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorStore};
 use moa_providers::{
     COHERE_DEFAULT_RERANK_MODEL, CohereReranker, CohereV4Embedder, NoopReranker, RerankHit,
     Reranker,
@@ -461,6 +462,12 @@ async fn run_memory_retrieval_eval_in_store(
 ) -> Result<MemoryRetrievalEvalReport> {
     cleanup_eval_graph_rows(store.pool(), &corpus.ledger).await?;
     let providers = options.providers_for_corpus(&corpus).await?;
+    seed_eval_storage_partition_embedder_state(
+        store.pool(),
+        &corpus.ledger,
+        providers.embedder.as_ref(),
+    )
+    .await?;
     let ingest_ctx = store.ingest_ctx(
         providers.embedder.clone(),
         providers.extractor.clone(),
@@ -982,7 +989,10 @@ pub(crate) async fn cleanup_eval_graph_rows(pool: &PgPool, ledger: &[LedgerFact]
     if storage_partition_ids.is_empty() {
         return Ok(());
     }
-    cleanup_eval_age_rows(pool, &storage_partition_ids).await?;
+    sqlx::query("DELETE FROM moa.edge_index WHERE storage_partition_id = ANY($1)")
+        .bind(&storage_partition_ids)
+        .execute(pool)
+        .await?;
     sqlx::query("DELETE FROM moa.embeddings WHERE storage_partition_id = ANY($1)")
         .bind(&storage_partition_ids)
         .execute(pool)
@@ -1018,57 +1028,55 @@ pub(crate) async fn cleanup_eval_graph_rows(pool: &PgPool, ledger: &[LedgerFact]
     Ok(())
 }
 
-async fn cleanup_eval_age_rows(pool: &PgPool, storage_partition_ids: &[String]) -> Result<()> {
-    for label in AGE_EDGE_LABELS {
-        cleanup_eval_age_table(pool, label, storage_partition_ids).await?;
-    }
-    for label in AGE_NODE_LABELS {
-        cleanup_eval_age_table(pool, label, storage_partition_ids).await?;
-    }
-    Ok(())
-}
-
-async fn cleanup_eval_age_table(
+async fn seed_eval_storage_partition_embedder_state(
     pool: &PgPool,
-    label: &str,
-    storage_partition_ids: &[String],
+    ledger: &[LedgerFact],
+    embedder: &dyn EmbeddingProvider,
 ) -> Result<()> {
-    let sql = format!(
-        r#"
-        DELETE FROM moa_graph."{label}"
-        WHERE trim(both '"' from moa.age_property(properties, 'storage_partition_id')::text) = $1
-        "#
-    );
-    for storage_partition_id in storage_partition_ids {
-        sqlx::query(&sql)
-            .bind(storage_partition_id)
-            .execute(pool)
+    for storage_partition_id in eval_storage_partition_ids(ledger) {
+        seed_eval_storage_partition_embedder_state_row(pool, &storage_partition_id, embedder)
             .await?;
     }
     Ok(())
 }
 
-const AGE_NODE_LABELS: &[&str] = &[
-    "Entity", "Concept", "Decision", "Incident", "Lesson", "Fact", "Source",
-];
-
-const AGE_EDGE_LABELS: &[&str] = &[
-    "RELATES_TO",
-    "DEPENDS_ON",
-    "OWNED_BY",
-    "SUPERSEDES",
-    "CONTRADICTS",
-    "DERIVED_FROM",
-    "MENTIONED_IN",
-    "CAUSED",
-    "LEARNED_FROM",
-    "APPLIES_TO",
-];
+async fn seed_eval_storage_partition_embedder_state_row(
+    pool: &PgPool,
+    storage_partition_id: &str,
+    embedder: &dyn EmbeddingProvider,
+) -> Result<()> {
+    let scope = RlsContext::tenant(tenant_id_from_storage_partition(storage_partition_id));
+    let mut conn = ScopedConn::begin(pool, &scope).await?;
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(conn.as_mut())
+        .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.storage_partition_state
+            (storage_partition_id, embedding_model, embedding_model_version, embedding_dimension)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (storage_partition_id) DO UPDATE
+            SET embedding_model = EXCLUDED.embedding_model,
+                embedding_model_version = EXCLUDED.embedding_model_version,
+                embedding_dimension = EXCLUDED.embedding_dimension,
+                reembed_state = 'steady',
+                updated_at = now()
+        "#,
+    )
+    .bind(storage_partition_id)
+    .bind(embedder.model_id())
+    .bind(embedder.model_version())
+    .bind(VECTOR_DIMENSION as i32)
+    .execute(conn.as_mut())
+    .await?;
+    conn.commit().await?;
+    Ok(())
+}
 
 fn eval_storage_partition_ids(ledger: &[LedgerFact]) -> Vec<String> {
     ledger
         .iter()
-        .map(|fact| fact.storage_partition_id.to_string())
+        .map(|fact| tenant_id_from_storage_partition_id(&fact.storage_partition_id).to_string())
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -1178,7 +1186,7 @@ async fn retrieve_probe(
         vector_store = vector_store.with_exact_search(true);
     }
     let vector: Arc<dyn VectorStore> = Arc::new(vector_store);
-    let graph_store = AgeGraphStore::scoped_for_app_role(pool.clone(), scope_context)
+    let graph_store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_context)
         .with_vector_store(vector.clone());
     let graph: Arc<dyn GraphStore> = Arc::new(graph_store);
     let hybrid = Arc::new(
@@ -2179,7 +2187,7 @@ impl IsolatedEvalStore {
             scope.clone(),
         ));
         let graph = Arc::new(
-            AgeGraphStore::scoped_for_app_role(self.pool().clone(), scope)
+            PostgresGraphStore::scoped_for_app_role(self.pool().clone(), scope)
                 .with_vector_store(vector.clone()),
         );
         let entity_resolver = EntityResolver::for_app_role(entity_merge_verifier);
@@ -2291,7 +2299,52 @@ mod tests {
     use crate::memory_eval::{
         CorpusProfile, generate_memory_eval_corpus, write_memory_eval_corpus,
     };
-    use moa_core::StoragePartitionId;
+    use moa_core::{SessionId, StoragePartitionId};
+
+    #[derive(Debug)]
+    struct PrDeterministicEmbedder;
+
+    #[async_trait]
+    impl EmbeddingProvider for PrDeterministicEmbedder {
+        fn model_id(&self) -> &str {
+            "memory-eval-deterministic-sha256-v1"
+        }
+
+        fn dimensions(&self) -> usize {
+            VECTOR_DIMENSION
+        }
+
+        fn model_version(&self) -> i32 {
+            7
+        }
+
+        async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+            Ok(vec![vec![0.0; VECTOR_DIMENSION]; inputs.len()])
+        }
+    }
+
+    fn ledger_fact(storage_partition_id: StoragePartitionId, fact_id: &str) -> LedgerFact {
+        LedgerFact {
+            storage_partition_id,
+            user_id: UserId::new("user"),
+            scope: ScopeTier::Tenant,
+            fact_id: fact_id.to_string(),
+            valid_from: Utc::now(),
+            valid_to: None,
+            subject: "eval".to_string(),
+            predicate: "uses_embedder".to_string(),
+            object: "deterministic".to_string(),
+            answer: "Eval uses the deterministic embedder.".to_string(),
+            supersedes: Vec::new(),
+            restates: None,
+            prior_uses: None,
+            prior_successes: None,
+            source_session_id: SessionId::new(),
+            source_turn_seq: 1,
+            pii_class: PiiClass::None,
+            expected_redacted: false,
+        }
+    }
 
     #[test]
     fn live_lane_refuses_to_start_without_credentials() {
@@ -2438,5 +2491,67 @@ mod tests {
 
         assert_eq!(live.embeddings.len(), 0);
         assert!(error.to_string().contains("embeddings.jsonl"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MOA_DATABASE_URL and local Postgres"]
+    async fn eval_seed_sets_pr_embedder_state_before_ingestion_db_memory() {
+        // Pins: eval ingestion partitions are configured to the active PR embedder before vector writes.
+        let store = IsolatedEvalStore::create()
+            .await
+            .expect("create isolated eval store");
+        let storage_partition_a =
+            StoragePartitionId::new(format!("memory-eval-pr-seed-a-{}", Uuid::now_v7()));
+        let storage_partition_b =
+            StoragePartitionId::new(format!("memory-eval-pr-seed-b-{}", Uuid::now_v7()));
+        let ledger = vec![
+            ledger_fact(storage_partition_a.clone(), "fact-a"),
+            ledger_fact(storage_partition_b.clone(), "fact-b"),
+            ledger_fact(storage_partition_b.clone(), "fact-b-duplicate-partition"),
+        ];
+
+        seed_eval_storage_partition_embedder_state(store.pool(), &ledger, &PrDeterministicEmbedder)
+            .await
+            .expect("seed eval storage partition state");
+
+        let storage_partition_ids = vec![
+            tenant_id_from_storage_partition_id(&storage_partition_a).to_string(),
+            tenant_id_from_storage_partition_id(&storage_partition_b).to_string(),
+        ];
+        let rows = sqlx::query(
+            r#"
+            SELECT storage_partition_id, embedding_model, embedding_model_version, embedding_dimension
+            FROM moa.storage_partition_state
+            WHERE storage_partition_id = ANY($1)
+            ORDER BY storage_partition_id ASC
+            "#,
+        )
+        .bind(&storage_partition_ids)
+        .fetch_all(store.pool())
+        .await
+        .expect("read seeded storage partition state");
+
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            let model: String = row.try_get("embedding_model").expect("model column");
+            let version: i32 = row
+                .try_get("embedding_model_version")
+                .expect("model version column");
+            let dimension: i32 = row
+                .try_get("embedding_dimension")
+                .expect("embedding dimension column");
+            assert_eq!(model, "memory-eval-deterministic-sha256-v1");
+            assert_ne!(model, "cohere-embed-v4");
+            assert_ne!(model, "embed-v4.0");
+            assert_eq!(version, 7);
+            assert_eq!(dimension, VECTOR_DIMENSION as i32);
+        }
+
+        sqlx::query("DELETE FROM moa.storage_partition_state WHERE storage_partition_id = ANY($1)")
+            .bind(&storage_partition_ids)
+            .execute(store.pool())
+            .await
+            .expect("delete seeded storage partition state rows");
+        store.cleanup().await.expect("cleanup isolated eval store");
     }
 }

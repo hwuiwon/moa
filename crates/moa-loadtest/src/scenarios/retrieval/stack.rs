@@ -42,7 +42,7 @@ impl Stack {
                 self.pool.clone(),
                 scope.clone(),
             ));
-            let graph = AgeGraphStore::scoped_for_app_role(self.pool.clone(), scope)
+            let graph = PostgresGraphStore::scoped_for_app_role(self.pool.clone(), scope)
                 .with_vector_store(vector);
 
             let fact_texts = (0..cfg.facts_per_tenant)
@@ -130,7 +130,7 @@ impl TenantRetriever {
             scope_ctx.clone(),
         ));
         let graph = Arc::new(
-            AgeGraphStore::scoped_for_app_role(pool.clone(), scope_ctx)
+            PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_ctx)
                 .with_vector_store(vector.clone()),
         );
         let hybrid = HybridRetriever::new(pool.clone(), graph, vector).with_assume_app_role(true);

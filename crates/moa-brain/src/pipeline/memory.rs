@@ -14,7 +14,7 @@ use moa_core::{
     MoaError, NullLineageHandle, ProcessorOutput, QueryRewriteResult, Result, WorkingContext,
     traits::EmbeddingProvider,
 };
-use moa_memory_graph::{AgeGraphStore, GraphStore, PiiClass};
+use moa_memory_graph::{GraphStore, PiiClass, PostgresGraphStore};
 use moa_memory_types::{MemoryScope, ScopeTier};
 use moa_memory_vector::{PgvectorStore, VectorStore};
 use sqlx::PgPool;
@@ -136,9 +136,9 @@ impl ScopedRetrievalRuntimeFactory for PostgresScopedRetrievalRuntimeFactory {
             Arc::new(PgvectorStore::new(pool.clone(), scope_context.clone()))
         };
         let graph_store = if assume_app_role {
-            AgeGraphStore::scoped_for_app_role(pool.clone(), scope_context)
+            PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_context)
         } else {
-            AgeGraphStore::scoped(pool.clone(), scope_context)
+            PostgresGraphStore::scoped(pool.clone(), scope_context)
         }
         .with_vector_store(vector.clone());
         let graph: Arc<dyn GraphStore> = Arc::new(graph_store);

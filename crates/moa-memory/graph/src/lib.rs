@@ -1,21 +1,19 @@
-//! Graph-memory store, AGE templates, and SQL sidecar helpers.
+//! Graph-memory store, relational graph tables, and SQL sidecar helpers.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-pub mod age;
 pub mod changelog;
-pub mod cypher;
 pub mod edge;
 pub mod error;
 pub mod lexical;
 pub mod node;
 pub mod read;
+pub mod store;
 pub mod validity;
 pub mod write;
 
-pub use age::AgeGraphStore;
 pub use changelog::{ChangelogRecord, write_and_bump};
 pub use edge::{EdgeLabel, EdgeWriteIntent};
 pub use error::GraphError;
@@ -24,6 +22,7 @@ pub use node::{
     ExistingSupersessionIntent, NodeEmbeddingIntent, NodeIndexRow, NodeLabel,
     NodePropertyUpdateIntent, NodeWriteIntent, PiiClass, bump_last_accessed, lookup_seed_by_name,
 };
+pub use store::PostgresGraphStore;
 pub use validity::push_validity_filter;
 pub use write::{
     close_existing_node_with_supersession, update_node_properties, upsert_node_embedding,
@@ -51,7 +50,7 @@ pub struct GraphExpansionHit {
     pub edges: Vec<EdgeLabel>,
 }
 
-/// Canonical graph-memory storage interface.
+/// Canonical graph-memory persistence interface.
 #[async_trait]
 pub trait GraphStore: Send + Sync {
     /// Creates a new node, sidecar projection, and changelog row in one transaction.
@@ -77,7 +76,7 @@ pub trait GraphStore: Send + Sync {
     /// Soft-invalidates a node by setting its validity end and invalidation metadata.
     async fn invalidate_node(&self, uid: Uuid, reason: &str) -> Result<()>;
 
-    /// Hard-purges a node from AGE and sidecar tables, preserving an erase changelog marker.
+    /// Hard-purges a node from graph tables, preserving an erase changelog marker.
     async fn hard_purge(&self, uid: Uuid, redaction_marker: &str) -> Result<()>;
 
     /// Creates an edge between two nodes.
@@ -95,7 +94,7 @@ pub trait GraphStore: Send + Sync {
         as_of: Option<DateTime<Utc>>,
     ) -> Result<Vec<NodeIndexRow>>;
 
-    /// Expands a batch of seed nodes and returns shortest directed labeled paths to visible nodes.
+    /// Expands a batch of seed nodes and returns bounded shortest labeled paths to visible nodes.
     async fn expand_seeds(
         &self,
         seeds: &[Uuid],

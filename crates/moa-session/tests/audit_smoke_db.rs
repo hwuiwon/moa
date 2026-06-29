@@ -30,7 +30,13 @@ async fn pgaudit_migration_configures_labels_when_provider_loaded_and_auditor_vi
     sqlx::query(&format!("CREATE SCHEMA {quoted_schema}"))
         .execute(&pool)
         .await?;
-    for table in ["node_index", "embeddings", "graph_changelog", "label_probe"] {
+    for table in [
+        "node_index",
+        "edge_index",
+        "embeddings",
+        "graph_changelog",
+        "label_probe",
+    ] {
         sqlx::query(&format!(
             "CREATE TABLE {quoted_schema}.{} (created_at timestamptz NOT NULL DEFAULT now())",
             quote_identifier(table)
@@ -64,7 +70,7 @@ async fn pgaudit_migration_configures_labels_when_provider_loaded_and_auditor_vi
           ON l.objoid = c.oid
          AND l.provider = 'pgaudit'
         WHERE n.nspname = $1
-          AND c.relname IN ('node_index', 'embeddings', 'graph_changelog')
+          AND c.relname IN ('node_index', 'edge_index', 'embeddings', 'graph_changelog')
         ORDER BY c.relname
         "#,
     )
@@ -72,7 +78,7 @@ async fn pgaudit_migration_configures_labels_when_provider_loaded_and_auditor_vi
     .fetch_all(&pool)
     .await?;
 
-    assert_eq!(rows.len(), 3, "expected all PHI tables to exist");
+    assert_eq!(rows.len(), 4, "expected all PHI tables to exist");
     for row in &rows {
         let relname = row.try_get::<String, _>("relname")?;
         let label = row.try_get::<Option<String>, _>("label")?;

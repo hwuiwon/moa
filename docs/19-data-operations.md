@@ -1,35 +1,36 @@
 # 19 - Data Operations
 
-_Postgres extensions, graph changelog replication, pgaudit retention, and the
-PII sidecar._
+_Postgres extensions, relational graph changelog replication, pgaudit
+retention, and the PII sidecar._
 
-## Apache AGE And Local Postgres
+## Local Postgres Extensions
 
-MOA's local Postgres image is built on the Postgres 17 line and pins:
+MOA's graph memory uses ordinary Postgres tables: nodes in `moa.node_index`,
+edges in `moa.edge_index`, sidecar rows, and `moa.graph_changelog`. Standard
+managed Postgres is sufficient for graph storage.
 
-- Apache AGE `release/PG17/1.7.0`;
-- pgvector `v0.8.2`;
+The local Postgres service is built on the Postgres 17 line and pins:
+
+- pgvector `v0.8.2` when the pgvector vector backend is enabled;
 - Debian `postgresql-17-pgaudit`.
 
-Build and start the local database:
+Start the local database:
 
 ```bash
-docker compose build postgres
 docker compose up -d postgres
 ```
 
-The compose service starts Postgres with:
+When pgaudit is enabled, Postgres must preload it:
 
 ```text
-shared_preload_libraries=age,pgaudit
-session_preload_libraries=age
+shared_preload_libraries=pgaudit
 ```
 
-AGE still requires transaction-local search path setup for Cypher. MOA's
-`ScopedConn` installs `search_path = ag_catalog, "$user", public` alongside
-tenant row-level-security GUCs before tenant queries run. The tenant is the
-hard runtime isolation boundary; deployment maintenance reads must use an
-explicit control-plane scope instead of the default tenant connection.
+Graph queries do not require a graph-specific extension or transaction-local
+search-path setup. MOA's `ScopedConn` installs tenant row-level-security GUCs
+before tenant queries run. The tenant is the hard runtime isolation boundary;
+deployment maintenance reads must use an explicit control-plane scope instead
+of the default tenant connection.
 
 ## Graph Changelog Replication
 

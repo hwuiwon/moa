@@ -7,7 +7,6 @@ cohere
 fly.io
 aws
 pgvector
-apache age
 memory graph
 session store
 workspace state

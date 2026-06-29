@@ -4,7 +4,7 @@ use moa_core::RlsContext;
 use moa_core::{ContactId, StoragePartitionId, TenantId};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
-    AgeGraphStore, ChangelogRecord, write::hard_purge_with_audit, write_and_bump,
+    ChangelogRecord, PostgresGraphStore, write::hard_purge_with_audit, write_and_bump,
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -139,9 +139,9 @@ fn erase_graph_store(
     pool: &PgPool,
     tenant_id: TenantId,
     subject_user_id: &str,
-) -> Result<AgeGraphStore> {
+) -> Result<PostgresGraphStore> {
     let scope = contact_scope_from_subject(tenant_id, subject_user_id)?;
-    Ok(AgeGraphStore::scoped_for_app_role(pool.clone(), scope))
+    Ok(PostgresGraphStore::scoped_for_app_role(pool.clone(), scope))
 }
 
 fn contact_scope_from_subject(tenant_id: TenantId, subject_user_id: &str) -> Result<RlsContext> {

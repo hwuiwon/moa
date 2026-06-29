@@ -16,7 +16,7 @@ curl -sS "$MOA_EDGE_URL/v1/privacy/erase" \
 ```
 
 Use `"dry_run": true` first to list the candidate count and a sample of node ids
-without writing graph, embedding, approval-JTI, or changelog rows.
+without writing graph, vector, approval-JTI, or changelog rows.
 
 For agent-facing contacts, set `subject_user_id` to either the contact UUID or
 `contact:<contact-uuid>`. Contact erasure always requires an explicit
@@ -46,13 +46,13 @@ non-dry-run erasures with matching candidates, it records the JTI in
 
 ## What gets erased
 
-For every active `moa.node_index` row in the authenticated tenant whose `user_id` or
-`properties_summary.user_id` matches the subject, MOA calls the graph
-hard-purge path. That path deletes:
+For every active `moa.node_index` row in the authenticated tenant whose
+`user_id` or `properties_summary.user_id` matches the subject, MOA calls the
+graph hard-purge path. That path deletes:
 
-- the AGE vertex and attached edges
-- the `moa.node_index` sidecar row
-- associated `moa.embeddings` rows
+- the matching `moa.node_index` graph node row
+- attached relational edge rows in `moa.edge_index`
+- associated vector records, including `moa.embeddings` rows for pgvector-backed tenants
 
 The operation does not decrypt data and has no crypto-shred mode. ADR 0001
 deferred envelope encryption; erasure is hard-purge only.
@@ -67,10 +67,11 @@ enumeration. Linked contact deletion is never implicit; it only happens when
 
 ## Audit trail
 
-Each purged node leaves a redacted `op='erase'` changelog row with a redaction
-marker and an audit metadata object containing the reason, approver id, approval
-token JTI, and subject user id. After at least one node is erased,
-the API writes one summary `op='erase'` row targeting the subject user.
+Each purged node leaves a redacted `op='erase'` changelog row in
+`moa.graph_changelog` with a redaction marker and an audit metadata object
+containing the reason, approver id, approval token JTI, and subject user id.
+After at least one node is erased, the API writes one summary `op='erase'` row
+targeting the subject user.
 
 Re-running after all matching nodes are gone returns `erased_count: 0` and writes
 no new changelog rows.

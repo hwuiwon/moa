@@ -26,7 +26,7 @@ use moa_brain::{
 use moa_core::RlsContext;
 use moa_core::{StoragePartitionId, TenantId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
-use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_providers::CohereV4Embedder;
@@ -98,7 +98,7 @@ pub async fn run_perf_gate(cfg: PerfGateConfig) -> Result<()> {
 
 async fn run_perf_gate_inner(cfg: &PerfGateConfig, metrics: &PrometheusHandle) -> Result<()> {
     let database_url = std::env::var("MOA_DATABASE_URL")
-        .context("MOA_DATABASE_URL is required for perf_gate Postgres/AGE/pgvector access")?;
+        .context("MOA_DATABASE_URL is required for perf_gate Postgres/pgvector access")?;
     let api_key = std::env::var("MOA_COHERE_API_KEY")
         .context("MOA_COHERE_API_KEY is required for perf_gate embeddings")?;
     let embedder = Arc::new(CohereV4Embedder::new(api_key)?);

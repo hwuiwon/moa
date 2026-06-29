@@ -23,7 +23,7 @@ Product data in Postgres / Neon
   sessions, events, pending_signals, context_snapshots
   task_segments, experience_records, experience_attributions,
   learning_candidates, segment and strategy materialized views
-  graph nodes, graph edges, sidecar indexes, pgvector embeddings
+  graph nodes, graph edges, sidecar indexes, configured vector records
   knowledge connections, sync runs, document versions, chunks
   learning_log
   analytics.turn_lineage, analytics.score_run, analytics.scores,
@@ -263,7 +263,7 @@ policy.
 | Live behavior experiments | Postgres | `moa.experiment_run`, `moa.experiment_run_artifact_revision`, and linked `analytics.score_run` rows |
 | Tenant knowledge base | Postgres | `moa-knowledge` owns linked connections, sync runs, ingestion steps, document versions, blocks, chunks, and provider event state; `moa-memory-*` owns the resulting graph/vector storage |
 | Graph memory | Postgres | Nodes, edges, sidecar indexes, changelog, and RLS-protected scope state |
-| Memory vectors | Postgres | pgvector embeddings for graph retrieval |
+| Memory vectors | Postgres or configured vector backend | pgvector embeddings or Turbopuffer namespaces for graph retrieval; graph storage remains relational Postgres |
 | Skill packages | Postgres | `moa.artifact`, `moa.artifact_revision`, and `moa.artifact_file` store tenant-owned skill documents and package bytes; generated tenant updates first land as tenant-scoped draft skill artifacts plus proposed `learning_candidates` and only become active after review acceptance |
 | Learning audit | Postgres | `learning_log` append-only rows with bitemporal validity |
 | Hand leases | Postgres | `moa.hand_leases` stores session/provider sandbox bindings, serialized handles, generation fencing, status, and expiry for cross-pod reuse and cleanup |
@@ -460,10 +460,10 @@ and replay resistance on the verify path.
 | `moa-brain` | Context pipeline, query rewrite, segment helpers, segment assessment |
 | `moa-session` | Postgres session store, event log, task segments, learning log |
 | `moa-knowledge` | Tenant knowledge linked connectors, provider sync, parsing, block/chunk derivation, sync-run inspection, and high-level graph ingestion assembly |
-| `moa-memory/graph` (`moa-memory-graph`) | Graph-memory SQL sidecars, RLS, changelog, and AGE projection helpers |
+| `moa-memory/graph` (`moa-memory-graph`) | Relational graph-memory node and edge tables, SQL sidecars, RLS, and changelog |
 | `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path graph ingestion and fast memory write APIs |
 | `moa-memory/pii` (`moa-memory-pii`) | PII classification and privacy helpers |
-| `moa-memory/vector` (`moa-memory-vector`) | Graph-memory vector storage abstraction and pgvector backend |
+| `moa-memory/vector` (`moa-memory-vector`) | Graph-memory vector storage abstraction, pgvector backend, and Turbopuffer backend |
 | `moa-lineage/core` (`moa-lineage-core`) | Lineage records and score record types |
 | `moa-lineage/citation` (`moa-lineage-citation`) | Provider citation normalization and answer-source verification |
 | `moa-lineage/sink` (`moa-lineage-sink`) | Async lineage sink writers |

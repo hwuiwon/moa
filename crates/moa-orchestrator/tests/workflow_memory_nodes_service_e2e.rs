@@ -26,7 +26,7 @@ include!("workflow_execution_support/common.rs");
 include!("workflow_execution_support/memory.rs");
 
 #[tokio::test]
-#[ignore = "requires a local restate-server, Postgres, OpenFGA, AGE, and pgvector"]
+#[ignore = "requires a local restate-server, Postgres, OpenFGA, and pgvector"]
 async fn workflow_memory_read_respects_contact_scope_service_e2e() -> Result<()> {
     // Pins: workflow MemoryRead nodes execute through the scoped Memory service adapter.
     let _guard = RESTATE_E2E_LOCK.lock().await;
@@ -89,7 +89,7 @@ async fn workflow_memory_read_respects_contact_scope_service_e2e() -> Result<()>
 }
 
 #[tokio::test]
-#[ignore = "requires a local restate-server, Postgres, OpenFGA, AGE, and pgvector"]
+#[ignore = "requires a local restate-server, Postgres, OpenFGA, and pgvector"]
 async fn workflow_memory_write_records_scoped_fact_service_e2e() -> Result<()> {
     // Pins: workflow MemoryWrite nodes execute through graph-memory ingestion with provenance.
     let _guard = RESTATE_E2E_LOCK.lock().await;

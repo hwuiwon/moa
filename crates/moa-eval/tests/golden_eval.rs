@@ -19,7 +19,7 @@ use moa_core::RlsContext;
 use moa_core::{ContactId, SessionId, TenantId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_eval::golden::comparator::dump_traces;
-use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, PiiClass, cypher};
+use moa_memory_graph::{GraphStore, NodeLabel, PiiClass, PostgresGraphStore};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, FastPathCtx,
     FastRememberRequest, IngestCtx, IngestError, SessionTurn, fast_remember,
@@ -162,7 +162,7 @@ impl GoldenStack {
         let scope = RlsContext::tenant(tenant_id);
         let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
         let graph = Arc::new(
-            AgeGraphStore::scoped_for_app_role(pool.clone(), scope.clone())
+            PostgresGraphStore::scoped_for_app_role(pool.clone(), scope.clone())
                 .with_vector_store(vector.clone()),
         );
         seed_tenant_embedder_state(&pool, &scope, tenant_uuid).await?;
@@ -419,7 +419,7 @@ impl RetrievalHarness {
             scope_ctx.clone(),
         ));
         let graph = Arc::new(
-            AgeGraphStore::scoped_for_app_role(stack.pool.clone(), scope_ctx)
+            PostgresGraphStore::scoped_for_app_role(stack.pool.clone(), scope_ctx)
                 .with_vector_store(vector.clone()),
         );
         let hybrid = HybridRetriever::new(stack.pool.clone(), graph.clone(), vector)
@@ -673,15 +673,23 @@ async fn supersedes_edge_count(
     let mut count = 0_i64;
     for (old_uid, new_uid) in pairs {
         let mut conn = scoped_conn(pool, storage_partition_id).await?;
-        let row = cypher::edge::SUPERSEDES_EXISTS
-            .execute(&serde_json::json!({
-                "old_uid": old_uid.to_string(),
-                "new_uid": new_uid.to_string(),
-            }))
-            .fetch_optional(conn.as_mut())
-            .await?;
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS ( \
+                 SELECT 1 \
+                 FROM moa.edge_index \
+                 WHERE label = 'SUPERSEDES' \
+                   AND start_uid = $1 \
+                   AND end_uid = $2 \
+                   AND storage_partition_id = $3 \
+             )",
+        )
+        .bind(new_uid)
+        .bind(old_uid)
+        .bind(storage_partition_id.to_string())
+        .fetch_one(conn.as_mut())
+        .await?;
         conn.commit().await.map_err(box_error)?;
-        if row.is_some() {
+        if exists {
             count += 1;
         }
     }

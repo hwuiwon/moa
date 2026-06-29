@@ -26,7 +26,7 @@ the default retrieval path uses tenant knowledge only.
 | Linked-account domain, provider sync, parser abstraction, normalization, block/chunk identity, sync-run inspection | `moa-knowledge` |
 | Restate service and workflow binding | `moa-orchestrator` |
 | Public HTTP route translation | `moa-edge` |
-| Graph labels, graph writes, SQL sidecars, and AGE projection | `moa-memory-graph` |
+| Graph labels, relational node/edge writes, SQL sidecars, and changelog rows | `moa-memory-graph` |
 | Embeddings and vector rows | `moa-memory-vector` |
 | Privacy classification and redaction | `moa-memory-pii` |
 | Retrieval fusion and context assembly | `moa-brain` |

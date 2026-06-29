@@ -11,12 +11,12 @@ pub mod sink;
 
 pub use ids::{LineageRecordId, TurnId};
 pub use records::{
-    AclFilterDecision, AgeIntrospection, BackendIntrospection, Citation, CitationLineage,
-    ContextChunk, ContextLineage, DecisionKind, DecisionRecord, FusedHit, GenerationLineage,
-    GenerationTokenUsage, GraphPath, LineageEvent, PgvectorIntrospection, PiiRedactionDecision,
-    PrivacyEraseDecision, PrivacyExportDecision, RecordKind, RerankHit, RetrievalLineage,
-    RetrievalSelectedHit, RetrievalStage, ScopeEnforcementDecision, ScoreRecord, ScoreSource,
-    ScoreTarget, ScoreValue, StageTimings, ToolCallSummary, TruncationEvent,
+    AclFilterDecision, BackendIntrospection, Citation, CitationLineage, ContextChunk,
+    ContextLineage, DecisionKind, DecisionRecord, FusedHit, GenerationLineage,
+    GenerationTokenUsage, GraphIntrospection, GraphPath, LineageEvent, PgvectorIntrospection,
+    PiiRedactionDecision, PrivacyEraseDecision, PrivacyExportDecision, RecordKind, RerankHit,
+    RetrievalLineage, RetrievalSelectedHit, RetrievalStage, ScopeEnforcementDecision, ScoreRecord,
+    ScoreSource, ScoreTarget, ScoreValue, StageTimings, ToolCallSummary, TruncationEvent,
     TurbopufferIntrospection, VecHit, VerifierResult,
 };
 pub use sink::{LineageSink, NullSink};

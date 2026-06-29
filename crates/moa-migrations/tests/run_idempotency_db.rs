@@ -52,8 +52,7 @@ async fn clean_apply_then_reapply(
             .await?;
         target
             .execute(
-                "CREATE EXTENSION IF NOT EXISTS age; \
-                 CREATE EXTENSION IF NOT EXISTS vector; \
+                "CREATE EXTENSION IF NOT EXISTS vector; \
                  CREATE EXTENSION IF NOT EXISTS pgaudit;",
             )
             .await?;

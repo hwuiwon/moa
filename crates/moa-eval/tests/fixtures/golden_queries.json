@@ -81,7 +81,7 @@
       ]
     },
     {
-      "query": "fact41 fact42 fact43 fact45 fact47 alice rust postgres restate age adr",
+      "query": "fact41 fact42 fact43 fact45 fact47 alice rust postgres restate relational graph adr",
       "expected_top_5_uids": [
         "fact-41",
         "fact-42",

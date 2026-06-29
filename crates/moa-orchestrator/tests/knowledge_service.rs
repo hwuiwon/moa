@@ -19,6 +19,7 @@ use moa_core::{
         KnowledgeUpdateConnectionSourceSelectionRequest,
     },
 };
+use moa_db::ScopedConn;
 use moa_knowledge::{
     Error as KnowledgeError,
     chunking::ChunkingConfig,
@@ -48,7 +49,7 @@ use moa_lineage_core::{
     BackendIntrospection, FusedHit, GraphPath, LineageEvent, RecordKind, RerankHit,
     RetrievalLineage, RetrievalSelectedHit, RetrievalStage, StageTimings, TurnId, VecHit,
 };
-use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_orchestrator::services::knowledge::{
@@ -1122,9 +1123,11 @@ async fn mock_connector_end_to_end_db_memory() {
         pool.clone(),
         scope.clone(),
     ));
+    seed_task14_embedder_state(&pool, tenant_id).await;
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     let graph_store = Arc::new(
-        AgeGraphStore::scoped_for_app_role(pool.clone(), scope.clone()).with_vector_store(vector),
+        PostgresGraphStore::scoped_for_app_role(pool.clone(), scope.clone())
+            .with_vector_store(vector),
     );
     let graph_writer = Arc::new(MemoryKnowledgeGraphWriter::new(
         graph_store.clone(),
@@ -1642,6 +1645,7 @@ async fn knowledge_auto_sync_provider_synced_run_lists_changed_records_and_inges
         "docs",
         task14_nango_records(),
     ));
+    seed_task14_embedder_state(&pool, tenant_id).await;
     let pipeline = task14_ingestion_pipeline(pool.clone(), repository.clone(), tenant_id, "nango");
     let mut steps =
         DbKnowledgeAutoSyncSteps::new(repository.clone(), provider.clone(), pipeline, 2, "task14");
@@ -2377,7 +2381,7 @@ type Task14KnowledgeIngestionPipeline = KnowledgeIngestionPipeline<
     PostgresKnowledgeRepository,
     Task14Parser,
     Task14Embedder,
-    MemoryKnowledgeGraphWriter<AgeGraphStore>,
+    MemoryKnowledgeGraphWriter<PostgresGraphStore>,
     MetricsIngestionObserver,
 >;
 
@@ -2618,8 +2622,9 @@ fn task14_ingestion_pipeline(
 ) -> Arc<Task14KnowledgeIngestionPipeline> {
     let scope = RlsContext::tenant(tenant_id);
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
-    let graph_store =
-        Arc::new(AgeGraphStore::scoped_for_app_role(pool, scope.clone()).with_vector_store(vector));
+    let graph_store = Arc::new(
+        PostgresGraphStore::scoped_for_app_role(pool, scope.clone()).with_vector_store(vector),
+    );
     let graph_writer = Arc::new(MemoryKnowledgeGraphWriter::new(
         graph_store,
         MemoryScope::Tenant { tenant_id },
@@ -2912,6 +2917,38 @@ async fn complete_sync_run(
     repository.update_sync_run(run).await
 }
 
+async fn seed_task14_embedder_state(pool: &sqlx::PgPool, tenant_id: TenantId) {
+    let mut conn = ScopedConn::begin_tenant(pool, tenant_id)
+        .await
+        .expect("begin Task14 embedder state seed transaction");
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(conn.as_mut())
+        .await
+        .expect("set app role for Task14 embedder state seed");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.storage_partition_state
+            (storage_partition_id, embedding_model, embedding_model_version, embedding_dimension)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (storage_partition_id) DO UPDATE
+            SET embedding_model = EXCLUDED.embedding_model,
+                embedding_model_version = EXCLUDED.embedding_model_version,
+                embedding_dimension = EXCLUDED.embedding_dimension,
+                reembed_state = 'steady'
+        "#,
+    )
+    .bind(StoragePartitionId::for_tenant(tenant_id).to_string())
+    .bind(TASK14_EMBEDDING_MODEL)
+    .bind(TASK14_EMBEDDING_MODEL_VERSION)
+    .bind(VECTOR_DIMENSION as i32)
+    .execute(conn.as_mut())
+    .await
+    .expect("seed Task14 storage partition embedder state");
+    conn.commit()
+        .await
+        .expect("commit Task14 embedder state seed");
+}
+
 async fn insert_retrieval_lineage_row(
     pool: &sqlx::PgPool,
     event: LineageEvent,
@@ -2984,7 +3021,7 @@ fn object_ingestion_steps() -> Vec<&'static str> {
 }
 
 async fn create_contact_group_graph_node(
-    graph: &AgeGraphStore,
+    graph: &PostgresGraphStore,
     tenant_id: TenantId,
     group: &ContactGroup,
 ) -> moa_memory_graph::Result<Uuid> {
@@ -3420,14 +3457,21 @@ fn element(
 #[derive(Debug, Default)]
 struct Task14Embedder;
 
+const TASK14_EMBEDDING_MODEL: &str = "embed-v4.0";
+const TASK14_EMBEDDING_MODEL_VERSION: i32 = 1;
+
 #[async_trait]
 impl EmbeddingProvider for Task14Embedder {
     fn model_id(&self) -> &str {
-        "embed-v4.0"
+        TASK14_EMBEDDING_MODEL
     }
 
     fn dimensions(&self) -> usize {
         VECTOR_DIMENSION
+    }
+
+    fn model_version(&self) -> i32 {
+        TASK14_EMBEDDING_MODEL_VERSION
     }
 
     async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {

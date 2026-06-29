@@ -94,6 +94,41 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION moa.apply_memory_contact_rls(target_table REGCLASS) RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM moa.drop_runtime_boundary_policies(target_table);
+    EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', target_table);
+    EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', target_table);
+    EXECUTE format(
+        'CREATE POLICY contact_isolation ON %s FOR ALL TO moa_app
+         USING (
+             moa.current_control_plane()
+             OR (
+                 tenant_id::TEXT = moa.current_tenant_id()::TEXT
+                 AND (
+                     contact_id IS NULL
+                     OR contact_id::TEXT = moa.current_contact_id()::TEXT
+                 )
+             )
+         )
+         WITH CHECK (
+             moa.current_control_plane()
+             OR (
+                 tenant_id::TEXT = moa.current_tenant_id()::TEXT
+                 AND (
+                     (moa.current_contact_id() IS NULL AND contact_id IS NULL)
+                     OR contact_id::TEXT = moa.current_contact_id()::TEXT
+                 )
+             )
+         )',
+        target_table
+    );
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO moa_app', target_table);
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION moa.apply_global_tenant_override_rls(target_table REGCLASS)
 RETURNS VOID
 LANGUAGE plpgsql
@@ -120,41 +155,6 @@ BEGIN
          )',
         target_table
     );
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO moa_app', target_table);
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION moa.apply_age_tenant_rls(target_table REGCLASS) RETURNS VOID
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', target_table);
-    EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', target_table);
-
-    EXECUTE format('DROP POLICY IF EXISTS rd_global ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS rd_tenant ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS rd_user ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS wr_tenant ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS wr_user ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS wr_global_promoter ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS owner_dev_access ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %s', target_table);
-
-    EXECUTE format(
-        'CREATE POLICY tenant_isolation ON %s FOR ALL TO moa_app
-         USING (
-             moa.current_control_plane()
-             OR moa.age_property(properties, ''storage_partition_id'')::TEXT
-                = moa.current_tenant_id()::TEXT
-         )
-         WITH CHECK (
-             moa.current_control_plane()
-             OR moa.age_property(properties, ''storage_partition_id'')::TEXT
-                = moa.current_tenant_id()::TEXT
-         )',
-        target_table
-    );
-
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO moa_app', target_table);
 END;
 $$;
@@ -334,23 +334,65 @@ BEGIN
         WHERE uid = NEW.uid;
 
         IF NEW.tenant_id IS NULL THEN
-            NEW.tenant_id := COALESCE(node_tenant, moa.current_tenant_id());
+            IF TG_OP = 'UPDATE' THEN
+                NEW.tenant_id := COALESCE(OLD.tenant_id, node_tenant, moa.current_tenant_id());
+            ELSE
+                NEW.tenant_id := COALESCE(node_tenant, moa.current_tenant_id());
+            END IF;
         END IF;
         IF NEW.contact_id IS NULL THEN
-            NEW.contact_id := COALESCE(node_contact, moa.current_contact_id());
+            IF TG_OP = 'UPDATE' THEN
+                NEW.contact_id := OLD.contact_id;
+            ELSE
+                NEW.contact_id := COALESCE(node_contact, moa.current_contact_id());
+            END IF;
+        END IF;
+    ELSIF TG_TABLE_SCHEMA = 'moa' AND TG_TABLE_NAME = 'edge_index' THEN
+        SELECT tenant_id, contact_id
+        INTO node_tenant, node_contact
+        FROM moa.node_index
+        WHERE uid = NEW.start_uid;
+
+        IF NEW.tenant_id IS NULL THEN
+            IF TG_OP = 'UPDATE' THEN
+                NEW.tenant_id := COALESCE(OLD.tenant_id, node_tenant, moa.current_tenant_id());
+            ELSE
+                NEW.tenant_id := COALESCE(node_tenant, moa.current_tenant_id());
+            END IF;
+        END IF;
+        IF NEW.contact_id IS NULL THEN
+            IF TG_OP = 'UPDATE' THEN
+                NEW.contact_id := OLD.contact_id;
+            ELSE
+                NEW.contact_id := COALESCE(node_contact, moa.current_contact_id());
+            END IF;
         END IF;
     ELSE
         IF NEW.tenant_id IS NULL THEN
-            NEW.tenant_id := COALESCE(moa.current_tenant_id(), CASE
-                WHEN NEW.storage_partition_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                    THEN NEW.storage_partition_id::UUID
-                WHEN current_schema() <> 'public'
-                    THEN gen_random_uuid()
-                ELSE moa.storage_partition_text_to_tenant_uuid(NEW.storage_partition_id, TG_TABLE_NAME)
-            END);
+            IF TG_OP = 'UPDATE' THEN
+                NEW.tenant_id := COALESCE(OLD.tenant_id, moa.current_tenant_id(), CASE
+                    WHEN NEW.storage_partition_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                        THEN NEW.storage_partition_id::UUID
+                    WHEN current_schema() <> 'public'
+                        THEN gen_random_uuid()
+                    ELSE moa.storage_partition_text_to_tenant_uuid(NEW.storage_partition_id, TG_TABLE_NAME)
+                END);
+            ELSE
+                NEW.tenant_id := COALESCE(moa.current_tenant_id(), CASE
+                    WHEN NEW.storage_partition_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                        THEN NEW.storage_partition_id::UUID
+                    WHEN current_schema() <> 'public'
+                        THEN gen_random_uuid()
+                    ELSE moa.storage_partition_text_to_tenant_uuid(NEW.storage_partition_id, TG_TABLE_NAME)
+                END);
+            END IF;
         END IF;
         IF NEW.contact_id IS NULL THEN
-            NEW.contact_id := moa.current_contact_id();
+            IF TG_OP = 'UPDATE' THEN
+                NEW.contact_id := OLD.contact_id;
+            ELSE
+                NEW.contact_id := moa.current_contact_id();
+            END IF;
         END IF;
     END IF;
 
@@ -626,6 +668,32 @@ CREATE INDEX IF NOT EXISTS node_index_contact_label_idx
     ON moa.node_index(tenant_id, contact_id, label)
     WHERE valid_to IS NULL AND contact_id IS NOT NULL;
 
+ALTER TABLE moa.edge_index
+    ADD COLUMN IF NOT EXISTS tenant_id UUID,
+    ADD COLUMN IF NOT EXISTS contact_id UUID;
+UPDATE moa.edge_index e
+SET tenant_id = n.tenant_id,
+    contact_id = COALESCE(e.contact_id, n.contact_id)
+FROM moa.node_index n
+WHERE e.start_uid = n.uid
+  AND n.tenant_id IS NOT NULL
+  AND (e.tenant_id IS NULL OR e.contact_id IS NULL);
+SELECT moa.backfill_required_tenant_id('moa.edge_index'::REGCLASS, 'moa.edge_index');
+DROP TRIGGER IF EXISTS edge_index_set_memory_runtime_columns ON moa.edge_index;
+CREATE TRIGGER edge_index_set_memory_runtime_columns
+    BEFORE INSERT OR UPDATE ON moa.edge_index
+    FOR EACH ROW
+    EXECUTE FUNCTION moa.set_memory_runtime_columns();
+CREATE INDEX IF NOT EXISTS edge_index_tenant_label_idx
+    ON moa.edge_index(tenant_id, label);
+CREATE INDEX IF NOT EXISTS edge_index_contact_label_idx
+    ON moa.edge_index(tenant_id, contact_id, label)
+    WHERE contact_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS edge_index_tenant_start_idx
+    ON moa.edge_index(tenant_id, start_uid);
+CREATE INDEX IF NOT EXISTS edge_index_tenant_end_idx
+    ON moa.edge_index(tenant_id, end_uid);
+
 ALTER TABLE moa.embeddings
     ADD COLUMN IF NOT EXISTS tenant_id UUID,
     ADD COLUMN IF NOT EXISTS contact_id UUID;
@@ -878,11 +946,12 @@ SELECT moa.apply_contact_rls('contact_token_grants'::REGCLASS);
 SELECT moa.apply_contact_rls('contact_verification_challenges'::REGCLASS);
 SELECT moa.apply_contact_rls('contact_channel_accounts'::REGCLASS);
 SELECT moa.apply_contact_rls('session_channel_bindings'::REGCLASS);
-SELECT moa.apply_contact_rls('moa.node_index'::REGCLASS);
-SELECT moa.apply_contact_rls('moa.embeddings'::REGCLASS);
-SELECT moa.apply_contact_rls('moa.memory_digests'::REGCLASS);
-SELECT moa.apply_contact_rls('moa.retrieval_lineage'::REGCLASS);
-SELECT moa.apply_contact_rls('moa.graph_changelog'::REGCLASS);
+SELECT moa.apply_memory_contact_rls('moa.node_index'::REGCLASS);
+SELECT moa.apply_memory_contact_rls('moa.edge_index'::REGCLASS);
+SELECT moa.apply_memory_contact_rls('moa.embeddings'::REGCLASS);
+SELECT moa.apply_memory_contact_rls('moa.memory_digests'::REGCLASS);
+SELECT moa.apply_memory_contact_rls('moa.retrieval_lineage'::REGCLASS);
+SELECT moa.apply_memory_contact_rls('moa.graph_changelog'::REGCLASS);
 SELECT moa.apply_tenant_rls('moa.storage_partition_state'::REGCLASS);
 SELECT moa.apply_tenant_rls('moa.ingest_dedup'::REGCLASS);
 SELECT moa.apply_tenant_rls('moa.ingest_dlq'::REGCLASS);
@@ -908,21 +977,4 @@ BEGIN
     IF to_regclass('analytics.turn_lineage') IS NOT NULL THEN
         PERFORM moa.apply_tenant_rls('analytics.turn_lineage'::REGCLASS);
     END IF;
-END $$;
-
-DO $$
-DECLARE
-    label_name TEXT;
-BEGIN
-    IF to_regnamespace('moa_graph') IS NULL THEN
-        RETURN;
-    END IF;
-
-    FOREACH label_name IN ARRAY (
-        moa.age_vertex_labels() || moa.age_edge_labels() || moa.age_base_labels()
-    ) LOOP
-        IF to_regclass(format('%I.%I', 'moa_graph', label_name)) IS NOT NULL THEN
-            PERFORM moa.apply_age_tenant_rls(format('%I.%I', 'moa_graph', label_name)::REGCLASS);
-        END IF;
-    END LOOP;
 END $$;

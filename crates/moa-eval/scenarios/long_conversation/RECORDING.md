@@ -9,7 +9,7 @@ Recorded long-conversation scenarios replay provider calls deterministically in 
 
 To re-record a scenario:
 
-1. Stand up a local Postgres test database with AGE and pgvector.
+1. Stand up a local Postgres test database with pgvector.
 2. Export the relevant live provider key locally. Do not commit secrets or shell history containing secrets.
 3. Run the scenario with `MOA_RECORD_TRANSCRIPT=1` through the hosted Eval API or a dedicated ignored integration test.
 4. Capture the provider stream with the recording wrapper and save it as `<scenario>/transcript.jsonl`.
