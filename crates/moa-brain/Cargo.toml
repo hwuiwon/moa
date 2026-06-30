@@ -47,6 +47,7 @@ moa-memory-ingest = { workspace = true, features = ["test-util"] }
 moa-memory-pii = { workspace = true }
 moa-providers = { workspace = true, features = ["test-util"] }
 moa-session = { workspace = true }
+moa-test-support = { workspace = true }
 proptest.workspace = true
 tempfile.workspace = true
 tracing-subscriber.workspace = true

@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod fixtures;
 pub mod postgres;
 pub mod pricing;
 

@@ -17,7 +17,7 @@ use moa_core::{
     ActionRuleScope, Attachment, Channel, CompletionContent, CompletionRequest, CompletionResponse,
     CompletionStream, Event, EventRecord, LLMProvider, MoaConfig, MoaError, ModelCapabilities,
     ModelId, ModelTier, SessionId, SessionMeta, SessionStatus, StopReason, StoragePartitionId,
-    TenantId, TokenPricing, TokenUsage, ToolCallFormat, ToolCallId, ToolOutput,
+    TokenPricing, TokenUsage, ToolCallFormat, ToolCallId, ToolOutput,
 };
 use moa_providers::ModelRouter;
 use moa_session::PostgresSessionStore;
@@ -25,10 +25,10 @@ use moa_skills::format::{
     build_skill_path, parse_skill_markdown, render_skill_markdown, skill_metadata_from_document,
 };
 use moa_skills::registry::{NewSkill, Skill, SkillRegistry};
+use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -112,7 +112,7 @@ pub fn load_session_fixture(json_text: &str) -> LoadedSession {
     let _user_id = fixture.user_id;
     let session = SessionMeta {
         id: SessionId(fixture.session_id),
-        tenant_id: tenant_id_from_storage_partition(&storage_partition_id),
+        tenant_id: tenant_id_from_storage_partition_id(&storage_partition_id),
         title: Some(fixture.task.clone()),
         status: SessionStatus::Completed,
         channel: Channel::Chat,
@@ -384,23 +384,11 @@ impl LLMProvider for TestProvider {
 /// Returns a tenant artifact-visibility scope for tests.
 pub fn tenant_scope(storage_partition_id: &StoragePartitionId) -> ActionRuleScope {
     ActionRuleScope::Tenant {
-        tenant_id: tenant_id_from_storage_partition(storage_partition_id),
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
     }
 }
 
 /// Returns the tenant storage key for session-scoped learning rows.
 pub fn session_storage_partition_id(session: &SessionMeta) -> StoragePartitionId {
     StoragePartitionId::for_tenant(session.tenant_id)
-}
-
-fn tenant_id_from_storage_partition(storage_partition_id: &StoragePartitionId) -> TenantId {
-    if let Ok(uuid) = Uuid::parse_str(storage_partition_id.as_str()) {
-        return TenantId::from(uuid);
-    }
-    let digest = Sha256::digest(storage_partition_id.as_str().as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    TenantId::from(Uuid::from_bytes(bytes))
 }

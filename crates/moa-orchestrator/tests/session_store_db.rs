@@ -7,6 +7,7 @@ use moa_core::{
     StoragePartitionId, TenantId,
 };
 use moa_session::{PostgresSessionStore, store::SessionChannelBindingReplacement, testing};
+use moa_test_support::fixtures::contact_ref_fixture;
 use uuid::Uuid;
 
 fn test_session_meta(_storage_partition_id: &str) -> SessionMeta {
@@ -25,18 +26,11 @@ fn test_session_meta(_storage_partition_id: &str) -> SessionMeta {
 }
 
 fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
-    ContactRef {
-        contact_id,
-        tenant_id,
-        state: ContactVerificationState::Verified,
-        canonical_contact_id: None,
-        linked_contact_ids: Vec::new(),
-        scopes: vec!["agent:session:create".to_string()],
-        permissions: serde_json::json!({}),
-        agent_ids: Vec::new(),
-        session_ids: Vec::new(),
-        verified_contact_point_ids: Vec::new(),
-    }
+    let mut contact =
+        contact_ref_fixture(contact_id, tenant_id, ContactVerificationState::Verified);
+    contact.scopes = vec!["agent:session:create".to_string()];
+    contact.permissions = serde_json::json!({});
+    contact
 }
 
 async fn test_store() -> Result<(PostgresSessionStore, String, String)> {

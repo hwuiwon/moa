@@ -3,6 +3,7 @@
 use moa_core::{
     ContactId, ContactRef, ContactVerificationState, StoragePartitionId, TenantId, TokenUsage,
 };
+use moa_test_support::fixtures::contact_ref_fixture;
 use uuid::Uuid;
 
 fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
@@ -48,16 +49,5 @@ fn stable_uuid_from_label(label: &str) -> Uuid {
 }
 
 fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
-    ContactRef {
-        contact_id,
-        tenant_id,
-        state: ContactVerificationState::Verified,
-        canonical_contact_id: None,
-        linked_contact_ids: Vec::new(),
-        scopes: Vec::new(),
-        permissions: serde_json::Value::Null,
-        agent_ids: Vec::new(),
-        session_ids: Vec::new(),
-        verified_contact_point_ids: Vec::new(),
-    }
+    contact_ref_fixture(contact_id, tenant_id, ContactVerificationState::Verified)
 }

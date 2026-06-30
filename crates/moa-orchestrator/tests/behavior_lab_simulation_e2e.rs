@@ -33,6 +33,7 @@ use moa_core::{
     traits::Identity,
 };
 use moa_db::ScopedConn;
+use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::test_database_url;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -544,7 +545,7 @@ async fn run_plan_experiment(
     plan_revision_uid: Uuid,
 ) -> Result<ExperimentRunResponse> {
     let request = ExperimentRunRequest {
-        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         name: name.to_string(),
         plan_revision_uid: Some(plan_revision_uid),
         target: None,
@@ -570,7 +571,7 @@ async fn wait_for_run_status(
     done: impl Fn(&ExperimentRunStatusResponse) -> bool,
 ) -> Result<ExperimentRunStatusResponse> {
     let request = ExperimentRunStatusRequest {
-        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         run_uid,
     };
     let mut last_status = None;
@@ -599,7 +600,7 @@ async fn list_trials(
     run_uid: Uuid,
 ) -> Result<ExperimentTrialsResponse> {
     let request = ExperimentTrialsRequest {
-        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         run_uid,
         status: None,
         limit: Some(10),
@@ -641,7 +642,7 @@ async fn trial_status(
     trial_uid: Uuid,
 ) -> Result<ExperimentTrialStatusResponse> {
     let request = ExperimentTrialStatusRequest {
-        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         trial_uid,
     };
     post_json_with_identity(
@@ -666,7 +667,7 @@ async fn experiment_scores(
     run_uid: Uuid,
 ) -> Result<ExperimentScoresResponse> {
     let request = ExperimentScoresRequest {
-        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         run_uid,
     };
     post_json_with_identity(client, ingress, "Experiments", "scores", identity, &request)
@@ -961,12 +962,6 @@ fn scope_context(scope: &ActionRuleScope) -> RlsContext {
     match scope {
         ActionRuleScope::Tenant { tenant_id } => RlsContext::tenant(*tenant_id),
     }
-}
-
-fn tenant_id_from_storage_partition(storage_partition_id: &StoragePartitionId) -> Result<TenantId> {
-    Uuid::parse_str(storage_partition_id.as_str())
-        .map(TenantId::from)
-        .context("storage partition fixture id should be a tenant UUID")
 }
 
 fn assert_trial_status_matches_summary(

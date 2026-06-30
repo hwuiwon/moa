@@ -16,6 +16,7 @@ use moa_core::wire::experiments::{
 };
 use moa_core::wire::workflows::{WorkflowRunStatus, WorkflowStatusRequest};
 use moa_core::{ActionRuleScope, StoragePartitionId, TenantId};
+use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::test_database_url;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -183,7 +184,7 @@ async fn experiments_run_denies_caller_without_tenant_operator() -> Result<()> {
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
         let request = ExperimentRunRequest {
-            tenant_id: tenant_id_from_workspace(&storage_partition_id)?,
+            tenant_id: tenant_id_from_storage_partition_id(&storage_partition_id),
             name: "unauthorized-experiment-run".to_string(),
             plan_revision_uid: None,
             target: None,
@@ -286,7 +287,7 @@ async fn run_workflow_experiment(
 ) -> Result<ExperimentRunResponse> {
     let order_id = format!("ORD-{}", Uuid::now_v7());
     let request = ExperimentRunRequest {
-        tenant_id: tenant_id_from_workspace(storage_partition_id)?,
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         name: "damaged-food-workflow-experiment".to_string(),
         plan_revision_uid: None,
         target: Some(json!({
@@ -331,7 +332,7 @@ async fn wait_for_linked_workflow_experiment(
     run_uid: Uuid,
 ) -> Result<ExperimentRunStatusResponse> {
     let request = ExperimentRunStatusRequest {
-        tenant_id: tenant_id_from_workspace(storage_partition_id)?,
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         run_uid,
     };
     let mut last_status = None;
@@ -490,10 +491,4 @@ fn assert_validation_report_has_no_errors(report: &Value) -> Result<()> {
     }
 
     bail!("published workflow had validation errors: {errors:?}")
-}
-
-fn tenant_id_from_workspace(storage_partition_id: &StoragePartitionId) -> Result<TenantId> {
-    Uuid::parse_str(storage_partition_id.as_str())
-        .map(TenantId::from)
-        .context("storage partition fixture id should be a tenant UUID")
 }

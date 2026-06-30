@@ -2,6 +2,7 @@
 
 use std::{error::Error, process::Command, time::Duration};
 
+use moa_test_support::fixtures::quote_identifier;
 use moa_test_support::postgres::test_database_url;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -130,10 +131,6 @@ async fn pgaudit_migration_configures_labels_when_provider_loaded_and_auditor_vi
         .await?;
 
     Ok(())
-}
-
-fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 #[tokio::test]

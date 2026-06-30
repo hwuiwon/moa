@@ -475,6 +475,7 @@ mod tests {
         ToolCallContent, ToolCallId, ToolInvocation, TrustedSandboxFileEntry,
         TrustedSandboxFileManifestRef, UserId,
     };
+    use moa_test_support::fixtures::contact_ref_fixture;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -721,17 +722,9 @@ mod tests {
     }
 
     fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
-        ContactRef {
-            contact_id,
-            tenant_id,
-            state: ContactVerificationState::Verified,
-            canonical_contact_id: None,
-            linked_contact_ids: Vec::new(),
-            scopes: Vec::new(),
-            permissions: json!({}),
-            agent_ids: Vec::new(),
-            session_ids: Vec::new(),
-            verified_contact_point_ids: Vec::new(),
-        }
+        let mut contact =
+            contact_ref_fixture(contact_id, tenant_id, ContactVerificationState::Verified);
+        contact.permissions = json!({});
+        contact
     }
 }

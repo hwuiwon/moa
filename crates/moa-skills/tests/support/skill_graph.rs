@@ -8,12 +8,11 @@
 #![allow(dead_code)]
 
 use moa_core::RlsContext;
-use moa_core::{ActionRuleScope, MoaError, Result, TenantId};
+use moa_core::{ActionRuleScope, MoaError, Result};
 use moa_memory_graph::PostgresGraphStore;
 use moa_memory_types::MemoryScope;
-use sha2::{Digest, Sha256};
+use moa_test_support::fixtures::tenant_id_from_storage_partition;
 use sqlx::PgConnection;
-use uuid::Uuid;
 
 pub(crate) static GRAPH_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -31,18 +30,6 @@ pub(crate) fn memory_scope(storage_partition_id: &str) -> MemoryScope {
 
 pub(crate) fn graph_store(pool: &sqlx::PgPool, scope: &MemoryScope) -> PostgresGraphStore {
     PostgresGraphStore::scoped_for_app_role(pool.clone(), RlsContext::from(scope.clone()))
-}
-
-fn tenant_id_from_storage_partition(storage_partition_id: &str) -> TenantId {
-    if let Ok(uuid) = Uuid::parse_str(storage_partition_id) {
-        return TenantId::from(uuid);
-    }
-    let digest = Sha256::digest(storage_partition_id.as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    TenantId::from(Uuid::from_bytes(bytes))
 }
 
 pub(crate) async fn set_app_role(conn: &mut PgConnection) -> Result<()> {

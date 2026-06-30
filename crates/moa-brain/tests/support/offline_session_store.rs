@@ -9,7 +9,7 @@ use moa_core::{
     ModelId, Result, SequenceNum, SessionActorRef, SessionFilter, SessionId, SessionMeta,
     SessionStatus, SessionStore, SessionSummary, TenantId,
 };
-use serde_json::Value;
+use moa_test_support::fixtures::contact_ref_fixture;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -17,7 +17,8 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct MockSessionStore {
     session: Arc<Mutex<SessionMeta>>,
-    events: Arc<Mutex<Vec<EventRecord>>>,
+    /// Recorded events, exposed so brain-turn offline tests can assert on them directly.
+    pub events: Arc<Mutex<Vec<EventRecord>>>,
 }
 
 impl MockSessionStore {
@@ -161,16 +162,5 @@ fn stable_uuid_from_label(label: &str) -> Uuid {
 }
 
 fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
-    ContactRef {
-        contact_id,
-        tenant_id,
-        state: ContactVerificationState::Verified,
-        canonical_contact_id: None,
-        linked_contact_ids: Vec::new(),
-        scopes: Vec::new(),
-        permissions: Value::Null,
-        agent_ids: Vec::new(),
-        session_ids: Vec::new(),
-        verified_contact_point_ids: Vec::new(),
-    }
+    contact_ref_fixture(contact_id, tenant_id, ContactVerificationState::Verified)
 }

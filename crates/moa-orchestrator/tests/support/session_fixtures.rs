@@ -6,6 +6,7 @@ use moa_core::{
     ContactRef, ContactVerificationState, Event, EventRange, ModelId, SessionId, SessionMeta,
     StoragePartitionId, TenantId, UserMessage,
 };
+use moa_test_support::fixtures::contact_ref_fixture;
 
 /// Returns a request payload for `append_event`.
 pub fn append_event_request(session_id: SessionId, event: Event) -> AppendEventRequest {
@@ -70,16 +71,11 @@ fn test_agent_context() -> AgentContext {
 }
 
 fn test_contact_ref(tenant_id: TenantId) -> ContactRef {
-    ContactRef {
-        contact_id: ContactId::new(),
+    let mut contact = contact_ref_fixture(
+        ContactId::new(),
         tenant_id,
-        state: ContactVerificationState::Unverified,
-        canonical_contact_id: None,
-        linked_contact_ids: Vec::new(),
-        scopes: Vec::new(),
-        permissions: serde_json::json!({}),
-        agent_ids: Vec::new(),
-        session_ids: Vec::new(),
-        verified_contact_point_ids: Vec::new(),
-    }
+        ContactVerificationState::Unverified,
+    );
+    contact.permissions = serde_json::json!({});
+    contact
 }
