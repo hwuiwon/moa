@@ -286,6 +286,38 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
             record.sequence_num,
             truncate(summary)
         )),
+        Event::SubAgentSignalReceived {
+            sub_agent_id,
+            kind,
+            summary,
+            ..
+        } => Some(format!(
+            "#{} sub_agent_signal {sub_agent_id} {kind:?}: {}",
+            record.sequence_num,
+            truncate(summary)
+        )),
+        Event::SubAgentParentResumeRequested {
+            sub_agent_id,
+            reason,
+            ..
+        } => Some(format!(
+            "#{} sub_agent_resume {sub_agent_id}: {}",
+            record.sequence_num,
+            truncate(reason)
+        )),
+        Event::SubAgentHeartbeatStale {
+            sub_agent_id,
+            threshold_ms,
+            ..
+        } => Some(format!(
+            "#{} sub_agent_stale {sub_agent_id} threshold_ms={threshold_ms}",
+            record.sequence_num
+        )),
+        Event::ProgressNarrated { text, .. } => Some(format!(
+            "#{} progress_narration: {}",
+            record.sequence_num,
+            truncate(text)
+        )),
         Event::MemoryRead { path, scope } => Some(format!(
             "#{} memory read {scope}:{path}",
             record.sequence_num

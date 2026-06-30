@@ -88,8 +88,8 @@ pub use hands::{
     validate_sandbox_file_path,
 };
 pub use identifiers::{
-    BrainId, ModelId, SegmentId, SessionAttachmentId, SessionId, StoragePartitionId, TenantId,
-    ToolCallId, UserId,
+    AgentSignalId, BrainId, ModelId, SegmentId, SessionAttachmentId, SessionId, StoragePartitionId,
+    TenantId, ToolCallId, UserId,
 };
 pub use learning::LearningEntry;
 pub use memory::{RlsContext, SkillMetadata};
@@ -108,7 +108,7 @@ pub use segment_assessment::{
 };
 pub use segments::{ActiveSegment, SegmentCompletion, TaskSegment, deterministic_segment_id};
 pub use session::{
-    CancelMode, CheckpointHandle, CheckpointInfo, SessionFilter, SessionMeta, SessionSignal,
+    CancelScope, CheckpointHandle, CheckpointInfo, SessionFilter, SessionMeta, SessionSignal,
     SessionStatus, SessionSummary, TurnOutcome, UserMessage,
 };
 pub use snapshot::{
@@ -116,14 +116,16 @@ pub use snapshot::{
 };
 pub use sub_agent::{
     AgentPath, AttachSubAgentResultWaiterInput, AttachSubAgentResultWaiterOutput,
-    CancelSubAgentInput, CompleteSubAgentChildInput, ConsumeSubAgentChildResultInput,
-    ConsumeSubAgentChildResultOutput, DelegationTool, DelegationToolKind, ListSubAgentsInput,
-    ListSubAgentsOutput, ListedSubAgent, MarkSubAgentChildTerminalInput, MessageSubAgentInput,
-    RemoveSubAgentResultWaiterInput, ReserveSubAgentInput, ReservedSubAgent, SpawnSubAgentInput,
-    SpawnSubAgentOutput, SubAgentChildRef, SubAgentChildRequest, SubAgentId, SubAgentInitialTask,
-    SubAgentMessage, SubAgentResult, SubAgentState, SubAgentStatus, SubAgentTerminalResult,
-    SubAgentToolRecord, SubAgentTurnOutcomeRecord, SubAgentTurnPreparation,
-    SubAgentTurnResponseRecord, WaitSubAgentInput, WaitSubAgentOutput,
+    CancelSubAgentInput, ChildSignalKind, CompleteSubAgentChildInput,
+    ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput, DelegationTool,
+    DelegationToolKind, InputAudience, ListSubAgentsInput, ListSubAgentsOutput, ListedSubAgent,
+    MarkSubAgentChildTerminalInput, MessageSubAgentInput, NarrationSegment, NarrationSource,
+    ParentResumePolicy, RemoveSubAgentResultWaiterInput, ReserveSubAgentInput, ReservedSubAgent,
+    SignalSeverity, SpawnSubAgentInput, SpawnSubAgentOutput, SubAgentChildRef,
+    SubAgentChildRequest, SubAgentId, SubAgentInitialTask, SubAgentMessage,
+    SubAgentProgressSummary, SubAgentResult, SubAgentSignal, SubAgentState, SubAgentStatus,
+    SubAgentTerminalResult, SubAgentToolRecord, SubAgentTurnOutcomeRecord, SubAgentTurnPreparation,
+    SubAgentTurnResponseRecord, UnreadChildSignal, WaitSubAgentInput, WaitSubAgentOutput,
     cancel_sub_agent_tool_schema, default_sub_agent_budget_tokens, default_wait_timeout_ms,
     delegation_tool_schema, delegation_tool_schemas, is_delegation_tool_name,
     list_sub_agents_tool_schema, message_sub_agent_tool_schema, parse_delegation_tool_input,

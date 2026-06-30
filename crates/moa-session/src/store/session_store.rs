@@ -540,78 +540,19 @@ impl SessionStore for PostgresSessionStore {
         session_id: moa_core::SessionId,
         event: Event,
     ) -> Result<EventRecord> {
-        let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let event_id = Uuid::now_v7();
-        let event_type = event.type_name();
-        let event_type_record = event.event_type();
-        let hand_id = event_hand_id(&event);
-        let token_count = event.token_count();
-        let payload = encode_event_for_storage(
-            self.blob_store.as_ref(),
-            &session_id,
-            &event,
-            self.blob_threshold_bytes,
-        )
-        .await?;
-        let now = Utc::now();
-        let sessions = self.table_name("sessions");
-        let events = self.table_name("events");
+        self.emit_event_record_with_dedupe(session_id, event, None)
+            .await
+    }
 
-        let locked_session = sqlx::query(&format!(
-            "SELECT event_count, tenant_id, storage_partition_id, user_id, contact_id FROM {sessions} WHERE id = $1 FOR UPDATE"
-        ))
-        .bind(session_id.0)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(map_sqlx_error)?
-        .ok_or(MoaError::SessionNotFound(session_id))?;
-        let sequence_num = locked_session.col::<i64>("event_count")? as u64;
-        let tenant_id = locked_session.col::<Uuid>("tenant_id")?;
-        let storage_partition_id = locked_session.col::<String>("storage_partition_id")?;
-        let actor_storage_key = locked_session.col::<String>("user_id")?;
-        let contact_id = locked_session.col::<Option<Uuid>>("contact_id")?;
-
-        sqlx::query(&format!(
-            "INSERT INTO {events} \
-             (id, session_id, tenant_id, contact_id, storage_partition_id, user_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
-        ))
-        .bind(event_id)
-        .bind(session_id.0)
-        .bind(tenant_id)
-        .bind(contact_id)
-        .bind(storage_partition_id)
-        .bind(actor_storage_key)
-        .bind(sequence_num as i64)
-        .bind(event_type)
-        .bind(Json(payload))
-        .bind(now)
-        .bind(Option::<Uuid>::None)
-        .bind(&hand_id)
-        .bind(token_count as i32)
-        .execute(&mut *transaction)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        transaction.commit().await.map_err(map_sqlx_error)?;
-        if let Event::BrainResponse {
-            model, model_tier, ..
-        } = &event
-        {
-            record_turn_completed(model, *model_tier);
-        }
-        record_session_event_append(event_type);
-        Ok(EventRecord {
-            id: event_id,
-            session_id,
-            sequence_num,
-            event_type: event_type_record,
-            event,
-            timestamp: now,
-            brain_id: None,
-            hand_id,
-            token_count: Some(token_count),
-        })
+    /// Appends an event with optional idempotency, returning the persisted record.
+    async fn emit_event_record_deduped(
+        &self,
+        session_id: moa_core::SessionId,
+        event: Event,
+        dedupe_key: Option<String>,
+    ) -> Result<EventRecord> {
+        self.emit_event_record_with_dedupe(session_id, event, dedupe_key)
+            .await
     }
 
     async fn store_text_artifact(
@@ -1266,6 +1207,155 @@ impl LearningCandidateStore for PostgresSessionStore {
         update: &LearningCandidateStatusUpdate,
     ) -> Result<()> {
         PostgresSessionStore::update_learning_candidate_status(self, update).await
+    }
+}
+
+impl PostgresSessionStore {
+    /// Appends an event under the session-row lock, optionally deduplicated.
+    ///
+    /// The `None` path is the original unconditional append. When `dedupe_key`
+    /// is `Some` and a `session_event_dedupe` row already exists for
+    /// `(session_id, dedupe_key)`, the previously persisted event is returned
+    /// without inserting a second event; otherwise the event and a matching
+    /// dedupe row are inserted together in the same transaction so a retry
+    /// short-circuits.
+    async fn emit_event_record_with_dedupe(
+        &self,
+        session_id: moa_core::SessionId,
+        event: Event,
+        dedupe_key: Option<String>,
+    ) -> Result<EventRecord> {
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let event_id = Uuid::now_v7();
+        let event_type = event.type_name();
+        let event_type_record = event.event_type();
+        let hand_id = event_hand_id(&event);
+        let token_count = event.token_count();
+        let payload = encode_event_for_storage(
+            self.blob_store.as_ref(),
+            &session_id,
+            &event,
+            self.blob_threshold_bytes,
+        )
+        .await?;
+        let now = Utc::now();
+        let sessions = self.table_name("sessions");
+        let events = self.table_name("events");
+
+        let locked_session = sqlx::query(&format!(
+            "SELECT event_count, tenant_id, storage_partition_id, user_id, contact_id FROM {sessions} WHERE id = $1 FOR UPDATE"
+        ))
+        .bind(session_id.0)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(map_sqlx_error)?
+        .ok_or(MoaError::SessionNotFound(session_id))?;
+        let sequence_num = locked_session.col::<i64>("event_count")? as u64;
+        let tenant_id = locked_session.col::<Uuid>("tenant_id")?;
+        let storage_partition_id = locked_session.col::<String>("storage_partition_id")?;
+        let actor_storage_key = locked_session.col::<String>("user_id")?;
+        let contact_id = locked_session.col::<Option<Uuid>>("contact_id")?;
+
+        // Idempotency fast path: if this `(session_id, dedupe_key)` was already
+        // appended, return the first persisted record without inserting again.
+        if let Some(key) = dedupe_key.as_deref() {
+            let dedupe = self.table_name("session_event_dedupe");
+            if let Some(existing) = sqlx::query(&format!(
+                "SELECT sequence_num FROM {dedupe} WHERE session_id = $1 AND dedupe_key = $2"
+            ))
+            .bind(session_id.0)
+            .bind(key)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(map_sqlx_error)?
+            {
+                let existing_seq = existing.col::<i64>("sequence_num")? as u64;
+                let existing_event = sqlx::query(&format!(
+                    "SELECT id, timestamp FROM {events} WHERE session_id = $1 AND sequence_num = $2"
+                ))
+                .bind(session_id.0)
+                .bind(existing_seq as i64)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(map_sqlx_error)?;
+                transaction.commit().await.map_err(map_sqlx_error)?;
+                let (existing_id, existing_timestamp) = match existing_event {
+                    Some(row) => (
+                        row.col::<Uuid>("id")?,
+                        row.col::<DateTime<Utc>>("timestamp")?,
+                    ),
+                    None => (event_id, now),
+                };
+                return Ok(EventRecord {
+                    id: existing_id,
+                    session_id,
+                    sequence_num: existing_seq,
+                    event_type: event_type_record,
+                    event,
+                    timestamp: existing_timestamp,
+                    brain_id: None,
+                    hand_id,
+                    token_count: Some(token_count),
+                });
+            }
+        }
+
+        sqlx::query(&format!(
+            "INSERT INTO {events} \
+             (id, session_id, tenant_id, contact_id, storage_partition_id, user_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
+        ))
+        .bind(event_id)
+        .bind(session_id.0)
+        .bind(tenant_id)
+        .bind(contact_id)
+        .bind(storage_partition_id)
+        .bind(actor_storage_key)
+        .bind(sequence_num as i64)
+        .bind(event_type)
+        .bind(Json(payload))
+        .bind(now)
+        .bind(Option::<Uuid>::None)
+        .bind(&hand_id)
+        .bind(token_count as i32)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        // Record the dedupe key in the same transaction so a retry of the same
+        // logical append short-circuits on the fast path above.
+        if let Some(key) = dedupe_key.as_deref() {
+            let dedupe = self.table_name("session_event_dedupe");
+            sqlx::query(&format!(
+                "INSERT INTO {dedupe} (session_id, dedupe_key, sequence_num) VALUES ($1, $2, $3)"
+            ))
+            .bind(session_id.0)
+            .bind(key)
+            .bind(sequence_num as i64)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+
+        transaction.commit().await.map_err(map_sqlx_error)?;
+        if let Event::BrainResponse {
+            model, model_tier, ..
+        } = &event
+        {
+            record_turn_completed(model, *model_tier);
+        }
+        record_session_event_append(event_type);
+        Ok(EventRecord {
+            id: event_id,
+            session_id,
+            sequence_num,
+            event_type: event_type_record,
+            event,
+            timestamp: now,
+            brain_id: None,
+            hand_id,
+            token_count: Some(token_count),
+        })
     }
 }
 

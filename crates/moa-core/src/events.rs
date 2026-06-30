@@ -6,10 +6,11 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::types::{
-    ActionEnvelope, ActionReviewDecision, ActionReviewPreview, Attachment, CacheReport, Channel,
-    ContactId, GuardrailDirection, GuardrailMode, ModelId, ModelTier, SegmentId, SessionActorRef,
-    SessionChannelBindingId, SessionStatus, SubAgentId, SubAgentState, TenantId, ToolCallId,
-    ToolOutput,
+    ActionEnvelope, ActionReviewDecision, ActionReviewPreview, AgentSignalId, Attachment,
+    CacheReport, Channel, ChildSignalKind, ContactId, GuardrailDirection, GuardrailMode, ModelId,
+    ModelTier, NarrationSegment, NarrationSource, SegmentId, SessionActorRef,
+    SessionChannelBindingId, SessionStatus, SignalSeverity, SubAgentId, SubAgentState, TenantId,
+    ToolCallId, ToolOutput,
 };
 
 /// Append-only session event payload.
@@ -322,6 +323,60 @@ pub enum Event {
         state: SubAgentState,
         /// Short result or error summary.
         summary: String,
+    },
+    /// A control-plane attention signal from a child was recorded on the coordinator.
+    SubAgentSignalReceived {
+        /// Stable identifier for the recorded signal.
+        signal_id: AgentSignalId,
+        /// Child sub-agent that raised the signal.
+        sub_agent_id: SubAgentId,
+        /// Immediate parent sub-agent for nested children.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_sub_agent_id: Option<SubAgentId>,
+        /// Kind of attention requested.
+        kind: ChildSignalKind,
+        /// Relative urgency of the signal.
+        severity: SignalSeverity,
+        /// Short, safe summary of the signal.
+        summary: String,
+    },
+    /// A child signal triggered a guarded coordinator auto-resume turn.
+    SubAgentParentResumeRequested {
+        /// Signal that triggered the resume.
+        signal_id: AgentSignalId,
+        /// Child sub-agent associated with the resume.
+        sub_agent_id: SubAgentId,
+        /// Coordinator turn id dispatched for the resume.
+        turn_id: String,
+        /// Short reason the resume was requested.
+        reason: String,
+    },
+    /// A child's heartbeat was detected stale by the watchdog.
+    SubAgentHeartbeatStale {
+        /// Child sub-agent whose heartbeat went stale.
+        sub_agent_id: SubAgentId,
+        /// Last heartbeat timestamp observed before the staleness was detected.
+        last_heartbeat_at: DateTime<Utc>,
+        /// Stale threshold, in milliseconds, that was exceeded.
+        threshold_ms: u64,
+    },
+    /// One durable, rate-limited natural-language progress narration for the session.
+    ///
+    /// Emitted by the per-session narrator: one merged update per period covering
+    /// all active sub-agents (and the active coordinator step). Carries
+    /// `model`/`tokens_used` for cost observability.
+    ProgressNarrated {
+        /// Source attributed to the merged narration (`Coordinator` for the merge).
+        source: NarrationSource,
+        /// Merged human-readable update streamed to the user.
+        text: String,
+        /// Optional per-source breakdown produced by the same single call.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        segments: Vec<NarrationSegment>,
+        /// Model used for the narration call (`"none"` for the 0-call short-circuit).
+        model: String,
+        /// Tokens consumed by the narration call (`0` for the short-circuit).
+        tokens_used: u32,
     },
     /// Memory read operation.
     MemoryRead {
@@ -765,6 +820,48 @@ mod tests {
                 },
                 EventType::SubAgentNotificationDelivered,
                 "SubAgentNotificationDelivered",
+            ),
+            (
+                Event::SubAgentSignalReceived {
+                    signal_id: AgentSignalId::new(),
+                    sub_agent_id: "child-1".to_string(),
+                    parent_sub_agent_id: None,
+                    kind: ChildSignalKind::Blocked,
+                    severity: SignalSeverity::Warning,
+                    summary: "blocked on input".to_string(),
+                },
+                EventType::SubAgentSignalReceived,
+                "SubAgentSignalReceived",
+            ),
+            (
+                Event::SubAgentParentResumeRequested {
+                    signal_id: AgentSignalId::new(),
+                    sub_agent_id: "child-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    reason: "child blocked".to_string(),
+                },
+                EventType::SubAgentParentResumeRequested,
+                "SubAgentParentResumeRequested",
+            ),
+            (
+                Event::SubAgentHeartbeatStale {
+                    sub_agent_id: "child-1".to_string(),
+                    last_heartbeat_at: Utc::now(),
+                    threshold_ms: 30_000,
+                },
+                EventType::SubAgentHeartbeatStale,
+                "SubAgentHeartbeatStale",
+            ),
+            (
+                Event::ProgressNarrated {
+                    source: NarrationSource::Coordinator,
+                    text: "Searching the pricing docs".to_string(),
+                    segments: Vec::new(),
+                    model: "none".to_string(),
+                    tokens_used: 0,
+                },
+                EventType::ProgressNarrated,
+                "ProgressNarrated",
             ),
         ];
 

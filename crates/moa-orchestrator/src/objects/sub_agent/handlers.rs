@@ -6,6 +6,10 @@ use crate::workflows::sub_agent_turn_execution::SubAgentTurnExecutionClient;
 use moa_core::wire::turn::{RunSubAgentTurnRequest, TurnOutcomeKind};
 use moa_security::{canary_system_message, new_canary_token};
 
+/// Default heartbeat staleness threshold used when deriving the `stale` flag.
+// TODO(Task 9): read sub_agent_heartbeat_stale_ms from MoaConfig instead of this const.
+const DEFAULT_HEARTBEAT_STALE_MS: u64 = 60_000;
+
 impl SubAgent for SubAgentImpl {
     #[tracing::instrument(skip(self, ctx, msg))]
     async fn post_message(
@@ -23,11 +27,25 @@ impl SubAgent for SubAgentImpl {
                     .map_err(moa_error_to_handler_error)?;
             }
             SubAgentMessage::FollowUp { text } => {
+                // Reject a follow-up to a child whose VO state was cleared by
+                // self-cleanup: there is nothing to revive and re-bootstrapping would
+                // resurrect a completed child. A still-initialized terminal child (within
+                // the grace window) is revived by `enqueue_follow_up` as before.
+                if !state.accepts_follow_up() {
+                    return Err(TerminalError::new(
+                        "sub-agent already completed; its state was cleaned up and it cannot accept follow-ups",
+                    )
+                    .into());
+                }
                 state
                     .enqueue_follow_up(text.clone())
                     .map_err(moa_error_to_handler_error)?;
             }
         }
+        // Accepting any message supersedes a pending self-cleanup scheduled during the
+        // grace window, so a message arriving mid-grace revives the child instead of
+        // letting the delayed `cleanup` tick clear it.
+        state.bump_cleanup_generation();
         let turn_id = if state.active_turn_id.is_none() {
             let turn_id = generate_turn_id(&mut ctx);
             let _started = state.start_workflow_turn(turn_id.clone());
@@ -54,6 +72,43 @@ impl SubAgent for SubAgentImpl {
         Ok(Json::from(
             SubAgentVoState::load_from(&ctx).await?.status_view(),
         ))
+    }
+
+    #[tracing::instrument(skip(self, ctx))]
+    // SAFETY: informational fan-in read; mirrors `status` which exposes the same
+    // VO projection without additional authz (the calling coordinator is already
+    // authorized for the owning session before it fans in).
+    async fn progress_summary(
+        &self,
+        ctx: SharedObjectContext<'_>,
+    ) -> Result<Json<SubAgentProgressSummary>, HandlerError> {
+        annotate_restate_handler_span("SubAgent", "progress_summary");
+        let state = SubAgentVoState::load_from(&ctx).await?;
+        let now = ctx
+            .run(|| async { Ok::<_, HandlerError>(Json::from(Utc::now())) })
+            .name("sub_agent_progress_summary_now")
+            .await?
+            .into_inner();
+        Ok(Json::from(state.progress_summary(
+            ctx.key().to_string(),
+            now,
+            DEFAULT_HEARTBEAT_STALE_MS,
+        )))
+    }
+
+    #[tracing::instrument(skip(self, ctx, at))]
+    // SAFETY: internal telemetry-plane write invoked only by the child's own turn
+    // workflow at the progress cadence; updates VO state only and appends no event.
+    async fn record_heartbeat(
+        &self,
+        ctx: ObjectContext<'_>,
+        at: Json<DateTime<Utc>>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SubAgent", "record_heartbeat");
+        let mut state = SubAgentVoState::load_from(&ctx).await?;
+        state.last_heartbeat_at = Some(at.into_inner());
+        state.persist_into(&ctx);
+        Ok(())
     }
 
     #[tracing::instrument(skip(self, ctx))]
@@ -343,7 +398,169 @@ impl SubAgent for SubAgentImpl {
         tracing::info!(key = %ctx.key(), "sub-agent VO state cleared");
         Ok(())
     }
+
+    #[tracing::instrument(skip(self, ctx, req))]
+    // SAFETY: internal generation-guarded self-call scheduled by this SubAgent VO's own
+    // terminal-delivery path. It reads only this child's own VO state and writes only to
+    // its own state (clear) plus the parent fan-out removal handler, which is itself an
+    // established internal VO→VO write (register_child/remove_child/complete_child) on the
+    // child's own parent. No caller-owned data is read back to a caller.
+    async fn cleanup(
+        &self,
+        ctx: ObjectContext<'_>,
+        req: Json<CleanupRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SubAgent", "cleanup");
+        let req = req.into_inner();
+        let state = SubAgentVoState::load_from(&ctx).await?;
+        let has_non_terminal_child = state.children.iter().any(|child| child.terminal.is_none());
+        let decision = decide_cleanup(
+            req.generation == state.cleanup_generation,
+            crate::delegation::is_terminal_sub_agent_state(state.current_status()),
+            has_non_terminal_child,
+            state.notification_delivered,
+        );
+
+        match decision {
+            CleanupDecision::Skip => {
+                tracing::debug!(
+                    key = %ctx.key(),
+                    req_generation = req.generation,
+                    cleanup_generation = state.cleanup_generation,
+                    "sub-agent cleanup skipped (stale, revived, or report not durable)"
+                );
+            }
+            CleanupDecision::Defer => {
+                // Bottom-up teardown: this child still has non-terminal children, so
+                // reschedule (same generation) and let them self-clean first. A revive of
+                // this child bumps the generation and supersedes the rescheduled tick.
+                let grace_ms = OrchestratorCtx::current_config()
+                    .session_limits
+                    .sub_agent_cleanup_grace_ms;
+                if grace_ms > 0 {
+                    let now = durable_utc_now(&ctx).await?;
+                    schedule_cleanup_self_call(&ctx, state.cleanup_generation, now, grace_ms);
+                }
+                tracing::debug!(
+                    key = %ctx.key(),
+                    "sub-agent cleanup deferred: non-terminal children remain"
+                );
+            }
+            CleanupDecision::Proceed => {
+                release_and_clear_sub_agent(&ctx, &state);
+            }
+        }
+        Ok(())
+    }
 }
+
+/// Decision of whether a fired `cleanup` tick should clear, wait, or be ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanupDecision {
+    /// Stale generation, revived (non-terminal), or report not yet durable: drop the
+    /// tick without clearing or rescheduling.
+    Skip,
+    /// Terminal but not a leaf yet (non-terminal children remain): reschedule so
+    /// teardown stays bottom-up.
+    Defer,
+    /// Terminal leaf with a durable report: release fan-out and clear VO state.
+    Proceed,
+}
+
+/// Pure cleanup guard ordering: stale/revive → terminal → bottom-up → durable report.
+///
+/// Kept free of `ctx` so the guard order is unit-testable without a Restate runtime.
+fn decide_cleanup(
+    generation_matches: bool,
+    is_terminal: bool,
+    has_non_terminal_child: bool,
+    notification_delivered: bool,
+) -> CleanupDecision {
+    // Stale/revive guard: a superseded generation or a child that was revived back to a
+    // non-terminal state must not be torn down.
+    if !generation_matches || !is_terminal {
+        return CleanupDecision::Skip;
+    }
+    // Bottom-up: defer until this child's own children are terminal.
+    if has_non_terminal_child {
+        return CleanupDecision::Defer;
+    }
+    // Durable-report guard: only clear once the terminal result is recorded on the
+    // parent (the same flag delivery set). Never reached in practice because cleanup is
+    // scheduled only after delivery, but it fails safe by not clearing.
+    if !notification_delivered {
+        return CleanupDecision::Skip;
+    }
+    CleanupDecision::Proceed
+}
+
+/// Releases a terminal leaf child's fan-out registration and clears its VO state.
+///
+/// Non-fatal by construction: the parent fan-out removal is dispatched detached
+/// (`.send()`) and `clear_all` cannot fail, so a partial failure cannot panic or leave
+/// inconsistent state — the child either stays registered (and is reclaimed at session
+/// teardown) or is fully removed.
+fn release_and_clear_sub_agent(ctx: &ObjectContext<'_>, state: &SubAgentVoState) {
+    let sub_agent_id = ctx.key().to_string();
+
+    // Resource release (hand leases / sandbox bindings):
+    // TODO(hand-lease teardown): sub-agent tool hands are provisioned under the PARENT
+    // session id (`synthetic_session_meta.id = parent_session`) and shared with the
+    // parent and sibling children. The only existing teardown,
+    // `ToolRouter::destroy_session_hands`, is session-scoped (and currently has no
+    // orchestrator caller), so releasing here would over-release the parent's hands, and
+    // the SubAgent VO holds no `ToolRouter`. Sub-agent hand leases are therefore reclaimed
+    // by the owning session's teardown; wire a per-sub-agent lease release here once
+    // moa-hands exposes one keyed by sub_agent_id.
+
+    // Remove from the parent fan-out via the existing removal handler (detached).
+    if let Some(parent_sub_agent) = state.parent_sub_agent.clone() {
+        ctx.object_client::<SubAgentClient>(parent_sub_agent)
+            .complete_child(Json::from(CompleteSubAgentChildInput {
+                sub_agent_id: sub_agent_id.clone(),
+                tokens_used: state.tokens_used,
+            }))
+            .send();
+    } else if let Some(parent_session) = state.parent_session {
+        ctx.object_client::<SessionClient>(parent_session.to_string())
+            .remove_child(sub_agent_id.clone())
+            .send();
+    }
+
+    // Clear all VO state (reuse `destroy` semantics). The parent keeps the cached
+    // terminal result and the durable event log, so nothing is lost.
+    ctx.clear_all();
+    tracing::info!(
+        key = %sub_agent_id,
+        "sub-agent self-cleaned after terminal report"
+    );
+}
+
+/// Issues one generation-guarded delayed self-call to `SubAgent/cleanup`.
+fn schedule_cleanup_self_call(
+    ctx: &ObjectContext<'_>,
+    generation: u64,
+    now: DateTime<Utc>,
+    grace_ms: u64,
+) {
+    let delay = std::time::Duration::from_millis(grace_ms);
+    let scheduled_for_millis =
+        (now + chrono::Duration::milliseconds(grace_ms as i64)).timestamp_millis();
+    schedule_generation_guarded_self_call(
+        ctx,
+        SUB_AGENT_OBJECT_NAME,
+        CLEANUP_HANDLER,
+        generation,
+        scheduled_for_millis,
+        Json::from(CleanupRequest { generation }),
+        delay,
+    );
+}
+
+/// Registered Restate object name for the SubAgent VO, used for the untyped self-call.
+const SUB_AGENT_OBJECT_NAME: &str = "SubAgent";
+/// Handler name of the self-cleanup tick on the SubAgent VO.
+const CLEANUP_HANDLER: &str = "cleanup";
 
 fn generate_turn_id(ctx: &mut ObjectContext<'_>) -> String {
     let key = ctx.key().to_string();
@@ -640,6 +857,13 @@ async fn deliver_terminal_notification_once(
     }
 
     let result = terminal.result.clone();
+    // Captured before the events move `result.sub_agent_id`, for the additive idle-wake.
+    let wake_sub_agent_id = result.sub_agent_id.clone();
+    let wake_summary = result
+        .error
+        .clone()
+        .unwrap_or_else(|| result.output.clone());
+    let parent_sub_agent = state.parent_sub_agent.clone();
     cache_parent_terminal_result(ctx, state, terminal).await?;
     persist_parent_session_event(
         ctx,
@@ -665,8 +889,92 @@ async fn deliver_terminal_notification_once(
         },
     )
     .await?;
+
+    // Terminal idle-wake (additive control-plane wake; does NOT alter the three existing
+    // channels or the `notification_delivered` guard). Lets a finished-while-idle child
+    // wake its coordinator. The wake is idempotent via the terminal signal id's dedupe
+    // key and non-fatal. `record_child_signal` performs the idle gate (active-turn
+    // check), so a busy coordinator is never auto-resumed; a Failed terminal is
+    // resume-eligible, a Completed/Cancelled terminal records as a non-resuming Finding.
+    emit_terminal_idle_wake(
+        ctx,
+        parent_session,
+        &wake_sub_agent_id,
+        parent_sub_agent,
+        status,
+        wake_summary,
+    )
+    .await?;
+
     state.notification_delivered = true;
+
+    // Report-then-self-clean: now that the result is durable on the parent (cache +
+    // event log) and the idle-wake fired, schedule a generation-guarded delayed
+    // self-cleanup. A follow-up arriving during the grace window bumps
+    // `cleanup_generation` (in `post_message`), making this pending tick stale so the
+    // child is revived instead of cleaned. The caller persists `state` after this
+    // returns `true`, so the bumped generation is durable before the tick fires.
+    let grace_ms = OrchestratorCtx::current_config()
+        .session_limits
+        .sub_agent_cleanup_grace_ms;
+    if grace_ms > 0 {
+        state.bump_cleanup_generation();
+        let now = durable_utc_now(ctx).await?;
+        schedule_cleanup_self_call(ctx, state.cleanup_generation, now, grace_ms);
+    }
+
     Ok(true)
+}
+
+/// Sends the additive terminal idle-wake control-plane signal to the owning coordinator.
+///
+/// The signal id and timestamp are journaled via `ctx.run()` so the wake is replay-safe
+/// and idempotent (the coordinator dedupes on `sub_agent_signal:{signal_id}`). It is
+/// dispatched detached (`.send()`) and never fails terminal delivery; the coordinator's
+/// `record_child_signal` applies the idle gate, so this only ever wakes an *idle*
+/// parent. A Failed terminal maps to a resume-eligible `Failed` signal; a successful or
+/// cancelled terminal maps to an informational `Finding` that records the wake without
+/// arming a resume (honoring "never resume on plain success").
+async fn emit_terminal_idle_wake(
+    ctx: &ObjectContext<'_>,
+    parent_session: SessionId,
+    sub_agent_id: &str,
+    parent_sub_agent: Option<SubAgentId>,
+    status: SubAgentState,
+    summary: String,
+) -> Result<(), HandlerError> {
+    let signal_id = ctx
+        .run(|| async { Ok::<_, HandlerError>(Json::from(AgentSignalId::new())) })
+        .name("sub_agent_terminal_wake_signal_id")
+        .await?
+        .into_inner();
+    let created_at = ctx
+        .run(|| async { Ok::<_, HandlerError>(Json::from(Utc::now())) })
+        .name("sub_agent_terminal_wake_at")
+        .await?
+        .into_inner();
+    let (kind, severity) = if matches!(status, SubAgentState::Failed) {
+        (ChildSignalKind::Failed, SignalSeverity::Critical)
+    } else {
+        (ChildSignalKind::Finding, SignalSeverity::Info)
+    };
+    ctx.object_client::<SessionClient>(parent_session.to_string())
+        .record_child_signal(Json::from(SubAgentSignal {
+            signal_id,
+            sub_agent_id: sub_agent_id.to_string(),
+            parent_session,
+            parent_sub_agent,
+            kind,
+            severity,
+            summary,
+            payload: serde_json::Value::Null,
+            created_at,
+            resume_policy: ParentResumePolicy::IfIdle,
+            input_request_id: None,
+            input_audience: None,
+        }))
+        .send();
+    Ok(())
 }
 
 async fn cache_parent_terminal_result(
@@ -690,4 +998,58 @@ async fn cache_parent_terminal_result(
             .await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CleanupDecision, decide_cleanup};
+
+    #[test]
+    fn cleanup_skips_on_stale_generation() {
+        // Pins: a fired cleanup whose generation no longer matches (the child was revived
+        // or rescheduled during the grace window) is a no-op, never tearing down.
+        assert_eq!(
+            decide_cleanup(false, true, false, true),
+            CleanupDecision::Skip
+        );
+    }
+
+    #[test]
+    fn cleanup_skips_when_revived_to_non_terminal() {
+        // Pins: a child that a follow-up revived back to Running is not terminal, so
+        // cleanup must skip even when the generation still matches.
+        assert_eq!(
+            decide_cleanup(true, false, false, true),
+            CleanupDecision::Skip
+        );
+    }
+
+    #[test]
+    fn cleanup_defers_while_non_terminal_child_exists() {
+        // Pins: teardown is bottom-up; a terminal parent with a still-running child
+        // reschedules rather than clearing.
+        assert_eq!(
+            decide_cleanup(true, true, true, true),
+            CleanupDecision::Defer
+        );
+    }
+
+    #[test]
+    fn cleanup_skips_when_report_not_durable() {
+        // Pins: the durable-report guard — cleanup never clears a terminal leaf whose
+        // result was not yet recorded on the parent.
+        assert_eq!(
+            decide_cleanup(true, true, false, false),
+            CleanupDecision::Skip
+        );
+    }
+
+    #[test]
+    fn cleanup_proceeds_on_durable_terminal_leaf() {
+        // Pins: a terminal leaf with a durable report and a live generation is released.
+        assert_eq!(
+            decide_cleanup(true, true, false, true),
+            CleanupDecision::Proceed
+        );
+    }
 }

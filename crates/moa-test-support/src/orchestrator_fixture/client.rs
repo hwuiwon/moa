@@ -47,7 +47,11 @@ impl TestApiClient {
     pub async fn append_event(&self, session_id: SessionId, event: Event) -> Result<u64> {
         self.post_call(
             "/SessionStore/append_event",
-            &AppendEventRequest { session_id, event },
+            &AppendEventRequest {
+                session_id,
+                event,
+                dedupe_key: None,
+            },
         )
         .await
     }

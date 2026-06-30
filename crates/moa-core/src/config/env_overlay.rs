@@ -393,6 +393,18 @@ pub struct MoaEnvOverlay {
     pub session_limits_progress_first_delay_ms: Option<u64>,
     /// `MOA_SESSION_LIMITS_PROGRESS_INTERVAL_MS`.
     pub session_limits_progress_interval_ms: Option<u64>,
+    /// `MOA_SESSION_LIMITS_PROGRESS_NARRATION_ENABLED`.
+    pub session_limits_progress_narration_enabled: Option<bool>,
+    /// `MOA_SESSION_LIMITS_PROGRESS_NARRATION_MODEL`.
+    pub session_limits_progress_narration_model: Option<String>,
+    /// `MOA_SESSION_LIMITS_PROGRESS_NARRATION_INTERVAL_MS`.
+    pub session_limits_progress_narration_interval_ms: Option<u64>,
+    /// `MOA_SESSION_LIMITS_PROGRESS_NARRATION_MAX_PER_WINDOW`.
+    pub session_limits_progress_narration_max_per_window: Option<u32>,
+    /// `MOA_SESSION_LIMITS_PROGRESS_NARRATION_MAX_TOKENS`.
+    pub session_limits_progress_narration_max_tokens: Option<u32>,
+    /// `MOA_SESSION_LIMITS_SUB_AGENT_CLEANUP_GRACE_MS`.
+    pub session_limits_sub_agent_cleanup_grace_ms: Option<u64>,
     /// `MOA_TOOL_OUTPUT_MAX_REPLAY_CHARS`.
     pub tool_output_max_replay_chars: Option<usize>,
     /// `MOA_TOOL_OUTPUT_MAX_BASH_LINES`.

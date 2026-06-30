@@ -149,6 +149,10 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
             "../migrations/postgres/V000319__knowledge_visibility_cache_invalidation.sql"
         ),
     },
+    SchemaMigration {
+        name: "V000320__session_event_dedupe.sql",
+        sql: include_str!("../migrations/postgres/V000320__session_event_dedupe.sql"),
+    },
 ];
 
 const AUTH_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[

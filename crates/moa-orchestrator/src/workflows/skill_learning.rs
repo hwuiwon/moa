@@ -216,6 +216,7 @@ async fn record_skill_learning_failure_from_workflow(
             event: Event::Warning {
                 message: skill_learning_failure_message(experience_id, error),
             },
+            dedupe_key: None,
         }))
         .call()
         .await;

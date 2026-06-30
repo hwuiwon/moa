@@ -159,7 +159,11 @@ impl ActionReviews for ActionReviewsImpl {
                 .await?;
                 if !event_exists {
                     ctx.service_client::<RestateSessionStoreClient>()
-                        .append_event(Json(AppendEventRequest { session_id, event }))
+                        .append_event(Json(AppendEventRequest {
+                            session_id,
+                            event,
+                            dedupe_key: None,
+                        }))
                         .call()
                         .await?;
                 }
@@ -255,6 +259,7 @@ impl ActionReviews for ActionReviewsImpl {
                                 decided_by: decided.decided_by.clone(),
                                 decided_at: decided.decided_at,
                             },
+                            dedupe_key: None,
                         }))
                         .call()
                         .await?;

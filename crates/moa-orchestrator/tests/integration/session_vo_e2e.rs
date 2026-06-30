@@ -4,7 +4,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use moa_core::{CancelMode, Event, EventRange, ModelId, SessionId, SessionStatus};
+use moa_core::{CancelScope, Event, EventRange, ModelId, SessionId, SessionStatus};
 use reqwest::StatusCode;
 use sqlx::PgPool;
 use tempfile::TempDir;
@@ -201,7 +201,7 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
 
         let cancel_request = client
             .post(object_url(ingress, session_id, "cancel"))
-            .json(&CancelMode::Soft);
+            .json(&CancelScope::TaskTree);
         with_identity(cancel_request, &identity)
             .send()
             .await

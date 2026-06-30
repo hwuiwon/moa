@@ -440,7 +440,11 @@ async fn append_session_event(
     let persist_started = Instant::now();
     let sequence_num = ctx
         .service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest { session_id, event }))
+        .append_event(Json(AppendEventRequest {
+            session_id,
+            event,
+            dedupe_key: None,
+        }))
         .call()
         .instrument(persist_span)
         .await?;

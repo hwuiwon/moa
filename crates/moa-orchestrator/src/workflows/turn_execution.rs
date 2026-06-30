@@ -1207,6 +1207,7 @@ async fn ensure_current_segment(
                 .append_event(Json(AppendEventRequest {
                     session_id,
                     event: completed.clone().into_event(),
+                    dedupe_key: None,
                 }))
                 .send();
             assess_completed_segment_at_transition(
@@ -1228,6 +1229,7 @@ async fn ensure_current_segment(
             .append_event(Json(AppendEventRequest {
                 session_id,
                 event: transition.started.clone().into_event(),
+                dedupe_key: None,
             }))
             .send();
 
@@ -1853,7 +1855,11 @@ async fn append_session_event(
     let persist_started = Instant::now();
     let sequence_num = ctx
         .service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest { session_id, event }))
+        .append_event(Json(AppendEventRequest {
+            session_id,
+            event,
+            dedupe_key: None,
+        }))
         .call()
         .instrument(persist_span)
         .await?;

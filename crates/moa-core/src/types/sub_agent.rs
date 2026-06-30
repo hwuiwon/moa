@@ -1,12 +1,14 @@
 //! Sub-agent message, result, and status types used by Restate orchestration.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::error::{MoaError, Result};
 
 use super::{
-    CompletionRequest, CompletionResponse, ModelId, SessionId, SessionMeta, TenantId, ToolCallId,
-    ToolInvocation, ToolOutput, TrustedSandboxFileManifestRef, TurnOutcome, UserId,
+    AgentSignalId, CompletionRequest, CompletionResponse, ModelId, SessionId, SessionMeta,
+    TenantId, ToolCallId, ToolInvocation, ToolOutput, TrustedSandboxFileManifestRef, TurnOutcome,
+    UserId,
 };
 
 /// Stable sub-agent identifier keyed under the parent session or sub-agent.
@@ -103,6 +105,164 @@ pub enum SubAgentState {
     Failed,
     /// Child was cancelled.
     Cancelled,
+}
+
+/// Attention-requiring child-to-parent signal kind.
+///
+/// Excludes high-frequency telemetry (progress/heartbeat) and plain terminal
+/// success (handled by the existing notification path); these are the only kinds
+/// routed to the owning coordinator on the control plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildSignalKind {
+    /// The child surfaced a noteworthy intermediate finding.
+    Finding,
+    /// The child is blocked and cannot make progress without intervention.
+    Blocked,
+    /// The child needs input before it can continue.
+    NeedsInput,
+    /// The child failed terminally and is reporting the failure.
+    Failed,
+    /// The child's heartbeat went stale (raised by the watchdog).
+    HeartbeatStale,
+}
+
+/// Whether a signal may wake an idle coordinator. Conservative by design.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParentResumePolicy {
+    /// Never wake the coordinator; the signal waits for the next user turn.
+    Never,
+    /// Wake the coordinator only when it is currently idle.
+    IfIdle,
+}
+
+/// Relative urgency of one control-plane signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalSeverity {
+    /// Informational; no action implied.
+    Info,
+    /// Warrants attention but is not terminal.
+    Warning,
+    /// Critical condition requiring prompt coordinator attention.
+    Critical,
+}
+
+/// For `NeedsInput`: whether the child's question needs the human or the
+/// coordinator can answer it autonomously.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputAudience {
+    /// The owning coordinator can answer the question itself.
+    Coordinator,
+    /// The question must be surfaced to the human user.
+    User,
+}
+
+/// Narrow child-to-parent attention signal routed to the owning coordinator.
+///
+/// Idempotent at the event log via a dedupe key derived from `signal_id`. This is
+/// the control plane: low-frequency, model-driven attention events (not per-tick
+/// telemetry).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubAgentSignal {
+    /// Stable identifier for this attention signal.
+    pub signal_id: AgentSignalId,
+    /// Child sub-agent that raised the signal.
+    pub sub_agent_id: SubAgentId,
+    /// Owning root session coordinator that should receive the signal.
+    pub parent_session: SessionId,
+    /// Immediate parent sub-agent when the signal originated from a nested child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_sub_agent: Option<SubAgentId>,
+    /// Kind of attention being requested.
+    pub kind: ChildSignalKind,
+    /// Relative urgency of the signal.
+    pub severity: SignalSeverity,
+    /// Short, safe human-readable summary of the signal.
+    pub summary: String,
+    /// Structured payload carrying signal-specific detail.
+    #[serde(default)]
+    pub payload: serde_json::Value,
+    /// When the signal was created (Restate-journaled at the child).
+    pub created_at: DateTime<Utc>,
+    /// Whether this signal may wake an idle coordinator.
+    pub resume_policy: ParentResumePolicy,
+    /// Awakeable id the child is blocked on; `Some` only for `NeedsInput`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_request_id: Option<String>,
+    /// Who should answer the request; `Some` only for `NeedsInput`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_audience: Option<InputAudience>,
+}
+
+/// Compact, persisted projection of one unread child→parent control-plane signal.
+///
+/// Stored on the owning coordinator `Session` VO so a later resume/drain turn (Task 6)
+/// can surface the signal's content without re-reading the event log. Carries CONTENT
+/// (kind/summary/input request) rather than only ids, and is capped to a small recent
+/// window on the VO so it never bloats parent state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnreadChildSignal {
+    /// Stable identifier of the recorded signal.
+    pub signal_id: AgentSignalId,
+    /// Child sub-agent that raised the signal.
+    pub sub_agent_id: SubAgentId,
+    /// Kind of attention requested.
+    pub kind: ChildSignalKind,
+    /// Short, safe human-readable summary carried for the resume/drain turn.
+    pub summary: String,
+    /// Awakeable id the child is blocked on; `Some` only for `NeedsInput`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_request_id: Option<String>,
+    /// Who should answer the request; `Some` only for `NeedsInput`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_audience: Option<InputAudience>,
+}
+
+/// Compact fan-in summary read on demand by `Session/progress` and
+/// `list_sub_agents`. Kept small so it never bloats parent VO state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubAgentProgressSummary {
+    /// Child sub-agent the summary describes.
+    pub sub_agent_id: SubAgentId,
+    /// Current lifecycle state.
+    pub state: SubAgentState,
+    /// Active workflow turn id, when a turn is running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_turn_id: Option<String>,
+    /// Most recent short progress summary, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_summary: Option<String>,
+    /// Tokens consumed so far by the child.
+    pub tokens_used: u64,
+    /// Remaining token budget for the child.
+    pub budget_remaining: u64,
+    /// Last heartbeat timestamp observed for the child, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    /// Whether the child's heartbeat is currently considered stale.
+    pub stale: bool,
+}
+
+/// Source of one progress-narration segment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NarrationSource {
+    /// The owning coordinator (the merged, user-facing voice).
+    Coordinator,
+    /// One specific sub-agent.
+    SubAgent(SubAgentId),
+}
+
+/// One attributed line within a merged progress narration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NarrationSegment {
+    /// Which active source this line describes.
+    pub source: NarrationSource,
+    /// Short, user-facing narration text for the source.
+    pub text: String,
 }
 
 /// Persisted child reference used by parents for depth and loop control.

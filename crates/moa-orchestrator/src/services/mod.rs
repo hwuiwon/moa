@@ -20,6 +20,7 @@ pub mod knowledge;
 pub mod learning_review;
 pub mod llm_gateway;
 pub mod memory;
+pub mod narration;
 pub mod neon_maint;
 pub mod privacy;
 pub mod scim;

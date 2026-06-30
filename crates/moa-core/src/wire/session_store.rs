@@ -12,6 +12,12 @@ pub struct AppendEventRequest {
     pub session_id: SessionId,
     /// Event payload to append to the durable log.
     pub event: Event,
+    /// Optional idempotency key. When set, a retried append with the same
+    /// `(session_id, dedupe_key)` returns the first persisted sequence number
+    /// without inserting a second event (see `session_event_dedupe`). Existing
+    /// callers omit it and every append inserts as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<String>,
 }
 
 /// Request payload for `SessionStore/get_events`.

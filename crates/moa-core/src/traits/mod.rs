@@ -69,6 +69,21 @@ pub trait SessionStore: Send + Sync {
             .ok_or_else(|| MoaError::StorageError("failed to reload appended event".to_string()))
     }
 
+    /// Appends an event with optional idempotency, returning the persisted record.
+    ///
+    /// When `dedupe_key` is `Some`, a retried append with the same
+    /// `(session_id, dedupe_key)` returns the first persisted record without
+    /// inserting a second event. The default implementation ignores the key and
+    /// always appends, preserving stores that do not support dedupe.
+    async fn emit_event_record_deduped(
+        &self,
+        session_id: SessionId,
+        event: Event,
+        _dedupe_key: Option<String>,
+    ) -> Result<EventRecord> {
+        self.emit_event_record(session_id, event).await
+    }
+
     /// Stores a large text artifact behind a session-scoped claim check.
     async fn store_text_artifact(&self, _session_id: SessionId, _text: &str) -> Result<ClaimCheck> {
         Err(MoaError::Unsupported(

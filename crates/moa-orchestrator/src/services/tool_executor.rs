@@ -598,6 +598,7 @@ async fn append_tool_call_event(
                 input: request.input.clone(),
                 hand_id: None,
             },
+            dedupe_key: None,
         }))
         .call()
         .await?;
@@ -625,6 +626,7 @@ async fn append_tool_result_event(
                 success: !output.is_error,
                 duration_ms: output.duration.as_millis() as u64,
             },
+            dedupe_key: None,
         }))
         .call()
         .await?;
@@ -655,6 +657,7 @@ async fn append_tool_error_event(
                     IdempotencyClass::NonIdempotent
                 ),
             },
+            dedupe_key: None,
         }))
         .call()
         .await?;
@@ -679,6 +682,7 @@ async fn append_tool_canary_block_events(
                     request.tool_name
                 ),
             },
+            dedupe_key: None,
         }))
         .call()
         .await?;
@@ -693,6 +697,7 @@ async fn append_tool_canary_block_events(
                 error: blocked_canary_message(&request.tool_name),
                 retryable: false,
             },
+            dedupe_key: None,
         }))
         .call()
         .await?;
@@ -719,6 +724,7 @@ async fn append_agent_tool_policy_denied_event(
                 error: output.to_text(),
                 retryable: false,
             },
+            dedupe_key: None,
         }))
         .call()
         .await?;

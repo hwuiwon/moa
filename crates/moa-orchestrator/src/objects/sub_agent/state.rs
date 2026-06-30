@@ -25,6 +25,8 @@ pub(super) const K_ACTIVE_TURN_ID: &str = "active_turn_id";
 pub(super) const K_LAST_OUTCOME: &str = "last_outcome";
 pub(super) const K_NOTIFICATION_DELIVERED: &str = "notification_delivered";
 pub(super) const K_RESULT_WAITERS: &str = "result_waiters";
+pub(super) const K_LAST_HEARTBEAT_AT: &str = "last_heartbeat_at";
+pub(super) const K_CLEANUP_GENERATION: &str = "cleanup_generation";
 pub(super) const MAX_TURNS_PER_POST: usize = 50;
 
 /// Serializable projection of the SubAgent VO's durable state keys.
@@ -76,6 +78,18 @@ pub struct SubAgentVoState {
     pub notification_delivered: bool,
     /// Awakeable ids waiting for this sub-agent's terminal result.
     pub result_waiters: Vec<String>,
+    /// Last telemetry-plane heartbeat timestamp, refreshed at the progress cadence.
+    ///
+    /// Updated by `SubAgent/record_heartbeat` (VO state only, no event per tick) so
+    /// `progress_summary` and the watchdog can detect a stuck child.
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    /// Generation guarding the report-then-self-clean delayed self-call.
+    ///
+    /// Bumped when terminal delivery schedules a cleanup tick and again on any accepted
+    /// `post_message` (initial task or revive follow-up). A fired `SubAgent/cleanup`
+    /// whose carried generation no longer matches this value is stale — the child was
+    /// revived or re-scheduled during the grace window — and is ignored.
+    pub cleanup_generation: u64,
 }
 
 impl SubAgentVoState {
@@ -141,6 +155,26 @@ impl SubAgentVoState {
         Err(MoaError::ValidationError(
             "sub-agent state is not initialized".to_string(),
         ))
+    }
+
+    /// Returns whether a follow-up may revive this child.
+    ///
+    /// A child whose VO state was cleared by self-cleanup reads back as
+    /// `Uninitialized`, so a follow-up to it must be rejected rather than
+    /// re-bootstrapped. A still-initialized terminal child (within the grace window)
+    /// is revivable, preserving the existing revive behavior.
+    #[must_use]
+    pub(super) fn accepts_follow_up(&self) -> bool {
+        !matches!(self.current_status(), SubAgentState::Uninitialized)
+    }
+
+    /// Bumps the self-cleanup generation, invalidating any pending cleanup tick.
+    ///
+    /// Called when terminal delivery schedules a cleanup and on any accepted
+    /// `post_message`, so a message arriving during the grace window supersedes the
+    /// pending cleanup and revives the child instead.
+    pub(super) fn bump_cleanup_generation(&mut self) {
+        self.cleanup_generation = self.cleanup_generation.wrapping_add(1);
     }
 
     /// Queues a follow-up message and transitions the child into `Running`.
@@ -266,6 +300,34 @@ impl SubAgentVoState {
             error,
         }
     }
+
+    /// Builds the compact fan-in progress summary returned by `progress_summary`.
+    ///
+    /// `now` and `stale_threshold_ms` are passed in (journaled by the handler) so
+    /// the staleness derivation stays replay-deterministic and unit-testable. The
+    /// child is considered stale when a heartbeat exists and its age exceeds the
+    /// threshold; a child without a heartbeat yet is never reported stale.
+    #[must_use]
+    pub(super) fn progress_summary(
+        &self,
+        sub_agent_id: SubAgentId,
+        now: DateTime<Utc>,
+        stale_threshold_ms: u64,
+    ) -> SubAgentProgressSummary {
+        let stale = self
+            .last_heartbeat_at
+            .is_some_and(|last| (now - last).num_milliseconds() > stale_threshold_ms as i64);
+        SubAgentProgressSummary {
+            sub_agent_id,
+            state: self.current_status(),
+            active_turn_id: self.active_turn_id.clone(),
+            last_summary: self.last_turn_summary.clone(),
+            tokens_used: self.tokens_used,
+            budget_remaining: self.budget_remaining,
+            last_heartbeat_at: self.last_heartbeat_at,
+            stale,
+        }
+    }
 }
 
 impl VoState for SubAgentVoState {
@@ -300,6 +362,11 @@ impl VoState for SubAgentVoState {
                 .await?
                 .unwrap_or_default(),
             result_waiters: reader.get_json(K_RESULT_WAITERS).await?.unwrap_or_default(),
+            last_heartbeat_at: reader.get_json(K_LAST_HEARTBEAT_AT).await?,
+            cleanup_generation: reader
+                .get_json(K_CLEANUP_GENERATION)
+                .await?
+                .unwrap_or_default(),
         })
     }
 
@@ -336,6 +403,8 @@ impl VoState for SubAgentVoState {
             false,
         );
         set_or_clear_vec(ctx, K_RESULT_WAITERS, &self.result_waiters);
+        set_or_clear_opt(ctx, K_LAST_HEARTBEAT_AT, self.last_heartbeat_at.as_ref());
+        set_or_clear_scalar(ctx, K_CLEANUP_GENERATION, self.cleanup_generation, 0);
     }
 }
 
@@ -643,6 +712,88 @@ mod tests {
         assert_eq!(state.budget_remaining, 275);
         assert_eq!(state.consume_child_terminal("child-1"), Some(terminal));
         assert_eq!(state.consume_child_terminal("child-1"), None);
+    }
+
+    #[test]
+    fn progress_summary_reports_state_and_heartbeat_fields() {
+        // Pins: the compact fan-in summary carries the child's live state, last summary,
+        // budget, and heartbeat, and derives staleness from the heartbeat age.
+        use chrono::{Duration, Utc};
+
+        let mut state = SubAgentVoState::default();
+        state
+            .initialize(&initial_task())
+            .expect("initial task should seed state");
+        state.record_token_usage(100);
+        state.last_turn_summary = Some("searching docs".to_string());
+        state.active_turn_id = Some("turn-1".to_string());
+        let now = Utc::now();
+        let heartbeat = now - Duration::milliseconds(5_000);
+        state.last_heartbeat_at = Some(heartbeat);
+
+        let fresh = state.progress_summary("child-1".to_string(), now, 60_000);
+        assert_eq!(fresh.sub_agent_id, "child-1");
+        assert_eq!(fresh.state, SubAgentState::Running);
+        assert_eq!(fresh.active_turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(fresh.last_summary.as_deref(), Some("searching docs"));
+        assert_eq!(fresh.tokens_used, 100);
+        assert_eq!(fresh.budget_remaining, 412);
+        assert_eq!(fresh.last_heartbeat_at, Some(heartbeat));
+        assert!(!fresh.stale, "a recent heartbeat must not be stale");
+
+        // A heartbeat older than the threshold flips the stale flag.
+        let stale = state.progress_summary("child-1".to_string(), now, 1_000);
+        assert!(stale.stale, "an aged heartbeat must be stale");
+
+        // No heartbeat yet is never stale.
+        state.last_heartbeat_at = None;
+        let no_heartbeat = state.progress_summary("child-1".to_string(), now, 1);
+        assert!(!no_heartbeat.stale);
+        assert_eq!(no_heartbeat.last_heartbeat_at, None);
+    }
+
+    #[test]
+    fn cleaned_state_rejects_follow_up_but_terminal_child_is_revivable() {
+        // Pins: a follow-up to a cleaned (cleared) VO must be rejected, while a
+        // still-initialized terminal child within the grace window stays revivable.
+        let cleaned = SubAgentVoState::default();
+        assert!(
+            !cleaned.accepts_follow_up(),
+            "a cleared/uninitialized child must not accept follow-ups"
+        );
+
+        let mut terminal = SubAgentVoState::default();
+        terminal
+            .initialize(&initial_task())
+            .expect("initial task should seed state");
+        terminal.apply_turn_outcome(TurnOutcome::Idle);
+        assert_eq!(terminal.current_status(), SubAgentState::Completed);
+        assert!(
+            terminal.accepts_follow_up(),
+            "a terminal-but-not-cleaned child must still be revivable"
+        );
+    }
+
+    #[test]
+    fn accepted_message_bumps_cleanup_generation_invalidating_pending_cleanup() {
+        // Pins: a message arriving during the grace window bumps cleanup_generation so a
+        // cleanup tick scheduled for the prior generation is recognized as stale.
+        let mut state = SubAgentVoState::default();
+        state
+            .initialize(&initial_task())
+            .expect("initial task should seed state");
+
+        // Terminal delivery schedules cleanup for this generation.
+        state.bump_cleanup_generation();
+        let scheduled_generation = state.cleanup_generation;
+
+        // A revive follow-up arriving mid-grace bumps the generation again.
+        state.bump_cleanup_generation();
+
+        assert_ne!(
+            scheduled_generation, state.cleanup_generation,
+            "an accepted message must supersede the pending cleanup generation"
+        );
     }
 
     #[test]

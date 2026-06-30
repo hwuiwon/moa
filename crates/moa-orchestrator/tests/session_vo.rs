@@ -2,9 +2,12 @@
 
 use chrono::Utc;
 use moa_core::{
-    CancelMode, Channel, ModelId, SessionActorRef, SessionMeta, SessionStatus, TenantId,
+    CancelScope, Channel, ModelId, SessionActorRef, SessionMeta, SessionStatus, SubAgentResult,
+    SubAgentState, SubAgentTerminalResult, TenantId,
 };
-use moa_orchestrator::objects::session::SessionVoState;
+use moa_orchestrator::objects::session::{
+    ChildProgressFetch, SessionVoState, plan_child_progress_fan_in, terminal_child_summary,
+};
 use uuid::Uuid;
 
 fn test_meta() -> SessionMeta {
@@ -71,10 +74,136 @@ fn session_vo_post_message_updates_status_to_running_then_idle_parks_paused() {
 #[test]
 fn session_vo_cancel_sets_flag() {
     let mut state = SessionVoState::default();
-    state.set_cancel_flag(CancelMode::Soft);
+    state.set_cancel_flag(CancelScope::CoordinatorOnly);
 
-    assert_eq!(state.take_cancel_flag(), Some(CancelMode::Soft));
+    assert_eq!(state.take_cancel_flag(), Some(CancelScope::CoordinatorOnly));
     assert_eq!(state.take_cancel_flag(), None);
+}
+
+fn test_child_ref(id: &str) -> moa_core::SubAgentChildRef {
+    moa_core::SubAgentChildRef {
+        id: id.to_string(),
+        task_hash: format!("hash-{id}"),
+        budget_tokens: 0,
+        terminal: None,
+    }
+}
+
+#[test]
+fn coordinator_only_cancel_preserves_child_refs() {
+    // Pins: a CoordinatorOnly cancel stops only the coordinator turn and does not cascade to
+    // children, so the handler must not forward SubAgent/cancel and the child refs stay registered.
+    let mut state = SessionVoState::default();
+    state.set_meta(test_meta());
+    state.children.push(test_child_ref("child-1"));
+    state.children.push(test_child_ref("child-2"));
+
+    state.set_cancel_flag(CancelScope::CoordinatorOnly);
+
+    // The production branch the handler uses to decide whether to cascade to children.
+    assert!(!CancelScope::CoordinatorOnly.cancels_task_tree());
+    // Children remain registered on the coordinator (left running).
+    assert_eq!(state.children.len(), 2);
+    assert_eq!(state.take_cancel_flag(), Some(CancelScope::CoordinatorOnly));
+}
+
+#[test]
+fn task_tree_cancel_cancels_children() {
+    // Pins: a TaskTree cancel reproduces today's behavior — the handler forwards SubAgent/cancel
+    // to every registered child in addition to cancelling the coordinator turn.
+    let mut state = SessionVoState::default();
+    state.set_meta(test_meta());
+    state.children.push(test_child_ref("child-1"));
+    state.children.push(test_child_ref("child-2"));
+
+    state.set_cancel_flag(CancelScope::TaskTree);
+
+    // The production branch the handler uses to decide whether to cascade to children.
+    assert!(CancelScope::TaskTree.cancels_task_tree());
+    // TaskTree is also the default scope (a bare "stop" cancels everything).
+    assert_eq!(CancelScope::default(), CancelScope::TaskTree);
+    // Child refs remain available for the handler's forward-to-children loop.
+    assert_eq!(state.children.len(), 2);
+    assert_eq!(state.take_cancel_flag(), Some(CancelScope::TaskTree));
+}
+
+fn terminal_child_ref(id: &str, output: &str) -> moa_core::SubAgentChildRef {
+    moa_core::SubAgentChildRef {
+        id: id.to_string(),
+        task_hash: format!("hash-{id}"),
+        budget_tokens: 256,
+        terminal: Some(SubAgentTerminalResult {
+            state: SubAgentState::Completed,
+            result: SubAgentResult {
+                sub_agent_id: id.to_string(),
+                success: true,
+                output: output.to_string(),
+                tokens_used: 42,
+                tools_invoked: 1,
+                error: None,
+            },
+        }),
+    }
+}
+
+#[test]
+fn session_progress_fan_in_includes_active_child_and_synthesizes_terminal() {
+    // Pins: Session/progress builds child_progress by bounded on-demand fan-in — an active
+    // child is scheduled for a live progress_summary read, a terminal child is synthesized
+    // in place from its cached parent ref without a live call.
+    let children = vec![
+        test_child_ref("active-1"),
+        terminal_child_ref("done-1", "summary for done-1"),
+    ];
+
+    let plan = plan_child_progress_fan_in(&children, 4);
+    assert_eq!(plan.len(), 2);
+    assert_eq!(plan[0], ChildProgressFetch::Fetch("active-1".to_string()));
+    match &plan[1] {
+        ChildProgressFetch::Ready(summary) => {
+            assert_eq!(summary.sub_agent_id, "done-1");
+            assert_eq!(summary.state, SubAgentState::Completed);
+            assert_eq!(summary.last_summary.as_deref(), Some("summary for done-1"));
+            assert_eq!(summary.tokens_used, 42);
+            assert!(!summary.stale);
+            assert_eq!(summary.active_turn_id, None);
+        }
+        other => panic!("expected a synthesized terminal summary, got {other:?}"),
+    }
+
+    // The synthesized summary matches the standalone synthesis helper.
+    let direct = terminal_child_summary(
+        &children[1],
+        children[1]
+            .terminal
+            .as_ref()
+            .expect("terminal child has a cached result"),
+    );
+    assert_eq!(ChildProgressFetch::Ready(direct), plan[1]);
+}
+
+#[test]
+fn session_progress_fan_in_caps_live_child_calls() {
+    // Pins: the fan-in never walks an unbounded tree — live progress_summary reads are
+    // capped by the fan-out limit, while cached terminal children are always synthesized.
+    let children = vec![
+        test_child_ref("active-1"),
+        test_child_ref("active-2"),
+        test_child_ref("active-3"),
+        terminal_child_ref("done-1", "done"),
+    ];
+
+    let plan = plan_child_progress_fan_in(&children, 2);
+    let fetches = plan
+        .iter()
+        .filter(|item| matches!(item, ChildProgressFetch::Fetch(_)))
+        .count();
+    let ready = plan
+        .iter()
+        .filter(|item| matches!(item, ChildProgressFetch::Ready(_)))
+        .count();
+    assert_eq!(fetches, 2, "live fan-out is capped at max_live");
+    assert_eq!(ready, 1, "cached terminal children are always synthesized");
 }
 
 #[test]
@@ -91,7 +220,7 @@ fn session_vo_destroy_clears_state() {
         budget_tokens: 0,
         terminal: None,
     });
-    state.set_cancel_flag(CancelMode::Hard);
+    state.set_cancel_flag(CancelScope::TaskTree);
     state.destroy();
 
     assert_eq!(state, SessionVoState::default());

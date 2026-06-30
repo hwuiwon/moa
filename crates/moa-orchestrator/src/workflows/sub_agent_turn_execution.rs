@@ -8,15 +8,17 @@
 use std::collections::BTreeSet;
 use std::time::Instant;
 
+use chrono::{DateTime, Utc};
 use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequest};
 use moa_core::wire::turn::{
     RunSubAgentTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
 };
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, Event, ModelTier, SessionId,
-    SessionMeta, StopReason, SubAgentToolRecord, SubAgentTurnOutcomeRecord,
-    SubAgentTurnPreparation, SubAgentTurnResponseRecord, TokenUsage, ToolCallContent, ToolCallId,
-    ToolInvocation, ToolOutput, TrustedSandboxFileManifestRef, TurnOutcome as CoreTurnOutcome,
+    AgentSignalId, ChildSignalKind, CompletionContent, CompletionRequest, CompletionResponse,
+    Event, ModelTier, ParentResumePolicy, SessionId, SessionMeta, SignalSeverity, StopReason,
+    SubAgentSignal, SubAgentToolRecord, SubAgentTurnOutcomeRecord, SubAgentTurnPreparation,
+    SubAgentTurnResponseRecord, TokenUsage, ToolCallContent, ToolCallId, ToolInvocation,
+    ToolOutput, TrustedSandboxFileManifestRef, TurnOutcome as CoreTurnOutcome,
 };
 use moa_observability::restate_observability::{
     annotate_restate_handler_span, event_persist_span, llm_call_span, sub_agent_turn_span,
@@ -30,6 +32,7 @@ use restate_sdk::prelude::*;
 use tracing::Instrument;
 
 use crate::OrchestratorCtx;
+use crate::objects::session::SessionClient;
 use crate::objects::sub_agent::{MAX_SUB_AGENT_TURNS_PER_WORKFLOW, SubAgentClient};
 use crate::services::{llm_gateway::LLMGatewayClient, session_store::RestateSessionStoreClient};
 use crate::tool_invocation::governed::{
@@ -44,6 +47,7 @@ use crate::turn::util::{
 use crate::turn_driver::{
     model_loop as driver_model_loop, progress as driver_progress, segments as driver_segments,
 };
+use crate::workflows::durable_utc_now;
 use crate::workflows::turn_progress::{self, SUMMARY_CALLING_MODEL};
 use crate::workflows::turn_responsiveness::{
     ToolBudgetDecision, ToolBudgetExhausted, ToolBudgetState,
@@ -96,7 +100,12 @@ impl SubAgentTurnExecution for SubAgentTurnExecutionImpl {
         driver_progress::set_phase(&ctx, TurnPhase::Compiling);
 
         let workflow_started = Instant::now();
-        let outcome = match run_sub_agent_inside_workflow(&ctx, &request).await {
+        // `parent_session` is learned during the loop (best-effort for the FAILED-signal
+        // emit below). It stays `None` if the workflow errors before the first turn is
+        // prepared; the terminal idle-wake still covers waking an idle parent.
+        let mut parent_session: Option<SessionId> = None;
+        let outcome = match run_sub_agent_inside_workflow(&ctx, &request, &mut parent_session).await
+        {
             Ok(outcome) => outcome,
             Err(error) => TurnOutcome {
                 turn_id: request.turn_id.clone(),
@@ -117,6 +126,10 @@ impl SubAgentTurnExecution for SubAgentTurnExecutionImpl {
         };
         turn_progress::finish(&ctx).await?;
         driver_progress::set_phase(&ctx, phase);
+        // Control plane: a FAILED outcome raises a Failed attention signal to the owning
+        // coordinator (the only child-originated emit in this increment).
+        emit_failed_child_signal_if_needed(&ctx, &request.sub_agent_id, parent_session, &outcome)
+            .await?;
         notify_sub_agent_of_outcome(&ctx, &request.sub_agent_id, &outcome);
         Ok(Json::from(outcome))
     }
@@ -144,6 +157,7 @@ impl SubAgentTurnExecution for SubAgentTurnExecutionImpl {
 async fn run_sub_agent_inside_workflow(
     ctx: &WorkflowContext<'_>,
     request: &RunSubAgentTurnRequest,
+    parent_session_out: &mut Option<SessionId>,
 ) -> Result<TurnOutcome, HandlerError> {
     let session_limits = &OrchestratorCtx::current_config().session_limits;
     let loop_plan = driver_model_loop::sub_agent_loop_plan(
@@ -197,6 +211,9 @@ async fn run_sub_agent_inside_workflow(
             } => {
                 last_request_meta = Some((*session_meta).clone());
                 last_parent_session = Some(parent_session);
+                // Surface the owning coordinator session to the caller for the
+                // FAILED-signal emit, even if a later turn errors.
+                *parent_session_out = Some(parent_session);
                 (*request, active_canary, *session_meta, parent_session)
             }
         };
@@ -292,6 +309,7 @@ async fn run_sub_agent_iteration(
         cadence.interval_ms,
     )
     .await?;
+    record_sub_agent_heartbeat(ctx, &input.request.sub_agent_id).await?;
     let span = llm_call_span(&input.meta);
     let llm_started = Instant::now();
     let response = {
@@ -391,6 +409,22 @@ async fn run_sub_agent_iteration(
         .call()
         .await?;
     Ok(SubAgentIterationOutcome::Core(outcome))
+}
+
+/// Refreshes the child's telemetry-plane heartbeat at the progress cadence.
+///
+/// The timestamp is journaled via `durable_utc_now` so it stays replay-stable, then
+/// fire-and-forget delivered to the `SubAgent` VO. This is VO state only (no event
+/// per tick); the watchdog and `progress_summary` read it to detect a stuck child.
+async fn record_sub_agent_heartbeat(
+    ctx: &WorkflowContext<'_>,
+    sub_agent_id: &str,
+) -> Result<(), HandlerError> {
+    let now = durable_utc_now(ctx, "sub_agent_heartbeat").await?;
+    ctx.object_client::<SubAgentClient>(sub_agent_id.to_string())
+        .record_heartbeat(Json::from(now))
+        .send();
+    Ok(())
 }
 
 async fn attach_active_segment_metadata(
@@ -549,6 +583,7 @@ async fn handle_delegation_tool(
         cadence.interval_ms,
     )
     .await?;
+    record_sub_agent_heartbeat(ctx, parent_sub_agent_id).await?;
     let dispatch_started = Instant::now();
     let output = crate::delegation::execute_delegation_tool(
         ctx,
@@ -832,7 +867,11 @@ async fn append_session_event(
     let persist_started = Instant::now();
     let sequence_num = ctx
         .service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest { session_id, event }))
+        .append_event(Json(AppendEventRequest {
+            session_id,
+            event,
+            dedupe_key: None,
+        }))
         .call()
         .instrument(persist_span)
         .await?;
@@ -848,6 +887,110 @@ fn notify_sub_agent_of_outcome(
     ctx.object_client::<SubAgentClient>(sub_agent_id.to_string())
         .record_turn_outcome(Json::from(outcome.clone()))
         .send();
+}
+
+/// Emits a `Failed` control-plane attention signal to the owning coordinator when a
+/// child turn ends in a FAILED outcome.
+///
+/// This is the only child-originated control-plane emit in this increment: it is
+/// low-frequency (once per failed turn) and routed to `parent_session`. The signal id
+/// and timestamp are journaled via `ctx.run()`/`durable_utc_now` for replay safety, and
+/// the cross-VO `record_child_signal` is dispatched detached (`.send()`) so the workflow
+/// never blocks on the coordinator's single-writer queue. A missing `parent_session`
+/// (failure before the first turn prepared) is non-fatal — the terminal-delivery
+/// idle-wake still covers waking an idle parent.
+// TODO(Task 6): add the model-driven report tool so the child loop can emit
+// Finding/NeedsInput/Blocked signals (with the needs_input awakeable round-trip) here.
+async fn emit_failed_child_signal_if_needed(
+    ctx: &WorkflowContext<'_>,
+    sub_agent_id: &str,
+    parent_session: Option<SessionId>,
+    outcome: &TurnOutcome,
+) -> Result<(), HandlerError> {
+    if !matches!(outcome.kind, TurnOutcomeKind::Failed) {
+        return Ok(());
+    }
+    let Some(parent_session) = parent_session else {
+        tracing::warn!(
+            sub_agent_id = %sub_agent_id,
+            "child turn failed before a parent session was known; skipping Failed control-plane signal (terminal idle-wake still applies)"
+        );
+        return Ok(());
+    };
+
+    let signal_id = ctx
+        .run(|| async { Ok::<_, HandlerError>(Json::from(AgentSignalId::new())) })
+        .name("sub_agent_failed_signal_id")
+        .await?
+        .into_inner();
+    let created_at = durable_utc_now(ctx, "sub_agent_failed_signal_at").await?;
+    let signal = build_failed_child_signal(
+        sub_agent_id,
+        parent_session,
+        signal_id,
+        created_at,
+        &outcome.message,
+    );
+    // DETACHED: never block the workflow on the coordinator VO's single-writer queue.
+    ctx.object_client::<SessionClient>(parent_session.to_string())
+        .record_child_signal(Json::from(signal))
+        .send();
+    tracing::info!(
+        sub_agent_id = %sub_agent_id,
+        parent_session = %parent_session,
+        signal_id = %signal_id,
+        "emitted Failed control-plane signal to coordinator"
+    );
+    Ok(())
+}
+
+/// Builds the `Failed` control-plane signal for a failed child turn.
+///
+/// A resume-eligible `Failed`/`Critical` signal with `resume_policy = IfIdle` and a
+/// short, safe one-line summary. Kept pure (no Restate context) so the construction is
+/// unit-testable; the caller journals `signal_id`/`created_at`.
+fn build_failed_child_signal(
+    sub_agent_id: &str,
+    parent_session: SessionId,
+    signal_id: AgentSignalId,
+    created_at: DateTime<Utc>,
+    failure_message: &str,
+) -> SubAgentSignal {
+    SubAgentSignal {
+        signal_id,
+        sub_agent_id: sub_agent_id.to_string(),
+        parent_session,
+        parent_sub_agent: None,
+        kind: ChildSignalKind::Failed,
+        severity: SignalSeverity::Critical,
+        summary: short_failure_summary(failure_message),
+        payload: serde_json::Value::Null,
+        created_at,
+        resume_policy: ParentResumePolicy::IfIdle,
+        input_request_id: None,
+        input_audience: None,
+    }
+}
+
+/// Reduces a failure message into a short, safe one-line control-plane summary.
+fn short_failure_summary(message: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    let first_line = message
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let base = if first_line.is_empty() {
+        "sub-agent turn failed"
+    } else {
+        first_line
+    };
+    if base.chars().count() > MAX_CHARS {
+        let truncated: String = base.chars().take(MAX_CHARS).collect();
+        format!("{truncated}…")
+    } else {
+        base.to_string()
+    }
 }
 
 fn workflow_outcome_from_core(
@@ -882,9 +1025,54 @@ fn turn_outcome_kind_label(kind: &TurnOutcomeKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::SessionId;
+    use chrono::Utc;
+    use moa_core::wire::turn::{TurnOutcome, TurnOutcomeKind};
+    use moa_core::{AgentSignalId, ChildSignalKind, ParentResumePolicy, SessionId, SignalSeverity};
 
-    use super::parent_session_from_initial_message;
+    use super::{
+        build_failed_child_signal, parent_session_from_initial_message, short_failure_summary,
+    };
+
+    #[test]
+    fn failed_outcome_builds_resume_eligible_failed_signal() {
+        // Pins: a FAILED child turn constructs a Failed/Critical, IfIdle-resume signal
+        // routed to the owning coordinator with a short summary derived from the failure.
+        let parent_session = SessionId::new();
+        let signal_id = AgentSignalId::new();
+        let created_at = Utc::now();
+        let outcome = TurnOutcome {
+            turn_id: "turn-1".to_string(),
+            kind: TurnOutcomeKind::Failed,
+            message: "tool sandbox crashed\nstack trace line".to_string(),
+        };
+
+        let signal = build_failed_child_signal(
+            "parent-1-child-1",
+            parent_session,
+            signal_id,
+            created_at,
+            &outcome.message,
+        );
+
+        assert_eq!(signal.signal_id, signal_id);
+        assert_eq!(signal.sub_agent_id, "parent-1-child-1");
+        assert_eq!(signal.parent_session, parent_session);
+        assert_eq!(signal.kind, ChildSignalKind::Failed);
+        assert_eq!(signal.severity, SignalSeverity::Critical);
+        assert_eq!(signal.resume_policy, ParentResumePolicy::IfIdle);
+        // Summary is the first non-empty line only (no multi-line leak).
+        assert_eq!(signal.summary, "tool sandbox crashed");
+    }
+
+    #[test]
+    fn short_failure_summary_falls_back_and_truncates() {
+        // Pins: empty failure text yields a safe default; overlong text is truncated.
+        assert_eq!(short_failure_summary("   "), "sub-agent turn failed");
+        let long = "x".repeat(300);
+        let summary = short_failure_summary(&long);
+        assert!(summary.chars().count() <= 201, "summary must be bounded");
+        assert!(summary.ends_with('…'), "overlong summary is truncated");
+    }
 
     #[test]
     fn reserved_child_parent_session_requires_initial_message() {

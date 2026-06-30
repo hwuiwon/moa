@@ -2,29 +2,35 @@
 
 use std::collections::HashMap;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentTurnUsageRequest};
 use moa_core::{
-    AttachSubAgentResultWaiterInput, AttachSubAgentResultWaiterOutput, CompleteSubAgentChildInput,
-    CompletionRequest, ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput,
-    ContextMessage, Event, MarkSubAgentChildTerminalInput, MoaError, ModelCapabilities, ModelId,
+    AgentSignalId, AttachSubAgentResultWaiterInput, AttachSubAgentResultWaiterOutput,
+    ChildSignalKind, CompleteSubAgentChildInput, CompletionRequest,
+    ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput, ContextMessage, Event,
+    MarkSubAgentChildTerminalInput, MoaError, ModelCapabilities, ModelId, ParentResumePolicy,
     RemoveSubAgentResultWaiterInput, ReserveSubAgentInput, ReservedSubAgent, SessionId,
-    SessionMeta, SessionStatus, SubAgentChildRef, SubAgentId, SubAgentMessage, SubAgentResult,
-    SubAgentState, SubAgentStatus, SubAgentTerminalResult, SubAgentToolRecord,
-    SubAgentTurnOutcomeRecord, SubAgentTurnPreparation, SubAgentTurnResponseRecord, TenantId,
-    TrustedSandboxFileManifestRef, TurnOutcome, UserId, UserMessage, delegation_tool_schemas,
+    SessionMeta, SessionStatus, SignalSeverity, SubAgentChildRef, SubAgentId, SubAgentMessage,
+    SubAgentProgressSummary, SubAgentResult, SubAgentSignal, SubAgentState, SubAgentStatus,
+    SubAgentTerminalResult, SubAgentToolRecord, SubAgentTurnOutcomeRecord, SubAgentTurnPreparation,
+    SubAgentTurnResponseRecord, TenantId, TrustedSandboxFileManifestRef, TurnOutcome, UserId,
+    UserMessage, delegation_tool_schemas,
 };
 use restate_sdk::prelude::*;
 use serde_json::json;
 
 use crate::OrchestratorCtx;
+use crate::objects::durable_utc_now;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::sub_agent_dispatch::{
     MAX_SUB_AGENT_DEPTH, child_agent_path, refund_child_budget, reserve_child_budget,
     validate_dispatch_budget, validate_dispatch_limits,
 };
 use crate::turn::util::{apply_response_to_history, summarize_response_text};
-use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_scalar, set_or_clear_vec};
+use crate::vo::{
+    VoReader, VoState, schedule_generation_guarded_self_call, set_or_clear_opt,
+    set_or_clear_scalar, set_or_clear_vec,
+};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 
 mod handlers;
@@ -50,6 +56,13 @@ pub trait SubAgent {
     /// Returns read-only child status without entering the single-writer queue.
     #[shared]
     async fn status() -> Result<Json<SubAgentStatus>, HandlerError>;
+
+    /// Returns a compact fan-in progress summary read on demand by the coordinator.
+    #[shared]
+    async fn progress_summary() -> Result<Json<SubAgentProgressSummary>, HandlerError>;
+
+    /// Refreshes the telemetry-plane heartbeat timestamp (VO state only, no event).
+    async fn record_heartbeat(at: Json<DateTime<Utc>>) -> Result<(), HandlerError>;
 
     /// Returns the terminal child result when the child has finished.
     #[shared]
@@ -116,6 +129,23 @@ pub trait SubAgent {
 
     /// Clears all persisted state for this child key.
     async fn destroy() -> Result<(), HandlerError>;
+
+    /// Report-then-self-clean: releases this terminal child's fan-out and VO state.
+    ///
+    /// Scheduled as a generation-guarded delayed self-call after terminal delivery. It
+    /// no-ops when revived/superseded, defers while the child still has non-terminal
+    /// children (bottom-up teardown), and otherwise removes the child from the parent
+    /// fan-out and clears its VO state once the report is durable.
+    async fn cleanup(req: Json<CleanupRequest>) -> Result<(), HandlerError>;
+}
+
+/// Internal payload for a generation-guarded report-then-self-clean self-call.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CleanupRequest {
+    /// Cleanup generation observed when this tick was scheduled. A tick whose
+    /// generation no longer matches the VO's current `cleanup_generation` is stale —
+    /// the child was revived or the cleanup was rescheduled — and is ignored.
+    pub generation: u64,
 }
 
 /// Concrete `SubAgent` virtual object implementation.

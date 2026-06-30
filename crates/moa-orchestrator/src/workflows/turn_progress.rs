@@ -200,6 +200,7 @@ async fn append_progress_event(
                 summary: summary.to_string(),
                 elapsed_ms,
             },
+            dedupe_key: None,
         }))
         .call()
         .instrument(persist_span)

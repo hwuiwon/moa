@@ -321,6 +321,7 @@ mod tests {
             },
             active_turn_progress: None,
             events: Vec::new(),
+            child_progress: Vec::new(),
         }
     }
 }

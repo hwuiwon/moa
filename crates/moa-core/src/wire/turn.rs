@@ -278,6 +278,10 @@ pub struct SessionProgress {
     pub active_turn_progress: Option<TurnProgress>,
     /// Durable event history matching the requested range.
     pub events: Vec<EventRecord>,
+    /// Compact fan-in summaries for active child sub-agents. Omitted by older
+    /// clients and absent when the session has no children.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_progress: Vec<SubAgentProgressSummary>,
 }
 
 fn default_session_progress_event_range() -> EventRange {
@@ -364,6 +368,7 @@ mod tests {
             },
             active_turn_progress: None,
             events: Vec::new(),
+            child_progress: Vec::new(),
         };
 
         let json = serde_json::to_string(&progress).expect("serialize session progress");

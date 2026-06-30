@@ -555,7 +555,11 @@ async fn append_session_event(
     let persist_span = moa_observability::restate_observability::event_persist_span(1);
     let sequence_num = ctx
         .service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest { session_id, event }))
+        .append_event(Json(AppendEventRequest {
+            session_id,
+            event,
+            dedupe_key: None,
+        }))
         .call()
         .instrument(persist_span)
         .await?;

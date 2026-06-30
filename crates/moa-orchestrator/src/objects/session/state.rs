@@ -1,7 +1,11 @@
 //! Durable Session VO state projection.
 
 use super::*;
-use moa_core::TurnOutcome;
+use moa_core::traits::Identity;
+use moa_core::{
+    AgentSignalId, ChildSignalKind, ParentResumePolicy, SubAgentSignal, TurnOutcome,
+    UnreadChildSignal,
+};
 
 pub(super) const K_META: &str = "meta";
 pub(super) const K_STATUS: &str = "status";
@@ -10,6 +14,43 @@ pub(super) const K_CHILDREN: &str = "children";
 pub(super) const K_LAST_TURN_SUMMARY: &str = "last_turn_summary";
 pub(super) const K_CANCEL_FLAG: &str = "cancel_flag";
 pub(super) const K_CURRENT_SEGMENT: &str = "current_segment";
+pub(super) const K_NARRATION_TICK_GENERATION: &str = "narration_tick_generation";
+pub(super) const K_NARRATION_TICK_OUTSTANDING: &str = "narration_tick_outstanding";
+pub(super) const K_NARRATION_SEQ: &str = "narration_seq";
+pub(super) const K_LAST_NARRATED_MARKER: &str = "last_narrated_marker";
+pub(super) const K_LAST_NARRATION_AT: &str = "last_narration_at";
+pub(super) const K_NARRATION_WINDOW_START: &str = "narration_window_start";
+pub(super) const K_NARRATION_WINDOW_COUNT: &str = "narration_window_count";
+pub(super) const K_OWNING_IDENTITY: &str = "owning_identity";
+pub(super) const K_UNREAD_CHILD_SIGNALS: &str = "unread_child_signals";
+pub(super) const K_PENDING_PARENT_RESUME_SIGNAL: &str = "pending_parent_resume_signal";
+pub(super) const K_RESUME_BUDGET: &str = "resume_budget";
+
+/// Maximum unread child→parent control-plane signals retained on the coordinator VO.
+///
+/// Kept small so the control-plane projection never bloats parent state. When the cap
+/// is exceeded, action-required kinds (`NeedsInput`/`Blocked`) are preferentially kept
+/// over informational `Finding`s during eviction.
+pub(super) const MAX_UNREAD_CHILD_SIGNALS: usize = 32;
+
+/// Maximum guarded parent auto-resumes per rolling window.
+// TODO(Task 6): source the resume budget window + cap from MoaConfig session limits and
+// consume the budget on dispatch; this increment only reads the cap for the gate.
+pub(super) const RESUME_BUDGET_MAX_PER_WINDOW: u32 = 8;
+
+/// Per-session guarded-resume budget: a rolling window start and the resume count
+/// dispatched within it.
+///
+/// Defined here and persisted with the Session VO; the rolling-window accounting and
+/// dispatch-time consumption are wired by the guarded-resume path (Task 6). This
+/// increment defines the shape and reads `count` for the resume-eligibility gate.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResumeBudget {
+    /// Start of the current rolling resume window, if one has opened.
+    pub window_start: Option<DateTime<Utc>>,
+    /// Number of guarded resumes dispatched in the current window.
+    pub count: u32,
+}
 
 /// Serializable projection of the Session VO's durable state keys.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -24,10 +65,42 @@ pub struct SessionVoState {
     pub children: Vec<SubAgentChildRef>,
     /// Human-readable stub summary of the last drained turn.
     pub last_turn_summary: Option<String>,
-    /// Cooperative cancellation flag checked at turn boundaries.
-    pub cancel_flag: Option<CancelMode>,
+    /// Requested cancellation scope, recorded at the most recent cancel request.
+    pub cancel_flag: Option<CancelScope>,
     /// Active task segment, when one has been created for the session.
     pub current_segment: Option<ActiveSegment>,
+    /// Current progress-narration scheduling generation. Bumped on each active-edge
+    /// (re)start so a delayed tick scheduled by a superseded generation is ignored.
+    pub narration_tick_generation: u64,
+    /// Whether a narration tick is scheduled and not yet stopped. Guarantees a single
+    /// outstanding tick so `register_child`/turn-start edges cannot fan out overlapping ticks.
+    pub narration_tick_outstanding: bool,
+    /// Monotonic narration sequence used to build the `narration:{session}:{seq}` dedupe key.
+    pub narration_seq: u64,
+    /// Change cursor (semantic marker) of the most recently narrated active sources.
+    pub last_narrated_marker: Option<String>,
+    /// Journaled instant of the most recent narration dispatch, for the interval gate.
+    pub last_narration_at: Option<DateTime<Utc>>,
+    /// Rolling narration window start, for the per-window cost cap.
+    pub narration_window_start: Option<DateTime<Utc>>,
+    /// Narrations dispatched in the current rolling window.
+    pub narration_window_count: u32,
+    /// Owning participant identity captured for self-originated narration reads. Sourced
+    /// from the first verified turn participant, falling back to session metadata.
+    pub owning_identity: Option<Identity>,
+    /// Recent unread child→parent control-plane signals, capped to a small window.
+    ///
+    /// Stores signal CONTENT (kind/summary/input request) so a Task-6 resume/drain turn
+    /// can compile it into the coordinator prompt without re-reading the event log.
+    /// Eviction prefers to keep action-required kinds (`NeedsInput`/`Blocked`).
+    pub unread_child_signals: Vec<UnreadChildSignal>,
+    /// Signal armed for a guarded coordinator auto-resume, when one is pending.
+    ///
+    /// Set by the resume-eligibility gate (decision only). The actual resume-turn
+    /// dispatch and clearing on completion are wired in Task 6.
+    pub pending_parent_resume_signal: Option<AgentSignalId>,
+    /// Per-session guarded-resume budget (consumed by the Task-6 dispatch path).
+    pub resume_budget: ResumeBudget,
 }
 
 impl SessionVoState {
@@ -77,13 +150,13 @@ impl SessionVoState {
         next_status
     }
 
-    /// Records a cooperative cancellation request.
-    pub fn set_cancel_flag(&mut self, mode: CancelMode) {
-        self.cancel_flag = Some(mode);
+    /// Records the requested cancellation scope.
+    pub fn set_cancel_flag(&mut self, scope: CancelScope) {
+        self.cancel_flag = Some(scope);
     }
 
-    /// Consumes the current cancellation flag, if any.
-    pub fn take_cancel_flag(&mut self) -> Option<CancelMode> {
+    /// Consumes the current cancellation scope, if any.
+    pub fn take_cancel_flag(&mut self) -> Option<CancelScope> {
         self.cancel_flag.take()
     }
 
@@ -177,6 +250,56 @@ impl SessionVoState {
         self.children.iter().any(|child| child.id == sub_agent_id)
     }
 
+    /// Pushes one unread child→parent control-plane signal onto the recent window.
+    ///
+    /// Deduplicates by `signal_id` (a retried delivery is a no-op) and caps the window
+    /// to [`MAX_UNREAD_CHILD_SIGNALS`]. When evicting, an action-required signal
+    /// (`NeedsInput`/`Blocked`) is preferentially kept over informational kinds: the
+    /// oldest non-action-required entry is dropped first, falling back to the oldest
+    /// entry only when every retained signal is action-required. Returns whether a new
+    /// entry was inserted.
+    pub fn push_unread_child_signal(&mut self, signal: UnreadChildSignal) -> bool {
+        if self
+            .unread_child_signals
+            .iter()
+            .any(|existing| existing.signal_id == signal.signal_id)
+        {
+            return false;
+        }
+        self.unread_child_signals.push(signal);
+        while self.unread_child_signals.len() > MAX_UNREAD_CHILD_SIGNALS {
+            let victim = self
+                .unread_child_signals
+                .iter()
+                .position(|existing| !signal_kind_is_action_required(existing.kind))
+                .unwrap_or(0);
+            self.unread_child_signals.remove(victim);
+        }
+        true
+    }
+
+    /// Computes the guarded parent-resume decision for one recorded signal and arms it.
+    ///
+    /// Sets [`Self::pending_parent_resume_signal`] and returns `true` only when the
+    /// signal opts into idle-wake (`resume_policy == IfIdle`), its kind is
+    /// resume-eligible, the coordinator has no active root turn, and the per-window
+    /// resume budget is not exhausted. DECISION ONLY: this increment never dispatches a
+    /// turn; the Task-6 resume path consumes `pending_parent_resume_signal`.
+    pub fn maybe_arm_parent_resume(
+        &mut self,
+        signal: &SubAgentSignal,
+        active_turn_id: Option<&str>,
+    ) -> bool {
+        let eligible = matches!(signal.resume_policy, ParentResumePolicy::IfIdle)
+            && signal_kind_is_resume_eligible(signal.kind)
+            && active_turn_id.is_none()
+            && self.resume_budget.count < RESUME_BUDGET_MAX_PER_WINDOW;
+        if eligible {
+            self.pending_parent_resume_signal = Some(signal.signal_id);
+        }
+        eligible
+    }
+
     pub(super) fn set_status(&mut self, status: SessionStatus, now: DateTime<Utc>) {
         self.status = Some(status.clone());
         if let Some(meta) = self.meta.as_mut() {
@@ -193,6 +316,28 @@ impl SessionVoState {
     }
 }
 
+/// Whether a signal kind must be preserved over informational kinds during unread-cap
+/// eviction. Action-required kinds block the child until the coordinator responds.
+#[must_use]
+fn signal_kind_is_action_required(kind: ChildSignalKind) -> bool {
+    matches!(kind, ChildSignalKind::NeedsInput | ChildSignalKind::Blocked)
+}
+
+/// Whether a signal kind is eligible to wake an idle coordinator (resume-eligible).
+///
+/// Conservative by design: only blocking/attention-or-failure kinds qualify; plain
+/// `Finding`s never trigger a resume.
+#[must_use]
+fn signal_kind_is_resume_eligible(kind: ChildSignalKind) -> bool {
+    matches!(
+        kind,
+        ChildSignalKind::Blocked
+            | ChildSignalKind::NeedsInput
+            | ChildSignalKind::Failed
+            | ChildSignalKind::HeartbeatStale
+    )
+}
+
 impl VoState for SessionVoState {
     async fn load_from<R: VoReader>(reader: &R) -> Result<Self, HandlerError> {
         Ok(Self {
@@ -203,6 +348,29 @@ impl VoState for SessionVoState {
             last_turn_summary: reader.get_json(K_LAST_TURN_SUMMARY).await?,
             cancel_flag: reader.get_json(K_CANCEL_FLAG).await?,
             current_segment: reader.get_json(K_CURRENT_SEGMENT).await?,
+            narration_tick_generation: reader
+                .get_json(K_NARRATION_TICK_GENERATION)
+                .await?
+                .unwrap_or_default(),
+            narration_tick_outstanding: reader
+                .get_json(K_NARRATION_TICK_OUTSTANDING)
+                .await?
+                .unwrap_or_default(),
+            narration_seq: reader.get_json(K_NARRATION_SEQ).await?.unwrap_or_default(),
+            last_narrated_marker: reader.get_json(K_LAST_NARRATED_MARKER).await?,
+            last_narration_at: reader.get_json(K_LAST_NARRATION_AT).await?,
+            narration_window_start: reader.get_json(K_NARRATION_WINDOW_START).await?,
+            narration_window_count: reader
+                .get_json(K_NARRATION_WINDOW_COUNT)
+                .await?
+                .unwrap_or_default(),
+            owning_identity: reader.get_json(K_OWNING_IDENTITY).await?,
+            unread_child_signals: reader
+                .get_json(K_UNREAD_CHILD_SIGNALS)
+                .await?
+                .unwrap_or_default(),
+            pending_parent_resume_signal: reader.get_json(K_PENDING_PARENT_RESUME_SIGNAL).await?,
+            resume_budget: reader.get_json(K_RESUME_BUDGET).await?.unwrap_or_default(),
         })
     }
 
@@ -214,6 +382,49 @@ impl VoState for SessionVoState {
         set_or_clear_opt(ctx, K_LAST_TURN_SUMMARY, self.last_turn_summary.as_ref());
         set_or_clear_opt(ctx, K_CANCEL_FLAG, self.cancel_flag.as_ref());
         set_or_clear_opt(ctx, K_CURRENT_SEGMENT, self.current_segment.as_ref());
+        set_or_clear_scalar(
+            ctx,
+            K_NARRATION_TICK_GENERATION,
+            self.narration_tick_generation,
+            0,
+        );
+        set_or_clear_scalar(
+            ctx,
+            K_NARRATION_TICK_OUTSTANDING,
+            self.narration_tick_outstanding,
+            false,
+        );
+        set_or_clear_scalar(ctx, K_NARRATION_SEQ, self.narration_seq, 0);
+        set_or_clear_opt(
+            ctx,
+            K_LAST_NARRATED_MARKER,
+            self.last_narrated_marker.as_ref(),
+        );
+        set_or_clear_opt(ctx, K_LAST_NARRATION_AT, self.last_narration_at.as_ref());
+        set_or_clear_opt(
+            ctx,
+            K_NARRATION_WINDOW_START,
+            self.narration_window_start.as_ref(),
+        );
+        set_or_clear_scalar(
+            ctx,
+            K_NARRATION_WINDOW_COUNT,
+            self.narration_window_count,
+            0,
+        );
+        set_or_clear_opt(ctx, K_OWNING_IDENTITY, self.owning_identity.as_ref());
+        set_or_clear_vec(ctx, K_UNREAD_CHILD_SIGNALS, &self.unread_child_signals);
+        set_or_clear_opt(
+            ctx,
+            K_PENDING_PARENT_RESUME_SIGNAL,
+            self.pending_parent_resume_signal.as_ref(),
+        );
+        set_or_clear_scalar(
+            ctx,
+            K_RESUME_BUDGET,
+            self.resume_budget.clone(),
+            ResumeBudget::default(),
+        );
     }
 }
 
@@ -284,9 +495,12 @@ mod tests {
     #[test]
     fn session_vo_cancel_flag_round_trips() {
         let mut state = SessionVoState::default();
-        state.set_cancel_flag(moa_core::CancelMode::Soft);
+        state.set_cancel_flag(moa_core::CancelScope::CoordinatorOnly);
 
-        assert_eq!(state.take_cancel_flag(), Some(moa_core::CancelMode::Soft));
+        assert_eq!(
+            state.take_cancel_flag(),
+            Some(moa_core::CancelScope::CoordinatorOnly)
+        );
         assert_eq!(state.take_cancel_flag(), None);
     }
 
@@ -304,7 +518,7 @@ mod tests {
             terminal: None,
         });
         state.last_turn_summary = Some("summary".to_string());
-        state.set_cancel_flag(moa_core::CancelMode::Hard);
+        state.set_cancel_flag(moa_core::CancelScope::TaskTree);
         state.destroy();
 
         assert_eq!(state, SessionVoState::default());
@@ -394,5 +608,126 @@ mod tests {
         assert_eq!(state.consume_child_terminal("child-1"), Some(terminal));
         assert_eq!(state.consume_child_terminal("child-1"), None);
         assert!(!state.owns_child("child-1"));
+    }
+
+    fn unread_entry(
+        signal_id: moa_core::AgentSignalId,
+        kind: moa_core::ChildSignalKind,
+    ) -> moa_core::UnreadChildSignal {
+        moa_core::UnreadChildSignal {
+            signal_id,
+            sub_agent_id: "child".to_string(),
+            kind,
+            summary: "summary".to_string(),
+            input_request_id: None,
+            input_audience: None,
+        }
+    }
+
+    fn resume_signal(
+        kind: moa_core::ChildSignalKind,
+        resume_policy: moa_core::ParentResumePolicy,
+    ) -> moa_core::SubAgentSignal {
+        moa_core::SubAgentSignal {
+            signal_id: moa_core::AgentSignalId::new(),
+            sub_agent_id: "child".to_string(),
+            parent_session: moa_core::SessionId::new(),
+            parent_sub_agent: None,
+            kind,
+            severity: moa_core::SignalSeverity::Warning,
+            summary: "needs attention".to_string(),
+            payload: serde_json::Value::Null,
+            created_at: Utc::now(),
+            resume_policy,
+            input_request_id: None,
+            input_audience: None,
+        }
+    }
+
+    #[test]
+    fn unread_child_signal_push_is_idempotent_by_signal_id() {
+        // Pins: a retried child-signal delivery records exactly one unread entry.
+        let mut state = SessionVoState::default();
+        let signal_id = moa_core::AgentSignalId::new();
+        let entry = unread_entry(signal_id, moa_core::ChildSignalKind::Finding);
+
+        assert!(state.push_unread_child_signal(entry.clone()));
+        assert!(!state.push_unread_child_signal(entry));
+        assert_eq!(state.unread_child_signals.len(), 1);
+    }
+
+    #[test]
+    fn unread_child_signal_cap_evicts_findings_before_action_required() {
+        // Pins: when the unread window overflows, NeedsInput/Blocked are preserved while
+        // informational Findings are evicted first.
+        use moa_core::ChildSignalKind;
+        let mut state = SessionVoState::default();
+
+        let blocked_id = moa_core::AgentSignalId::new();
+        assert!(state.push_unread_child_signal(unread_entry(blocked_id, ChildSignalKind::Blocked)));
+        let needs_input_id = moa_core::AgentSignalId::new();
+        assert!(
+            state.push_unread_child_signal(unread_entry(
+                needs_input_id,
+                ChildSignalKind::NeedsInput,
+            ))
+        );
+        for _ in 0..super::MAX_UNREAD_CHILD_SIGNALS + 5 {
+            state.push_unread_child_signal(unread_entry(
+                moa_core::AgentSignalId::new(),
+                ChildSignalKind::Finding,
+            ));
+        }
+
+        assert_eq!(
+            state.unread_child_signals.len(),
+            super::MAX_UNREAD_CHILD_SIGNALS
+        );
+        assert!(
+            state
+                .unread_child_signals
+                .iter()
+                .any(|signal| signal.signal_id == blocked_id),
+            "Blocked signal must be preserved over evicted Findings"
+        );
+        assert!(
+            state
+                .unread_child_signals
+                .iter()
+                .any(|signal| signal.signal_id == needs_input_id),
+            "NeedsInput signal must be preserved over evicted Findings"
+        );
+    }
+
+    #[test]
+    fn resume_gate_arms_only_when_idle_eligible_and_under_budget() {
+        // Pins: the resume-eligibility gate arms a pending resume only for an idle
+        // coordinator on a resume-eligible IfIdle signal under budget, and never
+        // dispatches a turn (it only mutates VO state).
+        use moa_core::{ChildSignalKind, ParentResumePolicy};
+
+        let mut idle = SessionVoState::default();
+        let signal = resume_signal(ChildSignalKind::Blocked, ParentResumePolicy::IfIdle);
+        assert!(idle.maybe_arm_parent_resume(&signal, None));
+        assert_eq!(idle.pending_parent_resume_signal, Some(signal.signal_id));
+
+        let mut busy = SessionVoState::default();
+        assert!(!busy.maybe_arm_parent_resume(&signal, Some("turn-1")));
+        assert_eq!(busy.pending_parent_resume_signal, None);
+
+        let mut finding = SessionVoState::default();
+        let finding_signal = resume_signal(ChildSignalKind::Finding, ParentResumePolicy::IfIdle);
+        assert!(!finding.maybe_arm_parent_resume(&finding_signal, None));
+        assert_eq!(finding.pending_parent_resume_signal, None);
+
+        let mut never = SessionVoState::default();
+        let never_signal = resume_signal(ChildSignalKind::Blocked, ParentResumePolicy::Never);
+        assert!(!never.maybe_arm_parent_resume(&never_signal, None));
+        assert_eq!(never.pending_parent_resume_signal, None);
+
+        let mut exhausted = SessionVoState::default();
+        exhausted.resume_budget.count = super::RESUME_BUDGET_MAX_PER_WINDOW;
+        assert!(!exhausted.maybe_arm_parent_resume(&signal, None));
+        assert_eq!(exhausted.pending_parent_resume_signal, None);
     }
 }
