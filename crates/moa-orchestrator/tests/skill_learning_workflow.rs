@@ -25,6 +25,7 @@ use moa_orchestrator::workflows::skill_learning::{
 };
 use moa_providers::ModelRouter;
 use moa_skills::registry::SkillRegistry;
+use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::bootstrap_test_db;
 use serde_json::json;
 use uuid::Uuid;
@@ -64,7 +65,7 @@ mod skill_learning {
         let candidate = test_db
             .store()
             .get_learning_candidate(
-                &tenant_id_from_storage_partition(&storage_partition_id),
+                &tenant_id_from_storage_partition_id(&storage_partition_id),
                 candidate_id,
             )
             .await
@@ -360,15 +361,8 @@ fn skill_markdown(name: &str, description: &str, body: &str) -> String {
 
 fn tenant_scope(storage_partition_id: &StoragePartitionId) -> ActionRuleScope {
     ActionRuleScope::Tenant {
-        tenant_id: tenant_id_from_storage_partition(storage_partition_id),
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
     }
-}
-
-fn tenant_id_from_storage_partition(storage_partition_id: &StoragePartitionId) -> TenantId {
-    TenantId::from(
-        Uuid::parse_str(storage_partition_id.as_str())
-            .expect("test storage partition id is tenant UUID"),
-    )
 }
 
 fn unique_name(prefix: &str) -> String {

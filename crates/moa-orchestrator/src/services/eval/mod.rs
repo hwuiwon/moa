@@ -9,8 +9,7 @@ use std::{future::Future, pin::Pin, result::Result as StdResult};
 
 #[cfg(any(feature = "internal-eval-runner", test))]
 use chrono::Utc;
-use moa_authz::require_authz_with_delegation;
-use moa_authz_schema::{ObjectType, Relation};
+use moa_authz_schema::Relation;
 #[cfg(feature = "internal-eval-runner")]
 use moa_core::ActionRuleScope;
 use moa_core::RlsContext;
@@ -59,8 +58,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::OrchestratorCtx;
-use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::authorize_tenant;
 
 #[cfg(feature = "internal-eval-runner")]
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
@@ -1414,18 +1412,6 @@ fn replay_evaluator_name(cfg: &ReplayConfig) -> String {
         (None, Some(embedder)) => format!("replay-f1:{embedder}"),
         (None, None) => "f1-overlap".to_string(),
     }
-}
-
-async fn authorize_tenant(
-    ctx: &impl RequestHeaders,
-    tenant_id: TenantId,
-    relation: Relation,
-) -> Result<(), HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
-        .await
-        .map_err(translate_authz_error)
 }
 
 fn eval_error_to_handler_error(error: EvalServiceError) -> HandlerError {

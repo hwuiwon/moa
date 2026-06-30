@@ -654,25 +654,38 @@ fn validate_budget(budget: &ExperimentBudget, report: &mut ValidationReport) {
 }
 
 fn validate_skill(definition: &SkillDefinition, report: &mut ValidationReport) {
-    let mut action_ids = HashSet::new();
-    for (index, action) in definition.actions.iter().enumerate() {
-        let path = format!("definition.spec.actions[{index}].id");
-        if action.id.trim().is_empty() {
-            report.push_error(path, "skill action id must not be empty");
-        } else if !action_ids.insert(action.id.as_str()) {
-            report.push_error(path, "duplicate skill action id");
-        }
-    }
+    validate_action_id_uniqueness(
+        definition.actions.iter().map(|action| action.id.as_str()),
+        "skill action id must not be empty",
+        "duplicate skill action id",
+        report,
+    );
 }
 
 fn validate_connector(definition: &ConnectorDefinition, report: &mut ValidationReport) {
+    validate_action_id_uniqueness(
+        definition.actions.iter().map(|action| action.id.as_str()),
+        "connector action id must not be empty",
+        "duplicate connector action id",
+        report,
+    );
+}
+
+/// Validates that action ids in `definition.spec.actions[*]` are present and
+/// unique, sharing the skill and connector action loops.
+fn validate_action_id_uniqueness<'a>(
+    ids: impl Iterator<Item = &'a str>,
+    empty_message: &str,
+    duplicate_message: &str,
+    report: &mut ValidationReport,
+) {
     let mut action_ids = HashSet::new();
-    for (index, action) in definition.actions.iter().enumerate() {
+    for (index, id) in ids.enumerate() {
         let path = format!("definition.spec.actions[{index}].id");
-        if action.id.trim().is_empty() {
-            report.push_error(path, "connector action id must not be empty");
-        } else if !action_ids.insert(action.id.as_str()) {
-            report.push_error(path, "duplicate connector action id");
+        if id.trim().is_empty() {
+            report.push_error(path, empty_message);
+        } else if !action_ids.insert(id) {
+            report.push_error(path, duplicate_message);
         }
     }
 }
@@ -822,52 +835,74 @@ fn validate_dependency_refs(
     validate_non_empty_unique_refs(path, refs, Some(expected), report);
 }
 
-fn validate_non_empty_unique_refs(
+/// Shared skeleton for the reference-list validators: per item, flag empty
+/// targets, flag duplicates via a `HashSet`, then run a per-call kind check.
+fn validate_ref_list(
     path: &str,
     refs: &[ArtifactRef],
-    expected: Option<ArtifactKind>,
+    empty_message: &str,
+    duplicate_message: &str,
+    mut validate_kind: impl FnMut(&str, &ArtifactRef, &mut ValidationReport),
     report: &mut ValidationReport,
 ) {
     let mut seen = HashSet::new();
     for (index, artifact_ref) in refs.iter().enumerate() {
         let item_path = format!("{path}[{index}]");
         if artifact_ref.target_name().trim().is_empty() {
-            report.push_error(item_path.clone(), "reference target must not be empty");
+            report.push_error(item_path.clone(), empty_message);
         }
         if !seen.insert(artifact_ref.to_string()) {
-            report.push_error(item_path.clone(), "duplicate reference");
+            report.push_error(item_path.clone(), duplicate_message);
         }
-        if let Some(expected) = expected.clone() {
-            validate_ref_kind(&item_path, artifact_ref, expected, report);
-        }
+        validate_kind(&item_path, artifact_ref, report);
     }
 }
 
-fn validate_action_refs(path: &str, refs: &[ArtifactRef], report: &mut ValidationReport) {
-    let mut seen = HashSet::new();
-    for (index, artifact_ref) in refs.iter().enumerate() {
-        let item_path = format!("{path}[{index}]");
-        if artifact_ref.target_name().trim().is_empty() {
-            report.push_error(
-                item_path.clone(),
-                "action reference target must not be empty",
-            );
-        }
-        if !seen.insert(artifact_ref.to_string()) {
-            report.push_error(item_path.clone(), "duplicate action reference");
-        }
-        match artifact_ref {
-            ArtifactRef::Artifact {
-                kind: ArtifactKind::Action,
-                ..
-            }
-            | ArtifactRef::Action { .. } => {}
-            _ => report.push_error(
-                item_path,
-                "action reference must use action:// or connector.action action syntax",
-            ),
-        }
+/// Pushes an error unless the reference uses `action://` or `connector.action`.
+fn validate_action_ref_kind(path: &str, artifact_ref: &ArtifactRef, report: &mut ValidationReport) {
+    if !matches!(
+        artifact_ref,
+        ArtifactRef::Artifact {
+            kind: ArtifactKind::Action,
+            ..
+        } | ArtifactRef::Action { .. }
+    ) {
+        report.push_error(
+            path.to_string(),
+            "action reference must use action:// or connector.action action syntax",
+        );
     }
+}
+
+fn validate_non_empty_unique_refs(
+    path: &str,
+    refs: &[ArtifactRef],
+    expected: Option<ArtifactKind>,
+    report: &mut ValidationReport,
+) {
+    validate_ref_list(
+        path,
+        refs,
+        "reference target must not be empty",
+        "duplicate reference",
+        |item_path, artifact_ref, report| {
+            if let Some(expected) = expected.clone() {
+                validate_ref_kind(item_path, artifact_ref, expected, report);
+            }
+        },
+        report,
+    );
+}
+
+fn validate_action_refs(path: &str, refs: &[ArtifactRef], report: &mut ValidationReport) {
+    validate_ref_list(
+        path,
+        refs,
+        "action reference target must not be empty",
+        "duplicate action reference",
+        validate_action_ref_kind,
+        report,
+    );
 }
 
 fn validate_single_action_ref(
@@ -890,33 +925,22 @@ fn validate_single_action_ref(
             "action reference action must not be empty",
         );
     }
-    match artifact_ref {
-        ArtifactRef::Artifact {
-            kind: ArtifactKind::Action,
-            ..
-        }
-        | ArtifactRef::Action { .. } => {}
-        _ => report.push_error(
-            path.to_string(),
-            "action reference must use action:// or connector.action action syntax",
-        ),
-    }
+    validate_action_ref_kind(path, artifact_ref, report);
 }
 
 fn validate_tool_refs(path: &str, refs: &[ArtifactRef], report: &mut ValidationReport) {
-    let mut seen = HashSet::new();
-    for (index, artifact_ref) in refs.iter().enumerate() {
-        let item_path = format!("{path}[{index}]");
-        if artifact_ref.target_name().trim().is_empty() {
-            report.push_error(item_path.clone(), "tool reference target must not be empty");
-        }
-        if !seen.insert(artifact_ref.to_string()) {
-            report.push_error(item_path.clone(), "duplicate tool reference");
-        }
-        if !matches!(artifact_ref, ArtifactRef::Tool { .. }) {
-            report.push_error(item_path, "tool reference must use tool://");
-        }
-    }
+    validate_ref_list(
+        path,
+        refs,
+        "tool reference target must not be empty",
+        "duplicate tool reference",
+        |item_path, artifact_ref, report| {
+            if !matches!(artifact_ref, ArtifactRef::Tool { .. }) {
+                report.push_error(item_path, "tool reference must use tool://");
+            }
+        },
+        report,
+    );
 }
 
 fn validate_non_empty_unique_strings(

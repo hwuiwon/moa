@@ -1,17 +1,9 @@
-use moa_core::{BlobStore, ModelId, SessionActorRef, SessionMeta, SessionStore, TenantId};
+use moa_core::{BlobStore, SessionStore, TenantId};
 use moa_session::blob::PostgresBlobStore;
+use moa_test_support::fixtures::session_meta_fixture;
 use moa_test_support::postgres::bootstrap_test_db;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
-
-fn test_session_meta(tenant_id: TenantId) -> SessionMeta {
-    SessionMeta {
-        tenant_id,
-        created_by: Some(SessionActorRef::Identity { id: Uuid::now_v7() }),
-        model: ModelId::new("test-model"),
-        ..SessionMeta::default()
-    }
-}
 
 fn qualified(schema_name: &str, table_name: &str) -> String {
     format!(
@@ -29,7 +21,7 @@ async fn postgres_blob_store_reads_blob_written_by_previous_instance_db() {
         .expect("bootstrap test database with session_blobs migration");
     let session_id = test_db
         .store()
-        .create_session(test_session_meta(TenantId::from(Uuid::now_v7())))
+        .create_session(session_meta_fixture(TenantId::from(Uuid::now_v7())))
         .await
         .expect("create session row for blob FK");
     let writer_pool = PgPoolOptions::new()

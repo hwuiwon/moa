@@ -74,12 +74,11 @@ pub async fn write_and_bump(conn: &mut PgConnection, rec: ChangelogRecord) -> Re
 }
 
 fn validate_scope(rec: &ChangelogRecord) -> Result<()> {
-    let expected = match (&rec.storage_partition_id, &rec.contact_id) {
-        (None, None) => "global",
-        (Some(_), None) => "tenant",
-        (Some(_), Some(_)) => "contact",
-        (None, Some(_)) => return Err(GraphError::InvalidChangelogScope),
-    };
+    let expected = crate::write::expected_scope_tier(
+        rec.storage_partition_id.as_deref(),
+        rec.contact_id.as_deref(),
+    )
+    .ok_or(GraphError::InvalidChangelogScope)?;
 
     if rec.scope == expected {
         Ok(())

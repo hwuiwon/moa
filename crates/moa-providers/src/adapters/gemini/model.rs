@@ -11,13 +11,7 @@ pub(crate) fn canonical_model_id(model: &str) -> Result<String> {
             "Gemini 2 models are no longer supported; use gemini-3-flash-preview".to_string(),
         ));
     }
-    if models::find_for_provider_model(PROVIDER_GOOGLE, model).is_some() {
-        return Ok(model.to_string());
-    }
-
-    Err(MoaError::Unsupported(format!(
-        "unsupported Google Gemini model '{model}'"
-    )))
+    models::canonical_model_id(PROVIDER_GOOGLE, "Google Gemini", model)
 }
 
 pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {

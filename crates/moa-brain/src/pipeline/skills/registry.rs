@@ -2,11 +2,10 @@
 
 use std::collections::HashMap;
 
-use crate::pipeline::estimate_tokens;
 use moa_artifacts::document::{ArtifactDefinition, ArtifactDocument};
 use moa_core::{
     AgentSkillPolicyMode, MoaError, ResolvedArtifactRevisionRef, Result, SandboxFile,
-    SkillMetadata, WorkingContext,
+    SkillMetadata, WorkingContext, estimate_text_tokens,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Row};
@@ -283,7 +282,7 @@ fn skill_metadata_from_row(row: sqlx::postgres::PgRow) -> Result<SkillMetadata> 
         tags,
         allowed_tools: skill.allowed_tools,
         actions,
-        estimated_tokens: estimate_tokens(&source_text).max(1),
+        estimated_tokens: estimate_text_tokens(&source_text).max(1),
     })
 }
 

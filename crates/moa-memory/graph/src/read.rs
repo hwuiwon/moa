@@ -9,8 +9,7 @@ use uuid::Uuid;
 use crate::{
     GraphError, GraphExpansionHit, GraphStore, PostgresGraphStore,
     edge::{EdgeLabel, EdgeWriteIntent},
-    lexical,
-    node::{NodeIndexRow, NodeLabel, NodeWriteIntent},
+    node::{NODE_INDEX_COLUMNS, NodeIndexRow, NodeLabel, NodeWriteIntent},
 };
 
 #[async_trait::async_trait]
@@ -54,19 +53,7 @@ impl GraphStore for PostgresGraphStore {
             return Ok(row);
         }
 
-        sqlx::query_as::<_, NodeIndexRow>(
-            r#"
-            SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
-                   valid_to, valid_from, properties_summary, last_accessed_at,
-                   COALESCE(quality_score, 0.5) AS quality_score
-            FROM moa.node_index
-            WHERE uid = $1
-            "#,
-        )
-        .bind(uid)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(GraphError::from)
+        fetch_node(&self.pool, uid).await
     }
 
     async fn neighbors(
@@ -177,7 +164,7 @@ impl GraphStore for PostgresGraphStore {
             return Ok(rows);
         }
 
-        lexical::lookup_seed_rows(&self.pool, name, limit, as_of).await
+        crate::node::lookup_seed_by_name(&self.pool, name, limit, as_of).await
     }
 }
 
@@ -383,21 +370,15 @@ fn expansion_hits_from_rows(
         .collect()
 }
 
-async fn fetch_node(
-    conn: &mut sqlx::PgConnection,
-    uid: Uuid,
-) -> Result<Option<NodeIndexRow>, GraphError> {
-    sqlx::query_as::<_, NodeIndexRow>(
-        r#"
-        SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
-               valid_to, valid_from, properties_summary, last_accessed_at,
-               COALESCE(quality_score, 0.5) AS quality_score
-        FROM moa.node_index
-        WHERE uid = $1
-        "#,
-    )
+async fn fetch_node<'e, E>(executor: E, uid: Uuid) -> Result<Option<NodeIndexRow>, GraphError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    sqlx::query_as::<_, NodeIndexRow>(&format!(
+        "SELECT {NODE_INDEX_COLUMNS} FROM moa.node_index WHERE uid = $1"
+    ))
     .bind(uid)
-    .fetch_optional(conn)
+    .fetch_optional(executor)
     .await
     .map_err(GraphError::from)
 }

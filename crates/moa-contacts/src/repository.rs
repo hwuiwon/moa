@@ -17,6 +17,27 @@ use crate::domain::{
 };
 use crate::{ContactError, Result};
 
+/// Reads a Postgres column by name, mapping decode failures to a database error
+/// tagged with the column name. Collapses the repeated
+/// `row.try_get(name).map_err(|e| ContactError::database(..., e))?` pattern in
+/// the row mappers below to `row.col(name)?`.
+trait RowExt {
+    /// Decodes the named column, returning a [`ContactError::Database`] on failure.
+    fn col<'r, T>(&'r self, name: &'static str) -> Result<T>
+    where
+        T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>;
+}
+
+impl RowExt for sqlx::postgres::PgRow {
+    fn col<'r, T>(&'r self, name: &'static str) -> Result<T>
+    where
+        T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+    {
+        self.try_get(name)
+            .map_err(|error| ContactError::database(name, error))
+    }
+}
+
 const MAX_VERIFICATION_ATTEMPTS: i32 = 5;
 
 /// Issues a contact row and any unverified contact points in one transaction.
@@ -111,16 +132,13 @@ pub async fn load_contact_ref(
     .await
     .map_err(|error| ContactError::database("load contact", error))?
     .ok_or_else(|| ContactError::terminal(404, "contact not found"))?;
-    let state = row
-        .try_get::<String, _>("state")
-        .map_err(|error| ContactError::database("read contact state", error))?;
+    let state = row.col::<String>("state")?;
     Ok(ContactRef {
         contact_id,
         tenant_id,
         state: parse_contact_state(&state)?,
         canonical_contact_id: row
-            .try_get::<Option<Uuid>, _>("canonical_contact_id")
-            .map_err(|error| ContactError::database("read canonical contact id", error))?
+            .col::<Option<Uuid>>("canonical_contact_id")?
             .map(ContactId),
         linked_contact_ids: Vec::new(),
         scopes: Vec::new(),
@@ -577,36 +595,28 @@ pub async fn complete_contact_verification(
     .await
     .map_err(|error| ContactError::database("load contact verification challenge", error))?
     .ok_or_else(|| ContactError::terminal(404, "verification challenge not found"))?;
-    let consumed_at = challenge
-        .try_get::<Option<DateTime<Utc>>, _>("consumed_at")
-        .map_err(|error| ContactError::database("read challenge consumed_at", error))?;
+    let consumed_at = challenge.col::<Option<DateTime<Utc>>>("consumed_at")?;
     if consumed_at.is_some() {
         return Err(ContactError::terminal(
             409,
             "verification challenge already used",
         ));
     }
-    let expires_at = challenge
-        .try_get::<DateTime<Utc>, _>("expires_at")
-        .map_err(|error| ContactError::database("read challenge expires_at", error))?;
+    let expires_at = challenge.col::<DateTime<Utc>>("expires_at")?;
     if expires_at < Utc::now() {
         return Err(ContactError::terminal(
             410,
             "verification challenge expired",
         ));
     }
-    let attempts = challenge
-        .try_get::<i32, _>("attempts")
-        .map_err(|error| ContactError::database("read challenge attempts", error))?;
+    let attempts = challenge.col::<i32>("attempts")?;
     if attempts >= MAX_VERIFICATION_ATTEMPTS {
         return Err(ContactError::terminal(
             429,
             "verification challenge attempts exceeded",
         ));
     }
-    let stored_hash = challenge
-        .try_get::<String, _>("code_hash")
-        .map_err(|error| ContactError::database("read challenge code hash", error))?;
+    let stored_hash = challenge.col::<String>("code_hash")?;
     if stored_hash != hash_verification_code(challenge_id, &code) {
         sqlx::query(
             r#"
@@ -630,21 +640,11 @@ pub async fn complete_contact_verification(
         return Err(ContactError::terminal(403, "invalid verification code"));
     }
 
-    let point_id = ContactPointId(
-        challenge
-            .try_get::<Uuid, _>("contact_point_id")
-            .map_err(|error| ContactError::database("read challenge contact point", error))?,
-    );
-    let kind = challenge
-        .try_get::<String, _>("kind")
-        .map_err(|error| ContactError::database("read contact point kind", error))?;
+    let point_id = ContactPointId(challenge.col::<Uuid>("contact_point_id")?);
+    let kind = challenge.col::<String>("kind")?;
     let point_kind = parse_contact_point_kind(&kind)?;
-    let normalized_hash = challenge
-        .try_get::<String, _>("normalized_hash")
-        .map_err(|error| ContactError::database("read contact point hash", error))?;
-    let display_value = challenge
-        .try_get::<Option<String>, _>("display_value")
-        .map_err(|error| ContactError::database("read contact point display value", error))?;
+    let normalized_hash = challenge.col::<String>("normalized_hash")?;
+    let display_value = challenge.col::<Option<String>>("display_value")?;
     let canonical_id = existing_verified_contact(
         &mut transaction,
         tenant_id,
@@ -795,16 +795,10 @@ async fn upsert_verified_contact_point_channel_account(
 
     if let Some(row) = updated {
         return Ok(Some(ChannelAccountRef {
-            channel_account_id: ChannelAccountId(row.try_get::<Uuid, _>("id").map_err(
-                |error| ContactError::database("read verified channel account id", error),
-            )?),
+            channel_account_id: ChannelAccountId(row.col::<Uuid>("id")?),
             contact_point_id: Some(point_id),
             channel,
-            display_name: row
-                .try_get::<Option<String>, _>("display_name")
-                .map_err(|error| {
-                    ContactError::database("read verified channel account display", error)
-                })?,
+            display_name: row.col::<Option<String>>("display_name")?,
         }));
     }
 
@@ -886,10 +880,7 @@ async fn upsert_external_channel_account(
     .map_err(|error| ContactError::database("load channel account", error))?;
 
     if let Some(row) = row {
-        let account_contact_id = ContactId(
-            row.try_get::<Uuid, _>("contact_id")
-                .map_err(|error| ContactError::database("read channel account contact", error))?,
-        );
+        let account_contact_id = ContactId(row.col::<Uuid>("contact_id")?);
         if !contact_allows_channel_contact(
             contact.contact_id,
             contact.canonical_contact_id,
@@ -900,10 +891,7 @@ async fn upsert_external_channel_account(
                 "channel account belongs to another contact",
             ));
         }
-        let account_id = ChannelAccountId(
-            row.try_get::<Uuid, _>("id")
-                .map_err(|error| ContactError::database("read channel account id", error))?,
-        );
+        let account_id = ChannelAccountId(row.col::<Uuid>("id")?);
         sqlx::query(
             r#"
             UPDATE contact_channel_accounts
@@ -984,10 +972,7 @@ async fn resolve_contact_point_channel_account(
     .map_err(|error| ContactError::database("load contact channel account", error))?
     .ok_or_else(|| ContactError::terminal(404, "channel account not found"))?;
 
-    let account_contact_id = ContactId(
-        row.try_get::<Uuid, _>("contact_id")
-            .map_err(|error| ContactError::database("read channel account contact", error))?,
-    );
+    let account_contact_id = ContactId(row.col::<Uuid>("contact_id")?);
     if !contact_allows_channel_contact(
         contact.contact_id,
         contact.canonical_contact_id,
@@ -998,22 +983,15 @@ async fn resolve_contact_point_channel_account(
             "channel account belongs to another contact",
         ));
     }
-    let point_id = ContactPointId(
-        row.try_get::<Uuid, _>("contact_point_id")
-            .map_err(|error| ContactError::database("read channel account contact point", error))?,
-    );
-    let kind = row.try_get::<String, _>("kind").map_err(|error| {
-        ContactError::database("read channel account contact point kind", error)
-    })?;
+    let point_id = ContactPointId(row.col::<Uuid>("contact_point_id")?);
+    let kind = row.col::<String>("kind")?;
     if parse_contact_point_kind(&kind)? != expected_kind {
         return Err(ContactError::terminal(
             400,
             "channel account contact point kind mismatch",
         ));
     }
-    let verified = row
-        .try_get::<bool, _>("verified")
-        .map_err(|error| ContactError::database("read channel account verification", error))?;
+    let verified = row.col::<bool>("verified")?;
     if !verified {
         return Err(ContactError::terminal(
             403,
@@ -1036,11 +1014,7 @@ async fn resolve_contact_point_channel_account(
             channel_account_id,
             contact_point_id: Some(point_id),
             channel,
-            display_name: row
-                .try_get::<Option<String>, _>("display_name")
-                .map_err(|error| {
-                    ContactError::database("read channel account display name", error)
-                })?,
+            display_name: row.col::<Option<String>>("display_name")?,
         }),
         contact_point_id: Some(point_id),
     })
@@ -1168,19 +1142,10 @@ async fn insert_contact_point(
     .await
     .map_err(|error| ContactError::database("upsert contact point", error))?;
     Ok(ContactPointRef {
-        id: ContactPointId(
-            row.try_get::<Uuid, _>("id")
-                .map_err(|error| ContactError::database("read contact point id", error))?,
-        ),
+        id: ContactPointId(row.col::<Uuid>("id")?),
         kind: point.kind,
-        display_value: row
-            .try_get::<Option<String>, _>("display_value")
-            .map_err(|error| ContactError::database("read contact point display value", error))?,
-        verified: row
-            .try_get::<bool, _>("verified")
-            .map_err(|error| ContactError::database("read contact point verified flag", error))?,
-        verified_at: row
-            .try_get::<Option<DateTime<Utc>>, _>("verified_at")
-            .map_err(|error| ContactError::database("read contact point verified_at", error))?,
+        display_value: row.col::<Option<String>>("display_value")?,
+        verified: row.col::<bool>("verified")?,
+        verified_at: row.col::<Option<DateTime<Utc>>>("verified_at")?,
     })
 }

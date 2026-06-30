@@ -7,7 +7,7 @@ use rand::{RngCore, rngs::OsRng};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
 use sha2::Sha256;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -39,14 +39,32 @@ pub struct ActiveKey {
     pub key: SecretString,
 }
 
-/// Return the active signing key for a tenant.
-pub async fn active_key_for(pool: &PgPool, tenant_id: Uuid) -> Result<ActiveKey, SigningError> {
-    let row: Option<(Uuid, String)> = sqlx::query_as(
+/// Fetch the active signing-key row for a tenant, if one exists.
+///
+/// Works against any `sqlx` executor (a pool or a transaction connection) so the
+/// active-key SELECT lives in exactly one place.
+async fn fetch_active_key_row<'e, E>(
+    exec: E,
+    tenant_id: Uuid,
+) -> Result<Option<(Uuid, String)>, SigningError>
+where
+    E: PgExecutor<'e>,
+{
+    let row = sqlx::query_as(
         "SELECT id, key_b64 FROM tenant_signing_keys WHERE tenant_id = $1 AND active = TRUE LIMIT 1",
     )
     .bind(tenant_id)
-    .fetch_optional(pool)
+    .fetch_optional(exec)
     .await?;
+    Ok(row)
+}
+
+/// Return the active signing key for a tenant.
+pub(crate) async fn active_key_for(
+    pool: &PgPool,
+    tenant_id: Uuid,
+) -> Result<ActiveKey, SigningError> {
+    let row = fetch_active_key_row(pool, tenant_id).await?;
     active_key_from_row(row, tenant_id)
 }
 
@@ -57,23 +75,6 @@ pub async fn ensure_key(pool: &PgPool, tenant_id: Uuid) -> Result<Uuid, SigningE
         Err(SigningError::NoActiveKey(_)) => rotate_key(pool, tenant_id).await,
         Err(error) => Err(error),
     }
-}
-
-/// Ensure a tenant has an active signing key inside an existing transaction.
-pub async fn ensure_key_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    tenant_id: Uuid,
-) -> Result<Uuid, SigningError> {
-    if let Some((key_id, _key_b64)) = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT id, key_b64 FROM tenant_signing_keys WHERE tenant_id = $1 AND active = TRUE LIMIT 1",
-    )
-    .bind(tenant_id)
-    .fetch_optional(&mut **tx)
-    .await?
-    {
-        return Ok(key_id);
-    }
-    rotate_key_tx(tx, tenant_id).await
 }
 
 /// Generate a fresh active signing key for a tenant.
@@ -176,26 +177,12 @@ async fn active_or_create_key_tx(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
 ) -> Result<ActiveKey, SigningError> {
-    let row: Option<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, key_b64 FROM tenant_signing_keys WHERE tenant_id = $1 AND active = TRUE LIMIT 1",
-    )
-    .bind(tenant_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-
-    match row {
-        Some(row) => active_key_from_row(Some(row), tenant_id),
-        None => {
-            rotate_key_tx(tx, tenant_id).await?;
-            let row: Option<(Uuid, String)> = sqlx::query_as(
-                "SELECT id, key_b64 FROM tenant_signing_keys WHERE tenant_id = $1 AND active = TRUE LIMIT 1",
-            )
-            .bind(tenant_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-            active_key_from_row(row, tenant_id)
-        }
+    if let Some(row) = fetch_active_key_row(&mut **tx, tenant_id).await? {
+        return active_key_from_row(Some(row), tenant_id);
     }
+    rotate_key_tx(tx, tenant_id).await?;
+    let row = fetch_active_key_row(&mut **tx, tenant_id).await?;
+    active_key_from_row(row, tenant_id)
 }
 
 fn active_key_from_row(

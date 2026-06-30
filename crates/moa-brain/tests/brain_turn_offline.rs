@@ -11,7 +11,7 @@ mod openai_wiremock;
 use moa_providers::OpenAIProvider;
 use wiremock::MockServer;
 
-use offline_session_store::{MockSessionStore as WiremockMockSessionStore, session_meta};
+use offline_session_store::{MockSessionStore, session_meta};
 use openai_wiremock::{captured_json_bodies, mount_openai_text};
 
 #[tokio::test]
@@ -30,7 +30,7 @@ async fn offline_brain_turn_returns_response() -> moa_core::Result<()> {
     );
     let session = session_meta("offline-brain-turn", "gpt-5.4");
     let session_id = session.id;
-    let store = Arc::new(WiremockMockSessionStore::new(session, Vec::new()));
+    let store = Arc::new(MockSessionStore::new(session, Vec::new()));
     let pipeline = build_default_pipeline(&config, store.clone());
 
     store

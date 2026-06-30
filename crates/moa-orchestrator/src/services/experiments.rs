@@ -1,8 +1,7 @@
 //! Restate service for authorized live behavior experiment run metadata.
 
 use moa_agents::{AgentResolver, AgentRuntimePolicy};
-use moa_authz::require_authz_with_delegation;
-use moa_authz_schema::{ObjectType, Relation};
+use moa_authz_schema::Relation;
 use moa_core::traits::{Identity, LearningCandidateStore};
 use moa_core::wire::experiments::{
     AgentArtifactDependencyDelta, AgentDependencyChange, AgentRevisionCompareRequest,
@@ -18,7 +17,7 @@ use moa_core::wire::experiments::{
     ExperimentScoresResponse, ExperimentTrialStatusRequest, ExperimentTrialStatusResponse,
     ExperimentTrialsRequest, ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
 };
-use moa_core::{ActionRuleScope, MoaError, TenantId};
+use moa_core::{ActionRuleScope, TenantId};
 use moa_experiments::app::{
     ExperimentAppError, admit_run, cancel_run, compare_runs, list_runs, list_trials,
     plan_generation_request, propose_improvement_candidate, scores, store_generated_plan,
@@ -36,9 +35,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::OrchestratorCtx;
-use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::authorize_tenant;
 use crate::services::llm_gateway::LLMGatewayImpl;
+use crate::workflows::errors::moa_error_to_handler_error;
 use crate::workflows::experiment_run::{ExperimentRunClient, ExperimentRunWorkflowRequest};
 
 /// Restate service surface for live behavior experiment runs.
@@ -955,19 +954,6 @@ fn dependency_change<T: Eq>(base: Option<T>, new: Option<T>) -> Option<AgentDepe
     }
 }
 
-async fn authorize_tenant(
-    ctx: &impl RequestHeaders,
-    tenant_id: TenantId,
-    relation: Relation,
-) -> Result<Identity, HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
-        .await
-        .map_err(translate_authz_error)?;
-    Ok(identity)
-}
-
 fn experiment_app_error_to_handler_error(error: ExperimentAppError) -> HandlerError {
     match error {
         ExperimentAppError::BadRequest(message) => {
@@ -978,14 +964,6 @@ fn experiment_app_error_to_handler_error(error: ExperimentAppError) -> HandlerEr
         ExperimentAppError::Moa(error) => moa_error_to_handler_error(error),
         ExperimentAppError::Scoring(error) => score_error_to_handler_error(error),
     }
-}
-
-fn moa_error_to_handler_error(error: MoaError) -> HandlerError {
-    if error.is_fatal() {
-        return TerminalError::new(error.to_string()).into();
-    }
-
-    HandlerError::from(error)
 }
 
 fn score_error_to_handler_error(error: ScoringError) -> HandlerError {

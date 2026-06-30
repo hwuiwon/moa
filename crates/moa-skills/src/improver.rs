@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use moa_core::{
-    ActionRuleScope, CompletionRequest, ContextMessage, Event, EventRecord, MoaConfig, ModelTask,
-    Result, SessionMeta, SkillMetadata,
+    ActionRuleScope, CompletionRequest, Event, EventRecord, MoaConfig, ModelTask, Result,
+    SessionMeta, SkillMetadata,
 };
 use moa_providers::ModelRouter;
 use moa_session::{PostgresSessionStore, create_session_store};
@@ -276,18 +276,10 @@ Keep spec-compatible top-level frontmatter fields and only use MOA metadata for 
 If the existing skill is still correct, output exactly UNCHANGED.";
 
 fn build_improvement_request(current_skill: &str, events: &[EventRecord]) -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        messages: vec![
-            ContextMessage::system(SKILL_IMPROVEMENT_SYSTEM_PROMPT),
-            ContextMessage::user(build_improvement_user_prompt(current_skill, events)),
-        ],
-        tools: Vec::new(),
-        max_output_tokens: None,
-        temperature: None,
-        response_format: None,
-        metadata: Default::default(),
-    }
+    crate::util::completion_request(
+        SKILL_IMPROVEMENT_SYSTEM_PROMPT,
+        build_improvement_user_prompt(current_skill, events),
+    )
 }
 
 fn build_improvement_user_prompt(current_skill: &str, events: &[EventRecord]) -> String {

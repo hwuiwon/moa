@@ -580,13 +580,9 @@ impl ArtifactRegistry {
     ) -> Result<Option<StoredArtifactRevision>> {
         let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
         let parts = ArtifactScopeParts::from_scope(scope);
-        let row = sqlx::query(
+        let row = sqlx::query(&format!(
             r#"
-            SELECT a.artifact_uid, r.revision_uid, a.storage_partition_id, a.user_id, a.scope,
-                   a.kind, a.name, a.description, a.tags, r.definition,
-                   r.canonical_hash, r.source_format, r.source_text, r.status,
-                   r.validation_report, r.version, r.published_at, r.valid_to,
-                   r.created_at, r.updated_at
+            SELECT {REVISION_COLUMNS}
             FROM moa.artifact a
             JOIN moa.artifact_revision r ON r.artifact_uid = a.artifact_uid
             WHERE a.valid_to IS NULL
@@ -595,8 +591,8 @@ impl ArtifactRegistry {
               AND a.storage_partition_id = $1
               AND (a.user_id IS NULL OR a.user_id = $2)
             LIMIT 1
-            "#,
-        )
+            "#
+        ))
         .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(revision_uid)
@@ -1139,13 +1135,9 @@ async fn load_visible_with_status(
 ) -> Result<Option<StoredArtifactRevision>> {
     let mut conn = ScopedConn::begin(pool, &artifact_scope_context(scope)).await?;
     let parts = ArtifactScopeParts::from_scope(scope);
-    let row = sqlx::query(
+    let row = sqlx::query(&format!(
         r#"
-        SELECT a.artifact_uid, r.revision_uid, a.storage_partition_id, a.user_id, a.scope,
-               a.kind, a.name, a.description, a.tags, r.definition,
-               r.canonical_hash, r.source_format, r.source_text, r.status,
-               r.validation_report, r.version, r.published_at, r.valid_to,
-               r.created_at, r.updated_at
+        SELECT {REVISION_COLUMNS}
         FROM moa.artifact a
         JOIN moa.artifact_revision r ON r.artifact_uid = a.artifact_uid
         WHERE a.valid_to IS NULL
@@ -1158,8 +1150,8 @@ async fn load_visible_with_status(
         ORDER BY
           r.version DESC
         LIMIT 1
-        "#,
-    )
+        "#
+    ))
     .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
     .bind(kind.to_string())
@@ -1303,18 +1295,14 @@ async fn load_revision_by_uid(
     conn: &mut PgConnection,
     revision_uid: Uuid,
 ) -> Result<StoredArtifactRevision> {
-    let row = sqlx::query(
+    let row = sqlx::query(&format!(
         r#"
-        SELECT a.artifact_uid, r.revision_uid, a.storage_partition_id, a.user_id, a.scope,
-               a.kind, a.name, a.description, a.tags, r.definition,
-               r.canonical_hash, r.source_format, r.source_text, r.status,
-               r.validation_report, r.version, r.published_at, r.valid_to,
-               r.created_at, r.updated_at
+        SELECT {REVISION_COLUMNS}
         FROM moa.artifact a
         JOIN moa.artifact_revision r ON r.artifact_uid = a.artifact_uid
         WHERE r.revision_uid = $1
-        "#,
-    )
+        "#
+    ))
     .bind(revision_uid)
     .fetch_one(&mut *conn)
     .await
@@ -1349,6 +1337,16 @@ async fn load_files(
 
     rows.iter().map(file_from_row).collect()
 }
+
+/// Column projection shared by every full artifact-revision load.
+///
+/// The order here must stay in lockstep with [`revision_from_row`], which reads
+/// each column by name; keep both in sync when columns are added or removed.
+const REVISION_COLUMNS: &str = "a.artifact_uid, r.revision_uid, a.storage_partition_id, a.user_id, a.scope, \
+     a.kind, a.name, a.description, a.tags, r.definition, \
+     r.canonical_hash, r.source_format, r.source_text, r.status, \
+     r.validation_report, r.version, r.published_at, r.valid_to, \
+     r.created_at, r.updated_at";
 
 fn revision_from_row(row: &sqlx::postgres::PgRow) -> Result<StoredArtifactRevision> {
     let kind_text: String = row.try_get("kind").map_err(map_sqlx_error)?;

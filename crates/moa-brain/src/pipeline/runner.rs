@@ -8,7 +8,7 @@ use moa_core::{
 use moa_observability::record_query_rewrite_decision;
 use tracing::Instrument;
 
-use super::util::estimate_tokens;
+use moa_core::{estimate_text_tokens, sum_message_tokens};
 
 /// Per-stage pipeline execution report.
 #[derive(Debug, Clone, PartialEq)]
@@ -242,7 +242,7 @@ fn cache_prefix_ratio(ctx: &WorkingContext) -> f64 {
     let tool_tokens = ctx
         .tools()
         .iter()
-        .map(|tool| estimate_tokens(&tool.to_string()))
+        .map(|tool| estimate_text_tokens(&tool.to_string()))
         .sum::<usize>();
     let total_tokens = ctx.token_count + tool_tokens;
 
@@ -255,11 +255,7 @@ fn cache_prefix_ratio(ctx: &WorkingContext) -> f64 {
         .iter()
         .take_while(|message| message.role == MessageRole::System)
         .count();
-    let prefix_tokens = ctx.messages[..stable_message_count]
-        .iter()
-        .map(|message| estimate_tokens(&message.content))
-        .sum::<usize>()
-        + tool_tokens;
+    let prefix_tokens = sum_message_tokens(&ctx.messages[..stable_message_count]) + tool_tokens;
 
     prefix_tokens as f64 / total_tokens as f64
 }
@@ -274,8 +270,9 @@ mod tests {
     };
     use serde_json::json;
 
+    use moa_core::estimate_text_tokens;
+
     use super::{ContextPipeline, PipelineStageReport, cache_prefix_ratio};
-    use crate::pipeline::estimate_tokens;
 
     struct TestStage {
         stage: u8,
@@ -313,7 +310,7 @@ mod tests {
             ctx.insert_metadata("stage_order", order);
 
             Ok(ProcessorOutput {
-                tokens_added: estimate_tokens(self.name),
+                tokens_added: estimate_text_tokens(self.name),
                 ..ProcessorOutput::default()
             })
         }

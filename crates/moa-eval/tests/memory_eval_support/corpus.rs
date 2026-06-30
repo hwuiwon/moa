@@ -5,7 +5,7 @@ use std::error::Error;
 
 use chrono::{DateTime, Utc};
 use moa_brain::planning::parse_temporal;
-use moa_core::{MoaError, SessionId, StoragePartitionId, UserId, traits::EmbeddingProvider};
+use moa_core::{MoaError, StoragePartitionId, UserId, traits::EmbeddingProvider};
 use moa_eval::memory_eval::{
     CORPUS_SCHEMA_VERSION, CachedEmbeddingProvider, CorpusManifest, CorpusProfile,
     EmbeddingInputKind, GeneratedMemoryEvalCorpus, LedgerFact, Probe, ProbeType,
@@ -20,7 +20,6 @@ use moa_eval_core::EvalError;
 use moa_memory_graph::PiiClass;
 use moa_memory_types::ScopeTier;
 use moa_memory_vector::VECTOR_DIMENSION;
-use uuid::Uuid;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -497,22 +496,4 @@ fn probe(spec: ProbeSpec<'_>) -> Probe {
         as_of: spec.as_of,
         expected_redacted: spec.expected_redacted,
     }
-}
-
-fn session_id(value: &str) -> SessionId {
-    SessionId(Uuid::parse_str(value).expect("stable fixture session UUID"))
-}
-
-fn user(value: &str) -> UserId {
-    UserId::new(value)
-}
-
-fn storage_partition(value: &str) -> StoragePartitionId {
-    StoragePartitionId::new(value)
-}
-
-fn utc(value: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(value)
-        .expect("fixture timestamp parses")
-        .with_timezone(&Utc)
 }

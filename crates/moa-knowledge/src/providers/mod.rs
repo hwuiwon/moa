@@ -46,8 +46,10 @@ pub(crate) mod http {
 
     use std::time::Duration;
 
+    use reqwest::header::HeaderMap;
     use reqwest::{Client, Response, StatusCode, header::RETRY_AFTER};
     use serde::de::DeserializeOwned;
+    use serde_json::Value;
 
     use crate::error::{Error, Result};
 
@@ -114,5 +116,82 @@ pub(crate) mod http {
         }
         let seconds = value?.to_str().ok()?.trim().parse::<u64>().ok()?;
         Some(Duration::from_secs(seconds))
+    }
+
+    /// Trims a single trailing slash from a base URL.
+    pub(crate) fn trim_base_url(value: String) -> String {
+        value.trim_end_matches('/').to_string()
+    }
+
+    /// Joins a trimmed base URL with a request path, normalizing the separator.
+    pub(crate) fn join_url(base_url: &str, path: &str) -> String {
+        format!("{}/{}", base_url, path.trim_start_matches('/'))
+    }
+
+    /// Resolves a dotted JSON path to a nested value when every segment exists.
+    pub(crate) fn nested_value<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
+        let mut current = value;
+        for segment in path.split('.') {
+            current = current.get(segment)?;
+        }
+        Some(current)
+    }
+
+    /// Returns the first dotted key that resolves to a JSON string.
+    pub(crate) fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
+        keys.iter()
+            .find_map(|key| nested_value(value, key)?.as_str().map(ToOwned::to_owned))
+    }
+
+    /// Returns the first dotted key that resolves to a non-null JSON value.
+    pub(crate) fn value_field(value: &Value, keys: &[&str]) -> Option<Value> {
+        keys.iter().find_map(|key| {
+            let current = nested_value(value, key)?;
+            (!current.is_null()).then(|| current.clone())
+        })
+    }
+
+    /// Parses a URL, mapping failures through the provided error constructor.
+    pub(crate) fn parse_url(
+        value: &str,
+        make_error: impl FnOnce(String) -> Error,
+    ) -> Result<reqwest::Url> {
+        reqwest::Url::parse(value)
+            .map_err(|error| make_error(format!("invalid URL `{value}`: {error}")))
+    }
+
+    /// Reads a required webhook header as a string for a labeled provider.
+    pub(crate) fn header_value<'a>(
+        provider: &str,
+        headers: &'a HeaderMap,
+        name: &str,
+    ) -> Result<&'a str> {
+        headers
+            .get(name)
+            .ok_or_else(|| Error::provider(provider, format!("webhook missing `{name}` header")))?
+            .to_str()
+            .map_err(|error| {
+                Error::provider(provider, format!("webhook header `{name}` failed: {error}"))
+            })
+    }
+
+    /// Returns the lowercased status string from the first matching JSON pointer.
+    pub(crate) fn parse_status(value: &Value, pointers: &[&str]) -> String {
+        pointers
+            .iter()
+            .find_map(|pointer| value.pointer(pointer))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+    }
+
+    /// Returns whether a parse/partition status denotes a terminal failure.
+    pub(crate) fn status_failed(status: &str) -> bool {
+        matches!(status, "error" | "failed" | "failure")
+    }
+
+    /// Returns whether a parse/partition status denotes an in-progress job.
+    pub(crate) fn status_pending(status: &str) -> bool {
+        matches!(status, "pending" | "queued" | "running" | "processing")
     }
 }

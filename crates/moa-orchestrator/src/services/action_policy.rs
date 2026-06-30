@@ -16,6 +16,7 @@ use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::workflows::errors::moa_error_to_handler_error;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 
 /// Request payload for `ActionPolicy/prepare_action_review`.
@@ -124,7 +125,7 @@ impl ActionPolicy for ActionPolicyImpl {
                 let prepared = router
                     .prepare_invocation(&request.session, &request.invocation)
                     .await
-                    .map_err(to_handler_error)?;
+                    .map_err(moa_error_to_handler_error)?;
                 let base_policy = prepared.policy().clone();
                 let agent_policy = agent_action_policy_effect(
                     &request.session,
@@ -132,7 +133,7 @@ impl ActionPolicy for ActionPolicyImpl {
                     request.origin_kind.as_deref(),
                     request.origin_id.as_deref(),
                 )
-                .map_err(to_handler_error)?;
+                .map_err(moa_error_to_handler_error)?;
                 let effect = stricter_effect(base_policy.effect, agent_policy.effect);
                 let base_reason = base_policy.reason.clone();
                 let reason = if effect == base_policy.effect {
@@ -195,7 +196,7 @@ impl ActionPolicy for ActionPolicyImpl {
                 rule_store
                     .upsert_action_policy_rule(rule)
                     .await
-                    .map_err(to_handler_error)
+                    .map_err(moa_error_to_handler_error)
             })
             .name("action_policy_upsert_rule")
             .await?)
@@ -308,14 +309,6 @@ fn allow_agent_action() -> AgentActionPolicyDecision {
         effect: ActionPolicyEffect::Allow,
         reason: None,
     }
-}
-
-fn to_handler_error(error: MoaError) -> HandlerError {
-    if error.is_fatal() {
-        return TerminalError::new(error.to_string()).into();
-    }
-
-    HandlerError::from(error)
 }
 
 #[cfg(test)]

@@ -27,7 +27,9 @@ use tracing::Instrument;
 use crate::core::http::build_http_client;
 use crate::core::instrumentation::LLMSpanRecorder;
 use crate::core::retry::RetryPolicy;
-use crate::core::streaming::parse_sse_json;
+use crate::core::streaming::{
+    finalize_streamed_completion, parse_sse_json, send_with_transport_phase,
+};
 
 pub(crate) mod model;
 mod request;
@@ -42,13 +44,7 @@ use model::{canonical_model_id, capabilities_for_model};
 use request::build_request_body;
 use streaming::consume_sse_events;
 
-/// Builds an Anthropic request body for inspection tests without sending it.
-pub fn debug_build_anthropic_request_body(
-    request: &CompletionRequest,
-    web_search_enabled: bool,
-) -> Result<Value> {
-    request::debug_build_anthropic_request_body(request, web_search_enabled)
-}
+pub use request::debug_build_anthropic_request_body;
 
 #[cfg(test)]
 use tools::{anthropic_content_blocks, anthropic_message, anthropic_tool_from_schema};
@@ -197,29 +193,19 @@ impl LLMProvider for AnthropicProvider {
             async move {
                 let mut span_recorder = span_recorder;
                 let started_at = Instant::now();
-                span_recorder.set_phase("transport");
-                let response = retry_policy
-                    .send(|| {
-                        client
-                            .post(&*messages_url)
-                            .header("x-api-key", &*api_key)
-                            .header("anthropic-version", ANTHROPIC_API_VERSION)
-                            .header(ACCEPT, "text/event-stream")
-                            .header(CONTENT_TYPE, "application/json")
-                            .json(&request_body)
-                    })
-                    .await;
-
-                let response = match response {
-                    Ok(response) => response,
-                    Err(error) => {
-                        span_recorder.fail_at_stage("transport", &error);
-                        return Err(error);
-                    }
-                };
+                let response = send_with_transport_phase(&span_recorder, &retry_policy, || {
+                    client
+                        .post(&*messages_url)
+                        .header("x-api-key", &*api_key)
+                        .header("anthropic-version", ANTHROPIC_API_VERSION)
+                        .header(ACCEPT, "text/event-stream")
+                        .header(CONTENT_TYPE, "application/json")
+                        .json(&request_body)
+                })
+                .await?;
 
                 span_recorder.set_phase("stream");
-                let response = consume_sse_events(
+                let consumed = consume_sse_events(
                     response.bytes_stream().eventsource(),
                     tx,
                     resolved_model,
@@ -228,17 +214,7 @@ impl LLMProvider for AnthropicProvider {
                 )
                 .await;
 
-                match response {
-                    Ok(response) => {
-                        span_recorder.set_phase("finalize");
-                        span_recorder.finish(&response);
-                        Ok(response)
-                    }
-                    Err(error) => {
-                        span_recorder.fail_at_stage("stream", &error);
-                        Err(error)
-                    }
-                }
+                finalize_streamed_completion(&span_recorder, consumed)
             }
             .instrument(span),
         );

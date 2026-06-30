@@ -121,12 +121,7 @@ impl PostgresGraphStore {
             return Ok(None);
         };
 
-        let mut conn = ScopedConn::begin(&self.pool, scope).await?;
-        if self.assume_app_role {
-            sqlx::query("SET LOCAL ROLE moa_app")
-                .execute(conn.as_mut())
-                .await?;
-        }
+        let conn = ScopedConn::begin_as_app(&self.pool, scope, self.assume_app_role).await?;
         Ok(Some(conn))
     }
 

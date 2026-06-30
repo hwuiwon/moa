@@ -6,6 +6,7 @@ use moa_core::{
     StoragePartitionId, TenantId, UserId,
 };
 use moa_memory_lifecycle::compute_quality_scores;
+use moa_test_support::fixtures::quote_identifier;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::json;
 use sqlx::{PgPool, Row};
@@ -303,6 +304,9 @@ async fn seed_node_index_row(
     .expect("seed node index row");
 }
 
+// Seeds one `task_segments` row; the column set maps directly to function
+// parameters, so the arity matches the table rather than a missing abstraction.
+#[allow(clippy::too_many_arguments)]
 async fn seed_task_segment(
     pool: &PgPool,
     storage_partition_id: &StoragePartitionId,
@@ -415,8 +419,4 @@ async fn cleanup_quality_rows(pool: &PgPool, storage_partition_id: &StorageParti
         .execute(pool)
         .await
         .expect("delete quality partition state");
-}
-
-fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
 }

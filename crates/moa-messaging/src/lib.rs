@@ -9,6 +9,8 @@ pub mod delivery;
 pub mod edit_window;
 #[cfg(feature = "postmark")]
 pub mod postmark;
+#[cfg(any(feature = "postmark", feature = "twilio"))]
+mod provider_http;
 pub mod rate_limit;
 pub mod renderer;
 #[cfg(feature = "twilio")]

@@ -40,18 +40,6 @@ impl ArtifactRef {
         }
     }
 
-    /// Builds a skill reference.
-    #[must_use]
-    pub fn skill(name: impl Into<String>) -> Self {
-        Self::artifact(ArtifactKind::Skill, name)
-    }
-
-    /// Builds an agent reference.
-    #[must_use]
-    pub fn agent(name: impl Into<String>) -> Self {
-        Self::artifact(ArtifactKind::Agent, name)
-    }
-
     /// Builds a standalone action artifact reference.
     #[must_use]
     pub fn action_artifact(name: impl Into<String>) -> Self {
@@ -77,12 +65,6 @@ impl ArtifactRef {
     #[must_use]
     pub fn connector(name: impl Into<String>) -> Self {
         Self::artifact(ArtifactKind::Connector, name)
-    }
-
-    /// Builds an experiment plan reference.
-    #[must_use]
-    pub fn experiment_plan(name: impl Into<String>) -> Self {
-        Self::artifact(ArtifactKind::ExperimentPlan, name)
     }
 
     /// Builds a tool reference.
@@ -115,16 +97,6 @@ impl ArtifactRef {
         match self {
             Self::Action { action, .. } => Some(action),
             Self::Artifact { .. } | Self::Tool { .. } => None,
-        }
-    }
-
-    /// Returns the URI scheme used when this reference is displayed.
-    #[must_use]
-    pub fn scheme(&self) -> &'static str {
-        match self {
-            Self::Artifact { kind, .. } => kind.as_str(),
-            Self::Action { .. } => "action",
-            Self::Tool { .. } => "tool",
         }
     }
 }

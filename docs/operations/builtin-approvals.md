@@ -5,10 +5,10 @@ challenge workflow. Builtin async-authz requests are stored in
 `builtin_pending_approvals` and are separate from tenant action reviews.
 
 ```sh
-curl -H "Authorization: Bearer <key>" http://localhost:10080/v1/authz-challenges
+curl -H "Authorization: Bearer <key>" http://localhost:10000/v1/authz-challenges
 curl -X POST -H "Authorization: Bearer <key>" \
   -H "Content-Type: application/json" \
-  http://localhost:10080/v1/authz-challenges/<id>/decision \
+  http://localhost:10000/v1/authz-challenges/<id>/decision \
   --data '{"outcome":"approved","reason":null}'
 ```
 
@@ -23,10 +23,10 @@ through:
 
 ```sh
 curl -H "Authorization: Bearer <key>" \
-  http://localhost:10080/v1/action-reviews
+  http://localhost:10000/v1/action-reviews
 curl -X POST -H "Authorization: Bearer <key>" \
   -H "Content-Type: application/json" \
-  http://localhost:10080/v1/action-reviews/<review_id>/decision \
+  http://localhost:10000/v1/action-reviews/<review_id>/decision \
   --data '{"decision":"cleared","reason":null}'
 ```
 

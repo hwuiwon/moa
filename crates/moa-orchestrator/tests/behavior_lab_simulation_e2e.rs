@@ -33,6 +33,7 @@ use moa_core::{
     traits::Identity,
 };
 use moa_db::ScopedConn;
+use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::test_database_url;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -49,32 +50,8 @@ use crate::support::{
     session_store_service::get_events_request,
 };
 
-mod support {
-    pub mod grant_tenant_admin;
-    pub mod restate_admin_url;
-    pub mod restate_identity;
-    pub mod restate_ingress_url;
-    pub mod restate_lock;
-    pub mod restate_ports;
-    pub mod restate_register;
-    pub mod session_get_events;
-
-    pub mod restate_runtime {
-        pub use super::grant_tenant_admin::grant_tenant_admin;
-        pub use super::restate_admin_url::restate_admin_url;
-        pub use super::restate_identity::{test_user_identity, with_identity};
-        pub use super::restate_ingress_url::restate_ingress_url;
-        pub use super::restate_lock::RESTATE_E2E_LOCK;
-        pub use super::restate_ports::{
-            OrchestratorPorts, deployment_endpoint_url, reserve_orchestrator_ports,
-        };
-        pub use super::restate_register::register_deployment;
-    }
-
-    pub mod session_store_service {
-        pub use super::session_get_events::get_events_request;
-    }
-}
+#[path = "support/mod.rs"]
+mod support;
 
 const SUPPORT_SKILL_PATH: &str = ".moa/skills/delivery-support/SKILL.md";
 const SUPPORT_SKILL_PROVIDER_ID: &str = "behavior-lab-read-delivery-support";
@@ -568,7 +545,7 @@ async fn run_plan_experiment(
     plan_revision_uid: Uuid,
 ) -> Result<ExperimentRunResponse> {
     let request = ExperimentRunRequest {
-        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         name: name.to_string(),
         plan_revision_uid: Some(plan_revision_uid),
         target: None,
@@ -594,7 +571,7 @@ async fn wait_for_run_status(
     done: impl Fn(&ExperimentRunStatusResponse) -> bool,
 ) -> Result<ExperimentRunStatusResponse> {
     let request = ExperimentRunStatusRequest {
-        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         run_uid,
     };
     let mut last_status = None;
@@ -623,7 +600,7 @@ async fn list_trials(
     run_uid: Uuid,
 ) -> Result<ExperimentTrialsResponse> {
     let request = ExperimentTrialsRequest {
-        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         run_uid,
         status: None,
         limit: Some(10),
@@ -665,7 +642,7 @@ async fn trial_status(
     trial_uid: Uuid,
 ) -> Result<ExperimentTrialStatusResponse> {
     let request = ExperimentTrialStatusRequest {
-        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         trial_uid,
     };
     post_json_with_identity(
@@ -690,7 +667,7 @@ async fn experiment_scores(
     run_uid: Uuid,
 ) -> Result<ExperimentScoresResponse> {
     let request = ExperimentScoresRequest {
-        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         run_uid,
     };
     post_json_with_identity(client, ingress, "Experiments", "scores", identity, &request)
@@ -985,12 +962,6 @@ fn scope_context(scope: &ActionRuleScope) -> RlsContext {
     match scope {
         ActionRuleScope::Tenant { tenant_id } => RlsContext::tenant(*tenant_id),
     }
-}
-
-fn tenant_id_from_storage_partition(storage_partition_id: &StoragePartitionId) -> Result<TenantId> {
-    Uuid::parse_str(storage_partition_id.as_str())
-        .map(TenantId::from)
-        .context("storage partition fixture id should be a tenant UUID")
 }
 
 fn assert_trial_status_matches_summary(

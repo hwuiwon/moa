@@ -4,6 +4,7 @@ pub mod corpus;
 pub mod embeddings;
 pub mod generator;
 pub mod gold;
+mod io;
 pub mod judge;
 pub mod metrics;
 pub mod recording;
@@ -42,7 +43,7 @@ pub use judge::{
 };
 pub use metrics::{
     CandidateLegs, EntityFragmentationCounts, ExtractionPrecisionCounts, ProbeResult,
-    RetrievalEvalReport, RetrievalMetrics, RetrievedCandidate, aggregate_retrieval_eval,
+    RetrievalEvalReport, RetrievalMetrics, RetrievedCandidate,
     aggregate_retrieval_eval_from_counts, aggregate_retrieval_eval_from_diagnostic_counts,
     aggregate_retrieval_eval_with_diagnostics, aggregate_retrieval_eval_with_extraction_precision,
     candidates_from_retrieval_hits,

@@ -8,7 +8,7 @@ use moa_core::{
 };
 use moa_security::wrap_untrusted_tool_output;
 
-use crate::pipeline::estimate_tokens;
+use moa_core::estimate_text_tokens;
 
 use super::conversion::ToolResultReplayMeta;
 use super::{FILE_READ_DEDUP_PLACEHOLDER, conversion::CompiledRecordMessage};
@@ -85,9 +85,9 @@ pub(super) fn deduplicate_file_reads(
             continue;
         }
 
-        let previous_tokens = estimate_tokens(&compiled.message.content);
+        let previous_tokens = estimate_text_tokens(&compiled.message.content);
         compiled.message = placeholder_tool_result_message(tool_result);
-        let placeholder_tokens = estimate_tokens(&compiled.message.content);
+        let placeholder_tokens = estimate_text_tokens(&compiled.message.content);
         stats.deduplicated_count += 1;
         stats.tokens_saved += previous_tokens.saturating_sub(placeholder_tokens);
     }

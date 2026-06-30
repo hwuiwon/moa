@@ -84,17 +84,15 @@ impl PgvectorStore {
     }
 
     async fn begin(&self) -> Result<ScopedConn<'_>> {
-        let mut conn = if self.control_plane {
-            ScopedConn::begin_control_plane(&self.pool).await?
+        if self.control_plane {
+            let mut conn = ScopedConn::begin_control_plane(&self.pool).await?;
+            if self.assume_app_role {
+                conn.assume_app_role().await?;
+            }
+            Ok(conn)
         } else {
-            ScopedConn::begin(&self.pool, &self.scope).await?
-        };
-        if self.assume_app_role {
-            sqlx::query("SET LOCAL ROLE moa_app")
-                .execute(conn.as_mut())
-                .await?;
+            Ok(ScopedConn::begin_as_app(&self.pool, &self.scope, self.assume_app_role).await?)
         }
-        Ok(conn)
     }
 }
 

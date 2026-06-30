@@ -123,25 +123,6 @@ impl TrajectoryCollector {
         }
     }
 
-    /// Returns a snapshot of the collected steps.
-    pub fn steps(&self) -> &[TrajectoryStep] {
-        &self.steps
-    }
-
-    /// Returns the current aggregate metrics.
-    pub fn metrics(&self) -> &EvalMetrics {
-        &self.metrics
-    }
-
-    /// Returns the aggregated assistant response text, if any.
-    pub fn response(&self) -> Option<String> {
-        if self.response_chunks.is_empty() {
-            None
-        } else {
-            Some(self.response_chunks.join("\n\n"))
-        }
-    }
-
     /// Consumes the collector and returns the final collected execution payload.
     pub(crate) fn finish(self) -> CollectedExecution {
         CollectedExecution {

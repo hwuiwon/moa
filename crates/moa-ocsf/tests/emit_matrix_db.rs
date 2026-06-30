@@ -12,14 +12,12 @@ use moa_core::{
     traits::{Identity, IdentityType},
 };
 use moa_ocsf::{
-    ActorInput, emit_agent_deactivated, emit_agent_deactivated_tx, emit_agent_registered,
-    emit_agent_registered_tx, emit_api_key_created, emit_api_key_created_tx, emit_api_key_revoked,
+    ActorInput, emit_agent_deactivated_tx, emit_agent_registered_tx, emit_api_key_created_tx,
     emit_api_key_revoked_tx, emit_approval_decided_tx, emit_authn_failure, emit_authn_success,
     emit_authz_decision, emit_delegation_granted_tx, emit_delegation_revoked_tx,
     emit_group_membership_added_tx, emit_group_membership_removed_tx, emit_scim_group_created_tx,
     emit_scim_group_deleted_tx, emit_scim_group_updated_tx, emit_scim_user_created_tx,
-    emit_scim_user_deactivated_tx, emit_scim_user_deleted_tx, emit_scim_user_updated_tx,
-    emit_user_created, emit_user_deactivated_tx, signing,
+    emit_scim_user_deleted_tx, emit_scim_user_updated_tx, emit_user_deactivated_tx, signing,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -36,6 +34,17 @@ const ENTITY_MANAGEMENT: i32 = 3004;
 const INFORMATIONAL: i32 = 1;
 const LOW: i32 = 2;
 const MEDIUM: i32 = 3;
+
+/// Drive a `_tx` emitter inside its own committed transaction, mirroring the
+/// begin/call/commit that production call sites perform around `_tx` helpers.
+macro_rules! emit_committed {
+    ($pool:expr, $msg:expr, |$tx:ident| $call:expr) => {{
+        let mut $tx = $pool.begin().await.expect("begin tx");
+        let id = $call.await.expect($msg);
+        $tx.commit().await.expect("commit tx");
+        id
+    }};
+}
 
 fn user_identity(tenant_uuid: Uuid, user_id: Uuid) -> Identity {
     Identity {
@@ -222,35 +231,45 @@ async fn emit_matrix_pins_class_activity_severity_for_every_emitter_db() {
     .expect("authz deny");
     cases.push(("authz_decision_deny", id, (AUTHORIZATION, 99, LOW)));
 
-    let id = emit_api_key_created(&pool, tenant_uuid, &identity, api_key_id)
-        .await
-        .expect("api key created");
+    let id = emit_committed!(&pool, "api key created", |tx| emit_api_key_created_tx(
+        &mut tx,
+        tenant_uuid,
+        &identity,
+        api_key_id
+    ));
     cases.push(("api_key_created", id, (ENTITY_MANAGEMENT, 1, INFORMATIONAL)));
 
-    let id = emit_api_key_revoked(
-        &pool,
+    let id = emit_committed!(&pool, "api key revoked", |tx| emit_api_key_revoked_tx(
+        &mut tx,
         tenant_uuid,
         actor.clone(),
         api_key_id,
-        Some("rotation"),
-    )
-    .await
-    .expect("api key revoked");
+        Some("rotation")
+    ));
     cases.push(("api_key_revoked", id, (ENTITY_MANAGEMENT, 4, INFORMATIONAL)));
 
-    let id = emit_agent_registered(&pool, tenant_uuid, &identity, agent_id)
-        .await
-        .expect("agent registered");
+    let id = emit_committed!(&pool, "agent registered", |tx| emit_agent_registered_tx(
+        &mut tx,
+        tenant_uuid,
+        &identity,
+        agent_id
+    ));
     cases.push(("agent_registered", id, (ACCOUNT_CHANGE, 1, INFORMATIONAL)));
 
-    let id = emit_agent_deactivated(&pool, tenant_uuid, &identity, agent_id)
-        .await
-        .expect("agent deactivated");
+    let id = emit_committed!(&pool, "agent deactivated", |tx| emit_agent_deactivated_tx(
+        &mut tx,
+        tenant_uuid,
+        &identity,
+        agent_id
+    ));
     cases.push(("agent_deactivated", id, (ACCOUNT_CHANGE, 3, MEDIUM)));
 
-    let id = emit_user_created(&pool, tenant_uuid, actor.clone(), user_id)
-        .await
-        .expect("user created");
+    let id = emit_committed!(&pool, "user created", |tx| emit_scim_user_created_tx(
+        &mut tx,
+        tenant_uuid,
+        actor.clone(),
+        user_id
+    ));
     cases.push(("user_created", id, (ACCOUNT_CHANGE, 1, INFORMATIONAL)));
 
     // Transaction-only emitters share one transaction, then commit once.
@@ -313,7 +332,7 @@ async fn emit_matrix_pins_class_activity_severity_for_every_emitter_db() {
         .expect("user deactivated");
     cases.push(("user_deactivated", id, (ACCOUNT_CHANGE, 3, MEDIUM)));
 
-    let id = emit_scim_user_deactivated_tx(&mut tx, tenant_uuid, actor.clone(), user_id)
+    let id = emit_user_deactivated_tx(&mut tx, tenant_uuid, actor.clone(), user_id)
         .await
         .expect("scim user deactivated");
     cases.push(("scim_user_deactivated", id, (ACCOUNT_CHANGE, 3, MEDIUM)));

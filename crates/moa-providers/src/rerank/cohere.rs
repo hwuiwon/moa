@@ -1,11 +1,11 @@
 //! Cohere rerank provider client.
 
 use async_trait::async_trait;
-use moa_core::{MoaError, Result};
+use moa_core::Result;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::core::http::build_http_client;
+use crate::core::http::{build_http_client, post_json};
 
 use super::{RerankHit, Reranker};
 
@@ -31,13 +31,6 @@ impl CohereReranker {
         })
     }
 
-    /// Overrides the HTTP client, primarily for tests.
-    #[must_use]
-    pub fn with_client(mut self, client: Client) -> Self {
-        self.client = client;
-        self
-    }
-
     /// Overrides the Cohere endpoint, primarily for tests.
     #[must_use]
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
@@ -59,36 +52,18 @@ impl Reranker for CohereReranker {
             return Ok(Vec::new());
         }
 
-        let response = self
-            .client
-            .post(&self.endpoint)
-            .bearer_auth(&self.api_key)
-            .json(&CohereRerankRequest {
+        let body: CohereRerankResponse = post_json(
+            &self.client,
+            &self.endpoint,
+            &self.api_key,
+            &CohereRerankRequest {
                 model,
                 query,
                 documents,
                 top_n,
-            })
-            .send()
-            .await
-            .map_err(|error| MoaError::ProviderError(error.to_string()))?;
-        let status = response.status();
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|error| format!("failed to read error body: {error}"));
-            return Err(MoaError::HttpStatus {
-                status: status.as_u16(),
-                retry_after: None,
-                message,
-            });
-        }
-
-        let body = response
-            .json::<CohereRerankResponse>()
-            .await
-            .map_err(|error| MoaError::ProviderError(error.to_string()))?;
+            },
+        )
+        .await?;
         Ok(body
             .results
             .into_iter()

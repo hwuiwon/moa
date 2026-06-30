@@ -21,7 +21,7 @@ curl -sS "$MOA_EDGE_URL/v1/admin-maintenance/vector/promote" \
 
 Required environment:
 
-- `TURBOPUFFER_API_KEY`
+- `MOA_TURBOPUFFER_API_KEY`
 - `MOA_TURBOPUFFER_ENVIRONMENT` or `MOA_OBSERVABILITY_ENVIRONMENT`
 - `MOA_TURBOPUFFER_BAA=true` for HIPAA or restricted-tier tenants
 

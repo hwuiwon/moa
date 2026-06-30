@@ -10,6 +10,7 @@ use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::OrchestratorCtx;
+use crate::objects::durable_utc_now;
 use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_scalar};
 use crate::workflows::consolidate::{
     ConsolidateClient, ConsolidateReport, ConsolidateRequest, consolidate_workflow_id,
@@ -292,13 +293,6 @@ async fn schedule_consolidation_inner(
         "scheduled next tenant consolidation"
     );
     Ok(())
-}
-
-async fn durable_utc_now(ctx: &ObjectContext<'_>) -> Result<DateTime<Utc>, HandlerError> {
-    Ok(ctx
-        .run(|| async { Ok::<_, HandlerError>(Json::from(Utc::now())) })
-        .await?
-        .into_inner())
 }
 
 fn duration_from_chrono(duration: chrono::Duration) -> Duration {

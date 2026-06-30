@@ -1370,7 +1370,7 @@ fn print_failures(failures: &[ScenarioFailure]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moa_eval::kernel::RetrievalCoreMetrics;
+    use moa_eval::kernel::{PerLexicalBackendRecall, RetrievalCoreMetrics};
     use moa_eval::memory_eval::GraphExpansionEvalPolicy;
     use moa_eval::memory_eval::runner::QueryRewriteClassMetrics;
     use moa_eval::memory_eval::{
@@ -1625,6 +1625,7 @@ mod tests {
                     vector: MetricSummary::default(),
                     lexical: MetricSummary::default(),
                 },
+                per_lexical_backend_recall: PerLexicalBackendRecall::default(),
                 p50_retrieval_latency_ms: 0,
                 p95_retrieval_latency_ms: 0,
                 cross_user_leak_count: 0,

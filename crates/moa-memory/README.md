@@ -1,8 +1,8 @@
 # moa-memory
 
-Graph-primary memory subsystem for MOA. These four subcrates form one logical
-unit while keeping graph storage, embeddings, privacy filtering, and ingestion
-separate.
+Graph-primary memory subsystem for MOA. These six subcrates form one logical
+unit while keeping graph storage, embeddings, privacy filtering, ingestion,
+lifecycle maintenance, and shared types separate.
 
 ## Subcrates
 
@@ -12,15 +12,17 @@ separate.
 | `vector/` | `moa-memory-vector` | Vector storage around the shared `moa_core::traits::EmbeddingProvider`, pgvector storage, Turbopuffer opt-in storage, and embedding queue support. |
 | `pii/` | `moa-memory-pii` | PII classification and redaction before durable memory writes. |
 | `ingest/` | `moa-memory-ingest` | Restate `IngestionVO` slow path and inline fast memory writes. |
+| `lifecycle/` | `moa-memory-lifecycle` | Memory consolidation, quality scoring, and digest generation. |
+| `types/` | `moa-memory-types` | Shared memory domain types used across the memory subcrates. |
 
 ## Public Surface
 
 Consumers depend on the package names, not these folder names:
-`moa-memory-graph`, `moa-memory-vector`, `moa-memory-pii`, and
-`moa-memory-ingest`.
+`moa-memory-graph`, `moa-memory-vector`, `moa-memory-pii`,
+`moa-memory-ingest`, `moa-memory-lifecycle`, and `moa-memory-types`.
 
 The retriever lives in `moa-brain` because it composes graph, vector, and query
 planning concerns.
 
 For type ownership across the memory crates, see
-`docs/architecture/type-placement.md`.
+`docs/15-architecture-policy.md`.

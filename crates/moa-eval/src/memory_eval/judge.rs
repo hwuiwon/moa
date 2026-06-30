@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_core::{CompletionRequest, ContextMessage, JsonResponseFormat, LLMProvider};
-use moa_eval_core::{EvalError, Result};
+use moa_eval_core::Result;
 use serde_json::{Value, json};
 
 use super::ProbeType;
+use super::io::invalid_config_error;
 
 /// Pure inputs needed to judge one generated memory-eval answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,7 +229,7 @@ impl DeterministicJudge {
                     },
                 ))
             }
-            ProbeType::MultiHop | ProbeType::PreferenceApplication => Err(invalid_config(
+            ProbeType::MultiHop | ProbeType::PreferenceApplication => Err(invalid_config_error(
                 "deterministic memory eval judge does not score open-ended probes; use PairwiseLlmJudge",
             )),
         }
@@ -257,10 +258,9 @@ impl PairwiseLlmJudge {
     /// Runs A/B and B/A pairwise judging and returns a winner only on agreement.
     pub async fn judge_pairwise(&self, input: &JudgeInput) -> Result<JudgeOutcome> {
         ensure_llm_judgable(input.probe_type)?;
-        let baseline_answer = input
-            .baseline_answer
-            .as_deref()
-            .ok_or_else(|| invalid_config("pairwise memory eval judge requires baseline_answer"))?;
+        let baseline_answer = input.baseline_answer.as_deref().ok_or_else(|| {
+            invalid_config_error("pairwise memory eval judge requires baseline_answer")
+        })?;
 
         let first = self
             .judge_order(
@@ -298,7 +298,7 @@ impl PairwiseLlmJudge {
 
         let response = self.provider.complete(request).await?.collect().await?;
         let verdict = normalized_verdict(&response.text).ok_or_else(|| {
-            invalid_config(format!(
+            invalid_config_error(format!(
                 "memory eval pairwise judge returned an unrecognized verdict: {}",
                 response.text
             ))
@@ -348,7 +348,7 @@ fn ensure_llm_judgable(probe_type: ProbeType) -> Result<()> {
         return Ok(());
     }
 
-    Err(invalid_config(format!(
+    Err(invalid_config_error(format!(
         "LLM memory eval judge only supports multi_hop and preference_application probes; got {probe_type:?}"
     )))
 }
@@ -486,8 +486,4 @@ fn verdict_token(token: &str) -> Option<JudgeVerdict> {
         "tie" | "draw" | "equal" => Some(JudgeVerdict::Tie),
         _ => None,
     }
-}
-
-fn invalid_config(message: impl Into<String>) -> EvalError {
-    EvalError::InvalidConfig(message.into())
 }

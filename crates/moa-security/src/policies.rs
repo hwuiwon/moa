@@ -193,11 +193,6 @@ impl Default for ActionPolicies {
     }
 }
 
-/// Validates an action-policy glob pattern before persistence or evaluation.
-pub fn validate_policy_glob(pattern: &str) -> Result<()> {
-    compile_policy_glob(pattern).map(|_| ())
-}
-
 /// Validates one persisted action-policy rule before it is stored or evaluated.
 pub fn validate_action_policy_rule(rule: &ActionPolicyRule) -> Result<()> {
     Glob::new(&rule.pattern).map(|_| ()).map_err(|error| {
@@ -211,7 +206,7 @@ pub fn validate_action_policy_rule(rule: &ActionPolicyRule) -> Result<()> {
 }
 
 /// Validates persisted action-policy rules before they are stored or evaluated.
-pub fn validate_action_policy_rules(rules: &[ActionPolicyRule]) -> Result<()> {
+fn validate_action_policy_rules(rules: &[ActionPolicyRule]) -> Result<()> {
     for rule in rules {
         validate_action_policy_rule(rule)?;
     }
@@ -233,22 +228,22 @@ fn compile_policy_glob(pattern: &str) -> Result<GlobMatcher> {
         })
 }
 
-fn validate_config_policy_glob(field: &str, pattern: &str) -> Result<()> {
-    Glob::new(pattern).map(|_| ()).map_err(|error| {
-        MoaError::ConfigError(format!(
-            "invalid action-policy config {field} glob pattern `{pattern}`: {error}"
-        ))
-    })
-}
-
-fn config_glob_matches(field: &str, pattern: &str, candidate: &str) -> Result<bool> {
+fn compile_config_glob(field: &str, pattern: &str) -> Result<GlobMatcher> {
     Glob::new(pattern)
-        .map(|glob| glob.compile_matcher().is_match(candidate))
+        .map(|glob| glob.compile_matcher())
         .map_err(|error| {
             MoaError::ConfigError(format!(
                 "invalid action-policy config {field} glob pattern `{pattern}`: {error}"
             ))
         })
+}
+
+fn validate_config_policy_glob(field: &str, pattern: &str) -> Result<()> {
+    compile_config_glob(field, pattern).map(|_| ())
+}
+
+fn config_glob_matches(field: &str, pattern: &str, candidate: &str) -> Result<bool> {
+    Ok(compile_config_glob(field, pattern)?.is_match(candidate))
 }
 
 /// Parses a shell command and matches it against a rule pattern.

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use moa_core::{LineageHandle, MoaError, NullLineageHandle};
+use moa_core::{LineageHandle, MoaError};
 use moa_lineage_core::{LineageEvent, LineageSink};
 use tokio::sync::mpsc;
 
@@ -355,18 +355,18 @@ impl LineageHandle for OtelSink {
 }
 
 /// Disabled-cost lineage sink exported from the production sink crate.
+///
+/// Kept as a `pub` type for potential out-of-tree consumers. Production code
+/// standardizes on [`moa_core::NullLineageHandle`] for the disabled handle, so
+/// this is a plain unit struct with no inner wrapper.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct NullSink {
-    inner: NullLineageHandle,
-}
+pub struct NullSink;
 
 impl NullSink {
     /// Creates a null sink.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            inner: NullLineageHandle,
-        }
+        Self
     }
 }
 
@@ -379,9 +379,7 @@ impl LineageSink for NullSink {
 }
 
 impl LineageHandle for NullSink {
-    fn record(&self, evt_json: serde_json::Value) {
-        self.inner.record(evt_json);
-    }
+    fn record(&self, _evt_json: serde_json::Value) {}
 }
 
 fn emit_lineage_span_attributes(span: &tracing::Span, evt_json: &serde_json::Value) {

@@ -24,6 +24,7 @@ use moa_core::wire::skills::{
     SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
 };
 use moa_core::{ActionRuleScope, Event, EventRange, EventRecord, StoragePartitionId, TenantId};
+use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::test_database_url;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -37,32 +38,8 @@ use crate::support::restate_runtime::{
 };
 use crate::support::session_store_service::get_events_request;
 
-mod support {
-    pub mod grant_tenant_admin;
-    pub mod restate_admin_url;
-    pub mod restate_identity;
-    pub mod restate_ingress_url;
-    pub mod restate_lock;
-    pub mod restate_ports;
-    pub mod restate_register;
-    pub mod session_get_events;
-
-    pub mod restate_runtime {
-        pub use super::grant_tenant_admin::grant_tenant_admin;
-        pub use super::restate_admin_url::restate_admin_url;
-        pub use super::restate_identity::{test_user_identity, with_identity};
-        pub use super::restate_ingress_url::restate_ingress_url;
-        pub use super::restate_lock::RESTATE_E2E_LOCK;
-        pub use super::restate_ports::{
-            OrchestratorPorts, deployment_endpoint_url, reserve_orchestrator_ports,
-        };
-        pub use super::restate_register::register_deployment;
-    }
-
-    pub mod session_store_service {
-        pub use super::session_get_events::get_events_request;
-    }
-}
+#[path = "support/mod.rs"]
+mod support;
 
 const SUPPORT_SKILL_PATH: &str = ".moa/skills/delivery-support/SKILL.md";
 const SUPPORT_SKILL_PROVIDER_ID: &str = "read_delivery_support_skill";
@@ -217,7 +194,7 @@ async fn run_agent_loop_experiment(
     agent_revision_uid: Uuid,
 ) -> Result<ExperimentRunResponse> {
     let request = ExperimentRunRequest {
-        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         name: "spilled-order-support-agent-loop".to_string(),
         plan_revision_uid: None,
         target: Some(json!({
@@ -259,7 +236,7 @@ async fn import_and_publish_artifact(
     source_text: &str,
 ) -> Result<ArtifactPublishResponse> {
     let scope = ActionRuleScope::Tenant {
-        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
     };
     let import_request = ArtifactImportRequest {
         scope,
@@ -310,7 +287,7 @@ async fn wait_for_experiment_status(
     run_uid: Uuid,
 ) -> Result<ExperimentRunStatusResponse> {
     let request = ExperimentRunStatusRequest {
-        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         run_uid,
     };
     let mut last_status = None;
@@ -494,12 +471,6 @@ fn write_scripted_fixture(path: &Path, final_text: &str) -> Result<()> {
     });
     let body = serde_json::to_vec_pretty(&fixture).context("serialize scripted fixture")?;
     fs::write(path, body).context("write scripted fixture")
-}
-
-fn tenant_id_from_storage_partition(storage_partition_id: &StoragePartitionId) -> Result<TenantId> {
-    Uuid::parse_str(storage_partition_id.as_str())
-        .map(TenantId::from)
-        .context("storage partition fixture id should be a tenant UUID")
 }
 
 fn support_skill_package() -> SkillPackageDocument {

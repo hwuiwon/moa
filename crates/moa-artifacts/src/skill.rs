@@ -89,14 +89,6 @@ pub struct SkillActionDefinition {
     pub ui: Value,
 }
 
-impl SkillActionDefinition {
-    /// Returns whether the action points at a connector action.
-    #[must_use]
-    pub fn uses_connector_action(&self) -> bool {
-        matches!(self.artifact_ref, Some(ArtifactRef::Action { .. }))
-    }
-}
-
 fn default_skill_path() -> String {
     "SKILL.md".to_string()
 }

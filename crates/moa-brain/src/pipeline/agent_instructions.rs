@@ -5,9 +5,8 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use moa_core::{
     ContextMessage, ContextProcessor, ContextSourceRef, ProcessorOutput, Result, WorkingContext,
+    estimate_text_tokens,
 };
-
-use super::estimate_tokens;
 
 const AGENT_CONTEXT_METADATA_KEY: &str = "agent_context";
 
@@ -78,7 +77,7 @@ impl ContextProcessor for AgentInstructionProcessor {
             "<agent_instructions ref=\"{}\" revision_uid=\"{}\" policy_hash=\"{}\">\n{}\n</agent_instructions>",
             definition_ref, revision_uid, policy_hash, body
         );
-        let tokens_added = estimate_tokens(&content);
+        let tokens_added = estimate_text_tokens(&content);
         ctx.append_message(ContextMessage::system(content).with_source_ref(
             ContextSourceRef::synthetic(format!("agent:{}", definition_ref)),
         ));

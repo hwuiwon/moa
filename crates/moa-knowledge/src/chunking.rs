@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     domain::{DocumentElement, KnowledgeBlock, KnowledgeChunk},
+    graph_delta::stable_uid,
     normalize::normalize_text,
 };
 
@@ -41,7 +42,7 @@ pub fn elements_to_blocks(version_uid: Uuid, elements: &[DocumentElement]) -> Ve
             }
             let block_hash = content_hash(&normalized_text);
             Some(KnowledgeBlock {
-                block_uid: deterministic_uid(&format!(
+                block_uid: stable_uid(&format!(
                     "{}:{}:{}",
                     version_uid, element.element_id, block_hash
                 )),
@@ -103,21 +104,6 @@ pub fn content_hash(text: &str) -> String {
     blake3::hash(text.as_bytes()).to_hex().to_string()
 }
 
-/// Returns whether a content-defined boundary should be honored after a chunk target is met.
-#[must_use]
-pub fn content_defined_boundary_after(
-    next_block_hash: &str,
-    current_tokens: usize,
-    config: ChunkingConfig,
-) -> bool {
-    if current_tokens < config.target_tokens {
-        return false;
-    }
-    let prefix = next_block_hash.get(0..4).unwrap_or(next_block_hash);
-    let value = u16::from_str_radix(prefix, 16).unwrap_or(0);
-    value % 4 == 0 || current_tokens >= config.max_tokens.saturating_sub(config.min_tokens / 2)
-}
-
 fn build_chunk(version_uid: Uuid, ordinal: u32, blocks: &[ChunkPart]) -> KnowledgeChunk {
     let text = blocks
         .iter()
@@ -142,7 +128,7 @@ fn build_chunk(version_uid: Uuid, ordinal: u32, blocks: &[ChunkPart]) -> Knowled
         })
     };
     KnowledgeChunk {
-        chunk_uid: deterministic_uid(&format!("{}:{}:{}", version_uid, ordinal, chunk_seed)),
+        chunk_uid: stable_uid(&format!("{}:{}:{}", version_uid, ordinal, chunk_seed)),
         version_uid,
         graph_node_uid: None,
         chunk_hash: content_hash(&chunk_seed),
@@ -214,13 +200,6 @@ fn flush_current(
         current.clear();
         *current_tokens = 0;
     }
-}
-
-fn deterministic_uid(seed: &str) -> Uuid {
-    let hash = blake3::hash(seed.as_bytes());
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[0..16]);
-    Uuid::from_bytes(bytes)
 }
 
 #[derive(Debug, Clone)]

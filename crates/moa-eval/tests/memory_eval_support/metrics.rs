@@ -1,25 +1,18 @@
 // Memory eval metric aggregation fixture support.
 
-use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::path::Path;
 
-use chrono::{DateTime, Utc};
-use moa_brain::retrieval::{LegSources, LexicalBackend, RetrievalHit, SourceTier};
+use moa_brain::retrieval::LexicalBackend;
 use moa_eval::kernel::{CostLedger, ProviderProvenance};
-use moa_eval::memory_eval::runner::QueryRewriteClassMetrics;
 use moa_eval::memory_eval::{
-    BinaryProbeOutcome, BootstrapConfig, CORPUS_SCHEMA_VERSION, CandidateLegs, CorpusManifest,
-    CorpusProfile, EntityFragmentationCounts, ExtractionPrecisionCounts, GoldNodeRecord,
-    GoldPiiStatus, GoldResolutionReport, GoldResolutionStatus, GraphExpansionEvalPolicy,
-    MemoryRetrievalEvalReport, MetricSummary, ProbeResult, ProbeType, QueryRewritePolicy,
-    RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K, RetrievedCandidate, TranscriptStyle,
-    aggregate_retrieval_eval_from_counts, aggregate_retrieval_eval_from_diagnostic_counts,
-    aggregate_retrieval_eval_with_diagnostics,
-    aggregate_retrieval_eval_with_extraction_precision, benjamini_hochberg,
-    candidates_from_retrieval_hits, mcnemar_paired_test,
+    BinaryProbeOutcome, BootstrapConfig, CandidateLegs, EntityFragmentationCounts,
+    ExtractionPrecisionCounts, GoldNodeRecord, GoldPiiStatus, GoldResolutionReport,
+    GoldResolutionStatus, MemoryRetrievalEvalReport, MetricSummary, ProbeResult, ProbeType,
+    RetrievedCandidate, aggregate_retrieval_eval_from_counts,
+    aggregate_retrieval_eval_from_diagnostic_counts, aggregate_retrieval_eval_with_diagnostics,
+    aggregate_retrieval_eval_with_extraction_precision, benjamini_hochberg, mcnemar_paired_test,
 };
-use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
 use uuid::Uuid;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -216,53 +209,6 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
     ]
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CandidateSpec {
-    fact_id: Option<&'static str>,
-    legs: LegSources,
-}
-
-fn metric_candidates(base: u128, specs: &[CandidateSpec]) -> Vec<RetrievedCandidate> {
-    let mut fact_ids_by_uid = HashMap::new();
-    let hits = specs
-        .iter()
-        .enumerate()
-        .map(|(index, spec)| {
-            let uid = Uuid::from_u128(base + index as u128 + 1);
-            if let Some(fact_id) = spec.fact_id {
-                fact_ids_by_uid.insert(uid, fact_id.to_string());
-            }
-            RetrievalHit {
-                uid,
-                score: 1.0 / (index + 1) as f64,
-                legs: spec.legs,
-                lexical_backend: None,
-                source_tier: SourceTier::UserMemory,
-                knowledge_chunk: None,
-                node: metric_node(uid),
-            }
-        })
-        .collect::<Vec<_>>();
-    candidates_from_retrieval_hits(&hits, &fact_ids_by_uid, &HashMap::new())
-}
-
-fn metric_node(uid: Uuid) -> NodeIndexRow {
-    NodeIndexRow {
-        uid,
-        label: NodeLabel::Fact,
-        storage_partition_id: Some("metrics-storage-partition".to_string()),
-        contact_id: Some("metrics-contact".to_string()),
-        scope: "tenant".to_string(),
-        name: format!("metric-node-{uid}"),
-        pii_class: PiiClass::None,
-        valid_to: None,
-        valid_from: utc("2026-05-01T00:00:00Z"),
-        properties_summary: None,
-        last_accessed_at: utc("2026-05-02T00:00:00Z"),
-        quality_score: 0.5,
-    }
-}
-
 fn parse_metric_probe(
     probe_id: &str,
     probe_type: ProbeType,
@@ -294,18 +240,6 @@ fn parse_metric_probe(
     }
 }
 
-fn legs(graph: bool, vector: bool, lexical: bool) -> LegSources {
-    LegSources {
-        graph,
-        vector,
-        lexical,
-    }
-}
-
-fn fact_ids(values: &[&str]) -> Vec<String> {
-    values.iter().map(|value| (*value).to_string()).collect()
-}
-
 fn assert_metric(summary: MetricSummary, numerator: f64, denominator: usize, value: f64) {
     assert_close(summary.numerator, numerator);
     assert_eq!(summary.denominator, denominator);
@@ -331,76 +265,4 @@ fn binary_outcomes(
             success: success_for_index(index),
         })
         .collect()
-}
-
-fn memory_budget_report(probe_results: Vec<ProbeResult>) -> MemoryRetrievalEvalReport {
-    memory_budget_report_with_reranker(probe_results, false)
-}
-
-
-fn memory_budget_report_with_reranker(
-    probe_results: Vec<ProbeResult>,
-    reranker_enabled: bool,
-) -> MemoryRetrievalEvalReport {
-    let retrieval = aggregate_retrieval_eval_from_counts(
-        3,
-        3,
-        probe_results,
-        BootstrapConfig {
-            resamples: 25,
-            seed: 23,
-        },
-    );
-    MemoryRetrievalEvalReport {
-        manifest: CorpusManifest {
-            version: CORPUS_SCHEMA_VERSION,
-            corpus_id: "memory-budget-fixture".to_string(),
-            profile: CorpusProfile::Pr,
-            description: "Hermetic budget gate fixture.".to_string(),
-            seeds: vec![1, 2, 3],
-            transcript_style: TranscriptStyle::Marked,
-        },
-        candidate_k: RETRIEVAL_EVAL_CANDIDATE_K,
-        final_k: RETRIEVAL_EVAL_FINAL_K,
-        reranker_enabled,
-        query_rewrite_policy: QueryRewritePolicy::Gated,
-        graph_expansion_policy: GraphExpansionEvalPolicy::Current,
-        query_rewrite_call_count: 0,
-        query_rewrite_skip_count: 0,
-        query_rewrite_call_rate: 0.0,
-        query_rewrite_p50_latency_ms: 0,
-        query_rewrite_p95_latency_ms: 0,
-        query_rewrite_input_tokens: 0,
-        query_rewrite_output_tokens: 0,
-        query_rewrite_est_usd: 0.0,
-        retrieval_plus_rewrite_p95_latency_ms: retrieval.metrics.p95_retrieval_latency_ms,
-        query_rewrite_by_class: BTreeMap::from([(
-            "exact_identifier".to_string(),
-            QueryRewriteClassMetrics {
-                total_count: 1,
-                call_count: 0,
-                skip_count: 1,
-                call_rate: 0.0,
-            },
-        )]),
-        aborted_over_budget: false,
-        cost: None,
-        providers: None,
-        metrics: retrieval.metrics,
-        probe_results: retrieval.probe_results,
-        bootstrap: retrieval.bootstrap,
-        cross_user_leak_probe_ids: retrieval.cross_user_leak_probe_ids,
-        gold_resolution: GoldResolutionReport {
-            ingest_reports: Vec::new(),
-            records: Vec::new(),
-        },
-        consolidation: None,
-    }
-}
-
-
-fn utc(value: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(value)
-        .expect("fixture timestamp parses")
-        .with_timezone(&Utc)
 }

@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_authz::{AwakeableResolveError, AwakeableResolver};
 use moa_orchestrator::services::authz_challenges_reaper::AuthzChallengeReaper;
+use moa_test_support::fixtures::quote_identifier;
 use serde_json::json;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::sync::{
@@ -197,10 +198,6 @@ async fn insert_terminal_challenge(
     .await
     .expect("terminal challenge should insert");
     challenge_id
-}
-
-fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 #[derive(Default)]

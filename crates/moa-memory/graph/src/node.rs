@@ -59,6 +59,14 @@ impl<'r> FromRow<'r, PgRow> for NodeIndexRow {
     }
 }
 
+/// Column projection for `moa.node_index` rows.
+///
+/// Must stay in sync with [`NodeIndexRow::from_row`]; every column read there
+/// is selected here.
+pub(crate) const NODE_INDEX_COLUMNS: &str = "uid, label, storage_partition_id, user_id, scope, name, pii_class, \
+     valid_to, valid_from, properties_summary, last_accessed_at, \
+     COALESCE(quality_score, 0.5) AS quality_score";
+
 /// Supported graph node labels for graph memory nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "text", rename_all = "PascalCase")]
@@ -260,24 +268,22 @@ pub struct NodeEmbeddingIntent {
 /// `0.55 * recency_decay + 0.35 * confidence + 0.10 * normalized_reference_count`,
 /// where recency decay is `1 / (1 + age_days)` and references are log-normalized up to
 /// 100 references.
-pub async fn lookup_seed_by_name(
-    conn: &mut PgConnection,
+pub async fn lookup_seed_by_name<'e, E>(
+    executor: E,
     name: &str,
     limit: i64,
     as_of: Option<DateTime<Utc>>,
-) -> Result<Vec<NodeIndexRow>> {
+) -> Result<Vec<NodeIndexRow>>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     if limit <= 0 {
         return Ok(Vec::new());
     }
 
-    let mut builder = QueryBuilder::<Postgres>::new(
-        r#"
-        SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
-               valid_to, valid_from, properties_summary, last_accessed_at,
-               COALESCE(quality_score, 0.5) AS quality_score
-        FROM moa.node_index
-        WHERE "#,
-    );
+    let mut builder = QueryBuilder::<Postgres>::new(format!(
+        "\n        SELECT {NODE_INDEX_COLUMNS}\n        FROM moa.node_index\n        WHERE "
+    ));
     crate::push_validity_filter(&mut builder, None, as_of);
     builder.push(
         r#"
@@ -309,7 +315,7 @@ pub async fn lookup_seed_by_name(
 
     builder
         .build_query_as::<NodeIndexRow>()
-        .fetch_all(&mut *conn)
+        .fetch_all(executor)
         .await
         .map_err(GraphError::from)
 }

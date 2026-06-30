@@ -1,19 +1,10 @@
 use moa_core::{
-    MoaConfig, ModelId, SessionActorRef, SessionAttachmentStorageConfig, SessionAttachmentStore,
-    SessionMeta, SessionStore, TenantId,
+    MoaConfig, SessionAttachmentStorageConfig, SessionAttachmentStore, SessionStore, TenantId,
 };
 use moa_session::{PostgresSessionStore, testing};
+use moa_test_support::fixtures::session_meta_fixture;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
-
-fn test_session_meta(tenant_id: TenantId) -> SessionMeta {
-    SessionMeta {
-        tenant_id,
-        created_by: Some(SessionActorRef::Identity { id: Uuid::now_v7() }),
-        model: ModelId::new("test-model"),
-        ..SessionMeta::default()
-    }
-}
 
 #[tokio::test]
 #[ignore = "requires Postgres and RustFS from docker compose"]
@@ -38,7 +29,7 @@ async fn session_attachment_store_round_trips_uploaded_content_across_instances_
         .expect("create isolated session attachment store");
     let tenant_id = TenantId::from(Uuid::now_v7());
     let session_id = writer
-        .create_session(test_session_meta(tenant_id))
+        .create_session(session_meta_fixture(tenant_id))
         .await
         .expect("create session for attachment");
 

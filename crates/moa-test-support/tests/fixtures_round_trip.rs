@@ -100,7 +100,9 @@ fn transcript_validate_rejects_turn_without_terminal_event() {
 
 #[tokio::test]
 #[ignore = "requires MOA_DATABASE_URL and a reachable Postgres instance"]
-async fn bootstrap_test_db_creates_isolated_schema_and_drops_on_drop() {
+async fn bootstrap_test_db_creates_isolated_database_and_drops_on_drop() {
+    // Pins: bootstrap clones an isolated per-test database that holds the session
+    // schema, and dropping the `TestDb` drops that whole database.
     let db = bootstrap_test_db().await.expect("bootstrap test db");
     let database_url = db.database_url().to_string();
     let schema_name = db.schema_name().to_string();
@@ -115,24 +117,36 @@ async fn bootstrap_test_db_creates_isolated_schema_and_drops_on_drop() {
     .expect("read schema existence");
     assert!(exists, "expected isolated schema {schema_name} to exist");
 
+    // Derive the per-test database name and a maintenance URL to inspect the
+    // server catalog after the database is dropped.
+    let (prefix, db_name) = database_url
+        .rsplit_once('/')
+        .map(|(prefix, db)| {
+            (
+                prefix.to_string(),
+                db.split('?').next().unwrap_or(db).to_string(),
+            )
+        })
+        .expect("per-test database url has a database segment");
+    let maintenance_url = format!("{prefix}/moa");
+
     drop(db);
 
-    let pool = sqlx::PgPool::connect(&database_url)
+    let pool = sqlx::PgPool::connect(&maintenance_url)
         .await
-        .expect("connect after drop");
-    let exists_after_drop: bool = sqlx::query(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)",
-    )
-    .bind(&schema_name)
-    .fetch_one(&pool)
-    .await
-    .expect("query schema after drop")
-    .try_get(0)
-    .expect("read schema existence after drop");
+        .expect("connect to maintenance database after drop");
+    let exists_after_drop: bool =
+        sqlx::query("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+            .bind(&db_name)
+            .fetch_one(&pool)
+            .await
+            .expect("query database after drop")
+            .try_get(0)
+            .expect("read database existence after drop");
     pool.close().await;
     assert!(
         !exists_after_drop,
-        "expected isolated schema {schema_name} to be dropped"
+        "expected isolated database {db_name} to be dropped"
     );
 }
 

@@ -13,7 +13,7 @@ use crate::tools::docker_file::{
     display_container_relative_path, docker_file_read, docker_file_write,
     resolve_container_workspace_path,
 };
-use crate::tools::edit_output::build_text_edit_output;
+use crate::tools::edit_output::{build_text_edit_output, count_lines};
 use crate::tools::file_read::resolve_sandbox_path;
 
 const MAX_CONTEXT_LINES: usize = 4;
@@ -158,8 +158,8 @@ fn plan_unique_replacement(
     updated_content.push_str(after);
 
     let start_line = line_number_at_offset(content, match_start);
-    let old_line_count = line_count(&params.old_str);
-    let new_line_count = line_count(&params.new_str);
+    let old_line_count = count_lines(&params.old_str);
+    let new_line_count = count_lines(&params.new_str);
     let preview_start = start_line.saturating_sub(context_lines).max(1);
     let preview_end_before =
         replacement_end_line(start_line, old_line_count).saturating_add(context_lines);
@@ -186,7 +186,7 @@ fn build_ambiguous_match_error(
     context_lines: usize,
 ) -> String {
     let mut hints = String::new();
-    let old_line_count = line_count(old_str);
+    let old_line_count = count_lines(old_str);
 
     for (index, position) in matches.iter().take(MAX_DISAMBIGUATION_MATCHES).enumerate() {
         let start_line = line_number_at_offset(content, *position);
@@ -226,14 +226,6 @@ fn line_number_at_offset(content: &str, byte_offset: usize) -> usize {
         .filter(|byte| *byte == b'\n')
         .count()
         + 1
-}
-
-fn line_count(content: &str) -> usize {
-    if content.is_empty() {
-        0
-    } else {
-        content.lines().count().max(1)
-    }
 }
 
 fn replacement_end_line(start_line: usize, line_count: usize) -> usize {

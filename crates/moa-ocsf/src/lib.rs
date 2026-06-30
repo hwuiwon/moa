@@ -11,13 +11,12 @@ pub mod jcs;
 pub mod signing;
 
 pub use emit::{
-    ActorInput, EmitError, emit_agent_deactivated, emit_agent_deactivated_tx,
-    emit_agent_registered, emit_agent_registered_tx, emit_api_key_created, emit_api_key_created_tx,
-    emit_api_key_revoked, emit_api_key_revoked_tx, emit_approval_decided_tx, emit_authn_failure,
+    ActorInput, EmitError, emit_agent_deactivated_tx, emit_agent_registered_tx,
+    emit_api_key_created_tx, emit_api_key_revoked_tx, emit_approval_decided_tx, emit_authn_failure,
     emit_authn_success, emit_authz_decision, emit_delegation_granted_tx,
     emit_delegation_revoked_tx, emit_group_membership_added_tx, emit_group_membership_removed_tx,
     emit_scim_group_created_tx, emit_scim_group_deleted_tx, emit_scim_group_updated_tx,
-    emit_scim_user_created_tx, emit_scim_user_deactivated_tx, emit_scim_user_deleted_tx,
-    emit_scim_user_updated_tx, emit_user_created, emit_user_deactivated_tx,
+    emit_scim_user_created_tx, emit_scim_user_deleted_tx, emit_scim_user_updated_tx,
+    emit_user_deactivated_tx,
 };
 pub use signing::{SigningError, ensure_key, rotate_key, verify};

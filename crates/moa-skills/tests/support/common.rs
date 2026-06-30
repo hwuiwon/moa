@@ -1,4 +1,11 @@
-//! Skill draft-proposal integration-test fixtures.
+//! Shared skill distillation/improvement integration-test fixtures.
+//!
+//! Consolidates the session-fixture, scripted-provider, and skill-seeding helpers
+//! previously duplicated across the `distillation`, `draft_proposals`, `improver`,
+//! and `regression` test binaries. Each binary uses only a subset of these helpers,
+//! so the module allows dead code rather than warning per binary.
+
+#![allow(dead_code)]
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -10,7 +17,7 @@ use moa_core::{
     ActionRuleScope, Attachment, Channel, CompletionContent, CompletionRequest, CompletionResponse,
     CompletionStream, Event, EventRecord, LLMProvider, MoaConfig, MoaError, ModelCapabilities,
     ModelId, ModelTier, SessionId, SessionMeta, SessionStatus, StopReason, StoragePartitionId,
-    TenantId, TokenPricing, TokenUsage, ToolCallFormat, ToolCallId, ToolOutput,
+    TokenPricing, TokenUsage, ToolCallFormat, ToolCallId, ToolOutput,
 };
 use moa_providers::ModelRouter;
 use moa_session::PostgresSessionStore;
@@ -18,19 +25,25 @@ use moa_skills::format::{
     build_skill_path, parse_skill_markdown, render_skill_markdown, skill_metadata_from_document,
 };
 use moa_skills::registry::{NewSkill, Skill, SkillRegistry};
+use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
 
 /// Successful session fixture with exactly five tool calls.
 pub const SESSION_WITH_5_TOOL_CALLS: &str = include_str!("fixtures/session_with_5_tool_calls.json");
+/// Successful session fixture below the distillation threshold.
+pub const SESSION_WITH_4_TOOL_CALLS: &str = include_str!("fixtures/session_with_4_tool_calls.json");
 /// Baseline skill fixture used by improvement and regression tests.
 pub const BASELINE_SKILL: &str = include_str!("fixtures/baseline_skill.md");
 /// Known-good improvement fixture returned by the scripted LLM.
 pub const IMPROVED_SKILL: &str = include_str!("fixtures/improved_skill_diff.md");
+/// Known-bad improvement fixture returned by the scripted LLM.
+pub const REGRESSED_SKILL: &str = include_str!("fixtures/regressed_skill_diff.md");
+/// Improvement fixture that renames the target skill; the improver must reject it.
+pub const RENAMED_SKILL: &str = include_str!("fixtures/renamed_skill_diff.md");
 
 #[derive(Debug, Deserialize)]
 struct SessionFixture {
@@ -99,7 +112,7 @@ pub fn load_session_fixture(json_text: &str) -> LoadedSession {
     let _user_id = fixture.user_id;
     let session = SessionMeta {
         id: SessionId(fixture.session_id),
-        tenant_id: tenant_id_from_storage_partition(&storage_partition_id),
+        tenant_id: tenant_id_from_storage_partition_id(&storage_partition_id),
         title: Some(fixture.task.clone()),
         status: SessionStatus::Completed,
         channel: Channel::Chat,
@@ -159,6 +172,24 @@ pub fn load_session_fixture(json_text: &str) -> LoadedSession {
         },
     );
     LoadedSession { session, events }
+}
+
+/// Returns a failed copy of a loaded session, preserving enough tool calls to pass the threshold.
+pub fn failed_session(mut loaded: LoadedSession) -> LoadedSession {
+    loaded.session.status = SessionStatus::Failed;
+    let tool_id = ToolCallId::new();
+    push_event(
+        &mut loaded.events,
+        loaded.session.id,
+        Event::ToolError {
+            tool_id,
+            provider_tool_use_id: None,
+            tool_name: "bash".to_string(),
+            error: "final verification failed".to_string(),
+            retryable: false,
+        },
+    );
+    loaded
 }
 
 /// Builds a model router backed by deterministic text responses.
@@ -353,23 +384,11 @@ impl LLMProvider for TestProvider {
 /// Returns a tenant artifact-visibility scope for tests.
 pub fn tenant_scope(storage_partition_id: &StoragePartitionId) -> ActionRuleScope {
     ActionRuleScope::Tenant {
-        tenant_id: tenant_id_from_storage_partition(storage_partition_id),
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
     }
 }
 
 /// Returns the tenant storage key for session-scoped learning rows.
 pub fn session_storage_partition_id(session: &SessionMeta) -> StoragePartitionId {
     StoragePartitionId::for_tenant(session.tenant_id)
-}
-
-fn tenant_id_from_storage_partition(storage_partition_id: &StoragePartitionId) -> TenantId {
-    if let Ok(uuid) = Uuid::parse_str(storage_partition_id.as_str()) {
-        return TenantId::from(uuid);
-    }
-    let digest = Sha256::digest(storage_partition_id.as_str().as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    TenantId::from(Uuid::from_bytes(bytes))
 }

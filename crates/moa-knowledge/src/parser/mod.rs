@@ -12,6 +12,7 @@ use crate::{
     domain::{ParseInput, ParsedDocument, WebhookEvent},
     error::{Error, Result},
     normalize::redact_provider_metadata,
+    providers::http::nested_value,
 };
 
 pub mod llamaparse;
@@ -359,12 +360,4 @@ fn webhook_header(headers: &HeaderMap, names: &[&str]) -> Option<String> {
 fn webhook_string(value: &Value, keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|key| nested_value(value, key)?.as_str().map(ToOwned::to_owned))
-}
-
-fn nested_value<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
-    let mut current = value;
-    for segment in path.split('.') {
-        current = current.get(segment)?;
-    }
-    Some(current)
 }

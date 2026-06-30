@@ -1,8 +1,12 @@
-//! OpenFGA grant helper for tenant admin access.
+//! OpenFGA grant helpers for Restate e2e tests.
+//!
+//! All three grants share one raw-tuple writer and one live OpenFGA client; the
+//! public helpers differ only in the relation and object they target.
 
 use anyhow::{Context, Result};
 use moa_authz::{FgaClient, FgaConfig};
 use moa_authz_schema::TupleOp;
+use moa_core::SessionId;
 use moa_core::traits::Identity;
 use serde_json::json;
 
@@ -21,6 +25,34 @@ pub async fn grant_tenant_admin(
     .context("grant test tenant admin")
 }
 
+/// Grant the test identity tenant-operator access directly in live OpenFGA.
+pub async fn grant_tenant_operator(
+    identity: &Identity,
+    tenant_id: impl std::fmt::Display,
+) -> Result<()> {
+    apply_raw_tuple(
+        TupleOp::Write,
+        &format!("user:{}", identity.id),
+        "operator",
+        &format!("tenant:{tenant_id}"),
+    )
+    .await
+    .context("grant test tenant operator")
+}
+
+/// Grant the test identity direct participation in one session.
+pub async fn grant_session_participant(identity: &Identity, session_id: SessionId) -> Result<()> {
+    apply_raw_tuple(
+        TupleOp::Write,
+        &format!("user:{}", identity.id),
+        "participant",
+        &format!("session:{session_id}"),
+    )
+    .await
+    .context("grant test session participation")
+}
+
+/// Write or delete a single raw tuple against live OpenFGA.
 async fn apply_raw_tuple(op: TupleOp, user: &str, relation: &str, object: &str) -> Result<()> {
     let fga = live_fga_client()?;
     let body = match op {
@@ -48,6 +80,7 @@ async fn apply_raw_tuple(op: TupleOp, user: &str, relation: &str, object: &str) 
     fga.apply_raw(body).await.context("apply raw OpenFGA tuple")
 }
 
+/// Build an OpenFGA client pointed at the local dev/live OpenFGA instance.
 fn live_fga_client() -> Result<FgaClient> {
     FgaClient::new(FgaConfig {
         url: std::env::var("MOA_AUTHZ_OPENFGA_URL")

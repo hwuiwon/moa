@@ -12,6 +12,7 @@ use moa_memory_graph::{
 };
 use moa_memory_vector::{PgvectorStore, VectorQuery, VectorStore};
 use moa_session::testing;
+use moa_test_support::fixtures::stable_uuid_from_label;
 use serde_json::json;
 use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
@@ -37,22 +38,6 @@ fn tenant_scope(storage_partition_id: impl AsRef<str>) -> RlsContext {
         .map(TenantId::from)
         .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id)));
     RlsContext::tenant(tenant_id)
-}
-
-fn stable_uuid_from_label(label: &str) -> Uuid {
-    let mut bytes = [0_u8; 16];
-    for (index, byte) in label.as_bytes().iter().copied().enumerate() {
-        let slot = index % 16;
-        bytes[slot] = bytes[slot]
-            .wrapping_mul(31)
-            .wrapping_add(byte)
-            .wrapping_add(index as u8);
-        let mirror = (index * 7 + 3) % 16;
-        bytes[mirror] ^= byte.rotate_left((index % 8) as u32);
-    }
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Uuid::from_bytes(bytes)
 }
 
 fn basis_vector(index: usize) -> Vec<f32> {

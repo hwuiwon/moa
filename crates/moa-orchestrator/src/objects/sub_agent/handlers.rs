@@ -18,12 +18,14 @@ impl SubAgent for SubAgentImpl {
         let mut state = SubAgentVoState::load_from(&ctx).await?;
         match &message {
             SubAgentMessage::InitialTask(_) => {
-                state.initialize(&message).map_err(to_handler_error)?;
+                state
+                    .initialize(&message)
+                    .map_err(moa_error_to_handler_error)?;
             }
             SubAgentMessage::FollowUp { text } => {
                 state
                     .enqueue_follow_up(text.clone())
-                    .map_err(to_handler_error)?;
+                    .map_err(moa_error_to_handler_error)?;
             }
         }
         let turn_id = if state.active_turn_id.is_none() {
@@ -366,7 +368,9 @@ async fn prepare_turn_inner(
         ))
         .into());
     }
-    state.ensure_initialized().map_err(to_handler_error)?;
+    state
+        .ensure_initialized()
+        .map_err(moa_error_to_handler_error)?;
 
     let pending = std::mem::take(&mut state.pending);
     for message in &pending {
@@ -487,7 +491,9 @@ async fn reserve_child_inner(
     input: ReserveSubAgentInput,
 ) -> Result<ReservedSubAgent, HandlerError> {
     let mut state = SubAgentVoState::load_from(ctx).await?;
-    state.ensure_initialized().map_err(to_handler_error)?;
+    state
+        .ensure_initialized()
+        .map_err(moa_error_to_handler_error)?;
     let parent_session = state.parent_session.ok_or_else(|| {
         TerminalError::new("sub-agent parent session missing while reserving child")
     })?;

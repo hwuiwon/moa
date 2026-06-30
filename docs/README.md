@@ -27,6 +27,7 @@ These docs describe the current MOA architecture as implemented in the Rust work
 | 18 | [Performance](18-performance.md) | Perf gate hardware floor and baseline |
 | 19 | [Data Operations](19-data-operations.md) | Postgres extensions, changelog replication, audit retention, PII sidecar |
 | 20 | [Testing](20-testing.md) | Provider overrides and snapshot testing conventions |
+| 21 | [Tenant Knowledge Base](21-tenant-knowledge-base.md) | Linked-account ingestion, document parsing, and knowledge graph labels |
 
 Supporting notes:
 

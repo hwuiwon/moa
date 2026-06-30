@@ -26,11 +26,3 @@ pub(super) fn parse_session_key(key: &str) -> Result<SessionId, HandlerError> {
         .map(SessionId)
         .map_err(|error| TerminalError::new(format!("invalid session key `{key}`: {error}")).into())
 }
-
-pub(super) fn to_handler_error(error: MoaError) -> HandlerError {
-    if error.is_fatal() {
-        return TerminalError::new(error.to_string()).into();
-    }
-
-    HandlerError::from(error)
-}

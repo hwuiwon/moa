@@ -17,11 +17,3 @@ pub(super) async fn persist_parent_session_event(
 pub(super) fn render_user_message(message: &UserMessage) -> String {
     moa_core::render_user_message_with_attachments(&message.text, &message.attachments)
 }
-
-pub(super) fn to_handler_error(error: MoaError) -> HandlerError {
-    if error.is_fatal() {
-        return TerminalError::new(error.to_string()).into();
-    }
-
-    HandlerError::from(error)
-}

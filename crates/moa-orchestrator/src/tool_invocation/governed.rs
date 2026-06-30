@@ -22,8 +22,7 @@ use crate::services::{
     tool_executor::ToolExecutorClient,
 };
 use crate::turn::util::{
-    blocked_canary_tool_output, denied_tool_output, disallowed_tool_output, tool_call_is_allowed,
-    tool_input_leaks_canary,
+    blocked_canary_tool_output, denied_tool_output, disallowed_tool_output, tool_input_leaks_canary,
 };
 use crate::workflows::turn_progress;
 
@@ -153,7 +152,7 @@ pub(crate) async fn invoke_governed_tool(
 ) -> Result<GovernedInvocationOutcome, HandlerError> {
     let invocation = request.tool_call.invocation.clone();
 
-    if !tool_call_is_allowed(request.allowed_tools, &invocation.name) {
+    if !request.allowed_tools.contains(&invocation.name) {
         append_tool_call_event(ctx, &request).await?;
         let output = disallowed_tool_output(&invocation.name);
         append_synthetic_tool_result(ctx, &request, &invocation, &output).await?;
@@ -476,6 +475,7 @@ mod tests {
         ToolCallContent, ToolCallId, ToolInvocation, TrustedSandboxFileEntry,
         TrustedSandboxFileManifestRef, UserId,
     };
+    use moa_test_support::fixtures::contact_ref_fixture;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -722,17 +722,9 @@ mod tests {
     }
 
     fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
-        ContactRef {
-            contact_id,
-            tenant_id,
-            state: ContactVerificationState::Verified,
-            canonical_contact_id: None,
-            linked_contact_ids: Vec::new(),
-            scopes: Vec::new(),
-            permissions: json!({}),
-            agent_ids: Vec::new(),
-            session_ids: Vec::new(),
-            verified_contact_point_ids: Vec::new(),
-        }
+        let mut contact =
+            contact_ref_fixture(contact_id, tenant_id, ContactVerificationState::Verified);
+        contact.permissions = json!({});
+        contact
     }
 }

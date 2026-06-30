@@ -9,7 +9,7 @@ use crate::{
     error::{Error, Result},
     normalize::normalize_text,
     parser::DocumentParser,
-    providers::http,
+    providers::http::{self, string_field},
 };
 
 const POLL_ATTEMPTS: usize = 30;
@@ -56,7 +56,7 @@ impl LlamaParseParser {
     ) -> Self {
         Self {
             client,
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url: http::trim_base_url(base_url.into()),
             api_key: api_key.into(),
             tier: tier.into(),
             version: version.into(),
@@ -65,7 +65,7 @@ impl LlamaParseParser {
     }
 
     fn url(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+        http::join_url(&self.base_url, path)
     }
 }
 
@@ -129,7 +129,9 @@ impl DocumentParser for LlamaParseParser {
         let result = if submitted.get("markdown").is_some() || submitted.get("items").is_some() {
             submitted
         } else {
-            let mut url = parse_url(&self.url(&format!("/api/v2/parse/{job_id}")))?;
+            let mut url = http::parse_url(&self.url(&format!("/api/v2/parse/{job_id}")), |m| {
+                Error::parser("llamaparse", m)
+            })?;
             url.query_pairs_mut()
                 .append_pair("expand", &expand.join(","));
             let mut result = Value::Null;
@@ -332,45 +334,15 @@ fn cost_optimizer_supported(tier: &str) -> bool {
     matches!(tier, "agentic" | "agentic_plus")
 }
 
+const LLAMAPARSE_STATUS_POINTERS: &[&str] = &["/status", "/job/status", "/job_metadata/status"];
+
 fn ensure_llamaparse_not_failed(value: &Value) -> Result<()> {
-    let status = value
-        .get("status")
-        .or_else(|| value.pointer("/job/status"))
-        .or_else(|| value.pointer("/job_metadata/status"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if matches!(status.as_str(), "error" | "failed" | "failure") {
+    if http::status_failed(&http::parse_status(value, LLAMAPARSE_STATUS_POINTERS)) {
         return Err(Error::parser("llamaparse", "parse job failed"));
     }
     Ok(())
 }
 
 fn is_pending_status(value: &Value) -> bool {
-    let status = value
-        .get("status")
-        .or_else(|| value.pointer("/job/status"))
-        .or_else(|| value.pointer("/job_metadata/status"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    matches!(
-        status.as_str(),
-        "pending" | "queued" | "running" | "processing"
-    )
-}
-
-fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        let mut current = value;
-        for segment in key.split('.') {
-            current = current.get(segment)?;
-        }
-        current.as_str().map(ToOwned::to_owned)
-    })
-}
-
-fn parse_url(value: &str) -> Result<reqwest::Url> {
-    reqwest::Url::parse(value)
-        .map_err(|error| Error::parser("llamaparse", format!("invalid URL `{value}`: {error}")))
+    http::status_pending(&http::parse_status(value, LLAMAPARSE_STATUS_POINTERS))
 }

@@ -12,11 +12,15 @@ bound on the developer machine.
 | Restate | 10012 | `restate` | Restate node endpoint | `restate:5122` |
 | Orchestrator | 10020 | `moa-orchestrator` | Optional direct handler debug port; not exposed by default compose | `moa-orchestrator:9080` |
 | Orchestrator | 10021 | `moa-orchestrator` | Health and readiness probes | `moa-orchestrator:9081` |
+| Orchestrator | 10022 | `moa-orchestrator` | SCIM v2 provisioning listener | `moa-orchestrator:10022` |
 | Authorization | 10030 | `openfga` | OpenFGA HTTP API | `openfga:8080` |
 | Authorization | 10031 | `openfga` | OpenFGA gRPC API | `openfga:8081` |
 | Authorization | 10032 | `openfga` | OpenFGA Playground | `openfga:3000` |
 | Data | 10040 | `postgres` | Postgres for MOA and OpenFGA logical databases | `postgres:5432` |
 | Privacy | 10050 | `moa-pii-service` | PII classifier sidecar API | `moa-pii-service:8080` |
+| Runtime cache | 10051 | `valkey` | Runtime cache store (Redis protocol) | `valkey:6379` |
+| Object storage | 9000 | `rustfs` | S3-compatible API for session attachments | `rustfs:9000` |
+| Object storage | 9001 | `rustfs` | RustFS web console | `rustfs:9001` |
 
 ## Rules
 

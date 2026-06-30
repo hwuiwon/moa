@@ -127,10 +127,9 @@ Promote the kernel to a separate crate only when a second suite needs it.
 `CachedHybridRetriever` caches final ranked hits. Its key includes scope, query
 text and embedding fingerprint, cutoff, reranker flag, temporal filter, ranking
 reference time, and a stable ranking fingerprint made from the ranking config
-plus `RANKING_PIPELINE_VERSION` 7. Version 7 removes the ranking-mode switch
-from the fingerprinted config shape while retaining the stemmed token features,
-first-person scope boost, graph-rescue weight, and OR lexical leg behavior from
-version 6.
+plus `RANKING_PIPELINE_VERSION` 8. The fingerprinted config shape excludes the
+ranking-mode switch while retaining the stemmed token features, first-person
+scope boost, graph-rescue weight, and OR lexical leg behavior.
 
 The memory eval runner still uses the production planner, cache, and hybrid
 retriever, but its default ranking config is time-neutral. Recorded extraction
@@ -374,7 +373,7 @@ threshold can be recalibrated against real vectors.
 
 Object edges now carry deterministic typed labels for dependency and ownership
 predicates (`DEPENDS_ON`, `OWNED_BY`); subject attachment edges remain
-`RELATES_TO`. The ranking pipeline version is `3` because typed edges and graph
+`RELATES_TO`. The ranking pipeline version is `8` because typed edges and graph
 candidate weighting change cacheable candidate pools.
 
 ## Nightly Live Lane

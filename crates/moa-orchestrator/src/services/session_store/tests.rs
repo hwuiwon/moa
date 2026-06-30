@@ -4,11 +4,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use moa_core::{
-    ContactId, ContactRef, ContactVerificationState, Event, EventFilter, EventRange, ModelId,
-    SessionActorRef, SessionMeta, SessionStatus, TenantId,
+    ContactId, ContactVerificationState, Event, EventFilter, EventRange, ModelId, SessionActorRef,
+    SessionMeta, SessionStatus, TenantId,
     traits::{Identity, IdentityType},
 };
 use moa_session::testing;
+use moa_test_support::fixtures::{contact_ref_fixture, session_meta_fixture};
 use restate_sdk::prelude::HandlerError;
 use uuid::Uuid;
 
@@ -28,14 +29,7 @@ struct AuthzOutboxTuple {
 
 fn test_session_meta(storage_partition_id: &str) -> SessionMeta {
     let _ = storage_partition_id;
-    SessionMeta {
-        tenant_id: TenantId::new(),
-        created_by: Some(SessionActorRef::Identity {
-            id: Uuid::from_u128(1),
-        }),
-        model: ModelId::new("test-model"),
-        ..SessionMeta::default()
-    }
+    session_meta_fixture(TenantId::new())
 }
 
 async fn test_service() -> Result<(SessionStoreImpl, String, String)> {
@@ -130,20 +124,12 @@ async fn create_contact_session_for_identity_db_enqueues_contact_session_tuple()
     install_authz_outbox(&service).await?;
     let tenant_id = TenantId::new();
     let contact_id = ContactId::new();
+    let mut contact =
+        contact_ref_fixture(contact_id, tenant_id, ContactVerificationState::Verified);
+    contact.permissions = serde_json::json!({});
     let meta = SessionMeta {
         tenant_id,
-        contact: Some(ContactRef {
-            contact_id,
-            tenant_id,
-            state: ContactVerificationState::Verified,
-            canonical_contact_id: None,
-            linked_contact_ids: Vec::new(),
-            scopes: Vec::new(),
-            permissions: serde_json::json!({}),
-            agent_ids: Vec::new(),
-            session_ids: Vec::new(),
-            verified_contact_point_ids: Vec::new(),
-        }),
+        contact: Some(contact),
         created_by: Some(SessionActorRef::Contact { id: contact_id }),
         model: ModelId::new("test-model"),
         ..SessionMeta::default()

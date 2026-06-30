@@ -1,13 +1,14 @@
 //! Skill rendering with linked graph lessons.
 
+use moa_core::Result;
 use moa_core::RlsContext;
-use moa_core::{MoaError, Result};
 use moa_db::ScopedConn;
 use moa_memory_types::MemoryScope;
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use crate::registry::Skill;
+use crate::util::{map_sqlx_error, set_app_role};
 
 const DEFAULT_ADDENDUM_LIMIT: i64 = 5;
 
@@ -118,18 +119,6 @@ async fn load_addenda(
             })
         })
         .collect()
-}
-
-async fn set_app_role(conn: &mut PgConnection) -> Result<()> {
-    sqlx::query("SET LOCAL ROLE moa_app")
-        .execute(conn)
-        .await
-        .map_err(map_sqlx_error)?;
-    Ok(())
-}
-
-fn map_sqlx_error(error: sqlx::Error) -> MoaError {
-    MoaError::StorageError(error.to_string())
 }
 
 #[derive(Debug)]

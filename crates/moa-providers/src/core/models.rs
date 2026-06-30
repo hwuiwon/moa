@@ -357,6 +357,18 @@ pub fn capabilities_for_provider_model(
         .ok_or_else(|| MoaError::Unsupported(format!("unsupported {provider} model '{model_id}'")))
 }
 
+/// Returns `model` unchanged when it is catalogued for `provider`, otherwise an
+/// [`MoaError::Unsupported`] error that names the provider via `display_name`.
+pub fn canonical_model_id(provider: &str, display_name: &str, model: &str) -> Result<String> {
+    if find_for_provider_model(provider, model).is_some() {
+        return Ok(model.to_string());
+    }
+
+    Err(MoaError::Unsupported(format!(
+        "unsupported {display_name} model '{model}'"
+    )))
+}
+
 /// Returns token pricing for a model id from the catalog.
 pub fn pricing_for_model(model_id: &str) -> Option<TokenPricing> {
     find_model(model_id).map(|model| model.pricing.clone())

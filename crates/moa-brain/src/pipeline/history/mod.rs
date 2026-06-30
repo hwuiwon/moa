@@ -15,7 +15,7 @@ use crate::compaction::{
     latest_checkpoint_state, non_checkpoint_events, recent_turn_boundary, unsummarized_events,
 };
 
-use super::estimate_tokens;
+use moa_core::estimate_text_tokens;
 
 mod budgeting;
 mod checkpoint;
@@ -129,7 +129,7 @@ impl HistoryCompiler {
                 .map(|state| state.events_summarized.min(all_non_checkpoint.len()))
                 .unwrap_or(0);
             for message in preserved_error_messages(&all_non_checkpoint[..summarized_end]) {
-                stable_prefix_tokens += estimate_tokens(&message.content);
+                stable_prefix_tokens += estimate_text_tokens(&message.content);
                 stable_prefix.push(CompiledRecordMessage::plain(message));
             }
         }
@@ -145,7 +145,7 @@ impl HistoryCompiler {
                 "<session_checkpoint summarized_events=\"{}\">\n{}\n</session_checkpoint>",
                 checkpoint.events_summarized, checkpoint.summary
             ));
-            stable_prefix_tokens += estimate_tokens(&checkpoint_message.content);
+            stable_prefix_tokens += estimate_text_tokens(&checkpoint_message.content);
             stable_prefix.push(CompiledRecordMessage::plain(checkpoint_message));
         }
 
@@ -155,7 +155,7 @@ impl HistoryCompiler {
         let deduplication = deduplicate_file_reads(&mut older_messages, &latest_file_reads);
         let recent_tokens = recent_messages
             .iter()
-            .map(|compiled| estimate_tokens(&compiled.message.content))
+            .map(|compiled| estimate_text_tokens(&compiled.message.content))
             .sum::<usize>();
         let (kept_older, tokens_used) = keep_budgeted_older_messages(
             stable_prefix_tokens,

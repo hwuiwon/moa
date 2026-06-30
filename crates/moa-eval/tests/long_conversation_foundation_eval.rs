@@ -14,7 +14,6 @@ use moa_eval_core::{
     AgentConfig, EngineOptions, EvalStatus, LongConversationMode, LongTestCase, TestCase,
     TestCaseKind, TestSuite,
 };
-use moa_lineage_core::{LineageEvent, LineageSink};
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -115,19 +114,6 @@ fn score_card() -> ScoreCard {
             prompt_injection_attempts_blocked: 0,
             shell_bypass_attempts_blocked: 0,
         },
-    }
-}
-
-#[derive(Default)]
-struct RecordingSink(std::sync::Mutex<Vec<LineageEvent>>);
-
-impl LineageSink for RecordingSink {
-    fn record(&self, evt: LineageEvent) {
-        self.0.lock().expect("recording sink lock").push(evt);
-    }
-
-    fn dropped_count(&self) -> u64 {
-        0
     }
 }
 
@@ -309,28 +295,6 @@ fn score_card_serializes_to_flat_metric_rows_for_analytics_scores() {
             .iter()
             .all(|record| record.model_or_evaluator == "long_conversation:foundation")
     );
-
-    let lineage_events = card.to_lineage_events(
-        StoragePartitionId::new("tenant"),
-        UserId::new("user"),
-        SessionId::new(),
-    );
-    assert_eq!(lineage_events.len(), rows.len());
-    assert!(
-        lineage_events
-            .iter()
-            .all(|event| matches!(event, LineageEvent::Eval(_)))
-    );
-
-    let sink = RecordingSink::default();
-    let emitted = card.emit_to_lineage_sink(
-        &sink,
-        StoragePartitionId::new("tenant"),
-        UserId::new("user"),
-        SessionId::new(),
-    );
-    assert_eq!(emitted, rows.len());
-    assert_eq!(sink.0.lock().expect("recorded events").len(), rows.len());
 }
 
 #[test]

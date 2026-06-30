@@ -1,6 +1,5 @@
 //! Embedding provider selection and construction from runtime config.
 
-use std::env;
 use std::sync::Arc;
 
 use moa_core::traits::EmbeddingProvider;
@@ -14,7 +13,7 @@ use super::{
     CohereEmbedding, EmbedRole, EmbedderConstructionRole, GeminiEmbeddingEmbedder, OpenAIEmbedding,
     ZeroEntropyEmbedding,
 };
-use crate::model_selection::split_explicit_provider_model;
+use crate::model_selection::{normalize_provider_name, split_explicit_provider_model};
 
 const OPENAI_PROVIDER_NAME: &str = "openai";
 const COHERE_PROVIDER_NAME: &str = "cohere";
@@ -58,19 +57,18 @@ impl EmbeddingProviderKind {
         }
     }
 
-    fn build_semantic_with_env(
+    fn build_semantic(
         self,
         config: &MoaConfig,
         model: String,
-        env_lookup: &impl Fn(&str) -> std::result::Result<String, env::VarError>,
     ) -> Result<Arc<dyn EmbeddingProvider>> {
         match self {
             Self::OpenAi => {
                 let api_key = read_api_key("MOA_OPENAI_API_KEY", &config.providers.openai.api_key)?;
                 Ok(Arc::new(OpenAIEmbedding::new(api_key, model)?))
             }
-            Self::Cohere => Ok(Arc::new(CohereEmbedding::from_config_with_model_env(
-                config, model, env_lookup,
+            Self::Cohere => Ok(Arc::new(CohereEmbedding::from_config_with_model(
+                config, model,
             )?)),
             Self::Gemini => {
                 if model != GEMINI_V2_MODEL {
@@ -78,24 +76,22 @@ impl EmbeddingProviderKind {
                         "gemini embedding provider only supports {GEMINI_V2_MODEL}, got {model}"
                     )));
                 }
-                Ok(Arc::new(build_gemini_embedder_with_env(
+                Ok(Arc::new(build_gemini_embedder(
                     config,
                     EmbedderConstructionRole::Retrieval,
-                    env_lookup,
                 )?))
             }
-            Self::ZeroEntropy => Ok(Arc::new(ZeroEntropyEmbedding::from_config_with_model_env(
-                config, model, env_lookup,
+            Self::ZeroEntropy => Ok(Arc::new(ZeroEntropyEmbedding::from_config_with_model(
+                config, model,
             )?)),
         }
     }
 
-    fn build_vector_with_env(
+    fn build_vector(
         self,
         config: &MoaConfig,
         model: String,
         role: EmbedderConstructionRole,
-        env_lookup: &impl Fn(&str) -> std::result::Result<String, env::VarError>,
     ) -> Result<Arc<dyn EmbeddingProvider>> {
         let cfg = &config.memory.vector.embedder;
         match self {
@@ -122,9 +118,7 @@ impl EmbeddingProviderKind {
                         "gemini vector embedder only supports {GEMINI_V2_MODEL}, got {model}"
                     )));
                 }
-                Ok(Arc::new(build_gemini_embedder_with_env(
-                    config, role, env_lookup,
-                )?))
+                Ok(Arc::new(build_gemini_embedder(config, role)?))
             }
             Self::ZeroEntropy => {
                 let api_key = read_api_key(
@@ -139,35 +133,20 @@ impl EmbeddingProviderKind {
     }
 }
 
-fn normalize_provider_name(name: &str) -> String {
-    name.trim().to_ascii_lowercase().replace('_', "-")
-}
-
 /// Builds a vector-space embedder from the tenant memory embedder configuration.
 pub fn build_embedder_from_config(
     config: &MoaConfig,
     role: EmbedderConstructionRole,
 ) -> Result<Arc<dyn EmbeddingProvider>> {
-    build_embedder_from_config_with_env(config, role, &|name| env::var(name))
-}
-
-fn build_embedder_from_config_with_env(
-    config: &MoaConfig,
-    role: EmbedderConstructionRole,
-    env_lookup: &impl Fn(&str) -> std::result::Result<String, env::VarError>,
-) -> Result<Arc<dyn EmbeddingProvider>> {
     let cfg = &config.memory.vector.embedder;
     let resolved = resolve_embedding_model(&cfg.name, "memory.vector.embedder.name")?
         .ok_or_else(|| MoaError::ConfigError("memory vector embedder is disabled".to_string()))?;
-    resolved
-        .provider
-        .build_vector_with_env(config, resolved.model, role, env_lookup)
+    resolved.provider.build_vector(config, resolved.model, role)
 }
 
-fn build_gemini_embedder_with_env(
+fn build_gemini_embedder(
     config: &MoaConfig,
     role: EmbedderConstructionRole,
-    _env_lookup: &impl Fn(&str) -> std::result::Result<String, env::VarError>,
 ) -> Result<GeminiEmbeddingEmbedder> {
     let cfg = &config.memory.vector.embedder;
     let api_key = read_api_key("MOA_GOOGLE_API_KEY", &config.providers.google.api_key)?;
@@ -207,23 +186,13 @@ fn normalize_config_key(value: &str) -> String {
 pub fn build_embedding_provider_from_config(
     config: &MoaConfig,
 ) -> Result<Option<Arc<dyn EmbeddingProvider>>> {
-    build_embedding_provider_from_config_with_env(config, &|name| env::var(name))
-}
-
-fn build_embedding_provider_from_config_with_env(
-    config: &MoaConfig,
-    env_lookup: &impl Fn(&str) -> std::result::Result<String, env::VarError>,
-) -> Result<Option<Arc<dyn EmbeddingProvider>>> {
     let Some(resolved) =
         resolve_embedding_model(&config.memory.embedding_model, "memory.embedding_model")?
     else {
         return Ok(None);
     };
 
-    match resolved
-        .provider
-        .build_semantic_with_env(config, resolved.model, env_lookup)
-    {
+    match resolved.provider.build_semantic(config, resolved.model) {
         Ok(provider) => Ok(Some(provider)),
         Err(MoaError::MissingEnvironmentVariable(env_name)) => {
             tracing::warn!(
@@ -264,15 +233,13 @@ fn resolve_embedding_model(
 
 #[cfg(test)]
 mod tests {
-    use std::env::VarError;
-
     use moa_core::MoaConfig;
 
     use super::{
         COHERE_DEFAULT_MODEL, EmbeddingProviderKind, GEMINI_V2_MODEL, ZEROENTROPY_DEFAULT_MODEL,
-        build_embedder_from_config_with_env, build_embedding_provider_from_config_with_env,
-        normalize_provider_name, resolve_embedding_model,
+        build_embedder_from_config, build_embedding_provider_from_config, resolve_embedding_model,
     };
+    use crate::model_selection::normalize_provider_name;
     #[test]
     fn embedding_provider_kind_accepts_supported_provider_prefixes() {
         // Pins: provider:model parsing accepts provider ids, not model aliases in provider position.
@@ -301,10 +268,9 @@ mod tests {
         config.memory.embedding_model = "cohere:embed-v4.0".to_string();
         config.providers.cohere.api_key = "test-key".to_string();
 
-        let provider =
-            build_embedding_provider_from_config_with_env(&config, &|_| Err(VarError::NotPresent))
-                .expect("cohere provider config should build")
-                .expect("cohere provider should be enabled");
+        let provider = build_embedding_provider_from_config(&config)
+            .expect("cohere provider config should build")
+            .expect("cohere provider should be enabled");
 
         assert_eq!(provider.model_id(), COHERE_DEFAULT_MODEL);
         assert_eq!(provider.dimensions(), 1_536);
@@ -317,10 +283,9 @@ mod tests {
         config.memory.embedding_model = "zeroentropy:zembed-1".to_string();
         config.providers.zeroentropy.api_key = "test-key".to_string();
 
-        let provider =
-            build_embedding_provider_from_config_with_env(&config, &|_| Err(VarError::NotPresent))
-                .expect("zeroentropy provider config should build")
-                .expect("zeroentropy provider should be enabled");
+        let provider = build_embedding_provider_from_config(&config)
+            .expect("zeroentropy provider config should build")
+            .expect("zeroentropy provider should be enabled");
 
         assert_eq!(provider.model_id(), ZEROENTROPY_DEFAULT_MODEL);
         assert_eq!(provider.dimensions(), 1_280);
@@ -334,12 +299,9 @@ mod tests {
         config.memory.vector.embedder.output_dim = 1_024;
         config.providers.cohere.api_key = "test-key".to_string();
 
-        let provider = build_embedder_from_config_with_env(
-            &config,
-            super::EmbedderConstructionRole::Retrieval,
-            &|_| Err(VarError::NotPresent),
-        )
-        .expect("cohere vector embedder config should build");
+        let provider =
+            build_embedder_from_config(&config, super::EmbedderConstructionRole::Retrieval)
+                .expect("cohere vector embedder config should build");
 
         assert_eq!(provider.model_id(), COHERE_DEFAULT_MODEL);
         assert_eq!(provider.dimensions(), 1_024);
@@ -351,9 +313,8 @@ mod tests {
         let mut config = MoaConfig::default();
         config.memory.embedding_model = "cohere:embed-v4.0".to_string();
 
-        let provider =
-            build_embedding_provider_from_config_with_env(&config, &|_| Err(VarError::NotPresent))
-                .expect("missing credential should not fail startup");
+        let provider = build_embedding_provider_from_config(&config)
+            .expect("missing credential should not fail startup");
 
         assert!(provider.is_none());
     }

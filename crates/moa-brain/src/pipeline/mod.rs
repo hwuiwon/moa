@@ -2,7 +2,6 @@
 
 mod builder;
 mod runner;
-mod util;
 
 pub mod agent_instructions;
 pub mod compactor;
@@ -24,5 +23,3 @@ pub use builder::{
     build_default_pipeline_with_tools, build_graph_memory_retriever,
 };
 pub use runner::{ContextPipeline, PipelineStageReport};
-
-pub(crate) use util::{estimate_tokens, sort_json_keys};

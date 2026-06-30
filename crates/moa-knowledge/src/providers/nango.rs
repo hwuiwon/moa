@@ -15,7 +15,10 @@ use crate::{
     },
     error::{Error, Result},
     normalize::redact_provider_metadata,
-    providers::{LinkedIntegrationProvider, http},
+    providers::{
+        LinkedIntegrationProvider,
+        http::{self, string_field, trim_base_url},
+    },
 };
 
 /// HTTP client for Nango tenant knowledge connections.
@@ -61,14 +64,14 @@ impl NangoProvider {
     }
 
     fn url(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+        http::join_url(&self.base_url, path)
     }
 
     fn verify_signature(&self, headers: &HeaderMap, body: &[u8]) -> Result<()> {
         let signing_key = self.webhook_signing_key.as_deref().ok_or_else(|| {
             Error::Config("Nango webhook signing key is not configured".to_string())
         })?;
-        let signature = header_value(headers, "x-nango-hmac-sha256")?;
+        let signature = http::header_value("nango", headers, "x-nango-hmac-sha256")?;
         let signature = hex::decode(signature.trim()).map_err(|error| {
             Error::provider("nango", format!("webhook signature was not hex: {error}"))
         })?;
@@ -259,7 +262,7 @@ impl LinkedIntegrationProvider for NangoProvider {
         }
 
         for variant in selection.variants {
-            let mut url = parse_url(&self.url("/"))?;
+            let mut url = http::parse_url(&self.url("/"), |m| Error::provider("nango", m))?;
             url.path_segments_mut()
                 .map_err(|_| Error::provider("nango", "Nango base URL cannot be a base"))?
                 .push("sync")
@@ -289,7 +292,7 @@ impl LinkedIntegrationProvider for NangoProvider {
     }
 
     async fn list_changed_records(&self, req: ListChangedRecordsRequest) -> Result<RecordPage> {
-        let mut url = parse_url(&self.url("/records"))?;
+        let mut url = http::parse_url(&self.url("/records"), |m| Error::provider("nango", m))?;
         if let Some(model) = nango_selected_model(&req.connection.source_selection) {
             url.query_pairs_mut().append_pair("model", &model);
         }
@@ -484,37 +487,8 @@ impl NangoRecord {
     }
 }
 
-fn trim_base_url(value: String) -> String {
-    value.trim_end_matches('/').to_string()
-}
-
-fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str> {
-    headers
-        .get(name)
-        .ok_or_else(|| Error::provider("nango", format!("webhook missing `{name}` header")))?
-        .to_str()
-        .map_err(|error| {
-            Error::provider("nango", format!("webhook header `{name}` failed: {error}"))
-        })
-}
-
-fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        let mut current = value;
-        for segment in key.split('.') {
-            current = current.get(segment)?;
-        }
-        current.as_str().map(ToOwned::to_owned)
-    })
-}
-
 fn stable_payload_id(value: &Value) -> String {
     blake3::hash(value.to_string().as_bytes())
         .to_hex()
         .to_string()
-}
-
-fn parse_url(value: &str) -> Result<reqwest::Url> {
-    reqwest::Url::parse(value)
-        .map_err(|error| Error::provider("nango", format!("invalid URL `{value}`: {error}")))
 }

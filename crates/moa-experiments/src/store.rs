@@ -73,7 +73,7 @@ impl ExperimentStore {
             let _ = conn.rollback().await;
             return Err(error);
         }
-        let row = sqlx::query(
+        let row = sqlx::query(&format!(
             r#"
             INSERT INTO moa.experiment_run (
                 run_uid, storage_partition_id, user_id, name, target_kind, status,
@@ -82,12 +82,9 @@ impl ExperimentStore {
                 created_by_identity
             )
             VALUES ($1, $2, $3, $4, $5, 'accepted', $6, $7, $8, $9, $10, $11, $12, $13, $14)
-            RETURNING run_uid, storage_partition_id, user_id, scope, name, target_kind, status,
-                      target, variant, scorecard, score_run_id, session_id, workflow_run_uid,
-                      artifact_revision_uids, idempotency_key, created_by_identity, error,
-                      started_at, completed_at, created_at, updated_at
-            "#,
-        )
+            RETURNING {RUN_COLUMNS}
+            "#
+        ))
         .bind(Uuid::now_v7())
         .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
@@ -149,12 +146,9 @@ impl ExperimentStore {
     ) -> MoaResult<Vec<ExperimentRunRecord>> {
         let parts = ScopeParts::from_scope(scope);
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
-        let rows = sqlx::query(
+        let rows = sqlx::query(&format!(
             r#"
-            SELECT run_uid, storage_partition_id, user_id, scope, name, target_kind, status,
-                   target, variant, scorecard, score_run_id, session_id, workflow_run_uid,
-                   artifact_revision_uids, idempotency_key, created_by_identity, error,
-                   started_at, completed_at, created_at, updated_at
+            SELECT {RUN_COLUMNS}
             FROM moa.experiment_run
             WHERE scope = $1
               AND storage_partition_id IS NOT DISTINCT FROM $2
@@ -162,8 +156,8 @@ impl ExperimentStore {
               AND ($4::TEXT IS NULL OR status = $4)
             ORDER BY created_at DESC
             LIMIT $5
-            "#,
-        )
+            "#
+        ))
         .bind(parts.scope)
         .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
@@ -187,7 +181,7 @@ impl ExperimentStore {
     ) -> MoaResult<Option<ExperimentRunRecord>> {
         let parts = ScopeParts::from_scope(scope);
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
-        let row = sqlx::query(
+        let row = sqlx::query(&format!(
             r#"
             UPDATE moa.experiment_run
             SET status = $5,
@@ -210,12 +204,9 @@ impl ExperimentStore {
               AND storage_partition_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
               AND (status NOT IN ('completed', 'failed', 'cancelled') OR status = $5)
-            RETURNING run_uid, storage_partition_id, user_id, scope, name, target_kind, status,
-                      target, variant, scorecard, score_run_id, session_id, workflow_run_uid,
-                      artifact_revision_uids, idempotency_key, created_by_identity, error,
-                      started_at, completed_at, created_at, updated_at
-            "#,
-        )
+            RETURNING {RUN_COLUMNS}
+            "#
+        ))
         .bind(parts.scope)
         .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
@@ -294,7 +285,7 @@ impl ExperimentStore {
             let _ = conn.rollback().await;
             return Err(error);
         }
-        let row = sqlx::query(
+        let row = sqlx::query(&format!(
             r#"
             INSERT INTO moa.experiment_trial (
                 trial_uid, run_uid, storage_partition_id, user_id, trial_key, status,
@@ -306,14 +297,9 @@ impl ExperimentStore {
                 $1, $2, $3, $4, $5, 'accepted', $6, $7, $8, $9, $10, $11,
                 $12, $13, $14, $15, $16, $17, $18
             )
-            RETURNING trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
-                      target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
-                      scenario_id, data_bundle_ids, artifact_revision_uids,
-                      simulator, target_model, seed, session_id, workflow_run_uid,
-                      score_run_id, turn_count, stop_reason, error, trace_id,
-                      started_at, completed_at, created_at, updated_at
-            "#,
-        )
+            RETURNING {TRIAL_COLUMNS}
+            "#
+        ))
         .bind(Uuid::now_v7())
         .bind(trial.run_uid)
         .bind(parts.storage_partition_id.as_deref())
@@ -375,14 +361,9 @@ impl ExperimentStore {
         let parts = ScopeParts::from_scope(scope);
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         ensure_run_exists_in_scope(conn.as_mut(), scope, run_uid).await?;
-        let rows = sqlx::query(
+        let rows = sqlx::query(&format!(
             r#"
-            SELECT trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
-                   target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
-                   scenario_id, data_bundle_ids, artifact_revision_uids,
-                   simulator, target_model, seed, session_id, workflow_run_uid,
-                   score_run_id, turn_count, stop_reason, error, trace_id,
-                   started_at, completed_at, created_at, updated_at
+            SELECT {TRIAL_COLUMNS}
             FROM moa.experiment_trial
             WHERE run_uid = $4
               AND scope = $1
@@ -391,8 +372,8 @@ impl ExperimentStore {
               AND ($5::TEXT IS NULL OR status = $5)
             ORDER BY created_at DESC
             LIMIT $6
-            "#,
-        )
+            "#
+        ))
         .bind(parts.scope)
         .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
@@ -421,7 +402,7 @@ impl ExperimentStore {
         let parts = ScopeParts::from_scope(scope);
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         ensure_run_exists_in_scope(conn.as_mut(), scope, run_uid).await?;
-        let rows = sqlx::query(
+        let rows = sqlx::query(&format!(
             r#"
             WITH selected AS (
                 SELECT trial_uid
@@ -450,14 +431,9 @@ impl ExperimentStore {
                 started_at = COALESCE(started_at, now()),
                 updated_at = now()
             WHERE trial_uid IN (SELECT trial_uid FROM selected)
-            RETURNING trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
-                      target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
-                      scenario_id, data_bundle_ids, artifact_revision_uids,
-                      simulator, target_model, seed, session_id, workflow_run_uid,
-                      score_run_id, turn_count, stop_reason, error, trace_id,
-                      started_at, completed_at, created_at, updated_at
-            "#,
-        )
+            RETURNING {TRIAL_COLUMNS}
+            "#
+        ))
         .bind(parts.scope)
         .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
@@ -483,7 +459,7 @@ impl ExperimentStore {
     ) -> MoaResult<Option<ExperimentTrialRecord>> {
         let parts = ScopeParts::from_scope(scope);
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
-        let row = sqlx::query(
+        let row = sqlx::query(&format!(
             r#"
             UPDATE moa.experiment_trial
             SET status = $5,
@@ -510,14 +486,9 @@ impl ExperimentStore {
               AND storage_partition_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
               AND (status NOT IN ('completed', 'failed', 'cancelled') OR status = $5)
-            RETURNING trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
-                      target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
-                      scenario_id, data_bundle_ids, artifact_revision_uids,
-                      simulator, target_model, seed, session_id, workflow_run_uid,
-                      score_run_id, turn_count, stop_reason, error, trace_id,
-                      started_at, completed_at, created_at, updated_at
-            "#,
-        )
+            RETURNING {TRIAL_COLUMNS}
+            "#
+        ))
         .bind(parts.scope)
         .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
@@ -543,7 +514,7 @@ impl ExperimentStore {
         let parts = ScopeParts::from_scope(scope);
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         ensure_run_exists_in_scope(conn.as_mut(), scope, run_uid).await?;
-        let rows = sqlx::query(
+        let rows = sqlx::query(&format!(
             r#"
             UPDATE moa.experiment_trial
             SET status = 'cancelled',
@@ -557,14 +528,9 @@ impl ExperimentStore {
               AND storage_partition_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
               AND status IN ('accepted', 'dispatched', 'running')
-            RETURNING trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
-                      target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
-                      scenario_id, data_bundle_ids, artifact_revision_uids,
-                      simulator, target_model, seed, session_id, workflow_run_uid,
-                      score_run_id, turn_count, stop_reason, error, trace_id,
-                      started_at, completed_at, created_at, updated_at
-            "#,
-        )
+            RETURNING {TRIAL_COLUMNS}
+            "#
+        ))
         .bind(parts.scope)
         .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
@@ -621,7 +587,7 @@ impl ExperimentStore {
     ) -> MoaResult<Option<ExperimentTrialRecord>> {
         let parts = ScopeParts::from_scope(scope);
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
-        let row = sqlx::query(
+        let row = sqlx::query(&format!(
             r#"
             UPDATE moa.experiment_trial
             SET turn_count = turn_count + 1,
@@ -630,14 +596,9 @@ impl ExperimentStore {
               AND scope = $1
               AND storage_partition_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
-            RETURNING trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
-                      target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
-                      scenario_id, data_bundle_ids, artifact_revision_uids,
-                      simulator, target_model, seed, session_id, workflow_run_uid,
-                      score_run_id, turn_count, stop_reason, error, trace_id,
-                      started_at, completed_at, created_at, updated_at
-            "#,
-        )
+            RETURNING {TRIAL_COLUMNS}
+            "#
+        ))
         .bind(parts.scope)
         .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
@@ -659,7 +620,7 @@ impl ExperimentStore {
     ) -> MoaResult<Option<ExperimentTrialRecord>> {
         let parts = ScopeParts::from_scope(scope);
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
-        let row = sqlx::query(
+        let row = sqlx::query(&format!(
             r#"
             UPDATE moa.experiment_trial
             SET session_id = COALESCE($5, session_id),
@@ -670,14 +631,9 @@ impl ExperimentStore {
               AND scope = $1
               AND storage_partition_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
-            RETURNING trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
-                      target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
-                      scenario_id, data_bundle_ids, artifact_revision_uids,
-                      simulator, target_model, seed, session_id, workflow_run_uid,
-                      score_run_id, turn_count, stop_reason, error, trace_id,
-                      started_at, completed_at, created_at, updated_at
-            "#,
-        )
+            RETURNING {TRIAL_COLUMNS}
+            "#
+        ))
         .bind(parts.scope)
         .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
@@ -701,7 +657,7 @@ impl ExperimentStore {
     ) -> MoaResult<Option<ExperimentRunRecord>> {
         let parts = ScopeParts::from_scope(scope);
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
-        let row = sqlx::query(
+        let row = sqlx::query(&format!(
             r#"
             UPDATE moa.experiment_run
             SET session_id = COALESCE($5, session_id),
@@ -711,12 +667,9 @@ impl ExperimentStore {
               AND scope = $1
               AND storage_partition_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
-            RETURNING run_uid, storage_partition_id, user_id, scope, name, target_kind, status,
-                      target, variant, scorecard, score_run_id, session_id, workflow_run_uid,
-                      artifact_revision_uids, idempotency_key, created_by_identity, error,
-                      started_at, completed_at, created_at, updated_at
-            "#,
-        )
+            RETURNING {RUN_COLUMNS}
+            "#
+        ))
         .bind(parts.scope)
         .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
@@ -755,20 +708,17 @@ async fn load_scoped_run(
     run_uid: Uuid,
 ) -> MoaResult<Option<sqlx::postgres::PgRow>> {
     let parts = ScopeParts::from_scope(scope);
-    sqlx::query(
+    sqlx::query(&format!(
         r#"
-        SELECT run_uid, storage_partition_id, user_id, scope, name, target_kind, status,
-               target, variant, scorecard, score_run_id, session_id, workflow_run_uid,
-               artifact_revision_uids, idempotency_key, created_by_identity, error,
-               started_at, completed_at, created_at, updated_at
+        SELECT {RUN_COLUMNS}
         FROM moa.experiment_run
         WHERE run_uid = $4
           AND scope = $1
           AND storage_partition_id IS NOT DISTINCT FROM $2
           AND user_id IS NOT DISTINCT FROM $3
         LIMIT 1
-        "#,
-    )
+        "#
+    ))
     .bind(parts.scope)
     .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
@@ -784,20 +734,17 @@ async fn load_scoped_run_by_idempotency_key(
     idempotency_key: &str,
 ) -> MoaResult<Option<sqlx::postgres::PgRow>> {
     let parts = ScopeParts::from_scope(scope);
-    sqlx::query(
+    sqlx::query(&format!(
         r#"
-        SELECT run_uid, storage_partition_id, user_id, scope, name, target_kind, status,
-               target, variant, scorecard, score_run_id, session_id, workflow_run_uid,
-               artifact_revision_uids, idempotency_key, created_by_identity, error,
-               started_at, completed_at, created_at, updated_at
+        SELECT {RUN_COLUMNS}
         FROM moa.experiment_run
         WHERE idempotency_key = $4
           AND scope = $1
           AND storage_partition_id IS NOT DISTINCT FROM $2
           AND user_id IS NOT DISTINCT FROM $3
         LIMIT 1
-        "#,
-    )
+        "#
+    ))
     .bind(parts.scope)
     .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
@@ -827,22 +774,17 @@ async fn load_scoped_trial(
     trial_uid: Uuid,
 ) -> MoaResult<Option<sqlx::postgres::PgRow>> {
     let parts = ScopeParts::from_scope(scope);
-    sqlx::query(
+    sqlx::query(&format!(
         r#"
-        SELECT trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
-               target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
-               scenario_id, data_bundle_ids, artifact_revision_uids,
-               simulator, target_model, seed, session_id, workflow_run_uid,
-               score_run_id, turn_count, stop_reason, error, trace_id,
-               started_at, completed_at, created_at, updated_at
+        SELECT {TRIAL_COLUMNS}
         FROM moa.experiment_trial
         WHERE trial_uid = $4
           AND scope = $1
           AND storage_partition_id IS NOT DISTINCT FROM $2
           AND user_id IS NOT DISTINCT FROM $3
         LIMIT 1
-        "#,
-    )
+        "#
+    ))
     .bind(parts.scope)
     .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
@@ -859,14 +801,9 @@ async fn load_scoped_trial_by_key(
     trial_key: &str,
 ) -> MoaResult<Option<sqlx::postgres::PgRow>> {
     let parts = ScopeParts::from_scope(scope);
-    sqlx::query(
+    sqlx::query(&format!(
         r#"
-        SELECT trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
-               target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
-               scenario_id, data_bundle_ids, artifact_revision_uids,
-               simulator, target_model, seed, session_id, workflow_run_uid,
-               score_run_id, turn_count, stop_reason, error, trace_id,
-               started_at, completed_at, created_at, updated_at
+        SELECT {TRIAL_COLUMNS}
         FROM moa.experiment_trial
         WHERE run_uid = $4
           AND trial_key = $5
@@ -874,8 +811,8 @@ async fn load_scoped_trial_by_key(
           AND storage_partition_id IS NOT DISTINCT FROM $2
           AND user_id IS NOT DISTINCT FROM $3
         LIMIT 1
-        "#,
-    )
+        "#
+    ))
     .bind(parts.scope)
     .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
@@ -963,22 +900,60 @@ async fn ensure_artifact_revisions_visible(
     Ok(())
 }
 
+/// Reads a Postgres column by name, mapping decode failures to [`MoaError`].
+///
+/// Collapses the repeated `row.try_get(name).map_err(map_sqlx_error)?` pattern
+/// used by the row mappers in this module down to `row.col(name)?`.
+trait RowExt {
+    /// Decodes the named column, returning a storage error on failure.
+    fn col<'r, T>(&'r self, name: &str) -> MoaResult<T>
+    where
+        T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>;
+}
+
+impl RowExt for sqlx::postgres::PgRow {
+    fn col<'r, T>(&'r self, name: &str) -> MoaResult<T>
+    where
+        T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+    {
+        self.try_get(name).map_err(map_sqlx_error)
+    }
+}
+
+/// Column projection shared by every full experiment-run load.
+///
+/// The order here must stay in lockstep with [`run_from_row`], which reads each
+/// column by name; keep both in sync when columns are added or removed.
+const RUN_COLUMNS: &str = "run_uid, storage_partition_id, user_id, scope, name, target_kind, status, \
+     target, variant, scorecard, score_run_id, session_id, workflow_run_uid, \
+     artifact_revision_uids, idempotency_key, created_by_identity, error, \
+     started_at, completed_at, created_at, updated_at";
+
+/// Column projection shared by every full experiment-trial load.
+///
+/// The order here must stay in lockstep with [`trial_from_row`], which reads
+/// each column by name; keep both in sync when columns are added or removed.
+const TRIAL_COLUMNS: &str = "trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status, \
+     target_kind, variant_key, plan_revision_uid, persona_id, profile_id, \
+     scenario_id, data_bundle_ids, artifact_revision_uids, \
+     simulator, target_model, seed, session_id, workflow_run_uid, \
+     score_run_id, turn_count, stop_reason, error, trace_id, \
+     started_at, completed_at, created_at, updated_at";
+
 fn run_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentRunRecord> {
-    let scope_text: String = row.try_get("scope").map_err(map_sqlx_error)?;
-    let storage_partition_id: Option<String> = row
-        .try_get("storage_partition_id")
-        .map_err(map_sqlx_error)?;
-    let user_id: Option<String> = row.try_get("user_id").map_err(map_sqlx_error)?;
-    let target_kind_text: String = row.try_get("target_kind").map_err(map_sqlx_error)?;
-    let status_text: String = row.try_get("status").map_err(map_sqlx_error)?;
-    let target: Value = row.try_get("target").map_err(map_sqlx_error)?;
-    let variant: Value = row.try_get("variant").map_err(map_sqlx_error)?;
-    let scorecard: Value = row.try_get("scorecard").map_err(map_sqlx_error)?;
+    let scope_text: String = row.col("scope")?;
+    let storage_partition_id: Option<String> = row.col("storage_partition_id")?;
+    let user_id: Option<String> = row.col("user_id")?;
+    let target_kind_text: String = row.col("target_kind")?;
+    let status_text: String = row.col("status")?;
+    let target: Value = row.col("target")?;
+    let variant: Value = row.col("variant")?;
+    let scorecard: Value = row.col("scorecard")?;
 
     Ok(ExperimentRunRecord {
         scope: scope_from_parts(&scope_text, storage_partition_id, user_id)?,
-        run_uid: row.try_get("run_uid").map_err(map_sqlx_error)?,
-        name: row.try_get("name").map_err(map_sqlx_error)?,
+        run_uid: row.col("run_uid")?,
+        name: row.col("name")?,
         target_kind: ExperimentTargetKind::from_db(&target_kind_text).ok_or_else(|| {
             MoaError::StorageError(format!(
                 "invalid experiment target kind `{target_kind_text}`"
@@ -993,23 +968,19 @@ fn run_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentRunRecord> {
             .map_err(|error| MoaError::SerializationError(error.to_string()))?,
         scorecard: serde_json::from_value::<ExperimentScorecard>(scorecard)
             .map_err(|error| MoaError::SerializationError(error.to_string()))?,
-        score_run_id: row.try_get("score_run_id").map_err(map_sqlx_error)?,
-        session_id: row
-            .try_get::<Option<Uuid>, _>("session_id")
-            .map_err(map_sqlx_error)?
-            .map(SessionId),
-        workflow_run_uid: row.try_get("workflow_run_uid").map_err(map_sqlx_error)?,
+        score_run_id: row.col("score_run_id")?,
+        session_id: row.col::<Option<Uuid>>("session_id")?.map(SessionId),
+        workflow_run_uid: row.col("workflow_run_uid")?,
         artifact_revision_uids: row
-            .try_get::<Option<Vec<Uuid>>, _>("artifact_revision_uids")
-            .map_err(map_sqlx_error)?
+            .col::<Option<Vec<Uuid>>>("artifact_revision_uids")?
             .unwrap_or_default(),
-        idempotency_key: row.try_get("idempotency_key").map_err(map_sqlx_error)?,
-        created_by_identity: row.try_get("created_by_identity").map_err(map_sqlx_error)?,
-        error: row.try_get("error").map_err(map_sqlx_error)?,
-        created_at: row.try_get("created_at").map_err(map_sqlx_error)?,
-        started_at: row.try_get("started_at").map_err(map_sqlx_error)?,
-        completed_at: row.try_get("completed_at").map_err(map_sqlx_error)?,
-        updated_at: row.try_get("updated_at").map_err(map_sqlx_error)?,
+        idempotency_key: row.col("idempotency_key")?,
+        created_by_identity: row.col("created_by_identity")?,
+        error: row.col("error")?,
+        created_at: row.col("created_at")?,
+        started_at: row.col("started_at")?,
+        completed_at: row.col("completed_at")?,
+        updated_at: row.col("updated_at")?,
     })
 }
 
@@ -1022,22 +993,20 @@ fn trial_artifact_revision_refs(trial: &NewExperimentTrial) -> Vec<Uuid> {
 }
 
 fn trial_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentTrialRecord> {
-    let scope_text: String = row.try_get("scope").map_err(map_sqlx_error)?;
-    let storage_partition_id: Option<String> = row
-        .try_get("storage_partition_id")
-        .map_err(map_sqlx_error)?;
-    let user_id: Option<String> = row.try_get("user_id").map_err(map_sqlx_error)?;
-    let target_kind_text: String = row.try_get("target_kind").map_err(map_sqlx_error)?;
-    let status_text: String = row.try_get("status").map_err(map_sqlx_error)?;
-    let stop_reason_text: Option<String> = row.try_get("stop_reason").map_err(map_sqlx_error)?;
-    let simulator: Value = row.try_get("simulator").map_err(map_sqlx_error)?;
-    let target_model: Option<String> = row.try_get("target_model").map_err(map_sqlx_error)?;
+    let scope_text: String = row.col("scope")?;
+    let storage_partition_id: Option<String> = row.col("storage_partition_id")?;
+    let user_id: Option<String> = row.col("user_id")?;
+    let target_kind_text: String = row.col("target_kind")?;
+    let status_text: String = row.col("status")?;
+    let stop_reason_text: Option<String> = row.col("stop_reason")?;
+    let simulator: Value = row.col("simulator")?;
+    let target_model: Option<String> = row.col("target_model")?;
 
     Ok(ExperimentTrialRecord {
         scope: scope_from_parts(&scope_text, storage_partition_id, user_id)?,
-        trial_uid: row.try_get("trial_uid").map_err(map_sqlx_error)?,
-        run_uid: row.try_get("run_uid").map_err(map_sqlx_error)?,
-        trial_key: row.try_get("trial_key").map_err(map_sqlx_error)?,
+        trial_uid: row.col("trial_uid")?,
+        run_uid: row.col("run_uid")?,
+        trial_key: row.col("trial_key")?,
         status: ExperimentTrialStatus::from_db(&status_text).ok_or_else(|| {
             MoaError::StorageError(format!("invalid experiment trial status `{status_text}`"))
         })?,
@@ -1046,27 +1015,23 @@ fn trial_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentTrialRecor
                 "invalid experiment trial target kind `{target_kind_text}`"
             ))
         })?,
-        variant_key: row.try_get("variant_key").map_err(map_sqlx_error)?,
-        plan_revision_uid: row.try_get("plan_revision_uid").map_err(map_sqlx_error)?,
-        persona_id: row.try_get("persona_id").map_err(map_sqlx_error)?,
-        profile_id: row.try_get("profile_id").map_err(map_sqlx_error)?,
-        scenario_id: row.try_get("scenario_id").map_err(map_sqlx_error)?,
-        data_bundle_ids: row.try_get("data_bundle_ids").map_err(map_sqlx_error)?,
+        variant_key: row.col("variant_key")?,
+        plan_revision_uid: row.col("plan_revision_uid")?,
+        persona_id: row.col("persona_id")?,
+        profile_id: row.col("profile_id")?,
+        scenario_id: row.col("scenario_id")?,
+        data_bundle_ids: row.col("data_bundle_ids")?,
         artifact_revision_uids: row
-            .try_get::<Option<Vec<Uuid>>, _>("artifact_revision_uids")
-            .map_err(map_sqlx_error)?
+            .col::<Option<Vec<Uuid>>>("artifact_revision_uids")?
             .unwrap_or_default(),
         simulator: serde_json::from_value::<ExperimentSimulatorConfig>(simulator)
             .map_err(|error| MoaError::SerializationError(error.to_string()))?,
         target_model: target_model.map(ModelId::new),
-        seed: row.try_get("seed").map_err(map_sqlx_error)?,
-        session_id: row
-            .try_get::<Option<Uuid>, _>("session_id")
-            .map_err(map_sqlx_error)?
-            .map(SessionId),
-        workflow_run_uid: row.try_get("workflow_run_uid").map_err(map_sqlx_error)?,
-        score_run_id: row.try_get("score_run_id").map_err(map_sqlx_error)?,
-        turn_count: row.try_get("turn_count").map_err(map_sqlx_error)?,
+        seed: row.col("seed")?,
+        session_id: row.col::<Option<Uuid>>("session_id")?.map(SessionId),
+        workflow_run_uid: row.col("workflow_run_uid")?,
+        score_run_id: row.col("score_run_id")?,
+        turn_count: row.col("turn_count")?,
         stop_reason: stop_reason_text
             .as_deref()
             .map(|value| {
@@ -1077,12 +1042,12 @@ fn trial_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentTrialRecor
                 })
             })
             .transpose()?,
-        error: row.try_get("error").map_err(map_sqlx_error)?,
-        trace_id: row.try_get("trace_id").map_err(map_sqlx_error)?,
-        started_at: row.try_get("started_at").map_err(map_sqlx_error)?,
-        completed_at: row.try_get("completed_at").map_err(map_sqlx_error)?,
-        created_at: row.try_get("created_at").map_err(map_sqlx_error)?,
-        updated_at: row.try_get("updated_at").map_err(map_sqlx_error)?,
+        error: row.col("error")?,
+        trace_id: row.col("trace_id")?,
+        started_at: row.col("started_at")?,
+        completed_at: row.col("completed_at")?,
+        created_at: row.col("created_at")?,
+        updated_at: row.col("updated_at")?,
     })
 }
 

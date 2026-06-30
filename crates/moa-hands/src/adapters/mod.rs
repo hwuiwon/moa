@@ -4,6 +4,7 @@
 pub mod daytona;
 #[cfg(feature = "e2b")]
 pub mod e2b;
+#[cfg(any(feature = "daytona", feature = "e2b"))]
+pub(crate) mod http_util;
 pub mod local;
 pub mod mcp;
-pub(crate) mod tool_route;

@@ -27,7 +27,7 @@ Status: early active development. The architecture is stable enough to document,
 
 `make dev` brings up the full local stack:
 
-- Postgres with AGE, pgvector, and pgaudit on `localhost:10040`
+- Postgres with pgvector and pgaudit on `localhost:10040`
 - `moa-edge` on `localhost:10000`
 - Restate Server 1.6.2 on `localhost:10010` for ingress and `localhost:10011` for the UI
 - `moa-orchestrator` with an internal-only Restate handler port and `localhost:10021` for health
@@ -89,10 +89,11 @@ curl -X POST http://localhost:10010/ApiKeys/create \
 ```
 
 Present the returned key to the edge with `Authorization: Bearer <key>`.
-Approvals are resolved through hosted approval endpoints:
+Builtin approvals are resolved through the edge approval endpoints:
 
 ```sh
-curl -H "Authorization: Bearer <key>" http://localhost:10080/v1/approvals
+curl -H "Authorization: Bearer <key>" http://localhost:10000/v1/authz-challenges
+curl -H "Authorization: Bearer <key>" http://localhost:10000/v1/action-reviews
 ```
 
 To stop everything while preserving data:
@@ -113,7 +114,7 @@ local `compose.override.yml`.
 Exercise the local stack through HTTP APIs:
 
 ```bash
-curl -H "Authorization: Bearer <key>" http://localhost:10080/v1/whoami
+curl -H "Authorization: Bearer <key>" http://localhost:10000/v1/whoami
 ```
 
 For a remote deployment, call the public `moa-edge` URL with the same bearer
@@ -146,13 +147,15 @@ cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --healt
 ```
 
 The binary serves these Restate surfaces: virtual objects `Session`, `SubAgent`,
-`Tenant`, `CronJob`, and `IngestionVO`; services `Agents`,
-`AdminMaintenance`, `Analytics`, `Approvals`, `ApiKeys`, `Audit`, `Authz`,
-`Eval`, `GraphMemoryMaint`, `Health`, `LineageAdmin`, `LLMGateway`, `Memory`,
-`NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`,
-`ActionPolicy`, and `Whoami`; and
-workflows `Consolidate`, `EvalRun`, and `TurnExecution`. Deployment
-registration is handled outside the binary.
+`Tenant`, `CronJob`, and `IngestionVO`; services `AgentDefinitions`, `Agents`,
+`AdminMaintenance`, `Artifacts`, `ActionReviews`, `ApiKeys`, `Authz`,
+`AuthzChallenges`, `Contacts`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`,
+`LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`,
+`Tenants`, `ToolExecutor`, `ActionPolicy`, and `Workflows`; and workflows
+`Consolidate`, `TurnExecution`, `SubAgentTurnExecution`,
+`ArtifactWorkflowExecution`, and `KnowledgeSyncIngestion`. Feature-gated builds
+also register experiment and eval-runner surfaces. Deployment registration is
+handled outside the binary.
 
 The Docker image builds `moa-orchestrator-bin` and installs it as `/usr/local/bin/moa-orchestrator`.
 
@@ -191,12 +194,14 @@ The context pipeline is byte-stable where possible for prompt caching. With quer
 
 ## Memory
 
-Memory is split across four crates under `crates/moa-memory/`:
+Memory is split across six crates under `crates/moa-memory/`:
 
-- `graph/` - Apache AGE adapter, bi-temporal write protocol
+- `graph/` - relational Postgres graph store, bi-temporal write protocol
 - `vector/` - pgvector / Turbopuffer, Gemini and Cohere embedders
 - `pii/` - redaction at ingestion via openai/privacy-filter HTTP service
 - `ingest/` - slow-path Restate VO, fast-path API, contradiction detector
+- `lifecycle/` - memory consolidation, quality scoring, and digest generation
+- `types/` - shared memory domain types
 
 See `docs/15-architecture-policy.md` for how types are owned across these
 crates and `crates/moa-memory/README.md` for crate-level details.
@@ -207,17 +212,23 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 |---|---|
 | [`moa-core`](crates/moa-core/) | Shared types, traits, config, events, telemetry, analytics DTOs |
 | [`moa-brain`](crates/moa-brain/) | Context pipeline, query rewriting, segment helpers, resolution scoring, streamed turns |
+| [`moa-db`](crates/moa-db/) | Database helpers shared by MOA storage crates (pools, scoped connections, RLS) |
 | [`moa-session`](crates/moa-session/) | Postgres session store, event log, task segments, learning log, analytics views |
+| [`moa-runtime-store`](crates/moa-runtime-store/) | Runtime cache store implementations (in-memory and Redis/Valkey) |
+| [`moa-migrations`](crates/moa-migrations/) | Central Postgres migrations and schema runners |
 | [`moa-memory-graph`](crates/moa-memory/graph/) | Graph memory store, SQL sidecars, RLS, bitemporal state, and changelog |
 | [`moa-memory-ingest`](crates/moa-memory/ingest/) | Slow-path graph ingestion and fast memory write APIs |
 | [`moa-memory-vector`](crates/moa-memory/vector/) | pgvector-backed graph embeddings and vector lookup |
 | [`moa-memory-pii`](crates/moa-memory/pii/) | PII classification and privacy filtering for memory writes |
 | [`moa-memory-lifecycle`](crates/moa-memory/lifecycle/) | Memory lifecycle jobs for consolidation, promotion, and quality scoring |
+| [`moa-memory-types`](crates/moa-memory/types/) | Shared memory domain types across the memory subcrates |
+| [`moa-knowledge`](crates/moa-knowledge/) | Tenant knowledge-base domain, providers, parsers, and ingestion seams |
 | [`moa-lineage-core`](crates/moa-lineage/core/) | Lineage records and score record types |
 | [`moa-lineage-citation`](crates/moa-lineage/citation/) | Provider citation normalization and BM25/NLI verification helpers |
 | [`moa-lineage-sink`](crates/moa-lineage/sink/) | Async lineage sink writers |
 | [`moa-lineage-otel`](crates/moa-lineage/otel/) | OTel/OpenInference bridge |
 | [`moa-lineage-audit`](crates/moa-lineage/audit/) | Compliance audit hashes, Merkle roots, signing, DSAR support |
+| [`moa-observability`](crates/moa-observability/) | Runtime metrics, tracing bootstrap, and Restate observability helpers |
 | [`moa-authz-schema`](crates/moa-auth/authz-schema/) | Typed OpenFGA object, relation, and tuple-key constants |
 | [`moa-authz`](crates/moa-auth/authz/) | OpenFGA authorization checks, tuple outbox, and delegated access helpers |
 | [`moa-auth-providers`](crates/moa-auth/providers/) | Local API keys, disabled auth, token vault, and provider bundle construction |
@@ -226,11 +237,18 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-ocsf`](crates/moa-ocsf/) | OCSF security event types, signing, and persistence helpers |
 | [`moa-edge`](crates/moa-edge/) | Hosted HTTP edge service and public API routing |
 | [`moa-hands`](crates/moa-hands/) | Tool router, local/Docker hands, Daytona, E2B, MCP client |
-| [`moa-providers`](crates/moa-providers/) | LLM and embedding providers |
+| [`moa-providers`](crates/moa-providers/) | LLM, embedding, and rerank providers |
 | [`moa-orchestrator`](crates/moa-orchestrator/) | Restate services, virtual objects, workflows, and handler binary |
+| [`moa-agents`](crates/moa-agents/) | Tenant-configurable agent resolution and runtime policy locking |
+| [`moa-contacts`](crates/moa-contacts/) | Contact identity domain and persistence helpers |
+| [`moa-workflows`](crates/moa-workflows/) | Workflow runtime logic for artifact-backed workflow definitions |
+| [`moa-artifacts`](crates/moa-artifacts/) | Canonical artifact definitions for agents, skills, connectors, actions, workflows, and experiment plans |
+| [`moa-experiments`](crates/moa-experiments/) | Domain types for experiment runs and scorecard configuration |
+| [`moa-scoring`](crates/moa-scoring/) | Shared score-run storage and score summary queries |
 | [`moa-messaging`](crates/moa-messaging/) | Slack adapter, platform rendering, Postmark email connector, and Twilio SMS connector |
 | [`moa-security`](crates/moa-security/) | Credential vault, MCP proxy, policies, prompt-injection controls |
 | [`moa-skills`](crates/moa-skills/) | Agent Skills parsing, distillation, improvement, regression suites |
+| [`moa-eval-core`](crates/moa-eval/core/) | Shared evaluation engine types and scoring primitives |
 | [`moa-eval`](crates/moa-eval/) | Evaluation harness |
 | [`moa-loadtest`](crates/moa-loadtest/) | Direct HTTP load-test harness for hosted orchestrator APIs |
 | [`moa-test-support`](crates/moa-test-support/) | Shared integration-test fixtures, Postgres helpers, and contract checks |

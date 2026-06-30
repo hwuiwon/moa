@@ -9,16 +9,16 @@ Mermaid sequence diagrams showing how MOA actually moves at runtime. Start with 
 | `User` | Person sending messages | — |
 | `Platform` | Slack / API caller | `moa-messaging`, `moa-edge` |
 | `Messaging` | Normalizes inbound, renders outbound | `moa-messaging` |
-| `Orch` | `BrainOrchestrator` (`LocalOrchestrator` or Restate-backed runtime) | `moa-orchestrator` |
+| `Orch` | Restate-backed orchestrator runtime | `moa-orchestrator` |
 | `Brain` | Stateless harness loop | `moa-brain` |
-| `Pipe` | 7-stage context compilation pipeline | `moa-brain` |
+| `Pipe` | Ordered context compilation pipeline | `moa-brain` |
 | `LLM` | LLM provider (Anthropic / OpenAI / Gemini) | `moa-providers` |
 | `Router` | `ToolRouter` — built-in / hand / MCP dispatch | `moa-hands` |
 | `Hand` | `HandProvider` implementation | `moa-hands` |
 | `Log` | `SessionStore` (Postgres) | `moa-session` |
 | `Memory` | graph memory store, ingestion, and hybrid retrieval | `moa-memory-graph`, `moa-memory-ingest`, `moa-brain` |
-| `Vault` | `CredentialVault` (file or HashiCorp) | `moa-security` |
-| `Cron` | Scheduled-task runner (tokio-cron or Restate workflow delay) | `moa-orchestrator` |
+| `Vault` | `CredentialVault` (environment-backed) | `moa-security` |
+| `Cron` | Scheduled-task runner (Restate `CronJob` virtual object) | `moa-orchestrator` |
 
 ---
 
@@ -50,7 +50,7 @@ sequenceDiagram
     Brain->>Log: get_events(session_id)
     Log-->>Brain: EventRecord[]
 
-    Brain->>Pipe: run 7 stages
+    Brain->>Pipe: run pipeline stages
     Pipe->>Memory: hybrid retrieve scoped graph nodes
     Memory-->>Pipe: ranked node hits + snippets
     Pipe->>Log: (reads history via Brain)
@@ -117,8 +117,8 @@ sequenceDiagram
     alt No active session for this thread
         Orch->>Log: create_session(meta)
         Log-->>Orch: session_id
-        Orch->>Orch: spawn LocalBrainHandle<br/>(mpsc + broadcast + cancel tokens)
-        Orch->>Brain: run_session_task(session_id, ...)
+        Orch->>Orch: invoke Session virtual object<br/>(durable per-session execution)
+        Orch->>Brain: TurnExecution(session_id, ...)
         Brain->>Log: update_status(Running)
     else Session already running
         Orch->>Brain: signal(QueueMessage)
@@ -133,9 +133,9 @@ sequenceDiagram
 
 ---
 
-## 3. Context compilation pipeline (7 stages)
+## 3. Context compilation pipeline (ordered stages)
 
-The stable-prefix layout that maximizes KV-cache reuse. Cost/latency depends heavily on this.
+The stable-prefix layout that maximizes KV-cache reuse. Cost/latency depends heavily on this. Query rewrite and digest stages are conditional on config.
 
 ```mermaid
 sequenceDiagram
@@ -153,29 +153,33 @@ sequenceDiagram
     rect rgb(230, 245, 255)
         Note over Pipe: STABLE PREFIX (cached across turns)
         Pipe->>Pipe: 1. IdentityProcessor — static system prompt
-        Pipe->>Pipe: 2. InstructionProcessor — tenant/contact prefs
-        Pipe->>Tools: 3. ToolDefinitionProcessor — get loadout (cap 30)
+        Pipe->>Pipe: 2. AgentInstructionProcessor — resolved agent policy
+        Pipe->>Pipe: 3. InstructionProcessor — tenant/contact prefs
+        Pipe->>Tools: 4. ToolDefinitionProcessor — get loadout (cap 30)
         Tools-->>Pipe: tool schemas (deterministic key order)
-        Pipe->>Skills: 4. SkillInjector — metadata only (~100 tok/skill)
-        Skills-->>Pipe: skill index
         Pipe->>Pipe: mark cache_breakpoint
     end
 
     rect rgb(255, 245, 230)
         Note over Pipe: DYNAMIC (changes per turn)
-        Pipe->>Memory: 5. HybridRetriever — retrieve(query, ≤20% budget)
+        Pipe->>Pipe: 5. QueryRewriter — normalize task (fail-open, optional)
+        Pipe->>Skills: 6. SkillInjector — metadata only (~100 tok/skill)
+        Skills-->>Pipe: skill index
+        Pipe->>Pipe: 7. DigestProcessor — rolling memory digest (optional)
+        Pipe->>Memory: 8. GraphMemoryRetriever — hybrid retrieve(query, ≤20% budget)
         Memory-->>Pipe: top-ranked graph nodes (truncated)
-        Pipe->>Log: 6. HistoryCompiler — get_events(all)
+        Pipe->>Log: 9. HistoryCompiler — get_events(all)
         Log-->>Pipe: events
         Note over Pipe: checkpoint + last-5 verbatim<br/>older turns reverse-chronological<br/>errors ALWAYS preserved
-        Pipe->>Pipe: 7. CacheOptimizer — verify prefix stability<br/>report cache_ratio
+        Pipe->>Pipe: 10. RuntimeContextProcessor — per-turn runtime state
+        Pipe->>Pipe: 11. Compactor — enforce token budget
     end
 
     Pipe-->>Brain: WorkingContext
     Brain->>LLM: complete(request)
     LLM-->>Brain: CompletionStream
 
-    Note over Pipe,LLM: Every stage logs ProcessorOutput:<br/>tokens_added, items_included, duration
+    Note over Pipe,LLM: Prefix stability + cache_ratio are reported by the pipeline runner, not a discrete stage<br/>Every stage logs ProcessorOutput: tokens_added, items_included, duration
 ```
 
 ---
@@ -481,7 +485,7 @@ sequenceDiagram
 
 ## 11. Consolidation ("Dream") — scheduled memory maintenance
 
-Fires when ≥3 sessions complete AND ≥24h since last run. Runs as a delayed Restate workflow (cloud) or `tokio-cron-scheduler` job (local).
+Fires when ≥3 sessions complete AND ≥24h since last run. Scheduled by the Restate `CronJob` virtual object, which invokes the `Consolidate` workflow.
 
 ```mermaid
 sequenceDiagram

@@ -1,6 +1,8 @@
 //! Authorization helpers shared by Restate handlers.
 
-use moa_authz::{AuthzCheckError, FgaClient};
+use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation};
+use moa_authz_schema::{ObjectType, Relation};
+use moa_core::TenantId;
 use moa_core::traits::Identity;
 use restate_sdk::prelude::{HandlerError, TerminalError};
 
@@ -23,6 +25,24 @@ pub fn require_fga_client() -> Result<FgaClient, HandlerError> {
     OrchestratorCtx::current()
         .fga_client()
         .ok_or_else(|| TerminalError::new_with_code(503, "authorization engine unavailable").into())
+}
+
+/// Authorize the caller against a tenant for a specific relation.
+///
+/// Composes identity loading, FGA client lookup, and a delegation-aware
+/// authorization check on `(Tenant, tenant_id, relation)`, returning the
+/// validated caller identity for downstream use.
+pub async fn authorize_tenant(
+    ctx: &impl RequestHeaders,
+    tenant_id: TenantId,
+    relation: Relation,
+) -> Result<Identity, HandlerError> {
+    let identity = require_identity(ctx)?;
+    let fga = require_fga_client()?;
+    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
+        .await
+        .map_err(translate_authz_error)?;
+    Ok(identity)
 }
 
 /// Translate identity-header failures into handler errors.

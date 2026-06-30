@@ -7,7 +7,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moa_core::MoaConfig;
 use moa_core::RlsContext;
-use moa_core::config::MoaEnvOverlay;
 use moa_db::ScopedConn;
 use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_vector::{Error as VectorError, VECTOR_DIMENSION, VectorQuery, VectorStore};
@@ -32,7 +31,6 @@ const RRF_K: f64 = 60.0;
 const DEFAULT_FAST_BUDGET: Duration = Duration::from_millis(250);
 const DEFAULT_SLOW_BUDGET: Duration = Duration::from_secs(5);
 const DEFAULT_JUDGE_BUDGET: Duration = Duration::from_millis(200);
-const DEFAULT_JUDGE_MODEL: &str = "command-a-plus-05-2026";
 const CACHE_CAPACITY: u64 = 10_000;
 const JUDGE_PROMPT: &str = include_str!("../prompts/judge.txt");
 
@@ -85,18 +83,6 @@ impl ContradictionContext {
         }
     }
 
-    /// Returns the underlying Postgres pool.
-    #[must_use]
-    pub fn pool(&self) -> &PgPool {
-        &self.pool
-    }
-
-    /// Returns the request scope used for RLS GUCs.
-    #[must_use]
-    pub fn scope(&self) -> &RlsContext {
-        &self.scope
-    }
-
     /// Returns the vector store used for KNN candidate retrieval.
     #[must_use]
     pub fn vector(&self) -> &dyn VectorStore {
@@ -104,13 +90,7 @@ impl ContradictionContext {
     }
 
     async fn begin(&self) -> Result<ScopedConn<'_>> {
-        let mut conn = ScopedConn::begin(&self.pool, &self.scope).await?;
-        if self.assume_app_role {
-            sqlx::query("SET LOCAL ROLE moa_app")
-                .execute(conn.as_mut())
-                .await?;
-        }
-        Ok(conn)
+        Ok(ScopedConn::begin_as_app(&self.pool, &self.scope, self.assume_app_role).await?)
     }
 }
 
@@ -248,19 +228,6 @@ impl RrfPlusJudgeDetector {
         }
     }
 
-    /// Creates a local detector, using the configured reranker when credentials are present.
-    #[must_use]
-    pub fn from_env_or_heuristic() -> Self {
-        let mut config = MoaConfig::default();
-        if let Err(error) = apply_detector_env_overlay(&mut config) {
-            tracing::warn!(
-                error = %error,
-                "failed to load contradiction-detector environment overlay"
-            );
-        }
-        Self::from_config_or_heuristic(&config)
-    }
-
     /// Creates a detector using shared MOA config.
     #[must_use]
     pub fn from_config_or_heuristic(config: &MoaConfig) -> Self {
@@ -272,60 +239,6 @@ impl RrfPlusJudgeDetector {
             config.memory.extraction.timeout_ms,
         );
         Self::new_with_model(configured.reranker, configured.model, judge)
-    }
-
-    /// Creates a detector using a configured Cohere API-key env-var name.
-    #[must_use]
-    pub fn from_cohere_api_key_env_or_heuristic(api_key_env: &str) -> Self {
-        Self::from_cohere_api_key_env_model_or_heuristic(
-            api_key_env,
-            DEFAULT_JUDGE_MODEL,
-            DEFAULT_JUDGE_BUDGET.as_millis() as u64,
-        )
-    }
-
-    /// Creates a detector using a configured Cohere API-key env-var name and judge model.
-    #[must_use]
-    pub fn from_cohere_api_key_env_model_or_heuristic(
-        api_key_env: &str,
-        judge_model: &str,
-        timeout_ms: u64,
-    ) -> Self {
-        let reranker: Arc<dyn Reranker> = std::env::var(api_key_env)
-            .ok()
-            .and_then(|api_key| match CohereReranker::new(api_key) {
-                Ok(reranker) => Some(Arc::new(reranker) as Arc<dyn Reranker>),
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        api_key_env,
-                        "falling back to no-op contradiction reranker"
-                    );
-                    None
-                }
-            })
-            .unwrap_or_else(NoopReranker::shared);
-        let judge: Arc<dyn JudgeModel> = match std::env::var(api_key_env) {
-            Ok(api_key) if !api_key.trim().is_empty() => Arc::new(LlmJudge::new(
-                LlmChatClient::from_api_key(SecretString::from(api_key), judge_model, timeout_ms),
-            )),
-            Ok(_) => {
-                tracing::warn!(
-                    api_key_env,
-                    "falling back to heuristic contradiction judge because API key env var is empty"
-                );
-                Arc::new(HeuristicJudge)
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    api_key_env,
-                    "falling back to heuristic contradiction judge because API key env var is missing"
-                );
-                Arc::new(HeuristicJudge)
-            }
-        };
-        Self::new(reranker, judge)
     }
 
     /// Creates a detector using a direct Cohere API key and judge model.
@@ -472,30 +385,6 @@ impl RrfPlusJudgeDetector {
         let candidates = self.rerank_top5(fact_text, &candidates).await?;
         self.judge_candidates(fact_text, &candidates).await
     }
-}
-
-fn apply_detector_env_overlay(config: &mut MoaConfig) -> moa_core::Result<()> {
-    let overlay = MoaEnvOverlay::from_env()?;
-    if let Some(api_key) = overlay.cohere_api_key {
-        config.providers.cohere.api_key = api_key.clone();
-        config.memory.extraction.api_key = api_key;
-    }
-    if let Some(api_key) = overlay.zeroentropy_api_key {
-        config.providers.zeroentropy.api_key = api_key;
-    }
-    if let Some(model) = overlay.memory_retrieval_reranker_model {
-        config.memory.retrieval.reranker_model = model;
-    }
-    if let Some(latency) = overlay.memory_retrieval_reranker_latency {
-        config.memory.retrieval.reranker_latency = Some(latency);
-    }
-    if let Some(model) = overlay.memory_extraction_model {
-        config.memory.extraction.model = model;
-    }
-    if let Some(timeout_ms) = overlay.memory_extraction_timeout_ms {
-        config.memory.extraction.timeout_ms = timeout_ms;
-    }
-    Ok(())
 }
 
 fn configured_reranker_or_noop(config: &MoaConfig) -> ConfiguredReranker {
@@ -847,14 +736,20 @@ fn fact_parts_from_text(text: &str) -> Option<FactParts> {
     })
 }
 
-fn normalize_fact_component(value: &str) -> String {
+fn normalize_fact(value: &str, allowed_extra: &[char]) -> String {
     value
         .split_whitespace()
-        .map(|part| part.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '.'))
+        .map(|part| {
+            part.trim_matches(|ch: char| !ch.is_alphanumeric() && !allowed_extra.contains(&ch))
+        })
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase()
+}
+
+fn normalize_fact_component(value: &str) -> String {
+    normalize_fact(value, &['_', '.'])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -919,12 +814,7 @@ fn deployment_provider(text: &str) -> Option<&'static str> {
 }
 
 fn normalize_fact_text(text: &str) -> String {
-    text.split_whitespace()
-        .map(|part| part.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '.'))
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
+    normalize_fact(text, &['.'])
 }
 
 #[cfg(test)]

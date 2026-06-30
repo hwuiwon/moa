@@ -11,7 +11,7 @@ use moa_core::{MoaError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::core::http::build_http_client;
+use crate::core::http::{build_http_client, decode_json_response, validate_embedding_dimension};
 
 const GEMINI_ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta";
 pub(super) const GEMINI_V2_MODEL: &str = "gemini-embedding-2";
@@ -123,7 +123,7 @@ impl GeminiEmbeddingEmbedder {
             output_dimensionality: Some(self.output_dim),
         };
         let response = self.post_embed(GEMINI_V2_MODEL, &body).await?;
-        validate_gemini_dimension(self.output_dim, &response.embedding.values)?;
+        validate_embedding_dimension(self.output_dim, &response.embedding.values)?;
         Ok(response.embedding.values)
     }
 
@@ -140,23 +140,7 @@ impl GeminiEmbeddingEmbedder {
             .send()
             .await
             .map_err(|error| MoaError::ProviderError(error.to_string()))?;
-        let status = response.status();
-        if status.is_success() {
-            return response
-                .json::<GeminiResponse>()
-                .await
-                .map_err(|error| MoaError::ProviderError(error.to_string()));
-        }
-
-        let message = response
-            .text()
-            .await
-            .unwrap_or_else(|error| format!("failed to read error body: {error}"));
-        Err(MoaError::HttpStatus {
-            status: status.as_u16(),
-            retry_after: None,
-            message,
-        })
+        decode_json_response(response).await
     }
 }
 
@@ -216,17 +200,6 @@ fn validate_gemini_output_dim(output_dim: usize) -> Result<()> {
     } else {
         Err(MoaError::ConfigError(format!(
             "Gemini output_dim must be in 128..=3072, got {output_dim}"
-        )))
-    }
-}
-
-fn validate_gemini_dimension(expected: usize, embedding: &[f32]) -> Result<()> {
-    if embedding.len() == expected {
-        Ok(())
-    } else {
-        Err(MoaError::ProviderError(format!(
-            "embedding dimension mismatch: expected {expected}, got {}",
-            embedding.len()
         )))
     }
 }

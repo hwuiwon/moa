@@ -15,7 +15,7 @@ use moa_core::{
 use moa_observability::record_turn_snapshot_load;
 
 use crate::compaction::recent_turn_boundary;
-use crate::pipeline::estimate_tokens;
+use moa_core::{estimate_text_tokens, sum_message_tokens};
 
 use super::budgeting::keep_budgeted_older_messages;
 use super::conversion::{CompiledRecordMessage, compile_records};
@@ -139,22 +139,19 @@ impl HistoryCompiler {
             }
 
             let previous_tokens =
-                estimate_tokens(&snapshotted_messages[previous.message_index].content);
+                estimate_text_tokens(&snapshotted_messages[previous.message_index].content);
             snapshotted_messages[previous.message_index] =
                 placeholder_tool_result_from_snapshot(path, &previous);
             let placeholder_tokens =
-                estimate_tokens(&snapshotted_messages[previous.message_index].content);
+                estimate_text_tokens(&snapshotted_messages[previous.message_index].content);
             deduplication.deduplicated_count += 1;
             deduplication.tokens_saved += previous_tokens.saturating_sub(placeholder_tokens);
         }
 
-        let snapshotted_tokens = snapshotted_messages
-            .iter()
-            .map(|message| estimate_tokens(&message.content))
-            .sum::<usize>();
+        let snapshotted_tokens = sum_message_tokens(&snapshotted_messages);
         let recent_tokens = recent_messages
             .iter()
-            .map(|compiled| estimate_tokens(&compiled.message.content))
+            .map(|compiled| estimate_text_tokens(&compiled.message.content))
             .sum::<usize>();
         let (kept_older, tokens_used) = keep_budgeted_older_messages(
             snapshotted_tokens,
@@ -193,10 +190,7 @@ impl HistoryCompiler {
             None
         } else {
             Some(SnapshotHistory {
-                token_count: next_snapshot_messages
-                    .iter()
-                    .map(|message| estimate_tokens(&message.content))
-                    .sum::<usize>(),
+                token_count: sum_message_tokens(&next_snapshot_messages),
                 messages: next_snapshot_messages,
                 last_sequence_num: older_events
                     .last()
@@ -236,10 +230,7 @@ pub(super) fn build_snapshot_state(
         .iter()
         .map(|compiled| compiled.message.clone())
         .collect::<Vec<_>>();
-    let token_count = messages
-        .iter()
-        .map(|message| estimate_tokens(&message.content))
-        .sum::<usize>();
+    let token_count = sum_message_tokens(&messages);
 
     SnapshotHistory {
         last_sequence_num,

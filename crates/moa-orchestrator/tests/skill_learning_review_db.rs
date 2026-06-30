@@ -26,6 +26,7 @@ use moa_skills::review::{
     LearningReviewStore, LearningReviewStoreFuture, SkillReviewAction, SkillReviewRequest,
     prepare_skill_acceptance, promote_claimed_skill_candidate,
 };
+use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::bootstrap_test_db;
 use serde_json::json;
 use uuid::Uuid;
@@ -58,7 +59,7 @@ mod skill_learning_review {
         let loaded = get_learning_candidate_after_authz(
             store.clone(),
             GetLearningCandidateRequest {
-                tenant_id: tenant_id_from_workspace(&storage_partition_id),
+                tenant_id: tenant_id_from_storage_partition_id(&storage_partition_id),
                 candidate_id: candidate.id,
             },
         )
@@ -67,7 +68,7 @@ mod skill_learning_review {
         assert_eq!(loaded.id, candidate.id);
         assert_eq!(
             loaded.tenant_id,
-            tenant_id_from_workspace(&storage_partition_id)
+            tenant_id_from_storage_partition_id(&storage_partition_id)
         );
 
         let response = accept_skill_candidate_after_authz(
@@ -77,7 +78,7 @@ mod skill_learning_review {
             #[cfg(feature = "internal-eval-runner")]
             review_providers(),
             LearningCandidateReviewRequest {
-                tenant_id: tenant_id_from_workspace(&storage_partition_id),
+                tenant_id: tenant_id_from_storage_partition_id(&storage_partition_id),
                 candidate_id: candidate.id,
                 action: LearningCandidateReviewAction::Accept,
                 reviewer_subject: "user:reviewer".to_string(),
@@ -109,7 +110,7 @@ mod skill_learning_review {
         let promoted = test_db
             .store()
             .get_learning_candidate(
-                &tenant_id_from_workspace(&storage_partition_id),
+                &tenant_id_from_storage_partition_id(&storage_partition_id),
                 candidate.id,
             )
             .await
@@ -188,7 +189,7 @@ mod skill_learning_review {
         let response = reject_learning_candidate_after_authz(
             Arc::new(test_db.store().clone()),
             LearningCandidateReviewRequest {
-                tenant_id: tenant_id_from_workspace(&storage_partition_id),
+                tenant_id: tenant_id_from_storage_partition_id(&storage_partition_id),
                 candidate_id: candidate.id,
                 action: LearningCandidateReviewAction::Reject,
                 reviewer_subject: "user:reviewer".to_string(),
@@ -216,7 +217,7 @@ mod skill_learning_review {
         let rejected = test_db
             .store()
             .get_learning_candidate(
-                &tenant_id_from_workspace(&storage_partition_id),
+                &tenant_id_from_storage_partition_id(&storage_partition_id),
                 candidate.id,
             )
             .await
@@ -264,7 +265,7 @@ mod skill_learning_review {
             store: Arc::new(test_db.store().clone()),
         };
         let request = SkillReviewRequest {
-            tenant_id: tenant_id_from_workspace(&storage_partition_id),
+            tenant_id: tenant_id_from_storage_partition_id(&storage_partition_id),
             candidate_id: candidate.id,
             action: SkillReviewAction::Accept,
             reviewer_subject: "user:reviewer".to_string(),
@@ -304,7 +305,7 @@ mod skill_learning_review {
         let reloaded = test_db
             .store()
             .get_learning_candidate(
-                &tenant_id_from_workspace(&storage_partition_id),
+                &tenant_id_from_storage_partition_id(&storage_partition_id),
                 candidate.id,
             )
             .await
@@ -421,21 +422,8 @@ mod skill_learning_review {
 
     fn tenant_scope(storage_partition_id: &StoragePartitionId) -> ActionRuleScope {
         ActionRuleScope::Tenant {
-            tenant_id: tenant_id_from_workspace(storage_partition_id),
+            tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         }
-    }
-
-    fn tenant_id_from_workspace(storage_partition_id: &StoragePartitionId) -> TenantId {
-        uuid::Uuid::parse_str(storage_partition_id.as_str())
-            .map(TenantId::from)
-            .unwrap_or_else(|_| {
-                let hash = blake3::hash(storage_partition_id.as_str().as_bytes());
-                let mut bytes = [0_u8; 16];
-                bytes.copy_from_slice(&hash.as_bytes()[..16]);
-                bytes[6] = (bytes[6] & 0x0f) | 0x80;
-                bytes[8] = (bytes[8] & 0x3f) | 0x80;
-                TenantId::from(uuid::Uuid::from_bytes(bytes))
-            })
     }
 
     #[derive(Clone)]
@@ -589,7 +577,7 @@ mod skill_learning_review {
         let now = Utc::now();
         let candidate = LearningCandidate {
             id: Uuid::now_v7(),
-            tenant_id: tenant_id_from_workspace(storage_partition_id),
+            tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
             user_id: None,
             candidate_type,
             status,
@@ -607,7 +595,7 @@ mod skill_learning_review {
                 "artifact_path": format!("skills/{skill_name}/SKILL.md"),
                 "source_session_id": Uuid::now_v7(),
                 "generated_regression_suite": {
-                    "relative_path": format!("tenants/{}/skills/{skill_name}/tests/suite.toml", tenant_id_from_workspace(storage_partition_id)),
+                    "relative_path": format!("tenants/{}/skills/{skill_name}/tests/suite.toml", tenant_id_from_storage_partition_id(storage_partition_id)),
                     "source_format": "toml",
                     "source_text": format!(
                         "[suite]\nname = \"{skill_name}-regression\"\n\n[[cases]]\nname = \"smoke\"\ninput = \"run it\"\n"
@@ -638,7 +626,7 @@ mod skill_learning_review {
         action: LearningCandidateReviewAction,
     ) -> LearningCandidateReviewRequest {
         LearningCandidateReviewRequest {
-            tenant_id: tenant_id_from_workspace(storage_partition_id),
+            tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
             candidate_id,
             action,
             reviewer_subject: "user:reviewer".to_string(),

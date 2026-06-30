@@ -2,8 +2,7 @@
 
 use std::sync::Arc;
 
-use moa_authz::require_authz_with_delegation;
-use moa_authz_schema::{ObjectType, Relation};
+use moa_authz_schema::Relation;
 use moa_core::RlsContext;
 use moa_core::wire::admin::{
     CheckpointCleanupResponse, CheckpointCreateRequest, CheckpointCreateResponse,
@@ -20,7 +19,7 @@ use restate_sdk::prelude::*;
 
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::{authorize_tenant, require_identity};
 
 /// Restate service for user-facing administrative maintenance operations.
 #[restate_sdk::service]
@@ -336,29 +335,12 @@ async fn authorize_tenant_admin_for_tenant(
     ctx: &impl RequestHeaders,
     tenant_id: TenantId,
 ) -> Result<(), HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Tenant,
-        tenant_id,
-        Relation::Admin,
-    )
-    .await
-    .map_err(translate_authz_error)
+    authorize_tenant(ctx, tenant_id, Relation::Admin).await?;
+    Ok(())
 }
 
 async fn authorize_tenant_admin(ctx: &impl RequestHeaders) -> Result<(), HandlerError> {
     let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Tenant,
-        identity.tenant_id,
-        Relation::Admin,
-    )
-    .await
-    .map_err(translate_authz_error)
+    authorize_tenant(ctx, identity.tenant_id, Relation::Admin).await?;
+    Ok(())
 }

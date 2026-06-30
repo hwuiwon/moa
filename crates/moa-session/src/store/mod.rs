@@ -38,7 +38,7 @@ use crate::blob::{
 };
 use crate::queries::{
     EVENT_COLUMNS, EXPERIENCE_ATTRIBUTION_COLUMNS, EXPERIENCE_RECORD_COLUMNS,
-    LEARNING_CANDIDATE_COLUMNS, LEARNING_ENTRY_COLUMNS, SESSION_INSERT_COLUMNS,
+    LEARNING_CANDIDATE_COLUMNS, LEARNING_ENTRY_COLUMNS, RowExt, SESSION_INSERT_COLUMNS,
     SESSION_SELECT_COLUMNS, SESSION_SUMMARY_COLUMNS, TASK_SEGMENT_COLUMNS,
     TASK_STRATEGY_SUCCESS_RATE_COLUMNS, action_policy_rule_from_row,
     experience_attribution_from_row, experience_record_from_row, from_db,
@@ -143,16 +143,35 @@ impl PostgresSessionStore {
     /// This is primarily intended for ignored integration tests so multiple runs can isolate
     /// their tables without separate databases.
     pub async fn new_in_schema(database_url: &str, schema_name: &str) -> Result<Self> {
-        let blob_dir = FileBlobStore::default_dir_for_database_path(Path::new(":memory:"))?;
-        let blob_store: Arc<dyn BlobStore> = Arc::new(FileBlobStore::new(blob_dir));
-        let attachment_store = AttachmentObjectStore::from_config(&local_rustfs_config())?;
-        let backends = SessionStorageBackends {
-            blob_store,
-            blob_threshold_bytes: 65_536,
-            attachment_store,
-        };
-        Self::new_with_options_and_schema(database_url, 1, 100, 60, Some(schema_name), backends)
-            .await
+        Self::new_with_options_and_schema(
+            database_url,
+            1,
+            100,
+            60,
+            Some(schema_name),
+            isolated_test_backends()?,
+            true,
+        )
+        .await
+    }
+
+    /// Creates a session store bound to a schema that is already migrated.
+    ///
+    /// This connects and configures the search path but skips migrations, so it
+    /// is only safe when the target schema already contains the session tables —
+    /// for example a per-test database cloned from a pre-migrated template by the
+    /// test harness. Use [`Self::new_in_schema`] when migrations must run.
+    pub async fn new_in_existing_schema(database_url: &str, schema_name: &str) -> Result<Self> {
+        Self::new_with_options_and_schema(
+            database_url,
+            1,
+            100,
+            60,
+            Some(schema_name),
+            isolated_test_backends()?,
+            false,
+        )
+        .await
     }
 
     /// Creates a session store from an existing Postgres pool without running migrations.
@@ -334,6 +353,7 @@ impl PostgresSessionStore {
             connect_timeout_secs,
             None,
             backends,
+            true,
         )
         .await
     }
@@ -345,6 +365,7 @@ impl PostgresSessionStore {
         connect_timeout_secs: u64,
         schema_name: Option<&str>,
         backends: SessionStorageBackends,
+        run_migrations: bool,
     ) -> Result<Self> {
         let pool = Self::connect_with_retry(
             database_url,
@@ -355,7 +376,9 @@ impl PostgresSessionStore {
             schema_name,
         )
         .await?;
-        migrate_database(database_url, &pool, schema_name).await?;
+        if run_migrations {
+            migrate_database(database_url, &pool, schema_name).await?;
+        }
         let store = Self {
             url: database_url.to_string(),
             pool,
@@ -458,7 +481,11 @@ impl PostgresSessionStore {
 
     fn table_name(&self, table_name: &str) -> String {
         match &self.schema_name {
-            Some(schema_name) => qualified_name(schema_name, table_name),
+            Some(schema_name) => format!(
+                "{}.{}",
+                quote_identifier(schema_name),
+                quote_identifier(table_name)
+            ),
             None => table_name.to_string(),
         }
     }
@@ -532,6 +559,23 @@ impl SessionAnalyticsStore for PostgresSessionStore {
     async fn refresh_analytics_materialized_views(&self) -> Result<()> {
         PostgresSessionStore::refresh_analytics_materialized_views(self).await
     }
+}
+
+/// Builds the in-memory blob store plus local attachment store used by
+/// schema-isolated test session stores.
+///
+/// Both [`PostgresSessionStore::new_in_schema`] and
+/// [`PostgresSessionStore::new_in_existing_schema`] share this so the migrating
+/// and template-cloned test paths configure identical storage backends.
+fn isolated_test_backends() -> Result<SessionStorageBackends> {
+    let blob_dir = FileBlobStore::default_dir_for_database_path(Path::new(":memory:"))?;
+    let blob_store: Arc<dyn BlobStore> = Arc::new(FileBlobStore::new(blob_dir));
+    let attachment_store = AttachmentObjectStore::from_config(&local_rustfs_config())?;
+    Ok(SessionStorageBackends {
+        blob_store,
+        blob_threshold_bytes: 65_536,
+        attachment_store,
+    })
 }
 
 async fn migrate_database(

@@ -25,9 +25,10 @@ use moa_core::wire::workflows::{
 };
 use moa_core::{
     ActionRuleScope, Event, EventRange, EventRecord, ModelId, SessionId, SessionStatus,
-    StoragePartitionId, TenantId,
+    StoragePartitionId,
 };
 use moa_skills::package::{SkillPackage, SkillPackageFile};
+use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::test_database_url;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -466,14 +467,8 @@ async fn import_and_publish_damaged_food_workflow(
 }
 
 fn tenant_scope(storage_partition_id: &StoragePartitionId) -> Result<ActionRuleScope> {
-    let tenant_id = tenant_id_from_workspace(storage_partition_id)?;
+    let tenant_id = tenant_id_from_storage_partition_id(storage_partition_id);
     Ok(ActionRuleScope::Tenant { tenant_id })
-}
-
-fn tenant_id_from_workspace(storage_partition_id: &StoragePartitionId) -> Result<TenantId> {
-    Uuid::parse_str(storage_partition_id.as_str())
-        .map(TenantId::from)
-        .context("artifact e2e storage partition id should be a tenant UUID")
 }
 
 async fn start_damaged_food_workflow(
@@ -485,7 +480,7 @@ async fn start_damaged_food_workflow(
     order_id: &str,
 ) -> Result<WorkflowRunResponse> {
     let request = WorkflowRunRequest {
-        tenant_id: tenant_id_from_workspace(storage_partition_id)?,
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         workflow_ref: "workflow://damaged-food-replacement".to_string(),
         input: json!({
             "order_id": order_id,
@@ -511,7 +506,7 @@ async fn wait_for_workflow_status(
     expected: &str,
 ) -> Result<WorkflowRunStatus> {
     let request = WorkflowStatusRequest {
-        tenant_id: tenant_id_from_workspace(storage_partition_id)?,
+        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         run_id,
     };
     let mut last_status = None;

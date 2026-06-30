@@ -11,7 +11,6 @@ pub mod transcript_runner;
 pub use budgets::{BudgetResult, BudgetViolation, Budgets};
 pub use cache_metrics::{
     CompiledRequest, TurnUsage, compute_input_cached_ratio, compute_prefix_stability,
-    compute_stable_prefix_bytes,
 };
 pub use memory_metrics::{
     ConsolidationOutcomes, MemoryScenario, compute_planted_fact_recall,

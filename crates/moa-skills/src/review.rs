@@ -5,7 +5,6 @@ use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactFile, ArtifactRegistry, StoredArtifactRevision};
 use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
-use moa_core::RlsContext;
 use moa_core::{
     ActionRuleScope, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
     LearningCandidateType, LearningEntry, MoaError, StoragePartitionId, TenantId,
@@ -14,6 +13,8 @@ use moa_db::ScopedConn;
 use serde_json::{Value, json};
 use sqlx::PgConnection;
 use std::future::Future;
+
+use crate::util::{artifact_scope_context, tenant_artifact_scope};
 use std::pin::Pin;
 use thiserror::Error;
 use uuid::Uuid;
@@ -238,7 +239,7 @@ pub async fn promote_claimed_skill_candidate(
     prepared: PreparedSkillAcceptance,
     regression_report: Value,
 ) -> Result<SkillReviewOutcome> {
-    let scope_context = artifact_scope_context(&prepared.scope)?;
+    let scope_context = artifact_scope_context(&prepared.scope);
     let mut conn = ScopedConn::begin(&pool, &scope_context).await?;
     let published = ArtifactRegistry::publish_revision_in_tx(
         conn.as_mut(),
@@ -343,16 +344,6 @@ async fn load_candidate(
         .get_learning_candidate(tenant_id, candidate_id)
         .await?
         .ok_or_else(|| SkillReviewError::NotFound("learning candidate not found".to_string()))
-}
-
-fn tenant_artifact_scope(tenant_id: TenantId) -> ActionRuleScope {
-    ActionRuleScope::Tenant { tenant_id }
-}
-
-fn artifact_scope_context(scope: &ActionRuleScope) -> Result<RlsContext> {
-    match scope {
-        ActionRuleScope::Tenant { tenant_id } => Ok(RlsContext::tenant(*tenant_id)),
-    }
 }
 
 fn ensure_skill_candidate(candidate: &LearningCandidate) -> Result<()> {

@@ -10,9 +10,7 @@ pub use scope::{
     UserScopeError, checked_ingest_contact_id, checked_memory_scope, effective_user_id,
 };
 
-use moa_authz::require_authz_with_delegation;
-use moa_authz_schema::{ObjectType, Relation};
-use moa_core::traits::Identity;
+use moa_authz_schema::Relation;
 use moa_core::wire::memory::{
     MemoryIngestRequest, MemoryIngestResponse, MemoryRetrieveDebugRequest,
     MemoryRetrieveDebugResponse, MemorySearchRequest, MemorySearchResponse, MemoryShowRequest,
@@ -21,8 +19,7 @@ use moa_core::wire::memory::{
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 
-use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::authorize_tenant;
 
 use self::ingest::ingest_documents_inner;
 use self::retrieval::{retrieve_debug_inner, search_inner, show_inner};
@@ -132,19 +129,6 @@ impl Memory for MemoryImpl {
 
         Ok(Json(response))
     }
-}
-
-async fn authorize_tenant(
-    ctx: &impl RequestHeaders,
-    tenant_id: moa_core::TenantId,
-    relation: Relation,
-) -> Result<Identity, HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
-        .await
-        .map_err(translate_authz_error)?;
-    Ok(identity)
 }
 
 fn user_scope_handler_error(error: UserScopeError) -> HandlerError {

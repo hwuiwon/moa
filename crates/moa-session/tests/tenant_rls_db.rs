@@ -1,6 +1,5 @@
-use moa_core::{
-    Event, ModelId, SessionActorRef, SessionMeta, SessionStore, TenantId, ToolCallId, ToolOutput,
-};
+use moa_core::{Event, SessionStore, TenantId, ToolCallId, ToolOutput};
+use moa_test_support::fixtures::session_meta_fixture;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use sqlx::{PgPool, Postgres, Transaction, types::Json};
 use std::time::Duration;
@@ -8,15 +7,6 @@ use uuid::Uuid;
 
 fn tenant_id() -> TenantId {
     TenantId::from(Uuid::now_v7())
-}
-
-fn test_session_meta(tenant_id: TenantId) -> SessionMeta {
-    SessionMeta {
-        tenant_id,
-        created_by: Some(SessionActorRef::Identity { id: Uuid::now_v7() }),
-        model: ModelId::new("test-model"),
-        ..SessionMeta::default()
-    }
 }
 
 fn qualified(schema_name: &str, table_name: &str) -> String {
@@ -98,7 +88,7 @@ async fn count_as_app_role(
 async fn create_session_for_tenant(test_db: &TestDb, tenant_id: TenantId) {
     test_db
         .store()
-        .create_session(test_session_meta(tenant_id))
+        .create_session(session_meta_fixture(tenant_id))
         .await
         .expect("create tenant session");
 }
@@ -135,12 +125,12 @@ async fn tenant_rls_blocks_cross_tenant_event_reads_db() {
     let tenant_b = tenant_id();
     let session_a = test_db
         .store()
-        .create_session(test_session_meta(tenant_a))
+        .create_session(session_meta_fixture(tenant_a))
         .await
         .expect("create tenant A session");
     let session_b = test_db
         .store()
-        .create_session(test_session_meta(tenant_b))
+        .create_session(session_meta_fixture(tenant_b))
         .await
         .expect("create tenant B session");
 

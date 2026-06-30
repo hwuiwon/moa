@@ -1,4 +1,7 @@
-//! JSONL I/O helpers for generated memory eval corpus sidecars.
+//! Shared JSONL and config-validation I/O helpers for the memory eval modules.
+//!
+//! These were previously copied verbatim across the corpus, embeddings, gold,
+//! generator, judge, and runner modules; this module is the single owner.
 
 use std::path::Path;
 
@@ -8,7 +11,8 @@ use serde::de::DeserializeOwned;
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-pub(super) async fn read_jsonl<T>(path: &Path) -> Result<Vec<T>>
+/// Reads newline-delimited JSON records, skipping blank lines.
+pub(crate) async fn read_jsonl<T>(path: &Path) -> Result<Vec<T>>
 where
     T: DeserializeOwned,
 {
@@ -30,7 +34,8 @@ where
     Ok(records)
 }
 
-pub(super) async fn write_jsonl<T>(path: &Path, records: &[T]) -> Result<()>
+/// Writes records as newline-delimited JSON, creating parent directories.
+pub(crate) async fn write_jsonl<T>(path: &Path, records: &[T]) -> Result<()>
 where
     T: Serialize,
 {
@@ -50,7 +55,8 @@ where
     file.flush().await.map_err(|source| io_error(path, source))
 }
 
-async fn ensure_parent_dir(path: &Path) -> Result<()> {
+/// Creates the parent directory of `path` when it has a non-empty parent.
+pub(crate) async fn ensure_parent_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -62,7 +68,26 @@ async fn ensure_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn io_error(path: &Path, source: std::io::Error) -> EvalError {
+/// Validates that a labelled config value is non-empty after trimming.
+pub(crate) fn ensure_non_empty(label: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return invalid_config(format!("{label} must not be empty"));
+    }
+    Ok(())
+}
+
+/// Returns an `Err` invalid-config result for the provided message.
+pub(crate) fn invalid_config<T>(message: impl Into<String>) -> Result<T> {
+    Err(invalid_config_error(message))
+}
+
+/// Builds an invalid-config error for the provided message.
+pub(crate) fn invalid_config_error(message: impl Into<String>) -> EvalError {
+    EvalError::InvalidConfig(message.into())
+}
+
+/// Wraps an I/O failure with the offending path.
+pub(crate) fn io_error(path: &Path, source: std::io::Error) -> EvalError {
     EvalError::Io {
         path: path.to_path_buf(),
         source,

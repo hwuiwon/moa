@@ -2,67 +2,54 @@
 
 use super::*;
 
-pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
-    let id = row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?;
-    let tenant_id = row
-        .try_get::<Uuid, _>("tenant_id")
-        .map_err(map_sqlx_error)?;
-    let status_text = row.try_get::<String, _>("status").map_err(map_sqlx_error)?;
-    let channel_text = row
-        .try_get::<String, _>("channel")
-        .map_err(map_sqlx_error)?;
-    let model = row.try_get::<String, _>("model").map_err(map_sqlx_error)?;
+/// Decodes individual row columns with consistent sqlx error mapping.
+pub(crate) trait RowExt {
+    /// Decodes a single column by name, mapping sqlx errors via `map_sqlx_error`.
+    fn col<'r, T>(&'r self, name: &str) -> Result<T>
+    where
+        T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>;
+}
 
-    let contact_id = row
-        .try_get::<Option<Uuid>, _>("contact_id")
-        .map_err(map_sqlx_error)?;
-    let contact_tenant_id = row
-        .try_get::<Option<Uuid>, _>("contact_tenant_id")
-        .map_err(map_sqlx_error)?;
-    let contact_state = row
-        .try_get::<Option<String>, _>("contact_state")
-        .map_err(map_sqlx_error)?;
-    let contact_canonical_id = row
-        .try_get::<Option<Uuid>, _>("contact_canonical_id")
-        .map_err(map_sqlx_error)?;
-    let contact_linked_ids = row
-        .try_get::<Vec<Uuid>, _>("contact_linked_ids")
-        .map_err(map_sqlx_error)?;
-    let contact_scopes = row
-        .try_get::<Vec<String>, _>("contact_scopes")
-        .map_err(map_sqlx_error)?;
-    let created_by_actor_type = row
-        .try_get::<Option<String>, _>("created_by_actor_type")
-        .map_err(map_sqlx_error)?;
-    let created_by_actor_id = row
-        .try_get::<Option<Uuid>, _>("created_by_actor_id")
-        .map_err(map_sqlx_error)?;
+impl RowExt for PgRow {
+    fn col<'r, T>(&'r self, name: &str) -> Result<T>
+    where
+        T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+    {
+        self.try_get::<T, _>(name).map_err(map_sqlx_error)
+    }
+}
+
+pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
+    let id = row.col::<Uuid>("id")?;
+    let tenant_id = row.col::<Uuid>("tenant_id")?;
+    let status_text = row.col::<String>("status")?;
+    let channel_text = row.col::<String>("channel")?;
+    let model = row.col::<String>("model")?;
+
+    let contact_id = row.col::<Option<Uuid>>("contact_id")?;
+    let contact_tenant_id = row.col::<Option<Uuid>>("contact_tenant_id")?;
+    let contact_state = row.col::<Option<String>>("contact_state")?;
+    let contact_canonical_id = row.col::<Option<Uuid>>("contact_canonical_id")?;
+    let contact_linked_ids = row.col::<Vec<Uuid>>("contact_linked_ids")?;
+    let contact_scopes = row.col::<Vec<String>>("contact_scopes")?;
+    let created_by_actor_type = row.col::<Option<String>>("created_by_actor_type")?;
+    let created_by_actor_id = row.col::<Option<Uuid>>("created_by_actor_id")?;
 
     Ok(SessionMeta {
         id: moa_core::SessionId(id),
         tenant_id: TenantId(tenant_id),
-        title: row
-            .try_get::<Option<String>, _>("title")
-            .map_err(map_sqlx_error)?,
+        title: row.col::<Option<String>>("title")?,
         status: from_db("session status", &status_text)?,
         channel: from_db("channel", &channel_text)?,
         active_channel_binding_id: row
-            .try_get::<Option<Uuid>, _>("active_channel_binding_id")
-            .map_err(map_sqlx_error)?
+            .col::<Option<Uuid>>("active_channel_binding_id")?
             .map(SessionChannelBindingId),
         model: ModelId::new(model),
-        created_at: row
-            .try_get::<DateTime<Utc>, _>("created_at")
-            .map_err(map_sqlx_error)?,
-        updated_at: row
-            .try_get::<DateTime<Utc>, _>("updated_at")
-            .map_err(map_sqlx_error)?,
-        completed_at: row
-            .try_get::<Option<DateTime<Utc>>, _>("completed_at")
-            .map_err(map_sqlx_error)?,
+        created_at: row.col::<DateTime<Utc>>("created_at")?,
+        updated_at: row.col::<DateTime<Utc>>("updated_at")?,
+        completed_at: row.col::<Option<DateTime<Utc>>>("completed_at")?,
         parent_session_id: row
-            .try_get::<Option<Uuid>, _>("parent_session_id")
-            .map_err(map_sqlx_error)?
+            .col::<Option<Uuid>>("parent_session_id")?
             .map(moa_core::SessionId),
         contact: contact_from_columns(
             contact_id,
@@ -74,34 +61,18 @@ pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
         )?,
         created_by: actor_from_columns(created_by_actor_type.as_deref(), created_by_actor_id)?,
         contact_promoted_from_id: row
-            .try_get::<Option<Uuid>, _>("contact_promoted_from_id")
-            .map_err(map_sqlx_error)?
+            .col::<Option<Uuid>>("contact_promoted_from_id")?
             .map(ContactId),
         agent_context: None,
-        total_input_tokens: row
-            .try_get::<i64, _>("total_input_tokens")
-            .map_err(map_sqlx_error)? as usize,
-        total_input_tokens_uncached: row
-            .try_get::<i64, _>("total_input_tokens_uncached")
-            .map_err(map_sqlx_error)? as usize,
-        total_input_tokens_cache_write: row
-            .try_get::<i64, _>("total_input_tokens_cache_write")
-            .map_err(map_sqlx_error)? as usize,
-        total_input_tokens_cache_read: row
-            .try_get::<i64, _>("total_input_tokens_cache_read")
-            .map_err(map_sqlx_error)? as usize,
-        total_output_tokens: row
-            .try_get::<i64, _>("total_output_tokens")
-            .map_err(map_sqlx_error)? as usize,
-        total_cost_cents: row
-            .try_get::<i64, _>("total_cost_cents")
-            .map_err(map_sqlx_error)? as u32,
-        event_count: row
-            .try_get::<i64, _>("event_count")
-            .map_err(map_sqlx_error)? as usize,
+        total_input_tokens: row.col::<i64>("total_input_tokens")? as usize,
+        total_input_tokens_uncached: row.col::<i64>("total_input_tokens_uncached")? as usize,
+        total_input_tokens_cache_write: row.col::<i64>("total_input_tokens_cache_write")? as usize,
+        total_input_tokens_cache_read: row.col::<i64>("total_input_tokens_cache_read")? as usize,
+        total_output_tokens: row.col::<i64>("total_output_tokens")? as usize,
+        total_cost_cents: row.col::<i64>("total_cost_cents")? as u32,
+        event_count: row.col::<i64>("event_count")? as usize,
         last_checkpoint_seq: row
-            .try_get::<Option<i64>, _>("last_checkpoint_seq")
-            .map_err(map_sqlx_error)?
+            .col::<Option<i64>>("last_checkpoint_seq")?
             .map(|value| value as u64),
     })
 }
@@ -155,36 +126,18 @@ fn actor_from_columns(
 
 /// Maps a `sessions` row into a `SessionSummary`.
 pub(crate) fn session_summary_from_row(row: &PgRow) -> Result<SessionSummary> {
-    let tenant_id = row
-        .try_get::<Uuid, _>("tenant_id")
-        .map_err(map_sqlx_error)?;
-    let contact_id = row
-        .try_get::<Option<Uuid>, _>("contact_id")
-        .map_err(map_sqlx_error)?;
-    let contact_tenant_id = row
-        .try_get::<Option<Uuid>, _>("contact_tenant_id")
-        .map_err(map_sqlx_error)?;
-    let contact_state = row
-        .try_get::<Option<String>, _>("contact_state")
-        .map_err(map_sqlx_error)?;
-    let contact_canonical_id = row
-        .try_get::<Option<Uuid>, _>("contact_canonical_id")
-        .map_err(map_sqlx_error)?;
-    let contact_linked_ids = row
-        .try_get::<Vec<Uuid>, _>("contact_linked_ids")
-        .map_err(map_sqlx_error)?;
-    let contact_scopes = row
-        .try_get::<Vec<String>, _>("contact_scopes")
-        .map_err(map_sqlx_error)?;
-    let created_by_actor_type = row
-        .try_get::<Option<String>, _>("created_by_actor_type")
-        .map_err(map_sqlx_error)?;
-    let created_by_actor_id = row
-        .try_get::<Option<Uuid>, _>("created_by_actor_id")
-        .map_err(map_sqlx_error)?;
+    let tenant_id = row.col::<Uuid>("tenant_id")?;
+    let contact_id = row.col::<Option<Uuid>>("contact_id")?;
+    let contact_tenant_id = row.col::<Option<Uuid>>("contact_tenant_id")?;
+    let contact_state = row.col::<Option<String>>("contact_state")?;
+    let contact_canonical_id = row.col::<Option<Uuid>>("contact_canonical_id")?;
+    let contact_linked_ids = row.col::<Vec<Uuid>>("contact_linked_ids")?;
+    let contact_scopes = row.col::<Vec<String>>("contact_scopes")?;
+    let created_by_actor_type = row.col::<Option<String>>("created_by_actor_type")?;
+    let created_by_actor_id = row.col::<Option<Uuid>>("created_by_actor_id")?;
 
     Ok(SessionSummary {
-        session_id: moa_core::SessionId(row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?),
+        session_id: moa_core::SessionId(row.col::<Uuid>("id")?),
         tenant_id: TenantId(tenant_id),
         contact: contact_from_columns(
             contact_id,
@@ -195,22 +148,11 @@ pub(crate) fn session_summary_from_row(row: &PgRow) -> Result<SessionSummary> {
             contact_scopes,
         )?,
         created_by: actor_from_columns(created_by_actor_type.as_deref(), created_by_actor_id)?,
-        title: row
-            .try_get::<Option<String>, _>("title")
-            .map_err(map_sqlx_error)?,
-        status: from_db(
-            "session status",
-            &row.try_get::<String, _>("status").map_err(map_sqlx_error)?,
-        )?,
-        channel: from_db(
-            "channel",
-            &row.try_get::<String, _>("channel")
-                .map_err(map_sqlx_error)?,
-        )?,
-        model: ModelId::new(row.try_get::<String, _>("model").map_err(map_sqlx_error)?),
-        updated_at: row
-            .try_get::<DateTime<Utc>, _>("updated_at")
-            .map_err(map_sqlx_error)?,
+        title: row.col::<Option<String>>("title")?,
+        status: from_db("session status", &row.col::<String>("status")?)?,
+        channel: from_db("channel", &row.col::<String>("channel")?)?,
+        model: ModelId::new(row.col::<String>("model")?),
+        updated_at: row.col::<DateTime<Utc>>("updated_at")?,
     })
 }
 
@@ -243,51 +185,22 @@ fn action_rule_scope_from_columns(
 /// Maps a `task_segments` row into a `TaskSegment`.
 pub(crate) fn task_segment_from_row(row: &PgRow) -> Result<TaskSegment> {
     Ok(TaskSegment {
-        id: SegmentId(row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?),
-        session_id: SessionId(
-            row.try_get::<Uuid, _>("session_id")
-                .map_err(map_sqlx_error)?,
-        ),
-        tenant_id: row
-            .try_get::<String, _>("tenant_id")
-            .map_err(map_sqlx_error)?,
-        segment_index: row
-            .try_get::<i32, _>("segment_index")
-            .map_err(map_sqlx_error)? as u32,
-        task_summary: row
-            .try_get::<Option<String>, _>("task_summary")
-            .map_err(map_sqlx_error)?,
-        started_at: row
-            .try_get::<DateTime<Utc>, _>("started_at")
-            .map_err(map_sqlx_error)?,
-        ended_at: row
-            .try_get::<Option<DateTime<Utc>>, _>("ended_at")
-            .map_err(map_sqlx_error)?,
-        outcome: row
-            .try_get::<Option<String>, _>("outcome")
-            .map_err(map_sqlx_error)?,
-        assessment: parse_segment_assessment(
-            row.try_get::<Option<String>, _>("assessment")
-                .map_err(map_sqlx_error)?,
-        )?,
-        outcome_confidence: row
-            .try_get::<Option<f64>, _>("outcome_confidence")
-            .map_err(map_sqlx_error)?,
-        tools_used: row
-            .try_get::<Vec<String>, _>("tools_used")
-            .map_err(map_sqlx_error)?,
-        skills_activated: row
-            .try_get::<Vec<String>, _>("skills_activated")
-            .map_err(map_sqlx_error)?,
-        turn_count: row
-            .try_get::<i32, _>("turn_count")
-            .map_err(map_sqlx_error)? as u32,
-        token_cost: row
-            .try_get::<i64, _>("token_cost")
-            .map_err(map_sqlx_error)? as u64,
+        id: SegmentId(row.col::<Uuid>("id")?),
+        session_id: SessionId(row.col::<Uuid>("session_id")?),
+        tenant_id: row.col::<String>("tenant_id")?,
+        segment_index: row.col::<i32>("segment_index")? as u32,
+        task_summary: row.col::<Option<String>>("task_summary")?,
+        started_at: row.col::<DateTime<Utc>>("started_at")?,
+        ended_at: row.col::<Option<DateTime<Utc>>>("ended_at")?,
+        outcome: row.col::<Option<String>>("outcome")?,
+        assessment: parse_segment_assessment(row.col::<Option<String>>("assessment")?)?,
+        outcome_confidence: row.col::<Option<f64>>("outcome_confidence")?,
+        tools_used: row.col::<Vec<String>>("tools_used")?,
+        skills_activated: row.col::<Vec<String>>("skills_activated")?,
+        turn_count: row.col::<i32>("turn_count")? as u32,
+        token_cost: row.col::<i64>("token_cost")? as u64,
         previous_segment_id: row
-            .try_get::<Option<Uuid>, _>("previous_segment_id")
-            .map_err(map_sqlx_error)?
+            .col::<Option<Uuid>>("previous_segment_id")?
             .map(SegmentId),
     })
 }
@@ -295,177 +208,88 @@ pub(crate) fn task_segment_from_row(row: &PgRow) -> Result<TaskSegment> {
 /// Maps a `learning_log` row into a `LearningEntry`.
 pub(crate) fn learning_entry_from_row(row: &PgRow) -> Result<LearningEntry> {
     Ok(LearningEntry {
-        id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
-        tenant_id: tenant_id_from_storage(
-            row.try_get::<String, _>("tenant_id")
-                .map_err(map_sqlx_error)?,
-        ),
-        learning_type: row
-            .try_get::<String, _>("learning_type")
-            .map_err(map_sqlx_error)?,
-        target_id: row
-            .try_get::<String, _>("target_id")
-            .map_err(map_sqlx_error)?,
-        target_label: row
-            .try_get::<Option<String>, _>("target_label")
-            .map_err(map_sqlx_error)?,
-        payload: row
-            .try_get::<serde_json::Value, _>("payload")
-            .map_err(map_sqlx_error)?,
-        confidence: row
-            .try_get::<Option<f64>, _>("confidence")
-            .map_err(map_sqlx_error)?,
-        source_refs: row
-            .try_get::<Vec<Uuid>, _>("source_refs")
-            .map_err(map_sqlx_error)?,
-        actor: row.try_get::<String, _>("actor").map_err(map_sqlx_error)?,
-        valid_from: row
-            .try_get::<DateTime<Utc>, _>("valid_from")
-            .map_err(map_sqlx_error)?,
-        valid_to: row
-            .try_get::<Option<DateTime<Utc>>, _>("valid_to")
-            .map_err(map_sqlx_error)?,
-        batch_id: row
-            .try_get::<Option<Uuid>, _>("batch_id")
-            .map_err(map_sqlx_error)?,
-        version: row.try_get::<i32, _>("version").map_err(map_sqlx_error)?,
+        id: row.col::<Uuid>("id")?,
+        tenant_id: tenant_id_from_storage(row.col::<String>("tenant_id")?),
+        learning_type: row.col::<String>("learning_type")?,
+        target_id: row.col::<String>("target_id")?,
+        target_label: row.col::<Option<String>>("target_label")?,
+        payload: row.col::<serde_json::Value>("payload")?,
+        confidence: row.col::<Option<f64>>("confidence")?,
+        source_refs: row.col::<Vec<Uuid>>("source_refs")?,
+        actor: row.col::<String>("actor")?,
+        valid_from: row.col::<DateTime<Utc>>("valid_from")?,
+        valid_to: row.col::<Option<DateTime<Utc>>>("valid_to")?,
+        batch_id: row.col::<Option<Uuid>>("batch_id")?,
+        version: row.col::<i32>("version")?,
     })
 }
 
 /// Maps an `experience_records` row into an `ExperienceRecord`.
 pub(crate) fn experience_record_from_row(row: &PgRow) -> Result<ExperienceRecord> {
     let user_id = row
-        .try_get::<Option<String>, _>("user_id")
-        .map_err(map_sqlx_error)?
+        .col::<Option<String>>("user_id")?
         .ok_or_else(|| MoaError::StorageError("experience record missing user_id".to_string()))?;
     Ok(ExperienceRecord {
-        id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
-        segment_id: SegmentId(
-            row.try_get::<Uuid, _>("segment_id")
-                .map_err(map_sqlx_error)?,
-        ),
-        session_id: SessionId(
-            row.try_get::<Uuid, _>("session_id")
-                .map_err(map_sqlx_error)?,
-        ),
-        tenant_id: tenant_id_from_storage(
-            row.try_get::<String, _>("tenant_id")
-                .map_err(map_sqlx_error)?,
-        ),
+        id: row.col::<Uuid>("id")?,
+        segment_id: SegmentId(row.col::<Uuid>("segment_id")?),
+        session_id: SessionId(row.col::<Uuid>("session_id")?),
+        tenant_id: tenant_id_from_storage(row.col::<String>("tenant_id")?),
         user_id: UserId(user_id),
-        task_summary: row
-            .try_get::<Option<String>, _>("task_summary")
-            .map_err(map_sqlx_error)?,
+        task_summary: row.col::<Option<String>>("task_summary")?,
         task_fingerprint: json_column(row, "task_fingerprint_payload")?,
         task_facets: json_column(row, "task_facets")?,
-        actions: row
-            .try_get::<Vec<String>, _>("actions")
-            .map_err(map_sqlx_error)?,
+        actions: row.col::<Vec<String>>("actions")?,
         resources: json_column(row, "resources")?,
-        outcome: from_db(
-            "segment outcome",
-            &row.try_get::<String, _>("outcome")
-                .map_err(map_sqlx_error)?,
-        )?,
-        confidence: row
-            .try_get::<f64, _>("confidence")
-            .map_err(map_sqlx_error)?,
+        outcome: from_db("segment outcome", &row.col::<String>("outcome")?)?,
+        confidence: row.col::<f64>("confidence")?,
         evidence: json_column(row, "evidence")?,
-        tools_used: row
-            .try_get::<Vec<String>, _>("tools_used")
-            .map_err(map_sqlx_error)?,
-        skills_activated: row
-            .try_get::<Vec<String>, _>("skills_activated")
-            .map_err(map_sqlx_error)?,
-        turn_count: row
-            .try_get::<i32, _>("turn_count")
-            .map_err(map_sqlx_error)? as u32,
-        token_cost: row
-            .try_get::<i64, _>("token_cost")
-            .map_err(map_sqlx_error)? as u64,
+        tools_used: row.col::<Vec<String>>("tools_used")?,
+        skills_activated: row.col::<Vec<String>>("skills_activated")?,
+        turn_count: row.col::<i32>("turn_count")? as u32,
+        token_cost: row.col::<i64>("token_cost")? as u64,
         duration_ms: row
-            .try_get::<Option<i64>, _>("duration_ms")
-            .map_err(map_sqlx_error)?
+            .col::<Option<i64>>("duration_ms")?
             .map(|value| value as u64),
-        assessment_policy_version: row
-            .try_get::<String, _>("assessment_policy_version")
-            .map_err(map_sqlx_error)?,
-        extraction_policy_version: row
-            .try_get::<String, _>("extraction_policy_version")
-            .map_err(map_sqlx_error)?,
-        created_at: row
-            .try_get::<DateTime<Utc>, _>("created_at")
-            .map_err(map_sqlx_error)?,
+        assessment_policy_version: row.col::<String>("assessment_policy_version")?,
+        extraction_policy_version: row.col::<String>("extraction_policy_version")?,
+        created_at: row.col::<DateTime<Utc>>("created_at")?,
     })
 }
 
 /// Maps an `experience_attributions` row into an `ExperienceAttribution`.
 pub(crate) fn experience_attribution_from_row(row: &PgRow) -> Result<ExperienceAttribution> {
     Ok(ExperienceAttribution {
-        id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
-        experience_id: row
-            .try_get::<Uuid, _>("experience_id")
-            .map_err(map_sqlx_error)?,
-        tenant_id: tenant_id_from_storage(
-            row.try_get::<String, _>("tenant_id")
-                .map_err(map_sqlx_error)?,
-        ),
-        user_id: row
-            .try_get::<Option<String>, _>("user_id")
-            .map_err(map_sqlx_error)?
-            .map(UserId),
+        id: row.col::<Uuid>("id")?,
+        experience_id: row.col::<Uuid>("experience_id")?,
+        tenant_id: tenant_id_from_storage(row.col::<String>("tenant_id")?),
+        user_id: row.col::<Option<String>>("user_id")?.map(UserId),
         subject_type: from_db(
             "attribution subject type",
-            &row.try_get::<String, _>("subject_type")
-                .map_err(map_sqlx_error)?,
+            &row.col::<String>("subject_type")?,
         )?,
-        subject_id: row
-            .try_get::<String, _>("subject_id")
-            .map_err(map_sqlx_error)?,
-        effect: from_db(
-            "attribution effect",
-            &row.try_get::<String, _>("effect").map_err(map_sqlx_error)?,
-        )?,
-        confidence: row
-            .try_get::<f64, _>("confidence")
-            .map_err(map_sqlx_error)?,
+        subject_id: row.col::<String>("subject_id")?,
+        effect: from_db("attribution effect", &row.col::<String>("effect")?)?,
+        confidence: row.col::<f64>("confidence")?,
         evidence: json_column(row, "evidence")?,
-        created_at: row
-            .try_get::<DateTime<Utc>, _>("created_at")
-            .map_err(map_sqlx_error)?,
+        created_at: row.col::<DateTime<Utc>>("created_at")?,
     })
 }
 
 /// Maps a `learning_candidates` row into a `LearningCandidate`.
 pub(crate) fn learning_candidate_from_row(row: &PgRow) -> Result<LearningCandidate> {
     Ok(LearningCandidate {
-        id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
-        tenant_id: tenant_id_from_storage(
-            row.try_get::<String, _>("tenant_id")
-                .map_err(map_sqlx_error)?,
-        ),
-        user_id: row
-            .try_get::<Option<String>, _>("user_id")
-            .map_err(map_sqlx_error)?
-            .map(UserId),
+        id: row.col::<Uuid>("id")?,
+        tenant_id: tenant_id_from_storage(row.col::<String>("tenant_id")?),
+        user_id: row.col::<Option<String>>("user_id")?.map(UserId),
         candidate_type: from_db(
             "learning candidate type",
-            &row.try_get::<String, _>("candidate_type")
-                .map_err(map_sqlx_error)?,
+            &row.col::<String>("candidate_type")?,
         )?,
-        status: from_db(
-            "learning candidate status",
-            &row.try_get::<String, _>("status").map_err(map_sqlx_error)?,
-        )?,
-        target_id: row
-            .try_get::<Option<String>, _>("target_id")
-            .map_err(map_sqlx_error)?,
-        target_label: row
-            .try_get::<Option<String>, _>("target_label")
-            .map_err(map_sqlx_error)?,
+        status: from_db("learning candidate status", &row.col::<String>("status")?)?,
+        target_id: row.col::<Option<String>>("target_id")?,
+        target_label: row.col::<Option<String>>("target_label")?,
         task_fingerprint: row
-            .try_get::<Option<serde_json::Value>, _>("task_fingerprint_payload")
-            .map_err(map_sqlx_error)?
+            .col::<Option<serde_json::Value>>("task_fingerprint_payload")?
             .map(|value| {
                 serde_json::from_value::<TaskFingerprint>(value).map_err(|error| {
                     MoaError::StorageError(format!("invalid task fingerprint payload: {error}"))
@@ -473,80 +297,41 @@ pub(crate) fn learning_candidate_from_row(row: &PgRow) -> Result<LearningCandida
             })
             .transpose()?,
         task_facets: row
-            .try_get::<Option<serde_json::Value>, _>("task_facets")
-            .map_err(map_sqlx_error)?
+            .col::<Option<serde_json::Value>>("task_facets")?
             .map(|value| {
                 serde_json::from_value(value).map_err(|error| {
                     MoaError::StorageError(format!("invalid task facet payload: {error}"))
                 })
             })
             .transpose()?,
-        payload: row
-            .try_get::<serde_json::Value, _>("payload")
-            .map_err(map_sqlx_error)?,
-        evaluation_payload: row
-            .try_get::<Option<serde_json::Value>, _>("evaluation_payload")
-            .map_err(map_sqlx_error)?,
-        source_experience_ids: row
-            .try_get::<Vec<Uuid>, _>("source_experience_ids")
-            .map_err(map_sqlx_error)?,
-        confidence: row
-            .try_get::<Option<f64>, _>("confidence")
-            .map_err(map_sqlx_error)?,
-        risk_class: from_db(
-            "learning risk class",
-            &row.try_get::<String, _>("risk_class")
-                .map_err(map_sqlx_error)?,
-        )?,
-        promotion_requirements: row
-            .try_get::<Vec<String>, _>("promotion_requirements")
-            .map_err(map_sqlx_error)?,
-        status_reason: row
-            .try_get::<Option<String>, _>("status_reason")
-            .map_err(map_sqlx_error)?,
-        batch_id: row
-            .try_get::<Option<Uuid>, _>("batch_id")
-            .map_err(map_sqlx_error)?,
-        created_at: row
-            .try_get::<DateTime<Utc>, _>("created_at")
-            .map_err(map_sqlx_error)?,
-        updated_at: row
-            .try_get::<DateTime<Utc>, _>("updated_at")
-            .map_err(map_sqlx_error)?,
+        payload: row.col::<serde_json::Value>("payload")?,
+        evaluation_payload: row.col::<Option<serde_json::Value>>("evaluation_payload")?,
+        source_experience_ids: row.col::<Vec<Uuid>>("source_experience_ids")?,
+        confidence: row.col::<Option<f64>>("confidence")?,
+        risk_class: from_db("learning risk class", &row.col::<String>("risk_class")?)?,
+        promotion_requirements: row.col::<Vec<String>>("promotion_requirements")?,
+        status_reason: row.col::<Option<String>>("status_reason")?,
+        batch_id: row.col::<Option<Uuid>>("batch_id")?,
+        created_at: row.col::<DateTime<Utc>>("created_at")?,
+        updated_at: row.col::<DateTime<Utc>>("updated_at")?,
     })
 }
 
 /// Maps a `task_strategy_success_rates` row into a task-conditioned aggregate.
 pub(crate) fn task_strategy_success_rate_from_row(row: &PgRow) -> Result<TaskStrategySuccessRate> {
     Ok(TaskStrategySuccessRate {
-        tenant_id: tenant_id_from_storage(
-            row.try_get::<String, _>("tenant_id")
-                .map_err(map_sqlx_error)?,
-        ),
-        task_fingerprint: row
-            .try_get::<String, _>("task_fingerprint")
-            .map_err(map_sqlx_error)?,
+        tenant_id: tenant_id_from_storage(row.col::<String>("tenant_id")?),
+        task_fingerprint: row.col::<String>("task_fingerprint")?,
         subject_type: from_db(
             "attribution subject type",
-            &row.try_get::<String, _>("subject_type")
-                .map_err(map_sqlx_error)?,
+            &row.col::<String>("subject_type")?,
         )?,
-        subject_id: row
-            .try_get::<String, _>("subject_id")
-            .map_err(map_sqlx_error)?,
-        uses: row.try_get::<i64, _>("uses").map_err(map_sqlx_error)? as u64,
-        success_rate: row
-            .try_get::<f64, _>("success_rate")
-            .map_err(map_sqlx_error)?,
-        avg_confidence: row
-            .try_get::<f64, _>("avg_confidence")
-            .map_err(map_sqlx_error)?,
-        avg_token_cost: row
-            .try_get::<f64, _>("avg_token_cost")
-            .map_err(map_sqlx_error)?,
-        avg_turn_count: row
-            .try_get::<f64, _>("avg_turn_count")
-            .map_err(map_sqlx_error)?,
+        subject_id: row.col::<String>("subject_id")?,
+        uses: row.col::<i64>("uses")? as u64,
+        success_rate: row.col::<f64>("success_rate")?,
+        avg_confidence: row.col::<f64>("avg_confidence")?,
+        avg_token_cost: row.col::<f64>("avg_token_cost")?,
+        avg_turn_count: row.col::<f64>("avg_turn_count")?,
     })
 }
 
@@ -554,9 +339,7 @@ fn json_column<T>(row: &PgRow, column: &str) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    let value = row
-        .try_get::<serde_json::Value, _>(column)
-        .map_err(map_sqlx_error)?;
+    let value = row.col::<serde_json::Value>(column)?;
     serde_json::from_value(value)
         .map_err(|error| MoaError::StorageError(format!("invalid {column} payload: {error}")))
 }
@@ -573,30 +356,16 @@ fn parse_segment_assessment(value: Option<String>) -> Result<Option<SegmentAsses
 
 /// Maps an `action_policy_rules` row into an `ActionPolicyRule`.
 pub(crate) fn action_policy_rule_from_row(row: &PgRow) -> Result<ActionPolicyRule> {
-    let storage_partition_id = row
-        .try_get::<String, _>("storage_partition_id")
-        .map_err(map_sqlx_error)?;
-    let scope = row.try_get::<String, _>("scope").map_err(map_sqlx_error)?;
+    let storage_partition_id = row.col::<String>("storage_partition_id")?;
+    let scope = row.col::<String>("scope")?;
     Ok(ActionPolicyRule {
-        id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
+        id: row.col::<Uuid>("id")?,
         scope: action_rule_scope_from_columns(&scope, &storage_partition_id)?,
-        tool: row.try_get::<String, _>("tool").map_err(map_sqlx_error)?,
-        pattern: row
-            .try_get::<String, _>("pattern")
-            .map_err(map_sqlx_error)?,
-        effect: from_db(
-            "action policy effect",
-            &row.try_get::<String, _>("effect").map_err(map_sqlx_error)?,
-        )?,
-        reason: row
-            .try_get::<Option<String>, _>("reason")
-            .map_err(map_sqlx_error)?,
-        created_by: moa_core::UserId(
-            row.try_get::<String, _>("created_by")
-                .map_err(map_sqlx_error)?,
-        ),
-        created_at: row
-            .try_get::<DateTime<Utc>, _>("created_at")
-            .map_err(map_sqlx_error)?,
+        tool: row.col::<String>("tool")?,
+        pattern: row.col::<String>("pattern")?,
+        effect: from_db("action policy effect", &row.col::<String>("effect")?)?,
+        reason: row.col::<Option<String>>("reason")?,
+        created_by: moa_core::UserId(row.col::<String>("created_by")?),
+        created_at: row.col::<DateTime<Utc>>("created_at")?,
     })
 }

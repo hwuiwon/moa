@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use moa_core::{CompactionConfig, ContextMessage, ContextSnapshot, MessageRole, WorkingContext};
 
-use crate::pipeline::estimate_tokens;
 use crate::pipeline::history::{HISTORY_END_INDEX_METADATA_KEY, HISTORY_START_INDEX_METADATA_KEY};
+use moa_core::sum_message_tokens;
 
 pub(super) fn history_bounds(ctx: &WorkingContext) -> Option<(usize, usize)> {
     let start = ctx
@@ -64,8 +64,5 @@ pub(super) fn should_apply_tier2(
 }
 
 pub(super) fn token_count(messages: &[ContextMessage]) -> usize {
-    messages
-        .iter()
-        .map(|message| estimate_tokens(&message.content))
-        .sum()
+    sum_message_tokens(messages)
 }

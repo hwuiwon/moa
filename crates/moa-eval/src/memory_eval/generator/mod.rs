@@ -17,10 +17,9 @@ use super::corpus::{
 };
 use moa_eval_core::{EvalError, Result};
 
-mod io;
 mod rendering;
 
-use io::{io_error, read_jsonl, write_jsonl};
+use super::io::{ensure_non_empty, invalid_config, io_error, read_jsonl, write_jsonl};
 use rendering::{distractor_transcript, render_fact_transcript, should_restate_dependency};
 
 const REQUIRED_SEED_COUNT: usize = 3;
@@ -2098,17 +2097,6 @@ fn missing_reference(kind: &str, seed_index: usize, index: usize) -> EvalError {
     EvalError::InvalidConfig(format!(
         "missing generated {kind} for seed index {seed_index}, record index {index}"
     ))
-}
-
-fn ensure_non_empty(label: &str, value: &str) -> Result<()> {
-    if value.trim().is_empty() {
-        return invalid_config(format!("{label} must not be empty"));
-    }
-    Ok(())
-}
-
-fn invalid_config<T>(message: impl Into<String>) -> Result<T> {
-    Err(EvalError::InvalidConfig(message.into()))
 }
 
 #[cfg(test)]

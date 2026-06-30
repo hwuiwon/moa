@@ -49,64 +49,9 @@ pub fn truncate_head_tail(text: &str, max_chars: usize, head_ratio: f64) -> (Str
     (truncated, true)
 }
 
-/// Truncates text by line count using head+tail preservation.
-pub fn truncate_head_tail_lines(text: &str, max_lines: usize, head_ratio: f64) -> (String, bool) {
-    if max_lines == 0 {
-        return (String::new(), !text.is_empty());
-    }
-
-    let lines = text.lines().collect::<Vec<_>>();
-    if lines.len() <= max_lines {
-        return (text.to_string(), false);
-    }
-
-    let ratio = head_ratio.clamp(0.0, 1.0);
-    let head_lines = ((max_lines as f64) * ratio).round() as usize;
-    let head_lines = head_lines.min(max_lines.saturating_sub(1));
-    let tail_lines = max_lines.saturating_sub(head_lines);
-    let omitted = lines.len().saturating_sub(head_lines + tail_lines);
-
-    let mut result = lines[..head_lines].join("\n");
-    if !result.is_empty() {
-        result.push('\n');
-    }
-    result.push_str(&format!("[... {} lines omitted ...]", omitted));
-    if tail_lines > 0 {
-        result.push('\n');
-        result.push_str(&lines[lines.len() - tail_lines..].join("\n"));
-    }
-
-    (result, true)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{truncate_head_tail, truncate_head_tail_lines};
-
-    #[test]
-    fn head_tail_preserves_both_ends() {
-        let input = (1..=100)
-            .map(|index| format!("line {index}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let (result, truncated) = truncate_head_tail_lines(&input, 20, 0.4);
-
-        assert!(truncated);
-        assert!(result.contains("line 1"));
-        assert!(result.contains("line 100"));
-        assert!(result.contains("[... 80 lines omitted ...]"));
-        assert!(!result.contains("line 50"));
-    }
-
-    #[test]
-    fn small_output_not_truncated() {
-        let input = "hello\nworld\n";
-        let (result, truncated) = truncate_head_tail_lines(input, 200, 0.4);
-
-        assert!(!truncated);
-        assert_eq!(result, input);
-    }
+    use super::truncate_head_tail;
 
     #[test]
     fn char_truncation_preserves_head_and_tail() {

@@ -7,10 +7,13 @@ use moa_core::{
     HandHandle, HandProvider, HandSpec, HandStatus, MoaConfig, MoaError, Result, SandboxFile,
     SandboxTier, ToolFailureClass, ToolOutput, classify_tool_error, validate_sandbox_file_path,
 };
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, RETRY_AFTER};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
 
+use crate::adapters::http_util::{
+    build_url, expect_success, expect_success_json, http_error, required_string_field,
+};
 use crate::tools::edit_output::{
     ExistingFileContent, build_file_write_output, build_text_edit_output,
 };
@@ -69,12 +72,7 @@ impl DaytonaHandProvider {
                 .daytona_api_url
                 .as_deref()
                 .unwrap_or(DEFAULT_DAYTONA_API_URL),
-            derive_toolbox_url(
-                hands
-                    .daytona_api_url
-                    .as_deref()
-                    .unwrap_or(DEFAULT_DAYTONA_API_URL),
-            ),
+            DEFAULT_DAYTONA_TOOLBOX_URL,
         )?;
         if let Some(image) = &hands.daytona_default_image {
             provider.default_image = image.clone();
@@ -137,7 +135,7 @@ impl DaytonaHandProvider {
             .map_err(|error| {
                 MoaError::ProviderError(format!("failed to create Daytona sandbox: {error}"))
             })?;
-        let value = expect_success_json(response).await?;
+        let value = expect_success_json(response, "Daytona").await?;
         extract_workspace_id(&value)
     }
 
@@ -165,7 +163,7 @@ impl DaytonaHandProvider {
             .map_err(|error| {
                 MoaError::ProviderError(format!("failed to execute Daytona command: {error}"))
             })?;
-        let value = expect_success_json(response).await?;
+        let value = expect_success_json(response, "Daytona").await?;
         Ok(ToolOutput::from_process(
             value
                 .get("result")
@@ -187,6 +185,7 @@ impl DaytonaHandProvider {
         let url = build_url(
             &format!("{}/{}/files/download", self.toolbox_url, workspace_id),
             &[("path", path)],
+            "Daytona",
         )?;
         let response = self.client.get(url).send().await.map_err(|error| {
             MoaError::ProviderError(format!("failed to read Daytona file: {error}"))
@@ -229,6 +228,7 @@ impl DaytonaHandProvider {
         let url = build_url(
             &format!("{}/{}/files/upload", self.toolbox_url, workspace_id),
             &[("path", path)],
+            "Daytona",
         )?;
         let form = reqwest::multipart::Form::new().part(
             "file",
@@ -294,11 +294,12 @@ impl DaytonaHandProvider {
         let url = build_url(
             &format!("{}/{}/files/search", self.toolbox_url, workspace_id),
             &[("path", "/"), ("pattern", pattern)],
+            "Daytona",
         )?;
         let response = self.client.get(url).send().await.map_err(|error| {
             MoaError::ProviderError(format!("failed to search Daytona files: {error}"))
         })?;
-        let value = expect_success_json(response).await?;
+        let value = expect_success_json(response, "Daytona").await?;
         Ok(ToolOutput::json(
             serde_json::to_string_pretty(&value)?,
             value,
@@ -420,7 +421,7 @@ impl HandProvider for DaytonaHandProvider {
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(HandStatus::Destroyed);
         }
-        let value = expect_success_json(response).await?;
+        let value = expect_success_json(response, "Daytona").await?;
         let state = value
             .get("state")
             .and_then(Value::as_str)
@@ -527,46 +528,6 @@ fn default_headers(api_key: &str) -> Result<HeaderMap> {
     Ok(headers)
 }
 
-async fn expect_success_json(response: reqwest::Response) -> Result<Value> {
-    if !response.status().is_success() {
-        return Err(http_error(response).await);
-    }
-    response
-        .json::<Value>()
-        .await
-        .map_err(|error| MoaError::ProviderError(format!("invalid Daytona JSON response: {error}")))
-}
-
-async fn expect_success(response: reqwest::Response) -> Result<()> {
-    if !response.status().is_success() {
-        return Err(http_error(response).await);
-    }
-    Ok(())
-}
-
-async fn http_error(response: reqwest::Response) -> MoaError {
-    let status = response.status().as_u16();
-    let retry_after = response
-        .headers()
-        .get(RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(parse_retry_after);
-    let message = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "failed to read response body".to_string());
-    MoaError::HttpStatus {
-        status,
-        retry_after,
-        message,
-    }
-}
-
-fn derive_toolbox_url(api_url: &str) -> &str {
-    let _ = api_url;
-    DEFAULT_DAYTONA_TOOLBOX_URL
-}
-
 fn extract_workspace_id(value: &Value) -> Result<String> {
     value
         .get("id")
@@ -576,26 +537,6 @@ fn extract_workspace_id(value: &Value) -> Result<String> {
         .ok_or_else(|| {
             MoaError::ProviderError("Daytona create sandbox response missing id".to_string())
         })
-}
-
-fn required_string_field<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .ok_or_else(|| MoaError::ValidationError(format!("missing string field `{field}`")))
-}
-
-fn build_url(base: &str, params: &[(&str, &str)]) -> Result<reqwest::Url> {
-    let mut url = reqwest::Url::parse(base).map_err(|error| {
-        MoaError::ValidationError(format!("invalid Daytona URL {base}: {error}"))
-    })?;
-    {
-        let mut query = url.query_pairs_mut();
-        for (key, value) in params {
-            query.append_pair(key, value);
-        }
-    }
-    Ok(url)
 }
 
 fn shell_quote(value: &str) -> String {
@@ -649,10 +590,6 @@ fn status_label(status: Option<HandStatus>) -> &'static str {
         Some(HandStatus::Failed) => "failed",
         None => "unknown",
     }
-}
-
-fn parse_retry_after(value: &str) -> Option<Duration> {
-    value.trim().parse::<u64>().ok().map(Duration::from_secs)
 }
 
 #[cfg(test)]

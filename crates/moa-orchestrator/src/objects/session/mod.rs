@@ -21,6 +21,7 @@ use restate_sdk::prelude::*;
 use tracing::Instrument;
 
 use crate::OrchestratorCtx;
+use crate::objects::durable_utc_now;
 use crate::objects::sub_agent::SubAgentClient;
 use crate::restate_identity::with_identity_headers;
 use crate::services::session_store::RestateSessionStoreClient;
@@ -32,7 +33,8 @@ mod handlers;
 mod persistence;
 mod state;
 
-use persistence::{parse_session_key, sync_status, to_handler_error};
+use crate::workflows::errors::moa_error_to_handler_error;
+use persistence::{parse_session_key, sync_status};
 pub use state::SessionVoState;
 
 const K_PENDING_STATE: &str = "pending_state";
@@ -162,13 +164,6 @@ async fn load_pending_state<R: VoReader>(reader: &R) -> Result<SessionPendingSta
 
 fn persist_pending_state(ctx: &ObjectContext<'_>, state: &SessionPendingState) {
     ctx.set(K_PENDING_STATE, Json::from(state.clone()));
-}
-
-async fn durable_utc_now(ctx: &ObjectContext<'_>) -> Result<DateTime<Utc>, HandlerError> {
-    Ok(ctx
-        .run(|| async { Ok::<_, HandlerError>(Json::from(Utc::now())) })
-        .await?
-        .into_inner())
 }
 
 fn generate_turn_id(ctx: &mut ObjectContext<'_>) -> String {

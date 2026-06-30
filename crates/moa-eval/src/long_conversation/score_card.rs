@@ -2,10 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::{SessionId, StoragePartitionId, UserId};
-use moa_lineage_core::{
-    LineageEvent, LineageSink, ScoreRecord, ScoreSource, ScoreTarget,
-    ScoreValue as LineageScoreValue,
-};
+use moa_lineage_core::{ScoreRecord, ScoreSource, ScoreTarget, ScoreValue as LineageScoreValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 use uuid::Uuid;
@@ -99,36 +96,6 @@ impl ScoreCard {
                 comment: Some(format!("provider={}", self.provider)),
             })
             .collect()
-    }
-
-    /// Converts metric rows into lineage eval events for the existing sink path.
-    #[must_use]
-    pub fn to_lineage_events(
-        &self,
-        storage_partition_id: StoragePartitionId,
-        user_id: UserId,
-        session_id: SessionId,
-    ) -> Vec<LineageEvent> {
-        self.to_score_records(storage_partition_id, user_id, session_id)
-            .into_iter()
-            .map(LineageEvent::Eval)
-            .collect()
-    }
-
-    /// Emits every score-card metric through the existing lineage sink.
-    pub fn emit_to_lineage_sink(
-        &self,
-        sink: &dyn LineageSink,
-        storage_partition_id: StoragePartitionId,
-        user_id: UserId,
-        session_id: SessionId,
-    ) -> usize {
-        let events = self.to_lineage_events(storage_partition_id, user_id, session_id);
-        let count = events.len();
-        for event in events {
-            sink.record(event);
-        }
-        count
     }
 }
 

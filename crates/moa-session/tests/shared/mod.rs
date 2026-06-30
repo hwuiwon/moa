@@ -1,13 +1,9 @@
 //! Shared helpers for session integration tests.
 
+use moa_test_support::fixtures::quote_identifier;
 use moa_test_support::postgres::TestDb;
 use sqlx::{PgPool, postgres::PgQueryResult};
 use uuid::Uuid;
-
-/// Returns a double-quoted PostgreSQL identifier.
-pub fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
-}
 
 /// Returns a schema-qualified table name.
 pub fn qualified(schema_name: &str, table_name: &str) -> String {

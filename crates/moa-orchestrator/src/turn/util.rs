@@ -37,11 +37,6 @@ pub(crate) fn allowed_tool_names(request: &CompletionRequest) -> BTreeSet<String
         .collect()
 }
 
-/// Returns whether a provider-emitted tool call is allowed by the compiled request.
-pub(crate) fn tool_call_is_allowed(allowed_tools: &BTreeSet<String>, tool_name: &str) -> bool {
-    allowed_tools.contains(tool_name)
-}
-
 /// Drops empty cancellation reasons so they do not resolve workflow cancellation.
 pub(crate) fn meaningful_cancel_reason(reason: Option<String>) -> Option<String> {
     reason.filter(|value| !value.trim().is_empty())
@@ -207,10 +202,9 @@ fn ensure_tool_schema(request: &mut CompletionRequest, schema: serde_json::Value
 
 /// Builds the synthetic tool output returned when a provider calls a disallowed tool.
 pub(crate) fn disallowed_tool_output(tool_name: &str) -> ToolOutput {
-    ToolOutput::error(
-        format!("Tool {tool_name} is not allowed for this agent turn."),
-        Duration::ZERO,
-    )
+    denied_tool_output(format!(
+        "Tool {tool_name} is not allowed for this agent turn."
+    ))
 }
 
 /// Returns whether serialized tool input contains a protected canary marker.
@@ -227,7 +221,7 @@ pub(crate) fn tool_input_leaks_canary(
 
 /// Builds the synthetic tool output used when execution leaks a canary.
 pub(crate) fn blocked_canary_tool_output(tool_name: &str) -> ToolOutput {
-    ToolOutput::error(blocked_canary_message(tool_name), Duration::ZERO)
+    denied_tool_output(blocked_canary_message(tool_name))
 }
 
 /// Returns the model-visible canary block message for a tool.
@@ -337,8 +331,7 @@ mod tests {
     use super::{
         TurnEvidence, allowed_tool_names, annotate_unresolved_verification, disallowed_tool_output,
         ensure_delegation_tool_schemas, meaningful_cancel_reason, stable_tool_call_id,
-        summarize_response_text, tool_call_is_allowed, tool_input_leaks_canary,
-        turn_outcome_for_response,
+        summarize_response_text, tool_input_leaks_canary, turn_outcome_for_response,
     };
 
     fn completion_response(
@@ -590,8 +583,6 @@ mod tests {
         let allowed = allowed_tool_names(&request);
 
         assert_eq!(allowed, BTreeSet::from(["file_read".to_string()]));
-        assert!(tool_call_is_allowed(&allowed, "file_read"));
-        assert!(!tool_call_is_allowed(&allowed, "bash"));
     }
 
     #[test]

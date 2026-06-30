@@ -18,6 +18,9 @@ use serde_json::{Value, json};
 use tokio::sync::RwLock;
 use tokio::time::Instant;
 
+use crate::adapters::http_util::{
+    build_url, expect_success, expect_success_json, http_error, required_string_field,
+};
 use crate::tools::edit_output::{
     ExistingFileContent, build_file_write_output, build_text_edit_output,
 };
@@ -28,8 +31,7 @@ use crate::tools::str_replace::plan_str_replace;
 use crate::tools::{file_outline, file_read, grep};
 
 use client::{
-    build_url, default_headers, encode_connect_request, envd_headers, expect_success,
-    expect_success_json, http_error, parse_e2b_connect_stream, required_string_field, shell_escape,
+    default_headers, encode_connect_request, envd_headers, parse_e2b_connect_stream, shell_escape,
 };
 
 const E2B_SUPPORTED_CAPABILITIES: &[SandboxToolCapability] = &SandboxToolCapability::ALL;
@@ -153,7 +155,7 @@ impl E2BHandProvider {
             .map_err(|error| {
                 MoaError::ProviderError(format!("failed to create E2B sandbox: {error}"))
             })?;
-        let value = expect_success_json(response).await?;
+        let value = expect_success_json(response, "E2B").await?;
         let sandbox_id = value
             .get("sandboxID")
             .and_then(Value::as_str)
@@ -188,7 +190,7 @@ impl E2BHandProvider {
             .map_err(|error| {
                 MoaError::ProviderError(format!("failed to connect E2B sandbox: {error}"))
             })?;
-        let value = expect_success_json(response).await?;
+        let value = expect_success_json(response, "E2B").await?;
         let sandbox = ConnectedSandbox {
             sandbox_domain: value
                 .get("domain")
@@ -271,6 +273,7 @@ impl E2BHandProvider {
         let url = build_url(
             &format!("{}/files", self.envd_url(sandbox_id, sandbox)),
             &[("path", path)],
+            "E2B",
         )?;
         let response = self
             .client
@@ -321,6 +324,7 @@ impl E2BHandProvider {
         let url = build_url(
             &format!("{}/files", self.envd_url(sandbox_id, sandbox)),
             &[("path", path)],
+            "E2B",
         )?;
         let response = self
             .client
@@ -333,7 +337,7 @@ impl E2BHandProvider {
             .map_err(|error| {
                 MoaError::ProviderError(format!("failed to write E2B file: {error}"))
             })?;
-        let _ = expect_success_json(response).await?;
+        let _ = expect_success_json(response, "E2B").await?;
         Ok(started_at.elapsed())
     }
 
@@ -389,6 +393,16 @@ impl E2BHandProvider {
     }
 }
 
+/// Extracts the sandbox id from an E2B hand handle.
+fn sandbox_id(handle: &HandHandle) -> Result<&str> {
+    match handle {
+        HandHandle::E2B { sandbox_id } => Ok(sandbox_id.as_str()),
+        _ => Err(MoaError::Unsupported(
+            "non-E2B hand handle passed to E2BHandProvider".to_string(),
+        )),
+    }
+}
+
 #[async_trait]
 impl HandProvider for E2BHandProvider {
     fn provider_name(&self) -> &str {
@@ -406,14 +420,7 @@ impl HandProvider for E2BHandProvider {
     }
 
     async fn execute(&self, handle: &HandHandle, tool: &str, input: &str) -> Result<ToolOutput> {
-        let sandbox_id = match handle {
-            HandHandle::E2B { sandbox_id } => sandbox_id.as_str(),
-            _ => {
-                return Err(MoaError::Unsupported(
-                    "non-E2B hand handle passed to E2BHandProvider".to_string(),
-                ));
-            }
-        };
+        let sandbox_id = sandbox_id(handle)?;
         let sandbox = self.connected_sandbox(sandbox_id).await?;
         let payload: Value = serde_json::from_str(input)?;
         match supported_capability_for_tool(tool, E2B_SUPPORTED_CAPABILITIES) {
@@ -471,14 +478,7 @@ impl HandProvider for E2BHandProvider {
     }
 
     async fn install_files(&self, handle: &HandHandle, files: &[SandboxFile]) -> Result<()> {
-        let sandbox_id = match handle {
-            HandHandle::E2B { sandbox_id } => sandbox_id.as_str(),
-            _ => {
-                return Err(MoaError::Unsupported(
-                    "non-E2B hand handle passed to E2BHandProvider".to_string(),
-                ));
-            }
-        };
+        let sandbox_id = sandbox_id(handle)?;
         let sandbox = self.connected_sandbox(sandbox_id).await?;
         for file in files {
             validate_sandbox_file_path(&file.path)?;
@@ -509,14 +509,7 @@ impl HandProvider for E2BHandProvider {
     }
 
     async fn status(&self, handle: &HandHandle) -> Result<HandStatus> {
-        let sandbox_id = match handle {
-            HandHandle::E2B { sandbox_id } => sandbox_id.as_str(),
-            _ => {
-                return Err(MoaError::Unsupported(
-                    "non-E2B hand handle passed to E2BHandProvider".to_string(),
-                ));
-            }
-        };
+        let sandbox_id = sandbox_id(handle)?;
         let response = self
             .client
             .get(format!("{}/sandboxes/{sandbox_id}", self.api_url))
@@ -528,7 +521,7 @@ impl HandProvider for E2BHandProvider {
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(HandStatus::Destroyed);
         }
-        let value = expect_success_json(response).await?;
+        let value = expect_success_json(response, "E2B").await?;
         let state = value
             .get("state")
             .and_then(Value::as_str)
@@ -545,14 +538,7 @@ impl HandProvider for E2BHandProvider {
     }
 
     async fn pause(&self, handle: &HandHandle) -> Result<()> {
-        let sandbox_id = match handle {
-            HandHandle::E2B { sandbox_id } => sandbox_id.as_str(),
-            _ => {
-                return Err(MoaError::Unsupported(
-                    "non-E2B hand handle passed to E2BHandProvider".to_string(),
-                ));
-            }
-        };
+        let sandbox_id = sandbox_id(handle)?;
         let response = self
             .client
             .post(format!("{}/sandboxes/{sandbox_id}/pause", self.api_url))
@@ -567,27 +553,13 @@ impl HandProvider for E2BHandProvider {
     }
 
     async fn resume(&self, handle: &HandHandle) -> Result<()> {
-        let sandbox_id = match handle {
-            HandHandle::E2B { sandbox_id } => sandbox_id.as_str(),
-            _ => {
-                return Err(MoaError::Unsupported(
-                    "non-E2B hand handle passed to E2BHandProvider".to_string(),
-                ));
-            }
-        };
+        let sandbox_id = sandbox_id(handle)?;
         let _ = self.connect_sandbox(sandbox_id).await?;
         Ok(())
     }
 
     async fn destroy(&self, handle: &HandHandle) -> Result<()> {
-        let sandbox_id = match handle {
-            HandHandle::E2B { sandbox_id } => sandbox_id.as_str(),
-            _ => {
-                return Err(MoaError::Unsupported(
-                    "non-E2B hand handle passed to E2BHandProvider".to_string(),
-                ));
-            }
-        };
+        let sandbox_id = sandbox_id(handle)?;
         let response = self
             .client
             .delete(format!("{}/sandboxes/{sandbox_id}", self.api_url))

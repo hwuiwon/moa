@@ -6,14 +6,12 @@ use std::path::Path;
 use async_trait::async_trait;
 use moa_core::{MoaError, traits::EmbeddingProvider};
 use moa_memory_vector::VECTOR_DIMENSION;
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::fs::File;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use super::generator::EmbeddingInput;
-use moa_eval_core::{EvalError, Result};
+use super::io::{ensure_non_empty, invalid_config, read_jsonl, write_jsonl};
+use moa_eval_core::Result;
 
 /// Deterministic fixture model name used by generated PR memory-eval corpora.
 pub const CACHED_EMBEDDING_MODEL: &str = "memory-eval-deterministic-sha256-v1";
@@ -294,76 +292,4 @@ fn normalized_tokens(text: &str) -> Vec<String> {
 
 fn normalize_text_hash(text_hash: &str) -> String {
     text_hash.trim().to_ascii_lowercase()
-}
-
-async fn read_jsonl<T>(path: &Path) -> Result<Vec<T>>
-where
-    T: DeserializeOwned,
-{
-    let file = File::open(path)
-        .await
-        .map_err(|source| io_error(path, source))?;
-    let mut lines = BufReader::new(file).lines();
-    let mut records = Vec::new();
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .map_err(|source| io_error(path, source))?
-    {
-        if line.trim().is_empty() {
-            continue;
-        }
-        records.push(serde_json::from_str(&line)?);
-    }
-    Ok(records)
-}
-
-async fn write_jsonl<T>(path: &Path, records: &[T]) -> Result<()>
-where
-    T: Serialize,
-{
-    ensure_parent_dir(path).await?;
-    let mut file = File::create(path)
-        .await
-        .map_err(|source| io_error(path, source))?;
-    for record in records {
-        let line = serde_json::to_vec(record)?;
-        file.write_all(&line)
-            .await
-            .map_err(|source| io_error(path, source))?;
-        file.write_all(b"\n")
-            .await
-            .map_err(|source| io_error(path, source))?;
-    }
-    file.flush().await.map_err(|source| io_error(path, source))
-}
-
-async fn ensure_parent_dir(path: &Path) -> Result<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|source| io_error(parent, source))?;
-    }
-    Ok(())
-}
-
-fn ensure_non_empty(label: &str, value: &str) -> Result<()> {
-    if value.trim().is_empty() {
-        return invalid_config(format!("{label} must not be empty"));
-    }
-    Ok(())
-}
-
-fn invalid_config<T>(message: impl Into<String>) -> Result<T> {
-    Err(EvalError::InvalidConfig(message.into()))
-}
-
-fn io_error(path: &Path, source: std::io::Error) -> EvalError {
-    EvalError::Io {
-        path: path.to_path_buf(),
-        source,
-    }
 }

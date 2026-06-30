@@ -2,14 +2,14 @@
 
 use std::sync::Arc;
 
-use moa_authz::{fga_subject, require_authz_with_delegation};
-use moa_authz_schema::{ObjectType, Relation};
+use moa_authz::fga_subject;
+use moa_authz_schema::Relation;
 use moa_core::wire::session_store::{
     GetLearningCandidateRequest, LearningCandidateReviewAction, LearningCandidateReviewRequest,
     LearningCandidateReviewResponse,
 };
 use moa_core::{
-    LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate, MoaError, TenantId,
+    LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate, TenantId,
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_session::PostgresSessionStore;
@@ -25,8 +25,9 @@ use uuid::Uuid;
 
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::authorize_tenant;
 use crate::services::skill_regression::skill_acceptance_regression_report;
+use crate::workflows::errors::moa_error_to_status_handler_error;
 
 /// Restate service surface for protected learning-candidate review.
 #[restate_sdk::service]
@@ -239,7 +240,7 @@ pub async fn accept_skill_candidate_after_authz(
         prepared.draft_files.clone(),
     )
     .await
-    .map_err(moa_handler_error)?;
+    .map_err(moa_error_to_status_handler_error)?;
     if !regression_gate.allow_promotion {
         let outcome = reject_claimed_skill_candidate(
             &review_store,
@@ -297,18 +298,7 @@ async fn authorize_tenant_operator(
     ctx: &impl RequestHeaders,
     tenant_id: TenantId,
 ) -> Result<moa_core::traits::Identity, HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Tenant,
-        tenant_id,
-        Relation::Operator,
-    )
-    .await
-    .map_err(translate_authz_error)?;
-    Ok(identity)
+    authorize_tenant(ctx, tenant_id, Relation::Operator).await
 }
 
 fn ensure_requested_action(
@@ -363,19 +353,6 @@ fn skill_review_error_to_handler_error(error: SkillReviewError) -> HandlerError 
         SkillReviewError::BadRequest(message) => TerminalError::new_with_code(400, message).into(),
         SkillReviewError::NotFound(message) => TerminalError::new_with_code(404, message).into(),
         SkillReviewError::Conflict(message) => TerminalError::new_with_code(409, message).into(),
-        SkillReviewError::Moa(error) => moa_handler_error(error),
-    }
-}
-
-fn moa_handler_error(error: MoaError) -> HandlerError {
-    match error {
-        MoaError::ValidationError(_) | MoaError::SerializationError(_) | MoaError::Uuid(_) => {
-            TerminalError::new_with_code(400, error.to_string()).into()
-        }
-        MoaError::Unsupported(_) | MoaError::NotImplemented(_) => {
-            TerminalError::new_with_code(501, error.to_string()).into()
-        }
-        other if other.is_fatal() => TerminalError::new(other.to_string()).into(),
-        other => HandlerError::from(other),
+        SkillReviewError::Moa(error) => moa_error_to_status_handler_error(error),
     }
 }

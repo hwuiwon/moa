@@ -18,7 +18,7 @@ curl -X POST http://localhost:10010/ApiKeys/create \
   -H "x-moa-identity-id: <admin-user-id>" \
   -H "x-moa-tenant-id: <tenant-id>" \
   --data '{"name":"okta-scim","env":"prod","description":null,"for_agent_id":null}'
-curl -X POST http://localhost:10080/v1/authz/tuple-write \
+curl -X POST http://localhost:10000/v1/authz/tuple-write \
   -H "Authorization: Bearer <admin-key>" \
   -H "Content-Type: application/json" \
   --data '{"user":"api_key:<scim-key-id>","relation":"scim_admin","object":"tenant:<tenant-id>"}'

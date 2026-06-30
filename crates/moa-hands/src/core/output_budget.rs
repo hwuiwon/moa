@@ -4,10 +4,10 @@ use moa_core::{
     SessionMeta, ToolBudgetConfig, ToolContent, ToolDefinition, ToolOutput, ToolOutputArtifact,
     ToolOutputConfig, truncate_head_tail,
 };
+use moa_observability::record_tool_output_truncated_metric;
 use serde_json::json;
 
 use super::ToolRouter;
-use super::telemetry::record_tool_output_truncated;
 
 impl ToolRouter {
     /// Overrides the router's replay truncation settings used for head/tail shaping.
@@ -41,7 +41,7 @@ impl ToolRouter {
             .artifactize_output(session, tool_definition, &output, original_output_tokens)
             .await
         {
-            record_tool_output_truncated(&tool_definition.name);
+            record_tool_output_truncated_metric(&tool_definition.name);
             return artifactized_output.with_truncated(true);
         }
 
@@ -83,7 +83,7 @@ impl ToolRouter {
         final_output.original_output_tokens = router_truncated.then_some(original_output_tokens);
 
         if router_truncated {
-            record_tool_output_truncated(&tool_definition.name);
+            record_tool_output_truncated_metric(&tool_definition.name);
         }
 
         final_output

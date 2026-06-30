@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use moa_brain::lineage::emit_generation_lineage;
 use moa_brain::pipeline::segments::{SegmentCompleted, SegmentTracker};
 use moa_brain::segment_assessment::AssessmentOverride;
@@ -73,6 +73,8 @@ use crate::turn_driver::{
     guardrails as driver_guardrails, learning as driver_learning, model_loop as driver_model_loop,
     progress as driver_progress, segments as driver_segments,
 };
+use crate::workflows::durable_utc_now;
+use crate::workflows::errors::moa_error_to_handler_error;
 #[cfg(feature = "skill-learning")]
 use crate::workflows::skill_learning::{RunSkillLearningRequest, SkillLearningClient};
 use crate::workflows::turn_progress::{
@@ -508,7 +510,8 @@ async fn evaluate_input_guardrail(
     let Some(agent_context) = meta.agent_context.as_ref() else {
         return Ok(None);
     };
-    let policy = AgentContext::parsed_policy_snapshot(agent_context).map_err(to_handler_error)?;
+    let policy =
+        AgentContext::parsed_policy_snapshot(agent_context).map_err(moa_error_to_handler_error)?;
     let Some(stage) = policy.guardrail_policy.stage(GuardrailDirection::Input) else {
         return Ok(None);
     };
@@ -591,7 +594,8 @@ async fn visible_response_after_output_guardrail(
     let Some(agent_context) = meta.agent_context.as_ref() else {
         return Ok((response.clone(), false));
     };
-    let policy = AgentContext::parsed_policy_snapshot(agent_context).map_err(to_handler_error)?;
+    let policy =
+        AgentContext::parsed_policy_snapshot(agent_context).map_err(moa_error_to_handler_error)?;
     let Some(stage) = policy.guardrail_policy.stage(GuardrailDirection::Output) else {
         return Ok((response.clone(), false));
     };
@@ -677,7 +681,7 @@ async fn ingest_deferred_session_turn(
     response: &CompletionResponse,
     response_sequence_num: u64,
 ) -> Result<(), HandlerError> {
-    let finalized_at = durable_utc_now(ctx).await?;
+    let finalized_at = durable_utc_now(ctx, "workflow_utc_now").await?;
     if let Some(turn) = crate::services::llm_gateway::session_turn_from_completion_request(
         request,
         &response.text,
@@ -896,7 +900,7 @@ async fn build_request_inside_workflow(
             )
             .await
             .map(Json::from)
-            .map_err(to_handler_error)
+            .map_err(moa_error_to_handler_error)
         })
         .name("prepare_turn_request")
         .await?
@@ -941,7 +945,7 @@ async fn store_trusted_sandbox_manifest(
     };
     let payload_text = serde_json::to_string(&payload)
         .map_err(MoaError::from)
-        .map_err(to_handler_error)?;
+        .map_err(moa_error_to_handler_error)?;
     let manifest_sha256 = sha256_hex(payload_text.as_bytes());
     let entries = trusted_sandbox_file_entries(files);
     let store = OrchestratorCtx::current_session_store();
@@ -951,7 +955,7 @@ async fn store_trusted_sandbox_manifest(
                 .store_text_artifact(session_id, &payload_text)
                 .await
                 .map(Json::from)
-                .map_err(to_handler_error)
+                .map_err(moa_error_to_handler_error)
         })
         .name("store_trusted_sandbox_file_manifest")
         .await?
@@ -1117,8 +1121,8 @@ async fn handle_delegation_tool(
     } = request;
     let invocation = tool_call.invocation.clone();
     append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
-    let Some(tool) =
-        moa_core::DelegationTool::from_invocation(&invocation).map_err(to_handler_error)?
+    let Some(tool) = moa_core::DelegationTool::from_invocation(&invocation)
+        .map_err(moa_error_to_handler_error)?
     else {
         return Err(
             TerminalError::new(format!("unsupported delegation tool {}", invocation.name)).into(),
@@ -1183,7 +1187,7 @@ async fn ensure_current_segment(
         .into_inner()
         .map(|segment| segment.active_view());
 
-    let now = durable_utc_now(ctx).await?;
+    let now = durable_utc_now(ctx, "workflow_utc_now").await?;
     let mut active_segment = active_segment;
     if let Some(transition) = SegmentTracker::transition_from_metadata(
         &request.metadata,
@@ -1343,7 +1347,7 @@ async fn assess_current_active_segment(
         let events = load_session_events_fallback(ctx, session_id).await?;
         segment_events_for_assessment(&events, segment.id, None)
     };
-    let duration_ms = durable_utc_now(ctx)
+    let duration_ms = durable_utc_now(ctx, "workflow_utc_now")
         .await?
         .signed_duration_since(segment.started_at)
         .num_milliseconds()
@@ -1419,7 +1423,7 @@ async fn emit_experience_for_assessment(
     rewrite: Option<&QueryRewriteResult>,
     duration_ms: Option<u64>,
 ) -> Result<(), HandlerError> {
-    let now = durable_utc_now(ctx).await?;
+    let now = durable_utc_now(ctx, "workflow_utc_now").await?;
     let learning = build_segment_learning_bundle(
         meta,
         segment,
@@ -1898,14 +1902,6 @@ fn create_turn_span(
     )
 }
 
-async fn durable_utc_now(ctx: &WorkflowContext<'_>) -> Result<DateTime<Utc>, HandlerError> {
-    Ok(ctx
-        .run(|| async { Ok::<_, HandlerError>(Json::from(Utc::now())) })
-        .name("workflow_utc_now")
-        .await?
-        .into_inner())
-}
-
 fn parse_session_id(raw: &str) -> Result<SessionId, HandlerError> {
     uuid::Uuid::parse_str(raw)
         .map(SessionId)
@@ -1916,14 +1912,6 @@ fn parse_turn_id(raw: &str) -> Result<TurnId, HandlerError> {
     uuid::Uuid::parse_str(raw)
         .map(TurnId)
         .map_err(|error| TerminalError::new(format!("invalid turn_id `{raw}`: {error}")).into())
-}
-
-fn to_handler_error(error: MoaError) -> HandlerError {
-    if error.is_fatal() {
-        return TerminalError::new(error.to_string()).into();
-    }
-
-    HandlerError::from(error)
 }
 
 fn notify_session_of_outcome(
