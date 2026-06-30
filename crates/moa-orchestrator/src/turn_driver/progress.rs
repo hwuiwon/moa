@@ -8,7 +8,7 @@ use crate::turn::util::meaningful_cancel_reason;
 use crate::workflows::turn_progress;
 use crate::workflows::turn_responsiveness::{progress_cap, progress_count as capped_count};
 
-/// Shared workflow state keys used by root and sub-agent turn workflows.
+/// Shared workflow state keys used by root and worker turn workflows.
 pub(crate) struct TurnStateKey;
 
 impl TurnStateKey {

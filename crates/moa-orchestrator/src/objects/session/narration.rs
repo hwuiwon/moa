@@ -200,11 +200,11 @@ fn tick_is_stale(tick_generation: u64, current_generation: u64) -> bool {
 /// bounded fan-in, used only to compute the change cursor.
 ///
 /// Only non-terminal sources with a non-empty summary are returned. Terminal children
-/// are skipped, active-child reads are capped by `MAX_SUB_AGENT_FAN_OUT`, and a failed
+/// are skipped, active-child reads are capped by `MAX_WORKER_FAN_OUT`, and a failed
 /// read is omitted rather than failing the tick.
 async fn collect_active_marker_sources(
     ctx: &ObjectContext<'_>,
-    children: &[SubAgentChildRef],
+    children: &[WorkerChildRef],
     active_turn_id: Option<&str>,
 ) -> Vec<(String, String)> {
     let mut sources = Vec::new();
@@ -233,12 +233,12 @@ async fn collect_active_marker_sources(
         }
     }
 
-    for item in plan_child_progress_fan_in(children, MAX_SUB_AGENT_FAN_OUT) {
+    for item in plan_child_progress_fan_in(children, MAX_WORKER_FAN_OUT) {
         let ChildProgressFetch::Fetch(child_id) = item else {
             continue; // terminal children are not active sources
         };
         match ctx
-            .object_client::<SubAgentClient>(child_id.clone())
+            .object_client::<WorkerClient>(child_id.clone())
             .progress_summary()
             .call()
             .await

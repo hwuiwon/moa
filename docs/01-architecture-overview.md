@@ -16,7 +16,7 @@ Runtime boundary
 Brain and execution
   Context pipeline -> provider router -> LLM
   Tool router -> built-ins / hands / MCP
-  Sub-agent dispatch -> Restate SubAgent virtual objects
+  Worker dispatch -> Restate Worker virtual objects
         |
         v
 Product data in Postgres / Neon
@@ -55,10 +55,10 @@ MOA supports two user-facing capability artifact shapes:
 - Skill: an open-ended, agent-mediated capability selected by the context
   pipeline and executed through the existing `Session` and `TurnExecution`
   path. Skills give an agent instructions, tools, memory, approvals, and
-  sub-agents so it can handle a task autonomously.
+  workers so it can handle a task autonomously.
 - Workflow: a deterministic, graph-shaped skill stored as an artifact-backed
   `WorkflowDefinition`. Workflows are used when conditions, approval gates,
-  connector actions, checkpoints, memory operations, bounded agent/sub-agent
+  connector actions, checkpoints, memory operations, bounded agent/worker
   adapter nodes, and run history must be explicit and reviewable.
 
 Agents, skills, connectors, actions, workflows, and behavior-lab experiment
@@ -179,14 +179,14 @@ binding without changing handler contracts.
 
 Core production bindings:
 
-- Virtual objects: `Session`, `SubAgent`, `Tenant`, `CronJob`, `IngestionVO`
+- Virtual objects: `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO`
 - Services: `ActionReviews`, `AgentDefinitions`, `Agents`,
   `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`,
   `Contacts`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`,
   `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`,
   `Tenants`, `ToolExecutor`, `Workflows`, `ActionPolicy`
 - Workflows: `ArtifactWorkflowExecution`, `KnowledgeSyncIngestion`,
-  `Consolidate`, `TurnExecution`, `SubAgentTurnExecution`
+  `Consolidate`, `TurnExecution`, `WorkerTurnExecution`
 
 Feature-gated bindings:
 
@@ -204,7 +204,20 @@ retrieval. Read-only analytics, identity diagnostics, audit verification, and
 lineage read routes are served directly from `moa-edge` against Postgres/domain
 stores instead of going through Restate.
 
-`Session` is the durable actor for one session key. It queues messages, admits `TurnExecution` workflows, tracks the active task segment, records tool/skill usage, and writes learning entries. Segment assessment happens at turn, segment, idle, cancellation, and timeout boundaries as an auditable learning artifact, not as a live-loop control signal. `SubAgent` owns conversational delegated state with depth and budget limits, while `SubAgentTurnExecution` runs one admitted child turn and reports turn-scoped mutations back to the VO.
+`Session` is the durable actor for one session key. It queues messages, admits `TurnExecution` workflows, tracks the active task segment, records tool/skill usage, and writes learning entries. Segment assessment happens at turn, segment, idle, cancellation, and timeout boundaries as an auditable learning artifact, not as a live-loop control signal. `Worker` owns conversational delegated state with depth and budget limits, while `WorkerTurnExecution` runs one admitted child turn and reports turn-scoped mutations back to the VO.
+
+Coordinator turns can return while detached workers keep running across
+non-sticky replicas. The coordinator and its children coordinate over two planes —
+a high-frequency telemetry plane (progress, heartbeat, one-call-per-period
+narration) that stays off the single-writer `Session` VO, and a low-frequency
+control plane (attention signals, terminal-wake, guarded resume) that routes
+through the coordinator VO. All of this is correct on Kubernetes because its state
+lives in Restate VO/workflow state and Postgres (idempotent event appends guarded
+by `session_event_dedupe`); Redis is a runtime cache only and never a correctness
+owner. The root coordinator is sandbox-free, and each worker owns one ephemeral
+sandbox keyed `(session_id, worker_id, provider)` that is released on the
+worker's self-cleanup. `docs/02-brain-orchestration.md` and
+`docs/12-restate-architecture.md` describe these planes in detail.
 
 ### Hosted API Clients
 

@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{SessionActorRef, SessionId, SubAgentId, TenantId, ToolCallId, UserId};
+use super::{SessionActorRef, SessionId, TenantId, ToolCallId, UserId, WorkerId};
 
 /// Risk level assigned to one policy-facing action.
 #[derive(
@@ -181,8 +181,8 @@ pub struct ActionEnvelope {
     pub requested_by: SessionActorRef,
     /// Session that owns the action, when present.
     pub session_id: Option<SessionId>,
-    /// Sub-agent that requested the action, when present.
-    pub sub_agent_id: Option<SubAgentId>,
+    /// Worker that requested the action, when present.
+    pub worker_id: Option<WorkerId>,
     /// Tool call identifier for the original model-visible request.
     pub tool_call_id: ToolCallId,
     /// Tool name being evaluated.

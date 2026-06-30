@@ -89,6 +89,13 @@ Every sandbox is ephemeral by default. Durable state belongs in the session
 event log, memory, artifacts, or approved external systems, not in a leftover
 container.
 
+The root coordinator is sandbox-free, and each worker owns one isolated
+sandbox keyed by `worker_id` (lease key `(session_id, worker_id,
+provider)`). Parallel workers therefore do not share a compute environment, so
+one delegated task's untrusted code or files cannot reach a sibling's sandbox. A
+worker's sandbox is released when it self-cleans, and any remainder is released
+at session teardown.
+
 ## Prompt Injection Defenses
 
 MOA treats tool results, fetched content, and external files as untrusted.
@@ -106,6 +113,14 @@ Current defenses:
 If a model repeatedly emits malicious tool calls after receiving blocked-tool
 feedback, the remaining control point is the turn retry/circuit-breaker policy.
 Do not treat prompt filtering as a complete security boundary.
+
+Progress narration treats child summaries and tool output as untrusted input.
+The per-session narrator summarizes that material into neutral, user-facing prose
+that is never executed, respects the same privacy/PII boundaries as other visible
+output, and must not widen what the user can already see. Its
+`tokens_used`/cost are attributed to a system/overhead bucket in observability,
+not to the user's task budget, and a narration failure is a warning rather than a
+turn failure.
 
 ## Agent Guardrails
 
@@ -136,7 +151,7 @@ Default tool policy is auto-mode `allow`. Tenant-level policy rows and config
 can return `allow`, `deny`, or `admin_review`.
 `admin_review` persists a tenant action-review row plus event, returns a
 pending-review tool result to the model, and does not block the root or
-sub-agent workflow. Tenant admins clear or deny the stored action later through
+worker workflow. Tenant admins clear or deny the stored action later through
 the action-review service.
 
 ## Security Audit

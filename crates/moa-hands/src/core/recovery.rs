@@ -19,6 +19,7 @@ const MAX_TOOL_REPROVISIONS: u32 = 2;
 
 struct HandFailureContext<'a> {
     session: &'a SessionMeta,
+    worker_id: Option<&'a str>,
     invocation: &'a ToolInvocation,
     tool_definition: &'a ToolDefinition,
     provider: &'a str,
@@ -42,6 +43,7 @@ impl ToolRouter {
     pub(super) async fn execute_authorized_with_recovery_inner(
         &self,
         session: &SessionMeta,
+        worker_id: Option<&str>,
         invocation: &ToolInvocation,
     ) -> Result<(Option<String>, ToolOutput)> {
         let Some(registered_tool) = self.registry.tools.get(&invocation.name) else {
@@ -65,6 +67,7 @@ impl ToolRouter {
             ToolExecution::Hand { provider, tier } => {
                 self.execute_hand_with_recovery(
                     session,
+                    worker_id,
                     invocation,
                     &registered_tool.definition,
                     provider,
@@ -87,6 +90,7 @@ impl ToolRouter {
     async fn execute_hand_with_recovery(
         &self,
         session: &SessionMeta,
+        worker_id: Option<&str>,
         invocation: &ToolInvocation,
         tool_definition: &ToolDefinition,
         provider: &str,
@@ -103,7 +107,7 @@ impl ToolRouter {
 
         loop {
             let hand = self
-                .get_or_provision_hand(provider, tier.clone(), session)
+                .get_or_provision_hand(provider, tier.clone(), session, worker_id)
                 .await?;
 
             match provider_impl.health_check(&hand).await {
@@ -116,6 +120,7 @@ impl ToolRouter {
                         .handle_hand_failure(
                             HandFailureContext {
                                 session,
+                                worker_id,
                                 invocation,
                                 tool_definition,
                                 provider,
@@ -156,6 +161,7 @@ impl ToolRouter {
                         .handle_hand_failure(
                             HandFailureContext {
                                 session,
+                                worker_id,
                                 invocation,
                                 tool_definition,
                                 provider,
@@ -193,7 +199,15 @@ impl ToolRouter {
             }
 
             match self
-                .execute_hand_once(session, invocation, tool_definition, provider, tier, None)
+                .execute_hand_once(
+                    session,
+                    worker_id,
+                    invocation,
+                    tool_definition,
+                    provider,
+                    tier,
+                    None,
+                )
                 .await
             {
                 Ok(output) => return Ok(output),
@@ -215,6 +229,7 @@ impl ToolRouter {
                         .handle_hand_failure(
                             HandFailureContext {
                                 session,
+                                worker_id,
                                 invocation,
                                 tool_definition,
                                 provider,
@@ -441,7 +456,7 @@ impl ToolRouter {
             }
             ToolFailureClass::ReProvision { .. } if reprovisions < MAX_TOOL_REPROVISIONS => {
                 if let Err(error) = self
-                    .reprovision_hand(ctx.session, ctx.provider, ctx.tier)
+                    .reprovision_hand(ctx.session, ctx.worker_id, ctx.provider, ctx.tier)
                     .await
                 {
                     return Ok(Some((

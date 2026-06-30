@@ -68,7 +68,7 @@ pub fn session_turn_span(
         "session_turn",
         otel.name = %trace_name,
         moa.session.id = %meta.id,
-        moa.sub_agent.id = tracing::field::Empty,
+        moa.worker.id = tracing::field::Empty,
         moa.tenant.id = %meta.tenant_id,
         moa.contact.id = tracing::field::Empty,
         moa.model = %meta.model,
@@ -96,21 +96,21 @@ pub fn session_turn_span(
     span
 }
 
-/// Root span for one sub-agent turn iteration.
-pub fn sub_agent_turn_span(
+/// Root span for one worker turn iteration.
+pub fn worker_turn_span(
     meta: &SessionMeta,
-    sub_agent_id: &str,
+    worker_id: &str,
     turn_id: &str,
     turn_number: i64,
     environment: Option<&str>,
 ) -> tracing::Span {
     let span = session_turn_span(meta, None, turn_number, environment);
-    span.record("moa.sub_agent.id", sub_agent_id);
+    span.record("moa.worker.id", worker_id);
     span.set_attribute(
         "otel.name",
-        format!("MOA sub-agent {sub_agent_id} turn {turn_number}"),
+        format!("MOA worker {worker_id} turn {turn_number}"),
     );
-    span.set_attribute("moa.turn.scope", "sub_agent");
+    span.set_attribute("moa.turn.scope", "worker");
     span.set_attribute("moa.turn.id", turn_id.to_string());
     span
 }
@@ -138,7 +138,7 @@ pub fn llm_call_span(meta: &SessionMeta) -> tracing::Span {
     }
 }
 
-/// Child span around one tool execution or sub-agent dispatch.
+/// Child span around one tool execution or worker dispatch.
 pub fn tool_dispatch_span(tool_name: &str) -> tracing::Span {
     match current_turn_root_span() {
         Some(parent) => tracing::info_span!(
@@ -420,29 +420,29 @@ mod tests {
     }
 
     #[test]
-    fn sub_agent_turn_span_tags_scope_and_identifiers() {
-        // Pins: sub-agent turns reuse the session-turn root but tag the sub-agent id, turn
-        // id, and `sub_agent` scope. `set_attribute("otel.name", ..)` adds an attribute and
+    fn worker_turn_span_tags_scope_and_identifiers() {
+        // Pins: worker turns reuse the session-turn root but tag the worker id, turn
+        // id, and `worker` scope. `set_attribute("otel.name", ..)` adds an attribute and
         // does NOT rename the span, so the exported name stays the session-turn name.
         let meta = test_meta();
         let spans = capture_spans(|| {
-            let span = sub_agent_turn_span(&meta, "agent-7", "turn-42", 2, Some("staging"));
+            let span = worker_turn_span(&meta, "agent-7", "turn-42", 2, Some("staging"));
             span.in_scope(|| {});
         });
 
         let span = find_span(&spans, "MOA turn 2");
         assert_eq!(
-            attr_string(span, "moa.sub_agent.id").as_deref(),
+            attr_string(span, "moa.worker.id").as_deref(),
             Some("agent-7")
         );
         assert_eq!(
             attr_string(span, "moa.turn.scope").as_deref(),
-            Some("sub_agent")
+            Some("worker")
         );
         assert_eq!(attr_string(span, "moa.turn.id").as_deref(), Some("turn-42"));
         assert_eq!(
             attr_string(span, "otel.name").as_deref(),
-            Some("MOA sub-agent agent-7 turn 2")
+            Some("MOA worker agent-7 turn 2")
         );
     }
 }

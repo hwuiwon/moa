@@ -10,6 +10,7 @@ Postgres stores:
 
 - session metadata
 - append-only event records
+- session-event idempotency dedupe rows (`session_event_dedupe`)
 - action policy rules
 - pending signals
 - context snapshots
@@ -175,10 +176,58 @@ updates the session to the verified contact and records the prior contact in
 | Action review | `ActionReviewRequested`, `ActionReviewDecided` |
 | Memory | `MemoryRead`, `MemoryWrite`, `MemoryIngest` |
 | Hands | `HandProvisioned`, `HandDestroyed`, `HandError` |
+| Worker coordination | `WorkerSpawned`, `WorkerMessageSent`, `WorkerStatusChanged`, `WorkerNotificationDelivered`, `WorkerSignalReceived`, `WorkerParentResumeRequested`, `WorkerHeartbeatStale`, `ProgressUpdate`, `ProgressNarrated` |
 | Compaction | `Checkpoint` |
 | Diagnostics | `Error`, `Warning` |
 
+The serialized enum is `Event` (not `SessionEvent`); each variant uses
+`#[serde(tag = "type", content = "data")]` with snake_case field names.
+
 `SegmentStarted` records segment ID, index, summary, and previous segment ID. `SegmentCompleted` records final counters and duration.
+
+`WorkerSpawned`, `WorkerMessageSent`, `WorkerStatusChanged`, and
+`WorkerNotificationDelivered` are the pre-existing spawn/steer/terminal events.
+The durable main-agent/worker coordination feature adds four:
+
+- `WorkerSignalReceived` records one control-plane attention signal
+  (`ChildSignalKind` = `Finding`/`Blocked`/`NeedsInput`/`Failed`/`HeartbeatStale`)
+  recorded on the owning coordinator, with `signal_id`, severity, summary, and —
+  for `NeedsInput` — the awakeable `input_request_id` and `input_audience`.
+- `WorkerParentResumeRequested` records that a signal triggered a guarded
+  coordinator auto-resume turn (`signal_id`, `worker_id`, `turn_id`, `reason`).
+- `WorkerHeartbeatStale` records a watchdog stale detection
+  (`last_heartbeat_at`, `threshold_ms`).
+- `ProgressNarrated` is one durable, rate-limited natural-language progress
+  update for the whole session (`source`, `text`, optional per-child `segments`,
+  `model`, `tokens_used`). It is the one intentional low-rate telemetry event;
+  `model = "none"`/`tokens_used = 0` marks the no-LLM N=1 short-circuit.
+
+`ProgressUpdate` (the per-tick child progress already emitted to the parent log)
+is unchanged; heartbeats stay in `Worker` VO state and append an event only on
+the stale transition above.
+
+## Idempotent Append
+
+Control-plane signals, the heartbeat watchdog, and progress narration all run in
+Restate handlers that can be retried after a partial failure, so their appends
+must be idempotent. `AppendEventRequest` carries an optional `dedupe_key`, and
+`emit_event_record` enforces it inside the same `sessions ... FOR UPDATE` lock and
+transaction that guards the event insert: when a `dedupe_key` is present and a row
+already exists for `(session_id, dedupe_key)`, the original `sequence_num` is
+returned and no second event is inserted; otherwise the event and the dedupe row
+are inserted together. Callers that pass no key always append. Enforcing this in
+`emit_event_record` (not only on the Restate wire path) means direct callers get
+the guarantee too.
+
+Dedupe state lives in a separate `session_event_dedupe(session_id, dedupe_key,
+sequence_num, created_at)` table whose primary key doubles as the uniqueness
+guard (migration `V000319`). It is kept off the hot, trigger-heavy, append-only
+`events` table on purpose: adding a unique index to `events` would need a
+write-blocking, non-concurrent `CREATE UNIQUE INDEX` (refinery runs each
+migration in a transaction), which stalls writes during deploy. The dedupe path
+is INSERT-only and never weakens append-only semantics. Stable dedupe keys
+include `worker_signal:{signal_id}`, `worker_stale:{worker_id}:{last_heartbeat_at_ms}`,
+and `narration:{session_id}:{narration_seq}`.
 
 ## Task Segment Rows
 
@@ -273,7 +322,7 @@ Replay is history-first:
 4. Attach to live runtime streams when available.
 
 The orchestrator publishes live runtime events during turn execution. Visible
-history is recoverable from the durable event log; hot turn/sub-agent progress
+history is recoverable from the durable event log; hot turn/worker progress
 is queryable through Restate where a durable execution primitive owns it.
 
 Replay uses persisted session contact metadata; clients cannot provide a new

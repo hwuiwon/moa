@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn session_cancel_public_route_forwards_explicit_coordinator_only() {
         // Pins: an explicit `coordinator_only` scope reaches the Session VO unchanged so a user can
-        // interrupt the coordinator turn while leaving sub-agent work running.
+        // interrupt the coordinator turn while leaving worker work running.
         let session_id = "11111111-1111-1111-1111-111111111111";
         let uri = format!("/v1/sessions/{session_id}/cancel")
             .parse::<Uri>()

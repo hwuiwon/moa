@@ -40,7 +40,7 @@ cargo test -p moa-orchestrator --test ingestion_service_e2e -- --test-threads=1
 cargo test -p moa-orchestrator --test workspace -- --test-threads=1
 cargo test -p moa-orchestrator --test integration_service_e2e -- --test-threads=1
 cargo test -p moa-orchestrator --test replay_determinism -- --test-threads=1
-cargo test -p moa-orchestrator --test sub_agent_delegation -- --test-threads=1
+cargo test -p moa-orchestrator --test worker_delegation -- --test-threads=1
 ```
 
 If a target does not exist, list `crates/moa-orchestrator/tests/` and use the actual name.

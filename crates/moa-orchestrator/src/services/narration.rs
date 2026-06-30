@@ -18,7 +18,7 @@ use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::wire::turn::{SessionProgress, SessionProgressRequest, TurnPhase, TurnProgress};
 use moa_core::{
     CompletionRequest, ContextMessage, Event, ModelId, NarrationSegment, NarrationSource,
-    SessionId, SubAgentProgressSummary, SubAgentState,
+    SessionId, WorkerProgressSummary, WorkerState,
 };
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -358,7 +358,7 @@ fn select_active_sources(progress: &SessionProgress) -> Vec<ActiveSource> {
     for child in &progress.child_progress {
         if let Some(summary) = active_child_summary(child) {
             sources.push(ActiveSource {
-                source: NarrationSource::SubAgent(child.sub_agent_id.clone()),
+                source: NarrationSource::Worker(child.worker_id.clone()),
                 summary,
             });
         }
@@ -376,7 +376,7 @@ fn active_turn_summary(turn: &TurnProgress) -> Option<String> {
 }
 
 /// Returns a non-terminal child's compact summary, if it has one.
-fn active_child_summary(child: &SubAgentProgressSummary) -> Option<String> {
+fn active_child_summary(child: &WorkerProgressSummary) -> Option<String> {
     if is_terminal_child_state(child.state) {
         return None;
     }
@@ -392,10 +392,10 @@ pub(crate) fn is_terminal_turn_phase(phase: &TurnPhase) -> bool {
 }
 
 /// Whether a child lifecycle state is terminal.
-pub(crate) fn is_terminal_child_state(state: SubAgentState) -> bool {
+pub(crate) fn is_terminal_child_state(state: WorkerState) -> bool {
     matches!(
         state,
-        SubAgentState::Completed | SubAgentState::Failed | SubAgentState::Cancelled
+        WorkerState::Completed | WorkerState::Failed | WorkerState::Cancelled
     )
 }
 
@@ -457,13 +457,13 @@ fn build_merge_prompt(sources: &[ActiveSource]) -> NarrationPrompt {
     let mut user = String::from(
         "Write one short, user-facing status update covering all of the following concurrent progress notes:\n",
     );
-    let mut sub_agent_index = 0_u32;
+    let mut worker_index = 0_u32;
     for source in sources {
         let label = match &source.source {
             NarrationSource::Coordinator => "the main agent".to_string(),
-            NarrationSource::SubAgent(_) => {
-                sub_agent_index += 1;
-                format!("sub-agent {sub_agent_index}")
+            NarrationSource::Worker(_) => {
+                worker_index += 1;
+                format!("worker {worker_index}")
             }
         };
         let summary = &source.summary;
@@ -482,9 +482,9 @@ mod tests {
 
     use super::*;
 
-    fn child(id: &str, state: SubAgentState, summary: Option<&str>) -> SubAgentProgressSummary {
-        SubAgentProgressSummary {
-            sub_agent_id: id.to_string(),
+    fn child(id: &str, state: WorkerState, summary: Option<&str>) -> WorkerProgressSummary {
+        WorkerProgressSummary {
+            worker_id: id.to_string(),
             state,
             active_turn_id: None,
             last_summary: summary.map(str::to_string),
@@ -492,6 +492,7 @@ mod tests {
             budget_remaining: 0,
             last_heartbeat_at: None,
             stale: false,
+            awaiting_input: false,
         }
     }
 
@@ -513,7 +514,7 @@ mod tests {
 
     fn progress(
         active_turn: Option<TurnProgress>,
-        children: Vec<SubAgentProgressSummary>,
+        children: Vec<WorkerProgressSummary>,
     ) -> SessionProgress {
         SessionProgress {
             snapshot: SessionSnapshot {
@@ -535,7 +536,7 @@ mod tests {
             None,
             vec![child(
                 "child-a",
-                SubAgentState::Running,
+                WorkerState::Running,
                 Some("indexing files"),
             )],
         );
@@ -544,7 +545,7 @@ mod tests {
 
         match plan_narration(sources) {
             NarrationPlan::ShortCircuit { source, text } => {
-                assert_eq!(source, NarrationSource::SubAgent("child-a".to_string()));
+                assert_eq!(source, NarrationSource::Worker("child-a".to_string()));
                 assert_eq!(text, "indexing files");
             }
             other => panic!("expected short-circuit, got {other:?}"),
@@ -559,7 +560,7 @@ mod tests {
             Some(turn(TurnPhase::Streaming, Some("drafting the reply"))),
             vec![child(
                 "child-a",
-                SubAgentState::Running,
+                WorkerState::Running,
                 Some("searching the web"),
             )],
         );
@@ -571,13 +572,13 @@ mod tests {
                 assert!(prompt.user.contains("drafting the reply"));
                 assert!(prompt.user.contains("searching the web"));
                 assert!(prompt.user.contains("the main agent"));
-                assert!(prompt.user.contains("sub-agent 1"));
+                assert!(prompt.user.contains("worker 1"));
                 assert!(prompt.system.contains("untrusted"));
                 assert_eq!(segments.len(), 2);
                 assert_eq!(segments[0].source, NarrationSource::Coordinator);
                 assert_eq!(
                     segments[1].source,
-                    NarrationSource::SubAgent("child-a".to_string())
+                    NarrationSource::Worker("child-a".to_string())
                 );
                 assert_eq!(segments[1].text, "searching the web");
             }
@@ -591,9 +592,9 @@ mod tests {
         let snapshot = progress(
             Some(turn(TurnPhase::Completed, Some("done"))),
             vec![
-                child("child-done", SubAgentState::Completed, Some("finished")),
-                child("child-silent", SubAgentState::Running, None),
-                child("child-blank", SubAgentState::Running, Some("   ")),
+                child("child-done", WorkerState::Completed, Some("finished")),
+                child("child-silent", WorkerState::Running, None),
+                child("child-blank", WorkerState::Running, Some("   ")),
             ],
         );
         let sources = select_active_sources(&snapshot);

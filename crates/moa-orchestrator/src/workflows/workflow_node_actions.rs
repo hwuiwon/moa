@@ -8,8 +8,8 @@ use moa_core::wire::memory::{MemoryIngestDocument, MemoryIngestRequest, MemorySe
 use moa_core::wire::turn::{QueueMessageRequest, TurnOutcome, TurnOutcomeKind};
 use moa_core::{
     ActionPolicyEffect, ContactId, DelegationTool, SessionActorRef, SessionId, SessionMeta,
-    SessionStatus, SpawnSubAgentInput, TenantId, ToolCallId, ToolCallRequest, ToolInvocation,
-    ToolOutput, UserId, WaitSubAgentInput,
+    SessionStatus, SpawnWorkerInput, TenantId, ToolCallId, ToolCallRequest, ToolInvocation,
+    ToolOutput, UserId, WaitWorkerInput,
 };
 use moa_workflows::interpreter::WorkflowNodeRequest;
 use restate_sdk::prelude::*;
@@ -28,7 +28,7 @@ use crate::services::session_store::RestateSessionStoreClient;
 use crate::services::tool_executor::ToolExecutorClient;
 
 const AGENT_NODE_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
-const SUB_AGENT_WAIT_TIMEOUT_MS: u64 = 30_000;
+const WORKER_WAIT_TIMEOUT_MS: u64 = 30_000;
 
 /// Runtime context needed to execute one workflow side-effect node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,10 +104,10 @@ pub async fn execute_workflow_node_action(
         } => {
             return execute_agent_node(ctx, action_context, input, *max_turns).await;
         }
-        WorkflowNodeRequest::SubAgent {
+        WorkflowNodeRequest::Worker {
             input, max_turns, ..
         } => {
-            return execute_sub_agent_node(ctx, action_context, input, *max_turns).await;
+            return execute_worker_node(ctx, action_context, input, *max_turns).await;
         }
         WorkflowNodeRequest::MemoryRead { input, .. } => {
             return execute_memory_read_node(ctx, action_context, input).await;
@@ -135,7 +135,7 @@ pub async fn execute_workflow_node_action(
             invocation: invocation.clone(),
             review_id: stable_review_id(action_context.run_uid, &action_context.node_id),
             tool_call_id,
-            sub_agent_id: None,
+            worker_id: None,
             origin_kind: Some("workflow".to_string()),
             origin_id: Some(action_context.run_uid.to_string()),
             origin_step_id: Some(action_context.node_id.clone()),
@@ -165,6 +165,7 @@ pub async fn execute_workflow_node_action(
         user_id: workflow_user_id(&action_context.identity),
         idempotency_key,
         trusted_sandbox_manifest: None,
+        worker_id: None,
     };
 
     if matches!(prepared_action.effect, ActionPolicyEffect::AdminReview) {
@@ -346,7 +347,7 @@ fn parse_turn_outcome(raw: &str) -> Result<TurnOutcome, HandlerError> {
     })
 }
 
-async fn execute_sub_agent_node(
+async fn execute_worker_node(
     ctx: &WorkflowContext<'_>,
     action_context: WorkflowNodeActionContext,
     input: &Value,
@@ -354,7 +355,7 @@ async fn execute_sub_agent_node(
 ) -> Result<WorkflowNodeActionOutcome, HandlerError> {
     let Some(session_id) = action_context.session_id else {
         return Ok(WorkflowNodeActionOutcome::Failed {
-            error: "workflow sub_agent node requires an associated session_id".to_string(),
+            error: "workflow worker node requires an associated session_id".to_string(),
         });
     };
     if let Some(reason) = workflow_cancel_requested(ctx, &action_context).await? {
@@ -362,7 +363,7 @@ async fn execute_sub_agent_node(
     }
     if matches!(max_turns, Some(0)) {
         return Ok(WorkflowNodeActionOutcome::Failed {
-            error: "workflow sub_agent node max_turns must be at least 1".to_string(),
+            error: "workflow worker node max_turns must be at least 1".to_string(),
         });
     }
     let mut spawn_input = match spawn_input_from_node(input) {
@@ -397,9 +398,9 @@ async fn execute_sub_agent_node(
             });
         }
     };
-    let Some(spawn) = structured_output::<moa_core::SpawnSubAgentOutput>(&spawn_output) else {
+    let Some(spawn) = structured_output::<moa_core::SpawnWorkerOutput>(&spawn_output) else {
         return Ok(WorkflowNodeActionOutcome::Failed {
-            error: "workflow sub_agent node spawn returned no structured output".to_string(),
+            error: "workflow worker node spawn returned no structured output".to_string(),
         });
     };
     if let Some(reason) = workflow_cancel_requested(ctx, &action_context).await? {
@@ -408,12 +409,12 @@ async fn execute_sub_agent_node(
     let wait_timeout_ms = input
         .get("timeout_ms")
         .and_then(Value::as_u64)
-        .unwrap_or(SUB_AGENT_WAIT_TIMEOUT_MS);
+        .unwrap_or(WORKER_WAIT_TIMEOUT_MS);
     let wait_output = match execute_delegation_tool(
         ctx,
         parent,
-        DelegationTool::Wait(WaitSubAgentInput {
-            sub_agent_id: spawn.sub_agent_id.clone(),
+        DelegationTool::Wait(WaitWorkerInput {
+            worker_id: spawn.worker_id.clone(),
             timeout_ms: wait_timeout_ms,
         }),
         None,
@@ -427,16 +428,16 @@ async fn execute_sub_agent_node(
             });
         }
     };
-    let Some(wait) = structured_output::<moa_core::WaitSubAgentOutput>(&wait_output) else {
+    let Some(wait) = structured_output::<moa_core::WaitWorkerOutput>(&wait_output) else {
         return Ok(WorkflowNodeActionOutcome::Failed {
-            error: "workflow sub_agent node wait returned no structured output".to_string(),
+            error: "workflow worker node wait returned no structured output".to_string(),
         });
     };
     if wait.timed_out {
         return Ok(WorkflowNodeActionOutcome::Failed {
             error: format!(
-                "workflow sub_agent node timed out waiting for {}",
-                wait.sub_agent_id
+                "workflow worker node timed out waiting for {}",
+                wait.worker_id
             ),
         });
     }
@@ -731,7 +732,7 @@ fn prompt_from_input(input: &Value) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn spawn_input_from_node(input: &Value) -> Result<SpawnSubAgentInput, String> {
+fn spawn_input_from_node(input: &Value) -> Result<SpawnWorkerInput, String> {
     let task = input
         .get("task")
         .or_else(|| input.get("instruction"))
@@ -740,7 +741,7 @@ fn spawn_input_from_node(input: &Value) -> Result<SpawnSubAgentInput, String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
-            "workflow sub_agent node requires input.task, input.instruction, or input.prompt"
+            "workflow worker node requires input.task, input.instruction, or input.prompt"
                 .to_string()
         })?
         .to_string();
@@ -758,8 +759,8 @@ fn spawn_input_from_node(input: &Value) -> Result<SpawnSubAgentInput, String> {
     let budget_tokens = input
         .get("budget_tokens")
         .and_then(Value::as_u64)
-        .unwrap_or_else(moa_core::default_sub_agent_budget_tokens);
-    Ok(SpawnSubAgentInput {
+        .unwrap_or_else(moa_core::default_worker_budget_tokens);
+    Ok(SpawnWorkerInput {
         task,
         task_name: input
             .get("task_name")
@@ -1040,8 +1041,8 @@ mod tests {
     }
 
     #[test]
-    fn sub_agent_input_preserves_task_budget_and_tools() {
-        // Pins: sub-agent workflow nodes feed the existing delegation validator shape.
+    fn worker_input_preserves_task_budget_and_tools() {
+        // Pins: worker workflow nodes feed the existing delegation validator shape.
         let input = spawn_input_from_node(&json!({
             "task": "Investigate refunds",
             "task_name": "refunds",

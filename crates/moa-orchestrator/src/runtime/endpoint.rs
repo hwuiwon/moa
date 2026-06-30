@@ -22,8 +22,8 @@ use crate::{
     objects::{
         cron_job::{CronJob, CronJobImpl},
         session::{Session, SessionImpl},
-        sub_agent::{SubAgent, SubAgentImpl},
         tenant::{TenantImpl, TenantObject},
+        worker::{Worker, WorkerImpl},
     },
     services::{
         action_policy::{ActionPolicy, ActionPolicyImpl},
@@ -53,8 +53,8 @@ use crate::{
         artifact_workflow_execution::{ArtifactWorkflowExecution, ArtifactWorkflowExecutionImpl},
         consolidate::{Consolidate, ConsolidateImpl},
         knowledge_sync_ingestion::{KnowledgeSyncIngestion, KnowledgeSyncIngestionImpl},
-        sub_agent_turn_execution::{SubAgentTurnExecution, SubAgentTurnExecutionImpl},
         turn_execution::{TurnExecution, TurnExecutionImpl},
+        worker_turn_execution::{WorkerTurnExecution, WorkerTurnExecutionImpl},
     },
 };
 
@@ -118,7 +118,7 @@ const CORE_BODY_BINDINGS: &[RestateBinding] = &[
     RestateBinding::enabled("Skills", bind_skills),
     RestateBinding::enabled("CronJob", bind_cron_job),
     RestateBinding::enabled("Session", bind_session),
-    RestateBinding::enabled("SubAgent", bind_sub_agent),
+    RestateBinding::enabled("Worker", bind_worker),
     RestateBinding::enabled("Tenants", bind_tenants),
     RestateBinding::enabled("Tenant", bind_tenant),
     RestateBinding::enabled("Workflows", bind_workflows),
@@ -131,7 +131,7 @@ const CORE_BODY_BINDINGS: &[RestateBinding] = &[
 ];
 
 const CORE_TAIL_BINDINGS: &[RestateBinding] = &[
-    RestateBinding::enabled("SubAgentTurnExecution", bind_sub_agent_turn_execution),
+    RestateBinding::enabled("WorkerTurnExecution", bind_worker_turn_execution),
     RestateBinding::enabled("TurnExecution", bind_turn_execution),
 ];
 
@@ -413,8 +413,8 @@ fn bind_session(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> End
     builder.bind(SessionImpl.serve())
 }
 
-fn bind_sub_agent(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(SubAgentImpl.serve())
+fn bind_worker(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
+    builder.bind(WorkerImpl.serve())
 }
 
 fn bind_tenants(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
@@ -471,11 +471,11 @@ fn bind_experiment_trial_run(
     builder.bind(ExperimentTrialRunImpl.serve())
 }
 
-fn bind_sub_agent_turn_execution(
+fn bind_worker_turn_execution(
     builder: EndpointBuilder,
     _: &EndpointBindingContext<'_>,
 ) -> EndpointBuilder {
-    builder.bind(SubAgentTurnExecutionImpl.serve())
+    builder.bind(WorkerTurnExecutionImpl.serve())
 }
 
 fn bind_turn_execution(

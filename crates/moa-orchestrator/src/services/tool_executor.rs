@@ -38,6 +38,32 @@ pub trait ToolExecutor {
     async fn list_tools(
         tenant_id: Json<TenantId>,
     ) -> Result<Json<Vec<ToolDescriptor>>, HandlerError>;
+
+    /// Releases the hands and durable leases owned by one finishing worker scope.
+    async fn release_worker_hands(
+        request: Json<ReleaseWorkerHandsRequest>,
+    ) -> Result<(), HandlerError>;
+
+    /// Releases every hand and durable lease under a session at terminal teardown.
+    async fn release_session_hands(
+        request: Json<ReleaseSessionHandsRequest>,
+    ) -> Result<(), HandlerError>;
+}
+
+/// Request to release one finishing worker's scoped hands during its cleanup.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReleaseWorkerHandsRequest {
+    /// Owning session under which the worker's hands were provisioned.
+    pub session_id: SessionId,
+    /// Worker scope whose sandbox should be released.
+    pub worker_id: String,
+}
+
+/// Request to release every hand under a session at terminal teardown.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReleaseSessionHandsRequest {
+    /// Session whose hands and durable leases should be reclaimed.
+    pub session_id: SessionId,
 }
 
 /// Derived `ctx.run()` plan for one tool execution.
@@ -90,13 +116,17 @@ impl ToolExecutorImpl {
             name: request.tool_name.clone(),
             input: request.input.clone(),
         };
+        // Scope the hand (and its trusted-file manifest) to the originating
+        // worker so each worker owns its own sandbox; the root
+        // coordinator keeps `None` for the shared session-level scope.
+        let hand_scope = request.worker_id.as_deref();
         let trusted_sandbox_files = self.trusted_sandbox_files_for_request(request).await?;
         self.router
-            .set_trusted_sandbox_files(session, trusted_sandbox_files)
+            .set_trusted_sandbox_files(session, hand_scope, trusted_sandbox_files)
             .await;
         let (_hand_id, output) = self
             .router
-            .execute_authorized_with_recovery(session, &invocation)
+            .execute_authorized_with_recovery(session, hand_scope, &invocation)
             .await?;
         Ok(output)
     }
@@ -155,7 +185,7 @@ impl TrustedSandboxFileManifestStore for SessionStoreTrustedSandboxFileManifestS
 
 impl ToolExecutor for ToolExecutorImpl {
     #[tracing::instrument(skip(self, ctx, request))]
-    // SAFETY: Internal session and sub-agent workflows admit callers before invoking tool execution.
+    // SAFETY: Internal session and worker workflows admit callers before invoking tool execution.
     async fn execute(
         &self,
         ctx: Context<'_>,
@@ -256,6 +286,39 @@ impl ToolExecutor for ToolExecutorImpl {
         annotate_restate_handler_span("ToolExecutor", "list_tools");
         let _tenant_id = tenant_id.into_inner();
         Ok(Json::from(self.list_descriptors()))
+    }
+
+    #[tracing::instrument(skip(self, _ctx, request))]
+    // SAFETY: internal teardown dispatched by a finishing Worker VO's own cleanup path.
+    // It destroys only that worker's own `(session_id, worker_id)` sandbox scope and
+    // reads no caller-owned data back. The router logs and swallows its own failures, so
+    // this is non-fatal and always returns Ok; cleanup must never be blocked by it.
+    async fn release_worker_hands(
+        &self,
+        _ctx: Context<'_>,
+        request: Json<ReleaseWorkerHandsRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("ToolExecutor", "release_worker_hands");
+        let request = request.into_inner();
+        self.router
+            .destroy_worker_hands(&request.session_id, &request.worker_id)
+            .await;
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, _ctx, request))]
+    // SAFETY: internal teardown dispatched at session terminal teardown. It reclaims only
+    // that session's own hands/leases and reads no caller-owned data back. The router logs
+    // and swallows its own failures, so this is non-fatal and always returns Ok.
+    async fn release_session_hands(
+        &self,
+        _ctx: Context<'_>,
+        request: Json<ReleaseSessionHandsRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("ToolExecutor", "release_session_hands");
+        let request = request.into_inner();
+        self.router.destroy_session_hands(&request.session_id).await;
+        Ok(())
     }
 }
 
@@ -956,12 +1019,16 @@ mod tests {
             user_id: UserId::new("user-1"),
             idempotency_key: None,
             trusted_sandbox_manifest: None,
+            worker_id: None,
         }
     }
 
-    #[tokio::test]
-    async fn execute_buffered_installs_files_from_durable_request_manifest() {
-        // Pins: ToolExecutor does not rely on trusted-file state from the turn-loop router.
+    fn install_scenario() -> (
+        ToolExecutorImpl,
+        Arc<InstallingProvider>,
+        Vec<SandboxFile>,
+        TrustedSandboxFileManifestRef,
+    ) {
         let provider = Arc::new(InstallingProvider::default());
         let mut registry = ToolRegistry::default_local();
         registry.register_hand(
@@ -1008,7 +1075,14 @@ mod tests {
             .with_trusted_manifest_store(Arc::new(StaticTrustedManifestStore {
                 files: files.clone(),
             }));
-        let request = ToolCallRequest {
+        (executor, provider, files, manifest)
+    }
+
+    fn manifest_request(
+        manifest: TrustedSandboxFileManifestRef,
+        worker_id: Option<String>,
+    ) -> ToolCallRequest {
+        ToolCallRequest {
             tool_call_id: ToolCallId::new(),
             provider_tool_use_id: Some("provider-tool-use".to_string()),
             tool_name: "bash".to_string(),
@@ -1019,12 +1093,36 @@ mod tests {
             user_id: UserId::new("user-1"),
             idempotency_key: None,
             trusted_sandbox_manifest: Some(manifest),
-        };
+            worker_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_buffered_installs_files_from_durable_request_manifest() {
+        // Pins: ToolExecutor does not rely on trusted-file state from the turn-loop router.
+        let (executor, provider, files, manifest) = install_scenario();
+        let request = manifest_request(manifest, None);
 
         let output = executor
             .execute_buffered(&SessionMeta::default(), &request)
             .await
             .expect("tool execution should use request manifest");
+
+        assert!(!output.is_error);
+        assert_eq!(provider.installed_files(), files);
+    }
+
+    #[tokio::test]
+    async fn execute_buffered_installs_worker_trusted_files_under_its_scope() {
+        // Pins: a worker's trusted files install on ITS scoped hand, proving the
+        // set_trusted_sandbox_files write scope and the hand-execution read scope match.
+        let (executor, provider, files, manifest) = install_scenario();
+        let request = manifest_request(manifest, Some("worker-7".to_string()));
+
+        let output = executor
+            .execute_buffered(&SessionMeta::default(), &request)
+            .await
+            .expect("worker tool execution should install its scoped manifest");
 
         assert!(!output.is_error);
         assert_eq!(provider.installed_files(), files);

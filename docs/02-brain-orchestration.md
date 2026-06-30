@@ -1,6 +1,6 @@
 # 02 — Brain Orchestration
 
-_Restate orchestration, hosted API runtime mode, turn execution, and sub-agents._
+_Restate orchestration, hosted API runtime mode, turn execution, and workers._
 
 ## Source Of Truth
 
@@ -10,8 +10,8 @@ _Restate orchestration, hosted API runtime mode, turn execution, and sub-agents.
 - Client surface: HTTP routes on `moa-edge` and Restate ingress test calls
 - Shared turn helpers: `crates/moa-orchestrator/src/turn/`
 - Session VO: `crates/moa-orchestrator/src/objects/session/`
-- Sub-agent VO: `crates/moa-orchestrator/src/objects/sub_agent/`
-- Turn workflows: `crates/moa-orchestrator/src/workflows/turn_execution.rs` and `crates/moa-orchestrator/src/workflows/sub_agent_turn_execution.rs`
+- Worker VO: `crates/moa-orchestrator/src/objects/worker/`
+- Turn workflows: `crates/moa-orchestrator/src/workflows/turn_execution.rs` and `crates/moa-orchestrator/src/workflows/worker_turn_execution.rs`
 - Artifact workflow execution: `crates/moa-orchestrator/src/workflows/artifact_workflow_execution.rs`
 - CronJob VO: `crates/moa-orchestrator/src/objects/cron_job.rs`
 - Pipeline assembly: `crates/moa-brain/src/pipeline/mod.rs`
@@ -33,9 +33,9 @@ Core production Restate bindings:
 
 | Restate primitive | Handlers |
 |---|---|
-| Virtual Object | `Session`, `SubAgent`, `Tenant`, `CronJob`, `IngestionVO` |
+| Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` |
 | Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `ActionPolicy` |
-| Workflow | `ArtifactWorkflowExecution`, `KnowledgeSyncIngestion`, `Consolidate`, `TurnExecution`, `SubAgentTurnExecution` |
+| Workflow | `ArtifactWorkflowExecution`, `KnowledgeSyncIngestion`, `Consolidate`, `TurnExecution`, `WorkerTurnExecution` |
 
 Feature-gated Restate bindings:
 
@@ -106,7 +106,7 @@ turn loop.
 9. Derive experience records, attributions, and proposed learning candidates after assessment persistence.
 10. When skill learning is compiled, dispatch a detached `SkillLearning` workflow after experience persistence succeeds.
 
-The turn loop is durable because external calls and side effects are wrapped through Restate handlers or `ctx.run()` boundaries. Cancellation is delivered through a workflow promise; the workflow checks it at deterministic boundaries and races it against the in-flight LLM call. Awakeables are used for builtin async-authz challenges and sub-agent result waits, not for tool action review or turn cancellation. Skill-learning proposal generation is intentionally detached: turn completion does not wait for a draft skill proposal, and generation failures are recorded as warning events rather than turn failures.
+The turn loop is durable because external calls and side effects are wrapped through Restate handlers or `ctx.run()` boundaries. Cancellation is delivered through a workflow promise; the workflow checks it at deterministic boundaries and races it against the in-flight LLM call. Awakeables are used for builtin async-authz challenges and worker result waits, not for tool action review or turn cancellation. Skill-learning proposal generation is intentionally detached: turn completion does not wait for a draft skill proposal, and generation failures are recorded as warning events rather than turn failures.
 
 ### Lineage Sink Selection
 
@@ -165,20 +165,97 @@ Tool call
 
 Tenant action reviews are decided by tenant admins through `ActionReviews`; conversation clients do not unblock turns.
 
-## Sub-Agents
+## Workers
 
-`SubAgent` is a Restate virtual object because delegated work can be conversational. It stores:
+`Worker` is a Restate virtual object because delegated work can be conversational. It stores:
 
-- parent session and optional parent sub-agent
+- parent session and optional parent worker
 - depth
 - budget remaining and tokens used
 - task and tool subset
 - pending messages and local history
 - child refs, cached terminal child results, result waiters, and cancellation reason
+- last turn summary and last heartbeat for the telemetry plane (`last_turn_summary`, `last_heartbeat_at`)
+- pending `needs_input` requests and the self-cleanup generation counter (`pending_input_requests`, `cleanup_generation`)
 
-`SubAgent` admits conversational messages and starts at most one `SubAgentTurnExecution` workflow per active child turn. Workflow callbacks carry the admitted `turn_id`; stale responses, tool results, approval clears, and outcomes are ignored rather than mutating a newer turn.
+`Worker` admits conversational messages and starts at most one `WorkerTurnExecution` workflow per active child turn. Workflow callbacks carry the admitted `turn_id`; stale responses, tool results, approval clears, and outcomes are ignored rather than mutating a newer turn.
 
-Delegation is bounded by depth, active fan-out, repeated active task detection, and inherited token budgets. `spawn_sub_agent` returns immediately, and `wait_sub_agent` first consumes any cached terminal child result; otherwise it registers a child-owned result waiter awakeable and removes that waiter on timeout. Terminal child results are cached on the parent until consumed so finished detached children free active fan-out without losing the final result.
+Delegation is bounded by depth, active fan-out, repeated active task detection, and inherited token budgets. `spawn_worker` returns immediately, and `wait_worker` first consumes any cached terminal child result; otherwise it registers a child-owned result waiter awakeable and removes that waiter on timeout. Terminal child results are cached on the parent until consumed so finished detached children free active fan-out without losing the final result.
+
+### Two coordination planes
+
+Coordinator turns can return while detached children keep running. Coordination
+is split so the high-frequency path never serializes through the single-writer
+parent VO. `docs/12-restate-architecture.md` is the detailed reference.
+
+- **Telemetry plane (high-frequency, off the `Session` VO).** Child progress
+  still flows to the parent event log via `turn_progress` (`ProgressUpdate`);
+  heartbeats update `Worker` state only; `Session/progress` reads compact
+  per-child summaries (`WorkerProgressSummary`) by bounded fan-in on demand
+  through `Worker/progress_summary`.
+- **Control plane (low-frequency, through the coordinator VO).** A narrow
+  child→parent attention signal (`ChildSignalKind` =
+  `Finding`/`Blocked`/`NeedsInput`/`Failed`/`HeartbeatStale`) is routed to the
+  owning root `Session` via `parent_session` and recorded idempotently by
+  `Session::record_child_signal`. It updates the compact `unread_child_signals`
+  projection and may start one guarded resume turn when the parent is idle.
+
+`post_message` / `WorkerMessage::FollowUp` remains the parent→child primitive.
+There is no command bus and no second message queue: steering, the `needs_input`
+answer, and revival all reuse the existing message path.
+
+### Progress narration
+
+A single per-session **narrator** keeps the user informed during the detached
+window. The `Session` VO schedules a generation-guarded narration tick
+(`objects/session/narration.rs`) that never calls the model inline; when its gate
+opens it `.send()`s a detached `LLMGateway::narrate_session` job. That job reads
+the fan-in summaries and makes **one** cheapest-chat-model call covering all
+active workers plus the active coordinator step, appending one
+`ProgressNarrated` event per period — O(1) LLM cost regardless of fan-out. With a
+single active source it short-circuits with no LLM call (`model = "none"`).
+Narration is default-on (`progress_narration_enabled`), gated by a coarse cadence
+(`progress_narration_interval_ms`, ~20s), a content change cursor, and a
+per-window cap (`progress_narration_max_per_window`), and uses the cheapest
+catalog chat model unless `progress_narration_model` overrides it.
+
+### Guarded parent resume and `needs_input`
+
+An idle coordinator can start at most one bounded turn per resume-eligible signal,
+fenced by an active-turn gate, signal-id dedupe (`pending_parent_resume_signal`),
+and a per-session resume budget (`worker_resume_max_per_window` over
+`worker_resume_window_ms`). Resume is conservative — only
+`Blocked`/`NeedsInput`/`Failed`/`HeartbeatStale` with `ParentResumePolicy::IfIdle`,
+never `Finding`/progress/plain success — and runs as the session's recorded owning
+identity. The resume turn carries `RunTurnRequest.trigger = ChildSignal`, which
+skips the synthetic user message; the brain renders the recorded
+`WorkerParentResumeRequested` as a system directive. A running coordinator turn
+also drains queued signals at context-compile time, so unread `NeedsInput`/`Blocked`
+signals reach the model even without a resume.
+
+`needs_input` is a child→parent round-trip on the same message path: the child's
+`request_input` tool registers a Restate awakeable, emits a `NeedsInput` signal
+carrying `input_request_id`/`input_audience`, and blocks on the awakeable against a
+long timeout (`worker_input_timeout_ms`). The coordinator answers with the
+`provide_worker_input` tool → `WorkerMessage::ProvideInput`, which resolves
+the awakeable through `post_message`. Coordinator-audience questions are answered
+autonomously; surfacing a `User`-audience question to the human and forwarding the
+reply is a pending thin addition (the awakeable/`ProvideInput` mechanism is
+complete, and such questions are already visible to the coordinator via the
+recorded signal).
+
+### Self-cleanup and the liveness watchdog
+
+After a child reports terminal (cached result + result-waiter awakeable + events +
+idle-wake), it schedules a generation-guarded delayed `Worker::cleanup` self-call
+after `worker_cleanup_grace_ms`. Cleanup releases the child's own sandbox,
+removes it from the parent's fan-out, and clears VO state — bottom-up and only once
+the result is durable on the parent. A follow-up that arrives during the grace
+window revives the child instead, and messages to a cleaned/terminal child are
+rejected rather than re-bootstrapped. Separately, the `Session` VO arms a
+generation-guarded `check_child_liveness` watchdog per active child; on a stale
+heartbeat it appends `WorkerHeartbeatStale` and raises a `HeartbeatStale` signal,
+exempting children parked on a `needs_input` request (`awaiting_input`).
 
 ## Workflows
 
@@ -187,7 +264,7 @@ MOA has two workflow-shaped execution surfaces. Restate workflows run internal d
 - `Consolidate`: one tenant/date memory consolidation pass.
 - `KnowledgeSyncIngestion`: one tenant knowledge sync ingestion pass.
 - `TurnExecution`: one durable session turn keyed by `turn_id`; runs the top-level session brain loop and calls back to `Session` on completion, cancellation, or failure.
-- `SubAgentTurnExecution`: one admitted sub-agent turn keyed by `turn_id`; runs child-local LLM/tool loops and calls back to `SubAgent` with turn-scoped mutations.
+- `WorkerTurnExecution`: one admitted worker turn keyed by `turn_id`; runs child-local LLM/tool loops and calls back to `Worker` with turn-scoped mutations.
 
 These are workflow-shaped because rerunning the same logical job should be explicit and observable.
 
@@ -211,13 +288,13 @@ Workflow nodes stay decomposable for future dashboard editing:
 - `agent` nodes enqueue one bounded `Session` turn and wait for the existing
   `TurnExecution` result; `max_turns` caps that turn loop, not the workflow
   graph itself;
-- `sub_agent` nodes call the existing delegation path, including depth,
+- `worker` nodes call the existing delegation path, including depth,
   fan-out, repeated-task, and budget validation;
 - `memory_read` and `memory_write` nodes call the existing `Memory` service so
   tenant/contact scope, privacy, ingestion, and retrieval behavior do not fork
   inside the workflow runtime.
 
-Adapter nodes link to inner service records such as session turns, sub-agent
+Adapter nodes link to inner service records such as session turns, worker
 outputs, review IDs, memory hit IDs, or ingestion reports through node output.
 The workflow graph remains the product-visible control plane; detailed inner
 events remain in their owning service logs. Workflow improvement should operate

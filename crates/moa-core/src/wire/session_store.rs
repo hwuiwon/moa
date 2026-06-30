@@ -14,8 +14,8 @@ pub struct AppendEventRequest {
     pub event: Event,
     /// Optional idempotency key. When set, a retried append with the same
     /// `(session_id, dedupe_key)` returns the first persisted sequence number
-    /// without inserting a second event (see `session_event_dedupe`). Existing
-    /// callers omit it and every append inserts as before.
+    /// without inserting a second event (see `session_event_dedupe`); when unset,
+    /// every append inserts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedupe_key: Option<String>,
 }

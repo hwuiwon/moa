@@ -49,11 +49,29 @@ pub struct SessionLimitsConfig {
     pub progress_narration_max_per_window: u32,
     /// Maximum output tokens for one progress-narration completion.
     pub progress_narration_max_tokens: u32,
-    /// Grace window before a terminal sub-agent self-cleans (removes itself from the
+    /// Grace window before a terminal worker self-cleans (removes itself from the
     /// parent fan-out and clears its VO state) after reporting its result. A follow-up
     /// arriving within this window revives the child instead of letting it clean up.
     /// `0` disables self-cleanup scheduling.
-    pub sub_agent_cleanup_grace_ms: u64,
+    pub worker_cleanup_grace_ms: u64,
+    /// Maximum guarded coordinator auto-resumes dispatched per rolling window before the
+    /// resume path backs off. `0` disables guarded parent resume entirely.
+    pub worker_resume_max_per_window: u32,
+    /// Rolling-window length, in milliseconds, for the guarded parent-resume budget.
+    pub worker_resume_window_ms: u64,
+    /// Maximum time a child `request_input` round-trip blocks on its awakeable before
+    /// returning a "no input received" result so the child can proceed or abort. Kept
+    /// large because a human answer (audience = user) may take minutes.
+    pub worker_input_timeout_ms: u64,
+    /// Target cadence, in milliseconds, at which an active child refreshes its
+    /// telemetry-plane heartbeat while running. Sizes the heartbeat the watchdog
+    /// observes; consumers treat `0` as the built-in default cadence.
+    pub worker_heartbeat_interval_ms: u64,
+    /// Age, in milliseconds, beyond which an active child's last heartbeat is treated
+    /// as stale by the per-child liveness watchdog. The watchdog schedules its delayed
+    /// self-check at this interval and raises a non-fatal `HeartbeatStale` signal when
+    /// the threshold is exceeded. `0` disables the watchdog.
+    pub worker_heartbeat_stale_ms: u64,
 }
 
 impl Default for SessionLimitsConfig {
@@ -71,7 +89,12 @@ impl Default for SessionLimitsConfig {
             progress_narration_interval_ms: 20_000,
             progress_narration_max_per_window: 30,
             progress_narration_max_tokens: 120,
-            sub_agent_cleanup_grace_ms: 60_000,
+            worker_cleanup_grace_ms: 60_000,
+            worker_resume_max_per_window: 6,
+            worker_resume_window_ms: 600_000,
+            worker_input_timeout_ms: 1_800_000,
+            worker_heartbeat_interval_ms: 15_000,
+            worker_heartbeat_stale_ms: 60_000,
         }
     }
 }
@@ -381,8 +404,28 @@ impl super::MoaEnvOverlay {
             self.session_limits_progress_narration_max_tokens,
         );
         set_copy_if_some(
-            &mut config.session_limits.sub_agent_cleanup_grace_ms,
-            self.session_limits_sub_agent_cleanup_grace_ms,
+            &mut config.session_limits.worker_cleanup_grace_ms,
+            self.session_limits_worker_cleanup_grace_ms,
+        );
+        set_copy_if_some(
+            &mut config.session_limits.worker_resume_max_per_window,
+            self.session_limits_worker_resume_max_per_window,
+        );
+        set_copy_if_some(
+            &mut config.session_limits.worker_resume_window_ms,
+            self.session_limits_worker_resume_window_ms,
+        );
+        set_copy_if_some(
+            &mut config.session_limits.worker_input_timeout_ms,
+            self.session_limits_worker_input_timeout_ms,
+        );
+        set_copy_if_some(
+            &mut config.session_limits.worker_heartbeat_interval_ms,
+            self.session_limits_worker_heartbeat_interval_ms,
+        );
+        set_copy_if_some(
+            &mut config.session_limits.worker_heartbeat_stale_ms,
+            self.session_limits_worker_heartbeat_stale_ms,
         );
         self.apply_tooling(config);
         self.apply_query_rewrite(config);
@@ -573,6 +616,59 @@ mod tests {
         assert_eq!(limits.progress_narration_interval_ms, 20_000);
         assert_eq!(limits.progress_narration_max_per_window, 30);
         assert_eq!(limits.progress_narration_max_tokens, 120);
+    }
+
+    #[test]
+    fn worker_resume_budget_defaults_are_bounded() {
+        // Pins: guarded parent resume ships with a finite per-window budget and window.
+        let limits = SessionLimitsConfig::default();
+        assert_eq!(limits.worker_resume_max_per_window, 6);
+        assert_eq!(limits.worker_resume_window_ms, 600_000);
+        // The needs_input round-trip ships with a large (but finite) default so a human
+        // answer has time to arrive without blocking a child turn forever.
+        assert_eq!(limits.worker_input_timeout_ms, 1_800_000);
+    }
+
+    #[test]
+    fn worker_resume_budget_env_overlay_overrides_defaults() {
+        // Pins: each MOA_SESSION_LIMITS_WORKER_RESUME_* flat env var maps to its field.
+        let overlay = MoaEnvOverlay {
+            session_limits_worker_resume_max_per_window: Some(3),
+            session_limits_worker_resume_window_ms: Some(120_000),
+            session_limits_worker_input_timeout_ms: Some(90_000),
+            ..MoaEnvOverlay::default()
+        };
+
+        let mut config = MoaConfig::default();
+        overlay
+            .apply_to(&mut config)
+            .expect("resume budget overlay should apply");
+
+        let limits = &config.session_limits;
+        assert_eq!(limits.worker_resume_max_per_window, 3);
+        assert_eq!(limits.worker_resume_window_ms, 120_000);
+        assert_eq!(limits.worker_input_timeout_ms, 90_000);
+    }
+
+    #[test]
+    fn worker_heartbeat_defaults_and_env_overlay_override() {
+        // Pins: the watchdog cadence/threshold ship with bounded defaults and each flat
+        // MOA_SESSION_LIMITS_WORKER_HEARTBEAT_* env var maps to its field.
+        let limits = SessionLimitsConfig::default();
+        assert_eq!(limits.worker_heartbeat_interval_ms, 15_000);
+        assert_eq!(limits.worker_heartbeat_stale_ms, 60_000);
+
+        let overlay = MoaEnvOverlay {
+            session_limits_worker_heartbeat_interval_ms: Some(5_000),
+            session_limits_worker_heartbeat_stale_ms: Some(30_000),
+            ..MoaEnvOverlay::default()
+        };
+        let mut config = MoaConfig::default();
+        overlay
+            .apply_to(&mut config)
+            .expect("heartbeat overlay should apply");
+        assert_eq!(config.session_limits.worker_heartbeat_interval_ms, 5_000);
+        assert_eq!(config.session_limits.worker_heartbeat_stale_ms, 30_000);
     }
 
     #[test]

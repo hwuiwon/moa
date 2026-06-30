@@ -8,6 +8,22 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_SESSION_PROGRESS_EVENT_LIMIT: usize = 100;
 const MAX_SESSION_PROGRESS_EVENT_LIMIT: usize = 500;
 
+/// What initiated one `TurnExecution` run.
+///
+/// Defaults to [`TurnTrigger::UserMessage`], the common path where a user (or queued
+/// user) message drives the turn.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TurnTrigger {
+    /// A user (or queued user) message initiated the turn — the default path.
+    #[default]
+    UserMessage,
+    /// A guarded coordinator auto-resume from a child control-plane signal. For this
+    /// trigger the request's `user_message` carries the system-generated coordinator
+    /// INSTRUCTION text (the signal kind/summary plus unread-signal context), not a
+    /// human user message, and no `Event::UserMessage` is appended for the turn.
+    ChildSignal,
+}
+
 /// Input accepted by one `TurnExecution` workflow run.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RunTurnRequest {
@@ -20,7 +36,8 @@ pub struct RunTurnRequest {
     /// Agent-facing contact admitted by the Session VO for this turn.
     #[serde(default)]
     pub contact: Option<ContactRef>,
-    /// User message that initiated the turn.
+    /// User message that initiated the turn, or — for [`TurnTrigger::ChildSignal`] —
+    /// the system-generated coordinator instruction text.
     pub user_message: String,
     /// User message attachments that initiated the turn.
     #[serde(default)]
@@ -31,13 +48,20 @@ pub struct RunTurnRequest {
     /// Optional turn-iteration cap for this request.
     #[serde(default)]
     pub max_turns: Option<u32>,
+    /// What initiated this turn. Defaults to a user message, the common path.
+    #[serde(default)]
+    pub trigger: TurnTrigger,
+    /// Child control-plane signal that triggered a guarded coordinator resume; `Some`
+    /// only when `trigger == ChildSignal`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_signal_id: Option<AgentSignalId>,
 }
 
-/// Input accepted by one `SubAgentTurnExecution` workflow run.
+/// Input accepted by one `WorkerTurnExecution` workflow run.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct RunSubAgentTurnRequest {
-    /// Sub-agent object key whose queued messages should be processed.
-    pub sub_agent_id: String,
+pub struct RunWorkerTurnRequest {
+    /// Worker object key whose queued messages should be processed.
+    pub worker_id: String,
     /// Stable turn identifier and workflow key.
     pub turn_id: String,
     /// Optional turn-iteration cap for this child turn workflow.
@@ -278,10 +302,10 @@ pub struct SessionProgress {
     pub active_turn_progress: Option<TurnProgress>,
     /// Durable event history matching the requested range.
     pub events: Vec<EventRecord>,
-    /// Compact fan-in summaries for active child sub-agents. Omitted by older
+    /// Compact fan-in summaries for active child workers. Omitted by older
     /// clients and absent when the session has no children.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub child_progress: Vec<SubAgentProgressSummary>,
+    pub child_progress: Vec<WorkerProgressSummary>,
 }
 
 fn default_session_progress_event_range() -> EventRange {

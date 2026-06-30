@@ -13,7 +13,7 @@ Status: early active development. The architecture is stable enough to document,
 ## What Matters
 
 - **Enterprise tenancy:** tenants own contacts, sessions, memory, skills, learning entries, lineage, policies, and audit evidence.
-- **Durable orchestration:** Restate virtual objects own sessions and sub-agents; workflows own one-shot jobs such as memory consolidation.
+- **Durable orchestration:** Restate virtual objects own sessions and workers; workflows own one-shot jobs such as memory consolidation.
 - **Postgres everywhere:** sessions, events, analytics, task segments, memory indexes, embeddings, and the learning log live in Postgres/Neon.
 - **Task-aware sessions:** every session can contain multiple task segments, each with tool and skill usage, cost, and a resolution score.
 - **Per-tenant learning:** tenants own learning entries and outcome aggregates that improve skill ranking and memory updates.
@@ -146,13 +146,13 @@ MOA_OPENAI_API_KEY=...
 cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --health-port 10021
 ```
 
-The binary serves these Restate surfaces: virtual objects `Session`, `SubAgent`,
+The binary serves these Restate surfaces: virtual objects `Session`, `Worker`,
 `Tenant`, `CronJob`, and `IngestionVO`; services `AgentDefinitions`, `Agents`,
 `AdminMaintenance`, `Artifacts`, `ActionReviews`, `ApiKeys`, `Authz`,
 `AuthzChallenges`, `Contacts`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`,
 `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`,
 `Tenants`, `ToolExecutor`, `ActionPolicy`, and `Workflows`; and workflows
-`Consolidate`, `TurnExecution`, `SubAgentTurnExecution`,
+`Consolidate`, `TurnExecution`, `WorkerTurnExecution`,
 `ArtifactWorkflowExecution`, and `KnowledgeSyncIngestion`. Feature-gated builds
 also register experiment and eval-runner surfaces. Deployment registration is
 handled outside the binary.
@@ -177,7 +177,7 @@ REST / Messaging / API automation
 Restate handler service (`moa-orchestrator-bin`)
         |
         +-- Session VO -> TurnRunner -> context pipeline -> LLMGateway
-        +-- SubAgent VO -> bounded child agent execution
+        +-- Worker VO -> bounded child agent execution
         +-- ToolExecutor -> ToolRouter -> hands / MCP / built-ins
         +-- Consolidate workflow -> memory compaction
         +-- IngestionVO -> graph memory updates
@@ -260,7 +260,7 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 Start with [`docs/README.md`](docs/README.md), then read:
 
 - [`docs/01-architecture-overview.md`](docs/01-architecture-overview.md) for the system model and trait map.
-- [`docs/02-brain-orchestration.md`](docs/02-brain-orchestration.md) for Restate session and sub-agent flow.
+- [`docs/02-brain-orchestration.md`](docs/02-brain-orchestration.md) for Restate session and worker flow.
 - [`docs/13-task-segmentation.md`](docs/13-task-segmentation.md) for segments and resolution scoring.
 - [`docs/14-multi-tenancy-and-learning.md`](docs/14-multi-tenancy-and-learning.md) for tenants, skills-first learning, rollback, and the learning log.
 - [`architecture.md`](architecture.md) for the current enterprise runtime map.

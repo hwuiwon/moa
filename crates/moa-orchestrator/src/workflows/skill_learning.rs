@@ -199,6 +199,7 @@ pub async fn record_skill_learning_failure(
             Event::Warning {
                 message: skill_learning_failure_message(experience_id, error),
             },
+            None,
         )
         .await
 }

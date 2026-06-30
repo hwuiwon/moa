@@ -144,7 +144,7 @@ and deployment setup. Key groups:
 
 Implemented architectural pillars:
 
-- Restate cloud orchestration with session, sub-agent, tenant, service, and workflow handlers.
+- Restate cloud orchestration with session, worker, tenant, service, and workflow handlers.
 - One `moa-orchestrator` production binary for local development and cloud execution, with domain logic kept behind in-process application and repository boundaries.
 - Postgres session store with tenant-isolated event log, analytics, task segments, and learning log.
 - Postgres hand leases and Postgres-backed claim-check blobs for cross-pod sandbox and replay correctness.
@@ -225,3 +225,25 @@ Kubernetes routing is non-sticky. Correctness-sensitive state must be stored in
 Postgres, Restate, or Redis-backed `RuntimeCacheStore`. The memory runtime cache
 backend is per process and suitable only for local development or best-effort
 transient behavior.
+
+### Durable Coordination Topology
+
+Durable main-agent/worker coordination keeps working across non-sticky
+replicas because all of its correctness state lives in Restate VO/workflow state
+and Postgres, never in process memory or Redis:
+
+- **Restate + Postgres are required for correctness.** Child attention signals,
+  guarded parent resume, terminal results, heartbeat-stale detection, narration
+  scheduling, and self-cleanup are all driven by `Session`/`Worker` VO state,
+  Restate awakeables/delayed self-calls, and idempotent Postgres event appends
+  (the `session_event_dedupe` guard). Any orchestrator replica can pick up the
+  next message or fired tick.
+- **Redis is runtime cache only**, never a correctness owner for signals, resume,
+  or terminal results.
+- **Coordinator/worker/sandbox topology.** The root coordinator
+  (`Session`/`TurnExecution`) is sandbox-free; each worker owns one ephemeral
+  sandbox keyed `(session_id, worker_id, provider)` in `moa.hand_leases`,
+  released on worker self-cleanup. Sandboxes are refreshable: durable state
+  lives in the event log and object store, and a crashed sandbox is reprovisioned
+  under a new lease generation. Readiness should still require the orchestrator's
+  Restate services to be registered before the replica takes traffic.

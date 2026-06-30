@@ -135,7 +135,7 @@ impl<'a> WorkflowInterpreter<'a> {
                 | WorkflowNodeKind::Tool
                 | WorkflowNodeKind::SkillAction
                 | WorkflowNodeKind::Agent
-                | WorkflowNodeKind::SubAgent
+                | WorkflowNodeKind::Worker
                 | WorkflowNodeKind::Review
                 | WorkflowNodeKind::WaitSignal
                 | WorkflowNodeKind::MemoryRead
@@ -502,13 +502,13 @@ pub enum WorkflowNodeRequest {
         /// Optional maximum autonomous turns.
         max_turns: Option<u32>,
     },
-    /// Existing bounded sub-agent invocation.
-    SubAgent {
+    /// Existing bounded worker invocation.
+    Worker {
         /// Source workflow node ID.
         node_id: String,
-        /// Skill references pinned for the sub-agent.
+        /// Skill references pinned for the worker.
         skill_refs: Vec<ArtifactRef>,
-        /// Tool references pinned for the sub-agent.
+        /// Tool references pinned for the worker.
         tool_refs: Vec<ArtifactRef>,
         /// Node input payload.
         input: Value,
@@ -570,7 +570,7 @@ impl WorkflowNodeRequest {
                 input: node.input.clone(),
                 max_turns: node.max_turns,
             },
-            WorkflowNodeKind::SubAgent => Self::SubAgent {
+            WorkflowNodeKind::Worker => Self::Worker {
                 node_id: node.id.clone(),
                 skill_refs: node.skill_refs.clone(),
                 tool_refs: node.tool_refs.clone(),
@@ -731,7 +731,7 @@ fn node_kind_label(kind: &WorkflowNodeKind) -> &'static str {
         WorkflowNodeKind::End => "end",
         WorkflowNodeKind::Tool => "tool",
         WorkflowNodeKind::SkillAction => "skill_action",
-        WorkflowNodeKind::SubAgent => "sub_agent",
+        WorkflowNodeKind::Worker => "worker",
         WorkflowNodeKind::Parallel => "parallel",
         WorkflowNodeKind::Join => "join",
         WorkflowNodeKind::WaitSignal => "wait_signal",
@@ -1123,7 +1123,7 @@ mod tests {
             | WorkflowNodeRequest::Tool { node_id, .. }
             | WorkflowNodeRequest::SkillAction { node_id, .. }
             | WorkflowNodeRequest::Agent { node_id, .. }
-            | WorkflowNodeRequest::SubAgent { node_id, .. }
+            | WorkflowNodeRequest::Worker { node_id, .. }
             | WorkflowNodeRequest::Review { node_id, .. }
             | WorkflowNodeRequest::WaitSignal { node_id, .. }
             | WorkflowNodeRequest::MemoryRead { node_id, .. }

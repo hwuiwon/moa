@@ -7,10 +7,10 @@ use uuid::Uuid;
 
 use crate::types::{
     ActionEnvelope, ActionReviewDecision, ActionReviewPreview, AgentSignalId, Attachment,
-    CacheReport, Channel, ChildSignalKind, ContactId, GuardrailDirection, GuardrailMode, ModelId,
-    ModelTier, NarrationSegment, NarrationSource, SegmentId, SessionActorRef,
-    SessionChannelBindingId, SessionStatus, SignalSeverity, SubAgentId, SubAgentState, TenantId,
-    ToolCallId, ToolOutput,
+    CacheReport, Channel, ChildSignalKind, ContactId, GuardrailDirection, GuardrailMode,
+    InputAudience, ModelId, ModelTier, NarrationSegment, NarrationSource, SegmentId,
+    SessionActorRef, SessionChannelBindingId, SessionStatus, SignalSeverity, TenantId, ToolCallId,
+    ToolOutput, WorkerId, WorkerState,
 };
 
 /// Append-only session event payload.
@@ -278,13 +278,13 @@ pub enum Event {
         /// Decision timestamp.
         decided_at: DateTime<Utc>,
     },
-    /// A child sub-agent was spawned by a root session or parent sub-agent.
-    SubAgentSpawned {
-        /// Child sub-agent identifier.
-        sub_agent_id: SubAgentId,
-        /// Parent sub-agent identifier for nested children.
+    /// A child worker was spawned by a root session or parent worker.
+    WorkerSpawned {
+        /// Child worker identifier.
+        worker_id: WorkerId,
+        /// Parent worker identifier for nested children.
         #[serde(skip_serializing_if = "Option::is_none")]
-        parent_sub_agent_id: Option<SubAgentId>,
+        parent_worker_id: Option<WorkerId>,
         /// Stable model-visible child path.
         path: String,
         /// Delegated task text.
@@ -292,69 +292,83 @@ pub enum Event {
         /// Reserved token budget for the child.
         budget_tokens: u64,
     },
-    /// A parent sent a follow-up or steering message to a child sub-agent.
-    SubAgentMessageSent {
-        /// Child sub-agent identifier.
-        sub_agent_id: SubAgentId,
-        /// Parent sub-agent identifier for nested children.
+    /// A parent sent a follow-up or steering message to a child worker.
+    WorkerMessageSent {
+        /// Child worker identifier.
+        worker_id: WorkerId,
+        /// Parent worker identifier for nested children.
         #[serde(skip_serializing_if = "Option::is_none")]
-        parent_sub_agent_id: Option<SubAgentId>,
+        parent_worker_id: Option<WorkerId>,
         /// Message text sent to the child.
         text: String,
     },
-    /// A child sub-agent lifecycle state changed.
-    SubAgentStatusChanged {
-        /// Child sub-agent identifier.
-        sub_agent_id: SubAgentId,
+    /// A child worker lifecycle state changed.
+    WorkerStatusChanged {
+        /// Child worker identifier.
+        worker_id: WorkerId,
         /// Previous known state, when available.
         #[serde(skip_serializing_if = "Option::is_none")]
-        from: Option<SubAgentState>,
+        from: Option<WorkerState>,
         /// New state.
-        to: SubAgentState,
+        to: WorkerState,
         /// Optional status summary.
         #[serde(skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
     },
-    /// A child sub-agent terminal notification was delivered to the parent session log.
-    SubAgentNotificationDelivered {
-        /// Child sub-agent identifier.
-        sub_agent_id: SubAgentId,
+    /// A child worker terminal notification was delivered to the parent session log.
+    WorkerNotificationDelivered {
+        /// Child worker identifier.
+        worker_id: WorkerId,
         /// Terminal state delivered.
-        state: SubAgentState,
+        state: WorkerState,
         /// Short result or error summary.
         summary: String,
     },
     /// A control-plane attention signal from a child was recorded on the coordinator.
-    SubAgentSignalReceived {
+    WorkerSignalReceived {
         /// Stable identifier for the recorded signal.
         signal_id: AgentSignalId,
-        /// Child sub-agent that raised the signal.
-        sub_agent_id: SubAgentId,
-        /// Immediate parent sub-agent for nested children.
+        /// Child worker that raised the signal.
+        worker_id: WorkerId,
+        /// Immediate parent worker for nested children.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent_sub_agent_id: Option<SubAgentId>,
+        parent_worker_id: Option<WorkerId>,
         /// Kind of attention requested.
         kind: ChildSignalKind,
         /// Relative urgency of the signal.
         severity: SignalSeverity,
         /// Short, safe summary of the signal.
         summary: String,
+        /// Awakeable id the child is blocked on; `Some` only for `NeedsInput`.
+        ///
+        /// Persisted on the event (not only the compact VO projection) so that any
+        /// later coordinator turn rendered from the history window — including a
+        /// plain `UserMessage` turn, not just a guarded `ChildSignal` resume — can
+        /// answer the request via `provide_worker_input`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_request_id: Option<String>,
+        /// Who should answer the request; `Some` only for `NeedsInput`.
+        ///
+        /// `User` means the question must be surfaced to the human; `Coordinator`
+        /// means the coordinator may answer it autonomously.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_audience: Option<InputAudience>,
     },
     /// A child signal triggered a guarded coordinator auto-resume turn.
-    SubAgentParentResumeRequested {
+    WorkerParentResumeRequested {
         /// Signal that triggered the resume.
         signal_id: AgentSignalId,
-        /// Child sub-agent associated with the resume.
-        sub_agent_id: SubAgentId,
+        /// Child worker associated with the resume.
+        worker_id: WorkerId,
         /// Coordinator turn id dispatched for the resume.
         turn_id: String,
         /// Short reason the resume was requested.
         reason: String,
     },
     /// A child's heartbeat was detected stale by the watchdog.
-    SubAgentHeartbeatStale {
-        /// Child sub-agent whose heartbeat went stale.
-        sub_agent_id: SubAgentId,
+    WorkerHeartbeatStale {
+        /// Child worker whose heartbeat went stale.
+        worker_id: WorkerId,
         /// Last heartbeat timestamp observed before the staleness was detected.
         last_heartbeat_at: DateTime<Utc>,
         /// Stale threshold, in milliseconds, that was exceeded.
@@ -363,7 +377,7 @@ pub enum Event {
     /// One durable, rate-limited natural-language progress narration for the session.
     ///
     /// Emitted by the per-session narrator: one merged update per period covering
-    /// all active sub-agents (and the active coordinator step). Carries
+    /// all active workers (and the active coordinator step). Carries
     /// `model`/`tokens_used` for cost observability.
     ProgressNarrated {
         /// Source attributed to the merged narration (`Coordinator` for the merge).
@@ -609,7 +623,7 @@ mod tests {
                 id: Uuid::from_u128(2),
             },
             session_id: Some(crate::types::SessionId::new()),
-            sub_agent_id: None,
+            worker_id: None,
             tool_call_id: ToolCallId::from(review_id),
             tool_name: tool_name.to_string(),
             normalized_input: input_summary.to_string(),
@@ -779,78 +793,80 @@ mod tests {
     }
 
     #[test]
-    fn sub_agent_lifecycle_events_use_stable_type_names() {
-        // Pins: sub-agent lifecycle events have stable event-log discriminators.
+    fn worker_lifecycle_events_use_stable_type_names() {
+        // Pins: worker lifecycle events have stable event-log discriminators.
         let events = [
             (
-                Event::SubAgentSpawned {
-                    sub_agent_id: "child-1".to_string(),
-                    parent_sub_agent_id: None,
+                Event::WorkerSpawned {
+                    worker_id: "child-1".to_string(),
+                    parent_worker_id: None,
                     path: "/root/research".to_string(),
                     task: "research".to_string(),
                     budget_tokens: 512,
                 },
-                EventType::SubAgentSpawned,
-                "SubAgentSpawned",
+                EventType::WorkerSpawned,
+                "WorkerSpawned",
             ),
             (
-                Event::SubAgentMessageSent {
-                    sub_agent_id: "child-1".to_string(),
-                    parent_sub_agent_id: None,
+                Event::WorkerMessageSent {
+                    worker_id: "child-1".to_string(),
+                    parent_worker_id: None,
                     text: "continue".to_string(),
                 },
-                EventType::SubAgentMessageSent,
-                "SubAgentMessageSent",
+                EventType::WorkerMessageSent,
+                "WorkerMessageSent",
             ),
             (
-                Event::SubAgentStatusChanged {
-                    sub_agent_id: "child-1".to_string(),
-                    from: Some(SubAgentState::Running),
-                    to: SubAgentState::Completed,
+                Event::WorkerStatusChanged {
+                    worker_id: "child-1".to_string(),
+                    from: Some(WorkerState::Running),
+                    to: WorkerState::Completed,
                     summary: Some("done".to_string()),
                 },
-                EventType::SubAgentStatusChanged,
-                "SubAgentStatusChanged",
+                EventType::WorkerStatusChanged,
+                "WorkerStatusChanged",
             ),
             (
-                Event::SubAgentNotificationDelivered {
-                    sub_agent_id: "child-1".to_string(),
-                    state: SubAgentState::Completed,
+                Event::WorkerNotificationDelivered {
+                    worker_id: "child-1".to_string(),
+                    state: WorkerState::Completed,
                     summary: "done".to_string(),
                 },
-                EventType::SubAgentNotificationDelivered,
-                "SubAgentNotificationDelivered",
+                EventType::WorkerNotificationDelivered,
+                "WorkerNotificationDelivered",
             ),
             (
-                Event::SubAgentSignalReceived {
+                Event::WorkerSignalReceived {
                     signal_id: AgentSignalId::new(),
-                    sub_agent_id: "child-1".to_string(),
-                    parent_sub_agent_id: None,
+                    worker_id: "child-1".to_string(),
+                    parent_worker_id: None,
                     kind: ChildSignalKind::Blocked,
                     severity: SignalSeverity::Warning,
                     summary: "blocked on input".to_string(),
+                    input_request_id: None,
+                    input_audience: None,
                 },
-                EventType::SubAgentSignalReceived,
-                "SubAgentSignalReceived",
+                EventType::WorkerSignalReceived,
+                "WorkerSignalReceived",
             ),
             (
-                Event::SubAgentParentResumeRequested {
+                Event::WorkerParentResumeRequested {
                     signal_id: AgentSignalId::new(),
-                    sub_agent_id: "child-1".to_string(),
+                    worker_id: "child-1".to_string(),
                     turn_id: "turn-1".to_string(),
                     reason: "child blocked".to_string(),
                 },
-                EventType::SubAgentParentResumeRequested,
-                "SubAgentParentResumeRequested",
+                EventType::WorkerParentResumeRequested,
+                "WorkerParentResumeRequested",
             ),
             (
-                Event::SubAgentHeartbeatStale {
-                    sub_agent_id: "child-1".to_string(),
+                Event::WorkerHeartbeatStale {
+                    worker_id: "child-1".to_string(),
                     last_heartbeat_at: Utc::now(),
                     threshold_ms: 30_000,
                 },
-                EventType::SubAgentHeartbeatStale,
-                "SubAgentHeartbeatStale",
+                EventType::WorkerHeartbeatStale,
+                "WorkerHeartbeatStale",
             ),
             (
                 Event::ProgressNarrated {
@@ -868,6 +884,53 @@ mod tests {
         for (event, expected_type, expected_name) in events {
             assert_eq!(event.event_type(), expected_type);
             assert_eq!(event.type_name(), expected_name);
+        }
+    }
+
+    #[test]
+    fn worker_signal_received_round_trips_needs_input_routing() {
+        // Pins: NeedsInput signals persist the awakeable id and audience on the event
+        // so a later coordinator turn can answer via `provide_worker_input`, and a
+        // payload that omits those optional input fields decodes to `None` for both.
+        let event = Event::WorkerSignalReceived {
+            signal_id: AgentSignalId::new(),
+            worker_id: "child-7".to_string(),
+            parent_worker_id: None,
+            kind: ChildSignalKind::NeedsInput,
+            severity: SignalSeverity::Warning,
+            summary: "needs the staging API key".to_string(),
+            input_request_id: Some("req-42".to_string()),
+            input_audience: Some(InputAudience::User),
+        };
+
+        let encoded = serde_json::to_string(&event).expect("serialize signal event");
+        assert_eq!(
+            serde_json::from_str::<Event>(&encoded).expect("deserialize signal event"),
+            event
+        );
+
+        let without_input_fields = serde_json::json!({
+            "type": "WorkerSignalReceived",
+            "data": {
+                "signal_id": Uuid::now_v7(),
+                "worker_id": "child-7",
+                "kind": "needs_input",
+                "severity": "warning",
+                "summary": "needs the staging API key"
+            }
+        });
+        let decoded = serde_json::from_value::<Event>(without_input_fields)
+            .expect("decode signal event without input fields");
+        match decoded {
+            Event::WorkerSignalReceived {
+                input_request_id,
+                input_audience,
+                ..
+            } => {
+                assert!(input_request_id.is_none());
+                assert!(input_audience.is_none());
+            }
+            other => panic!("unexpected decoded event: {other:?}"),
         }
     }
 

@@ -100,6 +100,16 @@ pub(crate) async fn prepare_turn_request(
             }
         };
     let lineage = ctx.lineage();
+    // The root coordinator turn is always sandbox-free: hard-exclude sandbox/compute
+    // (hand-routed) tools so the coordinator can never provision a hand. The
+    // worker tool subsets (built from the unfiltered `current_tool_schemas`)
+    // keep these tools, so all compute is delegated.
+    let root_tool_schemas = {
+        let tool_router = ctx.tool_router();
+        coordinator_tool_schemas(ctx.tool_schemas().as_ref(), |name| {
+            tool_router.tool_requires_sandbox(name)
+        })
+    };
     let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         config.as_ref(),
         session_store.clone(),
@@ -113,7 +123,7 @@ pub(crate) async fn prepare_turn_request(
             query_rewrite_llm_provider: query_rewrite_provider,
             identity_prompt_override: None,
             discovered_workspace_instructions: None,
-            tool_schemas: ctx.tool_schemas().as_ref().clone(),
+            tool_schemas: root_tool_schemas,
             lineage: lineage.clone(),
         },
     );
@@ -188,6 +198,33 @@ pub(crate) async fn prepare_turn_request(
         query_rewrite_cache,
         citation_sources,
     })
+}
+
+/// Removes sandbox-requiring (hand-routed) tool schemas so the root coordinator
+/// turn is offered only sandbox-free tools.
+///
+/// `requires_sandbox` classifies a tool *name* as hand/sandbox-executed; in
+/// production this is [`moa_hands::ToolRouter::tool_requires_sandbox`], the
+/// authoritative execution-routing predicate. Delegation, memory, retrieval, and
+/// read tools are not hand-routed, so they are preserved. Schemas without a
+/// string `name` are retained defensively: they cannot be classified as sandbox
+/// tools and are never the hand-routed compute tools this filter targets. The
+/// input slice is left untouched (a new `Vec` is returned), so the shared
+/// `current_tool_schemas` source that worker subsets read stays complete.
+pub(crate) fn coordinator_tool_schemas(
+    schemas: &[serde_json::Value],
+    requires_sandbox: impl Fn(&str) -> bool,
+) -> Vec<serde_json::Value> {
+    schemas
+        .iter()
+        .filter(|schema| {
+            !schema
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(&requires_sandbox)
+        })
+        .cloned()
+        .collect()
 }
 
 async fn persist_context_snapshot(
@@ -279,4 +316,99 @@ fn query_rewrite_cache_from_context(
         user_sequence_num,
         result,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::coordinator_tool_schemas;
+    use serde_json::{Value, json};
+
+    /// Mirrors the production hand-routed (sandbox) tool catalog so the filter
+    /// mechanics are exercised against representative names. The authoritative
+    /// classification lives in `moa_hands::ToolRouter::tool_requires_sandbox`,
+    /// pinned in `moa-hands` registration tests.
+    fn requires_sandbox(name: &str) -> bool {
+        matches!(
+            name,
+            "bash"
+                | "grep"
+                | "file_read"
+                | "file_outline"
+                | "file_search"
+                | "file_write"
+                | "str_replace"
+        )
+    }
+
+    fn schema(name: &str) -> Value {
+        json!({ "name": name, "description": name, "input_schema": {} })
+    }
+
+    fn names(schemas: &[Value]) -> Vec<String> {
+        schemas
+            .iter()
+            .filter_map(|schema| schema.get("name").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn coordinator_tool_schemas_drops_hand_tools_but_keeps_delegation_and_read() {
+        // Pins: the sandbox-free root coordinator loses hand-routed compute tools (bash,
+        // file_write) while keeping read/memory tools and delegation tools.
+        let source = vec![
+            schema("bash"),
+            schema("file_write"),
+            schema("session_search"),
+            schema("tool_result_read"),
+            schema("spawn_worker"),
+            schema("wait_worker"),
+        ];
+
+        let coordinator = coordinator_tool_schemas(&source, requires_sandbox);
+
+        let kept = names(&coordinator);
+        assert!(!kept.contains(&"bash".to_string()), "bash must be excluded");
+        assert!(
+            !kept.contains(&"file_write".to_string()),
+            "file_write must be excluded"
+        );
+        assert!(kept.contains(&"session_search".to_string()));
+        assert!(kept.contains(&"tool_result_read".to_string()));
+        assert!(kept.contains(&"spawn_worker".to_string()));
+        assert!(kept.contains(&"wait_worker".to_string()));
+    }
+
+    #[test]
+    fn coordinator_filter_leaves_worker_tool_source_intact() {
+        // Pins: filtering for the coordinator returns a new set and never mutates the shared
+        // schema source, so a worker subset that allows "bash" still resolves it.
+        let source = vec![schema("bash"), schema("session_search")];
+
+        let coordinator = coordinator_tool_schemas(&source, requires_sandbox);
+        assert!(!names(&coordinator).contains(&"bash".to_string()));
+
+        // The worker path intersects its allow-list against the unfiltered source.
+        let worker_subset = ["bash", "session_search"];
+        let worker_tools = names(&source)
+            .into_iter()
+            .filter(|name| worker_subset.contains(&name.as_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            worker_tools.contains(&"bash".to_string()),
+            "worker subset must still see the sandbox tool from the untouched source"
+        );
+    }
+
+    #[test]
+    fn coordinator_tool_schemas_retains_unnamed_schemas() {
+        // Pins: a schema without a string name cannot be classified as a sandbox tool and is
+        // preserved rather than silently dropped.
+        let source = vec![json!({ "description": "anonymous" }), schema("bash")];
+
+        let coordinator = coordinator_tool_schemas(&source, requires_sandbox);
+
+        assert_eq!(coordinator.len(), 1);
+        assert!(coordinator[0].get("name").is_none());
+    }
 }

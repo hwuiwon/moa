@@ -2,8 +2,8 @@
 
 use chrono::Utc;
 use moa_core::{
-    CancelScope, Channel, ModelId, SessionActorRef, SessionMeta, SessionStatus, SubAgentResult,
-    SubAgentState, SubAgentTerminalResult, TenantId,
+    CancelScope, Channel, ModelId, SessionActorRef, SessionMeta, SessionStatus, TenantId,
+    WorkerResult, WorkerState, WorkerTerminalResult,
 };
 use moa_orchestrator::objects::session::{
     ChildProgressFetch, SessionVoState, plan_child_progress_fan_in, terminal_child_summary,
@@ -80,8 +80,8 @@ fn session_vo_cancel_sets_flag() {
     assert_eq!(state.take_cancel_flag(), None);
 }
 
-fn test_child_ref(id: &str) -> moa_core::SubAgentChildRef {
-    moa_core::SubAgentChildRef {
+fn test_child_ref(id: &str) -> moa_core::WorkerChildRef {
+    moa_core::WorkerChildRef {
         id: id.to_string(),
         task_hash: format!("hash-{id}"),
         budget_tokens: 0,
@@ -92,7 +92,7 @@ fn test_child_ref(id: &str) -> moa_core::SubAgentChildRef {
 #[test]
 fn coordinator_only_cancel_preserves_child_refs() {
     // Pins: a CoordinatorOnly cancel stops only the coordinator turn and does not cascade to
-    // children, so the handler must not forward SubAgent/cancel and the child refs stay registered.
+    // children, so the handler must not forward Worker/cancel and the child refs stay registered.
     let mut state = SessionVoState::default();
     state.set_meta(test_meta());
     state.children.push(test_child_ref("child-1"));
@@ -109,7 +109,7 @@ fn coordinator_only_cancel_preserves_child_refs() {
 
 #[test]
 fn task_tree_cancel_cancels_children() {
-    // Pins: a TaskTree cancel reproduces today's behavior — the handler forwards SubAgent/cancel
+    // Pins: a TaskTree cancel reproduces today's behavior — the handler forwards Worker/cancel
     // to every registered child in addition to cancelling the coordinator turn.
     let mut state = SessionVoState::default();
     state.set_meta(test_meta());
@@ -127,15 +127,15 @@ fn task_tree_cancel_cancels_children() {
     assert_eq!(state.take_cancel_flag(), Some(CancelScope::TaskTree));
 }
 
-fn terminal_child_ref(id: &str, output: &str) -> moa_core::SubAgentChildRef {
-    moa_core::SubAgentChildRef {
+fn terminal_child_ref(id: &str, output: &str) -> moa_core::WorkerChildRef {
+    moa_core::WorkerChildRef {
         id: id.to_string(),
         task_hash: format!("hash-{id}"),
         budget_tokens: 256,
-        terminal: Some(SubAgentTerminalResult {
-            state: SubAgentState::Completed,
-            result: SubAgentResult {
-                sub_agent_id: id.to_string(),
+        terminal: Some(WorkerTerminalResult {
+            state: WorkerState::Completed,
+            result: WorkerResult {
+                worker_id: id.to_string(),
                 success: true,
                 output: output.to_string(),
                 tokens_used: 42,
@@ -161,8 +161,8 @@ fn session_progress_fan_in_includes_active_child_and_synthesizes_terminal() {
     assert_eq!(plan[0], ChildProgressFetch::Fetch("active-1".to_string()));
     match &plan[1] {
         ChildProgressFetch::Ready(summary) => {
-            assert_eq!(summary.sub_agent_id, "done-1");
-            assert_eq!(summary.state, SubAgentState::Completed);
+            assert_eq!(summary.worker_id, "done-1");
+            assert_eq!(summary.state, WorkerState::Completed);
             assert_eq!(summary.last_summary.as_deref(), Some("summary for done-1"));
             assert_eq!(summary.tokens_used, 42);
             assert!(!summary.stale);
@@ -214,7 +214,7 @@ fn session_vo_destroy_clears_state() {
         .enqueue_message(test_message("hello"), Utc::now())
         .expect("enqueue should succeed");
     state.last_turn_summary = Some("summary".to_string());
-    state.children.push(moa_core::SubAgentChildRef {
+    state.children.push(moa_core::WorkerChildRef {
         id: "child-1".to_string(),
         task_hash: "hash-1".to_string(),
         budget_tokens: 0,

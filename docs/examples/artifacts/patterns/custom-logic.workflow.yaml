@@ -29,7 +29,7 @@ definition:
           x: 280
           y: 180
       - id: escalate
-        kind: sub_agent
+        kind: worker
         max_turns: 2
         input:
           task: Investigate the high-priority case and summarize blockers.

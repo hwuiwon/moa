@@ -198,7 +198,7 @@ async fn recovery_retries_retryable_failures_up_to_three_attempts() {
         router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
     let (_hand_id, output) = router
-        .execute_authorized_with_recovery(&session(), &bash_invocation())
+        .execute_authorized_with_recovery(&session(), None, &bash_invocation())
         .await
         .expect("recovery path should return a tool output");
 
@@ -233,7 +233,7 @@ async fn recovery_reprovisions_and_succeeds_after_transient_sandbox_death() {
         router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
     let (_hand_id, output) = router
-        .execute_authorized_with_recovery(&session(), &bash_invocation())
+        .execute_authorized_with_recovery(&session(), None, &bash_invocation())
         .await
         .expect("recovery path should return a tool output");
 
@@ -263,7 +263,7 @@ async fn recovery_returns_fatal_failures_immediately() {
         router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
     let (_hand_id, output) = router
-        .execute_authorized_with_recovery(&session(), &bash_invocation())
+        .execute_authorized_with_recovery(&session(), None, &bash_invocation())
         .await
         .expect("recovery path should return a tool output");
 
@@ -303,7 +303,7 @@ async fn recovery_caps_reprovision_attempts_per_session() {
         router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
     let (_hand_id, output) = router
-        .execute_authorized_with_recovery(&session(), &bash_invocation())
+        .execute_authorized_with_recovery(&session(), None, &bash_invocation())
         .await
         .expect("recovery path should return a tool output");
 
@@ -333,7 +333,7 @@ async fn recovery_does_not_retry_non_idempotent_execution_failure() {
     let router = router_with_provider(provider.clone()).await;
 
     let (_hand_id, output) = router
-        .execute_authorized_with_recovery(&session(), &bash_invocation())
+        .execute_authorized_with_recovery(&session(), None, &bash_invocation())
         .await
         .expect("recovery path should return a tool output");
 
@@ -366,7 +366,7 @@ async fn recovery_does_not_reprovision_non_idempotent_execution_failure() {
     let router = router_with_provider(provider.clone()).await;
 
     let (_hand_id, output) = router
-        .execute_authorized_with_recovery(&session(), &bash_invocation())
+        .execute_authorized_with_recovery(&session(), None, &bash_invocation())
         .await
         .expect("recovery path should return a tool output");
 
@@ -398,7 +398,7 @@ async fn recovery_reprovisions_non_idempotent_before_execution() {
     let router = router_with_provider(provider.clone()).await;
 
     let (_hand_id, output) = router
-        .execute_authorized_with_recovery(&session(), &bash_invocation())
+        .execute_authorized_with_recovery(&session(), None, &bash_invocation())
         .await
         .expect("recovery path should return a tool output");
 

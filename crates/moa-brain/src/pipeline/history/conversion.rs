@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 
 use moa_core::{
-    ContextMessage, ContextSourceRef, Event, EventRecord, Result, ToolCallId, ToolContent,
-    ToolOutput, ToolOutputConfig, render_user_message_with_attachments, truncate_head_tail,
+    ChildSignalKind, ContextMessage, ContextSourceRef, Event, EventRecord, InputAudience, Result,
+    ToolCallId, ToolContent, ToolOutput, ToolOutputConfig, render_user_message_with_attachments,
+    truncate_head_tail,
 };
 use moa_security::wrap_untrusted_tool_output;
 
@@ -144,8 +145,104 @@ fn event_to_context_message(
             ))
             .with_source_ref(ContextSourceRef::session_event(record)),
         ))),
+        // A guarded coordinator resume seeds the model with the system-generated
+        // instruction here (kind/summary + unread-signal context folded into `reason`),
+        // rather than a fake `UserMessage`. Rendered as a system directive so it is not
+        // misattributed to the human user.
+        Event::WorkerParentResumeRequested { reason, .. } => {
+            Some(Ok(CompiledRecordMessage::plain(sourced_message(
+                ContextMessage::system(format!(
+                    "<coordinator_resume>{reason}</coordinator_resume>"
+                )),
+                record,
+            ))))
+        }
+        // Control-plane child signals are surfaced into the coordinator's context so ANY
+        // turn (including a plain `UserMessage` turn, not only a guarded `ChildSignal`
+        // resume) can see and act on an unaddressed signal. For `NeedsInput` the directive
+        // carries the child's `input_request_id` and audience so the model knows it can
+        // answer via `provide_worker_input`. Recency is bounded by the existing
+        // history/compaction window — addressed signals fall out of the recent tail
+        // naturally, so there is no separate "addressed" tracker here.
+        Event::WorkerSignalReceived {
+            worker_id,
+            kind,
+            summary,
+            input_request_id,
+            input_audience,
+            ..
+        } => render_child_signal(
+            record,
+            *kind,
+            worker_id,
+            summary,
+            input_request_id.as_deref(),
+            *input_audience,
+        ),
         _ => None,
     }
+}
+
+/// Renders a control-plane child signal as a system-visible coordinator directive.
+///
+/// `NeedsInput` renders the child's `worker_id`, `input_request_id`, and audience so
+/// the model can answer via `provide_worker_input`; `Blocked`, `Failed`, and
+/// `HeartbeatStale` render a concise attention directive. `Finding` is intentionally
+/// omitted (returns `None`) so low-signal informational notes never crowd the recent
+/// history window or nag the coordinator across turns.
+fn render_child_signal(
+    record: &EventRecord,
+    kind: ChildSignalKind,
+    worker_id: &str,
+    summary: &str,
+    input_request_id: Option<&str>,
+    input_audience: Option<InputAudience>,
+) -> Option<Result<CompiledRecordMessage>> {
+    let directive = match kind {
+        // Informational only: rely on the regular history/notification path instead of
+        // a standing directive so findings do not accumulate in the coordinator's window.
+        ChildSignalKind::Finding => return None,
+        ChildSignalKind::NeedsInput => {
+            // A NeedsInput signal always carries an audience (the child sets it on
+            // `request_input`); coordinator is the safe default for the unreachable
+            // None case.
+            let audience = match input_audience {
+                Some(InputAudience::User) => "user",
+                Some(InputAudience::Coordinator) | None => "coordinator",
+            };
+            match input_request_id {
+                Some(request_id) => format!(
+                    "<child_signal kind=\"needs_input\" worker_id=\"{worker_id}\" \
+                     input_request_id=\"{request_id}\" audience=\"{audience}\">{summary}\n\
+                     Answer with provide_worker_input(worker_id=\"{worker_id}\", \
+                     input_request_id=\"{request_id}\", ...) once the {audience} reply is \
+                     available.</child_signal>"
+                ),
+                // A NeedsInput signal without an awakeable id cannot be answered durably;
+                // surface it for awareness without the (non-actionable) answer hint.
+                None => format!(
+                    "<child_signal kind=\"needs_input\" worker_id=\"{worker_id}\" \
+                     audience=\"{audience}\">{summary}</child_signal>"
+                ),
+            }
+        }
+        ChildSignalKind::Blocked | ChildSignalKind::Failed | ChildSignalKind::HeartbeatStale => {
+            let kind_attr = match kind {
+                ChildSignalKind::Blocked => "blocked",
+                ChildSignalKind::Failed => "failed",
+                ChildSignalKind::HeartbeatStale => "heartbeat_stale",
+                ChildSignalKind::Finding | ChildSignalKind::NeedsInput => unreachable!(),
+            };
+            format!(
+                "<child_signal kind=\"{kind_attr}\" \
+                 worker_id=\"{worker_id}\">{summary}</child_signal>"
+            )
+        }
+    };
+    Some(Ok(CompiledRecordMessage::plain(sourced_message(
+        ContextMessage::system(directive),
+        record,
+    ))))
 }
 
 fn sourced_message(message: ContextMessage, record: &EventRecord) -> ContextMessage {
@@ -467,5 +564,145 @@ mod tests {
             Some("bash")
         );
         assert!(messages[0].content.contains("<tool_call"));
+    }
+
+    fn child_signal_event(
+        session: &moa_core::SessionMeta,
+        sequence_num: u64,
+        kind: moa_core::ChildSignalKind,
+        summary: &str,
+        input_request_id: Option<&str>,
+        input_audience: Option<moa_core::InputAudience>,
+    ) -> EventRecord {
+        event_record(
+            &session.id,
+            sequence_num,
+            Event::WorkerSignalReceived {
+                signal_id: moa_core::AgentSignalId::new(),
+                worker_id: "child-7".to_string(),
+                parent_worker_id: None,
+                kind,
+                severity: moa_core::SignalSeverity::Warning,
+                summary: summary.to_string(),
+                input_request_id: input_request_id.map(str::to_string),
+                input_audience,
+            },
+        )
+    }
+
+    #[test]
+    fn history_compiler_renders_needs_input_child_signal_directive() {
+        // Pins: a user-routed NeedsInput child signal renders as a system directive that
+        // carries worker_id + input_request_id + audience so the coordinator can answer
+        // via provide_worker_input on a plain user-reply turn (not just a resume turn).
+        let session = session();
+        let events = vec![
+            event_record(
+                &session.id,
+                0,
+                Event::UserMessage {
+                    text: "the key is sk-live-123".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            child_signal_event(
+                &session,
+                1,
+                moa_core::ChildSignalKind::NeedsInput,
+                "needs the staging API key",
+                Some("req-42"),
+                Some(moa_core::InputAudience::User),
+            ),
+        ];
+        let compiler = HistoryCompiler::new(Arc::new(MockSessionStore::new(
+            session.clone(),
+            events.clone(),
+        )));
+
+        let (messages, _) = compiler.compile_messages(&events, 10_000).unwrap();
+
+        let directive = messages
+            .iter()
+            .find(|message| message.content.contains("<child_signal"))
+            .expect("needs_input child signal rendered as a directive");
+        assert_eq!(directive.role, moa_core::MessageRole::System);
+        assert!(directive.content.contains("kind=\"needs_input\""));
+        assert!(directive.content.contains("worker_id=\"child-7\""));
+        assert!(directive.content.contains("input_request_id=\"req-42\""));
+        assert!(directive.content.contains("audience=\"user\""));
+        assert!(directive.content.contains("provide_worker_input"));
+        assert!(directive.content.contains("needs the staging API key"));
+    }
+
+    #[test]
+    fn history_compiler_renders_blocked_child_signal_directive() {
+        // Pins: a Blocked child signal renders a concise system attention directive
+        // carrying the worker_id and summary.
+        let session = session();
+        let events = vec![child_signal_event(
+            &session,
+            0,
+            moa_core::ChildSignalKind::Blocked,
+            "cannot reach the database",
+            None,
+            None,
+        )];
+        let compiler = HistoryCompiler::new(Arc::new(MockSessionStore::new(
+            session.clone(),
+            events.clone(),
+        )));
+
+        let (messages, _) = compiler.compile_messages(&events, 10_000).unwrap();
+
+        let directive = messages
+            .iter()
+            .find(|message| message.content.contains("<child_signal"))
+            .expect("blocked child signal rendered as a directive");
+        assert_eq!(directive.role, moa_core::MessageRole::System);
+        assert!(directive.content.contains("kind=\"blocked\""));
+        assert!(directive.content.contains("worker_id=\"child-7\""));
+        assert!(directive.content.contains("cannot reach the database"));
+        // A non-NeedsInput signal must not advertise the input-answer affordance.
+        assert!(!directive.content.contains("provide_worker_input"));
+    }
+
+    #[test]
+    fn history_compiler_omits_finding_child_signal() {
+        // Pins: informational Finding signals are intentionally NOT rendered as standing
+        // directives, so they never crowd the recent window or nag the coordinator.
+        let session = session();
+        let events = vec![
+            event_record(
+                &session.id,
+                0,
+                Event::UserMessage {
+                    text: "status?".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            child_signal_event(
+                &session,
+                1,
+                moa_core::ChildSignalKind::Finding,
+                "found three candidate vendors",
+                None,
+                None,
+            ),
+        ];
+        let compiler = HistoryCompiler::new(Arc::new(MockSessionStore::new(
+            session.clone(),
+            events.clone(),
+        )));
+
+        let (messages, _) = compiler.compile_messages(&events, 10_000).unwrap();
+
+        assert!(
+            messages
+                .iter()
+                .all(|message| !message.content.contains("<child_signal")),
+            "finding signal should not render a standing directive"
+        );
+        // The surrounding user turn is unaffected.
+        assert!(messages.iter().any(|message| message.content == "status?"));
     }
 }

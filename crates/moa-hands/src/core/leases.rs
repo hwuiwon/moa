@@ -89,6 +89,12 @@ impl HandLeaseStatus {
 pub struct HandLease {
     /// Session that owns the hand.
     pub session_id: SessionId,
+    /// Worker scope that owns the hand within the session.
+    ///
+    /// Empty (`""`) denotes the session-level (coordinator) scope, which is the
+    /// only scope used today. A non-empty value isolates a worker's sandbox so
+    /// the parent and siblings never collapse onto one shared hand.
+    pub worker_id: String,
     /// Tenant that owns the session.
     pub tenant_id: TenantId,
     /// Provider name, such as `local`, `daytona`, or `e2b`.
@@ -110,28 +116,40 @@ pub struct HandLease {
 }
 
 /// Store contract for durable hand lease coordination.
+///
+/// Every method carries a `worker_id` scope alongside `session_id`. The empty
+/// string is the session-level (coordinator) scope used by all callers today; a
+/// non-empty value isolates a worker's sandbox. `list_session` intentionally
+/// takes no scope so session teardown reclaims every worker scope at once.
 #[async_trait]
 pub trait HandLeaseStore: Send + Sync {
-    /// Atomically claims provisioning for a session/provider when no valid active lease exists.
+    /// Atomically claims provisioning for a session/worker/provider when no valid active lease exists.
     async fn claim_for_provisioning(
         &self,
         session_id: SessionId,
+        worker_id: &str,
         tenant_id: TenantId,
         provider: &str,
         tier: SandboxTier,
         expires_at: DateTime<Utc>,
     ) -> Result<Option<HandLease>>;
 
-    /// Loads the current lease for a session/provider.
-    async fn get(&self, session_id: SessionId, provider: &str) -> Result<Option<HandLease>>;
+    /// Loads the current lease for a session/worker/provider.
+    async fn get(
+        &self,
+        session_id: SessionId,
+        worker_id: &str,
+        provider: &str,
+    ) -> Result<Option<HandLease>>;
 
-    /// Lists all durable leases for a session.
+    /// Lists all durable leases for a session, across every worker scope.
     async fn list_session(&self, session_id: SessionId) -> Result<Vec<HandLease>>;
 
     /// Marks a claimed generation active with its durable handle payload.
     async fn activate(
         &self,
         session_id: SessionId,
+        worker_id: &str,
         provider: &str,
         generation: i64,
         handle: LeaseHandle,
@@ -142,6 +160,7 @@ pub trait HandLeaseStore: Send + Sync {
     async fn renew_active(
         &self,
         session_id: SessionId,
+        worker_id: &str,
         provider: &str,
         generation: i64,
         expires_at: DateTime<Utc>,
@@ -151,6 +170,7 @@ pub trait HandLeaseStore: Send + Sync {
     async fn mark_status(
         &self,
         session_id: SessionId,
+        worker_id: &str,
         provider: &str,
         generation: i64,
         status: HandLeaseStatus,
@@ -176,6 +196,7 @@ impl HandLeaseStore for PostgresHandLeaseStore {
     async fn claim_for_provisioning(
         &self,
         session_id: SessionId,
+        worker_id: &str,
         tenant_id: TenantId,
         provider: &str,
         tier: SandboxTier,
@@ -184,10 +205,10 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         let row = sqlx::query(
             r#"
             INSERT INTO moa.hand_leases (
-                session_id, tenant_id, provider, tier, status, generation, expires_at
+                session_id, worker_id, tenant_id, provider, tier, status, generation, expires_at
             )
-            VALUES ($1, $2, $3, $4, 'provisioning', 1, $5)
-            ON CONFLICT (session_id, provider) DO UPDATE
+            VALUES ($1, $2, $3, $4, $5, 'provisioning', 1, $6)
+            ON CONFLICT (session_id, worker_id, provider) DO UPDATE
             SET tenant_id = EXCLUDED.tenant_id,
                 tier = EXCLUDED.tier,
                 status = 'provisioning',
@@ -196,11 +217,12 @@ impl HandLeaseStore for PostgresHandLeaseStore {
                 expires_at = EXCLUDED.expires_at
             WHERE moa.hand_leases.status IN ('stale', 'destroyed', 'failed')
                OR moa.hand_leases.expires_at <= now()
-            RETURNING session_id, tenant_id, provider, tier, handle, status,
+            RETURNING session_id, worker_id, tenant_id, provider, tier, handle, status,
                       generation, created_at, updated_at, expires_at
             "#,
         )
         .bind(session_id)
+        .bind(worker_id)
         .bind(tenant_id)
         .bind(provider)
         .bind(tier_label(&tier))
@@ -212,16 +234,22 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         row.map(|row| hand_lease_from_row(&row)).transpose()
     }
 
-    async fn get(&self, session_id: SessionId, provider: &str) -> Result<Option<HandLease>> {
+    async fn get(
+        &self,
+        session_id: SessionId,
+        worker_id: &str,
+        provider: &str,
+    ) -> Result<Option<HandLease>> {
         let row = sqlx::query(
             r#"
-            SELECT session_id, tenant_id, provider, tier, handle, status,
+            SELECT session_id, worker_id, tenant_id, provider, tier, handle, status,
                    generation, created_at, updated_at, expires_at
             FROM moa.hand_leases
-            WHERE session_id = $1 AND provider = $2
+            WHERE session_id = $1 AND worker_id = $2 AND provider = $3
             "#,
         )
         .bind(session_id)
+        .bind(worker_id)
         .bind(provider)
         .fetch_optional(&self.pool)
         .await
@@ -233,11 +261,11 @@ impl HandLeaseStore for PostgresHandLeaseStore {
     async fn list_session(&self, session_id: SessionId) -> Result<Vec<HandLease>> {
         let rows = sqlx::query(
             r#"
-            SELECT session_id, tenant_id, provider, tier, handle, status,
+            SELECT session_id, worker_id, tenant_id, provider, tier, handle, status,
                    generation, created_at, updated_at, expires_at
             FROM moa.hand_leases
             WHERE session_id = $1
-            ORDER BY provider
+            ORDER BY worker_id, provider
             "#,
         )
         .bind(session_id)
@@ -251,6 +279,7 @@ impl HandLeaseStore for PostgresHandLeaseStore {
     async fn activate(
         &self,
         session_id: SessionId,
+        worker_id: &str,
         provider: &str,
         generation: i64,
         handle: LeaseHandle,
@@ -259,17 +288,19 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         let affected = sqlx::query(
             r#"
             UPDATE moa.hand_leases
-            SET handle = $4,
+            SET handle = $5,
                 status = 'active',
                 updated_at = now(),
-                expires_at = $5
+                expires_at = $6
             WHERE session_id = $1
-              AND provider = $2
-              AND generation = $3
+              AND worker_id = $2
+              AND provider = $3
+              AND generation = $4
               AND status = 'provisioning'
             "#,
         )
         .bind(session_id)
+        .bind(worker_id)
         .bind(provider)
         .bind(generation)
         .bind(Json(handle))
@@ -291,6 +322,7 @@ impl HandLeaseStore for PostgresHandLeaseStore {
     async fn renew_active(
         &self,
         session_id: SessionId,
+        worker_id: &str,
         provider: &str,
         generation: i64,
         expires_at: DateTime<Utc>,
@@ -299,15 +331,17 @@ impl HandLeaseStore for PostgresHandLeaseStore {
             r#"
             UPDATE moa.hand_leases
             SET updated_at = now(),
-                expires_at = $4
+                expires_at = $5
             WHERE session_id = $1
-              AND provider = $2
-              AND generation = $3
+              AND worker_id = $2
+              AND provider = $3
+              AND generation = $4
               AND status = 'active'
               AND expires_at > now()
             "#,
         )
         .bind(session_id)
+        .bind(worker_id)
         .bind(provider)
         .bind(generation)
         .bind(expires_at)
@@ -322,6 +356,7 @@ impl HandLeaseStore for PostgresHandLeaseStore {
     async fn mark_status(
         &self,
         session_id: SessionId,
+        worker_id: &str,
         provider: &str,
         generation: i64,
         status: HandLeaseStatus,
@@ -329,14 +364,16 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         sqlx::query(
             r#"
             UPDATE moa.hand_leases
-            SET status = $4,
+            SET status = $5,
                 updated_at = now()
             WHERE session_id = $1
-              AND provider = $2
-              AND generation = $3
+              AND worker_id = $2
+              AND provider = $3
+              AND generation = $4
             "#,
         )
         .bind(session_id)
+        .bind(worker_id)
         .bind(provider)
         .bind(generation)
         .bind(status.as_str())
@@ -350,6 +387,7 @@ impl HandLeaseStore for PostgresHandLeaseStore {
 fn hand_lease_from_row(row: &sqlx::postgres::PgRow) -> Result<HandLease> {
     Ok(HandLease {
         session_id: row.try_get("session_id").map_err(map_sqlx_error)?,
+        worker_id: row.try_get("worker_id").map_err(map_sqlx_error)?,
         tenant_id: row.try_get("tenant_id").map_err(map_sqlx_error)?,
         provider: row.try_get("provider").map_err(map_sqlx_error)?,
         tier: tier_from_label(
@@ -402,7 +440,7 @@ fn map_sqlx_error(error: sqlx::Error) -> MoaError {
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct MemoryHandLeaseStore {
-    leases: Mutex<HashMap<(SessionId, String), HandLease>>,
+    leases: Mutex<HashMap<(SessionId, String, String), HandLease>>,
 }
 
 #[cfg(test)]
@@ -418,13 +456,14 @@ impl HandLeaseStore for MemoryHandLeaseStore {
     async fn claim_for_provisioning(
         &self,
         session_id: SessionId,
+        worker_id: &str,
         tenant_id: TenantId,
         provider: &str,
         tier: SandboxTier,
         expires_at: DateTime<Utc>,
     ) -> Result<Option<HandLease>> {
         let mut leases = self.leases.lock().await;
-        let key = (session_id, provider.to_string());
+        let key = (session_id, worker_id.to_string(), provider.to_string());
         let now = Utc::now();
         if let Some(existing) = leases.get(&key)
             && existing.status != HandLeaseStatus::Stale
@@ -439,6 +478,7 @@ impl HandLeaseStore for MemoryHandLeaseStore {
             .map_or(1, |existing| existing.generation + 1);
         let lease = HandLease {
             session_id,
+            worker_id: worker_id.to_string(),
             tenant_id,
             provider: provider.to_string(),
             tier,
@@ -455,12 +495,17 @@ impl HandLeaseStore for MemoryHandLeaseStore {
         Ok(Some(lease))
     }
 
-    async fn get(&self, session_id: SessionId, provider: &str) -> Result<Option<HandLease>> {
+    async fn get(
+        &self,
+        session_id: SessionId,
+        worker_id: &str,
+        provider: &str,
+    ) -> Result<Option<HandLease>> {
         Ok(self
             .leases
             .lock()
             .await
-            .get(&(session_id, provider.to_string()))
+            .get(&(session_id, worker_id.to_string(), provider.to_string()))
             .cloned())
     }
 
@@ -480,13 +525,16 @@ impl HandLeaseStore for MemoryHandLeaseStore {
     async fn activate(
         &self,
         session_id: SessionId,
+        worker_id: &str,
         provider: &str,
         generation: i64,
         handle: LeaseHandle,
         expires_at: DateTime<Utc>,
     ) -> Result<()> {
         let mut leases = self.leases.lock().await;
-        let Some(lease) = leases.get_mut(&(session_id, provider.to_string())) else {
+        let Some(lease) =
+            leases.get_mut(&(session_id, worker_id.to_string(), provider.to_string()))
+        else {
             return Err(MoaError::StorageError("missing hand lease".to_string()));
         };
         if lease.generation != generation || lease.status != HandLeaseStatus::Provisioning {
@@ -504,12 +552,15 @@ impl HandLeaseStore for MemoryHandLeaseStore {
     async fn renew_active(
         &self,
         session_id: SessionId,
+        worker_id: &str,
         provider: &str,
         generation: i64,
         expires_at: DateTime<Utc>,
     ) -> Result<bool> {
         let mut leases = self.leases.lock().await;
-        let Some(lease) = leases.get_mut(&(session_id, provider.to_string())) else {
+        let Some(lease) =
+            leases.get_mut(&(session_id, worker_id.to_string(), provider.to_string()))
+        else {
             return Ok(false);
         };
         if lease.generation != generation
@@ -527,16 +578,16 @@ impl HandLeaseStore for MemoryHandLeaseStore {
     async fn mark_status(
         &self,
         session_id: SessionId,
+        worker_id: &str,
         provider: &str,
         generation: i64,
         status: HandLeaseStatus,
     ) -> Result<()> {
-        if let Some(lease) = self
-            .leases
-            .lock()
-            .await
-            .get_mut(&(session_id, provider.to_string()))
-            && lease.generation == generation
+        if let Some(lease) = self.leases.lock().await.get_mut(&(
+            session_id,
+            worker_id.to_string(),
+            provider.to_string(),
+        )) && lease.generation == generation
         {
             lease.status = status;
             lease.updated_at = Utc::now();
@@ -562,6 +613,7 @@ mod tests {
         let (left, right) = tokio::join!(
             store.claim_for_provisioning(
                 session_id,
+                "",
                 tenant_id,
                 "local",
                 SandboxTier::Local,
@@ -569,6 +621,7 @@ mod tests {
             ),
             store.claim_for_provisioning(
                 session_id,
+                "",
                 tenant_id,
                 "local",
                 SandboxTier::Local,
@@ -584,6 +637,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_store_isolates_worker_scope_from_session_scope() {
+        // Pins: a worker scope owns a separate lease row from the session scope.
+        let store = MemoryHandLeaseStore::shared();
+        let session_id = SessionId::new();
+        let tenant_id = TenantId::new();
+        let expires_at = Utc::now() + chrono::Duration::minutes(5);
+
+        let session_claim = store
+            .claim_for_provisioning(
+                session_id,
+                "",
+                tenant_id,
+                "local",
+                SandboxTier::Local,
+                expires_at,
+            )
+            .await
+            .expect("session claim succeeds")
+            .expect("session claim is owned");
+        // The same session/provider under a worker scope must still be claimable.
+        let worker_claim = store
+            .claim_for_provisioning(
+                session_id,
+                "sub-x",
+                tenant_id,
+                "local",
+                SandboxTier::Local,
+                expires_at,
+            )
+            .await
+            .expect("worker claim succeeds")
+            .expect("worker claim is owned because it is a distinct scope");
+
+        assert_eq!(session_claim.worker_id, "");
+        assert_eq!(worker_claim.worker_id, "sub-x");
+        assert!(
+            store
+                .get(session_id, "", "local")
+                .await
+                .expect("load session lease")
+                .is_some()
+        );
+        assert!(
+            store
+                .get(session_id, "sub-x", "local")
+                .await
+                .expect("load worker lease")
+                .is_some()
+        );
+        // list_session reclaims every scope under the session at once.
+        let listed = store.list_session(session_id).await.expect("list leases");
+        assert_eq!(listed.len(), 2, "both scopes belong to the session");
+    }
+
+    #[tokio::test]
     async fn memory_store_reuses_active_generation_until_stale() {
         // Pins: active leases block double-provisioning until they are marked stale.
         let store = MemoryHandLeaseStore::shared();
@@ -593,6 +701,7 @@ mod tests {
         let claimed = store
             .claim_for_provisioning(
                 session_id,
+                "",
                 tenant_id,
                 "local",
                 SandboxTier::Local,
@@ -604,6 +713,7 @@ mod tests {
         store
             .activate(
                 session_id,
+                "",
                 "local",
                 claimed.generation,
                 LeaseHandle::new(HandHandle::local(PathBuf::from("/tmp/moa-hand"))),
@@ -616,6 +726,7 @@ mod tests {
             store
                 .claim_for_provisioning(
                     session_id,
+                    "",
                     tenant_id,
                     "local",
                     SandboxTier::Local,
@@ -629,6 +740,7 @@ mod tests {
         store
             .mark_status(
                 session_id,
+                "",
                 "local",
                 claimed.generation,
                 HandLeaseStatus::Stale,
@@ -638,6 +750,7 @@ mod tests {
         let replacement = store
             .claim_for_provisioning(
                 session_id,
+                "",
                 tenant_id,
                 "local",
                 SandboxTier::Local,
@@ -664,6 +777,7 @@ mod tests {
         let claim = store
             .claim_for_provisioning(
                 SessionId::new(),
+                "",
                 TenantId::new(),
                 "local",
                 SandboxTier::Local,
@@ -687,6 +801,7 @@ mod tests {
         let claim = store
             .claim_for_provisioning(
                 session_id,
+                "",
                 tenant_id,
                 "local",
                 SandboxTier::Local,
@@ -698,6 +813,7 @@ mod tests {
         store
             .activate(
                 session_id,
+                "",
                 "local",
                 claim.generation,
                 LeaseHandle::new(HandHandle::local(PathBuf::from("/tmp/moa-hand"))),
@@ -708,18 +824,24 @@ mod tests {
 
         assert!(
             !store
-                .renew_active(session_id, "local", claim.generation + 1, renewed_expiry)
+                .renew_active(
+                    session_id,
+                    "",
+                    "local",
+                    claim.generation + 1,
+                    renewed_expiry
+                )
                 .await
                 .expect("wrong generation renewal should not fail storage")
         );
         assert!(
             store
-                .renew_active(session_id, "local", claim.generation, renewed_expiry)
+                .renew_active(session_id, "", "local", claim.generation, renewed_expiry)
                 .await
                 .expect("current generation renewal should succeed")
         );
         let renewed = store
-            .get(session_id, "local")
+            .get(session_id, "", "local")
             .await
             .expect("load renewed lease")
             .expect("lease should exist");

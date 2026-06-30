@@ -159,8 +159,8 @@ async fn workflow_agent_node_uses_session_turn_service_e2e() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, and OpenFGA"]
-async fn workflow_sub_agent_node_enforces_fanout_limits_service_e2e() -> Result<()> {
-    // Pins: workflow SubAgent nodes reuse the existing root-session delegation fan-out limit.
+async fn workflow_worker_node_enforces_fanout_limits_service_e2e() -> Result<()> {
+    // Pins: workflow Worker nodes reuse the existing root-session delegation fan-out limit.
     let _guard = RESTATE_E2E_LOCK.lock().await;
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
@@ -170,7 +170,7 @@ async fn workflow_sub_agent_node_enforces_fanout_limits_service_e2e() -> Result<
     let ingress = restate_ingress_url();
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
-    let meta = test_session_meta(&format!("workflow-sub-agent-{}", Uuid::now_v7()));
+    let meta = test_session_meta(&format!("workflow-worker-{}", Uuid::now_v7()));
     let tenant_id = meta.tenant_id;
     let mut identity = test_user_identity();
     identity.tenant_id = tenant_id;
@@ -186,7 +186,7 @@ async fn workflow_sub_agent_node_enforces_fanout_limits_service_e2e() -> Result<
             ingress,
             &identity,
             tenant_id,
-            sub_agent_workflow_source(),
+            worker_workflow_source(),
         )
         .await?;
 
@@ -195,7 +195,7 @@ async fn workflow_sub_agent_node_enforces_fanout_limits_service_e2e() -> Result<
             ingress,
             &identity,
             tenant_id,
-            "workflow://sub-agent-fanout-workflow",
+            "workflow://worker-fanout-workflow",
             json!({}),
             Some(session_id),
         )
@@ -212,7 +212,7 @@ async fn workflow_sub_agent_node_enforces_fanout_limits_service_e2e() -> Result<
                 .error
                 .as_deref()
                 .is_some_and(|error| error.contains("fan-out limit")),
-            "workflow sub-agent node should fail through delegation fan-out validation: {status:?}"
+            "workflow worker node should fail through delegation fan-out validation: {status:?}"
         );
 
         Ok(())

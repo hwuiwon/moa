@@ -103,6 +103,7 @@ fn tool_request(
         user_id: UserId::new("user-1"),
         idempotency_key: idempotency_key.map(ToOwned::to_owned),
         trusted_sandbox_manifest: None,
+        worker_id: None,
     }
 }
 

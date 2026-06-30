@@ -60,7 +60,7 @@ binary(/^(agent_artifacts_service_e2e|consolidate_service_e2e|ingestion_service_
 [profile.orchestrator-service-e2e]
 inherits = "default"
 test-threads = 1
-default-filter = 'binary(/^(session_turn_lifecycle_service_e2e|turn_execution_smoke_service_e2e)$/)'
+default-filter = 'binary(/^(session_turn_lifecycle_service_e2e|turn_execution_smoke_service_e2e|worker_coordination_service_e2e)$/)'
 
 [profile.service-e2e]
 inherits = "default"

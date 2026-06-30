@@ -246,7 +246,7 @@ async fn repeated_dedupe_key_returns_first_sequence_and_inserts_once_db() {
 
     let first = test_db
         .store()
-        .emit_event_record_deduped(
+        .emit_event_record(
             session_id,
             user_message("idempotent-first"),
             Some("dedupe-key-1".to_string()),
@@ -255,7 +255,7 @@ async fn repeated_dedupe_key_returns_first_sequence_and_inserts_once_db() {
         .expect("first deduped append");
     let second = test_db
         .store()
-        .emit_event_record_deduped(
+        .emit_event_record(
             session_id,
             user_message("idempotent-second"),
             Some("dedupe-key-1".to_string()),
@@ -284,12 +284,12 @@ async fn distinct_dedupe_keys_append_separate_events_db() {
 
     let first = test_db
         .store()
-        .emit_event_record_deduped(session_id, user_message("key-a"), Some("key-a".to_string()))
+        .emit_event_record(session_id, user_message("key-a"), Some("key-a".to_string()))
         .await
         .expect("append under key-a");
     let second = test_db
         .store()
-        .emit_event_record_deduped(session_id, user_message("key-b"), Some("key-b".to_string()))
+        .emit_event_record(session_id, user_message("key-b"), Some("key-b".to_string()))
         .await
         .expect("append under key-b");
 
@@ -311,12 +311,12 @@ async fn none_dedupe_key_always_appends_db() {
 
     let first = test_db
         .store()
-        .emit_event_record_deduped(session_id, user_message("no-key-1"), None)
+        .emit_event_record(session_id, user_message("no-key-1"), None)
         .await
         .expect("first keyless append");
     let second = test_db
         .store()
-        .emit_event_record_deduped(session_id, user_message("no-key-2"), None)
+        .emit_event_record(session_id, user_message("no-key-2"), None)
         .await
         .expect("second keyless append");
 

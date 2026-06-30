@@ -17,8 +17,8 @@ what must stay out of Restate state.
 | Restate primitive | Use in MOA | Reason |
 |---|---|---|
 | Service | Durable stateless calls such as `ActionReviews`, `AuthzChallenges`, `LearningReview`, `ToolExecutor`, `LLMGateway`, `SessionStore`, `Authz`, `Memory`, `Skills`, `Tenants` | Durable RPC with retries, no keyed state. |
-| Virtual Object | `Session`, `SubAgent`, `Tenant`, `CronJob`, `IngestionVO` | Single-writer-per-key semantics and small hot state. |
-| Workflow | `TurnExecution`, `SubAgentTurnExecution`, `ArtifactWorkflowExecution`, `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` | One logical run per ID with explicit progress and completion. |
+| Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` | Single-writer-per-key semantics and small hot state. |
+| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ArtifactWorkflowExecution`, `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` | One logical run per ID with explicit progress and completion. |
 
 Use the weakest primitive that gives the needed correctness property. Do not
 use a workflow for conversational actors; do not use virtual-object state as a
@@ -30,8 +30,8 @@ product database.
 |---|---|---|
 | Session | Virtual Object | `session_id` |
 | Top-level turn | Workflow | `turn_id` |
-| Sub-agent | Virtual Object | `sub_agent_id` |
-| Sub-agent turn | Workflow | `turn_id` |
+| Worker | Virtual Object | `worker_id` |
+| Worker turn | Workflow | `turn_id` |
 | Tool execution | Service | none |
 | LLM call | Service | none |
 | Graph-memory ingestion | Virtual Object plus Postgres ingestion claim rows | ingestion key |
@@ -41,8 +41,8 @@ product database.
 | Tenant action review | Service plus Postgres row/event | review id |
 | Read-only analytics/whoami/audit/lineage reads | Direct edge handler | HTTP request |
 
-Sessions and sub-agents are virtual objects because they receive multiple
-messages over time. `TurnExecution` and `SubAgentTurnExecution` are workflows
+Sessions and workers are virtual objects because they receive multiple
+messages over time. `TurnExecution` and `WorkerTurnExecution` are workflows
 because one admitted turn should have one observable durable run. Artifact
 workflow execution, tenant knowledge sync ingestion, and consolidation are
 workflows for the same reason. Hosted eval status is a Postgres row; it is not
@@ -77,8 +77,8 @@ Core production bindings:
 
 | Primitive | Handlers |
 |---|---|
-| Virtual Object | `Session`, `SubAgent`, `Tenant`, `CronJob`, `IngestionVO` |
-| Workflow | `TurnExecution`, `SubAgentTurnExecution`, `ArtifactWorkflowExecution`, `KnowledgeSyncIngestion`, `Consolidate` |
+| Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` |
+| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ArtifactWorkflowExecution`, `KnowledgeSyncIngestion`, `Consolidate` |
 | Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `ActionPolicy` |
 
 Feature-gated bindings:
@@ -112,14 +112,18 @@ Restate state should be small, replay-safe, and useful only for orchestration.
 | Session metadata and status record | Postgres, mirrored in VO hot state as needed |
 | Pending message queue | `Session` VO |
 | Current session turn progress | `TurnExecution` workflow |
-| Current sub-agent turn progress | `SubAgentTurnExecution` workflow |
+| Current worker turn progress | `WorkerTurnExecution` workflow |
 | Pending tenant action reviews | Postgres `tenant_action_reviews` rows |
-| Detached sub-agent result waiters | `SubAgent` VO, resolved by child terminal delivery |
+| Detached worker result waiters | `Worker` VO, resolved by child terminal delivery |
+| Child heartbeat, last turn summary, pending input requests | `Worker` VO state (`last_heartbeat_at`, `last_turn_summary`, `pending_input_requests`, `cleanup_generation`) |
+| Unread child signals, resume budget, pending resume | `Session` VO state (`unread_child_signals`, `resume_budget`, `pending_parent_resume_signal`, `resume_turn`) |
+| Narration scheduling cursor and per-window cap | `Session` VO state (`narration_tick_generation`, `narration_tick_outstanding`, `narration_seq`, `last_narrated_marker`, `narration_window_*`) |
+| Child liveness watchdog generations | `Session` VO state (`child_liveness`, `child_liveness_generation`) |
 | Tool result and assistant output | Postgres event log |
 | Graph memory, vectors, changelog | Postgres |
 | Learning log | Postgres |
 | Security events | Postgres and audit shipper |
-| Hand leases and sandbox binding | Postgres `moa.hand_leases` |
+| Hand leases and sandbox binding | Postgres `moa.hand_leases`, keyed `(session_id, worker_id, provider)` |
 | Runtime cache/pacing/message refs | Redis when configured; process-local memory only for fallback |
 | Handler journal | Restate |
 
@@ -132,6 +136,99 @@ edge or orchestrator replica, so Restate handler state cannot be replaced by
 ordinary process memory. Process-local maps are allowed only as reconnect
 caches, transport demultiplexing, or performance caches whose correctness owner
 is Postgres, Restate, or explicitly configured Redis runtime cache.
+
+## Main-Agent/Worker Coordination
+
+Coordinator turns can return while detached workers keep running across
+Kubernetes replicas. Coordination is split into two planes so the high-frequency
+path never serializes through the single-writer parent VO.
+
+**Telemetry plane (high-frequency, off the `Session` VO).**
+
+- Child progress flows to the parent session event log through
+  `turn_progress` exactly as before (`ProgressUpdate`).
+- Each child's heartbeat updates `Worker` VO state only
+  (`last_heartbeat_at`); no event is appended per tick. An event is appended
+  only on a stale transition.
+- `Session/progress` reads child summaries by **fan-in on demand**
+  (`child_progress`), calling `Worker/progress_summary` only for active
+  children under the existing fan-out cap — never absorbing every tick into
+  parent VO state and never iterating the whole tree per request.
+- A single **per-session narrator** emits one merged `ProgressNarrated` per
+  period covering all active workers (plus the active coordinator step), at
+  O(1) LLM cost regardless of fan-out (see Narration tick below).
+
+**Control plane (low-frequency, through the coordinator VO).**
+
+- A narrow child→parent attention signal (`ChildSignalKind` =
+  `Finding`/`Blocked`/`NeedsInput`/`Failed`/`HeartbeatStale`) is routed to the
+  owning root `Session` coordinator via `parent_session` and recorded by
+  `Session::record_child_signal`.
+- Recording is idempotent via a `dedupe_key` on the session event append
+  (`worker_signal:{signal_id}`), updates the compact `unread_child_signals`
+  projection, and may start **one** guarded coordinator resume turn when the
+  parent is idle.
+- Terminal completion keeps its existing path
+  (`WorkerStatusChanged`/`WorkerNotificationDelivered` + cached result +
+  result-waiter awakeable) and additionally records a control-plane idle-wake.
+- Only this plane writes parent VO state per event, and it fires rarely.
+
+Postgres owns the replayable signal/session event history. Restate awakeables
+back active result waits and the `needs_input` round-trip, not all delivery.
+Redis is never a correctness owner for signals, resume, or terminal results.
+
+### Scheduled VO ticks
+
+The new autonomous behaviors run as Restate **delayed self-calls** off the VO,
+through one shared helper `vo::schedule_generation_guarded_self_call` (modeled on
+the `CronJob` delayed self-tick). Each schedules a single outstanding tick guarded
+by a generation counter so superseded ticks no-op:
+
+- **Narration tick** — `Session::narration_tick` (scheduled by
+  `objects/session/narration.rs`). The tick never calls the model inline; when its
+  gate opens (interval elapsed, change cursor moved, under the per-window cap) it
+  `.send()`s a **detached** job `LLMGateway::narrate_session`, which reads the
+  fan-in summaries, makes one cheapest-chat-model call (or short-circuits with no
+  call when only one source is active), and appends one `ProgressNarrated` with
+  dedupe key `narration:{session_id}:{narration_seq}`. Default-on
+  (`progress_narration_enabled`).
+- **Liveness watchdog** — `Session::check_child_liveness`
+  (`objects/session/liveness.rs`), armed per active child. On a stale heartbeat it
+  appends `WorkerHeartbeatStale` (dedupe key
+  `worker_stale:{worker_id}:{last_heartbeat_at_ms}`) and raises a
+  `HeartbeatStale` control signal. A child parked on a `needs_input` request is
+  exempt (`awaiting_input`), so it is never flagged stale while legitimately
+  waiting.
+- **Self-cleanup** — `Worker::cleanup`, a generation-guarded delayed self-call
+  scheduled after the child reports terminal. It releases the child's own sandbox,
+  removes itself from the parent's fan-out, and clears VO state; a follow-up that
+  arrives during the grace window revives the child instead.
+
+### Guarded parent resume
+
+An idle coordinator can start at most one bounded turn per resume-eligible signal.
+The resume is fenced by an active-turn gate (a signal stays queued in
+`unread_child_signals` while a root turn is active), signal-id dedupe
+(`pending_parent_resume_signal`), and a per-session `resume_budget`
+(`worker_resume_max_per_window` over `worker_resume_window_ms`; default 6 per
+10 minutes). Resume is conservative: it fires only on
+`Blocked`/`NeedsInput`/`Failed`/`HeartbeatStale` with `ParentResumePolicy::IfIdle`,
+never on `progress`/`heartbeat`/`finding`/plain success. The resume turn runs as
+the session's already-recorded owning identity (no broad authz bypass).
+`record_child_signal` records `WorkerParentResumeRequested` and dispatches the
+turn with `RunTurnRequest.trigger = ChildSignal`; that turn branch skips the
+synthetic `UserMessage` append (`user_message` instead carries the
+system-generated resume instruction), and the history pipeline renders the
+already-recorded resume event. A running coordinator turn drains its dispatch-time
+snapshot of queued signals at context-compile time so a `NeedsInput`/`Blocked`
+child is not stranded.
+
+### Cancellation scope
+
+`Session::cancel` takes a `CancelScope`: `TaskTree` (default) cancels the active
+coordinator turn and the whole recursive child tree (today's behavior);
+`CoordinatorOnly` cancels only the active `TurnExecution` and leaves children
+running. The dead `Soft`/`Hard` `CancelMode` is removed.
 
 ## Determinism Rules
 
@@ -148,7 +245,7 @@ Code inside Restate handlers must keep replay safety in mind:
 
 ## Action Reviews
 
-Action reviews do not suspend root or sub-agent workflows. The turn workflow
+Action reviews do not suspend root or worker workflows. The turn workflow
 stores the review request in Postgres, appends a session event, returns a
 pending-review tool result to the model, and continues:
 
@@ -163,10 +260,10 @@ tool call requires admin review
 Gateway processes never own pending review state. If a gateway restarts, it can
 reconstruct pending tenant action reviews from Postgres.
 
-Sub-agent tool calls use the same action-review path as root turns. A pending
+Worker tool calls use the same action-review path as root turns. A pending
 tenant-admin review records product state in Postgres and returns a
 pending-review tool result to the child turn; it does not create a blocked
-sub-agent awakeable.
+worker awakeable.
 
 ## Cancellation
 
@@ -200,7 +297,7 @@ Keep completion retention short for high-volume services such as LLM and tool
 calls. Keep longer retention only where it helps operations, such as
 action-review resolution, consolidation, or slow-path ingestion.
 
-VO state persists until explicitly cleared. Session and sub-agent state should
+VO state persists until explicitly cleared. Session and worker state should
 be cleared after the product session is terminal and old enough that live
 recovery is no longer needed.
 
@@ -248,16 +345,16 @@ services up.
 
 `docs/02-brain-orchestration.md` describes the current boot sequence and the
 turn flow implemented by `Session` plus `TurnExecution`.
-Sub-agent conversational state is held by `SubAgent`; each admitted child turn
-runs in `SubAgentTurnExecution`, and detached waits use child-owned result
+Worker conversational state is held by `Worker`; each admitted child turn
+runs in `WorkerTurnExecution`, and detached waits use child-owned result
 awakeables plus parent-cached terminal results instead of status polling.
 
 ## Current Decisions
 
 1. Postgres is the system of record; Restate is the orchestration engine.
-2. Sessions and sub-agents are virtual objects.
+2. Sessions and workers are virtual objects.
 3. Top-level turns run in `TurnExecution` workflows keyed by turn ID.
-4. Sub-agent turns run in `SubAgentTurnExecution` workflows keyed by turn ID.
+4. Worker turns run in `WorkerTurnExecution` workflows keyed by turn ID.
 5. Tenant action reviews use the `ActionReviews` service plus Postgres rows
    and events; they do not block turn workflows.
 6. Product-visible events, learning, memory, lineage, and audit stay in

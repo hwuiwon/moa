@@ -10,7 +10,7 @@ use sqlx::{PgPool, raw_sql};
 use uuid::Uuid;
 
 const EVAL_RUN_STATUS_MIGRATION: &str =
-    include_str!("../../moa-migrations/migrations/postgres/V000314__eval_run_status.sql");
+    include_str!("../../moa-migrations/migrations/postgres/V000313__eval_run_status.sql");
 
 #[tokio::test]
 async fn eval_run_status_lifecycle_round_trips_under_app_role_force_rls_db() -> Result<()> {

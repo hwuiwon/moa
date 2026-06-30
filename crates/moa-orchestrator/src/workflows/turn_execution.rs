@@ -29,6 +29,7 @@ use moa_core::wire::session_store::{
 };
 use moa_core::wire::turn::{
     RunTurnRequest, TurnComplexityClass, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
+    TurnTrigger,
 };
 use moa_core::{
     ActiveSegment, AgentContext, AssessmentPhase, CompletionRequest, CompletionResponse,
@@ -287,31 +288,62 @@ async fn execute_turn_inside_workflow(
     turn_progress::enable_live_delivery(ctx);
 
     let meta = load_session_meta(ctx, session_id).await?;
-    if let Some(outcome) = evaluate_input_guardrail(
-        ctx,
-        session_id,
-        &request.turn_id,
-        &meta,
-        &request.user_message,
-    )
-    .await?
-    {
-        return Ok(outcome);
-    }
+    let user_sequence_num = match request.trigger {
+        TurnTrigger::UserMessage => {
+            if let Some(outcome) = evaluate_input_guardrail(
+                ctx,
+                session_id,
+                &request.turn_id,
+                &meta,
+                &request.user_message,
+            )
+            .await?
+            {
+                return Ok(outcome);
+            }
 
-    let user_sequence_num = append_session_event(
-        ctx,
-        session_id,
-        Event::UserMessage {
-            text: request.user_message.clone(),
-            attachments: request.attachments.clone(),
-        },
-    )
-    .await?;
-    ctx.set(
-        driver_progress::RootTurnStateKey::USER_MESSAGE_SEQUENCE,
-        Json::from(user_sequence_num),
-    );
+            let user_sequence_num = append_session_event(
+                ctx,
+                session_id,
+                Event::UserMessage {
+                    text: request.user_message.clone(),
+                    attachments: request.attachments.clone(),
+                },
+            )
+            .await?;
+            ctx.set(
+                driver_progress::RootTurnStateKey::USER_MESSAGE_SEQUENCE,
+                Json::from(user_sequence_num),
+            );
+            user_sequence_num
+        }
+        TurnTrigger::ChildSignal => {
+            // Guarded coordinator resume: the system-generated instruction was already
+            // recorded as `Event::WorkerParentResumeRequested` by
+            // `Session::record_child_signal` (with the unread child-signal context folded
+            // into its `reason`), and the history pipeline renders that control event into
+            // the prompt. So we deliberately do NOT append a fake `Event::UserMessage`,
+            // skip the user-input guardrail, and leave the USER_MESSAGE_SEQUENCE anchor
+            // unset — there is no human input on this turn.
+            //
+            // Recent `Event::WorkerSignalReceived` records are now rendered as
+            // system-visible `<child_signal>` directives by the history pipeline
+            // (`moa-brain` conversion), so a blocked or input-awaiting child is surfaced on
+            // ANY coordinator turn — including a plain `UserMessage` turn — not just this
+            // guarded resume path. A `NeedsInput` directive carries the child's
+            // `input_request_id`, letting the coordinator answer via `provide_worker_input`
+            // (e.g. on the user's reply turn for a `User`-audience request). Recency is
+            // bounded by the existing compaction/history window, so addressed signals are not
+            // re-surfaced indefinitely.
+            tracing::info!(
+                session_id = %request.session_id,
+                turn_id = %request.turn_id,
+                child_signal_id = ?request.child_signal_id,
+                "TurnExecution seeding guarded coordinator resume turn"
+            );
+            0
+        }
+    };
     ctx.clear(driver_progress::RootTurnStateKey::QUERY_REWRITE_CACHE);
 
     let recent_target_events = load_recent_target_events(ctx, session_id).await?;
@@ -740,7 +772,7 @@ async fn run_once_inside_workflow(
 
     let meta = load_session_meta(ctx, session_id).await?;
     OrchestratorCtx::current_tool_router()
-        .set_trusted_sandbox_files(&meta, trusted_sandbox_files.clone())
+        .set_trusted_sandbox_files(&meta, None, trusted_sandbox_files.clone())
         .await;
     let active_segment = ensure_current_segment(ctx, session_id, &meta, &mut request).await?;
     if let Some(segment) = active_segment.as_ref() {
@@ -1584,8 +1616,8 @@ async fn load_recent_target_events(
                 EventType::ToolCall,
                 EventType::ToolResult,
                 EventType::ToolError,
-                EventType::SubAgentSpawned,
-                EventType::SubAgentMessageSent,
+                EventType::WorkerSpawned,
+                EventType::WorkerMessageSent,
                 EventType::MemoryRead,
                 EventType::MemoryWrite,
                 EventType::MemoryIngest,

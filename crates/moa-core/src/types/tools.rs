@@ -415,6 +415,12 @@ pub struct ToolCallRequest {
     /// Durable trusted sandbox file manifest selected during context compilation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted_sandbox_manifest: Option<TrustedSandboxFileManifestRef>,
+    /// Worker hand scope that isolates this call's sandbox from the
+    /// session-level coordinator scope. `None` keys the hand at the session
+    /// level (the coordinator/root path); `Some(id)` keys it at
+    /// `{session_id}:{worker_id}` so each worker owns its own sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
 }
 
 /// Shared metadata that describes one callable tool.

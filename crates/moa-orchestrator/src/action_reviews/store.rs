@@ -80,7 +80,7 @@ pub(crate) async fn insert_review(
     let insert = sqlx::query(
         r#"
         INSERT INTO tenant_action_reviews (
-            id, tenant_id, storage_partition_id, user_id, session_id, sub_agent_id, tool_call_id, tool_name,
+            id, tenant_id, storage_partition_id, user_id, session_id, worker_id, tool_call_id, tool_name,
             action_class, risk_level, input_summary, normalized_input, envelope,
             preview, tool_request, requested_by
         )
@@ -92,7 +92,7 @@ pub(crate) async fn insert_review(
     .bind(tenant_id.0)
     .bind(storage_partition_id.to_string())
     .bind(request.envelope.session_id.map(|id| id.0))
-    .bind(request.envelope.sub_agent_id.clone())
+    .bind(request.envelope.worker_id.clone())
     .bind(request.envelope.tool_call_id.0)
     .bind(&request.envelope.tool_name)
     .bind(request.envelope.action_class.as_str())
@@ -128,7 +128,7 @@ pub(crate) async fn list_pending_reviews(
 ) -> Result<Vec<ActionReviewSummary>, HandlerError> {
     let rows = sqlx::query(
         r#"
-        SELECT id, tenant_id, storage_partition_id, session_id, sub_agent_id, tool_call_id, tool_name,
+        SELECT id, tenant_id, storage_partition_id, session_id, worker_id, tool_call_id, tool_name,
                action_class, risk_level, input_summary, envelope, preview, status,
                requested_by, decided_by, deny_reason, created_at, decided_at
         FROM tenant_action_reviews
@@ -296,7 +296,7 @@ async fn load_review_state(
 ) -> Result<StoredReview, HandlerError> {
     let row = sqlx::query(
         r#"
-        SELECT id, tenant_id, storage_partition_id, session_id, sub_agent_id, tool_call_id, tool_name,
+        SELECT id, tenant_id, storage_partition_id, session_id, worker_id, tool_call_id, tool_name,
                action_class, risk_level, input_summary, envelope, preview, status,
                requested_by, requested_event_recorded_at, decided_by, deny_reason,
                created_at, decided_at
@@ -328,7 +328,7 @@ fn summary_from_row(row: &sqlx::postgres::PgRow) -> Result<ActionReviewSummary, 
             .try_get::<Option<Uuid>, _>("session_id")
             .map_err(db_error)?
             .map(moa_core::SessionId),
-        sub_agent_id: row.try_get("sub_agent_id").map_err(db_error)?,
+        worker_id: row.try_get("worker_id").map_err(db_error)?,
         tool_call_id: ToolCallId(row.try_get("tool_call_id").map_err(db_error)?),
         tool_name: row.try_get("tool_name").map_err(db_error)?,
         action_class: parse_db_enum(

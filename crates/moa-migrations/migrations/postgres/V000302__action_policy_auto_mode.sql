@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS tenant_action_reviews (
     user_id TEXT,
     scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     session_id UUID REFERENCES sessions(id) ON DELETE SET NULL,
-    sub_agent_id TEXT,
+    worker_id TEXT,
     tool_call_id UUID NOT NULL,
     tool_name TEXT NOT NULL,
     action_class TEXT NOT NULL,

@@ -1,8 +1,8 @@
-// Tool, agent, and sub-agent workflow-node support.
+// Tool, agent, and worker workflow-node support.
 
 use std::fs;
 
-use moa_core::{Event, EventRange, EventRecord, ModelId, SessionId, SubAgentChildRef};
+use moa_core::{Event, EventRange, EventRecord, ModelId, SessionId, WorkerChildRef};
 
 use crate::support::restate_runtime::grant_session_participant;
 use crate::support::session_store_service::{
@@ -69,7 +69,7 @@ async fn seed_active_session_children(
     session_id: SessionId,
 ) -> Result<()> {
     for index in 0..4 {
-        let child = SubAgentChildRef {
+        let child = WorkerChildRef {
             id: format!("{session_id}-active-child-{index}"),
             task_hash: format!("active-hash-{index}"),
             budget_tokens: 256,
@@ -204,13 +204,13 @@ definition:
 "#
 }
 
-fn sub_agent_workflow_source() -> &'static str {
+fn worker_workflow_source() -> &'static str {
     r#"
 api_version: moa.artifact/v1
 kind: workflow
 metadata:
-  name: sub-agent-fanout-workflow
-  description: Workflow that adapts one deterministic graph node into sub-agent delegation.
+  name: worker-fanout-workflow
+  description: Workflow that adapts one deterministic graph node into worker delegation.
   tags:
     - test
 status: draft
@@ -224,7 +224,7 @@ definition:
           x: 80
           y: 120
       - id: delegate
-        kind: sub_agent
+        kind: worker
         max_turns: 1
         input:
           task: Inspect whether this workflow node respects existing delegation fan-out limits.

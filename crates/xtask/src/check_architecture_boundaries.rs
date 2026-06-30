@@ -74,17 +74,17 @@ macro_rules! allow {
 const ALLOWANCES: &[Allowance] = &[
     allow!(
         RuntimeContext,
-        "crates/moa-orchestrator/src/objects/sub_agent/request.rs",
+        "crates/moa-orchestrator/src/objects/worker/request.rs",
         "OrchestratorCtx::current_tool_schemas",
         1,
-        "Sub-agent request prep still reads configured tool schemas from the runtime singleton"
+        "Worker request prep still reads configured tool schemas from the runtime singleton"
     ),
     allow!(
         RuntimeContext,
-        "crates/moa-orchestrator/src/objects/sub_agent/request.rs",
+        "crates/moa-orchestrator/src/objects/worker/request.rs",
         "OrchestratorCtx::current_provider_registry",
         1,
-        "Sub-agent model capability checks still use the shared provider registry"
+        "Worker model capability checks still use the shared provider registry"
     ),
     allow!(
         RuntimeContext,
@@ -711,10 +711,10 @@ const ALLOWANCES: &[Allowance] = &[
     ),
     allow!(
         RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/sub_agent_turn_execution.rs",
+        "crates/moa-orchestrator/src/workflows/worker_turn_execution.rs",
         "OrchestratorCtx::current_config",
         1,
-        "Sub-agent turn execution still reads generation config from runtime config"
+        "Worker turn execution still reads generation config from runtime config"
     ),
     allow!(
         RuntimeContext,

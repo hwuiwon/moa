@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use moa_core::{
-    HandHandle, HandProvider, McpServerConfig, MemoryToolExecutor, SandboxFile, SessionId,
-    SessionStore, TenantId, ToolBudgetConfig, ToolOutputConfig,
+    HandHandle, HandProvider, McpServerConfig, MemoryToolExecutor, SandboxFile, SessionStore,
+    TenantId, ToolBudgetConfig, ToolOutputConfig,
 };
 use moa_security::{ActionPolicies, ActionPolicyRuleStore, MCPCredentialProxy};
 use tokio::sync::RwLock;
@@ -43,7 +43,10 @@ pub struct ToolRouter {
     mcp_proxy: Option<Arc<MCPCredentialProxy>>,
     active_hands: RwLock<HashMap<String, HandHandle>>,
     hand_leases: Option<Arc<dyn HandLeaseStore>>,
-    trusted_sandbox_files: RwLock<HashMap<SessionId, Vec<SandboxFile>>>,
+    /// Trusted sandbox file manifests keyed by hand scope (`scope_key`):
+    /// `"{session_id}:{worker_id}"`, where an empty worker segment is the
+    /// session-level (coordinator) scope.
+    trusted_sandbox_files: RwLock<HashMap<String, Vec<SandboxFile>>>,
     installed_files: RwLock<HashMap<String, Vec<SandboxFile>>>,
     workspace_roots: RwLock<HashMap<TenantId, PathBuf>>,
     policies: ActionPolicies,

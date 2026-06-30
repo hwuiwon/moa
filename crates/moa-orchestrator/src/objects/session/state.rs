@@ -3,8 +3,8 @@
 use super::*;
 use moa_core::traits::Identity;
 use moa_core::{
-    AgentSignalId, ChildSignalKind, ParentResumePolicy, SubAgentSignal, TurnOutcome,
-    UnreadChildSignal,
+    AgentSignalId, ChildSignalKind, ParentResumePolicy, TurnOutcome, UnreadChildSignal,
+    WorkerSignal,
 };
 
 pub(super) const K_META: &str = "meta";
@@ -25,6 +25,9 @@ pub(super) const K_OWNING_IDENTITY: &str = "owning_identity";
 pub(super) const K_UNREAD_CHILD_SIGNALS: &str = "unread_child_signals";
 pub(super) const K_PENDING_PARENT_RESUME_SIGNAL: &str = "pending_parent_resume_signal";
 pub(super) const K_RESUME_BUDGET: &str = "resume_budget";
+pub(super) const K_RESUME_TURN: &str = "resume_turn";
+pub(super) const K_CHILD_LIVENESS_GENERATION: &str = "child_liveness_generation";
+pub(super) const K_CHILD_LIVENESS: &str = "child_liveness";
 
 /// Maximum unread child→parent control-plane signals retained on the coordinator VO.
 ///
@@ -33,23 +36,86 @@ pub(super) const K_RESUME_BUDGET: &str = "resume_budget";
 /// over informational `Finding`s during eviction.
 pub(super) const MAX_UNREAD_CHILD_SIGNALS: usize = 32;
 
-/// Maximum guarded parent auto-resumes per rolling window.
-// TODO(Task 6): source the resume budget window + cap from MoaConfig session limits and
-// consume the budget on dispatch; this increment only reads the cap for the gate.
-pub(super) const RESUME_BUDGET_MAX_PER_WINDOW: u32 = 8;
-
 /// Per-session guarded-resume budget: a rolling window start and the resume count
 /// dispatched within it.
 ///
-/// Defined here and persisted with the Session VO; the rolling-window accounting and
-/// dispatch-time consumption are wired by the guarded-resume path (Task 6). This
-/// increment defines the shape and reads `count` for the resume-eligibility gate.
+/// Persisted with the Session VO. The rolling-window cap and length are sourced from
+/// `MoaConfig` session limits (`worker_resume_max_per_window` /
+/// `worker_resume_window_ms`); the budget is checked by the resume-eligibility gate
+/// and consumed only on an actual dispatch.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResumeBudget {
     /// Start of the current rolling resume window, if one has opened.
     pub window_start: Option<DateTime<Utc>>,
     /// Number of guarded resumes dispatched in the current window.
     pub count: u32,
+}
+
+impl ResumeBudget {
+    /// Returns whether another guarded resume may be dispatched at `now`.
+    ///
+    /// An elapsed (or never-opened) window resets the accounting, so the cap only binds
+    /// within one rolling `window_ms`. `max == 0` disables resume entirely.
+    #[must_use]
+    pub fn allows(&self, now: DateTime<Utc>, window_ms: u64, max: u32) -> bool {
+        if max == 0 {
+            return false;
+        }
+        match self.window_start {
+            Some(start)
+                if now.signed_duration_since(start)
+                    < chrono::Duration::milliseconds(window_ms as i64) =>
+            {
+                self.count < max
+            }
+            // Fresh or elapsed window: the next dispatch opens a new window.
+            _ => true,
+        }
+    }
+
+    /// Records one dispatched resume at `now`, resetting the window when it has elapsed.
+    pub fn consume(&mut self, now: DateTime<Utc>, window_ms: u64) {
+        match self.window_start {
+            Some(start)
+                if now.signed_duration_since(start)
+                    < chrono::Duration::milliseconds(window_ms as i64) =>
+            {
+                self.count = self.count.saturating_add(1);
+            }
+            _ => {
+                self.window_start = Some(now);
+                self.count = 1;
+            }
+        }
+    }
+}
+
+/// Dispatch-time context for an in-flight guarded coordinator resume turn.
+///
+/// Records which turn was dispatched for a resume and the snapshot of unread signal ids
+/// folded into its instruction, so [`SessionVoState::clear_resume_on_outcome`] consumes
+/// exactly that snapshot when the turn completes (signals that arrive mid-turn stay
+/// queued for the next resume).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResumeTurnContext {
+    /// Turn id dispatched for the guarded resume.
+    pub turn_id: String,
+    /// Unread signal ids consumed by this resume turn at dispatch time.
+    pub consumed_signal_ids: Vec<AgentSignalId>,
+}
+
+/// Per-active-child liveness-watchdog scheduling state held on the Session VO.
+///
+/// One entry exists while a per-child `check_child_liveness` delayed self-call is
+/// outstanding. `generation` is drawn from the session-wide monotonic
+/// [`SessionVoState::child_liveness_generation`] counter so a tick scheduled by a
+/// superseded arming is recognized as stale and ignored when it fires.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChildLivenessState {
+    /// Child worker this watchdog entry tracks.
+    pub worker_id: WorkerId,
+    /// Scheduling generation of the currently outstanding liveness check.
+    pub generation: u64,
 }
 
 /// Serializable projection of the Session VO's durable state keys.
@@ -61,8 +127,8 @@ pub struct SessionVoState {
     pub status: Option<SessionStatus>,
     /// Buffered user messages waiting for the next `TurnExecution` workflow.
     pub pending: Vec<UserMessage>,
-    /// Placeholder for sub-agent children introduced in R08.
-    pub children: Vec<SubAgentChildRef>,
+    /// Placeholder for worker children introduced in R08.
+    pub children: Vec<WorkerChildRef>,
     /// Human-readable stub summary of the last drained turn.
     pub last_turn_summary: Option<String>,
     /// Requested cancellation scope, recorded at the most recent cancel request.
@@ -99,8 +165,19 @@ pub struct SessionVoState {
     /// Set by the resume-eligibility gate (decision only). The actual resume-turn
     /// dispatch and clearing on completion are wired in Task 6.
     pub pending_parent_resume_signal: Option<AgentSignalId>,
-    /// Per-session guarded-resume budget (consumed by the Task-6 dispatch path).
+    /// Per-session guarded-resume budget, consumed on each guarded-resume dispatch.
     pub resume_budget: ResumeBudget,
+    /// In-flight guarded coordinator resume turn and its dispatch-time unread snapshot,
+    /// drained on `record_turn_outcome` when that turn completes.
+    pub resume_turn: Option<ResumeTurnContext>,
+    /// Session-wide monotonic counter minting one liveness-check generation per arming.
+    ///
+    /// Monotonic so a re-armed (or re-registered) child never reuses a prior
+    /// generation, making any stray in-flight tick from before a clear/re-arm
+    /// recognizable as stale.
+    pub child_liveness_generation: u64,
+    /// Per-child outstanding liveness-watchdog checks (single-outstanding per child).
+    pub child_liveness: Vec<ChildLivenessState>,
 }
 
 impl SessionVoState {
@@ -203,8 +280,8 @@ impl SessionVoState {
         segment.token_cost = segment.token_cost.saturating_add(token_cost);
     }
 
-    /// Adds a root-owned child sub-agent reference if it is not already registered.
-    pub fn register_child(&mut self, child: SubAgentChildRef) -> bool {
+    /// Adds a root-owned child worker reference if it is not already registered.
+    pub fn register_child(&mut self, child: WorkerChildRef) -> bool {
         if self.children.iter().any(|existing| existing.id == child.id) {
             return false;
         }
@@ -213,11 +290,11 @@ impl SessionVoState {
     }
 
     /// Caches a terminal child result until the parent consumes it.
-    pub fn mark_child_terminal(&mut self, input: MarkSubAgentChildTerminalInput) -> bool {
+    pub fn mark_child_terminal(&mut self, input: MarkWorkerChildTerminalInput) -> bool {
         let Some(child) = self
             .children
             .iter_mut()
-            .find(|child| child.id == input.sub_agent_id)
+            .find(|child| child.id == input.worker_id)
         else {
             return false;
         };
@@ -229,25 +306,27 @@ impl SessionVoState {
     }
 
     /// Removes and returns a cached terminal child result.
-    pub fn consume_child_terminal(&mut self, sub_agent_id: &str) -> Option<SubAgentTerminalResult> {
+    pub fn consume_child_terminal(&mut self, worker_id: &str) -> Option<WorkerTerminalResult> {
         let index = self
             .children
             .iter()
-            .position(|child| child.id == sub_agent_id && child.terminal.is_some())?;
+            .position(|child| child.id == worker_id && child.terminal.is_some())?;
         self.children.remove(index).terminal
     }
 
-    /// Removes a root-owned child sub-agent reference by id.
-    pub fn remove_child(&mut self, sub_agent_id: &str) -> bool {
+    /// Removes a root-owned child worker reference by id.
+    pub fn remove_child(&mut self, worker_id: &str) -> bool {
         let before = self.children.len();
-        self.children.retain(|child| child.id != sub_agent_id);
+        self.children.retain(|child| child.id != worker_id);
+        // Drop any outstanding liveness watchdog for the now-removed child.
+        self.clear_child_liveness(worker_id);
         self.children.len() != before
     }
 
-    /// Returns whether the session currently owns the child sub-agent id.
+    /// Returns whether the session currently owns the child worker id.
     #[must_use]
-    pub fn owns_child(&self, sub_agent_id: &str) -> bool {
-        self.children.iter().any(|child| child.id == sub_agent_id)
+    pub fn owns_child(&self, worker_id: &str) -> bool {
+        self.children.iter().any(|child| child.id == worker_id)
     }
 
     /// Pushes one unread child→parent control-plane signal onto the recent window.
@@ -282,22 +361,108 @@ impl SessionVoState {
     ///
     /// Sets [`Self::pending_parent_resume_signal`] and returns `true` only when the
     /// signal opts into idle-wake (`resume_policy == IfIdle`), its kind is
-    /// resume-eligible, the coordinator has no active root turn, and the per-window
-    /// resume budget is not exhausted. DECISION ONLY: this increment never dispatches a
-    /// turn; the Task-6 resume path consumes `pending_parent_resume_signal`.
+    /// resume-eligible, the coordinator has no active root turn, and the rolling
+    /// per-window resume budget (cap `max_per_window`, length `window_ms`) allows another
+    /// resume at `now`. The budget is consumed separately, only on an actual dispatch
+    /// ([`Self::record_resume_dispatch`]), so a retried delivery does not double-count.
     pub fn maybe_arm_parent_resume(
         &mut self,
-        signal: &SubAgentSignal,
+        signal: &WorkerSignal,
         active_turn_id: Option<&str>,
+        now: DateTime<Utc>,
+        max_per_window: u32,
+        window_ms: u64,
     ) -> bool {
         let eligible = matches!(signal.resume_policy, ParentResumePolicy::IfIdle)
             && signal_kind_is_resume_eligible(signal.kind)
             && active_turn_id.is_none()
-            && self.resume_budget.count < RESUME_BUDGET_MAX_PER_WINDOW;
+            && self.resume_budget.allows(now, window_ms, max_per_window);
         if eligible {
             self.pending_parent_resume_signal = Some(signal.signal_id);
         }
         eligible
+    }
+
+    /// Records a dispatched guarded-resume turn: consumes one unit of resume budget and
+    /// snapshots the current unread signal ids consumed by the turn.
+    ///
+    /// The snapshot is exactly the set of unread signals folded into the resume turn's
+    /// instruction; [`Self::clear_resume_on_outcome`] removes only this set on completion
+    /// so signals that arrive mid-turn remain queued for the next resume.
+    pub fn record_resume_dispatch(&mut self, turn_id: String, now: DateTime<Utc>, window_ms: u64) {
+        self.resume_budget.consume(now, window_ms);
+        self.resume_turn = Some(ResumeTurnContext {
+            turn_id,
+            consumed_signal_ids: self
+                .unread_child_signals
+                .iter()
+                .map(|signal| signal.signal_id)
+                .collect(),
+        });
+    }
+
+    /// Clears resume bookkeeping when the completing turn was the guarded-resume turn.
+    ///
+    /// Drains exactly the dispatch-time unread snapshot (leaving mid-turn arrivals
+    /// queued) and clears `pending_parent_resume_signal`. Returns whether the completing
+    /// turn matched the in-flight resume turn.
+    pub fn clear_resume_on_outcome(&mut self, completed_turn_id: &str) -> bool {
+        let Some(resume_turn) = self.resume_turn.as_ref() else {
+            return false;
+        };
+        if resume_turn.turn_id != completed_turn_id {
+            return false;
+        }
+        let consumed = self.resume_turn.take().map(|turn| turn.consumed_signal_ids);
+        if let Some(consumed) = consumed {
+            self.unread_child_signals
+                .retain(|signal| !consumed.contains(&signal.signal_id));
+        }
+        self.pending_parent_resume_signal = None;
+        true
+    }
+
+    /// Arms a single-outstanding liveness check for one active child.
+    ///
+    /// Returns the new monotonic generation to schedule with when a check is newly
+    /// armed, or `None` when one is already outstanding for the child (so overlapping
+    /// active edges cannot fan out multiple checks). The generation is drawn from the
+    /// session-wide monotonic counter so it never collides with a superseded arming.
+    pub fn arm_child_liveness(&mut self, worker_id: &str) -> Option<u64> {
+        if self
+            .child_liveness
+            .iter()
+            .any(|entry| entry.worker_id == worker_id)
+        {
+            return None;
+        }
+        self.child_liveness_generation = self.child_liveness_generation.wrapping_add(1);
+        let generation = self.child_liveness_generation;
+        self.child_liveness.push(ChildLivenessState {
+            worker_id: worker_id.to_string(),
+            generation,
+        });
+        Some(generation)
+    }
+
+    /// Returns whether a fired liveness check still owns scheduling for its child.
+    ///
+    /// A check is live only when an entry for the child is outstanding and its
+    /// generation matches; a superseded or cleared check no-ops.
+    #[must_use]
+    pub fn liveness_generation_matches(&self, worker_id: &str, generation: u64) -> bool {
+        self.child_liveness
+            .iter()
+            .any(|entry| entry.worker_id == worker_id && entry.generation == generation)
+    }
+
+    /// Clears the outstanding liveness check for one child (terminal/stale/removed).
+    ///
+    /// Removing the entry is safe because re-arming draws a fresh generation from the
+    /// monotonic counter, so any stray in-flight tick can never match the re-armed child.
+    pub fn clear_child_liveness(&mut self, worker_id: &str) {
+        self.child_liveness
+            .retain(|entry| entry.worker_id != worker_id);
     }
 
     pub(super) fn set_status(&mut self, status: SessionStatus, now: DateTime<Utc>) {
@@ -371,6 +536,12 @@ impl VoState for SessionVoState {
                 .unwrap_or_default(),
             pending_parent_resume_signal: reader.get_json(K_PENDING_PARENT_RESUME_SIGNAL).await?,
             resume_budget: reader.get_json(K_RESUME_BUDGET).await?.unwrap_or_default(),
+            resume_turn: reader.get_json(K_RESUME_TURN).await?,
+            child_liveness_generation: reader
+                .get_json(K_CHILD_LIVENESS_GENERATION)
+                .await?
+                .unwrap_or_default(),
+            child_liveness: reader.get_json(K_CHILD_LIVENESS).await?.unwrap_or_default(),
         })
     }
 
@@ -425,6 +596,14 @@ impl VoState for SessionVoState {
             self.resume_budget.clone(),
             ResumeBudget::default(),
         );
+        set_or_clear_opt(ctx, K_RESUME_TURN, self.resume_turn.as_ref());
+        set_or_clear_scalar(
+            ctx,
+            K_CHILD_LIVENESS_GENERATION,
+            self.child_liveness_generation,
+            0,
+        );
+        set_or_clear_vec(ctx, K_CHILD_LIVENESS, &self.child_liveness);
     }
 }
 
@@ -511,7 +690,7 @@ mod tests {
         state
             .enqueue_message(test_message("hello"), Utc::now())
             .expect("enqueue should succeed");
-        state.children.push(moa_core::SubAgentChildRef {
+        state.children.push(moa_core::WorkerChildRef {
             id: "child-1".to_string(),
             task_hash: "hash-1".to_string(),
             budget_tokens: 0,
@@ -528,7 +707,7 @@ mod tests {
     fn session_child_registry_is_idempotent_by_child_id() {
         // Pins: root delegation registration preserves one active child ref per id.
         let mut state = SessionVoState::default();
-        let child = moa_core::SubAgentChildRef {
+        let child = moa_core::WorkerChildRef {
             id: "child-1".to_string(),
             task_hash: "hash-1".to_string(),
             budget_tokens: 128,
@@ -545,13 +724,13 @@ mod tests {
     fn session_child_registry_remove_is_exact() {
         // Pins: root delegation cleanup removes only the requested active child ref.
         let mut state = SessionVoState::default();
-        state.register_child(moa_core::SubAgentChildRef {
+        state.register_child(moa_core::WorkerChildRef {
             id: "child-1".to_string(),
             task_hash: "hash-1".to_string(),
             budget_tokens: 128,
             terminal: None,
         });
-        state.register_child(moa_core::SubAgentChildRef {
+        state.register_child(moa_core::WorkerChildRef {
             id: "child-2".to_string(),
             task_hash: "hash-2".to_string(),
             budget_tokens: 256,
@@ -562,7 +741,7 @@ mod tests {
         assert!(!state.remove_child("missing"));
         assert_eq!(
             state.children,
-            vec![moa_core::SubAgentChildRef {
+            vec![moa_core::WorkerChildRef {
                 id: "child-2".to_string(),
                 task_hash: "hash-2".to_string(),
                 budget_tokens: 256,
@@ -575,16 +754,16 @@ mod tests {
     fn session_child_terminal_result_is_consumed_once() {
         // Pins: root wait consumes a cached terminal child result exactly once.
         let mut state = SessionVoState::default();
-        state.register_child(moa_core::SubAgentChildRef {
+        state.register_child(moa_core::WorkerChildRef {
             id: "child-1".to_string(),
             task_hash: "hash-1".to_string(),
             budget_tokens: 128,
             terminal: None,
         });
-        let terminal = moa_core::SubAgentTerminalResult {
-            state: moa_core::SubAgentState::Completed,
-            result: moa_core::SubAgentResult {
-                sub_agent_id: "child-1".to_string(),
+        let terminal = moa_core::WorkerTerminalResult {
+            state: moa_core::WorkerState::Completed,
+            result: moa_core::WorkerResult {
+                worker_id: "child-1".to_string(),
                 success: true,
                 output: "done".to_string(),
                 tokens_used: 17,
@@ -594,14 +773,14 @@ mod tests {
         };
 
         assert!(
-            state.mark_child_terminal(moa_core::MarkSubAgentChildTerminalInput {
-                sub_agent_id: "child-1".to_string(),
+            state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+                worker_id: "child-1".to_string(),
                 terminal: terminal.clone(),
             })
         );
         assert!(
-            !state.mark_child_terminal(moa_core::MarkSubAgentChildTerminalInput {
-                sub_agent_id: "child-1".to_string(),
+            !state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+                worker_id: "child-1".to_string(),
                 terminal: terminal.clone(),
             })
         );
@@ -616,7 +795,7 @@ mod tests {
     ) -> moa_core::UnreadChildSignal {
         moa_core::UnreadChildSignal {
             signal_id,
-            sub_agent_id: "child".to_string(),
+            worker_id: "child".to_string(),
             kind,
             summary: "summary".to_string(),
             input_request_id: None,
@@ -627,12 +806,12 @@ mod tests {
     fn resume_signal(
         kind: moa_core::ChildSignalKind,
         resume_policy: moa_core::ParentResumePolicy,
-    ) -> moa_core::SubAgentSignal {
-        moa_core::SubAgentSignal {
+    ) -> moa_core::WorkerSignal {
+        moa_core::WorkerSignal {
             signal_id: moa_core::AgentSignalId::new(),
-            sub_agent_id: "child".to_string(),
+            worker_id: "child".to_string(),
             parent_session: moa_core::SessionId::new(),
-            parent_sub_agent: None,
+            parent_worker: None,
             kind,
             severity: moa_core::SignalSeverity::Warning,
             summary: "needs attention".to_string(),
@@ -699,35 +878,213 @@ mod tests {
         );
     }
 
+    const TEST_RESUME_MAX: u32 = 6;
+    const TEST_RESUME_WINDOW_MS: u64 = 600_000;
+
     #[test]
     fn resume_gate_arms_only_when_idle_eligible_and_under_budget() {
         // Pins: the resume-eligibility gate arms a pending resume only for an idle
         // coordinator on a resume-eligible IfIdle signal under budget, and never
         // dispatches a turn (it only mutates VO state).
         use moa_core::{ChildSignalKind, ParentResumePolicy};
+        let now = Utc::now();
 
         let mut idle = SessionVoState::default();
         let signal = resume_signal(ChildSignalKind::Blocked, ParentResumePolicy::IfIdle);
-        assert!(idle.maybe_arm_parent_resume(&signal, None));
+        assert!(idle.maybe_arm_parent_resume(
+            &signal,
+            None,
+            now,
+            TEST_RESUME_MAX,
+            TEST_RESUME_WINDOW_MS
+        ));
         assert_eq!(idle.pending_parent_resume_signal, Some(signal.signal_id));
 
         let mut busy = SessionVoState::default();
-        assert!(!busy.maybe_arm_parent_resume(&signal, Some("turn-1")));
+        assert!(!busy.maybe_arm_parent_resume(
+            &signal,
+            Some("turn-1"),
+            now,
+            TEST_RESUME_MAX,
+            TEST_RESUME_WINDOW_MS
+        ));
         assert_eq!(busy.pending_parent_resume_signal, None);
 
         let mut finding = SessionVoState::default();
         let finding_signal = resume_signal(ChildSignalKind::Finding, ParentResumePolicy::IfIdle);
-        assert!(!finding.maybe_arm_parent_resume(&finding_signal, None));
+        assert!(!finding.maybe_arm_parent_resume(
+            &finding_signal,
+            None,
+            now,
+            TEST_RESUME_MAX,
+            TEST_RESUME_WINDOW_MS
+        ));
         assert_eq!(finding.pending_parent_resume_signal, None);
 
         let mut never = SessionVoState::default();
         let never_signal = resume_signal(ChildSignalKind::Blocked, ParentResumePolicy::Never);
-        assert!(!never.maybe_arm_parent_resume(&never_signal, None));
+        assert!(!never.maybe_arm_parent_resume(
+            &never_signal,
+            None,
+            now,
+            TEST_RESUME_MAX,
+            TEST_RESUME_WINDOW_MS
+        ));
         assert_eq!(never.pending_parent_resume_signal, None);
 
         let mut exhausted = SessionVoState::default();
-        exhausted.resume_budget.count = super::RESUME_BUDGET_MAX_PER_WINDOW;
-        assert!(!exhausted.maybe_arm_parent_resume(&signal, None));
+        exhausted.resume_budget.window_start = Some(now);
+        exhausted.resume_budget.count = TEST_RESUME_MAX;
+        assert!(!exhausted.maybe_arm_parent_resume(
+            &signal,
+            None,
+            now,
+            TEST_RESUME_MAX,
+            TEST_RESUME_WINDOW_MS
+        ));
         assert_eq!(exhausted.pending_parent_resume_signal, None);
+    }
+
+    #[test]
+    fn resume_gate_does_not_rearm_once_a_resume_turn_is_active() {
+        // Pins: after a resume is dispatched (turn active), a repeated delivery of the
+        // same signal does not arm a second resume — the active-turn gate blocks it.
+        use moa_core::{ChildSignalKind, ParentResumePolicy};
+        let now = Utc::now();
+        let signal = resume_signal(ChildSignalKind::Blocked, ParentResumePolicy::IfIdle);
+
+        let mut state = SessionVoState::default();
+        assert!(state.maybe_arm_parent_resume(
+            &signal,
+            None,
+            now,
+            TEST_RESUME_MAX,
+            TEST_RESUME_WINDOW_MS
+        ));
+        state.record_resume_dispatch("resume-turn".to_string(), now, TEST_RESUME_WINDOW_MS);
+
+        // The dispatched resume turn is now active; a retried signal cannot re-arm.
+        assert!(!state.maybe_arm_parent_resume(
+            &signal,
+            Some("resume-turn"),
+            now,
+            TEST_RESUME_MAX,
+            TEST_RESUME_WINDOW_MS
+        ));
+        assert_eq!(state.pending_parent_resume_signal, Some(signal.signal_id));
+        assert_eq!(state.resume_budget.count, 1);
+    }
+
+    #[test]
+    fn resume_budget_window_resets_after_elapsed_window() {
+        // Pins: the rolling resume budget caps within a window but reopens once the
+        // window elapses, and a zero cap disables resume entirely.
+        let base = Utc::now();
+        let mut budget = super::ResumeBudget::default();
+        for _ in 0..TEST_RESUME_MAX {
+            assert!(budget.allows(base, TEST_RESUME_WINDOW_MS, TEST_RESUME_MAX));
+            budget.consume(base, TEST_RESUME_WINDOW_MS);
+        }
+        // Cap reached inside the window.
+        assert!(!budget.allows(base, TEST_RESUME_WINDOW_MS, TEST_RESUME_MAX));
+        // After the window elapses the cap reopens.
+        let later = base + chrono::Duration::milliseconds(TEST_RESUME_WINDOW_MS as i64 + 1);
+        assert!(budget.allows(later, TEST_RESUME_WINDOW_MS, TEST_RESUME_MAX));
+        // A zero cap disables resume regardless of window state.
+        assert!(!budget.allows(base, TEST_RESUME_WINDOW_MS, 0));
+    }
+
+    #[test]
+    fn child_liveness_is_single_outstanding_with_monotonic_generations() {
+        // Pins: arming a child's liveness check is single-outstanding (a second arm while
+        // one is outstanding is a no-op), generations are monotonic so a re-armed child
+        // never reuses a prior generation, and a fired check only matches the live
+        // generation of an outstanding entry.
+        let mut state = SessionVoState::default();
+
+        let first = state
+            .arm_child_liveness("child-1")
+            .expect("first arm schedules a check");
+        // Single-outstanding: a second arm while one is outstanding does not reschedule.
+        assert_eq!(state.arm_child_liveness("child-1"), None);
+        // The live generation matches; a superseded/older generation does not.
+        assert!(state.liveness_generation_matches("child-1", first));
+        assert!(!state.liveness_generation_matches("child-1", first.wrapping_sub(1)));
+        assert!(!state.liveness_generation_matches("missing", first));
+
+        // A distinct active child gets its own, strictly newer generation.
+        let other = state
+            .arm_child_liveness("child-2")
+            .expect("second child arms independently");
+        assert_ne!(first, other);
+
+        // Clearing (terminal/stale/removed) stops scheduling; a stray tick no longer matches.
+        state.clear_child_liveness("child-1");
+        assert!(!state.liveness_generation_matches("child-1", first));
+
+        // Re-arming after a clear draws a fresh, strictly newer generation, so any stray
+        // in-flight tick carrying `first` can never match the re-armed child.
+        let rearmed = state
+            .arm_child_liveness("child-1")
+            .expect("re-arm after clear schedules a new check");
+        assert_ne!(first, rearmed);
+        assert!(rearmed > other);
+        assert!(!state.liveness_generation_matches("child-1", first));
+        assert!(state.liveness_generation_matches("child-1", rearmed));
+    }
+
+    #[test]
+    fn remove_child_clears_outstanding_liveness_check() {
+        // Pins: removing a child (e.g. on self-clean) drops its outstanding liveness
+        // watchdog so a later fired check recognizes it as superseded.
+        let mut state = SessionVoState::default();
+        state.register_child(moa_core::WorkerChildRef {
+            id: "child-1".to_string(),
+            task_hash: "hash-1".to_string(),
+            budget_tokens: 128,
+            terminal: None,
+        });
+        let generation = state
+            .arm_child_liveness("child-1")
+            .expect("active child arms a liveness check");
+        assert!(state.liveness_generation_matches("child-1", generation));
+
+        assert!(state.remove_child("child-1"));
+        assert!(!state.liveness_generation_matches("child-1", generation));
+    }
+
+    #[test]
+    fn clear_resume_on_outcome_drains_only_dispatch_snapshot() {
+        // Pins: completing the resume turn drains exactly the dispatch-time unread
+        // snapshot and clears the pending signal, leaving mid-turn arrivals queued.
+        use moa_core::ChildSignalKind;
+        let now = Utc::now();
+        let mut state = SessionVoState::default();
+        let snap_a = moa_core::AgentSignalId::new();
+        let snap_b = moa_core::AgentSignalId::new();
+        state.push_unread_child_signal(unread_entry(snap_a, ChildSignalKind::Blocked));
+        state.push_unread_child_signal(unread_entry(snap_b, ChildSignalKind::NeedsInput));
+        state.pending_parent_resume_signal = Some(snap_a);
+
+        state.record_resume_dispatch("resume-turn".to_string(), now, TEST_RESUME_WINDOW_MS);
+        assert_eq!(state.resume_budget.count, 1);
+
+        // A signal that arrives mid-turn must NOT be drained on outcome.
+        let mid_turn = moa_core::AgentSignalId::new();
+        state.push_unread_child_signal(unread_entry(mid_turn, ChildSignalKind::Finding));
+
+        // A non-matching turn id is a no-op.
+        assert!(!state.clear_resume_on_outcome("other-turn"));
+        assert!(state.resume_turn.is_some());
+
+        assert!(state.clear_resume_on_outcome("resume-turn"));
+        assert_eq!(state.pending_parent_resume_signal, None);
+        assert!(state.resume_turn.is_none());
+        let remaining: Vec<_> = state
+            .unread_child_signals
+            .iter()
+            .map(|signal| signal.signal_id)
+            .collect();
+        assert_eq!(remaining, vec![mid_turn]);
     }
 }

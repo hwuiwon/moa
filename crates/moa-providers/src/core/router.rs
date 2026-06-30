@@ -32,7 +32,7 @@ impl ModelRouter {
             ModelTask::Summarization
             | ModelTask::Consolidation
             | ModelTask::SkillDistillation
-            | ModelTask::Subagent => self.auxiliary.as_ref().unwrap_or(&self.main).clone(),
+            | ModelTask::Worker => self.auxiliary.as_ref().unwrap_or(&self.main).clone(),
         }
     }
 }

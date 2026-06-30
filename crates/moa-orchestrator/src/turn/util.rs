@@ -1,4 +1,4 @@
-//! Pure turn helpers shared by the durable session and sub-agent runners.
+//! Pure turn helpers shared by the durable session and worker runners.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -267,7 +267,7 @@ fn uuid_from_hash(hash: blake3::Hash) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
-/// Appends the provider response into a sub-agent's local history buffer.
+/// Appends the provider response into a worker's local history buffer.
 pub(crate) fn apply_response_to_history(
     history: &mut Vec<ContextMessage>,
     response: &CompletionResponse,
@@ -606,11 +606,12 @@ mod tests {
         ensure_delegation_tool_schemas(&mut request);
 
         let names = allowed_tool_names(&request);
-        assert_eq!(names.len(), 5);
-        assert!(moa_core::is_delegation_tool_name("spawn_sub_agent"));
-        assert!(moa_core::is_delegation_tool_name("wait_sub_agent"));
-        assert!(moa_core::is_delegation_tool_name("message_sub_agent"));
-        assert!(moa_core::is_delegation_tool_name("list_sub_agents"));
-        assert!(moa_core::is_delegation_tool_name("cancel_sub_agent"));
+        assert_eq!(names.len(), 6);
+        assert!(moa_core::is_delegation_tool_name("spawn_worker"));
+        assert!(moa_core::is_delegation_tool_name("wait_worker"));
+        assert!(moa_core::is_delegation_tool_name("message_worker"));
+        assert!(moa_core::is_delegation_tool_name("list_workers"));
+        assert!(moa_core::is_delegation_tool_name("cancel_worker"));
+        assert!(moa_core::is_delegation_tool_name("provide_worker_input"));
     }
 }

@@ -1481,7 +1481,7 @@ fn is_executable_adapter_request(request: &WorkflowNodeRequest) -> bool {
             | WorkflowNodeRequest::Tool { .. }
             | WorkflowNodeRequest::SkillAction { .. }
             | WorkflowNodeRequest::Agent { .. }
-            | WorkflowNodeRequest::SubAgent { .. }
+            | WorkflowNodeRequest::Worker { .. }
             | WorkflowNodeRequest::MemoryRead { .. }
             | WorkflowNodeRequest::MemoryWrite { .. }
     )
@@ -1515,7 +1515,7 @@ fn blocked_node_id(request: &WorkflowNodeRequest) -> String {
         | WorkflowNodeRequest::Tool { node_id, .. }
         | WorkflowNodeRequest::SkillAction { node_id, .. }
         | WorkflowNodeRequest::Agent { node_id, .. }
-        | WorkflowNodeRequest::SubAgent { node_id, .. }
+        | WorkflowNodeRequest::Worker { node_id, .. }
         | WorkflowNodeRequest::Review { node_id, .. }
         | WorkflowNodeRequest::WaitSignal { node_id, .. }
         | WorkflowNodeRequest::MemoryRead { node_id, .. }
@@ -1529,7 +1529,7 @@ fn blocked_input(request: &WorkflowNodeRequest) -> Value {
         | WorkflowNodeRequest::Tool { input, .. }
         | WorkflowNodeRequest::SkillAction { input, .. }
         | WorkflowNodeRequest::Agent { input, .. }
-        | WorkflowNodeRequest::SubAgent { input, .. }
+        | WorkflowNodeRequest::Worker { input, .. }
         | WorkflowNodeRequest::Review { input, .. }
         | WorkflowNodeRequest::WaitSignal { input, .. }
         | WorkflowNodeRequest::MemoryRead { input, .. }
