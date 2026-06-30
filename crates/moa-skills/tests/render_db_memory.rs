@@ -1,6 +1,6 @@
 //! Integration tests for rendering skills with learned graph lessons.
 
-#[path = "support/skill_graph_render.rs"]
+#[path = "support/skill_graph.rs"]
 mod skill_graph;
 
 use moa_core::{MoaError, Result, TenantId};

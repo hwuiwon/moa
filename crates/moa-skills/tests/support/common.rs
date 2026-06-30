@@ -1,4 +1,11 @@
-//! Skill draft-proposal integration-test fixtures.
+//! Shared skill distillation/improvement integration-test fixtures.
+//!
+//! Consolidates the session-fixture, scripted-provider, and skill-seeding helpers
+//! previously duplicated across the `distillation`, `draft_proposals`, `improver`,
+//! and `regression` test binaries. Each binary uses only a subset of these helpers,
+//! so the module allows dead code rather than warning per binary.
+
+#![allow(dead_code)]
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -27,10 +34,16 @@ use uuid::Uuid;
 
 /// Successful session fixture with exactly five tool calls.
 pub const SESSION_WITH_5_TOOL_CALLS: &str = include_str!("fixtures/session_with_5_tool_calls.json");
+/// Successful session fixture below the distillation threshold.
+pub const SESSION_WITH_4_TOOL_CALLS: &str = include_str!("fixtures/session_with_4_tool_calls.json");
 /// Baseline skill fixture used by improvement and regression tests.
 pub const BASELINE_SKILL: &str = include_str!("fixtures/baseline_skill.md");
 /// Known-good improvement fixture returned by the scripted LLM.
 pub const IMPROVED_SKILL: &str = include_str!("fixtures/improved_skill_diff.md");
+/// Known-bad improvement fixture returned by the scripted LLM.
+pub const REGRESSED_SKILL: &str = include_str!("fixtures/regressed_skill_diff.md");
+/// Improvement fixture that renames the target skill; the improver must reject it.
+pub const RENAMED_SKILL: &str = include_str!("fixtures/renamed_skill_diff.md");
 
 #[derive(Debug, Deserialize)]
 struct SessionFixture {
@@ -159,6 +172,24 @@ pub fn load_session_fixture(json_text: &str) -> LoadedSession {
         },
     );
     LoadedSession { session, events }
+}
+
+/// Returns a failed copy of a loaded session, preserving enough tool calls to pass the threshold.
+pub fn failed_session(mut loaded: LoadedSession) -> LoadedSession {
+    loaded.session.status = SessionStatus::Failed;
+    let tool_id = ToolCallId::new();
+    push_event(
+        &mut loaded.events,
+        loaded.session.id,
+        Event::ToolError {
+            tool_id,
+            provider_tool_use_id: None,
+            tool_name: "bash".to_string(),
+            error: "final verification failed".to_string(),
+            retryable: false,
+        },
+    );
+    loaded
 }
 
 /// Builds a model router backed by deterministic text responses.

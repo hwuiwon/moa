@@ -1,6 +1,6 @@
 //! Integration tests for graph-backed skill registry behavior.
 
-#[path = "support/skill_graph_registry.rs"]
+#[path = "support/skill_graph.rs"]
 mod skill_graph;
 
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};

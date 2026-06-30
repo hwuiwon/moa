@@ -25,7 +25,6 @@ use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_session::testing;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
-use uuid::Uuid;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -535,22 +534,4 @@ fn gold_resolution_vector(text: &str) -> Vec<f32> {
     }
     vector[0] += 1.0;
     vector
-}
-
-fn session_id(value: &str) -> SessionId {
-    SessionId(Uuid::parse_str(value).expect("stable fixture session UUID"))
-}
-
-fn user(value: &str) -> UserId {
-    UserId::new(value)
-}
-
-fn storage_partition(value: &str) -> StoragePartitionId {
-    StoragePartitionId::new(value)
-}
-
-fn utc(value: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(value)
-        .expect("fixture timestamp parses")
-        .with_timezone(&Utc)
 }

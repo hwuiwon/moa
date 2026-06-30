@@ -1,3 +1,7 @@
+#[path = "memory_eval_support/common.rs"]
+mod common;
+use common::*;
+
 include!("memory_eval_support/corpus.rs");
 
 #[tokio::test]

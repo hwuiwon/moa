@@ -28,27 +28,8 @@ use crate::support::restate_runtime::{
     test_user_identity, with_identity,
 };
 
-mod support {
-    pub mod grant_tenant_admin;
-    pub mod restate_admin_url;
-    pub mod restate_identity;
-    pub mod restate_ingress_url;
-    pub mod restate_lock;
-    pub mod restate_ports;
-    pub mod restate_register;
-
-    pub mod restate_runtime {
-        pub use super::grant_tenant_admin::grant_tenant_admin;
-        pub use super::restate_admin_url::restate_admin_url;
-        pub use super::restate_identity::{test_user_identity, with_identity};
-        pub use super::restate_ingress_url::restate_ingress_url;
-        pub use super::restate_lock::RESTATE_E2E_LOCK;
-        pub use super::restate_ports::{
-            OrchestratorPorts, deployment_endpoint_url, reserve_orchestrator_ports,
-        };
-        pub use super::restate_register::register_deployment;
-    }
-}
+#[path = "support/mod.rs"]
+mod support;
 
 fn spawn_orchestrator(
     ports: OrchestratorPorts,

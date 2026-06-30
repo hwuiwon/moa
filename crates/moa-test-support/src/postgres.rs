@@ -4,7 +4,6 @@ mod contracts;
 
 use moa_core::{MoaError, Result};
 use moa_session::{PostgresSessionStore, testing};
-use uuid::Uuid;
 
 pub use contracts::{
     test_action_policy_rules, test_create_and_get_session, test_emit_and_get_events,
@@ -84,11 +83,15 @@ impl Drop for TestDb {
     }
 }
 
-/// Creates a Postgres-backed session store in a fresh isolated schema.
+/// Creates a Postgres-backed session store in a fresh isolated database.
+///
+/// The database is cloned from a cached migration template (see
+/// [`moa_session::testing`]), so bootstrap is a fast block copy rather than a
+/// full migration replay. The returned `database_url` points at the per-test
+/// database and `schema_name` is the schema holding its session tables; the
+/// database is dropped when the [`TestDb`] is dropped.
 pub async fn bootstrap_test_db() -> Result<TestDb> {
-    let database_url = test_database_url();
-    let schema_name = format!("test_{}", Uuid::now_v7().simple());
-    let store = PostgresSessionStore::new_in_schema(&database_url, &schema_name).await?;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store().await?;
     Ok(TestDb {
         store: Some(store),
         database_url,

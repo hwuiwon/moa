@@ -253,6 +253,37 @@ async fn run_embedded_migrations(database_url: &str) -> Result<refinery::Report>
     Ok(report)
 }
 
+/// Returns a stable fingerprint of the session schema migration set.
+///
+/// The test harness keys its cached template database on this value so the
+/// template is rebuilt automatically whenever the session migrations change.
+/// `std::hash::DefaultHasher` uses fixed keys, so the result is stable across
+/// processes built by the same toolchain (a stale fingerprint at worst forces a
+/// one-time template rebuild, never an incorrect schema).
+#[must_use]
+pub fn session_schema_fingerprint() -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    // Version tag so behavioral changes to the helper (extensions, schema
+    // layout) invalidate previously cached templates even if the SQL is equal.
+    "session-template-v3".hash(&mut hasher);
+    for migration in SESSION_SCHEMA_MIGRATIONS {
+        migration.name.hash(&mut hasher);
+        migration.sql.hash(&mut hasher);
+    }
+    // The test template also materializes the standalone lineage/analytics
+    // schema and the OCSF security-event schema (the edge audit path writes
+    // `security_events` on every request), so their DDL is part of the template
+    // content and must invalidate the cached template when it changes.
+    LINEAGE_SCHEMA_DDL.hash(&mut hasher);
+    for migration in OCSF_SCHEMA_MIGRATIONS {
+        migration.name.hash(&mut hasher);
+        migration.sql.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
 /// Runs the session baseline inside an isolated schema.
 pub async fn run_session_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
     run_schema_migrations(pool, schema_name, SESSION_SCHEMA_MIGRATIONS, true).await
@@ -287,42 +318,16 @@ async fn run_schema_migrations(
     migrations: &[SchemaMigration],
     install_session_extensions: bool,
 ) -> Result<()> {
-    let mut lock_conn = pool
+    let mut conn = pool
         .acquire()
         .await
         .context("acquire migration connection")?;
-    sqlx::query("SELECT pg_advisory_lock($1)")
-        .bind(SCHEMA_MIGRATION_LOCK_ID)
-        .execute(&mut *lock_conn)
-        .await
-        .context("acquire schema migration advisory lock")?;
+    let conn: &mut PgConnection = &mut conn;
 
-    let result = run_schema_migrations_locked(
-        &mut lock_conn,
-        schema_name,
-        migrations,
-        install_session_extensions,
-    )
-    .await;
-    let unlock_result = sqlx::query("SELECT pg_advisory_unlock($1)")
-        .bind(SCHEMA_MIGRATION_LOCK_ID)
-        .execute(&mut *lock_conn)
-        .await
-        .context("release schema migration advisory lock");
-
-    match (result, unlock_result) {
-        (Ok(()), Ok(_)) => Ok(()),
-        (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
-    }
-}
-
-async fn run_schema_migrations_locked(
-    conn: &mut PgConnection,
-    schema_name: &str,
-    migrations: &[SchemaMigration],
-    install_session_extensions: bool,
-) -> Result<()> {
+    // Each bootstrap targets a unique schema name, so creating the schema and
+    // replaying its DDL never conflicts with concurrent bootstraps and needs no
+    // global lock. Only `CREATE EXTENSION` touches database-global catalog state
+    // shared across schemas, so that step alone is serialized below.
     sqlx::query(&format!(
         "CREATE SCHEMA IF NOT EXISTS {}",
         quote_identifier(schema_name)
@@ -331,6 +336,45 @@ async fn run_schema_migrations_locked(
     .await
     .with_context(|| format!("create schema {schema_name}"))?;
 
+    install_shared_extensions(conn, install_session_extensions).await?;
+    apply_schema_migrations(conn, schema_name, migrations).await
+}
+
+/// Installs the database-global extensions shared by every isolated schema.
+///
+/// Concurrent `CREATE EXTENSION IF NOT EXISTS` for the same extension can error
+/// or deadlock on the shared catalog, so a short advisory lock serializes just
+/// this step (a fast no-op once the extension already exists) rather than the
+/// whole migration replay.
+async fn install_shared_extensions(
+    conn: &mut PgConnection,
+    install_session_extensions: bool,
+) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(SCHEMA_MIGRATION_LOCK_ID)
+        .execute(&mut *conn)
+        .await
+        .context("acquire schema extension advisory lock")?;
+
+    let result = install_shared_extensions_locked(conn, install_session_extensions).await;
+
+    let unlock_result = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(SCHEMA_MIGRATION_LOCK_ID)
+        .execute(&mut *conn)
+        .await
+        .context("release schema extension advisory lock");
+
+    match (result, unlock_result) {
+        (Ok(()), Ok(_)) => Ok(()),
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+    }
+}
+
+async fn install_shared_extensions_locked(
+    conn: &mut PgConnection,
+    install_session_extensions: bool,
+) -> Result<()> {
     raw_sql("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
         .execute(&mut *conn)
         .await
@@ -343,6 +387,14 @@ async fn run_schema_migrations_locked(
             .context("install session migration extensions")?;
     }
 
+    Ok(())
+}
+
+async fn apply_schema_migrations(
+    conn: &mut PgConnection,
+    schema_name: &str,
+    migrations: &[SchemaMigration],
+) -> Result<()> {
     let mut tx = conn
         .begin()
         .await

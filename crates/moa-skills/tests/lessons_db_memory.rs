@@ -1,6 +1,6 @@
 //! Integration tests for skill lesson learning in graph memory.
 
-#[path = "support/skill_graph_lessons.rs"]
+#[path = "support/skill_graph.rs"]
 mod skill_graph;
 
 use moa_core::RlsContext;

@@ -2,7 +2,7 @@
 
 #![recursion_limit = "256"]
 
-#[path = "support/improver.rs"]
+#[path = "support/common.rs"]
 mod support;
 
 use moa_skills::improver::{ImprovementResult, improve_skill_with_learning};
