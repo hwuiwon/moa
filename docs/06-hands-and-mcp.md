@@ -116,10 +116,11 @@ worker owns exactly one sandbox and siblings never share one:
 
 - **The coordinator is sandbox-free.** Root-turn preparation in `brain_bridge.rs`
   filters the coordinator's tool schemas through `ToolRouter::tool_requires_sandbox`
-  (true only for `ToolExecution::Hand` tools) and hard-excludes those tools, leaving
-  the coordinator delegation and built-in/read tools only. The worker tool subsets
-  keep the hand tools, so all real computation is delegated. Zero workers means
-  zero sandboxes.
+  (true only for `ToolExecution::Hand` tools) and hard-excludes those tools except
+  manifest-backed selected-skill `file_read`. The root `file_read` path is served
+  directly from the trusted manifest by `ToolExecutor`; it does not provision a
+  hand. The worker tool subsets keep the hand tools, so all real computation is
+  delegated. Zero workers means zero sandboxes.
 - **Each worker owns one hand.** `ToolCallRequest.worker_id` is populated
   from `GovernedInvocationOrigin::Worker` and threaded through the tool executor
   into the lease/cache key `(session_id, worker_id, provider)`. The
@@ -140,13 +141,14 @@ worker owns exactly one sandbox and siblings never share one:
   may live only in a sandbox.
 
 Before the LLM call for a turn, the context pipeline selects relevant skills.
-The selected trusted sandbox file references are copied into `ToolCallRequest`
-so the `ToolExecutor` can materialize files even when the turn workflow and tool
-executor land on different pods. The router still caches installed-file markers
-to avoid duplicate installs inside one hand, but that cache is not the source of
-install intent. The model only sees the manifest paths; full `SKILL.md` and
-supporting scripts remain filesystem resources that are read or executed on
-demand.
+The selected trusted sandbox file references are copied into `ToolCallRequest`.
+The root coordinator may read exact selected skill files directly from that
+manifest without a hand; worker tool calls materialize the same files in the
+worker hand even when the turn workflow and tool executor land on different pods.
+The router still caches installed-file markers to avoid duplicate installs
+inside one hand, but that cache is not the source of install intent. The model
+only sees the manifest paths; full `SKILL.md` and supporting scripts remain
+filesystem resources that are read or executed on demand.
 
 Provider implementations must make cleanup best-effort and observable. Failed
 cleanup should warn through `tracing`, not panic or hide the terminal session

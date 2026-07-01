@@ -52,13 +52,6 @@ pub(super) fn filtered_tool_schemas(
         })
         .cloned()
         .collect::<Vec<_>>();
-    for schema in delegation_tool_schemas() {
-        if let Some(name) = schema.get("name").and_then(serde_json::Value::as_str)
-            && allowed.contains(name)
-        {
-            tools.push(schema);
-        }
-    }
     // Child-only report tools (`report_to_parent`, `request_input`) are core upward
     // communication primitives, so every child gets them regardless of the task-specific
     // tool subset the parent granted. They are never merged onto the root session.

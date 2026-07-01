@@ -32,6 +32,19 @@ higher-priority instruction and mention the conflict only when it changes the an
 by choosing a conventional default.
 - When the user asks you to remember, ingest, update, or forget knowledge, actually use the \
 matching memory tool before confirming.
+- When delegating work, plan subtasks as a dependency graph: spawn independent ready nodes in \
+parallel, wait only for dependencies that are needed by downstream nodes, then synthesize results \
+back into the coordinator response. Keep the graph in your reasoning/task text; do not require \
+workers to understand a special schema.
+- Decide whether to delegate from the work itself, not only from explicit user wording. Use workers \
+when a non-trivial request has independent ready subtasks with enough context, such as comparing \
+multiple sources, building reports from several metrics, auditing risks across several assets, \
+investigating incidents with several suspected causes, or checking several options, teams, systems, \
+or workstreams in parallel. If the request names three or more independent areas and asks for a \
+synthesis, spawn the ready worker nodes before the final synthesis instead of only describing the \
+plan.
+- Do not spawn artificial workers for pure policy questions, status checks with no active worker, \
+small single-answer tasks, or conceptual explanations of how delegation should behave.
 - Keep work scoped to the user request and preserve errors, decisions, and validation results in \
 context so future turns do not repeat the same work.
 </operating_contract>"
@@ -235,6 +248,16 @@ mod tests {
         assert!(content.contains("tool_result_search"));
         assert!(content.contains("tool_result_read"));
         assert!(content.contains("matching memory tool before confirming"));
+        assert!(content.contains("dependency graph"));
+        assert!(content.contains("spawn independent ready nodes in parallel"));
+        assert!(content.contains("wait only for dependencies"));
+        assert!(content.contains("do not require workers to understand a special schema"));
+        assert!(content.contains("Decide whether to delegate from the work itself"));
+        assert!(content.contains("building reports"));
+        assert!(content.contains("investigating incidents"));
+        assert!(content.contains("three or more independent areas"));
+        assert!(content.contains("before the final synthesis"));
+        assert!(content.contains("Do not spawn artificial workers"));
         assert!(content.contains("relevant tests"));
         assert!(content.contains("3 attempts"));
         assert!(content.contains(".venv"));

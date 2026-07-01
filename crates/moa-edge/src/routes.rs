@@ -48,7 +48,9 @@ use self::contact_messages::{
     attachment_response, authorization_bearer_token, cleanup_session_attachments,
     persist_session_attachments, session_message_input,
 };
-use self::session_stream::{initial_stream_sequence, session_message_stream_response};
+use self::session_stream::{
+    initial_stream_sequence, last_event_id_sequence, session_message_stream_response,
+};
 #[cfg(feature = "auth0")]
 use self::webhook_verification::verify_auth0_signature;
 use self::webhook_verification::verify_knowledge_webhook_at_edge;
@@ -659,14 +661,17 @@ async fn handle_session_message_stream(
         }
     };
 
-    let next_sequence_num = match initial_stream_sequence(&state, &input.message).await {
-        Ok(next_sequence_num) => next_sequence_num,
-        Err(error) => {
-            tracing::warn!(error = %error.summary(), "session stream preflight failed");
-            span.record("http.status_code", error.status_code().as_u16() as i64);
-            return error.into_response();
-        }
-    };
+    let next_sequence_num =
+        match initial_stream_sequence(&state, &input.message, last_event_id_sequence(&headers))
+            .await
+        {
+            Ok(next_sequence_num) => next_sequence_num,
+            Err(error) => {
+                tracing::warn!(error = %error.summary(), "session stream preflight failed");
+                span.record("http.status_code", error.status_code().as_u16() as i64);
+                return error.into_response();
+            }
+        };
     let mut stored_attachments = Vec::new();
     if !input.uploads.is_empty() {
         match persist_session_attachments(&state, &input.message, input.uploads).await {

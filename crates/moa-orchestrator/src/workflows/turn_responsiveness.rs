@@ -227,6 +227,12 @@ impl ToolBudgetState {
     pub(crate) fn attempted_tool_calls(&self) -> usize {
         self.attempted_tool_calls
     }
+
+    /// Returns remaining dispatch capacity before this turn hits the tool-call cap.
+    pub(crate) fn remaining_tool_calls(&self) -> usize {
+        self.max_tool_calls
+            .saturating_sub(self.attempted_tool_calls)
+    }
 }
 
 /// Decision returned by [`ToolBudgetState`] before a tool dispatch.

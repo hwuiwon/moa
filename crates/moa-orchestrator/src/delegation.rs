@@ -6,11 +6,10 @@ use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::{
     AttachWorkerResultWaiterInput, CancelWorkerInput, ConsumeWorkerChildResultInput,
     DelegationTool, Event, ListWorkersInput, ListWorkersOutput, MessageWorkerInput,
-    ProvideWorkerInputInput, RemoveWorkerResultWaiterInput, ReserveWorkerInput, ReservedWorker,
-    SessionId, SessionMeta, SpawnWorkerInput, SpawnWorkerOutput, ToolOutput,
-    TrustedSandboxFileManifestRef, UserId, WaitWorkerInput, WaitWorkerOutput, WorkerChildRef,
-    WorkerChildRequest, WorkerId, WorkerMessage, WorkerProgressSummary, WorkerState,
-    WorkerTerminalResult,
+    ProvideWorkerInputInput, RemoveWorkerResultWaiterInput, ReservedWorker, SessionId, SessionMeta,
+    SpawnWorkerInput, SpawnWorkerOutput, ToolOutput, TrustedSandboxFileManifestRef, UserId,
+    WaitWorkerInput, WaitWorkerOutput, WorkerChildRef, WorkerChildRequest, WorkerId, WorkerMessage,
+    WorkerProgressSummary, WorkerState, WorkerTerminalResult,
 };
 use restate_sdk::prelude::*;
 use serde::Serialize;
@@ -39,31 +38,17 @@ pub(crate) enum DelegationParent<'a> {
         /// Session metadata used to initialize root children.
         meta: &'a SessionMeta,
     },
-    /// Worker turn workflow is executing the tool.
-    Worker {
-        /// Parent worker that owns the child registry.
-        worker_id: &'a str,
-        /// Root session receiving events.
-        session_id: SessionId,
-    },
 }
 
 impl DelegationParent<'_> {
     fn session_id(self) -> SessionId {
         match self {
-            Self::RootSession { session_id, .. } | Self::Worker { session_id, .. } => session_id,
-        }
-    }
-
-    fn parent_worker_id(&self) -> Option<&str> {
-        match self {
-            Self::RootSession { .. } => None,
-            Self::Worker { worker_id, .. } => Some(worker_id),
+            Self::RootSession { session_id, .. } => session_id,
         }
     }
 }
 
-/// Executes one typed delegation tool call for either a root session or worker parent.
+/// Executes one typed delegation tool call for the root session coordinator.
 pub(crate) async fn execute_delegation_tool(
     ctx: &WorkflowContext<'_>,
     parent: DelegationParent<'_>,
@@ -74,22 +59,40 @@ pub(crate) async fn execute_delegation_tool(
         DelegationTool::Spawn(input) => {
             spawn_output(spawn_child_detached(ctx, parent, input, trusted_sandbox_manifest).await?)
         }
-        DelegationTool::Wait(input) => wait_output(wait_child(ctx, parent, input).await?),
+        DelegationTool::Wait(input) => {
+            if let Some(output) = unowned_child_output(ctx, parent, &input.worker_id).await? {
+                output
+            } else {
+                wait_output(wait_child(ctx, parent, input).await?)
+            }
+        }
         DelegationTool::Message(input) => {
             let worker_id = input.worker_id.clone();
-            message_child(ctx, parent, input).await?;
-            message_output(&worker_id)
+            if let Some(output) = unowned_child_output(ctx, parent, &worker_id).await? {
+                output
+            } else {
+                message_child(ctx, parent, input).await?;
+                message_output(&worker_id)
+            }
         }
         DelegationTool::List(input) => list_output(list_children(ctx, parent, input).await?),
         DelegationTool::Cancel(input) => {
             let worker_id = input.worker_id.clone();
-            cancel_child(ctx, parent, input).await?;
-            cancel_output(&worker_id)
+            if let Some(output) = unowned_child_output(ctx, parent, &worker_id).await? {
+                output
+            } else {
+                cancel_child(ctx, parent, input).await?;
+                cancel_output(&worker_id)
+            }
         }
         DelegationTool::ProvideInput(input) => {
             let worker_id = input.worker_id.clone();
-            provide_input_child(ctx, parent, input).await?;
-            provide_input_output(&worker_id)
+            if let Some(output) = unowned_child_output(ctx, parent, &worker_id).await? {
+                output
+            } else {
+                provide_input_child(ctx, parent, input).await?;
+                provide_input_output(&worker_id)
+            }
         }
     };
     Ok(output)
@@ -163,11 +166,12 @@ async fn spawn_child_detached(
     trusted_sandbox_manifest: Option<&TrustedSandboxFileManifestRef>,
 ) -> Result<SpawnWorkerOutput, HandlerError> {
     let task_name = request.task_name.clone();
+    let max_turns = effective_child_max_turns(&request);
     let child_request = WorkerChildRequest {
         task: request.task,
         tool_subset: request.tool_subset,
         budget_tokens: request.budget_tokens,
-        max_turns: request.max_turns,
+        max_turns,
         trusted_sandbox_manifest: trusted_sandbox_manifest.cloned(),
     };
     let reservation =
@@ -180,6 +184,16 @@ async fn spawn_child_detached(
     })
 }
 
+fn effective_child_max_turns(request: &SpawnWorkerInput) -> Option<u32> {
+    let requested = request.max_turns?;
+    if requested == 0 {
+        return Some(0);
+    }
+
+    let minimum = if request.tool_subset.is_empty() { 1 } else { 2 };
+    Some(requested.max(minimum))
+}
+
 async fn reserve_and_start_child(
     ctx: &WorkflowContext<'_>,
     parent: DelegationParent<'_>,
@@ -189,28 +203,16 @@ async fn reserve_and_start_child(
 ) -> Result<ReservedWorker, HandlerError> {
     let task = request.task.clone();
     let budget_tokens = request.budget_tokens;
-    let reservation = match parent {
-        DelegationParent::RootSession { session_id, meta } => {
-            reserve_root_child(
-                ctx,
-                session_id,
-                meta,
-                request,
-                task_name.clone(),
-                idempotency_step,
-            )
-            .await?
-        }
-        DelegationParent::Worker { worker_id, .. } => ctx
-            .object_client::<WorkerClient>(worker_id.to_string())
-            .reserve_child(Json::from(ReserveWorkerInput {
-                request,
-                task_name: task_name.clone(),
-            }))
-            .call()
-            .await?
-            .into_inner(),
-    };
+    let DelegationParent::RootSession { session_id, meta } = parent;
+    let reservation = reserve_root_child(
+        ctx,
+        session_id,
+        meta,
+        request,
+        task_name.clone(),
+        idempotency_step,
+    )
+    .await?;
 
     ctx.object_client::<WorkerClient>(reservation.child_ref.id.clone())
         .post_message(Json::from(reservation.initial_message.clone()))
@@ -250,7 +252,6 @@ async fn reserve_root_child(
     let budget_tokens = request.budget_tokens;
     let initial_message = request.into_initial_message(
         session_id,
-        None,
         1,
         meta.tenant_id,
         storage_user_id(meta),
@@ -285,7 +286,6 @@ async fn wait_child(
         return Ok(wait_terminal_output(input.worker_id, terminal));
     }
 
-    ensure_child_owned(ctx, parent, &input.worker_id).await?;
     let (awakeable_id, terminal_future) = ctx.awakeable::<String>();
     let attached = ctx
         .object_client::<WorkerClient>(input.worker_id.clone())
@@ -390,7 +390,6 @@ async fn message_child(
     parent: DelegationParent<'_>,
     input: MessageWorkerInput,
 ) -> Result<(), HandlerError> {
-    ensure_child_owned(ctx, parent, &input.worker_id).await?;
     let worker_id = input.worker_id.clone();
     ctx.object_client::<WorkerClient>(worker_id.clone())
         .post_message(Json::from(WorkerMessage::FollowUp {
@@ -402,7 +401,7 @@ async fn message_child(
         parent.session_id(),
         Event::WorkerMessageSent {
             worker_id,
-            parent_worker_id: parent.parent_worker_id().map(ToOwned::to_owned),
+            input_request_id: None,
             text: input.text,
         },
     )
@@ -420,7 +419,6 @@ async fn provide_input_child(
     parent: DelegationParent<'_>,
     input: ProvideWorkerInputInput,
 ) -> Result<(), HandlerError> {
-    ensure_child_owned(ctx, parent, &input.worker_id).await?;
     let worker_id = input.worker_id.clone();
     ctx.object_client::<WorkerClient>(worker_id.clone())
         .post_message(Json::from(WorkerMessage::ProvideInput {
@@ -433,7 +431,7 @@ async fn provide_input_child(
         parent.session_id(),
         Event::WorkerMessageSent {
             worker_id,
-            parent_worker_id: parent.parent_worker_id().map(ToOwned::to_owned),
+            input_request_id: Some(input.input_request_id),
             text: input.text,
         },
     )
@@ -499,7 +497,6 @@ async fn cancel_child(
     parent: DelegationParent<'_>,
     input: CancelWorkerInput,
 ) -> Result<(), HandlerError> {
-    ensure_child_owned(ctx, parent, &input.worker_id).await?;
     let worker_id = input.worker_id.clone();
     ctx.object_client::<WorkerClient>(input.worker_id)
         .cancel(input.reason)
@@ -511,10 +508,7 @@ async fn cancel_child(
             worker_id,
             from: None,
             to: WorkerState::Cancelled,
-            summary: Some(match parent.parent_worker_id() {
-                Some(_) => "cancel requested by parent worker".to_string(),
-                None => "cancel requested by parent".to_string(),
-            }),
+            summary: Some("cancel requested by parent".to_string()),
         },
     )
     .await?;
@@ -529,54 +523,44 @@ async fn consume_parent_cached_terminal(
     let input = Json::from(ConsumeWorkerChildResultInput {
         worker_id: worker_id.to_string(),
     });
-    let terminal = match parent {
-        DelegationParent::RootSession { session_id, .. } => {
-            ctx.object_client::<SessionClient>(session_id.to_string())
-                .consume_child_result(input)
-                .call()
-                .await?
-                .into_inner()
-                .terminal
-        }
-        DelegationParent::Worker { worker_id, .. } => {
-            ctx.object_client::<WorkerClient>(worker_id.to_string())
-                .consume_child_result(input)
-                .call()
-                .await?
-                .into_inner()
-                .terminal
-        }
-    };
+    let DelegationParent::RootSession { session_id, .. } = parent;
+    let terminal = ctx
+        .object_client::<SessionClient>(session_id.to_string())
+        .consume_child_result(input)
+        .call()
+        .await?
+        .into_inner()
+        .terminal;
     Ok(terminal)
 }
 
-async fn ensure_child_owned(
+async fn unowned_child_output(
     ctx: &WorkflowContext<'_>,
     parent: DelegationParent<'_>,
     worker_id: &str,
-) -> Result<(), HandlerError> {
+) -> Result<Option<ToolOutput>, HandlerError> {
     let children = child_refs(ctx, parent).await?;
     if child_is_owned(&children, worker_id) {
-        return Ok(());
+        return Ok(None);
     }
-    Err(TerminalError::new(format!("worker {worker_id} is not owned by this parent")).into())
+    Ok(Some(worker_not_owned_output(worker_id)))
+}
+
+fn worker_not_owned_output(worker_id: &str) -> ToolOutput {
+    ToolOutput::error(
+        format!(
+            "Worker {worker_id} is not owned by this coordinator. Use list_workers to inspect current worker ids before retrying."
+        ),
+        Duration::ZERO,
+    )
 }
 
 async fn child_refs(
     ctx: &WorkflowContext<'_>,
     parent: DelegationParent<'_>,
 ) -> Result<Vec<WorkerChildRef>, HandlerError> {
-    match parent {
-        DelegationParent::RootSession { session_id, .. } => {
-            session_child_refs(ctx, session_id).await
-        }
-        DelegationParent::Worker { worker_id, .. } => Ok(ctx
-            .object_client::<WorkerClient>(worker_id.to_string())
-            .child_refs()
-            .call()
-            .await?
-            .into_inner()),
-    }
+    let DelegationParent::RootSession { session_id, .. } = parent;
+    session_child_refs(ctx, session_id).await
 }
 
 async fn session_child_refs(
@@ -615,7 +599,6 @@ async fn append_child_spawned_event(
         parent.session_id(),
         Event::WorkerSpawned {
             worker_id: reservation.child_ref.id.clone(),
-            parent_worker_id: parent.parent_worker_id().map(ToOwned::to_owned),
             path: reservation.path.clone(),
             task,
             budget_tokens,
@@ -665,14 +648,15 @@ fn json_tool_output(summary: impl Into<String>, value: impl Serialize) -> ToolOu
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        ListWorkersOutput, SpawnWorkerOutput, ToolContent, WaitWorkerOutput, WorkerProgressSummary,
-        WorkerResult, WorkerState, WorkerTerminalResult,
+        ListWorkersOutput, SpawnWorkerInput, SpawnWorkerOutput, ToolContent, WaitWorkerOutput,
+        WorkerProgressSummary, WorkerResult, WorkerState, WorkerTerminalResult,
     };
     use serde_json::Value;
 
     use super::{
-        MAX_WAIT_TIMEOUT_MS, clamp_wait_timeout_ms, is_terminal_worker_state, list_output,
-        spawn_output, terminal_result_summary, wait_output, wait_terminal_output,
+        MAX_WAIT_TIMEOUT_MS, clamp_wait_timeout_ms, effective_child_max_turns,
+        is_terminal_worker_state, list_output, spawn_output, terminal_result_summary, wait_output,
+        wait_terminal_output, worker_not_owned_output,
     };
 
     #[test]
@@ -684,6 +668,27 @@ mod tests {
             clamp_wait_timeout_ms(MAX_WAIT_TIMEOUT_MS + 1),
             MAX_WAIT_TIMEOUT_MS
         );
+    }
+
+    #[test]
+    fn tool_enabled_worker_gets_enough_turns_to_consume_tool_result() {
+        // Pins: a worker with tools needs one model loop to call a tool and another
+        // to read the result; accepting max_turns=1 makes the delegated task fail.
+        let mut request = SpawnWorkerInput {
+            task: "compare three books".to_string(),
+            task_name: None,
+            tool_subset: vec!["session_search".to_string()],
+            budget_tokens: 600,
+            max_turns: Some(1),
+        };
+
+        assert_eq!(effective_child_max_turns(&request), Some(2));
+        request.tool_subset.clear();
+        assert_eq!(effective_child_max_turns(&request), Some(1));
+        request.max_turns = None;
+        assert_eq!(effective_child_max_turns(&request), None);
+        request.max_turns = Some(0);
+        assert_eq!(effective_child_max_turns(&request), Some(0));
     }
 
     #[test]
@@ -794,6 +799,17 @@ mod tests {
         }))
         .expect("wait output without progress deserializes");
         assert!(parsed.progress.is_none());
+    }
+
+    #[test]
+    fn invalid_worker_reference_is_tool_error_not_terminal_shape() {
+        // Pins: model-selected stale or malformed worker ids should be recoverable tool errors.
+        let output = worker_not_owned_output("missing-worker");
+
+        assert!(output.is_error);
+        assert!(output.content.iter().any(
+            |content| matches!(content, ToolContent::Text { text } if text.contains("list_workers"))
+        ));
     }
 
     #[test]

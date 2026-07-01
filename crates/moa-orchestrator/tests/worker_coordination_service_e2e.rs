@@ -488,11 +488,22 @@ async fn duplicate_child_signal_is_idempotent_service_e2e() -> Result<()> {
     let child_id = unique_child_id();
     let signal_id = AgentSignalId::new();
 
+    register_child(
+        &client,
+        &session,
+        &WorkerChildRef {
+            id: child_id.clone(),
+            task_hash: "task-hash-signal-dedupe".to_string(),
+            budget_tokens: 4_096,
+            terminal: None,
+        },
+    )
+    .await?;
+
     let signal = WorkerSignal {
         signal_id,
         worker_id: child_id,
         parent_session: session.session_id,
-        parent_worker: None,
         kind: ChildSignalKind::Finding,
         severity: SignalSeverity::Info,
         summary: "intermediate finding worth recording".to_string(),

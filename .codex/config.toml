@@ -6,3 +6,6 @@ args = ["-y", "@upstash/context7-mcp"]
 multi_agent = true
 shell_snapshot = true
 hooks = true
+
+[agents]
+max_threads = 11

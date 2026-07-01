@@ -277,58 +277,6 @@ impl Worker for WorkerImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, input))]
-    async fn reserve_child(
-        &self,
-        mut ctx: ObjectContext<'_>,
-        input: Json<ReserveWorkerInput>,
-    ) -> Result<Json<ReservedWorker>, HandlerError> {
-        annotate_restate_handler_span("Worker", "reserve_child");
-        Ok(Json::from(
-            reserve_child_inner(&mut ctx, input.into_inner()).await?,
-        ))
-    }
-
-    #[tracing::instrument(skip(self, ctx, input))]
-    async fn complete_child(
-        &self,
-        ctx: ObjectContext<'_>,
-        input: Json<CompleteWorkerChildInput>,
-    ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("Worker", "complete_child");
-        complete_child_inner(&ctx, input.into_inner()).await
-    }
-
-    #[tracing::instrument(skip(self, ctx, input))]
-    async fn mark_child_terminal(
-        &self,
-        ctx: ObjectContext<'_>,
-        input: Json<MarkWorkerChildTerminalInput>,
-    ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("Worker", "mark_child_terminal");
-        let mut state = WorkerVoState::load_from(&ctx).await?;
-        if state.mark_child_terminal(input.into_inner()).is_some() {
-            state.persist_into(&ctx);
-        }
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self, ctx, input))]
-    async fn consume_child_result(
-        &self,
-        ctx: ObjectContext<'_>,
-        input: Json<ConsumeWorkerChildResultInput>,
-    ) -> Result<Json<ConsumeWorkerChildResultOutput>, HandlerError> {
-        annotate_restate_handler_span("Worker", "consume_child_result");
-        let input = input.into_inner();
-        let mut state = WorkerVoState::load_from(&ctx).await?;
-        let terminal = state.consume_child_terminal(&input.worker_id);
-        if terminal.is_some() {
-            state.persist_into(&ctx);
-        }
-        Ok(Json::from(ConsumeWorkerChildResultOutput { terminal }))
-    }
-
-    #[tracing::instrument(skip(self, ctx, input))]
     async fn attach_result_waiter(
         &self,
         ctx: ObjectContext<'_>,
@@ -400,15 +348,6 @@ impl Worker for WorkerImpl {
             state.persist_into(&ctx);
         }
         Ok(())
-    }
-
-    #[tracing::instrument(skip(self, ctx))]
-    async fn child_refs(
-        &self,
-        ctx: SharedObjectContext<'_>,
-    ) -> Result<Json<Vec<WorkerChildRef>>, HandlerError> {
-        annotate_restate_handler_span("Worker", "child_refs");
-        Ok(Json::from(WorkerVoState::load_from(&ctx).await?.children))
     }
 
     #[tracing::instrument(skip(self, ctx, outcome))]
@@ -509,7 +448,14 @@ impl Worker for WorkerImpl {
                 );
             }
             CleanupDecision::Proceed => {
-                release_and_clear_worker(&ctx, &state);
+                if !release_and_clear_worker(&ctx, &state).await? {
+                    reschedule_cleanup(&ctx, state.cleanup_generation).await?;
+                    tracing::warn!(
+                        key = %ctx.key(),
+                        cleanup_generation = state.cleanup_generation,
+                        "worker cleanup release incomplete; rescheduled cleanup"
+                    );
+                }
             }
         }
         Ok(())
@@ -558,34 +504,38 @@ fn decide_cleanup(
 
 /// Releases a terminal leaf child's fan-out registration and clears its VO state.
 ///
-/// Non-fatal by construction: the parent fan-out removal is dispatched detached
-/// (`.send()`) and `clear_all` cannot fail, so a partial failure cannot panic or leave
-/// inconsistent state — the child either stays registered (and is reclaimed at session
-/// teardown) or is fully removed.
-fn release_and_clear_worker(ctx: &ObjectContext<'_>, state: &WorkerVoState) {
+/// Resource release is awaited before the VO is cleared. If hand cleanup is incomplete,
+/// the caller reschedules cleanup and leaves the worker state intact. The parent fan-out
+/// removal is still dispatched detached after release succeeds; `clear_all` cannot fail.
+async fn release_and_clear_worker(
+    ctx: &ObjectContext<'_>,
+    state: &WorkerVoState,
+) -> Result<bool, HandlerError> {
     let worker_id = ctx.key().to_string();
 
     // Resource release (hand leases / sandbox): each worker owns its own sandbox keyed
     // by `(parent_session, worker_id)` (Sandbox Increments 1-2 re-keyed hands by scope),
     // so releasing here frees exactly this child's hand without over-releasing the parent's
     // or siblings' sandboxes. The Worker VO holds no `ToolRouter`, so the release is
-    // dispatched detached (fire-and-forget) to the ToolExecutor service that owns the
-    // router. Done before clearing VO state and non-fatal by construction.
-    if let Some(request) = release_worker_hands_request(state.parent_session, &worker_id) {
-        ctx.service_client::<ToolExecutorClient>()
+    // delegated to the ToolExecutor service that owns the router and awaited before
+    // clearing state.
+    if let Some(request) = release_worker_hands_request(state.parent_session, &worker_id)
+        && let Err(error) = ctx
+            .service_client::<ToolExecutorClient>()
             .release_worker_hands(Json::from(request))
-            .send();
+            .call()
+            .await
+    {
+        tracing::warn!(
+            key = %worker_id,
+            error = ?error,
+            "worker hand release incomplete"
+        );
+        return Ok(false);
     }
 
-    // Remove from the parent fan-out via the existing removal handler (detached).
-    if let Some(parent_worker) = state.parent_worker.clone() {
-        ctx.object_client::<WorkerClient>(parent_worker)
-            .complete_child(Json::from(CompleteWorkerChildInput {
-                worker_id: worker_id.clone(),
-                tokens_used: state.tokens_used,
-            }))
-            .send();
-    } else if let Some(parent_session) = state.parent_session {
+    // Remove from the root parent fan-out via the existing removal handler (detached).
+    if let Some(parent_session) = state.parent_session {
         ctx.object_client::<SessionClient>(parent_session.to_string())
             .remove_child(worker_id.clone())
             .send();
@@ -598,6 +548,18 @@ fn release_and_clear_worker(ctx: &ObjectContext<'_>, state: &WorkerVoState) {
         key = %worker_id,
         "worker self-cleaned after terminal report"
     );
+    Ok(true)
+}
+
+async fn reschedule_cleanup(ctx: &ObjectContext<'_>, generation: u64) -> Result<(), HandlerError> {
+    let grace_ms = OrchestratorCtx::current_config()
+        .session_limits
+        .worker_cleanup_grace_ms;
+    if grace_ms > 0 {
+        let now = durable_utc_now(ctx).await?;
+        schedule_cleanup_self_call(ctx, generation, now, grace_ms);
+    }
+    Ok(())
 }
 
 /// Builds the hand-release request for a finishing worker, when it has an owning session.
@@ -678,7 +640,7 @@ async fn prepare_turn_inner(
     }
 
     if state.budget_exhausted() {
-        state.apply_turn_outcome(TurnOutcome::Idle);
+        state.complete_after_budget_exhausted();
         state.persist_into(ctx);
         return Ok(WorkerTurnPreparation::Outcome {
             outcome: TurnOutcome::Idle,
@@ -783,97 +745,6 @@ async fn record_tool_result_inner(
     Ok(())
 }
 
-async fn reserve_child_inner(
-    ctx: &mut ObjectContext<'_>,
-    input: ReserveWorkerInput,
-) -> Result<ReservedWorker, HandlerError> {
-    let mut state = WorkerVoState::load_from(ctx).await?;
-    state
-        .ensure_initialized()
-        .map_err(moa_error_to_handler_error)?;
-    let parent_session = state
-        .parent_session
-        .ok_or_else(|| TerminalError::new("worker parent session missing while reserving child"))?;
-    let tenant_id = state
-        .tenant_id
-        .ok_or_else(|| TerminalError::new("worker tenant_id missing"))?;
-    let user_id = state
-        .user_id
-        .clone()
-        .ok_or_else(|| TerminalError::new("worker user_id missing"))?;
-    let model = state
-        .model
-        .clone()
-        .ok_or_else(|| TerminalError::new("worker model missing"))?;
-    let hash = validate_dispatch_limits(
-        state.depth,
-        &state.children,
-        input.request.task.as_str(),
-        &input.request.tool_subset,
-    )?;
-    validate_dispatch_budget(input.request.budget_tokens, Some(state.budget_remaining))?;
-    state.budget_remaining =
-        reserve_child_budget(state.budget_remaining, input.request.budget_tokens)?;
-
-    let parent_key = ctx.key().to_string();
-    let sub_id = format!("{parent_key}-{}", ctx.rand_uuid());
-    let child_ref = WorkerChildRef {
-        id: sub_id.clone(),
-        task_hash: hash,
-        budget_tokens: input.request.budget_tokens,
-        terminal: None,
-    };
-    state.children.push(child_ref.clone());
-    let path = child_agent_path(&parent_key, &sub_id, input.task_name.as_deref());
-    let task = input.request.task.clone();
-    let budget_tokens = input.request.budget_tokens;
-    let initial_message = input.request.into_initial_message(
-        parent_session,
-        Some(parent_key),
-        state.depth + 1,
-        tenant_id,
-        user_id,
-        model,
-    );
-    state.persist_into(ctx);
-
-    Ok(ReservedWorker {
-        child_ref,
-        initial_message,
-        path,
-        task,
-        budget_tokens,
-    })
-}
-
-async fn complete_child_inner(
-    ctx: &ObjectContext<'_>,
-    input: CompleteWorkerChildInput,
-) -> Result<(), HandlerError> {
-    let mut state = WorkerVoState::load_from(ctx).await?;
-    let Some(index) = state
-        .children
-        .iter()
-        .position(|child| child.id == input.worker_id)
-    else {
-        return Err(TerminalError::new(format!(
-            "worker {} is not owned by this parent",
-            input.worker_id
-        ))
-        .into());
-    };
-    let child_ref = state.children.remove(index);
-    if child_ref.terminal.is_none() {
-        state.budget_remaining = refund_child_budget(
-            state.budget_remaining,
-            child_ref.budget_tokens,
-            input.tokens_used,
-        );
-    }
-    state.persist_into(ctx);
-    Ok(())
-}
-
 fn start_worker_turn_execution(
     ctx: &ObjectContext<'_>,
     turn_id: String,
@@ -943,7 +814,6 @@ async fn deliver_terminal_notification_once(
         .error
         .clone()
         .unwrap_or_else(|| result.output.clone());
-    let parent_worker = state.parent_worker.clone();
     cache_parent_terminal_result(ctx, state, terminal).await?;
     persist_parent_session_event(
         ctx,
@@ -976,15 +846,7 @@ async fn deliver_terminal_notification_once(
     // key and non-fatal. `record_child_signal` performs the idle gate (active-turn
     // check), so a busy coordinator is never auto-resumed; a Failed terminal is
     // resume-eligible, a Completed/Cancelled terminal records as a non-resuming Finding.
-    emit_terminal_idle_wake(
-        ctx,
-        parent_session,
-        &wake_worker_id,
-        parent_worker,
-        status,
-        wake_summary,
-    )
-    .await?;
+    emit_terminal_idle_wake(ctx, parent_session, &wake_worker_id, status, wake_summary).await?;
 
     state.notification_delivered = true;
 
@@ -1019,7 +881,6 @@ async fn emit_terminal_idle_wake(
     ctx: &ObjectContext<'_>,
     parent_session: SessionId,
     worker_id: &str,
-    parent_worker: Option<WorkerId>,
     status: WorkerState,
     summary: String,
 ) -> Result<(), HandlerError> {
@@ -1043,7 +904,6 @@ async fn emit_terminal_idle_wake(
             signal_id,
             worker_id: worker_id.to_string(),
             parent_session,
-            parent_worker,
             kind,
             severity,
             summary,
@@ -1066,12 +926,7 @@ async fn cache_parent_terminal_result(
         worker_id: terminal.result.worker_id.clone(),
         terminal,
     };
-    if let Some(parent_worker) = state.parent_worker.clone() {
-        ctx.object_client::<WorkerClient>(parent_worker)
-            .mark_child_terminal(Json::from(input))
-            .call()
-            .await?;
-    } else if let Some(parent_session) = state.parent_session {
+    if let Some(parent_session) = state.parent_session {
         ctx.object_client::<SessionClient>(parent_session.to_string())
             .mark_child_terminal(Json::from(input))
             .call()

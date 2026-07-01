@@ -12,10 +12,11 @@ use moa_core::wire::turn::{
     TurnTrigger,
 };
 use moa_core::{
-    ActiveSegment, CancelScope, ConsumeWorkerChildResultInput, ConsumeWorkerChildResultOutput,
-    ContactRef, Event, EventRange, EventRecord, MarkWorkerChildTerminalInput, MoaError,
-    Result as MoaResult, SessionId, SessionMeta, SessionStatus, UnreadChildSignal, UserMessage,
-    WorkerChildRef, WorkerId, WorkerProgressSummary, WorkerSignal, WorkerTerminalResult,
+    ActiveSegment, CancelScope, ChildSignalKind, ConsumeWorkerChildResultInput,
+    ConsumeWorkerChildResultOutput, ContactRef, Event, EventRange, EventRecord, InputAudience,
+    MarkWorkerChildTerminalInput, MoaError, ParentResumePolicy, Result as MoaResult, SessionId,
+    SessionMeta, SessionStatus, SignalSeverity, UnreadChildSignal, UserMessage, WorkerChildRef,
+    WorkerId, WorkerMessage, WorkerProgressSummary, WorkerSignal, WorkerTerminalResult,
 };
 use moa_observability::record_turn_event_persist_duration;
 use restate_sdk::prelude::*;
@@ -81,6 +82,15 @@ pub struct RemoveSessionTurnWaiterInput {
     pub turn_id: String,
     /// Awakeable id that should no longer be resolved by the session.
     pub awakeable_id: String,
+}
+
+/// Input for registering a deterministic auto-delegation run owned by the session.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RegisterAutoDelegationRunInput {
+    /// User-message sequence that caused the worker DAG to be scheduled.
+    pub user_sequence_num: u64,
+    /// Worker ids in deterministic scheduled order.
+    pub worker_ids: Vec<WorkerId>,
 }
 
 /// Internal payload for a generation-guarded progress-narration tick self-call.
@@ -159,6 +169,11 @@ pub trait Session {
 
     /// Registers a root-owned child worker for later turns and cancellation.
     async fn register_child(child: Json<WorkerChildRef>) -> Result<(), HandlerError>;
+
+    /// Registers the worker set for deterministic auto-delegation completion fan-in.
+    async fn register_auto_delegation_run(
+        input: Json<RegisterAutoDelegationRunInput>,
+    ) -> Result<(), HandlerError>;
 
     /// Removes a root-owned child worker from the active registry.
     async fn remove_child(worker_id: String) -> Result<(), HandlerError>;

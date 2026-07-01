@@ -286,6 +286,23 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
             record.sequence_num,
             truncate(summary)
         )),
+        Event::WorkerResultBundle {
+            results,
+            user_sequence_num,
+        } => Some(format!(
+            "#{} worker_result_bundle user_sequence_num={user_sequence_num} count={}",
+            record.sequence_num,
+            results.len()
+        )),
+        Event::WorkerResultSynthesisRequested {
+            user_sequence_num,
+            reason,
+            ..
+        } => Some(format!(
+            "#{} worker_result_synthesis user_sequence_num={user_sequence_num}: {}",
+            record.sequence_num,
+            truncate(reason)
+        )),
         Event::WorkerSignalReceived {
             worker_id,
             kind,

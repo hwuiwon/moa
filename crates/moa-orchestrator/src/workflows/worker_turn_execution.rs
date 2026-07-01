@@ -274,7 +274,7 @@ async fn run_worker_inside_workflow(
 
     if let (Some(meta), Some(parent_session)) = (last_request_meta.as_ref(), last_parent_session) {
         let message =
-            record_worker_turn_budget_stop(ctx, request, meta, parent_session, max_turns).await?;
+            record_worker_turn_cap_stop(ctx, request, meta, parent_session, max_turns).await?;
         return Ok(TurnOutcome {
             turn_id: request.turn_id.clone(),
             kind: TurnOutcomeKind::Completed,
@@ -285,7 +285,7 @@ async fn run_worker_inside_workflow(
     Ok(TurnOutcome {
         turn_id: request.turn_id.clone(),
         kind: TurnOutcomeKind::Failed,
-        message: format!("worker turn budget exceeded ({max_turns})"),
+        message: format!("worker model-loop turn cap reached ({max_turns})"),
     })
 }
 
@@ -548,11 +548,10 @@ async fn handle_tool_call(
                 ctx,
                 WorkerDelegationToolRequest {
                     turn_id: tool_context.turn_id,
-                    parent_worker_id: worker_id,
+                    worker_id,
                     session_id,
                     tool_id,
                     tool_call,
-                    trusted_sandbox_manifest: tool_context.trusted_sandbox_manifest,
                 },
                 turn_evidence,
             )
@@ -564,11 +563,10 @@ async fn handle_tool_call(
 
 struct WorkerDelegationToolRequest<'a> {
     turn_id: &'a str,
-    parent_worker_id: &'a str,
+    worker_id: &'a str,
     session_id: SessionId,
     tool_id: ToolCallId,
     tool_call: &'a ToolCallContent,
-    trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
 }
 
 async fn handle_delegation_tool(
@@ -578,21 +576,21 @@ async fn handle_delegation_tool(
 ) -> Result<(), HandlerError> {
     let WorkerDelegationToolRequest {
         turn_id,
-        parent_worker_id,
+        worker_id,
         session_id,
         tool_id,
         tool_call,
-        trusted_sandbox_manifest,
     } = request;
     let invocation = tool_call.invocation.clone();
     append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
-    let Some(tool) = moa_core::DelegationTool::from_invocation(&invocation)
+    if moa_core::DelegationTool::from_invocation(&invocation)
         .map_err(|error| TerminalError::new(error.to_string()))?
-    else {
+        .is_none()
+    {
         return Err(
             TerminalError::new(format!("unsupported delegation tool {}", invocation.name)).into(),
         );
-    };
+    }
 
     let span = tool_dispatch_span(&invocation.name);
     let cadence = driver_progress::current_cadence();
@@ -606,31 +604,20 @@ async fn handle_delegation_tool(
         cadence.interval_ms,
     )
     .await?;
-    record_worker_heartbeat(ctx, parent_worker_id).await?;
+    record_worker_heartbeat(ctx, worker_id).await?;
     let dispatch_started = Instant::now();
-    let output = crate::delegation::execute_delegation_tool(
-        ctx,
-        crate::delegation::DelegationParent::Worker {
-            worker_id: parent_worker_id,
-            session_id,
-        },
-        tool,
-        trusted_sandbox_manifest,
-    )
+    let output = async {
+        Ok::<_, HandlerError>(ToolOutput::error(
+            "workers cannot manage other workers",
+            Duration::ZERO,
+        ))
+    }
     .instrument(span)
     .await?;
     record_turn_tool_dispatch_duration(dispatch_started.elapsed(), 1);
 
     append_delegation_tool_result(ctx, session_id, tool_id, &invocation, &output).await?;
-    record_tool_result(
-        ctx,
-        turn_id,
-        parent_worker_id,
-        tool_id,
-        &invocation,
-        &output,
-    )
-    .await?;
+    record_denied_tool(ctx, turn_id, worker_id, tool_id, &invocation, &output).await?;
     turn_evidence.record_tool_result(&invocation, &output);
     if !output.is_error {
         record_segment_tool_use(ctx, session_id, &invocation.name).await?;
@@ -836,7 +823,6 @@ fn build_child_report_signal(
         signal_id,
         worker_id: worker_id.to_string(),
         parent_session,
-        parent_worker: None,
         kind,
         severity,
         summary: clamp_signal_summary(&input.summary, "worker report"),
@@ -867,7 +853,6 @@ fn build_needs_input_signal(
         signal_id,
         worker_id: worker_id.to_string(),
         parent_session,
-        parent_worker: None,
         kind: ChildSignalKind::NeedsInput,
         severity: SignalSeverity::Warning,
         summary: clamp_signal_summary(question, "worker requested input"),
@@ -915,25 +900,25 @@ async fn record_worker_budget_stop(
     Ok(message)
 }
 
-async fn record_worker_turn_budget_stop(
+async fn record_worker_turn_cap_stop(
     ctx: &WorkflowContext<'_>,
     request: &RunWorkerTurnRequest,
     meta: &SessionMeta,
     parent_session: SessionId,
     max_turns: usize,
 ) -> Result<String, HandlerError> {
-    record_session_error("turn_budget");
+    record_session_error("turn_cap");
     append_session_event(
         ctx,
         parent_session,
         Event::Error {
-            message: format!("worker turn budget exceeded ({max_turns}), stopping"),
+            message: format!("worker model-loop turn cap reached ({max_turns}), stopping"),
             recoverable: true,
         },
     )
     .await?;
     let message = format!(
-        "MOA stopped because this worker reached the model-loop budget ({max_turns}). Narrow the scope or ask MOA to continue."
+        "MOA stopped because this worker reached the model-loop turn cap ({max_turns}). Narrow the scope or ask MOA to continue."
     );
     append_zero_cost_assistant_response(ctx, parent_session, meta, message.clone()).await?;
     let response = CompletionResponse {
@@ -1221,7 +1206,6 @@ fn build_failed_child_signal(
         signal_id,
         worker_id: worker_id.to_string(),
         parent_session,
-        parent_worker: None,
         kind: ChildSignalKind::Failed,
         severity: SignalSeverity::Critical,
         summary: short_failure_summary(failure_message),
@@ -1433,7 +1417,7 @@ mod tests {
 
     #[test]
     fn reserved_child_parent_session_requires_initial_message() {
-        // Pins: nested spawn events derive their root session only from validated initial child messages.
+        // Pins: worker spawn events derive their root session only from validated initial child messages.
         let session_id = SessionId::new();
         let message = moa_core::WorkerMessage::InitialTask(Box::new(moa_core::WorkerInitialTask {
             task: "inspect".to_string(),
@@ -1441,8 +1425,7 @@ mod tests {
             budget_tokens: 100,
             max_turns: Some(2),
             parent_session: session_id,
-            parent_worker: Some("parent".to_string()),
-            depth: 2,
+            depth: 1,
             tenant_id: moa_core::TenantId::new(),
             user_id: moa_core::UserId::new("user"),
             model: moa_core::ModelId::new("model"),

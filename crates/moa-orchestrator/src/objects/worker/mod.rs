@@ -6,15 +6,13 @@ use chrono::{DateTime, Utc};
 use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentTurnUsageRequest};
 use moa_core::{
     AgentSignalId, AttachWorkerResultWaiterInput, AttachWorkerResultWaiterOutput, ChildSignalKind,
-    CompleteWorkerChildInput, CompletionRequest, ConsumeWorkerChildResultInput,
-    ConsumeWorkerChildResultOutput, ContextMessage, Event, MarkWorkerChildTerminalInput, MoaError,
-    ModelCapabilities, ModelId, ParentResumePolicy, RemoveWorkerResultWaiterInput,
-    ReserveWorkerInput, ReservedWorker, SessionId, SessionMeta, SessionStatus, SignalSeverity,
-    TenantId, TrustedSandboxFileManifestRef, TurnOutcome, UserId, UserMessage, WorkerChildRef,
-    WorkerId, WorkerMessage, WorkerPendingInput, WorkerProgressSummary, WorkerResult, WorkerSignal,
-    WorkerState, WorkerStatus, WorkerTerminalResult, WorkerToolRecord, WorkerTurnOutcomeRecord,
-    WorkerTurnPreparation, WorkerTurnResponseRecord, child_report_tool_schemas,
-    delegation_tool_schemas,
+    CompletionRequest, ContextMessage, Event, MarkWorkerChildTerminalInput, MoaError,
+    ModelCapabilities, ModelId, ParentResumePolicy, RemoveWorkerResultWaiterInput, SessionId,
+    SessionMeta, SessionStatus, SignalSeverity, TenantId, TrustedSandboxFileManifestRef,
+    TurnOutcome, UserId, UserMessage, WorkerChildRef, WorkerId, WorkerMessage, WorkerPendingInput,
+    WorkerProgressSummary, WorkerResult, WorkerSignal, WorkerState, WorkerStatus,
+    WorkerTerminalResult, WorkerToolRecord, WorkerTurnOutcomeRecord, WorkerTurnPreparation,
+    WorkerTurnResponseRecord, child_report_tool_schemas,
 };
 use restate_sdk::prelude::*;
 use serde_json::json;
@@ -27,10 +25,7 @@ use crate::vo::{
     VoReader, VoState, schedule_generation_guarded_self_call, set_or_clear_opt,
     set_or_clear_scalar, set_or_clear_vec,
 };
-use crate::worker_dispatch::{
-    MAX_WORKER_DEPTH, child_agent_path, refund_child_budget, reserve_child_budget,
-    validate_dispatch_budget, validate_dispatch_limits,
-};
+use crate::worker_dispatch::MAX_WORKER_DEPTH;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 
 mod handlers;
@@ -87,24 +82,6 @@ pub trait Worker {
     async fn apply_turn_outcome(outcome: Json<WorkerTurnOutcomeRecord>)
     -> Result<(), HandlerError>;
 
-    /// Reserves a nested child under this worker.
-    async fn reserve_child(
-        input: Json<ReserveWorkerInput>,
-    ) -> Result<Json<ReservedWorker>, HandlerError>;
-
-    /// Removes a terminal nested child and refunds unused budget.
-    async fn complete_child(input: Json<CompleteWorkerChildInput>) -> Result<(), HandlerError>;
-
-    /// Caches a nested child terminal result until a wait consumes it.
-    async fn mark_child_terminal(
-        input: Json<MarkWorkerChildTerminalInput>,
-    ) -> Result<(), HandlerError>;
-
-    /// Consumes a cached nested child terminal result.
-    async fn consume_child_result(
-        input: Json<ConsumeWorkerChildResultInput>,
-    ) -> Result<Json<ConsumeWorkerChildResultOutput>, HandlerError>;
-
     /// Registers a workflow awakeable that should resolve when this child terminates.
     async fn attach_result_waiter(
         input: Json<AttachWorkerResultWaiterInput>,
@@ -125,10 +102,6 @@ pub trait Worker {
     ///
     /// Makes a late `ProvideInput` for the same `input_request_id` an idempotent no-op.
     async fn clear_input_request(input_request_id: Json<String>) -> Result<(), HandlerError>;
-
-    /// Lists active nested children owned by this worker.
-    #[shared]
-    async fn child_refs() -> Result<Json<Vec<WorkerChildRef>>, HandlerError>;
 
     /// Records the terminal outcome delivered by a worker turn workflow.
     async fn record_turn_outcome(

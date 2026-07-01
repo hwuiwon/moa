@@ -1,5 +1,6 @@
 //! Contact session message SSE stream helpers.
 
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -63,7 +64,11 @@ pub(super) fn session_message_stream_response(
 pub(super) async fn initial_stream_sequence(
     state: &AppState,
     message: &ContactSessionMessageRequest,
+    reconnect_after: Option<SequenceNum>,
 ) -> Result<SequenceNum, EdgeJsonError> {
+    if let Some(sequence_num) = reconnect_after {
+        return Ok(sequence_num.saturating_add(1));
+    }
     let progress = call_contacts_handler::<_, SessionProgress>(
         state,
         "progress",
@@ -76,6 +81,15 @@ pub(super) async fn initial_stream_sequence(
     )
     .await?;
     Ok(next_sequence_after(&progress.events))
+}
+
+pub(super) fn last_event_id_sequence(headers: &HeaderMap) -> Option<SequenceNum> {
+    headers
+        .get("last-event-id")?
+        .to_str()
+        .ok()?
+        .parse::<SequenceNum>()
+        .ok()
 }
 
 struct SessionMessageStreamState {
@@ -230,7 +244,9 @@ fn session_message_terminal_done(
         // no-delegation case is unchanged.
         return turn_completed && !child_progress_has_active(&progress.child_progress);
     }
-    progress.snapshot.active_turn_id.is_none() && progress.snapshot.pending_message_count == 0
+    progress.snapshot.active_turn_id.is_none()
+        && progress.snapshot.pending_message_count == 0
+        && !child_progress_has_active(&progress.child_progress)
 }
 
 /// Whether a child lifecycle state is terminal (no further work expected).
@@ -322,6 +338,11 @@ fn sse_event_name(event: &Event) -> &'static str {
     match event {
         Event::ProgressUpdate { .. } => "progress",
         Event::ProgressNarrated { .. } => "progress_narration",
+        Event::WorkerSignalReceived {
+            kind: moa_core::ChildSignalKind::NeedsInput,
+            input_audience: Some(moa_core::InputAudience::User),
+            ..
+        } => "worker_input_request",
         Event::WorkerSignalReceived { .. } => "worker_signal",
         Event::WorkerParentResumeRequested { .. } => "worker_resume",
         Event::WorkerHeartbeatStale { .. } => "worker_stale",
@@ -370,6 +391,20 @@ mod tests {
 
         assert_eq!(next_sequence_after(&records), 10);
         assert_eq!(next_sequence_after(&[]), 1);
+    }
+
+    #[test]
+    fn session_message_stream_cursor_honors_last_event_id() {
+        // Pins: reconnecting streams resume after the browser's Last-Event-ID cursor.
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", "41".parse().expect("valid header value"));
+
+        assert_eq!(last_event_id_sequence(&headers), Some(41));
+        headers.insert(
+            "last-event-id",
+            "not-a-number".parse().expect("valid header value"),
+        );
+        assert_eq!(last_event_id_sequence(&headers), None);
     }
 
     #[test]
@@ -481,7 +516,6 @@ mod tests {
             sse_event_name(&Event::WorkerSignalReceived {
                 signal_id: moa_core::AgentSignalId::new(),
                 worker_id: "child-1".to_string(),
-                parent_worker_id: None,
                 kind: moa_core::ChildSignalKind::Blocked,
                 severity: moa_core::SignalSeverity::Warning,
                 summary: "blocked on input".to_string(),
@@ -489,6 +523,18 @@ mod tests {
                 input_audience: None,
             }),
             "worker_signal"
+        );
+        assert_eq!(
+            sse_event_name(&Event::WorkerSignalReceived {
+                signal_id: moa_core::AgentSignalId::new(),
+                worker_id: "child-1".to_string(),
+                kind: moa_core::ChildSignalKind::NeedsInput,
+                severity: moa_core::SignalSeverity::Warning,
+                summary: "needs user input".to_string(),
+                input_request_id: Some("req-1".to_string()),
+                input_audience: Some(moa_core::InputAudience::User),
+            }),
+            "worker_input_request"
         );
         assert_eq!(
             sse_event_name(&Event::WorkerParentResumeRequested {
@@ -558,9 +604,14 @@ mod tests {
     fn queued_session_message_stream_finishes_when_session_is_idle() {
         // Pins: queued messages have no accepted turn id, so their stream waits for the queue to drain.
         let running = session_progress(Some("active-turn".to_string()), 1, None);
-        let idle = session_progress(None, 0, None);
+        let mut idle = session_progress(None, 0, None);
+        let mut child_active = session_progress(None, 0, None);
+        child_active.child_progress = vec![child_summary(WorkerState::Running, Some("running"))];
 
         assert!(!session_message_terminal_done(None, &running));
+        assert!(!session_message_terminal_done(None, &child_active));
+        assert!(session_message_terminal_done(None, &idle));
+        idle.child_progress = vec![child_summary(WorkerState::Completed, Some("done"))];
         assert!(session_message_terminal_done(None, &idle));
     }
 

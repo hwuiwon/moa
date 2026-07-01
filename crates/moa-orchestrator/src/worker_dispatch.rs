@@ -86,25 +86,6 @@ pub(crate) fn validate_dispatch_budget(
     Ok(())
 }
 
-/// Returns the parent budget remaining after reserving the requested child budget.
-pub(crate) fn reserve_child_budget(
-    remaining_parent_budget: u64,
-    requested_budget: u64,
-) -> Result<u64, HandlerError> {
-    validate_dispatch_budget(requested_budget, Some(remaining_parent_budget))?;
-    Ok(remaining_parent_budget - requested_budget)
-}
-
-/// Returns the parent budget after refunding any unused child reservation.
-#[must_use]
-pub(crate) fn refund_child_budget(
-    current_parent_budget: u64,
-    requested_budget: u64,
-    child_tokens_used: u64,
-) -> u64 {
-    current_parent_budget.saturating_add(requested_budget.saturating_sub(child_tokens_used))
-}
-
 /// Returns whether the given child id is owned by this parent state.
 pub(crate) fn child_is_owned(children: &[WorkerChildRef], worker_id: &str) -> bool {
     children.iter().any(|child| child.id == worker_id)
@@ -148,8 +129,8 @@ mod tests {
     use moa_core::WorkerChildRef;
 
     use super::{
-        MAX_WORKER_DEPTH, MAX_WORKER_FAN_OUT, refund_child_budget, reserve_child_budget, task_hash,
-        validate_dispatch_budget, validate_dispatch_limits,
+        MAX_WORKER_DEPTH, MAX_WORKER_FAN_OUT, task_hash, validate_dispatch_budget,
+        validate_dispatch_limits,
     };
 
     #[test]
@@ -255,17 +236,6 @@ mod tests {
 
         assert!(format!("{zero_error:?}").contains("greater than zero"));
         assert!(format!("{over_error:?}").contains("exceeds remaining parent budget"));
-    }
-
-    #[test]
-    fn child_budget_reservation_and_refund_are_zero_sum() {
-        // Pins: parent budgets reserve requested child tokens and refund only the unused amount.
-        let after_reserve =
-            reserve_child_budget(1_000, 400).expect("reservation within budget should succeed");
-        let after_refund = refund_child_budget(after_reserve, 400, 125);
-
-        assert_eq!(after_reserve, 600);
-        assert_eq!(after_refund, 875);
     }
 
     #[test]

@@ -31,8 +31,6 @@ pub struct WorkerInitialTask {
     pub max_turns: Option<u32>,
     /// Root session that owns the child.
     pub parent_session: SessionId,
-    /// Optional parent worker when dispatch is nested.
-    pub parent_worker: Option<WorkerId>,
     /// Current depth in the worker tree.
     pub depth: u32,
     /// Tenant scope inherited from the parent.
@@ -200,9 +198,6 @@ pub struct WorkerSignal {
     pub worker_id: WorkerId,
     /// Owning root session coordinator that should receive the signal.
     pub parent_session: SessionId,
-    /// Immediate parent worker when the signal originated from a nested child.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_worker: Option<WorkerId>,
     /// Kind of attention being requested.
     pub kind: ChildSignalKind,
     /// Relative urgency of the signal.
@@ -748,7 +743,6 @@ impl WorkerChildRequest {
     pub fn into_initial_message(
         self,
         parent_session: SessionId,
-        parent_worker: Option<WorkerId>,
         depth: u32,
         tenant_id: TenantId,
         user_id: UserId,
@@ -760,7 +754,6 @@ impl WorkerChildRequest {
             budget_tokens: self.budget_tokens,
             max_turns: self.max_turns,
             parent_session,
-            parent_worker,
             depth,
             tenant_id,
             user_id,
@@ -774,17 +767,17 @@ impl WorkerChildRequest {
 pub fn spawn_worker_tool_schema() -> serde_json::Value {
     serde_json::json!({
         "name": "spawn_worker",
-        "description": "Start a focused child worker for bounded independent work and return immediately with its id.",
+        "description": "Use this tool when the coordinator decides a non-trivial request has an independent subtask with enough context to execute, even if the user did not ask for delegation. Good fits include reports, comparisons, audits, incident investigations, multi-source research, option checks, and named workstreams or systems that can run in parallel. If a request names three or more independent areas and asks for synthesis, spawn ready worker nodes before the final synthesis. Start one ready node in the coordinator's subtask DAG, then wait only when another node depends on its result.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "task": {
                     "type": "string",
-                    "description": "Clear delegated task for the child agent."
+                    "description": "Clear delegated task for the child agent. Include relevant DAG node/dependency context and any skill steps to follow in this text."
                 },
                 "task_name": {
                     "type": "string",
-                    "description": "Short optional model-visible name for the child task."
+                    "description": "Short optional model-visible DAG node name for the child task."
                 },
                 "tool_subset": {
                     "type": "array",
@@ -1162,6 +1155,40 @@ mod tests {
 
         assert!(!is_delegation_tool_name("unknown_worker"));
         assert!(delegation_tool_schema("unknown_worker").is_none());
+    }
+
+    #[test]
+    fn spawn_worker_schema_describes_dag_decomposition_without_extra_fields() {
+        // Pins: coordinator DAG planning stays in the task text, not strict selected
+        // skill/action fields on the worker wire contract.
+        let schema = spawn_worker_tool_schema();
+        let description = schema
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .expect("spawn_worker should have a description");
+        assert!(description.contains("subtask DAG"));
+        assert!(description.contains("even if the user did not ask for delegation"));
+        assert!(description.contains("reports, comparisons, audits"));
+        assert!(description.contains("named workstreams or systems"));
+        assert!(description.contains("three or more independent areas"));
+        assert!(description.contains("wait only when another node depends"));
+
+        let properties = schema
+            .pointer("/input_schema/properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("spawn_worker should expose object properties");
+        assert!(properties.contains_key("task"));
+        assert!(properties.contains_key("task_name"));
+        assert!(!properties.contains_key("selected_skill"));
+        assert!(!properties.contains_key("selected_action"));
+
+        let task_description = properties
+            .get("task")
+            .and_then(|property| property.get("description"))
+            .and_then(serde_json::Value::as_str)
+            .expect("task should have a description");
+        assert!(task_description.contains("DAG node/dependency context"));
+        assert!(task_description.contains("skill steps"));
     }
 
     #[test]

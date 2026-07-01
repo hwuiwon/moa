@@ -116,9 +116,9 @@ pub(super) async fn run_child_liveness_check(
             state.clear_child_liveness(&req.worker_id);
             state.persist_into(ctx);
         }
-        ChildLivenessDecision::Reschedule => {
+        ChildLivenessDecision::Reschedule { delay_ms } => {
             // Same generation: the single outstanding check continues watching this child.
-            send_child_liveness_check(ctx, &req.worker_id, req.expected_generation, now, stale_ms);
+            send_child_liveness_check(ctx, &req.worker_id, req.expected_generation, now, delay_ms);
         }
         ChildLivenessDecision::Stale { last_heartbeat_at } => {
             let session_id = parse_session_key(ctx.key())?;
@@ -187,7 +187,10 @@ enum ChildLivenessDecision {
     /// Terminal child: stop the watchdog.
     Stop,
     /// Active and not stale (fresh, missing, or legitimately awaiting input): reschedule.
-    Reschedule,
+    Reschedule {
+        /// Delay until the next check should fire.
+        delay_ms: u64,
+    },
     /// Heartbeat aged past the threshold while active: raise a non-fatal stale signal.
     Stale {
         /// Last heartbeat observed before staleness, carried into the event/dedupe key.
@@ -213,15 +216,25 @@ fn decide_child_liveness(
         return ChildLivenessDecision::Stop;
     }
     if awaiting_input {
-        return ChildLivenessDecision::Reschedule;
+        return ChildLivenessDecision::Reschedule {
+            delay_ms: stale_threshold_ms,
+        };
     }
     match last_heartbeat_at {
-        Some(last) if (now - last).num_milliseconds() > stale_threshold_ms as i64 => {
+        Some(last) if (now - last).num_milliseconds() >= stale_threshold_ms as i64 => {
             ChildLivenessDecision::Stale {
                 last_heartbeat_at: last,
             }
         }
-        _ => ChildLivenessDecision::Reschedule,
+        Some(last) => {
+            let age_ms = (now - last).num_milliseconds().max(0) as u64;
+            ChildLivenessDecision::Reschedule {
+                delay_ms: stale_threshold_ms.saturating_sub(age_ms).max(1),
+            }
+        }
+        None => ChildLivenessDecision::Reschedule {
+            delay_ms: stale_threshold_ms,
+        },
     }
 }
 
@@ -279,7 +292,6 @@ async fn raise_child_stale(
             signal_id,
             worker_id: worker_id.to_string(),
             parent_session: session_id,
-            parent_worker: None,
             kind: ChildSignalKind::HeartbeatStale,
             severity: SignalSeverity::Warning,
             summary,
@@ -337,7 +349,18 @@ mod tests {
         let heartbeat = now - Duration::milliseconds(5_000);
         assert_eq!(
             decide_child_liveness(false, false, Some(heartbeat), now, 60_000),
-            ChildLivenessDecision::Reschedule
+            ChildLivenessDecision::Reschedule { delay_ms: 55_000 }
+        );
+    }
+
+    #[test]
+    fn nearly_stale_heartbeat_reschedules_at_least_one_millisecond() {
+        // Pins: a fresh-but-near-threshold heartbeat does not schedule a zero-delay loop.
+        let now = ts(1_000_000);
+        let heartbeat = now - Duration::milliseconds(59_999);
+        assert_eq!(
+            decide_child_liveness(false, false, Some(heartbeat), now, 60_000),
+            ChildLivenessDecision::Reschedule { delay_ms: 1 }
         );
     }
 
@@ -349,7 +372,7 @@ mod tests {
         let heartbeat = now - Duration::milliseconds(600_000);
         assert_eq!(
             decide_child_liveness(false, true, Some(heartbeat), now, 60_000),
-            ChildLivenessDecision::Reschedule
+            ChildLivenessDecision::Reschedule { delay_ms: 60_000 }
         );
     }
 
@@ -360,7 +383,7 @@ mod tests {
         let now = ts(1_000_000);
         assert_eq!(
             decide_child_liveness(false, false, None, now, 60_000),
-            ChildLivenessDecision::Reschedule
+            ChildLivenessDecision::Reschedule { delay_ms: 60_000 }
         );
     }
 

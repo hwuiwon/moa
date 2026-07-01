@@ -18,6 +18,7 @@ use moa_memory_ingest::{execute_memory_tool, is_fast_memory_tool};
 use moa_observability::record_tool_idempotency_scan;
 use moa_security::{ToolInputCanaryScreening, screen_tool_input_for_canary};
 use restate_sdk::prelude::*;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -111,6 +112,14 @@ impl ToolExecutorImpl {
             return execute_memory_tool(session, &request.tool_name, &request.input).await;
         }
 
+        let trusted_sandbox_files = self.trusted_sandbox_files_for_request(request).await?;
+        if request.worker_id.is_none() && request.tool_name == "file_read" {
+            return Ok(
+                root_trusted_file_read(&request.input, &trusted_sandbox_files)
+                    .unwrap_or_else(root_file_read_denied_output),
+            );
+        }
+
         let invocation = ToolInvocation {
             id: request.provider_tool_use_id.clone(),
             name: request.tool_name.clone(),
@@ -120,7 +129,6 @@ impl ToolExecutorImpl {
         // worker so each worker owns its own sandbox; the root
         // coordinator keeps `None` for the shared session-level scope.
         let hand_scope = request.worker_id.as_deref();
-        let trusted_sandbox_files = self.trusted_sandbox_files_for_request(request).await?;
         self.router
             .set_trusted_sandbox_files(session, hand_scope, trusted_sandbox_files)
             .await;
@@ -155,6 +163,24 @@ impl ToolExecutorImpl {
             .map(tool_descriptor)
             .collect()
     }
+}
+
+fn root_trusted_file_read(input: &Value, files: &[SandboxFile]) -> Option<ToolOutput> {
+    let path = input.get("path").and_then(Value::as_str)?;
+    let file = files.iter().find(|file| file.path == path)?;
+    let input_json = serde_json::to_string(input).ok()?;
+    let content = String::from_utf8(file.content.clone()).ok()?;
+    Some(
+        moa_hands::tools::file_read::execute_with_content(&input_json, &file.path, &content)
+            .unwrap_or_else(|error| ToolOutput::error(error.to_string(), Duration::ZERO)),
+    )
+}
+
+fn root_file_read_denied_output() -> ToolOutput {
+    ToolOutput::error(
+        "Tool file_read is available to the root coordinator only for selected skill package files.",
+        Duration::ZERO,
+    )
 }
 
 /// Durable loader for trusted sandbox file manifests referenced by tool requests.
@@ -291,8 +317,8 @@ impl ToolExecutor for ToolExecutorImpl {
     #[tracing::instrument(skip(self, _ctx, request))]
     // SAFETY: internal teardown dispatched by a finishing Worker VO's own cleanup path.
     // It destroys only that worker's own `(session_id, worker_id)` sandbox scope and
-    // reads no caller-owned data back. The router logs and swallows its own failures, so
-    // this is non-fatal and always returns Ok; cleanup must never be blocked by it.
+    // reads no caller-owned data back. The router logs provider failures and reports an
+    // incomplete release so the Worker VO can reschedule cleanup instead of clearing.
     async fn release_worker_hands(
         &self,
         _ctx: Context<'_>,
@@ -300,9 +326,13 @@ impl ToolExecutor for ToolExecutorImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("ToolExecutor", "release_worker_hands");
         let request = request.into_inner();
-        self.router
+        let complete = self
+            .router
             .destroy_worker_hands(&request.session_id, &request.worker_id)
             .await;
+        if !complete {
+            return Err(TerminalError::new("worker hand cleanup incomplete").into());
+        }
         Ok(())
     }
 
@@ -832,7 +862,8 @@ mod tests {
 
     use super::{
         ToolExecutorImpl, TrustedSandboxFileManifestStore, agent_tool_policy_denied_output,
-        blocked_canary_tool_output, has_prior_tool_call_event, synthetic_session_id,
+        blocked_canary_tool_output, has_prior_tool_call_event, root_trusted_file_read,
+        synthetic_session_id,
     };
 
     #[derive(Default)]
@@ -1126,5 +1157,35 @@ mod tests {
 
         assert!(!output.is_error);
         assert_eq!(provider.installed_files(), files);
+    }
+
+    #[tokio::test]
+    async fn root_file_read_uses_trusted_manifest_without_installing_hand_files() {
+        // Pins: selected skill reads on the root coordinator stay sandbox-free.
+        let (executor, provider, _files, manifest) = install_scenario();
+        let mut request = manifest_request(manifest, None);
+        request.tool_name = "file_read".to_string();
+        request.input = serde_json::json!({"path": ".moa/skills/test/SKILL.md"});
+
+        let output = executor
+            .execute_buffered(&SessionMeta::default(), &request)
+            .await
+            .expect("root skill file_read should use request manifest");
+
+        assert!(!output.is_error);
+        assert!(output.to_text().contains("use this skill"));
+        assert!(
+            provider.installed_files().is_empty(),
+            "root manifest file_read must not provision or install hand files"
+        );
+    }
+
+    #[test]
+    fn root_file_read_ignores_paths_not_in_manifest() {
+        // Pins: root file_read cannot access arbitrary paths outside selected skill files.
+        let (_executor, _provider, files, _manifest) = install_scenario();
+        let output = root_trusted_file_read(&serde_json::json!({"path": "src/lib.rs"}), &files);
+
+        assert!(output.is_none());
     }
 }

@@ -8,8 +8,8 @@ use moa_brain::{
     lineage::emit_context_lineage, pipeline::history::HISTORY_SNAPSHOT_METADATA_KEY,
 };
 use moa_core::{
-    CompletionRequest, ContextSnapshot, EventRange, QueryRewriteResult, Result, SandboxFile,
-    SessionId, SessionStore, WorkingContext, record_pipeline_compile_duration,
+    CompletionRequest, ContextSnapshot, EventRange, EventRecord, EventType, QueryRewriteResult,
+    Result, SandboxFile, SessionId, SessionStore, WorkingContext, record_pipeline_compile_duration,
     session_engine::session_requires_processing,
 };
 use moa_lineage_citation::ChunkRef;
@@ -75,6 +75,13 @@ pub(crate) async fn prepare_turn_request(
     let recent_events = session_store
         .get_events(session_id, EventRange::recent(TURN_EVENT_TAIL_LIMIT))
         .await?;
+    let recent_events = preserve_active_user_event(
+        session_store.as_ref(),
+        session_id,
+        recent_events,
+        active_user_sequence_num,
+    )
+    .await?;
     if !session_requires_processing(&session, &recent_events) {
         return Ok(PreparedTurnRequestOutput {
             prepared: PreparedTurnRequest::Idle,
@@ -100,10 +107,11 @@ pub(crate) async fn prepare_turn_request(
             }
         };
     let lineage = ctx.lineage();
-    // The root coordinator turn is always sandbox-free: hard-exclude sandbox/compute
-    // (hand-routed) tools so the coordinator can never provision a hand. The
-    // worker tool subsets (built from the unfiltered `current_tool_schemas`)
-    // keep these tools, so all compute is delegated.
+    // The root coordinator turn is sandbox-free: hard-exclude sandbox/compute
+    // (hand-routed) tools so the coordinator never provisions a hand. Manifest-backed
+    // `file_read` is kept so selected skill packages can be read without a sandbox.
+    // The worker tool subsets (built from the unfiltered `current_tool_schemas`)
+    // keep the hand tools, so all compute is delegated.
     let root_tool_schemas = {
         let tool_router = ctx.tool_router();
         coordinator_tool_schemas(ctx.tool_schemas().as_ref(), |name| {
@@ -200,16 +208,56 @@ pub(crate) async fn prepare_turn_request(
     })
 }
 
+async fn preserve_active_user_event(
+    session_store: &dyn SessionStore,
+    session_id: SessionId,
+    recent_events: Vec<EventRecord>,
+    active_user_sequence_num: Option<u64>,
+) -> Result<Vec<EventRecord>> {
+    let Some(sequence_num) = active_user_sequence_num else {
+        return Ok(recent_events);
+    };
+    if recent_events
+        .iter()
+        .any(|record| record.sequence_num == sequence_num)
+    {
+        return Ok(recent_events);
+    }
+
+    let anchor = session_store
+        .get_events(
+            session_id,
+            EventRange {
+                from_seq: Some(sequence_num),
+                to_seq: Some(sequence_num),
+                event_types: Some(vec![EventType::UserMessage]),
+                ..EventRange::default()
+            },
+        )
+        .await?;
+    Ok(merge_active_user_event(recent_events, anchor))
+}
+
+fn merge_active_user_event(
+    mut recent_events: Vec<EventRecord>,
+    anchor_events: Vec<EventRecord>,
+) -> Vec<EventRecord> {
+    recent_events.extend(anchor_events);
+    recent_events.sort_by_key(|record| record.sequence_num);
+    recent_events.dedup_by_key(|record| record.sequence_num);
+    recent_events
+}
+
 /// Removes sandbox-requiring (hand-routed) tool schemas so the root coordinator
-/// turn is offered only sandbox-free tools.
+/// turn is offered only sandbox-free tools plus selected-skill `file_read`.
 ///
 /// `requires_sandbox` classifies a tool *name* as hand/sandbox-executed; in
 /// production this is [`moa_hands::ToolRouter::tool_requires_sandbox`], the
 /// authoritative execution-routing predicate. Delegation, memory, retrieval, and
-/// read tools are not hand-routed, so they are preserved. Schemas without a
-/// string `name` are retained defensively: they cannot be classified as sandbox
-/// tools and are never the hand-routed compute tools this filter targets. The
-/// input slice is left untouched (a new `Vec` is returned), so the shared
+/// manifest-backed selected-skill reads are preserved. Schemas without a string
+/// `name` are retained defensively: they cannot be classified as sandbox tools
+/// and are never the hand-routed compute tools this filter targets. The input
+/// slice is left untouched (a new `Vec` is returned), so the shared
 /// `current_tool_schemas` source that worker subsets read stays complete.
 pub(crate) fn coordinator_tool_schemas(
     schemas: &[serde_json::Value],
@@ -218,10 +266,10 @@ pub(crate) fn coordinator_tool_schemas(
     schemas
         .iter()
         .filter(|schema| {
-            !schema
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(&requires_sandbox)
+            let Some(name) = schema.get("name").and_then(serde_json::Value::as_str) else {
+                return true;
+            };
+            name == "file_read" || !requires_sandbox(name)
         })
         .cloned()
         .collect()
@@ -320,8 +368,11 @@ fn query_rewrite_cache_from_context(
 
 #[cfg(test)]
 mod tests {
-    use super::coordinator_tool_schemas;
+    use super::{coordinator_tool_schemas, merge_active_user_event};
+    use chrono::Utc;
+    use moa_core::{Event, EventRecord, EventType, SessionId};
     use serde_json::{Value, json};
+    use uuid::Uuid;
 
     /// Mirrors the production hand-routed (sandbox) tool catalog so the filter
     /// mechanics are exercised against representative names. The authoritative
@@ -352,12 +403,28 @@ mod tests {
             .collect()
     }
 
+    fn event_record(session_id: SessionId, sequence_num: u64, event: Event) -> EventRecord {
+        EventRecord {
+            id: Uuid::now_v7(),
+            session_id,
+            sequence_num,
+            event_type: EventType::from(&event),
+            event,
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        }
+    }
+
     #[test]
     fn coordinator_tool_schemas_drops_hand_tools_but_keeps_delegation_and_read() {
         // Pins: the sandbox-free root coordinator loses hand-routed compute tools (bash,
-        // file_write) while keeping read/memory tools and delegation tools.
+        // file_write) while keeping manifest-backed skill reads, memory tools, and
+        // delegation tools.
         let source = vec![
             schema("bash"),
+            schema("file_read"),
             schema("file_write"),
             schema("session_search"),
             schema("tool_result_read"),
@@ -373,6 +440,7 @@ mod tests {
             !kept.contains(&"file_write".to_string()),
             "file_write must be excluded"
         );
+        assert!(kept.contains(&"file_read".to_string()));
         assert!(kept.contains(&"session_search".to_string()));
         assert!(kept.contains(&"tool_result_read".to_string()));
         assert!(kept.contains(&"spawn_worker".to_string()));
@@ -410,5 +478,52 @@ mod tests {
 
         assert_eq!(coordinator.len(), 1);
         assert!(coordinator[0].get("name").is_none());
+    }
+
+    #[test]
+    fn active_user_anchor_is_merged_before_recent_tail() {
+        // Pins: a long tool/worker turn can exceed the event-tail limit, but the current
+        // user request must remain in the compiled context so final synthesis still has
+        // the task objective.
+        let session_id = SessionId::new();
+        let recent = (1..=3)
+            .map(|sequence_num| {
+                event_record(
+                    session_id,
+                    sequence_num,
+                    Event::BrainResponse {
+                        text: format!("tool event {sequence_num}"),
+                        thought_signature: None,
+                        model: "test-model".into(),
+                        model_tier: moa_core::ModelTier::Main,
+                        input_tokens_uncached: 1,
+                        input_tokens_cache_write: 0,
+                        input_tokens_cache_read: 0,
+                        output_tokens: 1,
+                        cost_cents: 0,
+                        duration_ms: 1,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let anchor = event_record(
+            session_id,
+            0,
+            Event::UserMessage {
+                text: "original task".to_string(),
+                attachments: Vec::new(),
+            },
+        );
+
+        let merged = merge_active_user_event(recent, vec![anchor]);
+
+        assert_eq!(
+            merged
+                .iter()
+                .map(|record| record.sequence_num)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert!(matches!(merged[0].event, Event::UserMessage { .. }));
     }
 }

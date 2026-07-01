@@ -138,6 +138,7 @@ pub(super) async fn run_narration_tick(
                 // narration job is `.send()` (never `.call()`).
                 ctx.service_client::<LLMGatewayClient>()
                     .narrate_session(Json::from(request))
+                    .idempotency_key(format!("narration:{session_id}:{}", state.narration_seq))
                     .send();
                 window.count = window.count.saturating_add(1);
                 state.last_narrated_marker = Some(marker);

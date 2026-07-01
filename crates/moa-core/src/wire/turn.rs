@@ -22,6 +22,10 @@ pub enum TurnTrigger {
     /// INSTRUCTION text (the signal kind/summary plus unread-signal context), not a
     /// human user message, and no `Event::UserMessage` is appended for the turn.
     ChildSignal,
+    /// A completed worker result bundle initiated a coordinator synthesis turn. The
+    /// request's `user_message` carries a system-generated instruction, not a human
+    /// message, and no `Event::UserMessage` is appended for the turn.
+    WorkerResults,
 }
 
 /// Input accepted by one `TurnExecution` workflow run.
@@ -36,8 +40,8 @@ pub struct RunTurnRequest {
     /// Agent-facing contact admitted by the Session VO for this turn.
     #[serde(default)]
     pub contact: Option<ContactRef>,
-    /// User message that initiated the turn, or — for [`TurnTrigger::ChildSignal`] —
-    /// the system-generated coordinator instruction text.
+    /// User message that initiated the turn, or — for non-user triggers — the
+    /// system-generated coordinator instruction text.
     pub user_message: String,
     /// User message attachments that initiated the turn.
     #[serde(default)]

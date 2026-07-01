@@ -30,13 +30,8 @@ pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
     ))
 }
 
-/// Renders a `file_read` response from content already loaded by a provider.
-#[cfg(any(feature = "daytona", feature = "e2b"))]
-pub(crate) fn execute_with_content(
-    input: &str,
-    display_path: &str,
-    content: &str,
-) -> Result<ToolOutput> {
+/// Renders a `file_read` response from content already loaded by a provider or trusted manifest.
+pub fn execute_with_content(input: &str, display_path: &str, content: &str) -> Result<ToolOutput> {
     let params: FileReadInput = serde_json::from_str(input)?;
     Ok(render_file_read_output(content, display_path, &params))
 }

@@ -7,7 +7,6 @@ pub(super) const K_PENDING: &str = "pending";
 pub(super) const K_CHILDREN: &str = "children";
 pub(super) const K_LAST_TURN_SUMMARY: &str = "last_turn_summary";
 pub(super) const K_PARENT_SESSION: &str = "parent_session";
-pub(super) const K_PARENT_WORKER: &str = "parent_worker";
 pub(super) const K_DEPTH: &str = "depth";
 pub(super) const K_BUDGET_REMAINING: &str = "budget_remaining";
 pub(super) const K_TOKENS_USED: &str = "tokens_used";
@@ -29,6 +28,7 @@ pub(super) const K_LAST_HEARTBEAT_AT: &str = "last_heartbeat_at";
 pub(super) const K_CLEANUP_GENERATION: &str = "cleanup_generation";
 pub(super) const K_PENDING_INPUT_REQUESTS: &str = "pending_input_requests";
 pub(super) const MAX_TURNS_PER_POST: usize = 50;
+pub(super) const WORKER_BUDGET_EXHAUSTED_MESSAGE: &str = "MOA stopped because this worker exhausted its token budget. Narrow the scope or ask MOA to continue.";
 
 /// Serializable projection of the Worker VO's durable state keys.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -37,8 +37,6 @@ pub struct WorkerVoState {
     pub status: Option<WorkerState>,
     /// Root session that owns this child.
     pub parent_session: Option<SessionId>,
-    /// Optional parent child when this is a nested worker.
-    pub parent_worker: Option<WorkerId>,
     /// Current depth in the child tree.
     pub depth: u32,
     /// Remaining token budget for future turns.
@@ -116,7 +114,6 @@ impl WorkerVoState {
 
         self.status = Some(WorkerState::Running);
         self.parent_session = Some(initial.parent_session);
-        self.parent_worker = initial.parent_worker.clone();
         self.depth = initial.depth;
         self.budget_remaining = initial.budget_tokens;
         self.tokens_used = 0;
@@ -245,6 +242,14 @@ impl WorkerVoState {
         self.budget_remaining == 0
     }
 
+    /// Completes this worker with a visible budget-exhaustion result.
+    pub(super) fn complete_after_budget_exhausted(&mut self) {
+        let message = WORKER_BUDGET_EXHAUSTED_MESSAGE.to_string();
+        self.last_turn_summary = Some(message.clone());
+        self.history.push(ContextMessage::assistant(message));
+        self.apply_turn_outcome(TurnOutcome::Idle);
+    }
+
     /// Builds the public status projection returned by the shared status handler.
     #[must_use]
     pub(super) fn status_view(&self) -> WorkerStatus {
@@ -344,7 +349,6 @@ impl VoState for WorkerVoState {
         Ok(Self {
             status: reader.get_json(K_STATUS).await?,
             parent_session: reader.get_json(K_PARENT_SESSION).await?,
-            parent_worker: reader.get_json(K_PARENT_WORKER).await?,
             depth: reader.get_json(K_DEPTH).await?.unwrap_or_default(),
             budget_remaining: reader
                 .get_json(K_BUDGET_REMAINING)
@@ -386,7 +390,6 @@ impl VoState for WorkerVoState {
     fn persist_into(&self, ctx: &ObjectContext<'_>) {
         set_or_clear_opt(ctx, K_STATUS, self.status.as_ref());
         set_or_clear_opt(ctx, K_PARENT_SESSION, self.parent_session.as_ref());
-        set_or_clear_opt(ctx, K_PARENT_WORKER, self.parent_worker.as_ref());
         set_or_clear_scalar(ctx, K_DEPTH, self.depth, 0);
         set_or_clear_scalar(ctx, K_BUDGET_REMAINING, self.budget_remaining, 0);
         set_or_clear_scalar(ctx, K_TOKENS_USED, self.tokens_used, 0);
@@ -491,38 +494,6 @@ impl WorkerVoState {
             .position(|entry| entry.input_request_id == input_request_id)?;
         Some(self.pending_input_requests.remove(index).awakeable_id)
     }
-
-    /// Caches a terminal child result and refunds unused reserved budget once.
-    pub(super) fn mark_child_terminal(
-        &mut self,
-        input: MarkWorkerChildTerminalInput,
-    ) -> Option<u64> {
-        let child = self
-            .children
-            .iter_mut()
-            .find(|child| child.id == input.worker_id)?;
-        if child.terminal.is_some() {
-            return None;
-        }
-
-        let tokens_used = input.terminal.result.tokens_used;
-        self.budget_remaining =
-            refund_child_budget(self.budget_remaining, child.budget_tokens, tokens_used);
-        child.terminal = Some(input.terminal);
-        Some(tokens_used)
-    }
-
-    /// Removes and returns a cached terminal child result.
-    pub(super) fn consume_child_terminal(
-        &mut self,
-        worker_id: &str,
-    ) -> Option<WorkerTerminalResult> {
-        let index = self
-            .children
-            .iter()
-            .position(|child| child.id == worker_id && child.terminal.is_some())?;
-        self.children.remove(index).terminal
-    }
 }
 
 #[cfg(test)]
@@ -531,7 +502,7 @@ mod tests {
         ModelId, SessionId, TenantId, TurnOutcome, UserId, WorkerInitialTask, WorkerMessage,
     };
 
-    use super::WorkerVoState;
+    use super::{WORKER_BUDGET_EXHAUSTED_MESSAGE, WorkerVoState, latest_assistant_text};
     use moa_core::WorkerState;
 
     fn initial_task() -> WorkerMessage {
@@ -541,7 +512,6 @@ mod tests {
             budget_tokens: 512,
             max_turns: Some(3),
             parent_session: SessionId::new(),
-            parent_worker: None,
             depth: 1,
             tenant_id: TenantId::new(),
             user_id: UserId::new("user-1"),
@@ -605,6 +575,27 @@ mod tests {
         assert_eq!(state.tokens_used, 200);
         assert_eq!(state.budget_remaining, 312);
         assert!(!state.budget_exhausted());
+    }
+
+    #[test]
+    fn exhausted_budget_completion_preserves_visible_result() {
+        // Pins: budget-capped workers must return a useful terminal result, not the
+        // previous progress summary such as "Calling tool session_search".
+        let mut state = WorkerVoState::default();
+        state
+            .initialize(&initial_task())
+            .expect("initial task should seed state");
+        state.budget_remaining = 0;
+
+        state.complete_after_budget_exhausted();
+        let result = state.build_result("worker-1".to_string());
+
+        assert!(result.success);
+        assert_eq!(result.output, WORKER_BUDGET_EXHAUSTED_MESSAGE);
+        assert_eq!(
+            latest_assistant_text(&state.history).as_deref(),
+            Some(WORKER_BUDGET_EXHAUSTED_MESSAGE)
+        );
     }
 
     #[test]
@@ -709,52 +700,6 @@ mod tests {
         assert!(state.start_workflow_turn("turn-2".to_string()));
         assert!(!state.clear_active_turn("turn-1"));
         assert_eq!(state.active_turn_id.as_deref(), Some("turn-2"));
-    }
-
-    #[test]
-    fn nested_child_terminal_result_refunds_once_and_consumes_once() {
-        // Pins: nested child terminal delivery refunds reserved budget once, then wait consumes the cache.
-        let mut state = WorkerVoState::default();
-        state
-            .initialize(&initial_task())
-            .expect("initial task should seed state");
-        state.children.push(moa_core::WorkerChildRef {
-            id: "child-1".to_string(),
-            task_hash: "hash-1".to_string(),
-            budget_tokens: 300,
-            terminal: None,
-        });
-        state.budget_remaining = 100;
-        let terminal = moa_core::WorkerTerminalResult {
-            state: WorkerState::Completed,
-            result: moa_core::WorkerResult {
-                worker_id: "child-1".to_string(),
-                success: true,
-                output: "done".to_string(),
-                tokens_used: 125,
-                tools_invoked: 1,
-                error: None,
-            },
-        };
-
-        assert_eq!(
-            state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-                worker_id: "child-1".to_string(),
-                terminal: terminal.clone(),
-            }),
-            Some(125)
-        );
-        assert_eq!(state.budget_remaining, 275);
-        assert_eq!(
-            state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-                worker_id: "child-1".to_string(),
-                terminal: terminal.clone(),
-            }),
-            None
-        );
-        assert_eq!(state.budget_remaining, 275);
-        assert_eq!(state.consume_child_terminal("child-1"), Some(terminal));
-        assert_eq!(state.consume_child_terminal("child-1"), None);
     }
 
     #[test]

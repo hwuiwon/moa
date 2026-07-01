@@ -3,8 +3,8 @@
 use super::*;
 use moa_core::traits::Identity;
 use moa_core::{
-    AgentSignalId, ChildSignalKind, ParentResumePolicy, TurnOutcome, UnreadChildSignal,
-    WorkerSignal,
+    AgentSignalId, ChildSignalKind, InputAudience, ParentResumePolicy, TurnOutcome,
+    UnreadChildSignal, WorkerSignal,
 };
 
 pub(super) const K_META: &str = "meta";
@@ -28,6 +28,7 @@ pub(super) const K_RESUME_BUDGET: &str = "resume_budget";
 pub(super) const K_RESUME_TURN: &str = "resume_turn";
 pub(super) const K_CHILD_LIVENESS_GENERATION: &str = "child_liveness_generation";
 pub(super) const K_CHILD_LIVENESS: &str = "child_liveness";
+pub(super) const K_AUTO_DELEGATION_RUN: &str = "auto_delegation_run";
 
 /// Maximum unread child→parent control-plane signals retained on the coordinator VO.
 ///
@@ -118,6 +119,23 @@ pub struct ChildLivenessState {
     pub generation: u64,
 }
 
+/// Session-owned completion state for one deterministic auto-delegation run.
+///
+/// The root turn still schedules workers, but completion is owned by the Session VO
+/// because terminal worker results are durably cached there. Only one run is needed per
+/// admitted user message; a newer user sequence replaces the prior run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AutoDelegationRun {
+    /// User-message sequence that caused the worker DAG to be scheduled.
+    pub user_sequence_num: u64,
+    /// Worker ids in deterministic scheduled order.
+    pub worker_ids: Vec<WorkerId>,
+    /// Whether the durable WorkerResultBundle event has already been emitted.
+    pub bundle_emitted: bool,
+    /// Coordinator synthesis turn dispatched for this bundle, when any.
+    pub synthesis_turn_id: Option<String>,
+}
+
 /// Serializable projection of the Session VO's durable state keys.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionVoState {
@@ -178,6 +196,8 @@ pub struct SessionVoState {
     pub child_liveness_generation: u64,
     /// Per-child outstanding liveness-watchdog checks (single-outstanding per child).
     pub child_liveness: Vec<ChildLivenessState>,
+    /// Active deterministic auto-delegation run waiting for worker result fan-in.
+    pub auto_delegation_run: Option<AutoDelegationRun>,
 }
 
 impl SessionVoState {
@@ -305,6 +325,108 @@ impl SessionVoState {
         true
     }
 
+    /// Registers or replaces the current deterministic auto-delegation run.
+    ///
+    /// Returns `true` when state changed. Re-registering the same user sequence and worker
+    /// order is idempotent, which lets the root workflow retry after partial delivery.
+    pub fn register_auto_delegation_run(
+        &mut self,
+        user_sequence_num: u64,
+        worker_ids: Vec<WorkerId>,
+    ) -> bool {
+        if worker_ids.is_empty() {
+            return false;
+        }
+        if self.auto_delegation_run.as_ref().is_some_and(|run| {
+            run.user_sequence_num == user_sequence_num && run.worker_ids == worker_ids
+        }) {
+            return false;
+        }
+        self.auto_delegation_run = Some(AutoDelegationRun {
+            user_sequence_num,
+            worker_ids,
+            bundle_emitted: false,
+            synthesis_turn_id: None,
+        });
+        true
+    }
+
+    /// Returns ordered terminal results when the registered auto-delegation run is complete.
+    #[must_use]
+    pub fn ready_auto_delegation_bundle(&self) -> Option<(u64, Vec<WorkerTerminalResult>)> {
+        let run = self.auto_delegation_run.as_ref()?;
+        if run.bundle_emitted {
+            return None;
+        }
+        let mut results = Vec::with_capacity(run.worker_ids.len());
+        for worker_id in &run.worker_ids {
+            let terminal = self
+                .children
+                .iter()
+                .find(|child| child.id == *worker_id)
+                .and_then(|child| child.terminal.as_ref())?;
+            results.push(terminal.clone());
+        }
+        Some((run.user_sequence_num, results))
+    }
+
+    /// Marks the current auto-delegation run's result bundle as durably emitted.
+    pub fn mark_auto_delegation_bundle_emitted(&mut self, user_sequence_num: u64) -> bool {
+        let Some(run) = self.auto_delegation_run.as_mut() else {
+            return false;
+        };
+        if run.user_sequence_num != user_sequence_num || run.bundle_emitted {
+            return false;
+        }
+        run.bundle_emitted = true;
+        true
+    }
+
+    /// Returns whether the session is still waiting for auto-delegated workers.
+    #[must_use]
+    pub fn auto_delegation_waiting_for_workers(&self) -> bool {
+        self.auto_delegation_run
+            .as_ref()
+            .is_some_and(|run| !run.bundle_emitted)
+    }
+
+    /// Returns the user sequence whose emitted result bundle still needs synthesis.
+    #[must_use]
+    pub fn pending_auto_delegation_synthesis_sequence(&self) -> Option<u64> {
+        let run = self.auto_delegation_run.as_ref()?;
+        if run.bundle_emitted && run.synthesis_turn_id.is_none() {
+            Some(run.user_sequence_num)
+        } else {
+            None
+        }
+    }
+
+    /// Records the coordinator turn dispatched to synthesize the auto-delegated results.
+    pub fn record_auto_delegation_synthesis_dispatch(&mut self, turn_id: String) -> bool {
+        let Some(run) = self.auto_delegation_run.as_mut() else {
+            return false;
+        };
+        if !run.bundle_emitted || run.synthesis_turn_id.is_some() {
+            return false;
+        }
+        run.synthesis_turn_id = Some(turn_id);
+        true
+    }
+
+    /// Clears a completed synthesis run after its coordinator turn reports an outcome.
+    pub fn clear_auto_delegation_on_synthesis_outcome(&mut self, turn_id: &str) -> bool {
+        if self
+            .auto_delegation_run
+            .as_ref()
+            .and_then(|run| run.synthesis_turn_id.as_deref())
+            != Some(turn_id)
+        {
+            return false;
+        }
+        self.auto_delegation_run = None;
+        true
+    }
+
     /// Removes and returns a cached terminal child result.
     pub fn consume_child_terminal(&mut self, worker_id: &str) -> Option<WorkerTerminalResult> {
         let index = self
@@ -327,6 +449,12 @@ impl SessionVoState {
     #[must_use]
     pub fn owns_child(&self, worker_id: &str) -> bool {
         self.children.iter().any(|child| child.id == worker_id)
+    }
+
+    /// Returns whether a child signal belongs to this session's worker tree.
+    #[must_use]
+    pub fn owns_signal_worker(&self, signal: &WorkerSignal) -> bool {
+        self.owns_child(&signal.worker_id)
     }
 
     /// Pushes one unread child→parent control-plane signal onto the recent window.
@@ -357,6 +485,46 @@ impl SessionVoState {
         true
     }
 
+    /// Removes and returns the first pending user-audience `NeedsInput` signal.
+    ///
+    /// The public contact/user reply path consumes exactly one pending human question and
+    /// forwards the reply to that worker over the existing `ProvideInput` message path.
+    pub fn take_user_input_signal(&mut self) -> Option<UnreadChildSignal> {
+        let index = self.unread_child_signals.iter().position(|signal| {
+            signal.kind == ChildSignalKind::NeedsInput
+                && signal.input_audience == Some(InputAudience::User)
+                && signal.input_request_id.is_some()
+        })?;
+        let signal = self.unread_child_signals.remove(index);
+        if self.pending_parent_resume_signal == Some(signal.signal_id) {
+            self.pending_parent_resume_signal = None;
+        }
+        Some(signal)
+    }
+
+    /// Clears one unread child signal by id.
+    pub fn clear_unread_child_signal(&mut self, signal_id: AgentSignalId) -> bool {
+        let before = self.unread_child_signals.len();
+        self.unread_child_signals
+            .retain(|signal| signal.signal_id != signal_id);
+        if self.pending_parent_resume_signal == Some(signal_id) {
+            self.pending_parent_resume_signal = None;
+        }
+        self.unread_child_signals.len() != before
+    }
+
+    /// Drains all queued child signals when a coordinator turn is admitted.
+    ///
+    /// The durable event log still carries those signals into the turn's compiled history;
+    /// this only clears the compact VO projection so answered/seen signals do not fill the
+    /// bounded unread window after an active turn has had a chance to observe them.
+    pub fn drain_unread_child_signals(&mut self) -> usize {
+        let drained = self.unread_child_signals.len();
+        self.unread_child_signals.clear();
+        self.pending_parent_resume_signal = None;
+        drained
+    }
+
     /// Computes the guarded parent-resume decision for one recorded signal and arms it.
     ///
     /// Sets [`Self::pending_parent_resume_signal`] and returns `true` only when the
@@ -381,6 +549,22 @@ impl SessionVoState {
             self.pending_parent_resume_signal = Some(signal.signal_id);
         }
         eligible
+    }
+
+    /// Returns whether the only reason this signal cannot arm a resume is budget.
+    #[must_use]
+    pub fn resume_budget_exhausted_for_signal(
+        &self,
+        signal: &WorkerSignal,
+        active_turn_id: Option<&str>,
+        now: DateTime<Utc>,
+        max_per_window: u32,
+        window_ms: u64,
+    ) -> bool {
+        matches!(signal.resume_policy, ParentResumePolicy::IfIdle)
+            && signal_kind_is_resume_eligible(signal.kind)
+            && active_turn_id.is_none()
+            && !self.resume_budget.allows(now, window_ms, max_per_window)
     }
 
     /// Records a dispatched guarded-resume turn: consumes one unit of resume budget and
@@ -542,6 +726,7 @@ impl VoState for SessionVoState {
                 .await?
                 .unwrap_or_default(),
             child_liveness: reader.get_json(K_CHILD_LIVENESS).await?.unwrap_or_default(),
+            auto_delegation_run: reader.get_json(K_AUTO_DELEGATION_RUN).await?,
         })
     }
 
@@ -604,6 +789,11 @@ impl VoState for SessionVoState {
             0,
         );
         set_or_clear_vec(ctx, K_CHILD_LIVENESS, &self.child_liveness);
+        set_or_clear_opt(
+            ctx,
+            K_AUTO_DELEGATION_RUN,
+            self.auto_delegation_run.as_ref(),
+        );
     }
 }
 
@@ -636,6 +826,20 @@ mod tests {
             channel: Channel::Chat,
             model: ModelId::new("test-model"),
             ..moa_core::SessionMeta::default()
+        }
+    }
+
+    fn worker_terminal(worker_id: &str, output: &str) -> moa_core::WorkerTerminalResult {
+        moa_core::WorkerTerminalResult {
+            state: moa_core::WorkerState::Completed,
+            result: moa_core::WorkerResult {
+                worker_id: worker_id.to_string(),
+                success: true,
+                output: output.to_string(),
+                tokens_used: 17,
+                tools_invoked: 1,
+                error: None,
+            },
         }
     }
 
@@ -789,6 +993,85 @@ mod tests {
         assert!(!state.owns_child("child-1"));
     }
 
+    #[test]
+    fn auto_delegation_bundle_waits_for_all_workers_and_preserves_schedule_order() {
+        // Pins: session-owned auto-delegation fan-in emits only when every scheduled
+        // worker is terminal, and the result order follows the scheduled DAG order.
+        let mut state = SessionVoState::default();
+        state.register_child(moa_core::WorkerChildRef {
+            id: "worker-a".to_string(),
+            task_hash: "hash-a".to_string(),
+            budget_tokens: 128,
+            terminal: None,
+        });
+        state.register_child(moa_core::WorkerChildRef {
+            id: "worker-b".to_string(),
+            task_hash: "hash-b".to_string(),
+            budget_tokens: 128,
+            terminal: None,
+        });
+
+        assert!(
+            state.register_auto_delegation_run(
+                7,
+                vec!["worker-b".to_string(), "worker-a".to_string()]
+            )
+        );
+        assert!(state.auto_delegation_waiting_for_workers());
+        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+            worker_id: "worker-a".to_string(),
+            terminal: worker_terminal("worker-a", "activation"),
+        });
+        assert_eq!(state.ready_auto_delegation_bundle(), None);
+        assert!(state.auto_delegation_waiting_for_workers());
+        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+            worker_id: "worker-b".to_string(),
+            terminal: worker_terminal("worker-b", "retention"),
+        });
+
+        let (sequence, results) = state
+            .ready_auto_delegation_bundle()
+            .expect("all scheduled workers are terminal");
+        assert_eq!(sequence, 7);
+        assert_eq!(
+            results
+                .iter()
+                .map(|terminal| terminal.result.worker_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["worker-b", "worker-a"]
+        );
+        assert!(state.mark_auto_delegation_bundle_emitted(sequence));
+        assert!(!state.auto_delegation_waiting_for_workers());
+        assert_eq!(state.ready_auto_delegation_bundle(), None);
+        assert_eq!(state.pending_auto_delegation_synthesis_sequence(), Some(7));
+        assert!(state.record_auto_delegation_synthesis_dispatch("synthesis-turn".to_string()));
+        assert_eq!(state.pending_auto_delegation_synthesis_sequence(), None);
+        assert!(state.clear_auto_delegation_on_synthesis_outcome("synthesis-turn"));
+        assert_eq!(state.auto_delegation_run, None);
+    }
+
+    #[test]
+    fn session_owns_only_registered_child_signals() {
+        // Pins: workers are root-session-owned only; signal acceptance is the root
+        // session child registry, not a nested worker tree.
+        let mut state = SessionVoState::default();
+        state.register_child(moa_core::WorkerChildRef {
+            id: "child".to_string(),
+            task_hash: "hash".to_string(),
+            budget_tokens: 128,
+            terminal: None,
+        });
+        let root_signal = resume_signal(
+            moa_core::ChildSignalKind::Blocked,
+            moa_core::ParentResumePolicy::IfIdle,
+        );
+        let mut missing_signal = root_signal.clone();
+        missing_signal.worker_id = "missing".to_string();
+
+        assert!(state.owns_signal_worker(&root_signal));
+        assert!(!state.owns_signal_worker(&missing_signal));
+    }
+
     fn unread_entry(
         signal_id: moa_core::AgentSignalId,
         kind: moa_core::ChildSignalKind,
@@ -811,7 +1094,6 @@ mod tests {
             signal_id: moa_core::AgentSignalId::new(),
             worker_id: "child".to_string(),
             parent_session: moa_core::SessionId::new(),
-            parent_worker: None,
             kind,
             severity: moa_core::SignalSeverity::Warning,
             summary: "needs attention".to_string(),

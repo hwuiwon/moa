@@ -169,18 +169,51 @@ Tenant action reviews are decided by tenant admins through `ActionReviews`; conv
 
 `Worker` is a Restate virtual object because delegated work can be conversational. It stores:
 
-- parent session and optional parent worker
+- owning root session
 - depth
 - budget remaining and tokens used
 - task and tool subset
 - pending messages and local history
-- child refs, cached terminal child results, result waiters, and cancellation reason
+- result waiters and cancellation reason
 - last turn summary and last heartbeat for the telemetry plane (`last_turn_summary`, `last_heartbeat_at`)
 - pending `needs_input` requests and the self-cleanup generation counter (`pending_input_requests`, `cleanup_generation`)
 
 `Worker` admits conversational messages and starts at most one `WorkerTurnExecution` workflow per active child turn. Workflow callbacks carry the admitted `turn_id`; stale responses, tool results, approval clears, and outcomes are ignored rather than mutating a newer turn.
 
-Delegation is bounded by depth, active fan-out, repeated active task detection, and inherited token budgets. `spawn_worker` returns immediately, and `wait_worker` first consumes any cached terminal child result; otherwise it registers a child-owned result waiter awakeable and removes that waiter on timeout. Terminal child results are cached on the parent until consumed so finished detached children free active fan-out without losing the final result.
+Delegation is owned by the root coordinator. Workers do not spawn or manage
+other workers. Coordinator delegation is bounded by active fan-out, repeated
+active task detection, and inherited token budgets. `spawn_worker` returns
+immediately, and `wait_worker` first consumes any cached terminal worker result;
+otherwise it registers a worker-owned result waiter awakeable and removes that
+waiter on timeout. Terminal worker results are cached on the session until
+consumed so finished detached workers free active fan-out without losing the
+final result.
+
+The coordinator decomposes delegated work as a DAG of subtasks. It should spawn
+all ready nodes whose dependencies are already satisfied so independent work runs
+in parallel, wait only when downstream work needs a result, then use completed
+worker results as context for dependent nodes or the final answer. This DAG is a
+coordinator planning contract, not a worker wire schema: `spawn_worker.task`
+remains the generic envelope that carries the subtask, dependency context, and
+any selected skill steps the worker should follow.
+
+Before the coordinator model synthesizes a response, the context pipeline may
+append a conservative `delegation_plan` candidate for high-confidence
+multi-workstream requests. Root `TurnExecution` consumes that artifact once per
+admitted user message and auto-spawns dependency-free ready nodes through the
+normal `spawn_worker` path, recording ordinary tool-call/tool-result events for
+replay and model context. This scheduler does not authorize workers to spawn
+other workers; workers stay child-local and report results back to the
+coordinator. When the deterministic planner finds ready worker nodes,
+`TurnExecution` raises a low requested coordinator model-loop turn cap to
+`4 + 2 * ready_node_count` (bounded by active fan-out and the global session hard
+cap) so the root has room to spawn, wait, and synthesize results. After
+auto-spawn, the root workflow tracks the spawned worker ids, waits on worker
+result awakeables before the next provider call, and appends one
+`WorkerResultBundle` event when all tracked workers are terminal. History replay
+renders that bundle as one coordinator-visible synthesis directive, so the model
+does not need extra `list_workers` / `wait_worker` discovery turns for completed
+auto-delegated workers.
 
 ### Two coordination planes
 
@@ -239,10 +272,9 @@ carrying `input_request_id`/`input_audience`, and blocks on the awakeable agains
 long timeout (`worker_input_timeout_ms`). The coordinator answers with the
 `provide_worker_input` tool → `WorkerMessage::ProvideInput`, which resolves
 the awakeable through `post_message`. Coordinator-audience questions are answered
-autonomously; surfacing a `User`-audience question to the human and forwarding the
-reply is a pending thin addition (the awakeable/`ProvideInput` mechanism is
-complete, and such questions are already visible to the coordinator via the
-recorded signal).
+autonomously. User-audience questions are exposed as `worker_input_request` SSE
+frames; the next plain user reply is forwarded by the session to the worker as
+`WorkerMessage::ProvideInput` instead of starting a separate root turn.
 
 ### Self-cleanup and the liveness watchdog
 

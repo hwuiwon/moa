@@ -15,7 +15,7 @@ The implementation lives in `crates/moa-brain/src/pipeline/`.
 
 ## Current Stage Order
 
-The code reports fixed stage numbers through each `ContextProcessor`. With query rewriting and memory digests enabled, the default graph-backed pipeline contains eleven processors:
+The code reports fixed stage numbers through each `ContextProcessor`. With query rewriting and memory digests enabled, the default graph-backed pipeline contains twelve processors:
 
 | Stage | Processor | Cache role | Purpose |
 |---|---|---|---|
@@ -28,6 +28,7 @@ The code reports fixed stage numbers through each `ContextProcessor`. With query
 | 6 | `DigestProcessor` | Dynamic tail | standing contact digest for contact sessions |
 | 7 | `MemoryRetriever` | Dynamic tail | tenant knowledge plus admitted contact memory filtered by pinned agent knowledge policy |
 | 8 | `HistoryCompiler` | Dynamic/history tail | replayed events, checkpoints, recent turns, errors |
+| 8 | `DelegationPlanningProcessor` | Dynamic tail | conservative coordinator DAG candidate for high-confidence multi-workstream tasks |
 | 9 | `RuntimeContextProcessor` | Dynamic tail | current date, tenant, working directory, branch, contact or admin/operator actor |
 | 10 | `Compactor` | Dynamic maintenance | checkpoint/compaction when thresholds are exceeded |
 
@@ -114,8 +115,10 @@ manifest. Selected package files load by exact locked artifact revision when the
 agent dependency lock provides one.
 
 It emits only a compact dynamic manifest. Full skill bodies and supporting package files
-are materialized in the active hand under `.moa/skills/<skill>/...` when a hand
-tool is first invoked. The manifest is budget-aware through `SkillBudgetConfig`.
+are carried as trusted selected-skill files. The root coordinator can read exact
+selected skill paths from that manifest without provisioning a hand; worker tool
+calls materialize the files under `.moa/skills/<skill>/...` when a hand tool is
+first invoked. The manifest is budget-aware through `SkillBudgetConfig`.
 Artifact-backed skills can expose named actions. When present, action names are
 included in the compact manifest so the model can choose a linked capability
 without loading the full package body.
@@ -123,6 +126,29 @@ without loading the full package body.
 The selected manifest is not part of the stable prefix because query keywords
 and tenant-level learning can legitimately change which skills are shown for one
 turn.
+
+## Delegation Planning
+
+`DelegationPlanningProcessor` runs after history compilation so it can read the
+actual recent user event instead of synthetic user-role context such as the skill
+manifest. It emits a structured `delegation_plan` metadata object plus a concise
+dynamic hint when the request has high-confidence independent workstreams, such
+as explicit reports from several inputs, readiness checks across named areas,
+reconciliations, incident investigations, audits, or option comparisons.
+
+The processor itself does not route workflows and does not add strict
+`selected_skill` or `selected_action` fields to the worker contract. Root
+`TurnExecution` consumes the metadata once per admitted user message: when
+`spawn_worker` is available, it auto-spawns dependency-free ready nodes as
+ordinary `ToolCall` / `ToolResult` history events, capped by worker fan-out and
+the remaining tool-call cap. It also raises a low requested coordinator
+model-loop turn cap to `4 + 2 * ready_node_count`, still bounded by the global
+session hard cap, so delegated turns have room for fan-in and synthesis.
+After auto-spawn, the root workflow waits for tracked ready-node workers through
+the existing worker result awakeable path and emits a single `WorkerResultBundle`
+event when they are terminal. History replay renders that bundle as one system
+directive for synthesis. Dependent DAG nodes are left for coordinator synthesis
+after worker results are available.
 
 ## Memory Retrieval
 

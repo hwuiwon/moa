@@ -277,7 +277,12 @@ impl ToolRouter {
     /// `(session_id, worker_id, provider)` across providers — marking only those
     /// `Destroyed`. The parent's session-level (`""`) scope and any sibling worker
     /// scopes are left untouched.
-    pub async fn destroy_worker_hands(&self, session_id: &moa_core::SessionId, worker_id: &str) {
+    pub async fn destroy_worker_hands(
+        &self,
+        session_id: &moa_core::SessionId,
+        worker_id: &str,
+    ) -> bool {
+        let mut complete = true;
         // The scope key is `"{session_id}:{worker_id}"`; appending `:` yields the cache
         // prefix `"{session_id}:{worker_id}:"`. The trailing `:` delimiter makes the
         // prefix collision-safe between sibling ids where one is a prefix of another (e.g.
@@ -328,6 +333,7 @@ impl ToolRouter {
                                     entry.insert(handle);
                                 }
                                 Err(error) => {
+                                    complete = false;
                                     tracing::warn!(
                                         session_id = %session_id,
                                         worker_id = %worker_id,
@@ -342,6 +348,7 @@ impl ToolRouter {
                     }
                 }
                 Err(error) => {
+                    complete = false;
                     tracing::warn!(
                         session_id = %session_id,
                         worker_id = %worker_id,
@@ -359,6 +366,7 @@ impl ToolRouter {
             let provider_name = key.strip_prefix(&scope_prefix).unwrap_or_default();
             let handle_id = hand_id(&handle);
             let Some(provider) = self.providers.get(provider_name) else {
+                complete = false;
                 tracing::warn!(
                     session_id = %session_id,
                     worker_id = %worker_id,
@@ -391,6 +399,7 @@ impl ToolRouter {
                             )
                             .await
                     {
+                        complete = false;
                         tracing::warn!(
                             session_id = %session_id,
                             worker_id = %worker_id,
@@ -402,6 +411,7 @@ impl ToolRouter {
                     }
                 }
                 Err(error) => {
+                    complete = false;
                     tracing::warn!(
                         session_id = %session_id,
                         worker_id = %worker_id,
@@ -413,6 +423,7 @@ impl ToolRouter {
                 }
             }
         }
+        complete
     }
 
     pub(super) async fn get_or_provision_hand(
@@ -1448,7 +1459,10 @@ mod tests {
         }
         assert_eq!(provider.provision_calls(), 3);
 
-        router.destroy_worker_hands(&session.id, "sub-x").await;
+        assert!(
+            router.destroy_worker_hands(&session.id, "sub-x").await,
+            "target worker cleanup should fully complete"
+        );
 
         assert_eq!(
             provider.destroy_calls(),
@@ -1525,6 +1539,42 @@ mod tests {
             4,
             "the released target scope re-provisions on next demand"
         );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_destroy_worker_failed_destroy_remains_retryable() {
+        // Pins: worker cleanup reports incomplete and leaves the lease active when provider
+        // destroy fails, so the orchestrator can retry instead of clearing the worker.
+        let lease_store = MemoryHandLeaseStore::shared();
+        let provider =
+            Arc::new(CountingProvider::new("worker-destroy-retry").with_destroy_failure());
+        let session = session();
+        let first_router = router(provider.clone(), lease_store.clone());
+        let cleanup_router = router(provider.clone(), lease_store.clone());
+
+        first_router
+            .get_or_provision_hand(
+                provider.provider_name(),
+                SandboxTier::Container,
+                &session,
+                Some("sub-x"),
+            )
+            .await
+            .expect("worker scope provisions");
+        assert!(
+            !cleanup_router
+                .destroy_worker_hands(&session.id, "sub-x")
+                .await,
+            "failed provider destroy should report incomplete cleanup"
+        );
+
+        assert_eq!(provider.destroy_calls(), 1);
+        let lease = lease_store
+            .get(session.id, "sub-x", provider.provider_name())
+            .await
+            .expect("load worker lease after failed cleanup")
+            .expect("worker lease should remain");
+        assert_eq!(lease.status, HandLeaseStatus::Active);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use crate::types::{
     CacheReport, Channel, ChildSignalKind, ContactId, GuardrailDirection, GuardrailMode,
     InputAudience, ModelId, ModelTier, NarrationSegment, NarrationSource, SegmentId,
     SessionActorRef, SessionChannelBindingId, SessionStatus, SignalSeverity, TenantId, ToolCallId,
-    ToolOutput, WorkerId, WorkerState,
+    ToolOutput, WorkerId, WorkerState, WorkerTerminalResult,
 };
 
 /// Append-only session event payload.
@@ -278,13 +278,10 @@ pub enum Event {
         /// Decision timestamp.
         decided_at: DateTime<Utc>,
     },
-    /// A child worker was spawned by a root session or parent worker.
+    /// A child worker was spawned by the root session coordinator.
     WorkerSpawned {
         /// Child worker identifier.
         worker_id: WorkerId,
-        /// Parent worker identifier for nested children.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        parent_worker_id: Option<WorkerId>,
         /// Stable model-visible child path.
         path: String,
         /// Delegated task text.
@@ -296,9 +293,10 @@ pub enum Event {
     WorkerMessageSent {
         /// Child worker identifier.
         worker_id: WorkerId,
-        /// Parent worker identifier for nested children.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        parent_worker_id: Option<WorkerId>,
+        /// Input request answered by this message, when it is a `provide_worker_input`
+        /// reply rather than a general follow-up.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_request_id: Option<String>,
         /// Message text sent to the child.
         text: String,
     },
@@ -324,15 +322,28 @@ pub enum Event {
         /// Short result or error summary.
         summary: String,
     },
+    /// A root coordinator bundled completed auto-delegated worker results for synthesis.
+    WorkerResultBundle {
+        /// User-message sequence that triggered the auto-delegated workers.
+        user_sequence_num: u64,
+        /// Terminal worker results in the original scheduled order.
+        results: Vec<WorkerTerminalResult>,
+    },
+    /// A coordinator synthesis turn was requested for a completed worker result bundle.
+    WorkerResultSynthesisRequested {
+        /// User-message sequence whose worker bundle should be synthesized.
+        user_sequence_num: u64,
+        /// Coordinator turn id dispatched for synthesis.
+        turn_id: String,
+        /// System-visible instruction for the synthesis turn.
+        reason: String,
+    },
     /// A control-plane attention signal from a child was recorded on the coordinator.
     WorkerSignalReceived {
         /// Stable identifier for the recorded signal.
         signal_id: AgentSignalId,
         /// Child worker that raised the signal.
         worker_id: WorkerId,
-        /// Immediate parent worker for nested children.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent_worker_id: Option<WorkerId>,
         /// Kind of attention requested.
         kind: ChildSignalKind,
         /// Relative urgency of the signal.
@@ -799,7 +810,6 @@ mod tests {
             (
                 Event::WorkerSpawned {
                     worker_id: "child-1".to_string(),
-                    parent_worker_id: None,
                     path: "/root/research".to_string(),
                     task: "research".to_string(),
                     budget_tokens: 512,
@@ -810,7 +820,7 @@ mod tests {
             (
                 Event::WorkerMessageSent {
                     worker_id: "child-1".to_string(),
-                    parent_worker_id: None,
+                    input_request_id: None,
                     text: "continue".to_string(),
                 },
                 EventType::WorkerMessageSent,
@@ -836,10 +846,36 @@ mod tests {
                 "WorkerNotificationDelivered",
             ),
             (
+                Event::WorkerResultBundle {
+                    user_sequence_num: 42,
+                    results: vec![crate::WorkerTerminalResult {
+                        state: WorkerState::Completed,
+                        result: crate::WorkerResult {
+                            worker_id: "child-1".to_string(),
+                            success: true,
+                            output: "done".to_string(),
+                            tokens_used: 17,
+                            tools_invoked: 2,
+                            error: None,
+                        },
+                    }],
+                },
+                EventType::WorkerResultBundle,
+                "WorkerResultBundle",
+            ),
+            (
+                Event::WorkerResultSynthesisRequested {
+                    user_sequence_num: 42,
+                    turn_id: "turn-1".to_string(),
+                    reason: "bundle complete".to_string(),
+                },
+                EventType::WorkerResultSynthesisRequested,
+                "WorkerResultSynthesisRequested",
+            ),
+            (
                 Event::WorkerSignalReceived {
                     signal_id: AgentSignalId::new(),
                     worker_id: "child-1".to_string(),
-                    parent_worker_id: None,
                     kind: ChildSignalKind::Blocked,
                     severity: SignalSeverity::Warning,
                     summary: "blocked on input".to_string(),
@@ -895,7 +931,6 @@ mod tests {
         let event = Event::WorkerSignalReceived {
             signal_id: AgentSignalId::new(),
             worker_id: "child-7".to_string(),
-            parent_worker_id: None,
             kind: ChildSignalKind::NeedsInput,
             severity: SignalSeverity::Warning,
             summary: "needs the staging API key".to_string(),

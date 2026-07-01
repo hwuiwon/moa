@@ -216,14 +216,23 @@ pub async fn execute_memory_tool(
 ) -> moa_core::Result<ToolOutput> {
     let started = Instant::now();
     let output = match tool_name {
-        "memory_remember" => execute_remember_tool(session, input, started).await,
-        "memory_forget" => execute_forget_tool(session, input, started).await,
-        "memory_supersede" => execute_supersede_tool(session, input, started).await,
+        "memory_remember" => Ok(execute_remember_tool(session, input, started)
+            .await
+            .unwrap_or_else(|error| memory_tool_failure_output(tool_name, &error, started))),
+        "memory_forget" => Ok(execute_forget_tool(session, input, started)
+            .await
+            .unwrap_or_else(|error| memory_tool_failure_output(tool_name, &error, started))),
+        "memory_supersede" => Ok(execute_supersede_tool(session, input, started)
+            .await
+            .unwrap_or_else(|error| memory_tool_failure_output(tool_name, &error, started))),
         _ => Err(FastError::Invalid(format!(
             "unknown fast memory tool {tool_name}"
         ))),
     };
-    output.map_err(|error| MoaError::ToolError(error.to_string()))
+    match output {
+        Ok(output) => Ok(output),
+        Err(error) => Err(MoaError::ToolError(error.to_string())),
+    }
 }
 
 /// Runtime adapter that lets `moa-hands` execute graph-memory tools without depending on ingest.
@@ -506,7 +515,10 @@ async fn execute_remember_tool(
 ) -> Result<ToolOutput, FastError> {
     let params: RememberToolInput = serde_json::from_value(input.clone())?;
     let label = parse_node_label(params.label.as_deref())?;
-    let scope = params.scope.unwrap_or_else(|| "tenant".to_string());
+    if requested_contact_scope_without_contact(session, params.scope.as_deref()) {
+        return Ok(contact_scope_without_contact_output(started));
+    }
+    let scope = requested_write_scope(params.scope.as_deref());
     let (ctx, tenant_id, contact_id) = runtime_ctx_for_scope(session, &scope)?;
     let actor_id = actor_id_from_session(session);
     let uid = fast_remember(
@@ -602,6 +614,48 @@ fn runtime_ctx_for_scope(
     Ok((runtime_fast_ctx(scope_ctx)?, tenant_id, contact_id))
 }
 
+fn requested_contact_scope_without_contact(
+    session: &SessionMeta,
+    requested_scope: Option<&str>,
+) -> bool {
+    requested_scope == Some("contact") && session.contact.is_none()
+}
+
+fn requested_write_scope(requested_scope: Option<&str>) -> String {
+    requested_scope.unwrap_or("tenant").to_string()
+}
+
+fn contact_scope_without_contact_output(started: Instant) -> ToolOutput {
+    ToolOutput::error(
+        "Contact-scoped memory was not written because this session has no contact. Do not retry this memory write in this turn; continue using the current session context or ask the user to identify the contact.",
+        started.elapsed(),
+    )
+}
+
+fn memory_tool_failure_output(tool_name: &str, error: &FastError, started: Instant) -> ToolOutput {
+    let message = match error {
+        FastError::Invalid(message) => {
+            format!("{tool_name} input was invalid: {message}")
+        }
+        FastError::PiiClassificationUnavailable { .. } => {
+            format!(
+                "{tool_name} did not persist memory because privacy classification is unavailable. Do not retry this memory tool in this turn; continue using the current session context."
+            )
+        }
+        FastError::Timeout(operation) => {
+            format!(
+                "{tool_name} timed out while running {operation}. Do not retry this memory tool in this turn; continue using the current session context and retry later if needed."
+            )
+        }
+        _ => {
+            format!(
+                "{tool_name} could not persist or read graph memory because memory storage is unavailable. Do not retry this memory tool in this turn; continue using the current session context and complete any remaining user request."
+            )
+        }
+    };
+    ToolOutput::error(message, started.elapsed())
+}
+
 fn runtime_ctx_for_contact(
     session: &SessionMeta,
     contact_id: Uuid,
@@ -690,5 +744,82 @@ struct FailClosedClassifier;
 impl PiiClassifier for FailClosedClassifier {
     async fn classify(&self, _text: &str) -> Result<PiiResult, PiiError> {
         Ok(PiiResult::fail_closed("fast-path-no-pii-service"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use moa_core::{
+        ContactId, ContactRef, ContactVerificationState, SessionMeta, TenantId, ToolContent,
+    };
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[test]
+    fn requested_contact_scope_without_contact_detects_invalid_contact_write() {
+        // Pins: no-contact sessions must not silently widen contact memory to tenant memory.
+        let session = SessionMeta {
+            tenant_id: TenantId::from(Uuid::from_u128(1)),
+            contact: None,
+            ..SessionMeta::default()
+        };
+
+        assert!(requested_contact_scope_without_contact(
+            &session,
+            Some("contact")
+        ));
+        assert_eq!(requested_write_scope(None), "tenant");
+    }
+
+    #[test]
+    fn requested_contact_scope_without_contact_allows_contact_session() {
+        // Pins: actual contact sessions keep their contact-owned memory boundary.
+        let tenant_id = TenantId::from(Uuid::from_u128(1));
+        let session = SessionMeta {
+            tenant_id,
+            contact: Some(ContactRef {
+                contact_id: ContactId(Uuid::from_u128(2)),
+                tenant_id,
+                state: ContactVerificationState::Verified,
+                canonical_contact_id: None,
+                linked_contact_ids: Vec::new(),
+                scopes: Vec::new(),
+                permissions: json!({}),
+                agent_ids: Vec::new(),
+                session_ids: Vec::new(),
+                verified_contact_point_ids: Vec::new(),
+            }),
+            ..SessionMeta::default()
+        };
+
+        assert!(!requested_contact_scope_without_contact(
+            &session,
+            Some("contact")
+        ));
+        assert_eq!(requested_write_scope(Some("contact")), "contact");
+    }
+
+    #[test]
+    fn memory_backend_failure_returns_recoverable_tool_error() {
+        // Pins: unavailable graph/vector memory should not fail the whole turn.
+        let output = memory_tool_failure_output(
+            "memory_remember",
+            &FastError::Timeout("remember"),
+            Instant::now(),
+        );
+
+        assert!(output.is_error);
+        assert!(
+            output.content.iter().any(
+                |content| matches!(content, ToolContent::Text { text } if text.contains("continue using the current session context"))
+            )
+        );
+        assert!(
+            output.content.iter().any(
+                |content| matches!(content, ToolContent::Text { text } if text.contains("Do not retry this memory tool in this turn"))
+            )
+        );
     }
 }

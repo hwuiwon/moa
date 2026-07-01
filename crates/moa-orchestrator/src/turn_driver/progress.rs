@@ -36,6 +36,13 @@ impl RootTurnStateKey {
     pub(crate) const USER_MESSAGE_SEQUENCE: &'static str = "user_message_sequence";
     /// Cached query-rewrite result from the last context compilation pass.
     pub(crate) const QUERY_REWRITE_CACHE: &'static str = "query_rewrite_cache";
+    /// User-message sequence for which deterministic ready delegation nodes were spawned.
+    pub(crate) const AUTO_DELEGATION_SEQUENCE: &'static str = "auto_delegation_sequence";
+    /// Worker ids spawned by deterministic auto-delegation for the admitted user message.
+    pub(crate) const AUTO_DELEGATION_WORKER_IDS: &'static str = "auto_delegation_worker_ids";
+    /// User-message sequence for which auto-delegated worker results were bundled.
+    pub(crate) const AUTO_DELEGATION_FAN_IN_SEQUENCE: &'static str =
+        "auto_delegation_fan_in_sequence";
 }
 
 /// Progress cadence derived from session limits.
