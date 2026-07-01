@@ -1,5 +1,6 @@
 //! Restate handlers for the Worker VO.
 
+use super::state::MAX_CLEANUP_RELEASE_ATTEMPTS;
 use super::*;
 use crate::objects::session::SessionClient;
 use crate::services::tool_executor::{ReleaseWorkerHandsRequest, ToolExecutorClient};
@@ -413,7 +414,7 @@ impl Worker for WorkerImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Worker", "cleanup");
         let req = req.into_inner();
-        let state = WorkerVoState::load_from(&ctx).await?;
+        let mut state = WorkerVoState::load_from(&ctx).await?;
         let has_non_terminal_child = state.children.iter().any(|child| child.terminal.is_none());
         let decision = decide_cleanup(
             req.generation == state.cleanup_generation,
@@ -449,12 +450,33 @@ impl Worker for WorkerImpl {
             }
             CleanupDecision::Proceed => {
                 if !release_and_clear_worker(&ctx, &state).await? {
-                    reschedule_cleanup(&ctx, state.cleanup_generation).await?;
-                    tracing::warn!(
-                        key = %ctx.key(),
-                        cleanup_generation = state.cleanup_generation,
-                        "worker cleanup release incomplete; rescheduled cleanup"
-                    );
+                    let attempts = state.cleanup_release_attempts.saturating_add(1);
+                    let grace_ms = OrchestratorCtx::current_config()
+                        .session_limits
+                        .worker_cleanup_grace_ms;
+                    if attempts >= MAX_CLEANUP_RELEASE_ATTEMPTS || grace_ms == 0 {
+                        // Bound the retry loop: a persistently-failing release (e.g. a provider
+                        // permanently absent from the router registry) must not reschedule
+                        // forever and pin the VO. Force-clear; the hand lease may leak and is
+                        // reclaimed at session teardown.
+                        tracing::error!(
+                            key = %ctx.key(),
+                            attempts,
+                            grace_ms,
+                            "worker hand release still incomplete after retry cap; force-clearing VO state (possible hand-lease leak until session teardown)"
+                        );
+                        ctx.clear_all();
+                    } else {
+                        state.cleanup_release_attempts = attempts;
+                        state.persist_into(&ctx);
+                        reschedule_cleanup(&ctx, state.cleanup_generation).await?;
+                        tracing::warn!(
+                            key = %ctx.key(),
+                            cleanup_generation = state.cleanup_generation,
+                            attempts,
+                            "worker cleanup release incomplete; rescheduled cleanup"
+                        );
+                    }
                 }
             }
         }

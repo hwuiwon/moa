@@ -3,8 +3,8 @@
 use super::*;
 use moa_core::traits::Identity;
 use moa_core::{
-    AgentSignalId, ChildSignalKind, InputAudience, ParentResumePolicy, TurnOutcome,
-    UnreadChildSignal, WorkerSignal,
+    AgentSignalId, ChildSignalKind, ParentResumePolicy, TurnOutcome, UnreadChildSignal,
+    WorkerSignal,
 };
 
 pub(super) const K_META: &str = "meta";
@@ -130,6 +130,12 @@ pub struct AutoDelegationRun {
     pub user_sequence_num: u64,
     /// Worker ids in deterministic scheduled order.
     pub worker_ids: Vec<WorkerId>,
+    /// Terminal results captured as each scheduled worker finishes, aligned position-wise
+    /// to [`Self::worker_ids`]. Run-owned so a fast worker's self-cleanup (or a manual
+    /// `wait_worker` consume) that removes it from the transient `children` registry cannot
+    /// strand the fan-in bundle. `None` slots are workers not yet terminal.
+    #[serde(default)]
+    pub results: Vec<Option<WorkerTerminalResult>>,
     /// Whether the durable WorkerResultBundle event has already been emitted.
     pub bundle_emitted: bool,
     /// Coordinator synthesis turn dispatched for this bundle, when any.
@@ -321,8 +327,33 @@ impl SessionVoState {
         if child.terminal.is_some() {
             return false;
         }
-        child.terminal = Some(input.terminal);
+        child.terminal = Some(input.terminal.clone());
+        // Borrow of `child` ends above; snapshot into the auto-delegation run (if any).
+        self.capture_auto_delegation_result(&input.worker_id, input.terminal);
         true
+    }
+
+    /// Snapshots a worker's terminal result into the active auto-delegation run.
+    ///
+    /// Fan-in reads these run-owned snapshots instead of the transient `children` registry,
+    /// so a worker removed by self-cleanup or a manual `wait_worker` consume cannot strand
+    /// the bundle. A no-op when there is no run, the bundle already emitted, the worker is
+    /// not part of the run, or its slot was already captured.
+    fn capture_auto_delegation_result(&mut self, worker_id: &str, terminal: WorkerTerminalResult) {
+        let Some(run) = self.auto_delegation_run.as_mut() else {
+            return;
+        };
+        if run.bundle_emitted {
+            return;
+        }
+        if let Some(pos) = run
+            .worker_ids
+            .iter()
+            .position(|id| id.as_str() == worker_id)
+            && run.results.get(pos).is_some_and(Option::is_none)
+        {
+            run.results[pos] = Some(terminal);
+        }
     }
 
     /// Registers or replaces the current deterministic auto-delegation run.
@@ -342,9 +373,23 @@ impl SessionVoState {
         }) {
             return false;
         }
+        // Back-fill terminals for any worker that already finished before the run was
+        // registered: the root turn schedules workers and only registers the run after the
+        // spawn loop, so a fast worker can be terminal (cached in `children`) by now. Reading
+        // the snapshot here means a pre-registration terminal is never lost.
+        let results = worker_ids
+            .iter()
+            .map(|worker_id| {
+                self.children
+                    .iter()
+                    .find(|child| child.id == *worker_id)
+                    .and_then(|child| child.terminal.clone())
+            })
+            .collect();
         self.auto_delegation_run = Some(AutoDelegationRun {
             user_sequence_num,
             worker_ids,
+            results,
             bundle_emitted: false,
             synthesis_turn_id: None,
         });
@@ -355,17 +400,12 @@ impl SessionVoState {
     #[must_use]
     pub fn ready_auto_delegation_bundle(&self) -> Option<(u64, Vec<WorkerTerminalResult>)> {
         let run = self.auto_delegation_run.as_ref()?;
-        if run.bundle_emitted {
+        if run.bundle_emitted || run.results.len() != run.worker_ids.len() {
             return None;
         }
         let mut results = Vec::with_capacity(run.worker_ids.len());
-        for worker_id in &run.worker_ids {
-            let terminal = self
-                .children
-                .iter()
-                .find(|child| child.id == *worker_id)
-                .and_then(|child| child.terminal.as_ref())?;
-            results.push(terminal.clone());
+        for slot in &run.results {
+            results.push(slot.as_ref()?.clone());
         }
         Some((run.user_sequence_num, results))
     }
@@ -379,6 +419,73 @@ impl SessionVoState {
             return false;
         }
         run.bundle_emitted = true;
+        true
+    }
+
+    /// Returns the first scheduled worker that has not yet reported a terminal result.
+    ///
+    /// Run-owned: reflects genuinely-not-yet-terminal workers only. A worker whose terminal
+    /// was already captured (even if it has since self-cleaned out of `children`) is not
+    /// reported as pending.
+    #[must_use]
+    pub fn pending_auto_delegation_worker(&self) -> Option<WorkerId> {
+        let run = self.auto_delegation_run.as_ref()?;
+        if run.bundle_emitted || run.results.len() != run.worker_ids.len() {
+            return None;
+        }
+        run.worker_ids
+            .iter()
+            .zip(run.results.iter())
+            .find_map(|(worker_id, slot)| slot.is_none().then(|| worker_id.clone()))
+    }
+
+    /// Fails out any not-yet-terminal worker of the active run with a synthetic terminal.
+    ///
+    /// Bounds fan-in so a worker that never reaches terminal (stale/hung) cannot hang the whole
+    /// session: after this, `ready_auto_delegation_bundle` completes with the failed slot filled
+    /// and the coordinator synthesizes from the workers that did finish. Only fills empty slots
+    /// (a worker that finished concurrently keeps its real result). Returns the count failed out.
+    pub fn fail_pending_auto_delegation_workers(&mut self, reason: &str) -> usize {
+        let Some(run) = self.auto_delegation_run.as_mut() else {
+            return 0;
+        };
+        if run.bundle_emitted || run.results.len() != run.worker_ids.len() {
+            return 0;
+        }
+        let mut failed = 0;
+        for (worker_id, slot) in run.worker_ids.iter().zip(run.results.iter_mut()) {
+            if slot.is_none() {
+                *slot = Some(failed_worker_terminal(worker_id, reason));
+                failed += 1;
+            }
+        }
+        failed
+    }
+
+    /// Fails out a single not-yet-terminal worker of the active run with a synthetic terminal.
+    ///
+    /// Returns whether a slot was filled (the worker is part of the un-emitted run and had no
+    /// result yet). Recovers a run blocked by one specific stuck worker (e.g. a stale worker
+    /// signalled via `record_child_signal`) when the root turn's inline fan-in bound — which only
+    /// applies while that turn is alive — no longer covers it.
+    pub fn fail_auto_delegation_worker(&mut self, worker_id: &str, reason: &str) -> bool {
+        let Some(run) = self.auto_delegation_run.as_mut() else {
+            return false;
+        };
+        if run.bundle_emitted || run.results.len() != run.worker_ids.len() {
+            return false;
+        }
+        let Some(pos) = run
+            .worker_ids
+            .iter()
+            .position(|id| id.as_str() == worker_id)
+        else {
+            return false;
+        };
+        if run.results[pos].is_some() {
+            return false;
+        }
+        run.results[pos] = Some(failed_worker_terminal(worker_id, reason));
         true
     }
 
@@ -433,6 +540,11 @@ impl SessionVoState {
             .children
             .iter()
             .position(|child| child.id == worker_id && child.terminal.is_some())?;
+        // Snapshot into the auto-delegation run before removing, so consuming an
+        // auto-scheduled worker's terminal via `wait_worker` cannot strand the fan-in bundle.
+        if let Some(terminal) = self.children[index].terminal.clone() {
+            self.capture_auto_delegation_result(worker_id, terminal);
+        }
         self.children.remove(index).terminal
     }
 
@@ -483,23 +595,6 @@ impl SessionVoState {
             self.unread_child_signals.remove(victim);
         }
         true
-    }
-
-    /// Removes and returns the first pending user-audience `NeedsInput` signal.
-    ///
-    /// The public contact/user reply path consumes exactly one pending human question and
-    /// forwards the reply to that worker over the existing `ProvideInput` message path.
-    pub fn take_user_input_signal(&mut self) -> Option<UnreadChildSignal> {
-        let index = self.unread_child_signals.iter().position(|signal| {
-            signal.kind == ChildSignalKind::NeedsInput
-                && signal.input_audience == Some(InputAudience::User)
-                && signal.input_request_id.is_some()
-        })?;
-        let signal = self.unread_child_signals.remove(index);
-        if self.pending_parent_resume_signal == Some(signal.signal_id) {
-            self.pending_parent_resume_signal = None;
-        }
-        Some(signal)
     }
 
     /// Clears one unread child signal by id.
@@ -677,7 +772,22 @@ fn signal_kind_is_action_required(kind: ChildSignalKind) -> bool {
 /// Conservative by design: only blocking/attention-or-failure kinds qualify; plain
 /// `Finding`s never trigger a resume.
 #[must_use]
-fn signal_kind_is_resume_eligible(kind: ChildSignalKind) -> bool {
+/// Builds a synthetic failed terminal for a worker that never reported one.
+fn failed_worker_terminal(worker_id: &str, reason: &str) -> moa_core::WorkerTerminalResult {
+    moa_core::WorkerTerminalResult {
+        state: moa_core::WorkerState::Failed,
+        result: moa_core::WorkerResult {
+            worker_id: worker_id.to_string(),
+            success: false,
+            output: String::new(),
+            tokens_used: 0,
+            tools_invoked: 0,
+            error: Some(reason.to_string()),
+        },
+    }
+}
+
+pub(super) fn signal_kind_is_resume_eligible(kind: ChildSignalKind) -> bool {
     matches!(
         kind,
         ChildSignalKind::Blocked
@@ -1048,6 +1158,208 @@ mod tests {
         assert_eq!(state.pending_auto_delegation_synthesis_sequence(), None);
         assert!(state.clear_auto_delegation_on_synthesis_outcome("synthesis-turn"));
         assert_eq!(state.auto_delegation_run, None);
+    }
+
+    fn pending_child(id: &str) -> moa_core::WorkerChildRef {
+        moa_core::WorkerChildRef {
+            id: id.to_string(),
+            task_hash: format!("hash-{id}"),
+            budget_tokens: 128,
+            terminal: None,
+        }
+    }
+
+    #[test]
+    fn auto_delegation_bundle_survives_worker_self_cleanup() {
+        // Pins (B1): a fast worker that self-cleans out of `children` before a slow sibling
+        // finishes must not strand the fan-in bundle. Fan-in reads run-owned snapshots, so a
+        // removed child's terminal is still bundled in scheduled order.
+        let mut state = SessionVoState::default();
+        state.register_child(pending_child("worker-a"));
+        state.register_child(pending_child("worker-b"));
+        assert!(
+            state.register_auto_delegation_run(
+                9,
+                vec!["worker-a".to_string(), "worker-b".to_string()]
+            )
+        );
+
+        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+            worker_id: "worker-a".to_string(),
+            terminal: worker_terminal("worker-a", "first"),
+        });
+        // Fast worker A self-cleans (removed from the transient children registry).
+        assert!(state.remove_child("worker-a"));
+        assert!(!state.owns_child("worker-a"));
+        // Slow worker B finishes afterward.
+        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+            worker_id: "worker-b".to_string(),
+            terminal: worker_terminal("worker-b", "second"),
+        });
+
+        let (sequence, results) = state
+            .ready_auto_delegation_bundle()
+            .expect("run-owned snapshots complete the bundle despite A's cleanup");
+        assert_eq!(sequence, 9);
+        assert_eq!(
+            results
+                .iter()
+                .map(|terminal| terminal.result.worker_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["worker-a", "worker-b"]
+        );
+    }
+
+    #[test]
+    fn auto_delegation_run_backfills_terminal_reported_before_registration() {
+        // Pins: a worker that finishes before the root turn registers the run (the register
+        // happens after the spawn loop) is back-filled from the children cache, so a
+        // pre-registration terminal is never lost.
+        let mut state = SessionVoState::default();
+        state.register_child(pending_child("worker-a"));
+        state.register_child(pending_child("worker-b"));
+        // Worker A finishes BEFORE the run is registered.
+        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+            worker_id: "worker-a".to_string(),
+            terminal: worker_terminal("worker-a", "early"),
+        });
+
+        assert!(
+            state.register_auto_delegation_run(
+                4,
+                vec!["worker-a".to_string(), "worker-b".to_string()]
+            )
+        );
+        // A already terminal → only B is pending.
+        assert_eq!(
+            state.pending_auto_delegation_worker(),
+            Some("worker-b".to_string())
+        );
+        assert_eq!(state.ready_auto_delegation_bundle(), None);
+
+        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+            worker_id: "worker-b".to_string(),
+            terminal: worker_terminal("worker-b", "late"),
+        });
+        assert_eq!(state.pending_auto_delegation_worker(), None);
+        let (sequence, results) = state
+            .ready_auto_delegation_bundle()
+            .expect("both workers terminal after back-fill");
+        assert_eq!(sequence, 4);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn auto_delegation_consume_child_terminal_snapshots_into_run() {
+        // Pins: consuming an auto-scheduled worker's terminal via `wait_worker` removes it
+        // from `children` but snapshots it into the run first, so the bundle still completes.
+        let mut state = SessionVoState::default();
+        state.register_child(pending_child("worker-a"));
+        state.register_child(pending_child("worker-b"));
+        assert!(
+            state.register_auto_delegation_run(
+                3,
+                vec!["worker-a".to_string(), "worker-b".to_string()]
+            )
+        );
+
+        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+            worker_id: "worker-a".to_string(),
+            terminal: worker_terminal("worker-a", "consumed"),
+        });
+        // A manual wait consumes and removes A from children.
+        assert!(state.consume_child_terminal("worker-a").is_some());
+        assert!(!state.owns_child("worker-a"));
+
+        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+            worker_id: "worker-b".to_string(),
+            terminal: worker_terminal("worker-b", "kept"),
+        });
+        let (_, results) = state
+            .ready_auto_delegation_bundle()
+            .expect("consumed worker's snapshot still completes the bundle");
+        assert_eq!(
+            results
+                .iter()
+                .map(|terminal| terminal.result.output.as_str())
+                .collect::<Vec<_>>(),
+            vec!["consumed", "kept"]
+        );
+    }
+
+    #[test]
+    fn fail_pending_auto_delegation_workers_completes_bundle_with_failed_slot() {
+        // Pins (B12): a worker that never reaches terminal is failed out so fan-in completes and
+        // the coordinator synthesizes from the workers that did finish; a real result is kept.
+        let mut state = SessionVoState::default();
+        state.register_child(pending_child("worker-a"));
+        state.register_child(pending_child("worker-b"));
+        assert!(
+            state.register_auto_delegation_run(
+                5,
+                vec!["worker-a".to_string(), "worker-b".to_string()]
+            )
+        );
+        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+            worker_id: "worker-a".to_string(),
+            terminal: worker_terminal("worker-a", "done"),
+        });
+        // worker-b never terminalizes → run cannot complete on its own.
+        assert_eq!(
+            state.pending_auto_delegation_worker(),
+            Some("worker-b".to_string())
+        );
+        assert_eq!(state.ready_auto_delegation_bundle(), None);
+
+        assert_eq!(state.fail_pending_auto_delegation_workers("stale"), 1);
+        let (seq, results) = state
+            .ready_auto_delegation_bundle()
+            .expect("bundle completes after failing out the stuck worker");
+        assert_eq!(seq, 5);
+        assert_eq!(results.len(), 2);
+        // worker-a keeps its real completed result; worker-b is a synthetic failed terminal.
+        assert!(results[0].result.success);
+        assert_eq!(results[1].state, moa_core::WorkerState::Failed);
+        assert!(!results[1].result.success);
+        // Nothing left to fail out.
+        assert_eq!(state.fail_pending_auto_delegation_workers("stale"), 0);
+    }
+
+    #[test]
+    fn fail_auto_delegation_worker_fails_only_the_named_stuck_worker() {
+        // Pins (B12b): a single stale worker (signalled via record_child_signal) is failed out on
+        // its own; siblings still complete normally and then the run emits.
+        let mut state = SessionVoState::default();
+        state.register_child(pending_child("worker-a"));
+        state.register_child(pending_child("worker-b"));
+        assert!(
+            state.register_auto_delegation_run(
+                6,
+                vec!["worker-a".to_string(), "worker-b".to_string()]
+            )
+        );
+
+        // Fail out only the stale worker-a; worker-b is still pending, so the run is not ready.
+        assert!(state.fail_auto_delegation_worker("worker-a", "stale"));
+        assert_eq!(state.ready_auto_delegation_bundle(), None);
+        assert_eq!(
+            state.pending_auto_delegation_worker(),
+            Some("worker-b".to_string())
+        );
+        // Re-failing the same worker, or failing an unknown one, is a no-op.
+        assert!(!state.fail_auto_delegation_worker("worker-a", "stale"));
+        assert!(!state.fail_auto_delegation_worker("worker-unknown", "stale"));
+
+        // worker-b completes normally → the run emits with a's Failed + b's real result.
+        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+            worker_id: "worker-b".to_string(),
+            terminal: worker_terminal("worker-b", "done"),
+        });
+        let (_, results) = state
+            .ready_auto_delegation_bundle()
+            .expect("run completes after the healthy sibling finishes");
+        assert_eq!(results[0].state, moa_core::WorkerState::Failed);
+        assert!(results[1].result.success);
     }
 
     #[test]

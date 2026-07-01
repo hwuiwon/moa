@@ -29,7 +29,9 @@ mod test_support;
 
 use budgeting::keep_budgeted_older_messages;
 use checkpoint::{SnapshotHistory, build_snapshot_state, snapshot_stage_inputs_hash};
-use conversion::{CompiledRecordMessage, compile_records};
+use conversion::{
+    CompiledRecordMessage, answered_worker_inputs, child_report_tool_ids, compile_records,
+};
 pub(crate) use errors::preserved_error_messages;
 use prune::{
     DeduplicationStats, build_full_file_read_path_map, deduplicate_file_reads,
@@ -149,9 +151,26 @@ impl HistoryCompiler {
             stable_prefix.push(CompiledRecordMessage::plain(checkpoint_message));
         }
 
-        let recent_messages = compile_records(recent_events, &self.tool_output, &file_read_paths)?;
-        let mut older_messages =
-            compile_records(older_events, &self.tool_output, &file_read_paths)?;
+        // Compute child-report tool ids and answered worker-input requests over the FULL visible
+        // window (both slices) so a tool call/result pair — or a NeedsInput signal and its answer
+        // — split across the older/recent boundary is still paired/suppressed. Computing them
+        // per-slice would emit a dangling provider `tool_result` with no matching `tool_use`.
+        let answered_input_requests = answered_worker_inputs(&visible_events);
+        let child_report_ids = child_report_tool_ids(&visible_events);
+        let recent_messages = compile_records(
+            recent_events,
+            &self.tool_output,
+            &file_read_paths,
+            &answered_input_requests,
+            &child_report_ids,
+        )?;
+        let mut older_messages = compile_records(
+            older_events,
+            &self.tool_output,
+            &file_read_paths,
+            &answered_input_requests,
+            &child_report_ids,
+        )?;
         let deduplication = deduplicate_file_reads(&mut older_messages, &latest_file_reads);
         let recent_tokens = recent_messages
             .iter()

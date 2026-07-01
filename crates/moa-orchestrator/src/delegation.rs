@@ -60,7 +60,16 @@ pub(crate) async fn execute_delegation_tool(
             spawn_output(spawn_child_detached(ctx, parent, input, trusted_sandbox_manifest).await?)
         }
         DelegationTool::Wait(input) => {
-            if let Some(output) = unowned_child_output(ctx, parent, &input.worker_id).await? {
+            // Fast path: a cached terminal is only ever stored on an owned child, so consuming it
+            // first serves the common fan-in case (the awaited worker already completed) in one
+            // Session round-trip and skips the extra `child_refs` ownership check. Only on a cache
+            // miss do we verify ownership before attaching a waiter.
+            if let Some(terminal) =
+                consume_parent_cached_terminal(ctx, parent, &input.worker_id).await?
+            {
+                wait_output(wait_terminal_output(input.worker_id, terminal))
+            } else if let Some(output) = unowned_child_output(ctx, parent, &input.worker_id).await?
+            {
                 output
             } else {
                 wait_output(wait_child(ctx, parent, input).await?)
@@ -186,10 +195,10 @@ async fn spawn_child_detached(
 
 fn effective_child_max_turns(request: &SpawnWorkerInput) -> Option<u32> {
     let requested = request.max_turns?;
-    if requested == 0 {
-        return Some(0);
-    }
-
+    // `max_turns == 0` is NOT unlimited: `effective_turn_cap` clamps `Some(0)` up to 1
+    // downstream (only `None` is unlimited). Flowing 0 through the floor gives a tool-enabled
+    // worker its required minimum (2 = call a tool, then read its result) instead of a single
+    // turn that calls a tool it can never observe.
     let minimum = if request.tool_subset.is_empty() { 1 } else { 2 };
     Some(requested.max(minimum))
 }
@@ -281,11 +290,9 @@ async fn wait_child(
     parent: DelegationParent<'_>,
     input: WaitWorkerInput,
 ) -> Result<WaitWorkerOutput, HandlerError> {
+    // The cached-terminal fast path and the ownership check both run in `execute_delegation_tool`
+    // before this is reached, so a cache re-check here would be a redundant Session round-trip.
     let timeout_ms = clamp_wait_timeout_ms(input.timeout_ms);
-    if let Some(terminal) = consume_parent_cached_terminal(ctx, parent, &input.worker_id).await? {
-        return Ok(wait_terminal_output(input.worker_id, terminal));
-    }
-
     let (awakeable_id, terminal_future) = ctx.awakeable::<String>();
     let attached = ctx
         .object_client::<WorkerClient>(input.worker_id.clone())
@@ -687,8 +694,12 @@ mod tests {
         assert_eq!(effective_child_max_turns(&request), Some(1));
         request.max_turns = None;
         assert_eq!(effective_child_max_turns(&request), None);
+        // `max_turns == 0` is not unlimited (only `None` is): a no-tool worker floors to 1,
+        // and a tool worker floors to 2 so it can call a tool AND read its result.
         request.max_turns = Some(0);
-        assert_eq!(effective_child_max_turns(&request), Some(0));
+        assert_eq!(effective_child_max_turns(&request), Some(1));
+        request.tool_subset.push("session_search".to_string());
+        assert_eq!(effective_child_max_turns(&request), Some(2));
     }
 
     #[test]

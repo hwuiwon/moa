@@ -12,6 +12,8 @@ use serde_json::json;
 
 const MAX_PLAN_NODES: usize = 5;
 const MIN_LIST_NODES: usize = 3;
+/// Minimum ready nodes for a two-sided comparison plan (gated on an explicit two-sided signal).
+const MIN_COMPARISON_NODES: usize = 2;
 
 /// Context metadata key containing the deterministic delegation DAG candidate.
 pub const DELEGATION_PLAN_METADATA_KEY: &str = "delegation_plan";
@@ -59,6 +61,12 @@ impl ContextProcessor for DelegationPlanningProcessor {
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
+        // On a synthesis turn (worker results already bundled for the active user message), the
+        // coordinator is producing the final answer from `<worker_result_bundle>`. Re-emitting a
+        // "call spawn_worker" hint here contradicts that guidance and wastes tokens every turn.
+        if synthesis_turn_in_progress(ctx) {
+            return Ok(ProcessorOutput::default());
+        }
         let Some(request_text) = latest_user_request_text(ctx) else {
             return Ok(ProcessorOutput::default());
         };
@@ -91,21 +99,29 @@ pub fn plan_delegation_for_request(request: &str) -> Option<DelegationPlan> {
         return None;
     }
 
-    let mut items = explicit_work_items(&normalized, &lower);
-    let mut reason = (items.len() >= MIN_LIST_NODES).then_some("explicit_multi_workstream_list");
-    if reason.is_none() {
-        items = two_sided_comparison_items(&lower);
-        if items.len() >= 2 {
-            reason = Some("explicit_comparison");
+    // Only a GENERIC, request-derived workstream list produces a plan — every node title comes
+    // from the user's own words, never a hardcoded phrasing or canned title. The coordinator's
+    // operating contract (see `pipeline::identity`) still instructs the model to decompose work
+    // and decide delegation from the task itself; this deterministic hint is a conservative nudge
+    // for the clearly-decomposable cases, not a substitute for that reasoning.
+    let (reason, items) = {
+        let list = explicit_work_items(&normalized, &lower, MIN_LIST_NODES);
+        if list.len() >= MIN_LIST_NODES {
+            ("explicit_multi_workstream_list", list)
+        } else if is_two_sided_request(&lower) {
+            // A two-sided task ("compare/summarize/categorize X and Y") is delegable at exactly
+            // two ready nodes. Gate the lower threshold on an explicit two-sided signal so an
+            // ordinary two-item phrase is not mistaken for parallel workstreams.
+            let pair = explicit_work_items(&normalized, &lower, MIN_COMPARISON_NODES);
+            if pair.len() >= MIN_COMPARISON_NODES {
+                ("explicit_comparison", pair)
+            } else {
+                return None;
+            }
+        } else {
+            return None;
         }
-    }
-    if reason.is_none() {
-        items = incident_investigation_items(&lower);
-        if items.len() >= MIN_LIST_NODES {
-            reason = Some("incident_investigation");
-        }
-    }
-    let reason = reason?;
+    };
     let nodes = items
         .into_iter()
         .take(MAX_PLAN_NODES)
@@ -121,6 +137,23 @@ pub fn plan_delegation_for_request(request: &str) -> Option<DelegationPlan> {
         reason: reason.to_string(),
         nodes,
     })
+}
+
+/// Returns whether worker results have already been bundled (or a synthesis requested) after the
+/// latest user message — i.e. this turn is synthesizing auto-delegated results, not starting
+/// fresh work, so the spawn hint must not re-fire.
+fn synthesis_turn_in_progress(ctx: &WorkingContext) -> bool {
+    let mut saw_results = false;
+    for record in ctx.recent_events().iter().rev() {
+        match &record.event {
+            Event::UserMessage { .. } | Event::QueuedMessage { .. } => return saw_results,
+            Event::WorkerResultBundle { .. } | Event::WorkerResultSynthesisRequested { .. } => {
+                saw_results = true;
+            }
+            _ => {}
+        }
+    }
+    saw_results
 }
 
 fn latest_user_request_text(ctx: &WorkingContext) -> Option<&str> {
@@ -187,7 +220,7 @@ fn is_non_execution_request(lower: &str) -> bool {
     )
 }
 
-fn explicit_work_items(normalized: &str, lower: &str) -> Vec<String> {
+fn explicit_work_items(normalized: &str, lower: &str, min_items: usize) -> Vec<String> {
     let candidates = [
         leading_list_segment(normalized),
         segment_after_colon(normalized),
@@ -200,6 +233,8 @@ fn explicit_work_items(normalized: &str, lower: &str) -> Vec<String> {
         segment_after_prefix(normalized, lower, "compare "),
         segment_after_anchor(normalized, lower, " reconcile "),
         segment_after_anchor(normalized, lower, " compare "),
+        segment_after_anchor(normalized, lower, " summarize "),
+        segment_after_anchor(normalized, lower, " categorize "),
         segment_after_anchor(normalized, lower, " review "),
         segment_after_semicolon(normalized),
     ];
@@ -208,56 +243,26 @@ fn explicit_work_items(normalized: &str, lower: &str) -> Vec<String> {
         .into_iter()
         .flatten()
         .map(|segment| split_work_items(&segment))
-        .find(|items| items.len() >= MIN_LIST_NODES)
+        .find(|items| items.len() >= min_items)
         .unwrap_or_default()
 }
 
-fn two_sided_comparison_items(lower: &str) -> Vec<String> {
-    if lower.contains("sales says") && lower.contains("finance model") {
-        return vec![
-            "sales assumptions".to_string(),
-            "finance model assumptions".to_string(),
-        ];
-    }
-    if lower.contains("customer response") && lower.contains("internal action plan") {
-        return vec![
-            "customer response".to_string(),
-            "internal action plan".to_string(),
-        ];
-    }
-    if lower.contains("likely buckets") && lower.contains("next ops checks") {
-        return vec![
-            "likely refund buckets".to_string(),
-            "next ops checks".to_string(),
-        ];
-    }
-    Vec::new()
-}
-
-fn incident_investigation_items(lower: &str) -> Vec<String> {
-    if lower.contains("checkout")
-        && lower.contains("slow")
-        && lower.contains("promo")
-        && lower.contains("db cpu")
-    {
-        return vec![
-            "promo-rule change impact".to_string(),
-            "database CPU and slow-query pressure".to_string(),
-            "checkout latency without 5xxs".to_string(),
-        ];
-    }
-    if lower.contains("cold-chain")
-        && lower.contains("complaints")
-        && contains_any(lower, &["doubled", "spike", "increased"])
-        && contains_any(lower, &["investigation", "triage", "plan"])
-    {
-        return vec![
-            "complaint trend and affected scope".to_string(),
-            "temperature-control process checks".to_string(),
-            "zone 4 route, carrier, and staffing changes".to_string(),
-        ];
-    }
-    Vec::new()
+/// Whether the request explicitly frames two sides to compare/summarize/categorize.
+///
+/// Used to gate the lower two-node threshold so an ordinary two-item phrase (e.g. "email Alice
+/// and Bob") is not treated as parallel delegation.
+fn is_two_sided_request(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "compare",
+            "comparison",
+            "reconcile",
+            "versus",
+            " vs ",
+            " vs.",
+        ],
+    ) || (contains_any(lower, &["summarize", "categorize"]) && lower.contains(" and "))
 }
 
 fn segment_after_colon(text: &str) -> Option<String> {
@@ -305,11 +310,20 @@ fn leading_list_segment(text: &str) -> Option<String> {
 
 fn split_work_items(segment: &str) -> Vec<String> {
     let bounded = trim_trailing_context(segment);
-    if !bounded.contains(',') {
+    // Accept comma-, semicolon-, or conjunction-delimited lists: a two-sided "X and Y" has no
+    // comma, and incident symptom lists often separate clauses with ";".
+    if !bounded.contains(',')
+        && !bounded.contains(';')
+        && !bounded.contains(" and ")
+        && !bounded.contains(" or ")
+    {
         return Vec::new();
     }
 
-    let list_text = bounded.replace(" and ", ", ").replace(" or ", ", ");
+    let list_text = bounded
+        .replace(';', ",")
+        .replace(" and ", ", ")
+        .replace(" or ", ", ");
     let mut items = Vec::new();
     for raw in list_text.split(',') {
         let item = clean_item(raw);
@@ -337,6 +351,16 @@ fn is_useful_work_item(item: &str) -> bool {
         || lower.starts_with("no-")
     {
         return false;
+    }
+    // Imperative clauses ("give me neutral questions", "tell me …") are task instructions, not
+    // parallel workstream titles — drop them so a "compare the assumptions and give me X" tail
+    // does not become a bogus node.
+    for imperative in [
+        "give ", "get ", "tell ", "show ", "make ", "let ", "help ", "send ",
+    ] {
+        if lower.starts_with(imperative) {
+            return false;
+        }
     }
     true
 }
@@ -475,25 +499,6 @@ mod tests {
     }
 
     #[test]
-    fn plans_two_sided_comparison_without_strict_schema_fields() {
-        // Pins: the planner can surface ready coordinator work without adding
-        // selected_skill or selected_action to the worker contract.
-        let plan = plan_delegation_for_request(
-            "Sales says Q3 forecast is sandbagged, but the finance model says we miss \
-             by 8 percent. Compare the assumptions and give me neutral questions for both teams.",
-        )
-        .expect("two-sided comparison should produce a plan");
-
-        assert_eq!(
-            plan.nodes
-                .iter()
-                .map(|node| node.title.as_str())
-                .collect::<Vec<_>>(),
-            vec!["sales assumptions", "finance model assumptions"]
-        );
-    }
-
-    #[test]
     fn plans_ready_nodes_for_leading_source_list() {
         // Pins: realistic synthesis prompts often name scattered inputs before the
         // actual work verb rather than after "from" or "across".
@@ -513,50 +518,77 @@ mod tests {
     }
 
     #[test]
-    fn plans_ready_nodes_for_cold_chain_complaint_spike_investigation() {
-        // Pins: users do not need to spell out delegation when an operational spike
-        // investigation has clear independent workstreams.
-        let plan = plan_delegation_for_request(
-            "Warehouse lead here: cold-chain complaints doubled in zone 4. \
-             Give me an ops investigation plan.",
+    fn plans_generic_two_sided_summary_and_comparison() {
+        // Pins (S4): a two-sided "verb X and Y" is delegable at two nodes whose titles are the
+        // user's OWN words — no hardcoded phrasing or canned title.
+        let summary = plan_delegation_for_request(
+            "I'm a support lead. Three customers reported damaged orders in the same zip code. \
+             Summarize the customer response and the internal action plan.",
         )
-        .expect("cold-chain complaint spike should produce a delegation plan");
-
-        assert_eq!(plan.reason, "incident_investigation");
+        .expect("two-sided summary should produce a plan");
+        assert_eq!(summary.reason, "explicit_comparison");
         assert_eq!(
-            plan.nodes
+            summary
+                .nodes
                 .iter()
                 .map(|node| node.title.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                "complaint trend and affected scope",
-                "temperature-control process checks",
-                "zone 4 route, carrier, and staffing changes"
-            ]
+            vec!["customer response", "internal action plan"]
+        );
+
+        let buckets = plan_delegation_for_request(
+            "We have 40 refund tickets from the same promo code. \
+             Categorize likely buckets and next ops checks.",
+        )
+        .expect("two-sided categorization should produce a plan");
+        assert_eq!(
+            buckets
+                .nodes
+                .iter()
+                .map(|node| node.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["likely buckets", "next ops checks"]
         );
     }
 
     #[test]
-    fn plans_checkout_latency_incident_without_vague_there_node() {
-        // Pins: status clauses like "there are no 5xxs" are incident signals, not
-        // standalone workstreams named "there".
+    fn plans_generic_incident_symptom_list_from_request_words() {
+        // Pins (S4): an incident stated as multiple symptom clauses (";"/"," separated) yields a
+        // plan whose nodes are the request's own symptom phrases, and drops the "no 5xxs" clause.
         let plan = plan_delegation_for_request(
             "Checkout is slow; promo rules changed, DB CPU is up, and there are no 5xxs. \
              Give me a triage plan.",
         )
-        .expect("checkout latency incident should produce a delegation plan");
-
-        assert_eq!(plan.reason, "incident_investigation");
+        .expect("multi-symptom incident should produce a plan");
+        assert_eq!(plan.reason, "explicit_multi_workstream_list");
         assert_eq!(
             plan.nodes
                 .iter()
                 .map(|node| node.title.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                "promo-rule change impact",
-                "database CPU and slow-query pressure",
-                "checkout latency without 5xxs"
-            ]
+            vec!["Checkout is slow", "promo rules changed", "DB CPU is up"]
+        );
+    }
+
+    #[test]
+    fn leaves_llm_to_decompose_when_workstreams_are_not_literal() {
+        // Pins (S4): when the workstreams are not literally present in the request — an imperative
+        // tail ("compare the assumptions and give me questions") or a single symptom whose
+        // investigation angles must be invented — the planner emits NO hardcoded plan and defers
+        // to the coordinator LLM (per the identity operating contract).
+        assert!(
+            plan_delegation_for_request(
+                "Sales says Q3 is sandbagged, but the finance model says we miss by 8 percent. \
+                 Compare the assumptions and give me neutral questions for both teams.",
+            )
+            .is_none()
+        );
+        assert!(
+            plan_delegation_for_request(
+                "Warehouse lead here: cold-chain complaints doubled in zone 4. \
+                 Give me an ops investigation plan.",
+            )
+            .is_none()
         );
     }
 
@@ -639,5 +671,78 @@ mod tests {
         assert!(hint.contains("node-1"));
         assert!(hint.contains("spawn_worker"));
         assert!(hint.contains("support training"));
+    }
+
+    #[tokio::test]
+    async fn processor_skips_spawn_hint_on_synthesis_turn() {
+        // Pins (S5): once worker results are bundled for the active user message, the spawn hint
+        // is suppressed so it does not contradict the <worker_result_bundle> synthesis guidance.
+        let session = SessionMeta {
+            id: SessionId::new(),
+            tenant_id: TenantId::new(),
+            channel: Channel::Chat,
+            model: ModelId::new("claude-sonnet-4-6"),
+            ..SessionMeta::default()
+        };
+        let capabilities = ModelCapabilities {
+            model_id: ModelId::new("claude-sonnet-4-6"),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cached_input_per_mtok: Some(0.3),
+                cache_write_5m_per_mtok: None,
+                cache_write_1h_per_mtok: None,
+            },
+            native_tools: Vec::new(),
+        };
+        let mut ctx = WorkingContext::new(&session, capabilities);
+        let record = |sequence_num: u64, event: Event| EventRecord {
+            id: Uuid::now_v7(),
+            session_id: session.id,
+            sequence_num,
+            event_type: EventType::from(&event),
+            event,
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        };
+        // A decomposable request (would normally produce a plan) followed by a bundle for it.
+        ctx.set_recent_events(vec![
+            record(
+                1,
+                Event::UserMessage {
+                    text: "I need launch readiness across docs, support training, billing, and analytics by Friday.".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            record(
+                2,
+                Event::WorkerResultBundle {
+                    user_sequence_num: 1,
+                    results: Vec::new(),
+                },
+            ),
+        ]);
+
+        let output = DelegationPlanningProcessor::new()
+            .process(&mut ctx)
+            .await
+            .expect("processor should run");
+
+        assert!(output.items_included.is_empty());
+        assert!(!ctx.metadata().contains_key(DELEGATION_PLAN_METADATA_KEY));
+        assert!(
+            !ctx.messages
+                .iter()
+                .any(|message| message.content.contains("<delegation_plan_candidate>"))
+        );
     }
 }

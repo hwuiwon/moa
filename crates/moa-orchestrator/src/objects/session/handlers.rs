@@ -1,5 +1,6 @@
 //! Restate handlers for the Session VO.
 
+use super::state::signal_kind_is_resume_eligible;
 use super::*;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
@@ -435,6 +436,71 @@ impl Session for SessionImpl {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self, ctx, input))]
+    // SAFETY: called only from TurnExecution after session participant authz has already checked.
+    async fn poll_auto_delegation_fan_in(
+        &self,
+        mut ctx: ObjectContext<'_>,
+        input: Json<PollAutoDelegationFanInInput>,
+    ) -> Result<Json<AutoDelegationFanInStatus>, HandlerError> {
+        annotate_restate_handler_span("Session", "poll_auto_delegation_fan_in");
+        let session_id = parse_session_key(ctx.key())?;
+        let input = input.into_inner();
+        let mut state = SessionVoState::load_from(&ctx).await?;
+        let mut pending_state = load_pending_state(&ctx).await?;
+
+        // Only the run for the polling root turn's own user sequence is fanned in here.
+        let matches = state
+            .auto_delegation_run
+            .as_ref()
+            .is_some_and(|run| run.user_sequence_num == input.user_sequence_num);
+        if !matches {
+            return Ok(Json::from(AutoDelegationFanInStatus::NotRunning));
+        }
+
+        // Fan-in wait bound exceeded for a stuck worker: fail out any worker still not terminal
+        // so the run can complete and the coordinator synthesizes from the workers that did
+        // finish, instead of hanging the whole session until the turn/session timeout.
+        if input.force_complete {
+            let failed = state.fail_pending_auto_delegation_workers(
+                "worker did not report a terminal result before the fan-in wait bound",
+            );
+            if failed > 0 {
+                tracing::warn!(
+                    key = %ctx.key(),
+                    user_sequence_num = input.user_sequence_num,
+                    failed,
+                    "auto-delegation fan-in bound exceeded; failed out stuck worker(s) to unblock synthesis"
+                );
+            }
+        }
+
+        // Emit the durable bundle from run-owned snapshots if the run is complete; idempotent
+        // if the Session-VO terminal path already emitted it. Does not dispatch synthesis
+        // because the root turn is the active turn.
+        maybe_complete_auto_delegation_run(&mut ctx, &mut pending_state, &mut state, session_id)
+            .await?;
+
+        let status = if state
+            .auto_delegation_run
+            .as_ref()
+            .is_some_and(|run| run.bundle_emitted)
+        {
+            // The active root turn owns synthesis: claim it so `record_turn_outcome` clears the
+            // run instead of dispatching a duplicate synthesis turn. Idempotent once claimed.
+            state.record_auto_delegation_synthesis_dispatch(input.root_turn_id);
+            AutoDelegationFanInStatus::Ready
+        } else if let Some(worker_id) = state.pending_auto_delegation_worker() {
+            AutoDelegationFanInStatus::Pending { worker_id }
+        } else {
+            AutoDelegationFanInStatus::NotRunning
+        };
+
+        state.persist_into(&ctx);
+        persist_pending_state(&ctx, &pending_state);
+        Ok(Json::from(status))
+    }
+
     #[tracing::instrument(skip(self, ctx))]
     // SAFETY: called only from TurnExecution after session participant authz has already checked.
     async fn remove_child(
@@ -530,11 +596,17 @@ impl Session for SessionImpl {
             .into());
         }
         if !state.owns_signal_worker(&signal) {
-            return Err(TerminalError::new_with_code(
-                403,
-                format!("worker {} is not owned by this session", signal.worker_id),
-            )
-            .into());
+            // Not a hard authorization failure: the `parent_session` already matched (checked
+            // above), so this is a signal for a worker that is no longer a registered child —
+            // typically one that raced its own `remove_child`/self-clean. Ignore it as a no-op
+            // (a non-retryable 403 would permanently drop a legitimate late signal); it injects
+            // nothing into the session either way.
+            tracing::debug!(
+                key = %ctx.key(),
+                worker_id = %signal.worker_id,
+                "ignoring child signal for a worker no longer registered on this session"
+            );
+            return Ok(());
         }
 
         // Idempotent append: a retried delivery with the same signal_id is a no-op at the
@@ -557,6 +629,32 @@ impl Session for SessionImpl {
             format!("worker_signal:{}", signal.signal_id),
         )
         .await?;
+
+        // Never-terminal recovery: a stuck worker (HeartbeatStale) that belongs to an un-emitted
+        // auto-delegation run is failed out here and the run is completed. The root turn's inline
+        // fan-in bound only force-completes while that turn is alive; once it has ended (e.g. this
+        // stale signal itself dispatches a resume, or the turn hit its cap) this is the only path
+        // that emits the bundle, so a never-terminal worker cannot leave the session waiting
+        // indefinitely. Runs BEFORE the active-turn reload so the resume gate below observes any
+        // synthesis turn this dispatches and does not start a duplicate.
+        if signal.kind == ChildSignalKind::HeartbeatStale
+            && state.fail_auto_delegation_worker(
+                &signal.worker_id,
+                "worker heartbeat went stale and it never reported a terminal result",
+            )
+        {
+            let mut pending_state = load_pending_state(&ctx).await?;
+            maybe_complete_auto_delegation_run(
+                &mut ctx,
+                &mut pending_state,
+                &mut state,
+                session_id,
+            )
+            .await?;
+            state.persist_into(&ctx);
+            persist_pending_state(&ctx, &pending_state);
+            sync_status(&ctx, session_id, &state).await?;
+        }
 
         // The resume gate needs the active-turn cursor, which lives in pending state.
         let active_turn_id = load_pending_state(&ctx).await?.active_turn_id;
@@ -823,17 +921,23 @@ async fn forward_user_input_reply(
     session_id: SessionId,
     text: &str,
 ) -> Result<Option<UnreadChildSignal>, HandlerError> {
-    let Some(signal) = state
-        .unread_child_signals
-        .iter()
-        .find(|signal| {
+    // Only auto-forward the message as a `ProvideInput` reply when EXACTLY ONE worker is
+    // awaiting user input. With zero pending questions there is nothing to answer, and with more
+    // than one the target is ambiguous — in both cases the message must start a normal
+    // coordinator turn rather than being silently swallowed into an unrelated worker.
+    let signal = {
+        let mut awaiting = state.unread_child_signals.iter().filter(|signal| {
             signal.kind == ChildSignalKind::NeedsInput
                 && signal.input_audience == Some(InputAudience::User)
                 && signal.input_request_id.is_some()
-        })
-        .cloned()
-    else {
-        return Ok(None);
+        });
+        let Some(signal) = awaiting.next() else {
+            return Ok(None);
+        };
+        if awaiting.next().is_some() {
+            return Ok(None);
+        }
+        signal.clone()
     };
     let Some(input_request_id) = signal.input_request_id.clone() else {
         return Ok(None);
@@ -982,7 +1086,7 @@ async fn dispatch_queued_parent_resume_if_idle(
     let Some(unread) = state
         .unread_child_signals
         .iter()
-        .find(|signal| signal_kind_can_resume(signal.kind))
+        .find(|signal| signal_kind_is_resume_eligible(signal.kind))
         .cloned()
     else {
         return Ok(false);
@@ -1100,16 +1204,6 @@ fn unread_to_resume_signal(
         input_request_id: unread.input_request_id.clone(),
         input_audience: unread.input_audience,
     }
-}
-
-fn signal_kind_can_resume(kind: ChildSignalKind) -> bool {
-    matches!(
-        kind,
-        ChildSignalKind::Blocked
-            | ChildSignalKind::NeedsInput
-            | ChildSignalKind::Failed
-            | ChildSignalKind::HeartbeatStale
-    )
 }
 
 /// Builds the system-generated coordinator instruction for a guarded resume turn.

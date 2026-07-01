@@ -26,8 +26,14 @@ pub(super) const K_NOTIFICATION_DELIVERED: &str = "notification_delivered";
 pub(super) const K_RESULT_WAITERS: &str = "result_waiters";
 pub(super) const K_LAST_HEARTBEAT_AT: &str = "last_heartbeat_at";
 pub(super) const K_CLEANUP_GENERATION: &str = "cleanup_generation";
+pub(super) const K_CLEANUP_RELEASE_ATTEMPTS: &str = "cleanup_release_attempts";
 pub(super) const K_PENDING_INPUT_REQUESTS: &str = "pending_input_requests";
 pub(super) const MAX_TURNS_PER_POST: usize = 50;
+/// Maximum consecutive failed hand-release attempts before self-clean force-clears the VO.
+///
+/// Bounds the reschedule loop so a permanently-failing release (e.g. a provider absent from
+/// the router registry) cannot pin the Worker VO forever.
+pub(super) const MAX_CLEANUP_RELEASE_ATTEMPTS: u32 = 5;
 pub(super) const WORKER_BUDGET_EXHAUSTED_MESSAGE: &str = "MOA stopped because this worker exhausted its token budget. Narrow the scope or ask MOA to continue.";
 
 /// Serializable projection of the Worker VO's durable state keys.
@@ -89,6 +95,13 @@ pub struct WorkerVoState {
     /// whose carried generation no longer matches this value is stale — the child was
     /// revived or re-scheduled during the grace window — and is ignored.
     pub cleanup_generation: u64,
+    /// Consecutive failed hand-release attempts during self-clean.
+    ///
+    /// Incremented each time `release_and_clear_worker` reports an incomplete release and the
+    /// cleanup tick is rescheduled. Once it reaches `MAX_CLEANUP_RELEASE_ATTEMPTS` (or grace is
+    /// disabled), the VO is force-cleared to bound the retry loop rather than rescheduling
+    /// forever on a permanent failure (e.g. a provider missing from the router registry).
+    pub cleanup_release_attempts: u32,
     /// In-flight `request_input` round-trips, mapping each `input_request_id` to the
     /// Restate awakeable id the blocked child turn is parked on.
     ///
@@ -181,6 +194,8 @@ impl WorkerVoState {
     /// pending cleanup and revives the child instead.
     pub(super) fn bump_cleanup_generation(&mut self) {
         self.cleanup_generation = self.cleanup_generation.wrapping_add(1);
+        // A fresh cleanup cycle (or a revive) starts with a clean release-attempt budget.
+        self.cleanup_release_attempts = 0;
     }
 
     /// Queues a follow-up message and transitions the child into `Running`.
@@ -380,6 +395,10 @@ impl VoState for WorkerVoState {
                 .get_json(K_CLEANUP_GENERATION)
                 .await?
                 .unwrap_or_default(),
+            cleanup_release_attempts: reader
+                .get_json(K_CLEANUP_RELEASE_ATTEMPTS)
+                .await?
+                .unwrap_or_default(),
             pending_input_requests: reader
                 .get_json(K_PENDING_INPUT_REQUESTS)
                 .await?
@@ -421,6 +440,12 @@ impl VoState for WorkerVoState {
         set_or_clear_vec(ctx, K_RESULT_WAITERS, &self.result_waiters);
         set_or_clear_opt(ctx, K_LAST_HEARTBEAT_AT, self.last_heartbeat_at.as_ref());
         set_or_clear_scalar(ctx, K_CLEANUP_GENERATION, self.cleanup_generation, 0);
+        set_or_clear_scalar(
+            ctx,
+            K_CLEANUP_RELEASE_ATTEMPTS,
+            self.cleanup_release_attempts,
+            0,
+        );
         set_or_clear_vec(ctx, K_PENDING_INPUT_REQUESTS, &self.pending_input_requests);
     }
 }
@@ -796,6 +821,18 @@ mod tests {
             scheduled_generation, state.cleanup_generation,
             "an accepted message must supersede the pending cleanup generation"
         );
+    }
+
+    #[test]
+    fn bump_cleanup_generation_resets_release_attempts() {
+        // Pins: a fresh cleanup cycle (or a revive) starts with a clean release-attempt
+        // budget, so a stale counter from a prior cycle cannot prematurely force-clear.
+        let mut state = WorkerVoState {
+            cleanup_release_attempts: super::MAX_CLEANUP_RELEASE_ATTEMPTS - 1,
+            ..WorkerVoState::default()
+        };
+        state.bump_cleanup_generation();
+        assert_eq!(state.cleanup_release_attempts, 0);
     }
 
     #[test]

@@ -207,6 +207,15 @@ fn enqueue_progress_events(state: &mut SessionMessageStreamState, records: Vec<E
         state.next_sequence_num = state
             .next_sequence_num
             .max(record.sequence_num.saturating_add(1));
+        // A follow-on coordinator turn (auto-delegation synthesis or a guarded child-signal
+        // resume) runs under a NEW turn id after the initial turn completed. Re-target the
+        // stream's terminal turn to it so the stream neither closes early — before the
+        // follow-on answer streams — nor leaks waiting on a turn id that never completes again.
+        // `pending_events` (this event) is drained before the done-check, so the poll that
+        // observes the follow-on event never closes on the stale terminal turn.
+        if let Some(turn_id) = follow_on_terminal_turn(&record.event) {
+            state.terminal_turn_id = Some(turn_id.to_string());
+        }
         state.pending_events.push_back(record_sse_event(&record));
     }
 }
@@ -239,14 +248,14 @@ fn session_message_terminal_done(
             .is_some_and(|outcome| outcome.turn_id == turn_id);
         // Keep the stream open across the detached window: a coordinator turn can
         // return and go idle while spawned children keep running. Only close once
-        // the started turn completed AND no non-terminal descendant remains. With
+        // the started turn completed AND no descendant is still doing work. With
         // no children this collapses to the prior turn-completion check, so the
         // no-delegation case is unchanged.
-        return turn_completed && !child_progress_has_active(&progress.child_progress);
+        return turn_completed && !child_progress_blocks_close(&progress.child_progress);
     }
     progress.snapshot.active_turn_id.is_none()
         && progress.snapshot.pending_message_count == 0
-        && !child_progress_has_active(&progress.child_progress)
+        && !child_progress_blocks_close(&progress.child_progress)
 }
 
 /// Whether a child lifecycle state is terminal (no further work expected).
@@ -266,9 +275,29 @@ fn active_child_summary(
         .find(|child| !is_terminal_child_state(child.state))
 }
 
-/// Whether any descendant worker is still in a non-terminal state.
-fn child_progress_has_active(child_progress: &[WorkerProgressSummary]) -> bool {
-    active_child_summary(child_progress).is_some()
+/// The follow-on coordinator turn id introduced by a synthesis/resume event, if any.
+///
+/// After the initial turn completes, auto-delegation synthesis and guarded child-signal resume
+/// each dispatch a NEW coordinator turn. The SSE stream re-targets its terminal turn to this id
+/// so it closes on the follow-on turn's completion rather than the original turn's.
+fn follow_on_terminal_turn(event: &Event) -> Option<&str> {
+    match event {
+        Event::WorkerResultSynthesisRequested { turn_id, .. }
+        | Event::WorkerParentResumeRequested { turn_id, .. } => Some(turn_id),
+        _ => None,
+    }
+}
+
+/// Whether any descendant is still doing work that should hold the SSE stream open.
+///
+/// A non-terminal child normally blocks close, EXCEPT one whose heartbeat has gone stale
+/// without awaiting input: the liveness watchdog has flagged it as stuck, so it must not hold
+/// the stream open (and its 1s poll) indefinitely. An `awaiting_input` child is never treated
+/// as stuck — it is legitimately parked on a question.
+fn child_progress_blocks_close(child_progress: &[WorkerProgressSummary]) -> bool {
+    child_progress.iter().any(|child| {
+        !is_terminal_child_state(child.state) && (!child.stale || child.awaiting_input)
+    })
 }
 
 fn done_sse_event(state: &SessionMessageStreamState, progress: &SessionProgress) -> SseEvent {
@@ -613,6 +642,108 @@ mod tests {
         assert!(session_message_terminal_done(None, &idle));
         idle.child_progress = vec![child_summary(WorkerState::Completed, Some("done"))];
         assert!(session_message_terminal_done(None, &idle));
+    }
+
+    #[test]
+    fn follow_on_terminal_turn_targets_synthesis_and_resume_turns() {
+        // Pins (B3): synthesis and guarded-resume events carry the follow-on coordinator turn id
+        // the stream must re-target to; other events do not move the terminal turn.
+        assert_eq!(
+            follow_on_terminal_turn(&Event::WorkerResultSynthesisRequested {
+                user_sequence_num: 1,
+                turn_id: "synth-turn".to_string(),
+                reason: "synthesize".to_string(),
+            }),
+            Some("synth-turn")
+        );
+        assert_eq!(
+            follow_on_terminal_turn(&Event::WorkerParentResumeRequested {
+                signal_id: moa_core::AgentSignalId::new(),
+                worker_id: "child-1".to_string(),
+                turn_id: "resume-turn".to_string(),
+                reason: "child needs attention".to_string(),
+            }),
+            Some("resume-turn")
+        );
+        assert_eq!(
+            follow_on_terminal_turn(&Event::Warning {
+                message: "x".to_string()
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn stream_tracks_follow_on_synthesis_turn_completion() {
+        // Pins (B3): after re-targeting to the synthesis turn, the stream stays open until THAT
+        // turn completes (not the original turn), then closes — so it neither closes early nor
+        // leaks.
+        let mut running = session_progress(
+            Some("synth-turn".to_string()),
+            0,
+            Some(TurnOutcome {
+                turn_id: "started-turn".to_string(),
+                kind: TurnOutcomeKind::Completed,
+                message: "spawned".to_string(),
+            }),
+        );
+        running.child_progress = vec![child_summary(WorkerState::Completed, Some("done"))];
+        // Original turn's completion + terminal children no longer closes the re-targeted stream.
+        assert!(!session_message_terminal_done(Some("synth-turn"), &running));
+
+        let done = session_progress(
+            None,
+            0,
+            Some(TurnOutcome {
+                turn_id: "synth-turn".to_string(),
+                kind: TurnOutcomeKind::Completed,
+                message: "final answer".to_string(),
+            }),
+        );
+        assert!(session_message_terminal_done(Some("synth-turn"), &done));
+    }
+
+    #[test]
+    fn stream_closes_when_only_remaining_child_is_stale_and_not_awaiting_input() {
+        // Pins (B11): a stuck (stale, not awaiting input) worker must not hold the stream — and
+        // its 1s poll — open forever.
+        let mut progress = session_progress(
+            None,
+            0,
+            Some(TurnOutcome {
+                turn_id: "started-turn".to_string(),
+                kind: TurnOutcomeKind::Completed,
+                message: "done".to_string(),
+            }),
+        );
+        let stale_stuck = WorkerProgressSummary {
+            stale: true,
+            ..child_summary(WorkerState::Running, Some("stuck"))
+        };
+        progress.child_progress = vec![stale_stuck];
+        assert!(session_message_terminal_done(
+            Some("started-turn"),
+            &progress
+        ));
+
+        // A stale child that is awaiting input is legitimately parked → stream stays open.
+        let stale_awaiting = WorkerProgressSummary {
+            stale: true,
+            awaiting_input: true,
+            ..child_summary(WorkerState::Running, Some("parked"))
+        };
+        progress.child_progress = vec![stale_awaiting];
+        assert!(!session_message_terminal_done(
+            Some("started-turn"),
+            &progress
+        ));
+
+        // A healthy (non-stale) running child → stream stays open.
+        progress.child_progress = vec![child_summary(WorkerState::Running, Some("working"))];
+        assert!(!session_message_terminal_done(
+            Some("started-turn"),
+            &progress
+        ));
     }
 
     fn event_record(sequence_num: SequenceNum) -> EventRecord {

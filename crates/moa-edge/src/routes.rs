@@ -661,10 +661,9 @@ async fn handle_session_message_stream(
         }
     };
 
+    let reconnect_after = last_event_id_sequence(&headers);
     let next_sequence_num =
-        match initial_stream_sequence(&state, &input.message, last_event_id_sequence(&headers))
-            .await
-        {
+        match initial_stream_sequence(&state, &input.message, reconnect_after).await {
             Ok(next_sequence_num) => next_sequence_num,
             Err(error) => {
                 tracing::warn!(error = %error.summary(), "session stream preflight failed");
@@ -672,6 +671,20 @@ async fn handle_session_message_stream(
                 return error.into_response();
             }
         };
+
+    if reconnect_after.is_some() {
+        // Reconnect (Last-Event-ID present): the message was already admitted on the original
+        // request. Re-admitting it here would start a duplicate turn, so resume the stream from
+        // the cursor without re-admitting or re-persisting attachments.
+        span.record("http.status_code", 200_i64);
+        let resumed = ContactSessionMessageResponse {
+            session_id: input.message.session_id,
+            queued: false,
+            started_turn_id: None,
+        };
+        return session_message_stream_response(state, input.message, resumed, next_sequence_num);
+    }
+
     let mut stored_attachments = Vec::new();
     if !input.uploads.is_empty() {
         match persist_session_attachments(&state, &input.message, input.uploads).await {

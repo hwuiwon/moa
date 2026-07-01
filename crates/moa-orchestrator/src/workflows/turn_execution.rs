@@ -65,7 +65,10 @@ use tracing::Instrument;
 
 use crate::OrchestratorCtx;
 use crate::brain_bridge::{PreparedTurnRequest, QueryRewriteCacheEntry, prepare_turn_request};
-use crate::objects::session::{RegisterAutoDelegationRunInput, SessionClient};
+use crate::objects::session::{
+    AutoDelegationFanInStatus, PollAutoDelegationFanInInput, RegisterAutoDelegationRunInput,
+    SessionClient,
+};
 use crate::objects::worker::WorkerClient;
 use crate::restate_identity::with_identity_headers;
 use crate::services::{llm_gateway::LLMGatewayClient, session_store::RestateSessionStoreClient};
@@ -1204,6 +1207,12 @@ async fn register_auto_delegation_run(
     Ok(())
 }
 
+/// Consecutive fan-in wait cycles (each up to `MAX_WAIT_TIMEOUT_MS`) on the same still-pending
+/// worker before it is failed out to unblock synthesis. At 4 cycles this bounds a stuck worker
+/// to roughly two minutes of silence — far beyond normal completion — while staying well under
+/// the session/turn timeout.
+const MAX_FAN_IN_STUCK_CYCLES: u32 = 4;
+
 async fn maybe_fan_in_auto_delegation_results(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
@@ -1242,47 +1251,66 @@ async fn maybe_fan_in_auto_delegation_results(
         return Ok(AutoDelegationFanInOutcome::Skipped);
     }
 
-    let children = session_child_refs(ctx, session_id).await?;
-    match auto_delegation_fan_in_readiness(&worker_ids, &children) {
-        AutoDelegationFanInReadiness::Complete(results) => {
-            append_auto_delegation_result_bundle(ctx, session_id, user_sequence_num, results)
-                .await?;
+    // Bound the fan-in wait so one never-terminal worker (stale/hung) cannot hang the whole
+    // session: track consecutive cycles spent on the same still-pending worker and, once the
+    // bound is exceeded, ask the Session VO to fail it out and complete the run with the
+    // partial results the coordinator can still synthesize from.
+    let stuck_worker = ctx
+        .get::<Json<String>>(driver_progress::RootTurnStateKey::AUTO_DELEGATION_FAN_IN_STUCK_WORKER)
+        .await?
+        .map(Json::into_inner);
+    let stuck_count = ctx
+        .get::<Json<u32>>(driver_progress::RootTurnStateKey::AUTO_DELEGATION_FAN_IN_STUCK_COUNT)
+        .await?
+        .map(Json::into_inner)
+        .unwrap_or(0);
+    let force_complete = stuck_count >= MAX_FAN_IN_STUCK_CYCLES;
+
+    // Fan-in readiness is computed by the Session VO from run-owned terminal snapshots, not
+    // from the transient `children` registry: a fast worker that self-cleaned (or was
+    // consumed by a manual `wait_worker`) can no longer strand the bundle or make the root
+    // turn synthesize before its siblings finish. The handler also emits the durable bundle
+    // and claims synthesis ownership for this root turn (preventing a duplicate synthesis
+    // turn on completion).
+    let status = ctx
+        .object_client::<SessionClient>(session_id.to_string())
+        .poll_auto_delegation_fan_in(Json::from(PollAutoDelegationFanInInput {
+            user_sequence_num,
+            root_turn_id: turn_id.to_string(),
+            force_complete,
+        }))
+        .call()
+        .await?
+        .into_inner();
+    match status {
+        AutoDelegationFanInStatus::Ready => {
             ctx.set(
                 driver_progress::RootTurnStateKey::AUTO_DELEGATION_FAN_IN_SEQUENCE,
                 Json::from(user_sequence_num),
             );
             Ok(AutoDelegationFanInOutcome::Continue)
         }
-        AutoDelegationFanInReadiness::Pending(worker_id) => {
+        AutoDelegationFanInStatus::Pending { worker_id } => {
+            // Count consecutive cycles on the same worker; reset when fan-in makes progress
+            // (a different worker becomes the first still-pending one).
+            let next_count = if stuck_worker.as_deref() == Some(worker_id.as_str()) {
+                stuck_count.saturating_add(1)
+            } else {
+                1
+            };
+            ctx.set(
+                driver_progress::RootTurnStateKey::AUTO_DELEGATION_FAN_IN_STUCK_WORKER,
+                Json::from(worker_id.clone()),
+            );
+            ctx.set(
+                driver_progress::RootTurnStateKey::AUTO_DELEGATION_FAN_IN_STUCK_COUNT,
+                Json::from(next_count),
+            );
             wait_for_auto_delegation_worker(ctx, session_id, turn_id, &worker_id, last_summary)
                 .await
         }
-        AutoDelegationFanInReadiness::Unavailable => Ok(AutoDelegationFanInOutcome::Skipped),
+        AutoDelegationFanInStatus::NotRunning => Ok(AutoDelegationFanInOutcome::Skipped),
     }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum AutoDelegationFanInReadiness {
-    Complete(Vec<WorkerTerminalResult>),
-    Pending(String),
-    Unavailable,
-}
-
-fn auto_delegation_fan_in_readiness(
-    worker_ids: &[String],
-    children: &[WorkerChildRef],
-) -> AutoDelegationFanInReadiness {
-    let mut results = Vec::with_capacity(worker_ids.len());
-    for worker_id in worker_ids {
-        let Some(child) = children.iter().find(|child| child.id == *worker_id) else {
-            return AutoDelegationFanInReadiness::Unavailable;
-        };
-        let Some(terminal) = child.terminal.as_ref() else {
-            return AutoDelegationFanInReadiness::Pending(worker_id.clone());
-        };
-        results.push(terminal.clone());
-    }
-    AutoDelegationFanInReadiness::Complete(results)
 }
 
 async fn wait_for_auto_delegation_worker(
@@ -1622,30 +1650,6 @@ async fn append_auto_delegation_result(
     if !output.is_error {
         record_segment_tool_use(ctx, session_id, &invocation.name).await?;
     }
-    Ok(())
-}
-
-async fn append_auto_delegation_result_bundle(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    user_sequence_num: u64,
-    results: Vec<WorkerTerminalResult>,
-) -> Result<(), HandlerError> {
-    let persist_span = event_persist_span(1);
-    let persist_started = Instant::now();
-    ctx.service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event: Event::WorkerResultBundle {
-                user_sequence_num,
-                results,
-            },
-            dedupe_key: Some(format!("auto_delegation_fan_in:{user_sequence_num}")),
-        }))
-        .call()
-        .instrument(persist_span)
-        .await?;
-    record_turn_event_persist_duration(persist_started.elapsed(), 1);
     Ok(())
 }
 
@@ -2788,58 +2792,10 @@ mod tests {
         assert_eq!(remaining_worker_capacity(&children), 1);
     }
 
-    #[test]
-    fn auto_delegation_fan_in_collects_terminal_results_in_scheduled_order() {
-        // Pins: the coordinator synthesis bundle follows DAG scheduling order, not VO child order.
-        let worker_ids = vec!["worker-b".to_string(), "worker-a".to_string()];
-        let children = vec![
-            worker_child("worker-a", Some(worker_terminal("worker-a", "activation"))),
-            worker_child("worker-b", Some(worker_terminal("worker-b", "retention"))),
-        ];
-
-        let readiness = auto_delegation_fan_in_readiness(&worker_ids, &children);
-
-        let AutoDelegationFanInReadiness::Complete(results) = readiness else {
-            panic!("expected complete fan-in readiness");
-        };
-        assert_eq!(
-            results
-                .iter()
-                .map(|terminal| terminal.result.worker_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["worker-b", "worker-a"]
-        );
-    }
-
-    #[test]
-    fn auto_delegation_fan_in_waits_for_first_pending_worker() {
-        // Pins: deterministic fan-in blocks before the model call until tracked workers finish.
-        let worker_ids = vec!["worker-a".to_string(), "worker-b".to_string()];
-        let children = vec![
-            worker_child("worker-a", Some(worker_terminal("worker-a", "activation"))),
-            worker_child("worker-b", None),
-        ];
-
-        assert_eq!(
-            auto_delegation_fan_in_readiness(&worker_ids, &children),
-            AutoDelegationFanInReadiness::Pending("worker-b".to_string())
-        );
-    }
-
-    #[test]
-    fn auto_delegation_fan_in_skips_when_tracked_worker_is_unavailable() {
-        // Pins: a missing child ref does not spin the coordinator loop forever.
-        let worker_ids = vec!["worker-a".to_string(), "missing-worker".to_string()];
-        let children = vec![worker_child(
-            "worker-a",
-            Some(worker_terminal("worker-a", "activation")),
-        )];
-
-        assert_eq!(
-            auto_delegation_fan_in_readiness(&worker_ids, &children),
-            AutoDelegationFanInReadiness::Unavailable
-        );
-    }
+    // Fan-in readiness/ordering is now owned by `SessionVoState` (run-owned terminal
+    // snapshots); those behaviors are pinned by unit tests in `objects::session::state`
+    // (`auto_delegation_bundle_*`), which also cover the self-cleanup / consume races that
+    // the former child-registry readiness helper could not.
 
     #[test]
     fn auto_delegation_spawn_input_is_generic_and_bounded() {
@@ -2930,28 +2886,5 @@ mod tests {
             tool_call.invocation.id.as_deref(),
             Some("fc_auto_delegation_42_10000_finance_model_v1")
         );
-    }
-
-    fn worker_child(id: &str, terminal: Option<moa_core::WorkerTerminalResult>) -> WorkerChildRef {
-        WorkerChildRef {
-            id: id.to_string(),
-            task_hash: format!("hash-{id}"),
-            budget_tokens: 128,
-            terminal,
-        }
-    }
-
-    fn worker_terminal(worker_id: &str, output: &str) -> moa_core::WorkerTerminalResult {
-        moa_core::WorkerTerminalResult {
-            state: moa_core::WorkerState::Completed,
-            result: moa_core::WorkerResult {
-                worker_id: worker_id.to_string(),
-                success: true,
-                output: output.to_string(),
-                tokens_used: 17,
-                tools_invoked: 1,
-                error: None,
-            },
-        }
     }
 }

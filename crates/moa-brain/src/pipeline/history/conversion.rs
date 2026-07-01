@@ -13,9 +13,9 @@ pub(super) fn compile_records(
     records: &[&EventRecord],
     tool_output: &ToolOutputConfig,
     file_read_paths: &HashMap<ToolCallId, String>,
+    answered_input_requests: &HashSet<String>,
+    child_report_tool_ids: &HashSet<ToolCallId>,
 ) -> Result<Vec<CompiledRecordMessage>> {
-    let answered_input_requests = answered_worker_inputs(records);
-    let child_report_tool_ids = child_report_tool_ids(records);
     records
         .iter()
         .filter_map(|record| {
@@ -23,14 +23,17 @@ pub(super) fn compile_records(
                 record,
                 tool_output,
                 file_read_paths,
-                &answered_input_requests,
-                &child_report_tool_ids,
+                answered_input_requests,
+                child_report_tool_ids,
             )
         })
         .collect::<Result<Vec<_>>>()
 }
 
-fn child_report_tool_ids(records: &[&EventRecord]) -> HashSet<ToolCallId> {
+/// Tool-call ids of child-report tools (`request_input`/`report_to_parent`) across the given
+/// records. Computed over the full visible window by callers so a child-report call and its
+/// result rendered in different history slices are still paired (no dangling `tool_result`).
+pub(super) fn child_report_tool_ids(records: &[&EventRecord]) -> HashSet<ToolCallId> {
     records
         .iter()
         .filter_map(|record| match &record.event {
@@ -281,7 +284,10 @@ fn event_to_context_message(
     }
 }
 
-fn answered_worker_inputs(records: &[&EventRecord]) -> HashSet<String> {
+/// Input-request ids answered by a `WorkerMessageSent` across the given records. Computed over
+/// the full visible window by callers so an answered NeedsInput signal is suppressed even when
+/// the signal and its answer fall in different history slices.
+pub(super) fn answered_worker_inputs(records: &[&EventRecord]) -> HashSet<String> {
     records
         .iter()
         .filter_map(|record| match &record.event {
@@ -824,6 +830,90 @@ mod tests {
         assert!(messages[1].tool_invocation.is_none());
         assert!(messages[1].content.contains("<child_report_tool_result"));
         assert!(messages[1].content_blocks.is_none());
+    }
+
+    #[test]
+    fn child_report_tool_result_pairs_across_history_slice_boundary() {
+        // Pins (B7): a child-report tool call can age into the `older` slice while its result
+        // sits in `recent`. The suppression set is computed over the full visible window, so the
+        // recent-slice result still renders as system evidence — not a dangling provider
+        // `tool_result` with no matching `tool_use` (which the provider rejects with a 400).
+        use std::collections::HashMap;
+
+        use moa_core::ToolOutputConfig;
+
+        use super::{answered_worker_inputs, child_report_tool_ids, compile_records};
+
+        let session = session();
+        let tool_id = ToolCallId::new();
+        let call = event_record(
+            &session.id,
+            0,
+            Event::ToolCall {
+                tool_id,
+                provider_tool_use_id: Some("fc_request_input".to_string()),
+                provider_thought_signature: None,
+                tool_name: "request_input".to_string(),
+                input: serde_json::json!({"audience": "coordinator", "question": "which artifact?"}),
+                hand_id: None,
+            },
+        );
+        let result = event_record(
+            &session.id,
+            1,
+            Event::ToolResult {
+                tool_id,
+                provider_tool_use_id: Some("fc_request_input".to_string()),
+                output: ToolOutput::text("use the packing list", Duration::ZERO),
+                original_output_tokens: None,
+                success: true,
+                duration_ms: 0,
+            },
+        );
+
+        // The call is in the older slice; only the result is compiled in the recent slice.
+        let visible = vec![&call, &result];
+        let recent = vec![&result];
+        let tool_output = ToolOutputConfig::default();
+        let file_read_paths = HashMap::new();
+        let answered = answered_worker_inputs(&visible);
+
+        // Computed over the full window (includes the call): the result is system evidence.
+        let union_ids = child_report_tool_ids(&visible);
+        let paired = compile_records(
+            &recent,
+            &tool_output,
+            &file_read_paths,
+            &answered,
+            &union_ids,
+        )
+        .unwrap();
+        assert_eq!(paired.len(), 1);
+        assert!(paired[0].message.tool_invocation.is_none());
+        assert!(
+            paired[0]
+                .message
+                .content
+                .contains("<child_report_tool_result")
+        );
+
+        // Control: computed over the recent slice alone (missing the call), the result would
+        // fall back to a provider tool_result — the cross-slice bug this fix prevents.
+        let recent_only_ids = child_report_tool_ids(&recent);
+        let broken = compile_records(
+            &recent,
+            &tool_output,
+            &file_read_paths,
+            &answered,
+            &recent_only_ids,
+        )
+        .unwrap();
+        assert!(
+            !broken[0]
+                .message
+                .content
+                .contains("<child_report_tool_result")
+        );
     }
 
     #[test]

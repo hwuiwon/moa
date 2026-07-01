@@ -583,14 +583,10 @@ async fn handle_delegation_tool(
     } = request;
     let invocation = tool_call.invocation.clone();
     append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
-    if moa_core::DelegationTool::from_invocation(&invocation)
-        .map_err(|error| TerminalError::new(error.to_string()))?
-        .is_none()
-    {
-        return Err(
-            TerminalError::new(format!("unsupported delegation tool {}", invocation.name)).into(),
-        );
-    }
+    // Workers are never granted delegation tools, so any delegation-named call reaching here is a
+    // model hallucination. Return a graceful, recoverable tool error WITHOUT parsing the
+    // (possibly malformed) invocation — parsing and erroring on it would fail the whole worker
+    // turn instead of steering the model back on task.
 
     let span = tool_dispatch_span(&invocation.name);
     let cadence = driver_progress::current_cadence();

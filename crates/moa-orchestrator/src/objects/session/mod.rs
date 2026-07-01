@@ -93,6 +93,38 @@ pub struct RegisterAutoDelegationRunInput {
     pub worker_ids: Vec<WorkerId>,
 }
 
+/// Input for polling deterministic auto-delegation fan-in from the root turn.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PollAutoDelegationFanInInput {
+    /// User-message sequence whose run the root turn is fanning in.
+    pub user_sequence_num: u64,
+    /// Active root turn id, claimed as the synthesis owner when the bundle is ready.
+    pub root_turn_id: String,
+    /// When true, fail out any worker still not terminal and complete the run now, rather than
+    /// reporting `Pending`. Set once the root fan-in wait bound for a stuck worker is exceeded.
+    #[serde(default)]
+    pub force_complete: bool,
+}
+
+/// Run-owned fan-in status reported to the root turn from the Session VO.
+///
+/// Computed from the run's own captured terminal snapshots, so a worker removed from the
+/// transient `children` registry (self-cleanup or `wait_worker` consume) cannot make a
+/// still-pending run look complete or a complete run look unavailable.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AutoDelegationFanInStatus {
+    /// Every scheduled worker reported; the durable bundle is emitted and synthesis is
+    /// owned by the requesting root turn. The caller may proceed to synthesize.
+    Ready,
+    /// At least one scheduled worker has not reported; the caller should wait on it.
+    Pending {
+        /// First scheduled worker still missing a terminal result.
+        worker_id: WorkerId,
+    },
+    /// No active auto-delegation run matches the requested user sequence.
+    NotRunning,
+}
+
 /// Internal payload for a generation-guarded progress-narration tick self-call.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NarrationTickRequest {
@@ -174,6 +206,15 @@ pub trait Session {
     async fn register_auto_delegation_run(
         input: Json<RegisterAutoDelegationRunInput>,
     ) -> Result<(), HandlerError>;
+
+    /// Reports run-owned auto-delegation fan-in status to the active root turn.
+    ///
+    /// Emits the durable result bundle when the run is complete (idempotent) and claims
+    /// synthesis ownership for the requesting root turn, so the completion fallback does not
+    /// dispatch a duplicate synthesis turn.
+    async fn poll_auto_delegation_fan_in(
+        input: Json<PollAutoDelegationFanInInput>,
+    ) -> Result<Json<AutoDelegationFanInStatus>, HandlerError>;
 
     /// Removes a root-owned child worker from the active registry.
     async fn remove_child(worker_id: String) -> Result<(), HandlerError>;

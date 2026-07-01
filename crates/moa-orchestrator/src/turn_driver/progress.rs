@@ -43,6 +43,13 @@ impl RootTurnStateKey {
     /// User-message sequence for which auto-delegated worker results were bundled.
     pub(crate) const AUTO_DELEGATION_FAN_IN_SEQUENCE: &'static str =
         "auto_delegation_fan_in_sequence";
+    /// Worker id the root fan-in has been waiting on across consecutive stuck cycles.
+    pub(crate) const AUTO_DELEGATION_FAN_IN_STUCK_WORKER: &'static str =
+        "auto_delegation_fan_in_stuck_worker";
+    /// Consecutive fan-in wait cycles spent on the same still-pending worker, used to bound the
+    /// wait so one never-terminal worker cannot hang the whole session.
+    pub(crate) const AUTO_DELEGATION_FAN_IN_STUCK_COUNT: &'static str =
+        "auto_delegation_fan_in_stuck_count";
 }
 
 /// Progress cadence derived from session limits.
