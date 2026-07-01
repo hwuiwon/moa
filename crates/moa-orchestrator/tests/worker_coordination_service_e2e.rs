@@ -194,6 +194,54 @@ async fn record_child_signal(
     Ok(())
 }
 
+/// Registers a deterministic auto-delegation run via `Session/register_auto_delegation_run`
+/// (the same write `TurnExecution` performs after scheduling the plan's ready workers).
+async fn register_auto_delegation_run(
+    client: &reqwest::Client,
+    session: &InitializedSession,
+    user_sequence_num: u64,
+    worker_ids: &[String],
+) -> Result<()> {
+    client
+        .post(session_url(&session.key(), "register_auto_delegation_run"))
+        .json(&serde_json::json!({
+            "user_sequence_num": user_sequence_num,
+            "worker_ids": worker_ids,
+        }))
+        .send()
+        .await
+        .context("send Session register_auto_delegation_run")?
+        .error_for_status()
+        .context("Session register_auto_delegation_run should succeed")?;
+    Ok(())
+}
+
+/// Polls run-owned fan-in status via `Session/poll_auto_delegation_fan_in`, returning the raw
+/// `AutoDelegationFanInStatus` (`"Ready"` / `"NotRunning"` / `{"Pending": {...}}`).
+async fn poll_auto_delegation_fan_in(
+    client: &reqwest::Client,
+    session: &InitializedSession,
+    user_sequence_num: u64,
+    root_turn_id: &str,
+    force_complete: bool,
+) -> Result<serde_json::Value> {
+    client
+        .post(session_url(&session.key(), "poll_auto_delegation_fan_in"))
+        .json(&serde_json::json!({
+            "user_sequence_num": user_sequence_num,
+            "root_turn_id": root_turn_id,
+            "force_complete": force_complete,
+        }))
+        .send()
+        .await
+        .context("send Session poll_auto_delegation_fan_in")?
+        .error_for_status()
+        .context("Session poll_auto_delegation_fan_in should succeed")?
+        .json::<serde_json::Value>()
+        .await
+        .context("deserialize Session poll_auto_delegation_fan_in response")
+}
+
 /// Reads the root-owned active child registry via the shared `Session/child_refs`.
 async fn child_refs(
     client: &reqwest::Client,
@@ -275,6 +323,24 @@ fn count_signal_events(progress: &ProgressView, signal_id: &str) -> usize {
                 && event["data"]["signal_id"] == serde_json::Value::String(signal_id.to_string())
         })
         .count()
+}
+
+/// Returns the `WorkerResultBundle` events for one `user_sequence_num` in a progress payload.
+///
+/// Each progress event is a serialized `EventRecord`; the durable `event` payload is adjacently
+/// tagged (`{"type": ..., "data": {...}}`), so the bundle's sequence lives at
+/// `event.data.user_sequence_num` and its ordered results at `event.data.results`.
+fn bundle_events(progress: &ProgressView, user_sequence_num: u64) -> Vec<serde_json::Value> {
+    progress
+        .events
+        .iter()
+        .filter(|record| {
+            let event = &record["event"];
+            event["type"] == "WorkerResultBundle"
+                && event["data"]["user_sequence_num"] == serde_json::json!(user_sequence_num)
+        })
+        .map(|record| record["event"].clone())
+        .collect()
 }
 
 /// Polls `Session/progress` until `predicate` holds or `timeout` elapses.
@@ -432,12 +498,11 @@ async fn coordinator_only_cancel_leaves_child_active_service_e2e() -> Result<()>
     // The child VO received no cancel: an uninitialized child reports Uninitialized, never
     // Cancelled. (No background path cancels a child, so this single read is deterministic.)
     let status = worker_status(&client, &child_id).await?;
-    assert_ne!(
+    assert_eq!(
         status.state,
-        WorkerState::Cancelled,
+        WorkerState::Uninitialized,
         "CoordinatorOnly cancel must not cascade to the child VO: {status:?}"
     );
-    assert_eq!(status.state, WorkerState::Uninitialized);
     Ok(())
 }
 
@@ -589,6 +654,208 @@ async fn terminal_child_caches_and_consumes_result_service_e2e() -> Result<()> {
     assert!(
         refs.iter().all(|child| child.id != child_id),
         "consumed terminal child must be dropped from child_refs: {refs:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
+async fn auto_delegation_fan_in_emits_single_ordered_bundle_service_e2e() -> Result<()> {
+    // Pins (B1 slow-sibling fan-in + bundle dedupe): once every scheduled worker of an
+    // auto-delegation run reaches terminal, the Session VO emits exactly one durable
+    // WorkerResultBundle whose results follow the SCHEDULED order (not completion order), and a
+    // handler replay (Restate re-invoking mark_child_terminal, plus the root turn re-polling
+    // fan-in) never appends a second bundle. Driven directly through the durable VO handlers so no
+    // synthesis turn runs (no owning identity is recorded without a real turn), which keeps the
+    // event-log assertions deterministic under the mock provider.
+    const FAN_IN_SEQ: u64 = 1;
+    let client = reqwest::Client::new();
+    let session = create_initialized_session(&client).await?;
+    let worker_a = unique_child_id();
+    let worker_b = unique_child_id();
+
+    for (id, task) in [(&worker_a, "task-a"), (&worker_b, "task-b")] {
+        register_child(
+            &client,
+            &session,
+            &WorkerChildRef {
+                id: id.clone(),
+                task_hash: format!("hash-{task}"),
+                budget_tokens: 4_096,
+                terminal: None,
+            },
+        )
+        .await?;
+    }
+
+    // Schedule order is [worker_b, worker_a]; workers finish in the OPPOSITE order below, so the
+    // bundle order can only match if fan-in preserves the scheduled order rather than completion.
+    register_auto_delegation_run(
+        &client,
+        &session,
+        FAN_IN_SEQ,
+        &[worker_b.clone(), worker_a.clone()],
+    )
+    .await?;
+
+    mark_child_terminal(
+        &client,
+        &session,
+        &MarkWorkerChildTerminalInput {
+            worker_id: worker_a.clone(),
+            terminal: completed_terminal(&worker_a, "a finished first"),
+        },
+    )
+    .await?;
+    // Not complete yet: the slow sibling (worker_b) is still pending, so no bundle is emitted.
+    let mid = session_progress(&client, &session).await?;
+    assert!(
+        bundle_events(&mid, FAN_IN_SEQ).is_empty(),
+        "no bundle before every scheduled worker is terminal"
+    );
+    mark_child_terminal(
+        &client,
+        &session,
+        &MarkWorkerChildTerminalInput {
+            worker_id: worker_b.clone(),
+            terminal: completed_terminal(&worker_b, "b finished last"),
+        },
+    )
+    .await?;
+
+    let progress = await_progress_matching(&client, &session, Duration::from_secs(10), |p| {
+        !bundle_events(p, FAN_IN_SEQ).is_empty()
+    })
+    .await?;
+    let bundles = bundle_events(&progress, FAN_IN_SEQ);
+    assert_eq!(
+        bundles.len(),
+        1,
+        "fan-in emits exactly one WorkerResultBundle: {bundles:?}"
+    );
+    let results = bundles[0]["data"]["results"]
+        .as_array()
+        .context("bundle carries a results array")?;
+    let order: Vec<&str> = results
+        .iter()
+        .map(|result| result["result"]["worker_id"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        order,
+        vec![worker_b.as_str(), worker_a.as_str()],
+        "bundle results follow scheduled order, not completion order"
+    );
+
+    // Handler replay 1: Restate may redeliver the terminal write; a replayed mark_child_terminal
+    // must not re-emit (the run's bundle_emitted guard makes it a no-op).
+    mark_child_terminal(
+        &client,
+        &session,
+        &MarkWorkerChildTerminalInput {
+            worker_id: worker_b.clone(),
+            terminal: completed_terminal(&worker_b, "redelivered"),
+        },
+    )
+    .await?;
+    // Handler replay 2: the active root turn re-polling fan-in after emission reports Ready and,
+    // via the same auto_delegation_fan_in:{seq} dedupe key, appends no second bundle.
+    let status =
+        poll_auto_delegation_fan_in(&client, &session, FAN_IN_SEQ, "root-turn-replay", false)
+            .await?;
+    assert_eq!(
+        status,
+        serde_json::json!("Ready"),
+        "re-poll after emission reports Ready without re-emitting"
+    );
+
+    let after_replay = session_progress(&client, &session).await?;
+    assert_eq!(
+        bundle_events(&after_replay, FAN_IN_SEQ).len(),
+        1,
+        "handler replay must not append a second WorkerResultBundle"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
+async fn unregistered_worker_signal_records_no_event_service_e2e() -> Result<()> {
+    // Pins (signal-ownership negative): a control-plane signal whose parent_session matches this
+    // session but whose worker is NOT a registered child appends ZERO WorkerSignalReceived events.
+    // The handler treats it as a success no-op (a worker that raced its own remove_child/self-clean),
+    // never a 403 that would permanently drop a legitimate late signal — but it injects nothing into
+    // the durable log. A second, registered "control" signal delivered afterward proves the log was
+    // observed, so the zero-count assertion is not merely a not-yet-landed event.
+    let client = reqwest::Client::new();
+    let session = create_initialized_session(&client).await?;
+
+    // The session owns one child; the negative signal targets a DIFFERENT, unregistered worker.
+    let registered = unique_child_id();
+    register_child(
+        &client,
+        &session,
+        &WorkerChildRef {
+            id: registered.clone(),
+            task_hash: "task-hash-owned".to_string(),
+            budget_tokens: 4_096,
+            terminal: None,
+        },
+    )
+    .await?;
+
+    let unregistered_signal_id = AgentSignalId::new();
+    let unregistered_signal = WorkerSignal {
+        signal_id: unregistered_signal_id,
+        worker_id: unique_child_id(),
+        parent_session: session.session_id,
+        kind: ChildSignalKind::Blocked,
+        severity: SignalSeverity::Warning,
+        summary: "signal from a worker not registered on this session".to_string(),
+        payload: serde_json::Value::Null,
+        created_at: Utc::now(),
+        resume_policy: ParentResumePolicy::Never,
+        input_request_id: None,
+        input_audience: None,
+    };
+    // The handler returns success (a no-op), not an error, for a parent-matching unregistered worker.
+    record_child_signal(&client, &session, &unregistered_signal).await?;
+
+    // Control signal for the registered child, delivered AFTER the unregistered one. Session VO
+    // handlers run serially per key, so by the time this control event is durable the earlier
+    // unregistered signal has already been fully processed — if it recorded an event, it would be
+    // visible now too.
+    let control_signal_id = AgentSignalId::new();
+    let control_signal = WorkerSignal {
+        signal_id: control_signal_id,
+        worker_id: registered,
+        parent_session: session.session_id,
+        kind: ChildSignalKind::Finding,
+        severity: SignalSeverity::Info,
+        summary: "registered control finding".to_string(),
+        payload: serde_json::Value::Null,
+        created_at: Utc::now(),
+        resume_policy: ParentResumePolicy::Never,
+        input_request_id: None,
+        input_audience: None,
+    };
+    record_child_signal(&client, &session, &control_signal).await?;
+
+    let control_id_str = control_signal_id.to_string();
+    let progress = await_progress_matching(&client, &session, Duration::from_secs(10), |p| {
+        count_signal_events(p, &control_id_str) >= 1
+    })
+    .await?;
+
+    let unregistered_id_str = unregistered_signal_id.to_string();
+    assert_eq!(
+        count_signal_events(&progress, &unregistered_id_str),
+        0,
+        "an unregistered worker's signal must append no WorkerSignalReceived event"
+    );
+    assert_eq!(
+        count_signal_events(&progress, &control_id_str),
+        1,
+        "the registered control signal is recorded, proving the event log was observed"
     );
     Ok(())
 }

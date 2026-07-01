@@ -4,7 +4,7 @@
 //! `coordination_cost_service_e2e`). The common case — a plain single-agent turn (context → model →
 //! tools → repeat) — is where per-user-message turn/tool-call waste is most likely to hide. This
 //! test drives a plain tool-using conversation with a keyed scripted provider and reconstructs a
-//! [`moa_core::ConversationCost`] so the exact model turns, tool calls, and internal round-trips per
+//! [`moa_eval_core::ConversationCost`] so the exact model turns, tool calls, and internal round-trips per
 //! user message are pinned and any regression (or optimization) is provable with zero LLM noise.
 //!
 //! Run: the fixture boots Postgres + Restate + OpenFGA testcontainers and builds
@@ -13,7 +13,7 @@
 
 #![cfg(feature = "integration")]
 
-use moa_core::ConversationCost;
+use moa_eval_core::ConversationCost;
 use moa_test_support::{ConversationOptions, OrchestratorTestFixture, drive_conversation};
 use serde_json::json;
 
@@ -82,10 +82,25 @@ async fn single_agent_plain_answer_loop_cost_service_e2e() {
         "the scripted answer carries output tokens"
     );
 
+    // The single final reply must be present and non-empty — an empty final would be a silent
+    // regression the turn/token counts alone do not catch.
+    let final_text = cost
+        .final_text
+        .as_deref()
+        .expect("the agent emitted a final BrainResponse");
+    assert!(
+        !final_text.is_empty(),
+        "the plain-answer final reply must be non-empty"
+    );
+    assert_eq!(
+        final_text, "The capital of France is Paris.",
+        "the final reply is the scripted answer"
+    );
+
     // The single-agent happy path makes ZERO Session/Worker VO round-trips and no fire-and-forget
     // sends — it only appends its own turn events. This is the coordination-overhead floor.
     assert!(
-        cost.coordination.present,
+        cost.coordination_present,
         "TurnMetrics were persisted (MOA_PERSIST_TURN_METRICS=1)"
     );
     assert_eq!(

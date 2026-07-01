@@ -1,7 +1,8 @@
 //! Score card schema and analytics-score flattening helpers.
 
 use chrono::{DateTime, Utc};
-use moa_core::{ConversationCost, SessionId, StoragePartitionId, UserId};
+use moa_core::{SessionId, StoragePartitionId, UserId};
+use moa_eval_core::ConversationCost;
 use moa_lineage_core::{ScoreRecord, ScoreSource, ScoreTarget, ScoreValue as LineageScoreValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
@@ -292,12 +293,12 @@ impl CoordinationScores {
         Self {
             model_turns: cost.model_turns,
             total_tool_calls: cost.total_tool_calls,
-            metrics_present: cost.coordination.present,
+            metrics_present: cost.coordination_present,
             session_vo_calls: cost.coordination.session_vo_calls,
             worker_vo_calls: cost.coordination.worker_vo_calls,
             vo_sends: cost.coordination.vo_sends,
             durable_appends: cost.coordination.durable_appends,
-            get_events_calls: cost.coordination.get_events_calls,
+            get_events_calls: cost.get_events_calls,
         }
     }
 

@@ -130,13 +130,10 @@ struct SessionMessageWorking {
     session_id: SessionId,
     /// Active descendant the liveness frame describes.
     worker_id: WorkerId,
-    /// Last known short summary for the active descendant, when available.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    summary: Option<String>,
-    /// Templated, assistant-voice liveness line for direct rendering.
+    /// Templated, assistant-voice liveness line for direct rendering. It already carries the
+    /// active descendant's summary and the elapsed silent window, so neither is duplicated as a
+    /// separate wire field.
     message: String,
-    /// Milliseconds of durable-event silence since the previous emitted frame.
-    elapsed_ms: u64,
 }
 
 async fn next_session_message_event(
@@ -354,9 +351,7 @@ fn working_frame_payload(
     SessionMessageWorking {
         session_id,
         worker_id: child.worker_id.clone(),
-        summary: child.last_summary.clone(),
         message,
-        elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
     }
 }
 
@@ -595,19 +590,20 @@ mod tests {
 
     #[test]
     fn working_frame_payload_renders_active_child_summary() {
-        // Pins: the silence-filler frame echoes the active child and reports the silent window.
+        // Pins: the silence-filler frame echoes the active child's summary and the silent window
+        // inside the pre-rendered `message`, and does not duplicate them as separate wire fields.
         let child = child_summary(WorkerState::Running, Some("indexing the corpus"));
         let payload =
             working_frame_payload(SessionId(Uuid::nil()), &child, Duration::from_secs(12));
 
         assert_eq!(payload.worker_id, "child-1");
-        assert_eq!(payload.summary.as_deref(), Some("indexing the corpus"));
-        assert_eq!(payload.elapsed_ms, 12_000);
         assert!(payload.message.contains("indexing the corpus"));
         assert!(payload.message.contains("12s"));
 
         let json = serde_json::to_value(&payload).expect("serialize working frame");
-        assert_eq!(json["elapsed_ms"], 12_000);
+        assert_eq!(json["worker_id"], "child-1");
+        assert!(json.get("summary").is_none());
+        assert!(json.get("elapsed_ms").is_none());
     }
 
     #[test]

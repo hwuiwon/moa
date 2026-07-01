@@ -4,7 +4,7 @@
 //! gates). Long conversations are where per-message overhead could compound: extra model turns as
 //! history grows, compaction/checkpoint behavior, and VO round-trip growth. This test drives a
 //! ~16-message conversation with a keyed scripted provider and reconstructs a
-//! [`moa_core::ConversationCost`] so the structural cost profile is pinned deterministically.
+//! [`moa_eval_core::ConversationCost`] so the structural cost profile is pinned deterministically.
 //!
 //! Scope note: the scripted provider reports a FIXED synthetic `input_tokens`, so this test
 //! measures STRUCTURAL waste (model turns per message, compaction triggers, round-trip growth) —
@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 
-use moa_core::ConversationCost;
+use moa_eval_core::ConversationCost;
 use moa_test_support::{ConversationOptions, OrchestratorTestFixture, drive_conversation};
 use serde_json::json;
 
@@ -94,13 +94,32 @@ async fn long_conversation_loop_cost_service_e2e() {
     // round-trips as history grows. This is the long-conversation turn floor — a regression that
     // adds a hidden per-message or history-rebuild model turn fails here.
     assert_eq!(
-        cost.model_turns,
-        MESSAGE_COUNT as u64,
+        cost.model_turns, MESSAGE_COUNT as u64,
         "exactly one model turn per user message; the loop adds no extra turns as history grows"
     );
-    assert_eq!(cost.total_tool_calls, 0, "a plain conversation uses no tools");
-    assert_eq!(cost.worker_spawns, 0, "plain conversation spawns no workers");
+    assert_eq!(
+        cost.total_tool_calls, 0,
+        "a plain conversation uses no tools"
+    );
+    assert_eq!(
+        cost.worker_spawns, 0,
+        "plain conversation spawns no workers"
+    );
     assert_eq!(cost.error_events, 0, "no durable errors on the happy path");
+    // The last user message must resolve to a present, non-empty acknowledgement — an empty final
+    // reply after a long history is a regression the turn/token counts alone would miss.
+    let final_text = cost
+        .final_text
+        .as_deref()
+        .expect("the last message emitted a final BrainResponse");
+    assert!(
+        !final_text.is_empty(),
+        "the final reply of the long conversation must be non-empty"
+    );
+    assert_eq!(
+        final_text, "Acknowledged.",
+        "each plain message resolves to the scripted acknowledgement"
+    );
     // Compaction (tier3) only triggers near the model's context ceiling (~160k tokens), so a
     // normal-length conversation must NOT compact and must NOT add summarization turns.
     assert_eq!(
@@ -110,7 +129,7 @@ async fn long_conversation_loop_cost_service_e2e() {
     // Non-delegating turns make no Session/Worker VO round-trips — coordination overhead does not
     // leak into a plain conversation, and it does not grow with history.
     assert!(
-        cost.coordination.present,
+        cost.coordination_present,
         "TurnMetrics were persisted (MOA_PERSIST_TURN_METRICS=1)"
     );
     assert_eq!(

@@ -62,6 +62,7 @@ pub(super) struct OrchestratorSpawnConfig<'a> {
     pub(super) postgres_url: &'a str,
     pub(super) admin_url: &'a str,
     pub(super) ingress_url: &'a str,
+    pub(super) redis_url: &'a str,
     pub(super) script_path: &'a Path,
     pub(super) fga_config: &'a FgaConfig,
     pub(super) extra_env: &'a [(String, String)],
@@ -79,6 +80,8 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
         .env("MOA_DATABASE_URL", config.postgres_url)
         .env("MOA_RESTATE_ADMIN_URL", config.admin_url)
         .env("MOA_RESTATE_INGRESS_URL", config.ingress_url)
+        .env("MOA_RUNTIME_CACHE_BACKEND", "redis")
+        .env("MOA_RUNTIME_CACHE_REDIS_URL", config.redis_url)
         .env(
             "MOA_PROVIDERS_OVERRIDE",
             format!("scripted:{}", config.script_path.display()),

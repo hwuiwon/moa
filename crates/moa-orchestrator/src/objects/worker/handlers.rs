@@ -590,7 +590,7 @@ async fn reschedule_cleanup(ctx: &ObjectContext<'_>, generation: u64) -> Result<
 /// under a session scope and there is nothing to release. The request is keyed by the
 /// owning session id (where the child's hands were provisioned: a worker tool call runs
 /// with `session_id = parent_session`) plus the child's own id, matching the
-/// `(session_id, worker_id)` hand scope used by `ToolRouter::destroy_worker_hands`.
+/// `(session_id, worker_id)` hand scope used by `ToolRouter::reclaim_hands`.
 fn release_worker_hands_request(
     parent_session: Option<SessionId>,
     worker_id: &str,

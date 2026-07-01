@@ -20,7 +20,6 @@
 //! from the previous turn, so status alone is an authoritative settle signal.
 
 use super::*;
-use moa_core::ConversationCost;
 use moa_core::wire::turn::{
     QueueMessageRequest, QueueMessageResponse, SessionProgress, SessionProgressRequest,
 };
@@ -78,30 +77,10 @@ pub async fn drive_conversation(
     fetch_all_events(client, session_id).await
 }
 
-/// Drives `session_id` through `turns` and hands the resulting durable event
-/// log to the Phase-1c cost analyzer, returning both the reconstructed
-/// [`ConversationCost`] and the raw events it was derived from.
-///
-/// This is the integrated path used by deterministic coordination tests: drive
-/// the conversation, then assert on model-side and coordination KPIs. The raw
-/// events are returned alongside so callers can also assert on individual
-/// [`EventRecord`]s. Coordination KPIs are only populated when the run enabled
-/// `MOA_PERSIST_TURN_METRICS`; see [`ConversationCost`] for details.
-pub async fn drive_conversation_cost(
-    client: &TestApiClient,
-    session_id: SessionId,
-    turns: &[&str],
-    opts: ConversationOptions,
-) -> Result<(ConversationCost, Vec<EventRecord>)> {
-    let events = drive_conversation(client, session_id, turns, opts).await?;
-    let cost = ConversationCost::from_events(&events);
-    Ok((cost, events))
-}
-
 /// Fetches the complete durable event log for `session_id` through
 /// `Session/progress`, paging forward by sequence number because the handler
 /// clamps each response to at most [`PROGRESS_PAGE_SIZE`] events.
-pub async fn fetch_all_events(
+async fn fetch_all_events(
     client: &TestApiClient,
     session_id: SessionId,
 ) -> Result<Vec<EventRecord>> {

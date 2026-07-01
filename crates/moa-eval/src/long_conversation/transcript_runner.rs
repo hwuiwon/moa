@@ -16,15 +16,15 @@ use moa_brain::{
 };
 use moa_core::transcript::Transcript;
 use moa_core::{
-    AssessmentPhase, AttributionSubjectType, CompletionRequest, CompletionStream, ConversationCost,
-    Event, EventRange, EventRecord, LLMProvider, LearningCandidateStatus, MoaConfig, MoaError,
+    AssessmentPhase, AttributionSubjectType, CompletionRequest, CompletionStream, Event,
+    EventRange, EventRecord, LLMProvider, LearningCandidateStatus, MoaConfig, MoaError,
     ModelCapabilities, RuntimeEvent, SegmentAssessment, SegmentEvidence, SegmentEvidenceKind,
     SegmentEvidencePolarity, SegmentOutcome, SessionId, SessionMeta, SessionStore, TaskSegment,
     deterministic_segment_id,
 };
 use moa_eval_core::{
-    AgentConfig, EngineOptions, EvalError, EvalResult, EvalScore, EvalScoreValue, EvalStatus,
-    LongConversationMode, LongSessionInterleaving, LongTestCase, Result, TestCase,
+    AgentConfig, ConversationCost, EngineOptions, EvalError, EvalResult, EvalScore, EvalScoreValue,
+    EvalStatus, LongConversationMode, LongSessionInterleaving, LongTestCase, Result, TestCase,
 };
 use moa_lineage_core::LineageEvent;
 use serde_json::Value;
@@ -535,17 +535,15 @@ async fn emit_user_turn(
     turn_index: usize,
     text: &str,
 ) -> Result<()> {
-    let event = if turn_index == 0 {
-        Event::UserMessage {
-            text: text.to_string(),
-            attachments: Vec::new(),
-        }
-    } else {
-        Event::QueuedMessage {
-            text: text.to_string(),
-            attachments: Vec::new(),
-            queued_at: Utc::now(),
-        }
+    // Recorded transcripts model sequential *delivered* user turns, each of which drives a model
+    // response. Under the current history semantics a delivered turn is a `UserMessage`; a
+    // `QueuedMessage` is a replay breadcrumb that stays model-invisible until it is drained into a
+    // `UserMessage` (see moa-brain history conversion and session-engine drain tests), so emitting
+    // one here would hide every turn after the first from the model-visible context.
+    let _ = turn_index;
+    let event = Event::UserMessage {
+        text: text.to_string(),
+        attachments: Vec::new(),
     };
     environment
         .session_store

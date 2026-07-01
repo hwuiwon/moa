@@ -16,6 +16,7 @@ pub mod knowledge_sync_ingestion;
 pub(crate) mod progress_delivery;
 #[cfg(feature = "skill-learning")]
 pub mod skill_learning;
+pub(crate) mod turn_events;
 pub mod turn_execution;
 pub(crate) mod turn_progress;
 pub(crate) mod turn_responsiveness;

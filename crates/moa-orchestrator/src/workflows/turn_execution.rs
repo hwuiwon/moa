@@ -28,8 +28,8 @@ use moa_brain::turn_segments::{
 };
 use moa_core::wire::session_store::{
     AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetEventsRequest,
-    GetSegmentBaselineRequest, RecordSegmentSkillActivationRequest, RecordSegmentToolUseRequest,
-    RecordSegmentTurnUsageRequest, UpdateSegmentAssessmentRequest,
+    GetSegmentBaselineRequest, RecordSegmentSkillActivationRequest, RecordSegmentTurnUsageRequest,
+    UpdateSegmentAssessmentRequest,
 };
 use moa_core::wire::turn::{
     RunTurnRequest, TurnComplexityClass, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
@@ -52,13 +52,11 @@ use moa_lineage_core::TurnId;
 use moa_memory_ingest::{IngestionVOClient, ingestion_object_key};
 use moa_observability::restate_observability::{
     annotate_restate_handler_span, emit_turn_coordination_summary, emit_turn_latency_summary,
-    emit_turn_replay_summary, event_persist_span, llm_call_span, session_turn_span,
-    tool_dispatch_span,
+    emit_turn_replay_summary, llm_call_span, session_turn_span, tool_dispatch_span,
 };
 use moa_observability::{
-    TurnLatencyCounters, record_session_error, record_turn_event_persist_duration,
-    record_turn_latency, record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
-    record_turn_workflow_outcome, scope_turn_latency_counters,
+    TurnLatencyCounters, record_session_error, record_turn_latency, record_turn_llm_call_duration,
+    record_turn_tool_dispatch_duration, record_turn_workflow_outcome, scope_turn_latency_counters,
 };
 use restate_sdk::prelude::*;
 use sha2::{Digest, Sha256};
@@ -92,6 +90,11 @@ use crate::workflows::durable_utc_now;
 use crate::workflows::errors::moa_error_to_handler_error;
 #[cfg(feature = "skill-learning")]
 use crate::workflows::skill_learning::{RunSkillLearningRequest, SkillLearningClient};
+use crate::workflows::turn_events::{
+    append_session_event, append_tool_call_event, append_tool_result_event,
+    append_zero_cost_assistant_response, emit_tool_budget_exceeded, record_segment_tool_use,
+    turn_outcome_kind_label,
+};
 use crate::workflows::turn_progress::{
     self, SUMMARY_CALLING_MODEL, SUMMARY_CHECKING_RESULTS, SUMMARY_WORKING,
 };
@@ -565,32 +568,6 @@ async fn append_clarification_response(
 ) -> Result<String, HandlerError> {
     let text = "What should I change? Point me at the file, message, object, or output and the specific fix you want.".to_string();
     append_zero_cost_assistant_response(ctx, session_id, meta, text).await
-}
-
-async fn append_zero_cost_assistant_response(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    meta: &SessionMeta,
-    text: String,
-) -> Result<String, HandlerError> {
-    append_session_event(
-        ctx,
-        session_id,
-        Event::BrainResponse {
-            text: text.clone(),
-            thought_signature: None,
-            model: meta.model.clone(),
-            model_tier: ModelTier::Auxiliary,
-            input_tokens_uncached: 0,
-            input_tokens_cache_write: 0,
-            input_tokens_cache_read: 0,
-            output_tokens: 0,
-            cost_cents: 0,
-            duration_ms: 0,
-        },
-    )
-    .await?;
-    Ok(text)
 }
 
 async fn evaluate_input_guardrail(
@@ -1720,19 +1697,7 @@ async fn append_auto_delegation_result(
     output: ToolOutput,
     turn_evidence: &mut TurnEvidence,
 ) -> Result<(), HandlerError> {
-    append_session_event(
-        ctx,
-        session_id,
-        Event::ToolResult {
-            tool_id,
-            provider_tool_use_id: invocation.id.clone(),
-            output: output.clone(),
-            original_output_tokens: output.original_output_tokens,
-            success: !output.is_error,
-            duration_ms: 0,
-        },
-    )
-    .await?;
+    append_tool_result_event(ctx, session_id, tool_id, invocation, &output).await?;
     turn_evidence.record_tool_result(invocation, &output);
 
     if !output.is_error {
@@ -1908,19 +1873,7 @@ async fn handle_delegation_tool(
     .await?;
     record_turn_tool_dispatch_duration(dispatch_started.elapsed(), 1);
 
-    append_session_event(
-        ctx,
-        session_id,
-        Event::ToolResult {
-            tool_id,
-            provider_tool_use_id: invocation.id.clone(),
-            output: output.clone(),
-            original_output_tokens: output.original_output_tokens,
-            success: !output.is_error,
-            duration_ms: 0,
-        },
-    )
-    .await?;
+    append_tool_result_event(ctx, session_id, tool_id, &invocation, &output).await?;
     turn_evidence.record_tool_result(&invocation, &output);
 
     if !output.is_error {
@@ -2528,20 +2481,6 @@ async fn latest_matching_brain_response_event(
         .max_by_key(|record| record.sequence_num))
 }
 
-async fn record_segment_tool_use(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    tool_name: &str,
-) -> Result<(), HandlerError> {
-    ctx.service_client::<RestateSessionStoreClient>()
-        .record_segment_tool_use(Json(RecordSegmentToolUseRequest {
-            session_id,
-            tool_name: tool_name.to_string(),
-        }))
-        .send();
-    Ok(())
-}
-
 async fn record_selected_segment_skills(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
@@ -2592,73 +2531,6 @@ async fn emit_turn_cap_exceeded(
     )
     .await
     .map(|_| ())
-}
-
-async fn emit_tool_budget_exceeded(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    exhaustion: &ToolBudgetExhausted,
-) -> Result<(), HandlerError> {
-    record_session_error("tool_budget");
-    append_session_event(
-        ctx,
-        session_id,
-        Event::Error {
-            message: exhaustion.audit_message(),
-            recoverable: true,
-        },
-    )
-    .await
-    .map(|_| ())
-}
-
-async fn append_tool_call_event(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    tool_id: ToolCallId,
-    tool_call: &ToolCallContent,
-) -> Result<(), HandlerError> {
-    let invocation = tool_call.invocation.clone();
-    append_session_event(
-        ctx,
-        session_id,
-        Event::ToolCall {
-            tool_id,
-            provider_tool_use_id: invocation.id,
-            provider_thought_signature: tool_call
-                .provider_metadata
-                .as_ref()
-                .and_then(|metadata| metadata.thought_signature())
-                .map(str::to_string),
-            tool_name: invocation.name,
-            input: invocation.input,
-            hand_id: None,
-        },
-    )
-    .await
-    .map(|_| ())
-}
-
-async fn append_session_event(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    event: Event,
-) -> Result<u64, HandlerError> {
-    let persist_span = event_persist_span(1);
-    let persist_started = Instant::now();
-    moa_core::record_durable_append();
-    let sequence_num = ctx
-        .service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event,
-            dedupe_key: None,
-        }))
-        .call()
-        .instrument(persist_span)
-        .await?;
-    record_turn_event_persist_duration(persist_started.elapsed(), 1);
-    Ok(sequence_num)
 }
 
 async fn load_session_meta(
@@ -2731,14 +2603,6 @@ fn notify_session_of_outcome(
         kind = ?outcome.kind,
         "TurnExecution outcome notified to Session VO"
     );
-}
-
-fn turn_outcome_kind_label(kind: &TurnOutcomeKind) -> &'static str {
-    match kind {
-        TurnOutcomeKind::Completed => "completed",
-        TurnOutcomeKind::Cancelled => "cancelled",
-        TurnOutcomeKind::Failed => "failed",
-    }
 }
 
 #[cfg(test)]

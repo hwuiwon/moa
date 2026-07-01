@@ -953,6 +953,26 @@ mod tests {
         }
     }
 
+    /// Builds a real (worker-reported) terminal in a specific non-default state, for pinning
+    /// that a genuinely failed/cancelled worker still counts as terminal for fan-in.
+    fn terminal_in_state(
+        worker_id: &str,
+        state: moa_core::WorkerState,
+        success: bool,
+    ) -> moa_core::WorkerTerminalResult {
+        moa_core::WorkerTerminalResult {
+            state,
+            result: moa_core::WorkerResult {
+                worker_id: worker_id.to_string(),
+                success,
+                output: String::new(),
+                tokens_used: 0,
+                tools_invoked: 0,
+                error: (!success).then(|| "terminal failure".to_string()),
+            },
+        }
+    }
+
     #[test]
     fn session_vo_requires_meta_before_enqueue() {
         let mut state = SessionVoState::default();
@@ -1360,6 +1380,150 @@ mod tests {
             .expect("run completes after the healthy sibling finishes");
         assert_eq!(results[0].state, moa_core::WorkerState::Failed);
         assert!(results[1].result.success);
+    }
+
+    #[test]
+    fn auto_delegation_emit_and_synthesis_dispatch_guards_are_idempotent() {
+        // Pins (B2 double-dispatch guard): the durable-bundle emit flag and the synthesis-turn
+        // owner are each claimed exactly once. A handler replay that re-runs completion must not
+        // emit a second bundle (`mark_auto_delegation_bundle_emitted` → false) nor dispatch a
+        // second synthesis turn (`record_auto_delegation_synthesis_dispatch` → false), and
+        // synthesis cannot be claimed before the bundle is emitted.
+        let mut state = SessionVoState::default();
+        state.register_child(pending_child("worker-a"));
+        assert!(state.register_auto_delegation_run(11, vec!["worker-a".to_string()]));
+
+        // Synthesis ownership cannot be claimed before the bundle is emitted.
+        assert!(!state.record_auto_delegation_synthesis_dispatch("premature".to_string()));
+
+        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+            worker_id: "worker-a".to_string(),
+            terminal: worker_terminal("worker-a", "done"),
+        });
+        let (sequence, _) = state
+            .ready_auto_delegation_bundle()
+            .expect("the single scheduled worker is terminal");
+
+        // Emit is idempotent: the first claim wins; a replayed completion is a no-op.
+        assert!(state.mark_auto_delegation_bundle_emitted(sequence));
+        assert!(!state.mark_auto_delegation_bundle_emitted(sequence));
+        assert_eq!(
+            state.pending_auto_delegation_synthesis_sequence(),
+            Some(sequence)
+        );
+
+        // Synthesis dispatch is idempotent: the first owner wins; a replayed dispatch is a no-op
+        // (so the completion fallback cannot start a duplicate synthesis turn).
+        assert!(state.record_auto_delegation_synthesis_dispatch("synthesis-1".to_string()));
+        assert!(!state.record_auto_delegation_synthesis_dispatch("synthesis-2".to_string()));
+        assert_eq!(state.pending_auto_delegation_synthesis_sequence(), None);
+    }
+
+    #[test]
+    fn auto_delegation_bundle_completes_with_real_failed_and_cancelled_terminals() {
+        // Pins (partial failure): a run whose workers report genuine Failed and Cancelled terminals
+        // (real worker outcomes, not synthetic force-fill) still completes — fan-in treats every
+        // terminal state as done, so the coordinator synthesizes from a partial/failed set instead
+        // of hanging. Non-success terminal states are preserved in scheduled order.
+        let mut state = SessionVoState::default();
+        state.register_child(pending_child("worker-ok"));
+        state.register_child(pending_child("worker-fail"));
+        state.register_child(pending_child("worker-cancel"));
+        assert!(state.register_auto_delegation_run(
+            8,
+            vec![
+                "worker-ok".to_string(),
+                "worker-fail".to_string(),
+                "worker-cancel".to_string(),
+            ],
+        ));
+
+        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+            worker_id: "worker-ok".to_string(),
+            terminal: worker_terminal("worker-ok", "answer"),
+        });
+        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+            worker_id: "worker-fail".to_string(),
+            terminal: terminal_in_state("worker-fail", moa_core::WorkerState::Failed, false),
+        });
+        // Not ready until every scheduled worker — including the failed one — is terminal.
+        assert_eq!(state.ready_auto_delegation_bundle(), None);
+        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+            worker_id: "worker-cancel".to_string(),
+            terminal: terminal_in_state("worker-cancel", moa_core::WorkerState::Cancelled, false),
+        });
+
+        let (sequence, results) = state
+            .ready_auto_delegation_bundle()
+            .expect("real failed and cancelled terminals still complete the run");
+        assert_eq!(sequence, 8);
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].result.worker_id, "worker-ok");
+        assert_eq!(results[0].state, moa_core::WorkerState::Completed);
+        assert!(results[0].result.success);
+        assert_eq!(results[1].result.worker_id, "worker-fail");
+        assert_eq!(results[1].state, moa_core::WorkerState::Failed);
+        assert!(!results[1].result.success);
+        assert_eq!(results[2].result.worker_id, "worker-cancel");
+        assert_eq!(results[2].state, moa_core::WorkerState::Cancelled);
+        assert!(!results[2].result.success);
+    }
+
+    #[test]
+    fn late_real_terminal_after_force_fill_does_not_alter_emitted_bundle() {
+        // Pins (B12 accepted trade-off): once the fan-in wait bound force-fills a stuck worker with
+        // a synthetic Failed terminal and the bundle is emitted, a real terminal that finally
+        // arrives for that worker is a no-op on the run — the coordinator already synthesized from
+        // the synthetic Failed. The late terminal is still accepted into the children cache (so a
+        // `wait_worker` can read it) but it neither overwrites the emitted run slot nor re-opens the
+        // run for a second bundle. This documents the accepted trade-off: a worker that outlasts the
+        // fan-in bound loses its real result from the answer.
+        let mut state = SessionVoState::default();
+        state.register_child(pending_child("worker-fast"));
+        state.register_child(pending_child("worker-stuck"));
+        assert!(state.register_auto_delegation_run(
+            12,
+            vec!["worker-fast".to_string(), "worker-stuck".to_string()],
+        ));
+        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+            worker_id: "worker-fast".to_string(),
+            terminal: worker_terminal("worker-fast", "real"),
+        });
+        // Fan-in bound exceeded: the stuck worker is force-filled with a synthetic Failed terminal.
+        assert_eq!(state.fail_pending_auto_delegation_workers("stale"), 1);
+        let (sequence, bundle) = state
+            .ready_auto_delegation_bundle()
+            .expect("force-fill completes the run");
+        assert_eq!(bundle[1].state, moa_core::WorkerState::Failed);
+        assert!(!bundle[1].result.success);
+        assert!(state.mark_auto_delegation_bundle_emitted(sequence));
+
+        // The stuck worker finally reports a real successful terminal — too late.
+        let accepted = state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+            worker_id: "worker-stuck".to_string(),
+            terminal: worker_terminal("worker-stuck", "arrived late"),
+        });
+        assert!(
+            accepted,
+            "the children cache still accepts the late terminal"
+        );
+
+        // The emitted run is unchanged: no second bundle, still not waiting on workers, and the
+        // synthesis is still owned by the already-emitted bundle's sequence.
+        assert_eq!(state.ready_auto_delegation_bundle(), None);
+        assert!(!state.auto_delegation_waiting_for_workers());
+        assert_eq!(state.pending_auto_delegation_synthesis_sequence(), Some(12));
+        // The run's own slot for the stuck worker is still the synthetic Failed (the late real
+        // result was NOT folded in): the coordinator's answer keeps the synthetic terminal.
+        let stuck_slot = state
+            .auto_delegation_run
+            .as_ref()
+            .expect("run is retained until synthesis clears it")
+            .results[1]
+            .as_ref()
+            .expect("stuck worker's slot stays filled");
+        assert_eq!(stuck_slot.state, moa_core::WorkerState::Failed);
+        assert_eq!(stuck_slot.result.error.as_deref(), Some("stale"));
     }
 
     #[test]

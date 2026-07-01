@@ -15,5 +15,5 @@ mod orchestrator_fixture;
 
 pub use orchestrator_fixture::{
     ConversationOptions, IsolatedTest, OrchestratorTestFixture, TestApiClient, TestSessionHandle,
-    drive_conversation, drive_conversation_cost, fetch_all_events,
+    drive_conversation,
 };

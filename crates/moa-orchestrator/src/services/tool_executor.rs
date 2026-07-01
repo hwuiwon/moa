@@ -328,7 +328,7 @@ impl ToolExecutor for ToolExecutorImpl {
         let request = request.into_inner();
         let complete = self
             .router
-            .destroy_worker_hands(&request.session_id, &request.worker_id)
+            .reclaim_hands(&request.session_id, Some(request.worker_id.as_str()))
             .await;
         if !complete {
             return Err(TerminalError::new("worker hand cleanup incomplete").into());
@@ -347,7 +347,7 @@ impl ToolExecutor for ToolExecutorImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("ToolExecutor", "release_session_hands");
         let request = request.into_inner();
-        self.router.destroy_session_hands(&request.session_id).await;
+        self.router.reclaim_hands(&request.session_id, None).await;
         Ok(())
     }
 }

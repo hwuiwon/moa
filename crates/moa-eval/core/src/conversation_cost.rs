@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{Event, EventRecord};
+use moa_core::{CoordinationSnapshot, Event, EventRecord};
 
 /// Per-model-turn cost (boundary = one `BrainResponse` event).
 #[derive(Debug, Clone, PartialEq)]
@@ -54,34 +54,6 @@ impl TurnCost {
     }
 }
 
-/// Conversation-total internal coordination cost, summed from `TurnMetrics` telemetry.
-///
-/// `present` is false when no `TurnMetrics` events were found (persistence was disabled) — in that
-/// case the counts are zero and only the model-side KPIs are meaningful.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CoordinationCost {
-    /// Whether any `TurnMetrics` telemetry was present (i.e. round-trip counts are meaningful).
-    pub present: bool,
-    /// Blocking Session-VO round-trips across the conversation.
-    pub session_vo_calls: u64,
-    /// Blocking Worker-VO round-trips across the conversation.
-    pub worker_vo_calls: u64,
-    /// Fire-and-forget VO dispatches across the conversation.
-    pub vo_sends: u64,
-    /// Durable event appends across the conversation.
-    pub durable_appends: u64,
-    /// `get_events` replay reads across the conversation.
-    pub get_events_calls: u64,
-}
-
-impl CoordinationCost {
-    /// Total blocking VO round-trips (Session + Worker) — the primary coordination latency cost.
-    #[must_use]
-    pub fn total_vo_calls(&self) -> u64 {
-        self.session_vo_calls.saturating_add(self.worker_vo_calls)
-    }
-}
-
 /// Full per-conversation cost reconstruction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConversationCost {
@@ -105,8 +77,22 @@ pub struct ConversationCost {
     pub bundled_results: u64,
     /// Durable error events (`Error` + `ToolError`).
     pub error_events: u64,
-    /// Conversation-total internal coordination cost.
-    pub coordination: CoordinationCost,
+    /// Trimmed text of the LAST `BrainResponse` event (the conversation's final model reply), or
+    /// `None` when no `BrainResponse` was recorded. `Some("")` distinguishes an empty final reply
+    /// (a coordinator that returned nothing) from the absence of any model turn.
+    pub final_text: Option<String>,
+    /// Whether any `TurnMetrics` telemetry was found. When false, persistence was disabled for the
+    /// run: [`Self::coordination`] and [`Self::get_events_calls`] are zero and only the model-side
+    /// KPIs are meaningful.
+    pub coordination_present: bool,
+    /// Conversation-total internal coordination round-trips (Session/Worker VO calls, fire-and-forget
+    /// sends, durable appends), summed from `TurnMetrics`. Reuses the production
+    /// [`CoordinationSnapshot`] recorder type so the analyzer and the runtime recorder share one
+    /// shape; only meaningful when [`Self::coordination_present`].
+    pub coordination: CoordinationSnapshot,
+    /// `get_events` replay reads across the conversation, summed from `TurnMetrics`. Kept alongside
+    /// (not inside) [`Self::coordination`] because the runtime recorder snapshot does not track it.
+    pub get_events_calls: u64,
     /// Per-model-turn breakdown.
     pub turns: Vec<TurnCost>,
 }
@@ -152,7 +138,10 @@ impl ConversationCost {
             worker_result_bundles: 0,
             bundled_results: 0,
             error_events: 0,
-            coordination: CoordinationCost::default(),
+            final_text: None,
+            coordination_present: false,
+            coordination: CoordinationSnapshot::default(),
+            get_events_calls: 0,
             turns: Vec::new(),
         };
         // Tool calls dispatched since the last BrainResponse — attributed to the turn that
@@ -170,6 +159,7 @@ impl ConversationCost {
                         .or_insert(0) += 1;
                 }
                 Event::BrainResponse {
+                    text,
                     model,
                     input_tokens_uncached,
                     input_tokens_cache_write,
@@ -179,6 +169,10 @@ impl ConversationCost {
                     ..
                 } => {
                     cost.model_turns += 1;
+                    // Overwrite each turn so the last BrainResponse wins — the conversation's final
+                    // model reply, which the coordination lanes assert is non-empty and free of raw
+                    // worker output.
+                    cost.final_text = Some(text.trim().to_string());
                     let uncached = *input_tokens_uncached as u64;
                     let cache_write = *input_tokens_cache_write as u64;
                     let cache_read = *input_tokens_cache_read as u64;
@@ -215,13 +209,12 @@ impl ConversationCost {
                     get_events_calls,
                     ..
                 } => {
-                    let coord = &mut cost.coordination;
-                    coord.present = true;
-                    coord.session_vo_calls += *session_vo_calls;
-                    coord.worker_vo_calls += *worker_vo_calls;
-                    coord.vo_sends += *vo_sends;
-                    coord.durable_appends += *durable_appends;
-                    coord.get_events_calls += *get_events_calls;
+                    cost.coordination_present = true;
+                    cost.coordination.session_vo_calls += *session_vo_calls;
+                    cost.coordination.worker_vo_calls += *worker_vo_calls;
+                    cost.coordination.vo_sends += *vo_sends;
+                    cost.coordination.durable_appends += *durable_appends;
+                    cost.get_events_calls += *get_events_calls;
                 }
                 _ => {}
             }
@@ -233,8 +226,8 @@ impl ConversationCost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EventType, ModelId, ModelTier, SessionId};
     use chrono::Utc;
+    use moa_core::{EventType, ModelId, ModelTier, SessionId, ToolCallId};
     use uuid::Uuid;
 
     fn record(session_id: SessionId, sequence_num: u64, event: Event) -> EventRecord {
@@ -266,9 +259,24 @@ mod tests {
         }
     }
 
+    fn brain_response_with_text(text: &str) -> Event {
+        Event::BrainResponse {
+            text: text.to_string(),
+            model: ModelId::new("gpt-5.4-mini"),
+            model_tier: ModelTier::Main,
+            input_tokens_uncached: 10,
+            input_tokens_cache_write: 0,
+            input_tokens_cache_read: 0,
+            output_tokens: 5,
+            cost_cents: 1,
+            duration_ms: 10,
+            thought_signature: None,
+        }
+    }
+
     fn tool_call(name: &str) -> Event {
         Event::ToolCall {
-            tool_id: crate::ToolCallId::new(),
+            tool_id: ToolCallId::new(),
             provider_tool_use_id: None,
             provider_thought_signature: None,
             tool_name: name.to_string(),
@@ -318,14 +326,48 @@ mod tests {
         assert_eq!(cost.turns[0].tool_call_count, 2);
         assert_eq!(cost.turns[1].tool_call_count, 1);
         // Coordination totals from the single TurnMetrics event.
-        assert!(cost.coordination.present);
+        assert!(cost.coordination_present);
         assert_eq!(cost.coordination.total_vo_calls(), 5);
         assert_eq!(cost.coordination.session_vo_calls, 3);
         assert_eq!(cost.coordination.durable_appends, 4);
+        assert_eq!(cost.get_events_calls, 2);
         // Cache-hit ratio: 1850 cache-read of 2000 total input (1000 per turn).
         assert_eq!(cost.total_input_tokens, 2000);
         assert!((cost.cache_hit_ratio() - (1850.0 / 2000.0)).abs() < 1e-9);
         assert!((cost.tool_calls_per_turn() - 1.5).abs() < 1e-9);
+        // The final reply is the text of the last BrainResponse.
+        assert_eq!(cost.final_text.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn final_text_is_last_brain_response_trimmed_and_none_without_any() {
+        // Pins: final_text captures the trimmed text of the LAST BrainResponse, and stays None when
+        // no BrainResponse was recorded (so an empty final and an absent final are distinguishable).
+        let session = SessionId::new();
+
+        let no_final =
+            ConversationCost::from_events(&[record(session, 1, tool_call("session_search"))]);
+        assert_eq!(no_final.final_text, None);
+        assert_eq!(no_final.model_turns, 0);
+
+        let events = vec![
+            record(session, 1, brain_response_with_text("  first draft  ")),
+            record(
+                session,
+                2,
+                brain_response_with_text("  Final synthesized answer.\n"),
+            ),
+        ];
+        let cost = ConversationCost::from_events(&events);
+        assert_eq!(
+            cost.final_text.as_deref(),
+            Some("Final synthesized answer.")
+        );
+
+        // An empty final reply is Some(""), not None — that is the empty-final failure signal.
+        let empty_final =
+            ConversationCost::from_events(&[record(session, 1, brain_response_with_text("   "))]);
+        assert_eq!(empty_final.final_text.as_deref(), Some(""));
     }
 
     #[test]
@@ -334,7 +376,8 @@ mod tests {
         let events = vec![record(session, 1, brain_response(10, 0, 5, 1))];
         let cost = ConversationCost::from_events(&events);
         assert_eq!(cost.model_turns, 1);
-        assert!(!cost.coordination.present);
+        assert!(!cost.coordination_present);
         assert_eq!(cost.coordination.total_vo_calls(), 0);
+        assert_eq!(cost.get_events_calls, 0);
     }
 }

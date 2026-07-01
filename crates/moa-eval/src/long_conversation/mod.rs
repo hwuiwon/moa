@@ -18,8 +18,8 @@ pub use memory_metrics::{
 };
 pub use provider_recorded::{RecordedProviderError, RecordedScriptedProvider};
 pub use score_card::{
-    CacheScores, ContextScores, CostScores, FunctionalScores, LatencyScores, MemoryScores,
-    MetricRow, SafetyScores, ScoreCard, ToolScores,
+    CacheScores, ContextScores, CoordinationScores, CostScores, FunctionalScores, LatencyScores,
+    MemoryScores, MetricRow, SafetyScores, ScoreCard, ToolScores,
 };
 pub use scripted_user::{
     ScriptedUserError, ScriptedUserScript, ScriptedUserTurn, ScriptedUserUtterance,

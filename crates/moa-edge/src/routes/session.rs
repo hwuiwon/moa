@@ -1,5 +1,7 @@
 //! Public session route translation.
 
+use std::sync::OnceLock;
+
 use axum::body::Bytes;
 use axum::http::{Method, Uri};
 use moa_core::TenantId;
@@ -9,10 +11,18 @@ use super::{RouteTranslation, translate_create_agent_session_route};
 
 /// Default cancel-scope body forwarded when a client omits an explicit scope.
 ///
-/// Mirrors [`moa_core::CancelScope::TaskTree`]'s snake_case serialization so a bare "stop" cancels
-/// the coordinator turn and the whole child task tree. The coupling is pinned by
+/// Derived once from [`moa_core::CancelScope::default`]'s snake_case serialization (today
+/// `"task_tree"`) so a bare "stop" cancels the coordinator turn and the whole child task tree, and
+/// the forwarded bytes can never drift from the type. The value is pinned by
 /// [`tests::default_cancel_scope_body_matches_task_tree_serialization`].
-const DEFAULT_CANCEL_SCOPE_BODY: &[u8] = b"\"task_tree\"";
+fn default_cancel_scope_body() -> &'static [u8] {
+    static BODY: OnceLock<Vec<u8>> = OnceLock::new();
+    BODY.get_or_init(|| {
+        serde_json::to_vec(&moa_core::CancelScope::default())
+            .expect("CancelScope serializes to JSON")
+    })
+    .as_slice()
+}
 
 pub(super) fn translate(
     method: &Method,
@@ -49,7 +59,7 @@ pub(super) fn translate(
         // Default to TaskTree when the client sends no body; forward an explicit
         // `"coordinator_only"`/`"task_tree"` scope unchanged for the Session VO to validate.
         let body = if body.is_empty() {
-            DEFAULT_CANCEL_SCOPE_BODY.to_vec()
+            default_cancel_scope_body().to_vec()
         } else {
             body.to_vec()
         };
@@ -106,11 +116,10 @@ mod tests {
 
     #[test]
     fn default_cancel_scope_body_matches_task_tree_serialization() {
-        // Pins: the edge's hardcoded default cancel body stays in sync with CancelScope::TaskTree,
-        // so an omitted scope forwards exactly what the Session VO deserializes as the default.
-        let serialized = serde_json::to_vec(&moa_core::CancelScope::default())
-            .expect("CancelScope serializes to JSON");
-        assert_eq!(serialized, super::DEFAULT_CANCEL_SCOPE_BODY);
+        // Pins: CancelScope::default() still serializes to the task-tree wire literal, so an
+        // omitted scope forwards a whole-tree cancel. The forwarded bytes are derived from the
+        // type, so this guards the semantic value that derivation produces, not a duplicate literal.
+        assert_eq!(super::default_cancel_scope_body(), b"\"task_tree\"");
     }
 
     #[test]

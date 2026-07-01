@@ -221,6 +221,15 @@ fn is_non_execution_request(lower: &str) -> bool {
 }
 
 fn explicit_work_items(normalized: &str, lower: &str, min_items: usize) -> Vec<String> {
+    // Distinct extractors only. Redundant anchors were dropped after a mutation check: " for
+    // storing " is subsumed by " for ", and the standalone verb anchors " compare "/" review "
+    // fire for no covered request (the leading-"compare " prefix and colon/leading-list
+    // extractors already recover them). " summarize " and " categorize " are KEPT: they are
+    // the only extractors that isolate a two-sided "verb X and Y" tail, so removing them regresses
+    // `plans_generic_two_sided_summary_and_comparison`. " reconcile " is KEPT: it is the only
+    // extractor for a mid-sentence "need to reconcile X, Y, and Z" item list (live sweep S008
+    // regressed to no delegation when it was dropped — pinned by
+    // `plans_mid_sentence_reconcile_item_list`).
     let candidates = [
         leading_list_segment(normalized),
         segment_after_colon(normalized),
@@ -228,14 +237,11 @@ fn explicit_work_items(normalized: &str, lower: &str, min_items: usize) -> Vec<S
         segment_after_anchor(normalized, lower, " across "),
         segment_after_anchor(normalized, lower, " using "),
         segment_after_anchor(normalized, lower, " between "),
-        segment_after_anchor(normalized, lower, " for storing "),
         segment_after_anchor(normalized, lower, " for "),
         segment_after_prefix(normalized, lower, "compare "),
-        segment_after_anchor(normalized, lower, " reconcile "),
-        segment_after_anchor(normalized, lower, " compare "),
         segment_after_anchor(normalized, lower, " summarize "),
         segment_after_anchor(normalized, lower, " categorize "),
-        segment_after_anchor(normalized, lower, " review "),
+        segment_after_anchor(normalized, lower, " reconcile "),
         segment_after_semicolon(normalized),
     ];
 
@@ -567,6 +573,26 @@ mod tests {
                 .map(|node| node.title.as_str())
                 .collect::<Vec<_>>(),
             vec!["Checkout is slow", "promo rules changed", "DB CPU is up"]
+        );
+    }
+
+    #[test]
+    fn plans_mid_sentence_reconcile_item_list() {
+        // Pins (live sweep S008): a mid-sentence "need to reconcile X, Y, and Z" item list must
+        // fire the extractor. Dropping the " reconcile " anchor regressed this persona from
+        // 3 workers + 1 bundle to no delegation in the 2026-07-01 post-simplification sweep.
+        let plan = plan_delegation_for_request(
+            "I need to reconcile Stripe payouts, bank deposits, and refunded orders. \
+             Give me a practical reconciliation plan.",
+        )
+        .expect("mid-sentence reconcile item list should produce a plan");
+        assert_eq!(plan.reason, "explicit_multi_workstream_list");
+        assert_eq!(
+            plan.nodes
+                .iter()
+                .map(|node| node.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Stripe payouts", "bank deposits", "refunded orders"]
         );
     }
 

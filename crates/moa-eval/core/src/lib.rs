@@ -1,5 +1,6 @@
 //! Production-safe evaluation contracts and scoring helpers.
 
+pub mod conversation_cost;
 pub mod engine;
 pub mod error;
 pub mod evaluator;
@@ -10,6 +11,7 @@ pub mod replay;
 pub mod results;
 pub mod types;
 
+pub use conversation_cost::{ConversationCost, TurnCost};
 pub use engine::{EngineOptions, EvalRun, RunSummary};
 pub use error::{EvalError, Result};
 pub use evaluator::Evaluator;

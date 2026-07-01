@@ -1,6 +1,7 @@
 //! Workspace-root tracking and lazy hand lifecycle management.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use std::time::{Duration as StdDuration, Instant};
 
@@ -129,88 +130,150 @@ impl ToolRouter {
         Ok(())
     }
 
-    /// Destroys and removes all cached and durably leased hands associated with the session.
+    /// Destroys and removes cached and durably leased hands for a session,
+    /// either across the whole session or for one worker scope.
     ///
-    /// Teardown is scope-agnostic: it reclaims every worker scope under the
-    /// session (cache keys `"{session_id}:*:{provider}"` and leases
-    /// `(session_id, *, provider)`), so the session-level and any worker hands
-    /// are all released.
-    pub async fn destroy_session_hands(&self, session_id: &moa_core::SessionId) {
+    /// `scope` selects what is reclaimed:
+    /// - `None` tears down the entire session — every worker scope under it
+    ///   (cache keys `"{session_id}:*:{provider}"` and leases
+    ///   `(session_id, *, provider)`) — so the session-level (coordinator) and
+    ///   all worker hands are released.
+    /// - `Some(worker_id)` reclaims only that `(session_id, worker_id)` scope, so
+    ///   a finishing worker releases its own sandbox without over-releasing the
+    ///   parent's or siblings' shared hands. It clears the cache keys with prefix
+    ///   `"{session_id}:{worker_id}:"`, that scope's `installed_files`/
+    ///   `trusted_sandbox_files` entries, and the durable leases
+    ///   `(session_id, worker_id, provider)` across providers; the parent's
+    ///   session-level (`""`) scope and any sibling worker scopes are untouched.
+    ///
+    /// Returns `true` when every matched hand was destroyed and its durable lease
+    /// marked `Destroyed`. A `false` result means at least one release step
+    /// failed and the affected leases stay reclaimable, so a worker caller can
+    /// reschedule cleanup instead of clearing its state. Session teardown ignores
+    /// the result and lets the lease TTL reclaim any straggler.
+    pub async fn reclaim_hands(
+        &self,
+        session_id: &moa_core::SessionId,
+        scope: Option<&str>,
+    ) -> bool {
+        let mut complete = true;
+        // Every cache/lease key for a session shares the `"{session_id}:"`
+        // prefix. Whole-session teardown matches that prefix; a worker scope
+        // narrows it to `"{session_id}:{worker_id}:"`. The trailing `:` keeps the
+        // worker prefix collision-safe between sibling ids where one is a prefix
+        // of another (e.g. `sub` vs `sub-x`).
         let session_prefix = format!("{session_id}:");
+        let match_prefix = match scope {
+            Some(worker_id) => format!("{session_prefix}{worker_id}:"),
+            None => session_prefix.clone(),
+        };
+
         let mut hands = {
             let mut active_hands = self.active_hands.write().await;
             let keys = active_hands
                 .keys()
-                .filter(|key| key.starts_with(&session_prefix))
+                .filter(|key| key.starts_with(&match_prefix))
                 .cloned()
                 .collect::<Vec<_>>();
             keys.into_iter()
-                .filter_map(|key| active_hands.remove(&key).map(|handle| (key, handle)))
+                .filter_map(|key| {
+                    active_hands
+                        .remove(&key)
+                        .map(|handle| (key, (handle, None::<i64>)))
+                })
                 .collect::<HashMap<_, _>>()
         };
         self.installed_files
             .write()
             .await
-            .retain(|key, _| !key.starts_with(&session_prefix));
-        self.trusted_sandbox_files
-            .write()
-            .await
-            .retain(|key, _| !key.starts_with(&session_prefix));
+            .retain(|key, _| !key.starts_with(&match_prefix));
+        match scope {
+            // `trusted_sandbox_files` is keyed by the bare scope key
+            // `"{session_id}:{worker_id}"`, so a worker clears its own entry
+            // exactly rather than by prefix; whole-session teardown clears every
+            // scope under the session prefix.
+            Some(worker_id) => {
+                let scope_key = format!("{session_prefix}{worker_id}");
+                self.trusted_sandbox_files.write().await.remove(&scope_key);
+            }
+            None => {
+                self.trusted_sandbox_files
+                    .write()
+                    .await
+                    .retain(|key, _| !key.starts_with(&session_prefix));
+            }
+        }
 
         if let Some(lease_store) = &self.hand_leases {
             match lease_store.list_session(*session_id).await {
                 Ok(leases) => {
                     for lease in leases {
+                        if let Some(worker_id) = scope
+                            && lease.worker_id != worker_id
+                        {
+                            continue;
+                        }
                         if lease.status == HandLeaseStatus::Destroyed {
                             continue;
                         }
-                        let Some(lease_handle) = lease.handle.as_ref() else {
-                            continue;
-                        };
                         let key = format!(
                             "{}:{}:{}",
                             lease.session_id, lease.worker_id, lease.provider
                         );
-                        if let std::collections::hash_map::Entry::Vacant(entry) = hands.entry(key) {
-                            match self
-                                .hydrate_lease_handle(&lease.provider, lease_handle)
-                                .await
-                            {
-                                Ok(handle) => {
-                                    entry.insert(handle);
-                                }
-                                Err(error) => {
-                                    tracing::warn!(
-                                        session_id = %session_id,
-                                        worker_id = %lease.worker_id,
-                                        provider = %lease.provider,
-                                        generation = lease.generation,
-                                        error = %error,
-                                        "failed to hydrate durable hand lease during cleanup"
-                                    );
+                        match hands.entry(key) {
+                            Entry::Occupied(mut entry) => {
+                                // The cached hand was already drained above; carry
+                                // its durable generation so the destroy loop marks
+                                // the right generation without a second store read.
+                                entry.get_mut().1 = Some(lease.generation);
+                            }
+                            Entry::Vacant(entry) => {
+                                let Some(lease_handle) = lease.handle.as_ref() else {
+                                    continue;
+                                };
+                                match self
+                                    .hydrate_lease_handle(&lease.provider, lease_handle)
+                                    .await
+                                {
+                                    Ok(handle) => {
+                                        entry.insert((handle, Some(lease.generation)));
+                                    }
+                                    Err(error) => {
+                                        complete = false;
+                                        tracing::warn!(
+                                            session_id = %session_id,
+                                            worker_id = %lease.worker_id,
+                                            provider = %lease.provider,
+                                            generation = lease.generation,
+                                            error = %error,
+                                            "failed to hydrate durable hand lease during cleanup"
+                                        );
+                                    }
                                 }
                             }
                         }
                     }
                 }
                 Err(error) => {
+                    complete = false;
                     tracing::warn!(
                         session_id = %session_id,
                         error = %error,
-                        "failed to list durable hand leases during session cleanup"
+                        "failed to list durable hand leases during cleanup"
                     );
                 }
             }
         }
 
-        for (key, handle) in hands {
-            // Cache keys are `"{session_id}:{worker_id}:{provider}"`; the
-            // provider is the final segment (no provider name contains `:`), and
-            // whatever precedes it under the session prefix is the worker scope.
+        for (key, (handle, generation)) in hands {
+            // Cache keys are `"{session_id}:{worker_id}:{provider}"`; strip the
+            // session prefix and split off the final segment (no provider name
+            // contains `:`) to recover the worker scope and provider name.
             let remainder = key.strip_prefix(&session_prefix).unwrap_or_default();
             let (worker_id, provider_name) = remainder.rsplit_once(':').unwrap_or(("", remainder));
             let handle_id = hand_id(&handle);
             let Some(provider) = self.providers.get(provider_name) else {
+                complete = false;
                 tracing::warn!(
                     session_id = %session_id,
                     worker_id = %worker_id,
@@ -228,173 +291,20 @@ impl ToolRouter {
                         worker_id = %worker_id,
                         provider = %provider_name,
                         hand_id = %handle_id,
-                        "destroyed cached session hand"
+                        "destroyed cached hand"
                     );
-                    if let Some(lease_store) = &self.hand_leases
-                        && let Ok(Some(lease)) =
-                            lease_store.get(*session_id, worker_id, provider_name).await
+                    // `list_session` already loaded this lease's generation, so
+                    // mark it destroyed with that fence (mark_status no-ops on a
+                    // generation mismatch) instead of re-fetching. A cached hand
+                    // with no matching live lease carries no generation.
+                    if let Some(generation) = generation
+                        && let Some(lease_store) = &self.hand_leases
                         && let Err(error) = lease_store
                             .mark_status(
                                 *session_id,
                                 worker_id,
                                 provider_name,
-                                lease.generation,
-                                HandLeaseStatus::Destroyed,
-                            )
-                            .await
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            worker_id = %worker_id,
-                            provider = %provider_name,
-                            generation = lease.generation,
-                            error = %error,
-                            "failed to mark durable hand lease destroyed"
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        worker_id = %worker_id,
-                        provider = %provider_name,
-                        hand_id = %handle_id,
-                        error = %error,
-                        "failed to destroy cached session hand"
-                    );
-                }
-            }
-        }
-    }
-
-    /// Destroys and removes the cached and durably leased hands for ONE worker scope.
-    ///
-    /// Unlike [`Self::destroy_session_hands`], this reclaims only the single
-    /// `(session_id, worker_id)` scope so a finishing worker releases its own
-    /// sandbox without over-releasing the parent's or siblings' shared hands. It clears
-    /// the cache keys with prefix `"{session_id}:{worker_id}:"`, that scope's
-    /// `installed_files`/`trusted_sandbox_files` entries, and the durable leases
-    /// `(session_id, worker_id, provider)` across providers — marking only those
-    /// `Destroyed`. The parent's session-level (`""`) scope and any sibling worker
-    /// scopes are left untouched.
-    pub async fn destroy_worker_hands(
-        &self,
-        session_id: &moa_core::SessionId,
-        worker_id: &str,
-    ) -> bool {
-        let mut complete = true;
-        // The scope key is `"{session_id}:{worker_id}"`; appending `:` yields the cache
-        // prefix `"{session_id}:{worker_id}:"`. The trailing `:` delimiter makes the
-        // prefix collision-safe between sibling ids where one is a prefix of another (e.g.
-        // `sub` vs `sub-x`); `trusted_sandbox_files` is keyed by the bare scope key, so it
-        // is matched exactly rather than by prefix.
-        let scope_key = format!("{session_id}:{worker_id}");
-        let scope_prefix = format!("{scope_key}:");
-        let mut hands = {
-            let mut active_hands = self.active_hands.write().await;
-            let keys = active_hands
-                .keys()
-                .filter(|key| key.starts_with(&scope_prefix))
-                .cloned()
-                .collect::<Vec<_>>();
-            keys.into_iter()
-                .filter_map(|key| active_hands.remove(&key).map(|handle| (key, handle)))
-                .collect::<HashMap<_, _>>()
-        };
-        self.installed_files
-            .write()
-            .await
-            .retain(|key, _| !key.starts_with(&scope_prefix));
-        self.trusted_sandbox_files.write().await.remove(&scope_key);
-
-        if let Some(lease_store) = &self.hand_leases {
-            match lease_store.list_session(*session_id).await {
-                Ok(leases) => {
-                    for lease in leases {
-                        if lease.worker_id != worker_id {
-                            continue;
-                        }
-                        if lease.status == HandLeaseStatus::Destroyed {
-                            continue;
-                        }
-                        let Some(lease_handle) = lease.handle.as_ref() else {
-                            continue;
-                        };
-                        let key = format!(
-                            "{}:{}:{}",
-                            lease.session_id, lease.worker_id, lease.provider
-                        );
-                        if let std::collections::hash_map::Entry::Vacant(entry) = hands.entry(key) {
-                            match self
-                                .hydrate_lease_handle(&lease.provider, lease_handle)
-                                .await
-                            {
-                                Ok(handle) => {
-                                    entry.insert(handle);
-                                }
-                                Err(error) => {
-                                    complete = false;
-                                    tracing::warn!(
-                                        session_id = %session_id,
-                                        worker_id = %worker_id,
-                                        provider = %lease.provider,
-                                        generation = lease.generation,
-                                        error = %error,
-                                        "failed to hydrate durable hand lease during worker cleanup"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(error) => {
-                    complete = false;
-                    tracing::warn!(
-                        session_id = %session_id,
-                        worker_id = %worker_id,
-                        error = %error,
-                        "failed to list durable hand leases during worker cleanup"
-                    );
-                }
-            }
-        }
-
-        for (key, handle) in hands {
-            // Cache keys are `"{session_id}:{worker_id}:{provider}"`; everything after
-            // this scope's `"{session_id}:{worker_id}:"` prefix is the provider name (no
-            // provider name contains `:`).
-            let provider_name = key.strip_prefix(&scope_prefix).unwrap_or_default();
-            let handle_id = hand_id(&handle);
-            let Some(provider) = self.providers.get(provider_name) else {
-                complete = false;
-                tracing::warn!(
-                    session_id = %session_id,
-                    worker_id = %worker_id,
-                    provider = %provider_name,
-                    hand_id = %handle_id,
-                    "cached hand provider missing during worker cleanup"
-                );
-                continue;
-            };
-
-            match provider.destroy(&handle).await {
-                Ok(()) => {
-                    tracing::info!(
-                        session_id = %session_id,
-                        worker_id = %worker_id,
-                        provider = %provider_name,
-                        hand_id = %handle_id,
-                        "destroyed cached worker hand"
-                    );
-                    if let Some(lease_store) = &self.hand_leases
-                        && let Ok(Some(lease)) =
-                            lease_store.get(*session_id, worker_id, provider_name).await
-                        && let Err(error) = lease_store
-                            .mark_status(
-                                *session_id,
-                                worker_id,
-                                provider_name,
-                                lease.generation,
+                                generation,
                                 HandLeaseStatus::Destroyed,
                             )
                             .await
@@ -404,9 +314,9 @@ impl ToolRouter {
                             session_id = %session_id,
                             worker_id = %worker_id,
                             provider = %provider_name,
-                            generation = lease.generation,
+                            generation = generation,
                             error = %error,
-                            "failed to mark durable worker hand lease destroyed"
+                            "failed to mark durable hand lease destroyed"
                         );
                     }
                 }
@@ -418,7 +328,7 @@ impl ToolRouter {
                         provider = %provider_name,
                         hand_id = %handle_id,
                         error = %error,
-                        "failed to destroy cached worker hand"
+                        "failed to destroy cached hand"
                     );
                 }
             }
@@ -1190,7 +1100,7 @@ mod tests {
             .execute_authorized_with_recovery(&session, None, &bash_invocation())
             .await
             .expect("first router provisions and executes");
-        cleanup_router.destroy_session_hands(&session.id).await;
+        cleanup_router.reclaim_hands(&session.id, None).await;
 
         assert_eq!(provider.destroy_calls(), 1);
     }
@@ -1325,7 +1235,7 @@ mod tests {
             .execute_authorized_with_recovery(&session, None, &bash_invocation())
             .await
             .expect("provision before cleanup");
-        cleanup_router.destroy_session_hands(&session.id).await;
+        cleanup_router.reclaim_hands(&session.id, None).await;
 
         assert_eq!(provider.destroy_calls(), 1);
         let lease = lease_store
@@ -1416,7 +1326,7 @@ mod tests {
             .expect("worker-scope hand provisions");
         assert_eq!(provider.provision_calls(), 2);
 
-        router.destroy_session_hands(&session.id).await;
+        router.reclaim_hands(&session.id, None).await;
 
         assert_eq!(
             provider.destroy_calls(),
@@ -1460,7 +1370,7 @@ mod tests {
         assert_eq!(provider.provision_calls(), 3);
 
         assert!(
-            router.destroy_worker_hands(&session.id, "sub-x").await,
+            router.reclaim_hands(&session.id, Some("sub-x")).await,
             "target worker cleanup should fully complete"
         );
 
@@ -1563,7 +1473,7 @@ mod tests {
             .expect("worker scope provisions");
         assert!(
             !cleanup_router
-                .destroy_worker_hands(&session.id, "sub-x")
+                .reclaim_hands(&session.id, Some("sub-x"))
                 .await,
             "failed provider destroy should report incomplete cleanup"
         );

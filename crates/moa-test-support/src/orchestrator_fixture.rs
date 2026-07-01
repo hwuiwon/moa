@@ -45,6 +45,8 @@ const RESTATE_TAG: &str = "1.6.2";
 const OPENFGA_IMAGE: &str = "openfga/openfga";
 const OPENFGA_TAG: &str = "v1.8.16";
 const OPENFGA_PRESHARED_KEY: &str = "localdev-preshared-key-do-not-use-in-prod";
+const REDIS_IMAGE: &str = "valkey/valkey";
+const REDIS_TAG: &str = "8-alpine";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
 mod client;
@@ -52,13 +54,12 @@ mod conversation;
 mod openfga;
 mod postgres;
 mod process;
+mod redis;
 mod restate;
 mod scripted_provider;
 
 pub use client::{TestApiClient, TestSessionHandle};
-pub use conversation::{
-    ConversationOptions, drive_conversation, drive_conversation_cost, fetch_all_events,
-};
+pub use conversation::{ConversationOptions, drive_conversation};
 
 use openfga::{bootstrap_openfga, external_fga_client, start_openfga_container, wait_for_openfga};
 use postgres::{ensure_postgres_image, start_postgres_container, wait_for_postgres};
@@ -66,6 +67,7 @@ use process::{
     OrchestratorSpawnConfig, locate_orchestrator_binary, pick_free_port, repo_root,
     spawn_orchestrator, terminate_child, wait_for_orchestrator_health,
 };
+use redis::{start_redis_container, wait_for_redis};
 use restate::{
     derive_admin_url, register_deployment, start_restate_container, trim_url,
     wait_for_registered_services, wait_for_restate_admin,
@@ -90,6 +92,7 @@ pub struct OrchestratorTestFixture {
     _postgres: Option<ContainerAsync<GenericImage>>,
     _restate: Option<ContainerAsync<GenericImage>>,
     _openfga: Option<ContainerAsync<GenericImage>>,
+    _redis: Option<ContainerAsync<GenericImage>>,
     orchestrator: Mutex<Option<Child>>,
 }
 
@@ -168,6 +171,7 @@ impl OrchestratorTestFixture {
             _postgres: None,
             _restate: None,
             _openfga: None,
+            _redis: None,
             orchestrator: Mutex::new(None),
         })
     }
@@ -200,6 +204,25 @@ impl OrchestratorTestFixture {
         let fga_client =
             FgaClient::new(fga_config.clone()).context("build fixture OpenFGA client")?;
 
+        // The orchestrator binary is built with the `redis` runtime-cache backend, so the internal
+        // path must supply a Redis endpoint. Honor an ambient MOA_RUNTIME_CACHE_REDIS_URL (e.g. the
+        // compose stack) when set; otherwise boot a throwaway Valkey container so the lane is
+        // hermetic and does not depend on exported cache env.
+        let (redis_url, redis_container) = match std::env::var("MOA_RUNTIME_CACHE_REDIS_URL") {
+            Ok(url) if !url.trim().is_empty() => {
+                let url = url.trim().to_string();
+                wait_for_redis(&url).await?;
+                (url, None)
+            }
+            _ => {
+                let redis = start_redis_container().await?;
+                let redis_port = redis.get_host_port_ipv4(6379.tcp()).await?;
+                let redis_url = format!("redis://127.0.0.1:{redis_port}/0");
+                wait_for_redis(&redis_url).await?;
+                (redis_url, Some(redis))
+            }
+        };
+
         let script_dir = tempfile::Builder::new()
             .prefix("moa-scripted-provider-")
             .tempdir()
@@ -227,6 +250,7 @@ impl OrchestratorTestFixture {
             postgres_url: &postgres_url,
             admin_url: &admin_url,
             ingress_url: &ingress_url,
+            redis_url: &redis_url,
             script_path: &script_path,
             fga_config: &fga_config,
             extra_env: &extra_env,
@@ -250,6 +274,7 @@ impl OrchestratorTestFixture {
             _postgres: Some(postgres),
             _restate: Some(restate),
             _openfga: Some(openfga),
+            _redis: redis_container,
             orchestrator: Mutex::new(Some(orchestrator)),
         })
     }
