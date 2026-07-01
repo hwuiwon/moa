@@ -105,7 +105,7 @@ first tool call claims a durable lease before provisioning the hand. Later tool
 calls on any Kubernetes replica load the lease, reconnect or resume the provider
 handle when healthy, or mark it stale and reprovision with a new generation. On
 terminal session status, cancellation, failure, or panic cleanup, the
-orchestrator calls `destroy_session_hands(session_id)`, which lists durable
+orchestrator calls `reclaim_hands(session_id, None)`, which lists durable
 leases for every worker scope rather than only handles cached in the current
 process.
 
@@ -129,10 +129,11 @@ worker owns exactly one sandbox and siblings never share one:
 - **Per-worker release.** Because each sandbox has exactly one owner, a child
   can release its own hand without over-releasing siblings. `Worker::cleanup`
   (the generation-guarded self-cleanup) dispatches
-  `ToolExecutor::release_worker_hands` → `destroy_worker_hands(session_id,
-  worker_id)`, which reclaims only that scope. The VO holds no `ToolRouter`, so
-  the release is a detached service call. Session teardown still reclaims any
-  remaining coordinator/orphan hands via `destroy_session_hands`.
+  `ToolExecutor::release_worker_hands` → `reclaim_hands(session_id,
+  Some(worker_id))`, which reclaims only that scope. The VO holds no
+  `ToolRouter`, so the release is a detached service call. Session teardown
+  still reclaims any remaining coordinator/orphan hands via
+  `reclaim_hands(session_id, None)`.
 - **Sandboxes are refreshable, never the primary state source.** Durable agent
   state lives in the event log, artifacts, and object store, so a sandbox crash is
   recovered by marking the durable lease stale, claiming a new fenced

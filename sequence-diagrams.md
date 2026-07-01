@@ -93,7 +93,7 @@ sequenceDiagram
     Messaging->>Platform: render final message
     Platform-->>User: "Deployment complete..."
 
-    Note over Orch,Hand: On terminal exit, Orchestrator calls<br/>ToolRouter.destroy_session_hands(session_id)
+    Note over Orch,Hand: On terminal exit, Orchestrator calls<br/>ToolRouter.reclaim_hands(session_id, None)
 ```
 
 ---
@@ -279,7 +279,7 @@ sequenceDiagram
     Router-->>Brain: ToolOutput
     Brain->>Log: emit ToolCall + ToolResult
 
-    Note over Router,Hand: On session terminal exit, Orchestrator calls<br/>Router.destroy_session_hands(session_id)
+    Note over Router,Hand: On session terminal exit, Orchestrator calls<br/>Router.reclaim_hands(session_id, None)
 ```
 
 ---
