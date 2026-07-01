@@ -7,7 +7,8 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, LLMProvider,
-    ModelCapabilities, Result, StopReason, TokenUsage, ToolCallContent, ToolInvocation,
+    MessageRole, ModelCapabilities, Result, StopReason, TokenUsage, ToolCallContent,
+    ToolInvocation,
 };
 use serde_json::Value;
 const DEFAULT_INPUT_TOKENS: usize = 64;
@@ -137,9 +138,15 @@ impl ScriptedResponse {
 }
 
 /// Deterministic provider that replays one scripted response per request and records requests.
+///
+/// Selection order per [`complete`](ScriptedProvider::complete) call is: keyed request matching
+/// first, then the FIFO response queue, then the fallback response. Keyed entries are reusable and
+/// resolved without mutation, so concurrent callers that share a match all receive the same
+/// scripted completion; the FIFO queue keeps its consume-once semantics.
 #[derive(Clone)]
 pub struct ScriptedProvider {
     capabilities: ModelCapabilities,
+    keyed: Arc<Vec<(String, ScriptedResponse)>>,
     responses: Arc<Mutex<VecDeque<ScriptedResponse>>>,
     fallback_response: Arc<Mutex<Option<ScriptedResponse>>>,
     recorded_requests: Arc<Mutex<Vec<CompletionRequest>>>,
@@ -150,6 +157,7 @@ impl ScriptedProvider {
     pub fn new(capabilities: ModelCapabilities) -> Self {
         Self {
             capabilities,
+            keyed: Arc::new(Vec::new()),
             responses: Arc::new(Mutex::new(VecDeque::new())),
             fallback_response: Arc::new(Mutex::new(None)),
             recorded_requests: Arc::new(Mutex::new(Vec::new())),
@@ -170,6 +178,41 @@ impl ScriptedProvider {
             *fallback = Some(response);
         }
         self
+    }
+
+    /// Registers a reusable response returned whenever `match_substring` appears in a request's
+    /// system or user message text.
+    ///
+    /// Keyed entries are checked in registration order and the first match wins, so callers should
+    /// register specific substrings before general ones. Unlike the FIFO queue, keyed entries are
+    /// never consumed, which lets multiple concurrent callers that share a match resolve the same
+    /// completion deterministically.
+    pub fn push_keyed(
+        mut self,
+        match_substring: impl Into<String>,
+        response: ScriptedResponse,
+    ) -> Self {
+        Arc::make_mut(&mut self.keyed).push((match_substring.into(), response));
+        self
+    }
+
+    /// Returns the first keyed response whose match substring is contained in the request's system
+    /// or user message text, resolving without mutating the keyed table.
+    fn match_keyed(&self, request: &CompletionRequest) -> Option<ScriptedResponse> {
+        if self.keyed.is_empty() {
+            return None;
+        }
+        let haystack = request
+            .messages
+            .iter()
+            .filter(|message| matches!(message.role, MessageRole::System | MessageRole::User))
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.keyed
+            .iter()
+            .find(|(needle, _)| haystack.contains(needle.as_str()))
+            .map(|(_, response)| response.clone())
     }
 
     /// Appends one end-turn text response.
@@ -217,6 +260,9 @@ impl LLMProvider for ScriptedProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        // Resolve the keyed match before recording moves the request; keyed lookup is pure so it
+        // stays correct under concurrent callers.
+        let keyed_response = self.match_keyed(&request);
         self.recorded_requests
             .lock()
             .map_err(|error| {
@@ -225,31 +271,36 @@ impl LLMProvider for ScriptedProvider {
                 ))
             })?
             .push(request);
-        let response = self
-            .responses
-            .lock()
-            .map_err(|error| {
-                moa_core::MoaError::ProviderError(format!(
-                    "scripted provider response queue poisoned: {error}"
-                ))
-            })?
-            .pop_front();
-        let response = match response {
+        let response = match keyed_response {
             Some(response) => response,
-            None => self
-                .fallback_response
-                .lock()
-                .map_err(|error| {
-                    moa_core::MoaError::ProviderError(format!(
-                        "scripted provider fallback response poisoned: {error}"
-                    ))
-                })?
-                .clone()
-                .ok_or_else(|| {
-                    moa_core::MoaError::ProviderError(
-                        "scripted provider ran out of queued responses".to_string(),
-                    )
-                })?,
+            None => {
+                let queued = self
+                    .responses
+                    .lock()
+                    .map_err(|error| {
+                        moa_core::MoaError::ProviderError(format!(
+                            "scripted provider response queue poisoned: {error}"
+                        ))
+                    })?
+                    .pop_front();
+                match queued {
+                    Some(response) => response,
+                    None => self
+                        .fallback_response
+                        .lock()
+                        .map_err(|error| {
+                            moa_core::MoaError::ProviderError(format!(
+                                "scripted provider fallback response poisoned: {error}"
+                            ))
+                        })?
+                        .clone()
+                        .ok_or_else(|| {
+                            moa_core::MoaError::ProviderError(
+                                "scripted provider ran out of queued responses".to_string(),
+                            )
+                        })?,
+                }
+            }
         };
         let text = response
             .content
@@ -298,5 +349,85 @@ impl LLMProvider for ScriptedProvider {
             duration_ms: response.duration_ms,
             thought_signature: None,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moa_core::ContextMessage;
+
+    /// Builds a request whose concatenated system + user text contains `text`.
+    fn user_request(text: &str) -> CompletionRequest {
+        CompletionRequest::new(text)
+    }
+
+    /// Drains a completion stream and returns its aggregated assistant text.
+    async fn complete_text(provider: &ScriptedProvider, request: CompletionRequest) -> String {
+        provider
+            .complete(request)
+            .await
+            .expect("scripted completion")
+            .collect()
+            .await
+            .expect("aggregated response")
+            .text
+    }
+
+    #[tokio::test]
+    async fn keyed_match_returns_completion_and_is_reusable() {
+        let provider = ScriptedProvider::new(ModelCapabilities::default())
+            .push_keyed("worker-alpha", ScriptedResponse::text("alpha-done"));
+
+        // The same keyed entry resolves across repeated concurrent-style calls without being
+        // consumed, so every worker sharing the match sees the same completion.
+        for _ in 0..3 {
+            let text = complete_text(&provider, user_request("please dispatch worker-alpha")).await;
+            assert_eq!(text, "alpha-done");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_keyed_match_falls_back_to_fifo_then_default() {
+        let provider = ScriptedProvider::new(ModelCapabilities::default())
+            .push_keyed("worker-alpha", ScriptedResponse::text("alpha-done"))
+            .push_text("queued-1")
+            .with_fallback_response(ScriptedResponse::text("fallback"));
+
+        // No keyed substring present: the FIFO queue is consumed first, then the fallback.
+        let first = complete_text(&provider, user_request("unrelated instruction")).await;
+        assert_eq!(first, "queued-1");
+        let second = complete_text(&provider, user_request("still unrelated")).await;
+        assert_eq!(second, "fallback");
+    }
+
+    #[tokio::test]
+    async fn first_registered_keyed_match_wins() {
+        let provider = ScriptedProvider::new(ModelCapabilities::default())
+            .push_keyed("worker-alpha", ScriptedResponse::text("specific"))
+            .push_keyed("worker", ScriptedResponse::text("general"));
+
+        // Both substrings match; registration order decides the winner.
+        let text = complete_text(&provider, user_request("run worker-alpha")).await;
+        assert_eq!(text, "specific");
+
+        // A request matching only the general entry still resolves it.
+        let text = complete_text(&provider, user_request("run worker-beta")).await;
+        assert_eq!(text, "general");
+    }
+
+    #[tokio::test]
+    async fn keyed_match_reads_system_and_user_messages() {
+        let provider = ScriptedProvider::new(ModelCapabilities::default())
+            .push_keyed("role=reviewer", ScriptedResponse::text("reviewing"));
+
+        let request = CompletionRequest {
+            messages: vec![
+                ContextMessage::system("You are role=reviewer for this session."),
+                ContextMessage::user("Look at the diff."),
+            ],
+            ..CompletionRequest::new("ignored")
+        };
+        assert_eq!(complete_text(&provider, request).await, "reviewing");
     }
 }

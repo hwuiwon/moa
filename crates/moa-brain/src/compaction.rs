@@ -240,6 +240,8 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
             truncate(message)
         )),
         Event::GuardrailCheck { .. } => None,
+        // Per-turn telemetry (coordination/replay/latency) is never part of a compaction summary.
+        Event::TurnMetrics { .. } => None,
         Event::ActionReviewRequested { envelope, .. } => Some(format!(
             "#{} action_review_requested {}: {}",
             record.sequence_num,

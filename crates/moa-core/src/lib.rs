@@ -2,6 +2,8 @@
 
 pub mod analytics;
 pub mod config;
+pub mod conversation_cost;
+pub mod coordination_counters;
 pub mod diff;
 pub mod error;
 pub mod events;
@@ -30,6 +32,11 @@ pub use config::{
     ResolutionConfig, ResolutionWeights, SessionAttachmentBackend, SessionAttachmentStorageConfig,
     SessionBlobBackend, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig,
     VectorEmbedderConfig, ZeroEntropyEmbedderConfig,
+};
+pub use conversation_cost::{ConversationCost, CoordinationCost, TurnCost};
+pub use coordination_counters::{
+    CoordinationCounters, CoordinationSnapshot, record_durable_append, record_session_vo_call,
+    record_vo_send, record_worker_vo_call, scope_coordination_counters,
 };
 pub use diff::compute_unified_diff;
 pub use error::{MoaError, Result, ToolFailureClass, classify_tool_error};

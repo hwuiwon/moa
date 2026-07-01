@@ -456,6 +456,16 @@ fn default_provider_id(provider_name: &str) -> moa_core::Result<ProviderId> {
 struct ScriptedProviderFile {
     default: Option<ScriptedEntry>,
     responses: Vec<ScriptedEntry>,
+    keyed: Vec<KeyedEntry>,
+}
+
+/// One reusable request-matched scripted completion keyed by a message substring.
+#[cfg(feature = "scripted-provider")]
+#[derive(Debug, Deserialize)]
+struct KeyedEntry {
+    #[serde(rename = "match")]
+    match_: String,
+    completion: ScriptedCompletion,
 }
 
 #[cfg(feature = "scripted-provider")]
@@ -522,6 +532,12 @@ fn scripted_registry_from_file(file: ScriptedProviderFile) -> moa_core::Result<P
     }
     for response in file.responses {
         provider = provider.push_response(scripted_response(response)?);
+    }
+    for entry in file.keyed {
+        provider = provider.push_keyed(
+            entry.match_,
+            scripted_response(ScriptedEntry::Direct(entry.completion))?,
+        );
     }
     Ok(ProviderRegistry::all_kinds_from_static(Arc::new(provider)))
 }

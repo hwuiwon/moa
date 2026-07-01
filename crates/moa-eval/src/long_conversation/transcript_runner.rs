@@ -16,8 +16,8 @@ use moa_brain::{
 };
 use moa_core::transcript::Transcript;
 use moa_core::{
-    AssessmentPhase, AttributionSubjectType, CompletionRequest, CompletionStream, Event,
-    EventRange, EventRecord, LLMProvider, LearningCandidateStatus, MoaConfig, MoaError,
+    AssessmentPhase, AttributionSubjectType, CompletionRequest, CompletionStream, ConversationCost,
+    Event, EventRange, EventRecord, LLMProvider, LearningCandidateStatus, MoaConfig, MoaError,
     ModelCapabilities, RuntimeEvent, SegmentAssessment, SegmentEvidence, SegmentEvidenceKind,
     SegmentEvidencePolarity, SegmentOutcome, SessionId, SessionMeta, SessionStore, TaskSegment,
     deterministic_segment_id,
@@ -37,8 +37,8 @@ use super::memory_metrics::{
 };
 use super::provider_recorded::RecordedScriptedProvider;
 use super::score_card::{
-    CacheScores, ContextScores, CostScores, FunctionalScores, LatencyScores, MemoryScores,
-    SafetyScores, ScoreCard, ToolScores,
+    CacheScores, ContextScores, CoordinationScores, CostScores, FunctionalScores, LatencyScores,
+    MemoryScores, SafetyScores, ScoreCard, ToolScores,
 };
 use super::scripted_user::{ScriptedUserScript, ScriptedUserTurn};
 use crate::collector::{CollectedExecution, TrajectoryCollector};
@@ -1308,6 +1308,12 @@ async fn build_score_card(
                 .unwrap_or(0),
             ..SafetyScores::default()
         },
+        // Reconstructed from the same durable log: model turns + internal VO round-trips. VO
+        // round-trip fields are only populated when the run persisted TurnMetrics; model-turn and
+        // tool-call fields are always meaningful.
+        coordination: CoordinationScores::from_conversation_cost(&ConversationCost::from_events(
+            event_records,
+        )),
     }
 }
 

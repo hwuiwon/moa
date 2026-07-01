@@ -6,6 +6,7 @@
 //! surface like top-level session turns.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -15,16 +16,16 @@ use moa_core::wire::turn::{
 };
 use moa_core::{
     AgentSignalId, ChildReportKind, ChildReportTool, ChildSignalKind, CompletionContent,
-    CompletionRequest, CompletionResponse, Event, InputAudience, ModelTier, ParentResumePolicy,
-    ReportToParentInput, RequestInputInput, SessionId, SessionMeta, SignalSeverity, StopReason,
-    TokenUsage, ToolCallContent, ToolCallId, ToolInvocation, ToolOutput,
-    TrustedSandboxFileManifestRef, TurnOutcome as CoreTurnOutcome, WorkerPendingInput,
+    CompletionRequest, CompletionResponse, CoordinationCounters, Event, InputAudience, ModelTier,
+    ParentResumePolicy, ReportToParentInput, RequestInputInput, SessionId, SessionMeta,
+    SignalSeverity, StopReason, TokenUsage, ToolCallContent, ToolCallId, ToolInvocation,
+    ToolOutput, TrustedSandboxFileManifestRef, TurnOutcome as CoreTurnOutcome, WorkerPendingInput,
     WorkerSignal, WorkerToolRecord, WorkerTurnOutcomeRecord, WorkerTurnPreparation,
-    WorkerTurnResponseRecord,
+    WorkerTurnResponseRecord, scope_coordination_counters,
 };
 use moa_observability::restate_observability::{
-    annotate_restate_handler_span, event_persist_span, llm_call_span, tool_dispatch_span,
-    worker_turn_span,
+    annotate_restate_handler_span, emit_turn_coordination_summary, event_persist_span,
+    llm_call_span, tool_dispatch_span, worker_turn_span,
 };
 use moa_observability::{
     record_session_error, record_turn_event_persist_duration, record_turn_llm_call_duration,
@@ -183,6 +184,7 @@ async fn run_worker_inside_workflow(
     for turn_number in 1..=max_turns {
         driver_progress::set_iteration(ctx, turn_number);
         if let Some(reason) = driver_progress::cancel_requested(ctx).await? {
+            moa_core::record_vo_send();
             ctx.object_client::<WorkerClient>(request.worker_id.clone())
                 .cancel(reason.clone())
                 .send();
@@ -194,6 +196,7 @@ async fn run_worker_inside_workflow(
         }
 
         driver_progress::set_phase(ctx, TurnPhase::Compiling);
+        moa_core::record_worker_vo_call();
         let preparation = ctx
             .object_client::<WorkerClient>(request.worker_id.clone())
             .prepare_turn()
@@ -225,20 +228,26 @@ async fn run_worker_inside_workflow(
             turn_number as i64,
             None,
         );
-        let outcome = run_worker_iteration(
-            ctx,
-            WorkerIterationInput {
-                request,
-                completion_request,
-                active_canary,
-                meta,
-                parent_session,
-                turn_evidence: &mut turn_evidence,
-                tool_budget: &mut tool_budget,
-            },
+        let turn_coordination_counters = Arc::new(CoordinationCounters::default());
+        let outcome = scope_coordination_counters(
+            turn_coordination_counters.clone(),
+            run_worker_iteration(
+                ctx,
+                WorkerIterationInput {
+                    request,
+                    completion_request,
+                    active_canary,
+                    meta,
+                    parent_session,
+                    turn_evidence: &mut turn_evidence,
+                    tool_budget: &mut tool_budget,
+                },
+            )
+            .instrument(turn_span.clone()),
         )
-        .instrument(turn_span)
         .await?;
+        let turn_coordination_snapshot = turn_coordination_counters.snapshot();
+        emit_turn_coordination_summary(&turn_span, &turn_coordination_snapshot);
         match outcome {
             WorkerIterationOutcome::Cancelled(message) => {
                 return Ok(TurnOutcome {
@@ -317,6 +326,7 @@ async fn run_worker_iteration(
         restate_sdk::select! {
             reason = ctx.promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE) => {
                 let reason = reason?;
+                moa_core::record_vo_send();
                 ctx.object_client::<WorkerClient>(input.request.worker_id.clone())
                     .cancel(reason.clone())
                     .send();
@@ -334,6 +344,7 @@ async fn run_worker_iteration(
     let (response, verification_annotated) =
         annotate_unresolved_verification(&response, &*input.turn_evidence);
 
+    moa_core::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(input.request.worker_id.clone())
         .record_response(Json::from(WorkerTurnResponseRecord {
             turn_id: input.request.turn_id.clone(),
@@ -344,6 +355,7 @@ async fn run_worker_iteration(
 
     if verification_annotated {
         let outcome = CoreTurnOutcome::Idle;
+        moa_core::record_worker_vo_call();
         ctx.object_client::<WorkerClient>(input.request.worker_id.clone())
             .apply_turn_outcome(Json::from(WorkerTurnOutcomeRecord {
                 turn_id: input.request.turn_id.clone(),
@@ -356,6 +368,7 @@ async fn run_worker_iteration(
 
     for (index, tool_call) in response_tool_calls(&response).into_iter().enumerate() {
         if let Some(reason) = driver_progress::cancel_requested(ctx).await? {
+            moa_core::record_vo_send();
             ctx.object_client::<WorkerClient>(input.request.worker_id.clone())
                 .cancel(reason.clone())
                 .send();
@@ -401,6 +414,7 @@ async fn run_worker_iteration(
     }
 
     let outcome = turn_outcome_for_response(&response);
+    moa_core::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(input.request.worker_id.clone())
         .apply_turn_outcome(Json::from(WorkerTurnOutcomeRecord {
             turn_id: input.request.turn_id.clone(),
@@ -421,6 +435,7 @@ async fn record_worker_heartbeat(
     worker_id: &str,
 ) -> Result<(), HandlerError> {
     let now = durable_utc_now(ctx, "worker_heartbeat").await?;
+    moa_core::record_vo_send();
     ctx.object_client::<WorkerClient>(worker_id.to_string())
         .record_heartbeat(Json::from(now))
         .send();
@@ -689,6 +704,7 @@ async fn report_to_parent(
         .into_inner();
     let created_at = durable_utc_now(ctx, "child_report_signal_at").await?;
     let signal = build_child_report_signal(worker_id, parent_session, signal_id, created_at, input);
+    moa_core::record_vo_send();
     ctx.object_client::<SessionClient>(parent_session.to_string())
         .record_child_signal(Json::from(signal))
         .send();
@@ -737,6 +753,7 @@ async fn request_input_from_parent(
     // Persist the awakeable mapping on the child VO BEFORE emitting the signal so any
     // `ProvideInput` the coordinator sends in response always finds it (this `.call()`
     // awaits durable storage). Mirrors `attach_result_waiter` in the wait path.
+    moa_core::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(worker_id.to_string())
         .register_input_request(Json::from(WorkerPendingInput {
             input_request_id: input_request_id.clone(),
@@ -764,6 +781,7 @@ async fn request_input_from_parent(
         input.audience,
         &input.question,
     );
+    moa_core::record_vo_send();
     ctx.object_client::<SessionClient>(parent_session.to_string())
         .record_child_signal(Json::from(signal))
         .send();
@@ -777,6 +795,7 @@ async fn request_input_from_parent(
         },
         _ = ctx.sleep(Duration::from_millis(timeout_ms)) => {
             // Clear the now-dead mapping so a late ProvideInput is an idempotent no-op.
+            moa_core::record_worker_vo_call();
             ctx.object_client::<WorkerClient>(worker_id.to_string())
                 .clear_input_request(Json::from(input_request_id.clone()))
                 .call()
@@ -879,6 +898,7 @@ async fn record_worker_budget_stop(
         duration_ms: 0,
         thought_signature: None,
     };
+    moa_core::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(request.worker_id.clone())
         .record_response(Json::from(WorkerTurnResponseRecord {
             turn_id: request.turn_id.clone(),
@@ -886,6 +906,7 @@ async fn record_worker_budget_stop(
         }))
         .call()
         .await?;
+    moa_core::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(request.worker_id.clone())
         .apply_turn_outcome(Json::from(WorkerTurnOutcomeRecord {
             turn_id: request.turn_id.clone(),
@@ -926,6 +947,7 @@ async fn record_worker_turn_cap_stop(
         duration_ms: 0,
         thought_signature: None,
     };
+    moa_core::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(request.worker_id.clone())
         .record_response(Json::from(WorkerTurnResponseRecord {
             turn_id: request.turn_id.clone(),
@@ -933,6 +955,7 @@ async fn record_worker_turn_cap_stop(
         }))
         .call()
         .await?;
+    moa_core::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(request.worker_id.clone())
         .apply_turn_outcome(Json::from(WorkerTurnOutcomeRecord {
             turn_id: request.turn_id.clone(),
@@ -1007,6 +1030,7 @@ async fn record_tool_result(
     invocation: &ToolInvocation,
     output: &ToolOutput,
 ) -> Result<(), HandlerError> {
+    moa_core::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(worker_id.to_string())
         .record_tool_result(Json::from(WorkerToolRecord {
             turn_id: Some(turn_id.to_string()),
@@ -1027,6 +1051,7 @@ async fn record_denied_tool(
     invocation: &ToolInvocation,
     output: &ToolOutput,
 ) -> Result<(), HandlerError> {
+    moa_core::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(worker_id.to_string())
         .record_denied_tool(Json::from(WorkerToolRecord {
             turn_id: Some(turn_id.to_string()),
@@ -1110,6 +1135,7 @@ async fn append_session_event(
 ) -> Result<u64, HandlerError> {
     let persist_span = event_persist_span(1);
     let persist_started = Instant::now();
+    moa_core::record_durable_append();
     let sequence_num = ctx
         .service_client::<RestateSessionStoreClient>()
         .append_event(Json(AppendEventRequest {
@@ -1125,6 +1151,7 @@ async fn append_session_event(
 }
 
 fn notify_worker_of_outcome(ctx: &WorkflowContext<'_>, worker_id: &str, outcome: &TurnOutcome) {
+    moa_core::record_vo_send();
     ctx.object_client::<WorkerClient>(worker_id.to_string())
         .record_turn_outcome(Json::from(outcome.clone()))
         .send();
@@ -1174,6 +1201,7 @@ async fn emit_failed_child_signal_if_needed(
         &outcome.message,
     );
     // DETACHED: never block the workflow on the coordinator VO's single-writer queue.
+    moa_core::record_vo_send();
     ctx.object_client::<SessionClient>(parent_session.to_string())
         .record_child_signal(Json::from(signal))
         .send();

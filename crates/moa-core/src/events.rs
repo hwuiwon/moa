@@ -338,6 +338,45 @@ pub enum Event {
         /// System-visible instruction for the synthesis turn.
         reason: String,
     },
+    /// Per-turn coordination / replay / latency telemetry, appended at turn end when metrics
+    /// persistence is enabled (`MOA_PERSIST_TURN_METRICS`). Purely informational: it is not shown
+    /// to the model, does not require processing, and is skipped by history compilation and
+    /// compaction (all handled by their catch-all match arms). It exists so per-turn tool-call /
+    /// round-trip / replay cost is reconstructable post-hoc from the durable event log — the
+    /// substrate for the conversation-cost analyzer and the deterministic coordination tests.
+    TurnMetrics {
+        /// Turn id this summary describes.
+        turn_id: String,
+        /// Actor whose turn this was ("coordinator" or "worker").
+        actor: String,
+        /// Blocking Session-VO round-trips during the turn.
+        #[serde(default)]
+        session_vo_calls: u64,
+        /// Blocking Worker-VO round-trips during the turn.
+        #[serde(default)]
+        worker_vo_calls: u64,
+        /// Fire-and-forget VO dispatches during the turn.
+        #[serde(default)]
+        vo_sends: u64,
+        /// Durable event appends during the turn.
+        #[serde(default)]
+        durable_appends: u64,
+        /// `get_events` replay reads during the turn.
+        #[serde(default)]
+        get_events_calls: u64,
+        /// Bytes deserialized across replay reads.
+        #[serde(default)]
+        events_bytes: u64,
+        /// LLM-call wall-clock for the turn (ms).
+        #[serde(default)]
+        llm_ms: u64,
+        /// Tool-dispatch wall-clock for the turn (ms).
+        #[serde(default)]
+        tool_ms: u64,
+        /// Event-persist wall-clock for the turn (ms).
+        #[serde(default)]
+        persist_ms: u64,
+    },
     /// A control-plane attention signal from a child was recorded on the coordinator.
     WorkerSignalReceived {
         /// Stable identifier for the recorded signal.

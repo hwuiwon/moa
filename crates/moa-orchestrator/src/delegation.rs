@@ -223,6 +223,7 @@ async fn reserve_and_start_child(
     )
     .await?;
 
+    moa_core::record_vo_send();
     ctx.object_client::<WorkerClient>(reservation.child_ref.id.clone())
         .post_message(Json::from(reservation.initial_message.clone()))
         .send();
@@ -294,6 +295,7 @@ async fn wait_child(
     // before this is reached, so a cache re-check here would be a redundant Session round-trip.
     let timeout_ms = clamp_wait_timeout_ms(input.timeout_ms);
     let (awakeable_id, terminal_future) = ctx.awakeable::<String>();
+    moa_core::record_worker_vo_call();
     let attached = ctx
         .object_client::<WorkerClient>(input.worker_id.clone())
         .attach_result_waiter(Json::from(AttachWorkerResultWaiterInput {
@@ -332,6 +334,7 @@ async fn wait_timed_out(
     if let Some(terminal) = consume_parent_cached_terminal(ctx, parent, &input.worker_id).await? {
         return Ok(wait_terminal_output(input.worker_id, terminal));
     }
+    moa_core::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(input.worker_id.clone())
         .remove_result_waiter(Json::from(RemoveWorkerResultWaiterInput { awakeable_id }))
         .call()
@@ -339,6 +342,7 @@ async fn wait_timed_out(
     if let Some(terminal) = consume_parent_cached_terminal(ctx, parent, &input.worker_id).await? {
         return Ok(wait_terminal_output(input.worker_id, terminal));
     }
+    moa_core::record_worker_vo_call();
     let status = ctx
         .object_client::<WorkerClient>(input.worker_id.clone())
         .status()
@@ -363,6 +367,7 @@ async fn latest_child_progress(
     ctx: &WorkflowContext<'_>,
     worker_id: &str,
 ) -> Option<WorkerProgressSummary> {
+    moa_core::record_worker_vo_call();
     match ctx
         .object_client::<WorkerClient>(worker_id.to_string())
         .progress_summary()
@@ -398,6 +403,7 @@ async fn message_child(
     input: MessageWorkerInput,
 ) -> Result<(), HandlerError> {
     let worker_id = input.worker_id.clone();
+    moa_core::record_vo_send();
     ctx.object_client::<WorkerClient>(worker_id.clone())
         .post_message(Json::from(WorkerMessage::FollowUp {
             text: input.text.clone(),
@@ -427,6 +433,7 @@ async fn provide_input_child(
     input: ProvideWorkerInputInput,
 ) -> Result<(), HandlerError> {
     let worker_id = input.worker_id.clone();
+    moa_core::record_vo_send();
     ctx.object_client::<WorkerClient>(worker_id.clone())
         .post_message(Json::from(WorkerMessage::ProvideInput {
             input_request_id: input.input_request_id.clone(),
@@ -480,6 +487,7 @@ async fn collect_child_progress(
         match item {
             ChildProgressFetch::Ready(summary) => summaries.push(summary),
             ChildProgressFetch::Fetch(child_id) => {
+                moa_core::record_worker_vo_call();
                 match ctx
                     .object_client::<WorkerClient>(child_id.clone())
                     .progress_summary()
@@ -505,6 +513,7 @@ async fn cancel_child(
     input: CancelWorkerInput,
 ) -> Result<(), HandlerError> {
     let worker_id = input.worker_id.clone();
+    moa_core::record_vo_send();
     ctx.object_client::<WorkerClient>(input.worker_id)
         .cancel(input.reason)
         .send();
@@ -531,6 +540,7 @@ async fn consume_parent_cached_terminal(
         worker_id: worker_id.to_string(),
     });
     let DelegationParent::RootSession { session_id, .. } = parent;
+    moa_core::record_session_vo_call();
     let terminal = ctx
         .object_client::<SessionClient>(session_id.to_string())
         .consume_child_result(input)
@@ -574,6 +584,7 @@ async fn session_child_refs(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
 ) -> Result<Vec<WorkerChildRef>, HandlerError> {
+    moa_core::record_session_vo_call();
     Ok(ctx
         .object_client::<SessionClient>(session_id.to_string())
         .child_refs()
@@ -587,6 +598,7 @@ async fn register_session_child(
     session_id: SessionId,
     child: WorkerChildRef,
 ) -> Result<(), HandlerError> {
+    moa_core::record_session_vo_call();
     ctx.object_client::<SessionClient>(session_id.to_string())
         .register_child(Json::from(child))
         .call()
@@ -621,6 +633,7 @@ async fn append_session_event(
     event: Event,
 ) -> Result<u64, HandlerError> {
     let persist_span = moa_observability::restate_observability::event_persist_span(1);
+    moa_core::record_durable_append();
     let sequence_num = ctx
         .service_client::<RestateSessionStoreClient>()
         .append_event(Json(AppendEventRequest {

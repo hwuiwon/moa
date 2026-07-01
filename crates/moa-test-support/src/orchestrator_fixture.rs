@@ -48,6 +48,7 @@ const OPENFGA_PRESHARED_KEY: &str = "localdev-preshared-key-do-not-use-in-prod";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
 mod client;
+mod conversation;
 mod openfga;
 mod postgres;
 mod process;
@@ -55,6 +56,9 @@ mod restate;
 mod scripted_provider;
 
 pub use client::{TestApiClient, TestSessionHandle};
+pub use conversation::{
+    ConversationOptions, drive_conversation, drive_conversation_cost, fetch_all_events,
+};
 
 use openfga::{bootstrap_openfga, external_fga_client, start_openfga_container, wait_for_openfga};
 use postgres::{ensure_postgres_image, start_postgres_container, wait_for_postgres};

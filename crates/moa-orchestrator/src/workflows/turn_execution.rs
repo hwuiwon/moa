@@ -37,22 +37,23 @@ use moa_core::wire::turn::{
 };
 use moa_core::{
     ActiveSegment, AgentContext, AssessmentPhase, AttachWorkerResultWaiterInput, CompletionRequest,
-    CompletionResponse, DEFER_BRAIN_RESPONSE_METADATA_KEY, DelegationTool, DelegationToolKind,
-    Event, EventRange, EventRecord, EventType, GuardrailDecision, GuardrailDirection,
-    MarkWorkerChildTerminalInput, MoaError, ModelTier, QueryRewriteResult,
+    CompletionResponse, CoordinationCounters, DEFER_BRAIN_RESPONSE_METADATA_KEY, DelegationTool,
+    DelegationToolKind, Event, EventRange, EventRecord, EventType, GuardrailDecision,
+    GuardrailDirection, MarkWorkerChildTerminalInput, MoaError, ModelTier, QueryRewriteResult,
     RemoveWorkerResultWaiterInput, SandboxFile, SegmentId, SessionId, SessionMeta,
     SpawnWorkerInput, SpawnWorkerOutput, TaskSegment, ToolCallContent, ToolCallId, ToolInvocation,
     ToolOutput, TrustedSandboxFileEntry, TrustedSandboxFileManifestPayload,
     TrustedSandboxFileManifestRef, TurnOutcome as CoreTurnOutcome, TurnReplayCounters,
     WorkerChildRef, WorkerTerminalResult, default_worker_budget_tokens, is_child_report_tool_name,
-    is_delegation_tool_name, scope_turn_replay_counters,
+    is_delegation_tool_name, scope_coordination_counters, scope_turn_replay_counters,
 };
 use moa_lineage_citation::ChunkRef;
 use moa_lineage_core::TurnId;
 use moa_memory_ingest::{IngestionVOClient, ingestion_object_key};
 use moa_observability::restate_observability::{
-    annotate_restate_handler_span, emit_turn_latency_summary, emit_turn_replay_summary,
-    event_persist_span, llm_call_span, session_turn_span, tool_dispatch_span,
+    annotate_restate_handler_span, emit_turn_coordination_summary, emit_turn_latency_summary,
+    emit_turn_replay_summary, event_persist_span, llm_call_span, session_turn_span,
+    tool_dispatch_span,
 };
 use moa_observability::{
     TurnLatencyCounters, record_session_error, record_turn_event_persist_duration,
@@ -429,34 +430,62 @@ async fn execute_turn_inside_workflow(
             turn_number,
         );
         let turn_counters = Arc::new(TurnReplayCounters::default());
-        let turn_outcome = scope_turn_replay_counters(turn_counters.clone(), async {
-            let turn_latency_counters = Arc::new(TurnLatencyCounters::new(turn_root_span.clone()));
-            let turn_started = Instant::now();
-            let turn_result = scope_turn_latency_counters(turn_latency_counters.clone(), async {
-                run_once_inside_workflow(
-                    ctx,
-                    RunOnceContext {
-                        session_id,
-                        turn_id,
-                        identity: &request.identity,
-                    },
-                    &mut last_summary,
-                    &mut turn_evidence,
-                    &mut tool_budget,
-                )
-                .instrument(turn_root_span.clone())
-                .await
-            })
-            .await;
+        let turn_coordination_counters = Arc::new(CoordinationCounters::default());
+        let turn_outcome = scope_coordination_counters(
+            turn_coordination_counters.clone(),
+            scope_turn_replay_counters(turn_counters.clone(), async {
+                let turn_latency_counters =
+                    Arc::new(TurnLatencyCounters::new(turn_root_span.clone()));
+                let turn_started = Instant::now();
+                let turn_result =
+                    scope_turn_latency_counters(turn_latency_counters.clone(), async {
+                        run_once_inside_workflow(
+                            ctx,
+                            RunOnceContext {
+                                session_id,
+                                turn_id,
+                                identity: &request.identity,
+                            },
+                            &mut last_summary,
+                            &mut turn_evidence,
+                            &mut tool_budget,
+                        )
+                        .instrument(turn_root_span.clone())
+                        .await
+                    })
+                    .await;
 
-            let turn_latency_snapshot = turn_latency_counters.snapshot();
-            record_turn_latency(turn_started.elapsed());
-            emit_turn_latency_summary(&turn_root_span, turn_number as i64, &turn_latency_snapshot);
-            turn_result
-        })
+                let turn_latency_snapshot = turn_latency_counters.snapshot();
+                record_turn_latency(turn_started.elapsed());
+                emit_turn_latency_summary(
+                    &turn_root_span,
+                    turn_number as i64,
+                    &turn_latency_snapshot,
+                );
+                // Persist the per-turn coordination/replay/latency summary (gated) so the
+                // conversation-cost analyzer and deterministic coordination tests can read it
+                // from the durable log. Snapshots are taken before this append, so it does not
+                // count itself.
+                maybe_append_turn_metrics(
+                    ctx,
+                    session_id,
+                    &turn_id.0.to_string(),
+                    "coordinator",
+                    &turn_coordination_counters.snapshot(),
+                    &turn_counters.snapshot(),
+                    turn_latency_snapshot.llm_call_ms(),
+                    turn_latency_snapshot.tool_dispatch_ms(),
+                    turn_latency_snapshot.event_persist_ms(),
+                )
+                .await?;
+                turn_result
+            }),
+        )
         .await?;
         let turn_snapshot = turn_counters.snapshot();
         emit_turn_replay_summary(&turn_root_span, turn_number as i64, &turn_snapshot);
+        let turn_coordination_snapshot = turn_coordination_counters.snapshot();
+        emit_turn_coordination_summary(&turn_root_span, &turn_coordination_snapshot);
 
         match turn_outcome {
             TurnIterationOutcome::Core(CoreTurnOutcome::Continue) => continue,
@@ -1197,10 +1226,64 @@ async fn register_auto_delegation_run(
     user_sequence_num: u64,
     worker_ids: Vec<String>,
 ) -> Result<(), HandlerError> {
+    moa_core::record_session_vo_call();
     ctx.object_client::<SessionClient>(session_id.to_string())
         .register_auto_delegation_run(Json::from(RegisterAutoDelegationRunInput {
             user_sequence_num,
             worker_ids,
+        }))
+        .call()
+        .await?;
+    Ok(())
+}
+
+/// Whether per-turn `TurnMetrics` telemetry events should be persisted to the durable log.
+///
+/// Off by default (zero production log growth); enabled in eval/test via `MOA_PERSIST_TURN_METRICS`.
+/// Cached once — reading a process-stable env var is deterministic across Restate replay.
+fn persist_turn_metrics_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MOA_PERSIST_TURN_METRICS")
+            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes"))
+    })
+}
+
+/// Appends a per-turn `TurnMetrics` telemetry event when persistence is enabled (else a no-op).
+///
+/// Snapshots must be taken before calling so the event does not count its own append.
+#[allow(clippy::too_many_arguments)]
+async fn maybe_append_turn_metrics(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    turn_id: &str,
+    actor: &str,
+    coordination: &moa_core::CoordinationSnapshot,
+    replay: &moa_core::TurnReplaySnapshot,
+    llm_ms: u64,
+    tool_ms: u64,
+    persist_ms: u64,
+) -> Result<(), HandlerError> {
+    if !persist_turn_metrics_enabled() {
+        return Ok(());
+    }
+    ctx.service_client::<RestateSessionStoreClient>()
+        .append_event(Json(AppendEventRequest {
+            session_id,
+            event: Event::TurnMetrics {
+                turn_id: turn_id.to_string(),
+                actor: actor.to_string(),
+                session_vo_calls: coordination.session_vo_calls,
+                worker_vo_calls: coordination.worker_vo_calls,
+                vo_sends: coordination.vo_sends,
+                durable_appends: coordination.durable_appends,
+                get_events_calls: replay.get_events_calls,
+                events_bytes: replay.events_bytes,
+                llm_ms,
+                tool_ms,
+                persist_ms,
+            },
+            dedupe_key: Some(format!("turn_metrics:{turn_id}")),
         }))
         .call()
         .await?;
@@ -1272,6 +1355,7 @@ async fn maybe_fan_in_auto_delegation_results(
     // turn synthesize before its siblings finish. The handler also emits the durable bundle
     // and claims synthesis ownership for this root turn (preventing a duplicate synthesis
     // turn on completion).
+    moa_core::record_session_vo_call();
     let status = ctx
         .object_client::<SessionClient>(session_id.to_string())
         .poll_auto_delegation_fan_in(Json::from(PollAutoDelegationFanInInput {
@@ -1339,6 +1423,7 @@ async fn wait_for_auto_delegation_worker(
     .await?;
 
     let (awakeable_id, terminal_future) = ctx.awakeable::<String>();
+    moa_core::record_worker_vo_call();
     let attached = ctx
         .object_client::<WorkerClient>(worker_id.to_string())
         .attach_result_waiter(Json::from(AttachWorkerResultWaiterInput {
@@ -1382,6 +1467,7 @@ async fn cache_auto_delegation_terminal(
     worker_id: &str,
     terminal: WorkerTerminalResult,
 ) -> Result<(), HandlerError> {
+    moa_core::record_session_vo_call();
     ctx.object_client::<SessionClient>(session_id.to_string())
         .mark_child_terminal(Json::from(MarkWorkerChildTerminalInput {
             worker_id: worker_id.to_string(),
@@ -1397,6 +1483,7 @@ async fn remove_auto_delegation_result_waiter(
     worker_id: &str,
     awakeable_id: String,
 ) -> Result<(), HandlerError> {
+    moa_core::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(worker_id.to_string())
         .remove_result_waiter(Json::from(RemoveWorkerResultWaiterInput { awakeable_id }))
         .call()
@@ -1463,6 +1550,7 @@ async fn session_child_refs(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
 ) -> Result<Vec<WorkerChildRef>, HandlerError> {
+    moa_core::record_session_vo_call();
     Ok(ctx
         .object_client::<SessionClient>(session_id.to_string())
         .child_refs()
@@ -1871,6 +1959,7 @@ async fn ensure_current_segment(
                     update: completed.update.clone(),
                 }))
                 .send();
+            moa_core::record_durable_append();
             ctx.service_client::<RestateSessionStoreClient>()
                 .append_event(Json(AppendEventRequest {
                     session_id,
@@ -1894,6 +1983,7 @@ async fn ensure_current_segment(
             }))
             .call()
             .await?;
+        moa_core::record_durable_append();
         ctx.service_client::<RestateSessionStoreClient>()
             .append_event(Json(AppendEventRequest {
                 session_id,
@@ -2556,6 +2646,7 @@ async fn append_session_event(
 ) -> Result<u64, HandlerError> {
     let persist_span = event_persist_span(1);
     let persist_started = Instant::now();
+    moa_core::record_durable_append();
     let sequence_num = ctx
         .service_client::<RestateSessionStoreClient>()
         .append_event(Json(AppendEventRequest {
@@ -2629,6 +2720,7 @@ fn notify_session_of_outcome(
     identity: &moa_core::traits::Identity,
     outcome: &TurnOutcome,
 ) {
+    moa_core::record_vo_send();
     let request = ctx
         .object_client::<SessionClient>(session_id.to_string())
         .record_turn_outcome(Json::from(outcome.clone()));

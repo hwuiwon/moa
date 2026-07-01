@@ -3,7 +3,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use moa_core::{SessionId, SessionMeta, TraceContext, TurnReplaySnapshot};
+use moa_core::{CoordinationSnapshot, SessionId, SessionMeta, TraceContext, TurnReplaySnapshot};
 use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -77,6 +77,10 @@ pub fn session_turn_span(
         moa.turn.events_replayed = tracing::field::Empty,
         moa.turn.events_bytes = tracing::field::Empty,
         moa.turn.get_events_total_ms = tracing::field::Empty,
+        moa.turn.vo_session_calls = tracing::field::Empty,
+        moa.turn.vo_worker_calls = tracing::field::Empty,
+        moa.turn.vo_sends = tracing::field::Empty,
+        moa.turn.durable_appends = tracing::field::Empty,
         moa.turn.snapshot_load_ms = tracing::field::Empty,
         moa.turn.snapshot_hit = tracing::field::Empty,
         moa.turn.snapshot_write_ms = tracing::field::Empty,
@@ -195,6 +199,34 @@ pub fn emit_turn_replay_summary(
         get_events_total_ms = snapshot.get_events_total_ms(),
         pipeline_compile_ms = snapshot.pipeline_compile_ms(),
         "turn event replay summary"
+    );
+}
+
+/// Emits the shared per-turn coordination summary event and mirrors the values onto the turn span.
+///
+/// Counts the durable virtual-object round-trips (Session/Worker `.call()`s, fire-and-forget
+/// `.send()`s, and durable event appends) made during one turn so fan-in and delegation
+/// optimizations have a directly observable target.
+pub fn emit_turn_coordination_summary(
+    turn_root_span: &tracing::Span,
+    snapshot: &CoordinationSnapshot,
+) {
+    turn_root_span.record(
+        "moa.turn.vo_session_calls",
+        snapshot.session_vo_calls as i64,
+    );
+    turn_root_span.record("moa.turn.vo_worker_calls", snapshot.worker_vo_calls as i64);
+    turn_root_span.record("moa.turn.vo_sends", snapshot.vo_sends as i64);
+    turn_root_span.record("moa.turn.durable_appends", snapshot.durable_appends as i64);
+
+    tracing::info!(
+        parent: turn_root_span,
+        vo_session_calls = snapshot.session_vo_calls,
+        vo_worker_calls = snapshot.worker_vo_calls,
+        vo_sends = snapshot.vo_sends,
+        durable_appends = snapshot.durable_appends,
+        total_vo_calls = snapshot.total_vo_calls(),
+        "turn coordination summary"
     );
 }
 

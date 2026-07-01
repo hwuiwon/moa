@@ -1,7 +1,7 @@
 //! Score card schema and analytics-score flattening helpers.
 
 use chrono::{DateTime, Utc};
-use moa_core::{SessionId, StoragePartitionId, UserId};
+use moa_core::{ConversationCost, SessionId, StoragePartitionId, UserId};
 use moa_lineage_core::{ScoreRecord, ScoreSource, ScoreTarget, ScoreValue as LineageScoreValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
@@ -34,6 +34,9 @@ pub struct ScoreCard {
     pub tools: ToolScores,
     /// Safety counters.
     pub safety: SafetyScores,
+    /// Coordination cost: model turns and internal VO round-trips per conversation.
+    #[serde(default)]
+    pub coordination: CoordinationScores,
 }
 
 impl Default for ScoreCard {
@@ -51,6 +54,7 @@ impl Default for ScoreCard {
             memory: MemoryScores::default(),
             tools: ToolScores::default(),
             safety: SafetyScores::default(),
+            coordination: CoordinationScores::default(),
         }
     }
 }
@@ -68,6 +72,7 @@ impl ScoreCard {
         push_memory_rows(&mut rows, &self.memory);
         push_tool_rows(&mut rows, &self.tools);
         push_safety_rows(&mut rows, &self.safety);
+        push_coordination_rows(&mut rows, &self.coordination);
         rows
     }
 
@@ -252,6 +257,55 @@ pub struct SafetyScores {
     pub prompt_injection_attempts_blocked: u32,
     /// Shell chaining attempts blocked from matching an unsafe persisted allow rule.
     pub shell_bypass_attempts_blocked: u32,
+}
+
+/// Coordination cost: model turns and internal Restate VO round-trips for one conversation.
+///
+/// The model-turn and tool-call fields are always meaningful; the VO round-trip fields
+/// (`session_vo_calls` … `get_events_calls`) are only populated when the run persisted per-turn
+/// `TurnMetrics` (`MOA_PERSIST_TURN_METRICS`), signalled by [`Self::metrics_present`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CoordinationScores {
+    /// Model turns to resolve the conversation (fewer = lower latency and cost).
+    pub model_turns: u64,
+    /// Durable tool calls recorded across the conversation.
+    pub total_tool_calls: u64,
+    /// Whether per-turn `TurnMetrics` were persisted, so the VO round-trip fields are populated.
+    pub metrics_present: bool,
+    /// Coordinator↔Session virtual-object round-trips.
+    pub session_vo_calls: u64,
+    /// Coordinator↔Worker virtual-object round-trips.
+    pub worker_vo_calls: u64,
+    /// Fire-and-forget virtual-object sends (worker dispatch).
+    pub vo_sends: u64,
+    /// Durable append steps (replay cost).
+    pub durable_appends: u64,
+    /// Session event-log reads (replay-read cost).
+    pub get_events_calls: u64,
+}
+
+impl CoordinationScores {
+    /// Builds coordination scores from a reconstructed [`ConversationCost`].
+    #[must_use]
+    pub fn from_conversation_cost(cost: &ConversationCost) -> Self {
+        Self {
+            model_turns: cost.model_turns,
+            total_tool_calls: cost.total_tool_calls,
+            metrics_present: cost.coordination.present,
+            session_vo_calls: cost.coordination.session_vo_calls,
+            worker_vo_calls: cost.coordination.worker_vo_calls,
+            vo_sends: cost.coordination.vo_sends,
+            durable_appends: cost.coordination.durable_appends,
+            get_events_calls: cost.coordination.get_events_calls,
+        }
+    }
+
+    /// Total internal VO round-trips (session + worker) for the conversation.
+    #[must_use]
+    pub fn total_vo_round_trips(&self) -> u64 {
+        self.session_vo_calls + self.worker_vo_calls
+    }
 }
 
 fn push_row(rows: &mut Vec<MetricRow>, name: impl Into<String>, value: Value) {
@@ -462,6 +516,46 @@ fn push_safety_rows(rows: &mut Vec<MetricRow>, scores: &SafetyScores) {
         rows,
         "safety.shell_bypass_attempts_blocked",
         number(u64::from(scores.shell_bypass_attempts_blocked)),
+    );
+}
+
+fn push_coordination_rows(rows: &mut Vec<MetricRow>, scores: &CoordinationScores) {
+    push_row(rows, "coordination.model_turns", number(scores.model_turns));
+    push_row(
+        rows,
+        "coordination.total_tool_calls",
+        number(scores.total_tool_calls),
+    );
+    push_row(
+        rows,
+        "coordination.metrics_present",
+        Value::Bool(scores.metrics_present),
+    );
+    push_row(
+        rows,
+        "coordination.session_vo_calls",
+        number(scores.session_vo_calls),
+    );
+    push_row(
+        rows,
+        "coordination.worker_vo_calls",
+        number(scores.worker_vo_calls),
+    );
+    push_row(rows, "coordination.vo_sends", number(scores.vo_sends));
+    push_row(
+        rows,
+        "coordination.durable_appends",
+        number(scores.durable_appends),
+    );
+    push_row(
+        rows,
+        "coordination.get_events_calls",
+        number(scores.get_events_calls),
+    );
+    push_row(
+        rows,
+        "coordination.total_vo_round_trips",
+        number(scores.total_vo_round_trips()),
     );
 }
 
