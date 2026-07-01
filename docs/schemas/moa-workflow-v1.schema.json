@@ -24,7 +24,7 @@
               "end",
               "tool",
               "skill_action",
-              "sub_agent",
+              "worker",
               "parallel",
               "join",
               "wait_signal",

@@ -18,6 +18,7 @@ use moa_memory_ingest::{execute_memory_tool, is_fast_memory_tool};
 use moa_observability::record_tool_idempotency_scan;
 use moa_security::{ToolInputCanaryScreening, screen_tool_input_for_canary};
 use restate_sdk::prelude::*;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -38,6 +39,32 @@ pub trait ToolExecutor {
     async fn list_tools(
         tenant_id: Json<TenantId>,
     ) -> Result<Json<Vec<ToolDescriptor>>, HandlerError>;
+
+    /// Releases the hands and durable leases owned by one finishing worker scope.
+    async fn release_worker_hands(
+        request: Json<ReleaseWorkerHandsRequest>,
+    ) -> Result<(), HandlerError>;
+
+    /// Releases every hand and durable lease under a session at terminal teardown.
+    async fn release_session_hands(
+        request: Json<ReleaseSessionHandsRequest>,
+    ) -> Result<(), HandlerError>;
+}
+
+/// Request to release one finishing worker's scoped hands during its cleanup.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReleaseWorkerHandsRequest {
+    /// Owning session under which the worker's hands were provisioned.
+    pub session_id: SessionId,
+    /// Worker scope whose sandbox should be released.
+    pub worker_id: String,
+}
+
+/// Request to release every hand under a session at terminal teardown.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReleaseSessionHandsRequest {
+    /// Session whose hands and durable leases should be reclaimed.
+    pub session_id: SessionId,
 }
 
 /// Derived `ctx.run()` plan for one tool execution.
@@ -85,18 +112,29 @@ impl ToolExecutorImpl {
             return execute_memory_tool(session, &request.tool_name, &request.input).await;
         }
 
+        let trusted_sandbox_files = self.trusted_sandbox_files_for_request(request).await?;
+        if request.worker_id.is_none() && request.tool_name == "file_read" {
+            return Ok(
+                root_trusted_file_read(&request.input, &trusted_sandbox_files)
+                    .unwrap_or_else(root_file_read_denied_output),
+            );
+        }
+
         let invocation = ToolInvocation {
             id: request.provider_tool_use_id.clone(),
             name: request.tool_name.clone(),
             input: request.input.clone(),
         };
-        let trusted_sandbox_files = self.trusted_sandbox_files_for_request(request).await?;
+        // Scope the hand (and its trusted-file manifest) to the originating
+        // worker so each worker owns its own sandbox; the root
+        // coordinator keeps `None` for the shared session-level scope.
+        let hand_scope = request.worker_id.as_deref();
         self.router
-            .set_trusted_sandbox_files(session, trusted_sandbox_files)
+            .set_trusted_sandbox_files(session, hand_scope, trusted_sandbox_files)
             .await;
         let (_hand_id, output) = self
             .router
-            .execute_authorized_with_recovery(session, &invocation)
+            .execute_authorized_with_recovery(session, hand_scope, &invocation)
             .await?;
         Ok(output)
     }
@@ -127,6 +165,24 @@ impl ToolExecutorImpl {
     }
 }
 
+fn root_trusted_file_read(input: &Value, files: &[SandboxFile]) -> Option<ToolOutput> {
+    let path = input.get("path").and_then(Value::as_str)?;
+    let file = files.iter().find(|file| file.path == path)?;
+    let input_json = serde_json::to_string(input).ok()?;
+    let content = String::from_utf8(file.content.clone()).ok()?;
+    Some(
+        moa_hands::tools::file_read::execute_with_content(&input_json, &file.path, &content)
+            .unwrap_or_else(|error| ToolOutput::error(error.to_string(), Duration::ZERO)),
+    )
+}
+
+fn root_file_read_denied_output() -> ToolOutput {
+    ToolOutput::error(
+        "Tool file_read is available to the root coordinator only for selected skill package files.",
+        Duration::ZERO,
+    )
+}
+
 /// Durable loader for trusted sandbox file manifests referenced by tool requests.
 #[async_trait]
 pub trait TrustedSandboxFileManifestStore: Send + Sync {
@@ -155,7 +211,7 @@ impl TrustedSandboxFileManifestStore for SessionStoreTrustedSandboxFileManifestS
 
 impl ToolExecutor for ToolExecutorImpl {
     #[tracing::instrument(skip(self, ctx, request))]
-    // SAFETY: Internal session and sub-agent workflows admit callers before invoking tool execution.
+    // SAFETY: Internal session and worker workflows admit callers before invoking tool execution.
     async fn execute(
         &self,
         ctx: Context<'_>,
@@ -256,6 +312,43 @@ impl ToolExecutor for ToolExecutorImpl {
         annotate_restate_handler_span("ToolExecutor", "list_tools");
         let _tenant_id = tenant_id.into_inner();
         Ok(Json::from(self.list_descriptors()))
+    }
+
+    #[tracing::instrument(skip(self, _ctx, request))]
+    // SAFETY: internal teardown dispatched by a finishing Worker VO's own cleanup path.
+    // It destroys only that worker's own `(session_id, worker_id)` sandbox scope and
+    // reads no caller-owned data back. The router logs provider failures and reports an
+    // incomplete release so the Worker VO can reschedule cleanup instead of clearing.
+    async fn release_worker_hands(
+        &self,
+        _ctx: Context<'_>,
+        request: Json<ReleaseWorkerHandsRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("ToolExecutor", "release_worker_hands");
+        let request = request.into_inner();
+        let complete = self
+            .router
+            .reclaim_hands(&request.session_id, Some(request.worker_id.as_str()))
+            .await;
+        if !complete {
+            return Err(TerminalError::new("worker hand cleanup incomplete").into());
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, _ctx, request))]
+    // SAFETY: internal teardown dispatched at session terminal teardown. It reclaims only
+    // that session's own hands/leases and reads no caller-owned data back. The router logs
+    // and swallows its own failures, so this is non-fatal and always returns Ok.
+    async fn release_session_hands(
+        &self,
+        _ctx: Context<'_>,
+        request: Json<ReleaseSessionHandsRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("ToolExecutor", "release_session_hands");
+        let request = request.into_inner();
+        self.router.reclaim_hands(&request.session_id, None).await;
+        Ok(())
     }
 }
 
@@ -598,6 +691,7 @@ async fn append_tool_call_event(
                 input: request.input.clone(),
                 hand_id: None,
             },
+            dedupe_key: None,
         }))
         .call()
         .await?;
@@ -625,6 +719,7 @@ async fn append_tool_result_event(
                 success: !output.is_error,
                 duration_ms: output.duration.as_millis() as u64,
             },
+            dedupe_key: None,
         }))
         .call()
         .await?;
@@ -655,6 +750,7 @@ async fn append_tool_error_event(
                     IdempotencyClass::NonIdempotent
                 ),
             },
+            dedupe_key: None,
         }))
         .call()
         .await?;
@@ -679,6 +775,7 @@ async fn append_tool_canary_block_events(
                     request.tool_name
                 ),
             },
+            dedupe_key: None,
         }))
         .call()
         .await?;
@@ -693,6 +790,7 @@ async fn append_tool_canary_block_events(
                 error: blocked_canary_message(&request.tool_name),
                 retryable: false,
             },
+            dedupe_key: None,
         }))
         .call()
         .await?;
@@ -719,6 +817,7 @@ async fn append_agent_tool_policy_denied_event(
                 error: output.to_text(),
                 retryable: false,
             },
+            dedupe_key: None,
         }))
         .call()
         .await?;
@@ -763,7 +862,8 @@ mod tests {
 
     use super::{
         ToolExecutorImpl, TrustedSandboxFileManifestStore, agent_tool_policy_denied_output,
-        blocked_canary_tool_output, has_prior_tool_call_event, synthetic_session_id,
+        blocked_canary_tool_output, has_prior_tool_call_event, root_trusted_file_read,
+        synthetic_session_id,
     };
 
     #[derive(Default)]
@@ -950,12 +1050,16 @@ mod tests {
             user_id: UserId::new("user-1"),
             idempotency_key: None,
             trusted_sandbox_manifest: None,
+            worker_id: None,
         }
     }
 
-    #[tokio::test]
-    async fn execute_buffered_installs_files_from_durable_request_manifest() {
-        // Pins: ToolExecutor does not rely on trusted-file state from the turn-loop router.
+    fn install_scenario() -> (
+        ToolExecutorImpl,
+        Arc<InstallingProvider>,
+        Vec<SandboxFile>,
+        TrustedSandboxFileManifestRef,
+    ) {
         let provider = Arc::new(InstallingProvider::default());
         let mut registry = ToolRegistry::default_local();
         registry.register_hand(
@@ -1002,7 +1106,14 @@ mod tests {
             .with_trusted_manifest_store(Arc::new(StaticTrustedManifestStore {
                 files: files.clone(),
             }));
-        let request = ToolCallRequest {
+        (executor, provider, files, manifest)
+    }
+
+    fn manifest_request(
+        manifest: TrustedSandboxFileManifestRef,
+        worker_id: Option<String>,
+    ) -> ToolCallRequest {
+        ToolCallRequest {
             tool_call_id: ToolCallId::new(),
             provider_tool_use_id: Some("provider-tool-use".to_string()),
             tool_name: "bash".to_string(),
@@ -1013,7 +1124,15 @@ mod tests {
             user_id: UserId::new("user-1"),
             idempotency_key: None,
             trusted_sandbox_manifest: Some(manifest),
-        };
+            worker_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_buffered_installs_files_from_durable_request_manifest() {
+        // Pins: ToolExecutor does not rely on trusted-file state from the turn-loop router.
+        let (executor, provider, files, manifest) = install_scenario();
+        let request = manifest_request(manifest, None);
 
         let output = executor
             .execute_buffered(&SessionMeta::default(), &request)
@@ -1022,5 +1141,51 @@ mod tests {
 
         assert!(!output.is_error);
         assert_eq!(provider.installed_files(), files);
+    }
+
+    #[tokio::test]
+    async fn execute_buffered_installs_worker_trusted_files_under_its_scope() {
+        // Pins: a worker's trusted files install on ITS scoped hand, proving the
+        // set_trusted_sandbox_files write scope and the hand-execution read scope match.
+        let (executor, provider, files, manifest) = install_scenario();
+        let request = manifest_request(manifest, Some("worker-7".to_string()));
+
+        let output = executor
+            .execute_buffered(&SessionMeta::default(), &request)
+            .await
+            .expect("worker tool execution should install its scoped manifest");
+
+        assert!(!output.is_error);
+        assert_eq!(provider.installed_files(), files);
+    }
+
+    #[tokio::test]
+    async fn root_file_read_uses_trusted_manifest_without_installing_hand_files() {
+        // Pins: selected skill reads on the root coordinator stay sandbox-free.
+        let (executor, provider, _files, manifest) = install_scenario();
+        let mut request = manifest_request(manifest, None);
+        request.tool_name = "file_read".to_string();
+        request.input = serde_json::json!({"path": ".moa/skills/test/SKILL.md"});
+
+        let output = executor
+            .execute_buffered(&SessionMeta::default(), &request)
+            .await
+            .expect("root skill file_read should use request manifest");
+
+        assert!(!output.is_error);
+        assert!(output.to_text().contains("use this skill"));
+        assert!(
+            provider.installed_files().is_empty(),
+            "root manifest file_read must not provision or install hand files"
+        );
+    }
+
+    #[test]
+    fn root_file_read_ignores_paths_not_in_manifest() {
+        // Pins: root file_read cannot access arbitrary paths outside selected skill files.
+        let (_executor, _provider, files, _manifest) = install_scenario();
+        let output = root_trusted_file_read(&serde_json::json!({"path": "src/lib.rs"}), &files);
+
+        assert!(output.is_none());
     }
 }

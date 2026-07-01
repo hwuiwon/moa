@@ -1,0 +1,4 @@
+interface:
+  display_name: "MOA 100 Session Sweep"
+  short_description: "Run MOA's live 100-session persona sweep and baseline report."
+  default_prompt: "Run the MOA 100-session sweep and update the baseline report."

@@ -23,8 +23,8 @@ pub use core::factory::{
     resolve_provider_selection, resolve_rewriter_provider,
 };
 pub use core::models::{
-    CATALOG, ProviderModel, by_provider, capabilities_for_provider_model, context_window, find,
-    find_for_provider_model, find_model, pricing_for_model,
+    CATALOG, ProviderModel, by_provider, capabilities_for_provider_model, cheapest_chat_model,
+    context_window, find, find_for_provider_model, find_model, pricing_for_model,
 };
 pub use core::router::ModelRouter;
 #[cfg(any(test, feature = "mock-embedding"))]

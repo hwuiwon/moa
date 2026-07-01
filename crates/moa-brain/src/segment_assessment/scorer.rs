@@ -13,8 +13,8 @@ const POLICY_VERSION: &str = "segment-assessment-v1";
 pub enum AssessmentOverride {
     /// User or runtime cancelled the task.
     Cancelled,
-    /// Agent hit the turn budget.
-    TurnBudgetExceeded,
+    /// Agent hit the model-loop turn cap.
+    TurnCapExceeded,
     /// A verification command passed.
     VerificationPassed,
     /// A verification command failed.
@@ -62,7 +62,7 @@ impl SegmentAssessor {
                 overrides,
             );
         }
-        if overrides.contains(&AssessmentOverride::TurnBudgetExceeded) {
+        if overrides.contains(&AssessmentOverride::TurnCapExceeded) {
             return segment_assessment(
                 SegmentOutcome::Failed,
                 0.9,
@@ -253,11 +253,11 @@ fn override_evidence(override_value: &AssessmentOverride) -> SegmentEvidence {
             strength: 1.0,
             summary: "session cancellation closed the segment".to_string(),
         },
-        AssessmentOverride::TurnBudgetExceeded => SegmentEvidence {
+        AssessmentOverride::TurnCapExceeded => SegmentEvidence {
             kind: SegmentEvidenceKind::Override,
             polarity: SegmentEvidencePolarity::SupportsFailed,
             strength: 0.9,
-            summary: "turn budget was exhausted".to_string(),
+            summary: "model-loop turn cap was reached".to_string(),
         },
         AssessmentOverride::VerificationPassed => SegmentEvidence {
             kind: SegmentEvidenceKind::Override,
@@ -343,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_budget_overrides_to_failed() {
+    fn turn_cap_overrides_to_failed() {
         let assessor = SegmentAssessor::default();
         let assessment = assessor.assess(
             Some(0.8),
@@ -352,7 +352,7 @@ mod tests {
             Some(0.7),
             None,
             AssessmentPhase::Immediate,
-            &[AssessmentOverride::TurnBudgetExceeded],
+            &[AssessmentOverride::TurnCapExceeded],
         );
 
         assert_eq!(assessment.outcome, SegmentOutcome::Failed);

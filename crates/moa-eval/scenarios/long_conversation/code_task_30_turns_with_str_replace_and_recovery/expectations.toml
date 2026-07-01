@@ -9,6 +9,10 @@ facts_planted = [
 ]
 
 [budgets]
+# Recorded lanes never touch Restate, so internal VO round-trips are structurally 0.
+vo_round_trips_max = 0
+# Whole-conversation model-turn ceiling: exact observed BrainResponse count for this recorded scenario.
+model_turns_max = 30
 latency_p95_ms_max = 4200
 cost_cents_max = 150
 cache_input_cached_ratio_min = 0.65

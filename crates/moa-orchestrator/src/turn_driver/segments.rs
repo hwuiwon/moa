@@ -47,7 +47,7 @@ mod tests {
 
     #[test]
     fn active_segment_metadata_uses_owned_keys() {
-        // Pins: root and sub-agent completion requests use one segment metadata key owner.
+        // Pins: root and worker completion requests use one segment metadata key owner.
         let segment = moa_core::ActiveSegment {
             id: SegmentId(uuid::Uuid::now_v7()),
             segment_index: 3,

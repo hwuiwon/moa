@@ -218,6 +218,15 @@ impl ToolRouter {
         self.registry.tools.contains_key(name)
     }
 
+    /// Returns whether the named tool provisions a hand/sandbox to execute.
+    ///
+    /// Delegates to the registry's execution-routing classification. Hand-routed
+    /// tools are the ones hard-excluded from the sandbox-free root coordinator's
+    /// tool set; built-in and MCP tools are coordinator-safe.
+    pub fn tool_requires_sandbox(&self, name: &str) -> bool {
+        self.registry.tool_requires_sandbox(name)
+    }
+
     /// Returns one registered tool definition by name.
     pub fn tool_definition(&self, name: &str) -> Option<moa_core::ToolDefinition> {
         self.registry

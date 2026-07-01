@@ -7,8 +7,8 @@ use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::{
     ActionEnvelope, ActionPolicyEffect, ActionPolicyRule, ActionReviewPreview, ActionRuleScope,
-    AgentPolicySnapshot, MoaError, SessionMeta, SubAgentId, TenantId, ToolCallId, ToolInvocation,
-    UserId,
+    AgentPolicySnapshot, MoaError, SessionMeta, TenantId, ToolCallId, ToolInvocation, UserId,
+    WorkerId,
 };
 use moa_hands::{ActionOrigin, ToolRouter};
 use moa_security::{ActionPolicyRuleStore, stricter_effect};
@@ -30,9 +30,9 @@ pub struct PrepareActionReviewRequest {
     pub review_id: Uuid,
     /// Stable tool-call identifier for event correlation.
     pub tool_call_id: ToolCallId,
-    /// Sub-agent that requested the action, when present.
+    /// Worker that requested the action, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sub_agent_id: Option<SubAgentId>,
+    pub worker_id: Option<WorkerId>,
     /// Origin object kind for workflow or artifact-driven actions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_kind: Option<String>,
@@ -110,7 +110,7 @@ impl ActionPolicyImpl {
 
 impl ActionPolicy for ActionPolicyImpl {
     #[tracing::instrument(skip(self, ctx, request))]
-    // SAFETY: internal workflow call after the owning session or sub-agent has admitted the caller; user-facing review listing and decisions authorize in `ActionReviews`.
+    // SAFETY: internal workflow call after the owning session or worker has admitted the caller; user-facing review listing and decisions authorize in `ActionReviews`.
     async fn prepare_action_review(
         &self,
         ctx: Context<'_>,
@@ -156,7 +156,7 @@ impl ActionPolicy for ActionPolicyImpl {
                         request.review_id,
                         &request.session,
                         request.tool_call_id,
-                        request.sub_agent_id,
+                        request.worker_id,
                         origin,
                     ),
                     preview: prepared.review_preview(),

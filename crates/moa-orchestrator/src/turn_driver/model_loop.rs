@@ -23,12 +23,12 @@ pub(crate) struct RootLoopPlanRequest<'a> {
     pub(crate) available_tool_count: usize,
 }
 
-/// Inputs for planning one sub-agent turn loop.
+/// Inputs for planning one worker turn loop.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct SubAgentLoopPlanRequest {
-    /// Caller-supplied sub-agent turn cap.
+pub(crate) struct WorkerLoopPlanRequest {
+    /// Caller-supplied worker turn cap.
     pub(crate) request_max_turns: Option<u32>,
-    /// Default sub-agent workflow cap used when the caller omits one.
+    /// Default worker workflow cap used when the caller omits one.
     pub(crate) default_max_turns: usize,
 }
 
@@ -62,15 +62,15 @@ pub(crate) fn root_loop_plan(
         request_max_turns: request.request_max_turns,
         has_recent_target: request.has_recent_target,
         is_workflow_context: false,
-        is_sub_agent_context: false,
+        is_worker_context: false,
         available_tool_count: request.available_tool_count,
     });
     loop_plan(request.request_max_turns, complexity_class, session_limits)
 }
 
-/// Builds a deterministic loop plan for a delegated sub-agent turn.
-pub(crate) fn sub_agent_loop_plan(
-    request: SubAgentLoopPlanRequest,
+/// Builds a deterministic loop plan for a delegated worker turn.
+pub(crate) fn worker_loop_plan(
+    request: WorkerLoopPlanRequest,
     session_limits: &SessionLimitsConfig,
 ) -> TurnLoopPlan {
     let complexity_class = classify_turn_request(TurnResponsivenessInput {
@@ -79,7 +79,7 @@ pub(crate) fn sub_agent_loop_plan(
         request_max_turns: request.request_max_turns,
         has_recent_target: true,
         is_workflow_context: false,
-        is_sub_agent_context: true,
+        is_worker_context: true,
         available_tool_count: 0,
     });
     let default_cap = request.default_max_turns.min(u32::MAX as usize) as u32;
@@ -107,9 +107,7 @@ mod tests {
     use moa_core::config::SessionLimitsConfig;
     use moa_core::wire::turn::TurnComplexityClass;
 
-    use super::{
-        RootLoopPlanRequest, SubAgentLoopPlanRequest, root_loop_plan, sub_agent_loop_plan,
-    };
+    use super::{RootLoopPlanRequest, WorkerLoopPlanRequest, root_loop_plan, worker_loop_plan};
 
     #[test]
     fn root_vague_turn_uses_clarification_budget() {
@@ -131,11 +129,11 @@ mod tests {
     }
 
     #[test]
-    fn sub_agent_plan_is_complex_and_defaults_cap() {
-        // Pins: sub-agent workflows keep their bounded default loop cap.
+    fn worker_plan_is_complex_and_defaults_cap() {
+        // Pins: worker workflows keep their bounded default loop cap.
         let limits = SessionLimitsConfig::default();
-        let plan = sub_agent_loop_plan(
-            SubAgentLoopPlanRequest {
+        let plan = worker_loop_plan(
+            WorkerLoopPlanRequest {
                 request_max_turns: None,
                 default_max_turns: 7,
             },

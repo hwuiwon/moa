@@ -328,7 +328,9 @@ pub(super) async fn append_event(
     );
     let started_at = Instant::now();
     let result = async {
-        let record = session_store.emit_event_record(session_id, event).await?;
+        let record = session_store
+            .emit_event_record(session_id, event, None)
+            .await?;
         if let Some(event_tx) = event_tx {
             let _ = event_tx.send(record);
         }

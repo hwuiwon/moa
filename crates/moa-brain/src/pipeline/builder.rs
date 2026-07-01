@@ -14,6 +14,7 @@ use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
 
 use super::agent_instructions::AgentInstructionProcessor;
 use super::compactor::Compactor;
+use super::delegation_planning::DelegationPlanningProcessor;
 use super::digest::DigestProcessor;
 use super::history::HistoryCompiler;
 use super::identity::{DEFAULT_IDENTITY_PROMPT, IdentityProcessor};
@@ -62,6 +63,7 @@ pub fn build_default_pipeline_with_tools(
     ];
     stages.extend([
         history,
+        Box::new(DelegationPlanningProcessor::new()) as Box<dyn ContextProcessor>,
         Box::new(RuntimeContextProcessor::default()) as Box<dyn ContextProcessor>,
         Box::new(Compactor::new(
             config.compaction.clone(),
@@ -253,6 +255,7 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
     stages.extend([
         graph_memory,
         history,
+        Box::new(DelegationPlanningProcessor::new()) as Box<dyn ContextProcessor>,
         Box::new(RuntimeContextProcessor::default()) as Box<dyn ContextProcessor>,
         Box::new(Compactor::new(
             config.compaction.clone(),

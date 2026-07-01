@@ -21,6 +21,28 @@ fn tenant_id() -> TenantId {
     TenantId::from(Uuid::parse_str(TENANT_ID).expect("test tenant id should be a valid UUID"))
 }
 
+async fn new_session(test_db: &TestDb) -> moa_core::SessionId {
+    test_db
+        .store()
+        .create_session(SessionMeta {
+            tenant_id: tenant_id(),
+            created_by: Some(SessionActorRef::Identity {
+                id: Uuid::from_u128(42),
+            }),
+            model: ModelId::new("test-model"),
+            ..SessionMeta::default()
+        })
+        .await
+        .expect("create dedupe test session")
+}
+
+fn user_message(text: &str) -> Event {
+    Event::UserMessage {
+        text: text.to_string(),
+        attachments: Vec::new(),
+    }
+}
+
 async fn seeded_event(test_db: &TestDb) -> Uuid {
     let session_id = test_db
         .store()
@@ -213,6 +235,99 @@ async fn update_on_events_is_blocked_even_if_privilege_is_regranted() {
         ),
         "defense-in-depth path should reach append-only trigger: {error}"
     );
+}
+
+#[tokio::test]
+async fn repeated_dedupe_key_returns_first_sequence_and_inserts_once_db() {
+    // Pins: a retried append with the same (session_id, dedupe_key) returns the
+    // first persisted sequence number and never inserts a second event.
+    let test_db = test_db().await;
+    let session_id = new_session(&test_db).await;
+
+    let first = test_db
+        .store()
+        .emit_event_record(
+            session_id,
+            user_message("idempotent-first"),
+            Some("dedupe-key-1".to_string()),
+        )
+        .await
+        .expect("first deduped append");
+    let second = test_db
+        .store()
+        .emit_event_record(
+            session_id,
+            user_message("idempotent-second"),
+            Some("dedupe-key-1".to_string()),
+        )
+        .await
+        .expect("second deduped append with same key");
+
+    assert_eq!(
+        first.sequence_num, second.sequence_num,
+        "same dedupe key must return the first persisted sequence number"
+    );
+
+    let events = test_db
+        .store()
+        .get_events(session_id, EventRange::all())
+        .await
+        .expect("read events after deduped appends");
+    assert_eq!(events.len(), 1, "dedupe must insert exactly one event");
+}
+
+#[tokio::test]
+async fn distinct_dedupe_keys_append_separate_events_db() {
+    // Pins: different dedupe keys append independently, each with its own sequence.
+    let test_db = test_db().await;
+    let session_id = new_session(&test_db).await;
+
+    let first = test_db
+        .store()
+        .emit_event_record(session_id, user_message("key-a"), Some("key-a".to_string()))
+        .await
+        .expect("append under key-a");
+    let second = test_db
+        .store()
+        .emit_event_record(session_id, user_message("key-b"), Some("key-b".to_string()))
+        .await
+        .expect("append under key-b");
+
+    assert_eq!(first.sequence_num, 0);
+    assert_eq!(second.sequence_num, 1);
+    let events = test_db
+        .store()
+        .get_events(session_id, EventRange::all())
+        .await
+        .expect("read events after distinct-key appends");
+    assert_eq!(events.len(), 2);
+}
+
+#[tokio::test]
+async fn none_dedupe_key_always_appends_db() {
+    // Pins: appends without a dedupe key keep inserting every time (today's behavior).
+    let test_db = test_db().await;
+    let session_id = new_session(&test_db).await;
+
+    let first = test_db
+        .store()
+        .emit_event_record(session_id, user_message("no-key-1"), None)
+        .await
+        .expect("first keyless append");
+    let second = test_db
+        .store()
+        .emit_event_record(session_id, user_message("no-key-2"), None)
+        .await
+        .expect("second keyless append");
+
+    assert_eq!(first.sequence_num, 0);
+    assert_eq!(second.sequence_num, 1);
+    let events = test_db
+        .store()
+        .get_events(session_id, EventRange::all())
+        .await
+        .expect("read events after keyless appends");
+    assert_eq!(events.len(), 2);
 }
 
 #[tokio::test]

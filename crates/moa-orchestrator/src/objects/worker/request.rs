@@ -1,21 +1,21 @@
-//! Completion-request construction helpers for sub-agent turns.
+//! Completion-request construction helpers for worker turns.
 
 use super::*;
 
 pub(super) fn build_completion_request(
-    state: &SubAgentVoState,
+    state: &WorkerVoState,
 ) -> Result<CompletionRequest, HandlerError> {
     let model = state
         .model
         .clone()
-        .ok_or_else(|| TerminalError::new("sub-agent model missing"))?;
+        .ok_or_else(|| TerminalError::new("worker model missing"))?;
     let capabilities = configured_model_capabilities(&model)?;
-    let max_output_tokens = clamp_sub_agent_max_output(&capabilities, state.budget_remaining);
+    let max_output_tokens = clamp_worker_max_output(&capabilities, state.budget_remaining);
     let mut request = CompletionRequest {
         model: Some(model),
         messages: vec![
-            ContextMessage::system(SUB_AGENT_SYSTEM_PROMPT),
-            ContextMessage::user(sub_agent_context_prompt(state)),
+            ContextMessage::system(WORKER_SYSTEM_PROMPT),
+            ContextMessage::user(worker_context_prompt(state)),
         ],
         tools: filtered_tool_schemas(&state.tool_subset)?,
         max_output_tokens: Some(max_output_tokens),
@@ -25,11 +25,11 @@ pub(super) fn build_completion_request(
     };
     request
         .metadata
-        .insert("_moa.sub_agent_id".to_string(), json!(state.task_hash()));
+        .insert("_moa.worker_id".to_string(), json!(state.task_hash()));
     Ok(request)
 }
 
-fn clamp_sub_agent_max_output(capabilities: &ModelCapabilities, budget_remaining: u64) -> usize {
+fn clamp_worker_max_output(capabilities: &ModelCapabilities, budget_remaining: u64) -> usize {
     let budget_remaining = usize::try_from(budget_remaining).unwrap_or(usize::MAX);
     capabilities.max_output.min(budget_remaining)
 }
@@ -52,13 +52,10 @@ pub(super) fn filtered_tool_schemas(
         })
         .cloned()
         .collect::<Vec<_>>();
-    for schema in delegation_tool_schemas() {
-        if let Some(name) = schema.get("name").and_then(serde_json::Value::as_str)
-            && allowed.contains(name)
-        {
-            tools.push(schema);
-        }
-    }
+    // Child-only report tools (`report_to_parent`, `request_input`) are core upward
+    // communication primitives, so every child gets them regardless of the task-specific
+    // tool subset the parent granted. They are never merged onto the root session.
+    tools.extend(child_report_tool_schemas());
     Ok(tools)
 }
 
@@ -70,27 +67,27 @@ pub(super) fn configured_model_capabilities(
         .map_err(moa_error_to_handler_error)
 }
 
-pub(super) fn synthetic_session_meta(state: &SubAgentVoState) -> Result<SessionMeta, HandlerError> {
+pub(super) fn synthetic_session_meta(state: &WorkerVoState) -> Result<SessionMeta, HandlerError> {
     let tenant_id = state
         .tenant_id
-        .ok_or_else(|| TerminalError::new("sub-agent tenant_id missing"))?;
+        .ok_or_else(|| TerminalError::new("worker tenant_id missing"))?;
     Ok(SessionMeta {
         id: state
             .parent_session
-            .ok_or_else(|| TerminalError::new("sub-agent parent session missing"))?,
+            .ok_or_else(|| TerminalError::new("worker parent session missing"))?,
         tenant_id,
         model: state
             .model
             .clone()
-            .ok_or_else(|| TerminalError::new("sub-agent model missing"))?,
+            .ok_or_else(|| TerminalError::new("worker model missing"))?,
         status: SessionStatus::Running,
         updated_at: Utc::now(),
         ..SessionMeta::default()
     })
 }
 
-const SUB_AGENT_SYSTEM_PROMPT: &str = "\
-You are a specialist sub-agent working for a parent agent session.
+const WORKER_SYSTEM_PROMPT: &str = "\
+You are a specialist worker working for a parent agent session.
 Complete only the delegated task and do not broaden scope without a parent follow-up.
 Use tools only when they materially advance the delegated task.
 Do not perform destructive or write-heavy work unless the task explicitly authorizes it.
@@ -100,7 +97,7 @@ Final result to parent:
 - Include relevant file paths, command results, or unresolved questions.
 - Summarize; do not return raw logs unless the parent specifically requested them.";
 
-fn sub_agent_context_prompt(state: &SubAgentVoState) -> String {
+fn worker_context_prompt(state: &WorkerVoState) -> String {
     let task = state
         .task
         .as_deref()
@@ -122,23 +119,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sub_agent_request_keeps_task_context_out_of_stable_system_prompt() {
-        // Pins: delegated sub-agent prompts preserve scope, allowed tools, and evidence-bearing final output.
-        let state = SubAgentVoState {
+    fn worker_request_keeps_task_context_out_of_stable_system_prompt() {
+        // Pins: delegated worker prompts preserve scope, allowed tools, and evidence-bearing final output.
+        let state = WorkerVoState {
             task: Some("Inspect auth.rs for token refresh races.".to_string()),
             tool_subset: vec!["grep".to_string(), "file_read".to_string()],
-            ..SubAgentVoState::default()
+            ..WorkerVoState::default()
         };
 
-        assert!(SUB_AGENT_SYSTEM_PROMPT.contains("Complete only the delegated task"));
-        assert!(SUB_AGENT_SYSTEM_PROMPT.contains("State the outcome and the evidence"));
-        assert!(SUB_AGENT_SYSTEM_PROMPT.contains("do not return raw logs"));
-        assert!(!SUB_AGENT_SYSTEM_PROMPT.contains("Inspect auth.rs"));
-        assert!(!SUB_AGENT_SYSTEM_PROMPT.contains("Allowed tools: grep"));
+        assert!(WORKER_SYSTEM_PROMPT.contains("Complete only the delegated task"));
+        assert!(WORKER_SYSTEM_PROMPT.contains("State the outcome and the evidence"));
+        assert!(WORKER_SYSTEM_PROMPT.contains("do not return raw logs"));
+        assert!(!WORKER_SYSTEM_PROMPT.contains("Inspect auth.rs"));
+        assert!(!WORKER_SYSTEM_PROMPT.contains("Allowed tools: grep"));
 
-        let prompt = sub_agent_context_prompt(&state);
+        let prompt = worker_context_prompt(&state);
         assert!(prompt.contains("Inspect auth.rs for token refresh races."));
         assert!(prompt.contains("Allowed tools: grep, file_read"));
+    }
+
+    #[test]
+    fn child_report_tools_are_appended_and_disjoint_from_root_delegation_set() {
+        // Pins: the schemas appended to every child subset are exactly the two child-only
+        // report tools, and none of them leak into the root session's delegation set.
+        // (`filtered_tool_schemas` itself needs an installed OrchestratorCtx, so the
+        // appended set and its disjointness from root are pinned at the schema layer.)
+        let child_report_names = moa_core::child_report_tool_schemas()
+            .iter()
+            .filter_map(|schema| schema.get("name").and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            child_report_names,
+            vec!["report_to_parent", "request_input"]
+        );
+
+        let root_names = moa_core::delegation_tool_schemas()
+            .iter()
+            .filter_map(|schema| schema.get("name").and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        for child_report in &child_report_names {
+            assert!(
+                !root_names.contains(child_report),
+                "root delegation set must not expose child-only tool {child_report}"
+            );
+        }
     }
 
     #[test]
@@ -149,7 +175,7 @@ mod tests {
             ..ModelCapabilities::default()
         };
 
-        assert_eq!(clamp_sub_agent_max_output(&capabilities, 512), 512);
-        assert_eq!(clamp_sub_agent_max_output(&capabilities, 8192), 4096);
+        assert_eq!(clamp_worker_max_output(&capabilities, 512), 512);
+        assert_eq!(clamp_worker_max_output(&capabilities, 8192), 4096);
     }
 }

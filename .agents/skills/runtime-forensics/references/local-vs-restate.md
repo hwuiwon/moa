@@ -15,7 +15,7 @@ The brain harness suites live in:
 
 The Restate suites live in:
 
-- `crates/moa-orchestrator/tests/` (multiple files: `session_vo.rs`, `session_store_db.rs`, `tool_executor.rs`, `llm_gateway.rs`, `ingestion_service_e2e.rs`, `workspace.rs`, `integration_service_e2e.rs`, `replay_determinism.rs`, `sub_agent_delegation.rs`, `session_turn_lifecycle_service_e2e.rs`)
+- `crates/moa-orchestrator/tests/` (multiple files: `session_vo.rs`, `session_store_db.rs`, `tool_executor.rs`, `llm_gateway.rs`, `ingestion_service_e2e.rs`, `workspace.rs`, `integration_service_e2e.rs`, `replay_determinism.rs`, `worker_delegation.rs`, `session_turn_lifecycle_service_e2e.rs`)
 
 ## Classification Flow
 
@@ -39,7 +39,7 @@ The Restate suites live in:
 
 - `crates/moa-orchestrator/src/services/` - Restate service handlers
 - `crates/moa-orchestrator/src/objects/` - virtual-object state machines
-- `crates/moa-orchestrator/src/workflows/` - workflow definitions (TurnExecution, SubAgentTurnExecution, Consolidate)
+- `crates/moa-orchestrator/src/workflows/` - workflow definitions (TurnExecution, WorkerTurnExecution, Consolidate)
 - `crates/moa-orchestrator/src/turn/` - turn-level orchestration
 - `crates/moa-orchestrator/src/brain_bridge.rs` - the bridge that compiles one turn via the brain pipeline
 - `docs/12-restate-architecture.md` - the Restate architecture deep dive

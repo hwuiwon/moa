@@ -1,6 +1,7 @@
 //! Workspace-root tracking and lazy hand lifecycle management.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use std::time::{Duration as StdDuration, Instant};
 
@@ -32,40 +33,56 @@ impl ToolRouter {
     }
 
     /// Provisions a hand if needed and installs trusted files into its sandbox.
+    ///
+    /// `worker_id` selects the hand scope: `None` is the session-level
+    /// (coordinator) scope used today; `Some(id)` isolates a worker's sandbox.
     pub async fn install_files(
         &self,
         session: &SessionMeta,
+        worker_id: Option<&str>,
         provider: &str,
         tier: SandboxTier,
         files: &[SandboxFile],
     ) -> Result<HandHandle> {
-        let handle = self.get_or_provision_hand(provider, tier, session).await?;
-        self.install_files_on_handle(session, provider, &handle, files)
+        let handle = self
+            .get_or_provision_hand(provider, tier, session, worker_id)
+            .await?;
+        self.install_files_on_handle(session, worker_id, provider, &handle, files)
             .await?;
         Ok(handle)
     }
 
     /// Stores trusted files that should be installed lazily before hand tool execution.
-    pub async fn set_trusted_sandbox_files(&self, session: &SessionMeta, files: Vec<SandboxFile>) {
+    ///
+    /// `worker_id` scopes the manifest: `None` is the session-level scope used
+    /// today; clearing one scope leaves other workers' manifests untouched.
+    pub async fn set_trusted_sandbox_files(
+        &self,
+        session: &SessionMeta,
+        worker_id: Option<&str>,
+        files: Vec<SandboxFile>,
+    ) {
+        let scope = scope_key(session, worker_id);
         if files.is_empty() {
-            self.trusted_sandbox_files.write().await.remove(&session.id);
-            let session_prefix = format!("{}:", session.id);
+            self.trusted_sandbox_files.write().await.remove(&scope);
+            let scope_prefix = format!("{scope}:");
             self.installed_files
                 .write()
                 .await
-                .retain(|key, _| !key.starts_with(&session_prefix));
+                .retain(|key, _| !key.starts_with(&scope_prefix));
             return;
         }
 
         self.trusted_sandbox_files
             .write()
             .await
-            .insert(session.id, files);
+            .insert(scope, files);
     }
 
     pub(super) async fn install_trusted_files_for_hand(
         &self,
         session: &SessionMeta,
+        worker_id: Option<&str>,
         provider: &str,
         handle: &HandHandle,
     ) -> Result<()> {
@@ -73,24 +90,25 @@ impl ToolRouter {
             .trusted_sandbox_files
             .read()
             .await
-            .get(&session.id)
+            .get(&scope_key(session, worker_id))
             .cloned()
             .unwrap_or_default();
         if files.is_empty() {
             return Ok(());
         }
-        self.install_files_on_handle(session, provider, handle, &files)
+        self.install_files_on_handle(session, worker_id, provider, handle, &files)
             .await
     }
 
     async fn install_files_on_handle(
         &self,
         session: &SessionMeta,
+        worker_id: Option<&str>,
         provider: &str,
         handle: &HandHandle,
         files: &[SandboxFile],
     ) -> Result<()> {
-        let key = session_provider_key(session, provider);
+        let key = session_provider_key(session, worker_id, provider);
         let already_installed = self
             .installed_files
             .read()
@@ -112,77 +130,153 @@ impl ToolRouter {
         Ok(())
     }
 
-    /// Destroys and removes all cached and durably leased hands associated with the session.
-    pub async fn destroy_session_hands(&self, session_id: &moa_core::SessionId) {
+    /// Destroys and removes cached and durably leased hands for a session,
+    /// either across the whole session or for one worker scope.
+    ///
+    /// `scope` selects what is reclaimed:
+    /// - `None` tears down the entire session — every worker scope under it
+    ///   (cache keys `"{session_id}:*:{provider}"` and leases
+    ///   `(session_id, *, provider)`) — so the session-level (coordinator) and
+    ///   all worker hands are released.
+    /// - `Some(worker_id)` reclaims only that `(session_id, worker_id)` scope, so
+    ///   a finishing worker releases its own sandbox without over-releasing the
+    ///   parent's or siblings' shared hands. It clears the cache keys with prefix
+    ///   `"{session_id}:{worker_id}:"`, that scope's `installed_files`/
+    ///   `trusted_sandbox_files` entries, and the durable leases
+    ///   `(session_id, worker_id, provider)` across providers; the parent's
+    ///   session-level (`""`) scope and any sibling worker scopes are untouched.
+    ///
+    /// Returns `true` when every matched hand was destroyed and its durable lease
+    /// marked `Destroyed`. A `false` result means at least one release step
+    /// failed and the affected leases stay reclaimable, so a worker caller can
+    /// reschedule cleanup instead of clearing its state. Session teardown ignores
+    /// the result and lets the lease TTL reclaim any straggler.
+    pub async fn reclaim_hands(
+        &self,
+        session_id: &moa_core::SessionId,
+        scope: Option<&str>,
+    ) -> bool {
+        let mut complete = true;
+        // Every cache/lease key for a session shares the `"{session_id}:"`
+        // prefix. Whole-session teardown matches that prefix; a worker scope
+        // narrows it to `"{session_id}:{worker_id}:"`. The trailing `:` keeps the
+        // worker prefix collision-safe between sibling ids where one is a prefix
+        // of another (e.g. `sub` vs `sub-x`).
         let session_prefix = format!("{session_id}:");
+        let match_prefix = match scope {
+            Some(worker_id) => format!("{session_prefix}{worker_id}:"),
+            None => session_prefix.clone(),
+        };
+
         let mut hands = {
             let mut active_hands = self.active_hands.write().await;
             let keys = active_hands
                 .keys()
-                .filter(|key| key.starts_with(&session_prefix))
+                .filter(|key| key.starts_with(&match_prefix))
                 .cloned()
                 .collect::<Vec<_>>();
             keys.into_iter()
-                .filter_map(|key| active_hands.remove(&key).map(|handle| (key, handle)))
+                .filter_map(|key| {
+                    active_hands
+                        .remove(&key)
+                        .map(|handle| (key, (handle, None::<i64>)))
+                })
                 .collect::<HashMap<_, _>>()
         };
         self.installed_files
             .write()
             .await
-            .retain(|key, _| !key.starts_with(&session_prefix));
-        self.trusted_sandbox_files.write().await.remove(session_id);
+            .retain(|key, _| !key.starts_with(&match_prefix));
+        match scope {
+            // `trusted_sandbox_files` is keyed by the bare scope key
+            // `"{session_id}:{worker_id}"`, so a worker clears its own entry
+            // exactly rather than by prefix; whole-session teardown clears every
+            // scope under the session prefix.
+            Some(worker_id) => {
+                let scope_key = format!("{session_prefix}{worker_id}");
+                self.trusted_sandbox_files.write().await.remove(&scope_key);
+            }
+            None => {
+                self.trusted_sandbox_files
+                    .write()
+                    .await
+                    .retain(|key, _| !key.starts_with(&session_prefix));
+            }
+        }
 
         if let Some(lease_store) = &self.hand_leases {
             match lease_store.list_session(*session_id).await {
                 Ok(leases) => {
                     for lease in leases {
+                        if let Some(worker_id) = scope
+                            && lease.worker_id != worker_id
+                        {
+                            continue;
+                        }
                         if lease.status == HandLeaseStatus::Destroyed {
                             continue;
                         }
-                        let Some(lease_handle) = lease.handle.as_ref() else {
-                            continue;
-                        };
-                        let key = format!("{}:{}", lease.session_id, lease.provider);
-                        if let std::collections::hash_map::Entry::Vacant(entry) = hands.entry(key) {
-                            match self
-                                .hydrate_lease_handle(&lease.provider, lease_handle)
-                                .await
-                            {
-                                Ok(handle) => {
-                                    entry.insert(handle);
-                                }
-                                Err(error) => {
-                                    tracing::warn!(
-                                        session_id = %session_id,
-                                        provider = %lease.provider,
-                                        generation = lease.generation,
-                                        error = %error,
-                                        "failed to hydrate durable hand lease during cleanup"
-                                    );
+                        let key = format!(
+                            "{}:{}:{}",
+                            lease.session_id, lease.worker_id, lease.provider
+                        );
+                        match hands.entry(key) {
+                            Entry::Occupied(mut entry) => {
+                                // The cached hand was already drained above; carry
+                                // its durable generation so the destroy loop marks
+                                // the right generation without a second store read.
+                                entry.get_mut().1 = Some(lease.generation);
+                            }
+                            Entry::Vacant(entry) => {
+                                let Some(lease_handle) = lease.handle.as_ref() else {
+                                    continue;
+                                };
+                                match self
+                                    .hydrate_lease_handle(&lease.provider, lease_handle)
+                                    .await
+                                {
+                                    Ok(handle) => {
+                                        entry.insert((handle, Some(lease.generation)));
+                                    }
+                                    Err(error) => {
+                                        complete = false;
+                                        tracing::warn!(
+                                            session_id = %session_id,
+                                            worker_id = %lease.worker_id,
+                                            provider = %lease.provider,
+                                            generation = lease.generation,
+                                            error = %error,
+                                            "failed to hydrate durable hand lease during cleanup"
+                                        );
+                                    }
                                 }
                             }
                         }
                     }
                 }
                 Err(error) => {
+                    complete = false;
                     tracing::warn!(
                         session_id = %session_id,
                         error = %error,
-                        "failed to list durable hand leases during session cleanup"
+                        "failed to list durable hand leases during cleanup"
                     );
                 }
             }
         }
 
-        for (key, handle) in hands {
-            let provider_name = key
-                .strip_prefix(&session_prefix)
-                .unwrap_or_default()
-                .to_string();
+        for (key, (handle, generation)) in hands {
+            // Cache keys are `"{session_id}:{worker_id}:{provider}"`; strip the
+            // session prefix and split off the final segment (no provider name
+            // contains `:`) to recover the worker scope and provider name.
+            let remainder = key.strip_prefix(&session_prefix).unwrap_or_default();
+            let (worker_id, provider_name) = remainder.rsplit_once(':').unwrap_or(("", remainder));
             let handle_id = hand_id(&handle);
-            let Some(provider) = self.providers.get(&provider_name) else {
+            let Some(provider) = self.providers.get(provider_name) else {
+                complete = false;
                 tracing::warn!(
                     session_id = %session_id,
+                    worker_id = %worker_id,
                     provider = %provider_name,
                     hand_id = %handle_id,
                     "cached hand provider missing during cleanup"
@@ -194,41 +288,52 @@ impl ToolRouter {
                 Ok(()) => {
                     tracing::info!(
                         session_id = %session_id,
+                        worker_id = %worker_id,
                         provider = %provider_name,
                         hand_id = %handle_id,
-                        "destroyed cached session hand"
+                        "destroyed cached hand"
                     );
-                    if let Some(lease_store) = &self.hand_leases
-                        && let Ok(Some(lease)) = lease_store.get(*session_id, &provider_name).await
+                    // `list_session` already loaded this lease's generation, so
+                    // mark it destroyed with that fence (mark_status no-ops on a
+                    // generation mismatch) instead of re-fetching. A cached hand
+                    // with no matching live lease carries no generation.
+                    if let Some(generation) = generation
+                        && let Some(lease_store) = &self.hand_leases
                         && let Err(error) = lease_store
                             .mark_status(
                                 *session_id,
-                                &provider_name,
-                                lease.generation,
+                                worker_id,
+                                provider_name,
+                                generation,
                                 HandLeaseStatus::Destroyed,
                             )
                             .await
                     {
+                        complete = false;
                         tracing::warn!(
                             session_id = %session_id,
+                            worker_id = %worker_id,
                             provider = %provider_name,
-                            generation = lease.generation,
+                            generation = generation,
                             error = %error,
                             "failed to mark durable hand lease destroyed"
                         );
                     }
                 }
                 Err(error) => {
+                    complete = false;
                     tracing::warn!(
                         session_id = %session_id,
+                        worker_id = %worker_id,
                         provider = %provider_name,
                         hand_id = %handle_id,
                         error = %error,
-                        "failed to destroy cached session hand"
+                        "failed to destroy cached hand"
                     );
                 }
             }
         }
+        complete
     }
 
     pub(super) async fn get_or_provision_hand(
@@ -236,19 +341,20 @@ impl ToolRouter {
         provider: &str,
         tier: SandboxTier,
         session: &SessionMeta,
+        worker_id: Option<&str>,
     ) -> Result<HandHandle> {
-        let key = session_provider_key(session, provider);
+        let key = session_provider_key(session, worker_id, provider);
         if self.hand_leases.is_some() {
             let cached_handle = self.active_hands.read().await.get(&key).cloned();
             if let Some(handle) = cached_handle
                 && let Some(validated) = self
-                    .validate_cached_durable_hand(provider, session, &key, &handle)
+                    .validate_cached_durable_hand(provider, session, worker_id, &key, &handle)
                     .await?
             {
                 return Ok(validated);
             }
             return self
-                .get_or_provision_durable_hand(provider, tier, session, key)
+                .get_or_provision_durable_hand(provider, tier, session, worker_id, key)
                 .await;
         }
 
@@ -264,13 +370,15 @@ impl ToolRouter {
         &self,
         provider: &str,
         session: &SessionMeta,
+        worker_id: Option<&str>,
         key: &str,
         cached_handle: &HandHandle,
     ) -> Result<Option<HandHandle>> {
+        let scope = worker_id.unwrap_or_default();
         let Some(lease_store) = &self.hand_leases else {
             return Ok(Some(cached_handle.clone()));
         };
-        let Some(lease) = lease_store.get(session.id, provider).await? else {
+        let Some(lease) = lease_store.get(session.id, scope, provider).await? else {
             self.remove_cached_hand_if_matches(key, cached_handle).await;
             return Ok(None);
         };
@@ -287,6 +395,7 @@ impl ToolRouter {
             Err(error) => {
                 tracing::warn!(
                     session_id = %session.id,
+                    worker_id = %scope,
                     provider,
                     generation = lease.generation,
                     error = %error,
@@ -296,6 +405,7 @@ impl ToolRouter {
                 lease_store
                     .mark_status(
                         session.id,
+                        scope,
                         provider,
                         lease.generation,
                         HandLeaseStatus::Stale,
@@ -311,6 +421,7 @@ impl ToolRouter {
         if !lease_store
             .renew_active(
                 session.id,
+                scope,
                 provider,
                 lease.generation,
                 hand_lease_expires_at(),
@@ -335,8 +446,10 @@ impl ToolRouter {
         provider: &str,
         tier: SandboxTier,
         session: &SessionMeta,
+        worker_id: Option<&str>,
         key: String,
     ) -> Result<HandHandle> {
+        let scope = worker_id.unwrap_or_default();
         let lease_store = self.hand_leases.as_ref().ok_or_else(|| {
             MoaError::StorageError("durable hand lease store missing".to_string())
         })?;
@@ -348,6 +461,7 @@ impl ToolRouter {
             if let Some(claim) = lease_store
                 .claim_for_provisioning(
                     session.id,
+                    scope,
                     session.tenant_id,
                     provider,
                     tier.clone(),
@@ -368,6 +482,7 @@ impl ToolRouter {
                                     if let Err(mark_error) = lease_store
                                         .mark_status(
                                             session.id,
+                                            scope,
                                             provider,
                                             claim.generation,
                                             HandLeaseStatus::Failed,
@@ -376,6 +491,7 @@ impl ToolRouter {
                                     {
                                         tracing::warn!(
                                             session_id = %session.id,
+                                            worker_id = %scope,
                                             provider,
                                             generation = claim.generation,
                                             error = %mark_error,
@@ -388,6 +504,7 @@ impl ToolRouter {
                         if let Err(error) = lease_store
                             .activate(
                                 session.id,
+                                scope,
                                 provider,
                                 claim.generation,
                                 lease_handle,
@@ -404,6 +521,7 @@ impl ToolRouter {
                         if let Err(mark_error) = lease_store
                             .mark_status(
                                 session.id,
+                                scope,
                                 provider,
                                 claim.generation,
                                 HandLeaseStatus::Failed,
@@ -412,6 +530,7 @@ impl ToolRouter {
                         {
                             tracing::warn!(
                                 session_id = %session.id,
+                                worker_id = %scope,
                                 provider,
                                 generation = claim.generation,
                                 error = %mark_error,
@@ -423,7 +542,7 @@ impl ToolRouter {
                 }
             }
 
-            if let Some(lease) = lease_store.get(session.id, provider).await? {
+            if let Some(lease) = lease_store.get(session.id, scope, provider).await? {
                 match lease.status {
                     HandLeaseStatus::Active if lease.expires_at > Utc::now() => {
                         match self.resume_durable_lease(provider, &lease, &key).await {
@@ -431,6 +550,7 @@ impl ToolRouter {
                                 if lease_store
                                     .renew_active(
                                         session.id,
+                                        scope,
                                         provider,
                                         lease.generation,
                                         hand_lease_expires_at(),
@@ -445,6 +565,7 @@ impl ToolRouter {
                             Err(error) => {
                                 tracing::warn!(
                                     session_id = %session.id,
+                                    worker_id = %scope,
                                     provider,
                                     generation = lease.generation,
                                     error = %error,
@@ -453,6 +574,7 @@ impl ToolRouter {
                                 lease_store
                                     .mark_status(
                                         session.id,
+                                        scope,
                                         provider,
                                         lease.generation,
                                         HandLeaseStatus::Stale,
@@ -474,6 +596,7 @@ impl ToolRouter {
                         lease_store
                             .mark_status(
                                 session.id,
+                                scope,
                                 provider,
                                 lease.generation,
                                 HandLeaseStatus::Stale,
@@ -626,10 +749,12 @@ impl ToolRouter {
     pub(super) async fn reprovision_hand(
         &self,
         session: &SessionMeta,
+        worker_id: Option<&str>,
         provider: &str,
         tier: &SandboxTier,
     ) -> Result<HandHandle> {
-        let key = session_provider_key(session, provider);
+        let scope = worker_id.unwrap_or_default();
+        let key = session_provider_key(session, worker_id, provider);
         let old_handle = self.active_hands.write().await.remove(&key);
         let provider_impl = self
             .providers
@@ -641,6 +766,7 @@ impl ToolRouter {
         {
             tracing::warn!(
                 session_id = %session.id,
+                worker_id = %scope,
                 provider,
                 hand_id = %hand_id(handle),
                 error = %error,
@@ -649,10 +775,11 @@ impl ToolRouter {
         }
 
         if let Some(lease_store) = &self.hand_leases
-            && let Ok(Some(lease)) = lease_store.get(session.id, provider).await
+            && let Ok(Some(lease)) = lease_store.get(session.id, scope, provider).await
             && let Err(error) = lease_store
                 .mark_status(
                     session.id,
+                    scope,
                     provider,
                     lease.generation,
                     HandLeaseStatus::Stale,
@@ -661,6 +788,7 @@ impl ToolRouter {
         {
             tracing::warn!(
                 session_id = %session.id,
+                worker_id = %scope,
                 provider,
                 generation = lease.generation,
                 error = %error,
@@ -669,7 +797,7 @@ impl ToolRouter {
         }
 
         let handle = self
-            .get_or_provision_hand(provider, tier.clone(), session)
+            .get_or_provision_hand(provider, tier.clone(), session, worker_id)
             .await?;
         if let Some(files) = self.installed_files.read().await.get(&key).cloned() {
             provider_impl.install_files(&handle, &files).await?;
@@ -678,8 +806,28 @@ impl ToolRouter {
     }
 }
 
-pub(super) fn session_provider_key(session: &SessionMeta, provider: &str) -> String {
-    format!("{}:{provider}", session.id)
+/// Returns the scope key that namespaces a session's hands by worker.
+///
+/// The session-level (coordinator) scope is `None`, which yields
+/// `"{session_id}:"` (an empty worker segment). A worker scope yields
+/// `"{session_id}:{worker_id}"`. All scope keys share the `"{session_id}:"`
+/// prefix so session teardown can match every worker scope at once.
+fn scope_key(session: &SessionMeta, worker_id: Option<&str>) -> String {
+    format!("{}:{}", session.id, worker_id.unwrap_or_default())
+}
+
+/// Returns the cache/lease key for one hand within a worker scope.
+///
+/// The format is `"{session_id}:{worker_id}:{provider}"`. For the session-level
+/// scope (`worker_id` is `None`) the middle segment is empty, giving
+/// `"{session_id}::{provider}"`, which keeps behavior identical to the prior
+/// single-scope world while reserving room for per-worker sandboxes.
+pub(super) fn session_provider_key(
+    session: &SessionMeta,
+    worker_id: Option<&str>,
+    provider: &str,
+) -> String {
+    format!("{}:{provider}", scope_key(session, worker_id))
 }
 
 fn tenant_key(session: &SessionMeta) -> TenantId {
@@ -806,7 +954,7 @@ mod tests {
             let count = self.provision_calls.fetch_add(1, Ordering::SeqCst) + 1;
             if let Some((lease_store, session_id)) = &self.stale_generation_on_provision {
                 lease_store
-                    .mark_status(*session_id, &self.name, 1, HandLeaseStatus::Stale)
+                    .mark_status(*session_id, "", &self.name, 1, HandLeaseStatus::Stale)
                     .await?;
             }
             Ok(HandHandle::docker(format!("{}-{count}", self.name)))
@@ -901,11 +1049,11 @@ mod tests {
         let second_router = router(provider.clone(), lease_store);
 
         first_router
-            .execute_authorized_with_recovery(&session, &bash_invocation())
+            .execute_authorized_with_recovery(&session, None, &bash_invocation())
             .await
             .expect("first router provisions and executes");
         second_router
-            .execute_authorized_with_recovery(&session, &bash_invocation())
+            .execute_authorized_with_recovery(&session, None, &bash_invocation())
             .await
             .expect("second router reuses durable lease");
 
@@ -929,8 +1077,8 @@ mod tests {
         let right_invocation = bash_invocation();
 
         let (left, right) = tokio::join!(
-            left_router.execute_authorized_with_recovery(&left_session, &left_invocation),
-            right_router.execute_authorized_with_recovery(&right_session, &right_invocation)
+            left_router.execute_authorized_with_recovery(&left_session, None, &left_invocation),
+            right_router.execute_authorized_with_recovery(&right_session, None, &right_invocation)
         );
 
         left.expect("left router should execute");
@@ -949,10 +1097,10 @@ mod tests {
         let cleanup_router = router(provider.clone(), lease_store);
 
         first_router
-            .execute_authorized_with_recovery(&session, &bash_invocation())
+            .execute_authorized_with_recovery(&session, None, &bash_invocation())
             .await
             .expect("first router provisions and executes");
-        cleanup_router.destroy_session_hands(&session.id).await;
+        cleanup_router.reclaim_hands(&session.id, None).await;
 
         assert_eq!(provider.destroy_calls(), 1);
     }
@@ -966,11 +1114,11 @@ mod tests {
         let router = router(provider.clone(), lease_store.clone());
 
         router
-            .execute_authorized_with_recovery(&session, &bash_invocation())
+            .execute_authorized_with_recovery(&session, None, &bash_invocation())
             .await
             .expect("first execution provisions");
         let first = lease_store
-            .get(session.id, provider.provider_name())
+            .get(session.id, "", provider.provider_name())
             .await
             .expect("load first lease")
             .expect("first lease should exist");
@@ -979,6 +1127,7 @@ mod tests {
             lease_store
                 .renew_active(
                     session.id,
+                    "",
                     provider.provider_name(),
                     first.generation,
                     short_expiry,
@@ -988,11 +1137,11 @@ mod tests {
         );
 
         router
-            .execute_authorized_with_recovery(&session, &bash_invocation())
+            .execute_authorized_with_recovery(&session, None, &bash_invocation())
             .await
             .expect("second execution reuses renewed lease");
         let renewed = lease_store
-            .get(session.id, provider.provider_name())
+            .get(session.id, "", provider.provider_name())
             .await
             .expect("load renewed lease")
             .expect("renewed lease should exist");
@@ -1006,6 +1155,7 @@ mod tests {
         lease_store
             .mark_status(
                 session.id,
+                "",
                 provider.provider_name(),
                 renewed.generation,
                 HandLeaseStatus::Stale,
@@ -1014,7 +1164,7 @@ mod tests {
             .expect("mark lease stale");
         let replacement_result = tokio::time::timeout(
             Duration::from_secs(1),
-            router.execute_authorized_with_recovery(&session, &bash_invocation()),
+            router.execute_authorized_with_recovery(&session, None, &bash_invocation()),
         )
         .await;
         match replacement_result {
@@ -1023,7 +1173,7 @@ mod tests {
             }
             Err(error) => {
                 let lease = lease_store
-                    .get(session.id, provider.provider_name())
+                    .get(session.id, "", provider.provider_name())
                     .await
                     .expect("load lease after replacement timeout");
                 panic!(
@@ -1033,7 +1183,7 @@ mod tests {
         }
 
         let replacement = lease_store
-            .get(session.id, provider.provider_name())
+            .get(session.id, "", provider.provider_name())
             .await
             .expect("load replacement lease")
             .expect("replacement lease should exist");
@@ -1054,7 +1204,7 @@ mod tests {
         let router = router(provider.clone(), lease_store.clone());
 
         let error = router
-            .execute_authorized_with_recovery(&session, &bash_invocation())
+            .execute_authorized_with_recovery(&session, None, &bash_invocation())
             .await
             .expect_err("activation fence loss should fail execution");
 
@@ -1065,7 +1215,7 @@ mod tests {
         assert_eq!(provider.provision_calls(), 1);
         assert_eq!(provider.destroy_calls(), 1);
         let lease = lease_store
-            .get(session.id, provider.provider_name())
+            .get(session.id, "", provider.provider_name())
             .await
             .expect("load lease after fence loss")
             .expect("lease row should remain");
@@ -1082,17 +1232,258 @@ mod tests {
         let cleanup_router = router(provider.clone(), lease_store.clone());
 
         first_router
-            .execute_authorized_with_recovery(&session, &bash_invocation())
+            .execute_authorized_with_recovery(&session, None, &bash_invocation())
             .await
             .expect("provision before cleanup");
-        cleanup_router.destroy_session_hands(&session.id).await;
+        cleanup_router.reclaim_hands(&session.id, None).await;
 
         assert_eq!(provider.destroy_calls(), 1);
         let lease = lease_store
-            .get(session.id, provider.provider_name())
+            .get(session.id, "", provider.provider_name())
             .await
             .expect("load lease after failed cleanup")
             .expect("lease should remain");
+        assert_eq!(lease.status, HandLeaseStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_worker_scope_isolates_hands_and_leases() {
+        // Pins: a worker scope provisions its own hand/lease, distinct from the session scope.
+        let lease_store = MemoryHandLeaseStore::shared();
+        let provider = Arc::new(CountingProvider::new("scope-isolation"));
+        let session = session();
+        let router = router(provider.clone(), lease_store.clone());
+
+        let root = router
+            .get_or_provision_hand(
+                provider.provider_name(),
+                SandboxTier::Container,
+                &session,
+                None,
+            )
+            .await
+            .expect("session-scope hand provisions");
+        let child = router
+            .get_or_provision_hand(
+                provider.provider_name(),
+                SandboxTier::Container,
+                &session,
+                Some("sub-x"),
+            )
+            .await
+            .expect("worker-scope hand provisions");
+
+        assert_ne!(root, child, "each scope must own a distinct hand");
+        assert_eq!(
+            provider.provision_calls(),
+            2,
+            "each scope provisions its own sandbox"
+        );
+
+        let root_lease = lease_store
+            .get(session.id, "", provider.provider_name())
+            .await
+            .expect("load session lease")
+            .expect("session lease exists");
+        let child_lease = lease_store
+            .get(session.id, "sub-x", provider.provider_name())
+            .await
+            .expect("load worker lease")
+            .expect("worker lease exists");
+        assert_eq!(root_lease.worker_id, "");
+        assert_eq!(child_lease.worker_id, "sub-x");
+        assert_ne!(
+            root_lease.handle, child_lease.handle,
+            "scoped leases hold distinct durable handles"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_destroy_session_releases_all_worker_scopes() {
+        // Pins: session teardown reclaims both the session-scope and worker-scope hands.
+        let lease_store = MemoryHandLeaseStore::shared();
+        let provider = Arc::new(CountingProvider::new("scope-teardown"));
+        let session = session();
+        let router = router(provider.clone(), lease_store.clone());
+
+        router
+            .get_or_provision_hand(
+                provider.provider_name(),
+                SandboxTier::Container,
+                &session,
+                None,
+            )
+            .await
+            .expect("session-scope hand provisions");
+        router
+            .get_or_provision_hand(
+                provider.provider_name(),
+                SandboxTier::Container,
+                &session,
+                Some("sub-x"),
+            )
+            .await
+            .expect("worker-scope hand provisions");
+        assert_eq!(provider.provision_calls(), 2);
+
+        router.reclaim_hands(&session.id, None).await;
+
+        assert_eq!(
+            provider.destroy_calls(),
+            2,
+            "teardown releases every scope under the session"
+        );
+        let root_lease = lease_store
+            .get(session.id, "", provider.provider_name())
+            .await
+            .expect("load session lease")
+            .expect("session lease row remains");
+        let child_lease = lease_store
+            .get(session.id, "sub-x", provider.provider_name())
+            .await
+            .expect("load worker lease")
+            .expect("worker lease row remains");
+        assert_eq!(root_lease.status, HandLeaseStatus::Destroyed);
+        assert_eq!(child_lease.status, HandLeaseStatus::Destroyed);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_destroy_worker_releases_only_target_scope() {
+        // Pins: a finishing worker releases ONLY its own scope's hand/lease and leaves
+        // the session-scope and a sibling worker's hand/lease intact (no over-release).
+        let lease_store = MemoryHandLeaseStore::shared();
+        let provider = Arc::new(CountingProvider::new("scope-release"));
+        let session = session();
+        let router = router(provider.clone(), lease_store.clone());
+
+        for scope in [None, Some("sub-x"), Some("sub-y")] {
+            router
+                .get_or_provision_hand(
+                    provider.provider_name(),
+                    SandboxTier::Container,
+                    &session,
+                    scope,
+                )
+                .await
+                .expect("scope hand provisions");
+        }
+        assert_eq!(provider.provision_calls(), 3);
+
+        assert!(
+            router.reclaim_hands(&session.id, Some("sub-x")).await,
+            "target worker cleanup should fully complete"
+        );
+
+        assert_eq!(
+            provider.destroy_calls(),
+            1,
+            "only the target worker's hand is destroyed"
+        );
+        let session_lease = lease_store
+            .get(session.id, "", provider.provider_name())
+            .await
+            .expect("load session lease")
+            .expect("session lease row remains");
+        let target_lease = lease_store
+            .get(session.id, "sub-x", provider.provider_name())
+            .await
+            .expect("load target lease")
+            .expect("target lease row remains");
+        let sibling_lease = lease_store
+            .get(session.id, "sub-y", provider.provider_name())
+            .await
+            .expect("load sibling lease")
+            .expect("sibling lease row remains");
+        assert_eq!(
+            target_lease.status,
+            HandLeaseStatus::Destroyed,
+            "target scope lease is destroyed"
+        );
+        assert_eq!(
+            session_lease.status,
+            HandLeaseStatus::Active,
+            "session-level scope lease is left intact"
+        );
+        assert_eq!(
+            sibling_lease.status,
+            HandLeaseStatus::Active,
+            "sibling worker lease is left intact"
+        );
+
+        // The intact scopes are still cached/active, so reusing them does not re-provision;
+        // the destroyed target scope re-provisions on next demand.
+        router
+            .get_or_provision_hand(
+                provider.provider_name(),
+                SandboxTier::Container,
+                &session,
+                None,
+            )
+            .await
+            .expect("session-scope hand reused");
+        router
+            .get_or_provision_hand(
+                provider.provider_name(),
+                SandboxTier::Container,
+                &session,
+                Some("sub-y"),
+            )
+            .await
+            .expect("sibling-scope hand reused");
+        assert_eq!(
+            provider.provision_calls(),
+            3,
+            "intact scopes are reused, not re-provisioned"
+        );
+        router
+            .get_or_provision_hand(
+                provider.provider_name(),
+                SandboxTier::Container,
+                &session,
+                Some("sub-x"),
+            )
+            .await
+            .expect("destroyed scope re-provisions");
+        assert_eq!(
+            provider.provision_calls(),
+            4,
+            "the released target scope re-provisions on next demand"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_destroy_worker_failed_destroy_remains_retryable() {
+        // Pins: worker cleanup reports incomplete and leaves the lease active when provider
+        // destroy fails, so the orchestrator can retry instead of clearing the worker.
+        let lease_store = MemoryHandLeaseStore::shared();
+        let provider =
+            Arc::new(CountingProvider::new("worker-destroy-retry").with_destroy_failure());
+        let session = session();
+        let first_router = router(provider.clone(), lease_store.clone());
+        let cleanup_router = router(provider.clone(), lease_store.clone());
+
+        first_router
+            .get_or_provision_hand(
+                provider.provider_name(),
+                SandboxTier::Container,
+                &session,
+                Some("sub-x"),
+            )
+            .await
+            .expect("worker scope provisions");
+        assert!(
+            !cleanup_router
+                .reclaim_hands(&session.id, Some("sub-x"))
+                .await,
+            "failed provider destroy should report incomplete cleanup"
+        );
+
+        assert_eq!(provider.destroy_calls(), 1);
+        let lease = lease_store
+            .get(session.id, "sub-x", provider.provider_name())
+            .await
+            .expect("load worker lease after failed cleanup")
+            .expect("worker lease should remain");
         assert_eq!(lease.status, HandLeaseStatus::Active);
     }
 

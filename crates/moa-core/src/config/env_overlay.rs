@@ -393,6 +393,28 @@ pub struct MoaEnvOverlay {
     pub session_limits_progress_first_delay_ms: Option<u64>,
     /// `MOA_SESSION_LIMITS_PROGRESS_INTERVAL_MS`.
     pub session_limits_progress_interval_ms: Option<u64>,
+    /// `MOA_SESSION_LIMITS_PROGRESS_NARRATION_ENABLED`.
+    pub session_limits_progress_narration_enabled: Option<bool>,
+    /// `MOA_SESSION_LIMITS_PROGRESS_NARRATION_MODEL`.
+    pub session_limits_progress_narration_model: Option<String>,
+    /// `MOA_SESSION_LIMITS_PROGRESS_NARRATION_INTERVAL_MS`.
+    pub session_limits_progress_narration_interval_ms: Option<u64>,
+    /// `MOA_SESSION_LIMITS_PROGRESS_NARRATION_MAX_PER_WINDOW`.
+    pub session_limits_progress_narration_max_per_window: Option<u32>,
+    /// `MOA_SESSION_LIMITS_PROGRESS_NARRATION_MAX_TOKENS`.
+    pub session_limits_progress_narration_max_tokens: Option<u32>,
+    /// `MOA_SESSION_LIMITS_WORKER_CLEANUP_GRACE_MS`.
+    pub session_limits_worker_cleanup_grace_ms: Option<u64>,
+    /// `MOA_SESSION_LIMITS_WORKER_RESUME_MAX_PER_WINDOW`.
+    pub session_limits_worker_resume_max_per_window: Option<u32>,
+    /// `MOA_SESSION_LIMITS_WORKER_RESUME_WINDOW_MS`.
+    pub session_limits_worker_resume_window_ms: Option<u64>,
+    /// `MOA_SESSION_LIMITS_WORKER_INPUT_TIMEOUT_MS`.
+    pub session_limits_worker_input_timeout_ms: Option<u64>,
+    /// `MOA_SESSION_LIMITS_WORKER_HEARTBEAT_INTERVAL_MS`.
+    pub session_limits_worker_heartbeat_interval_ms: Option<u64>,
+    /// `MOA_SESSION_LIMITS_WORKER_HEARTBEAT_STALE_MS`.
+    pub session_limits_worker_heartbeat_stale_ms: Option<u64>,
     /// `MOA_TOOL_OUTPUT_MAX_REPLAY_CHARS`.
     pub tool_output_max_replay_chars: Option<usize>,
     /// `MOA_TOOL_OUTPUT_MAX_BASH_LINES`.

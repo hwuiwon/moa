@@ -1,4 +1,4 @@
-//! Durable SubAgent VO state projection.
+//! Durable Worker VO state projection.
 
 use super::*;
 
@@ -7,7 +7,6 @@ pub(super) const K_PENDING: &str = "pending";
 pub(super) const K_CHILDREN: &str = "children";
 pub(super) const K_LAST_TURN_SUMMARY: &str = "last_turn_summary";
 pub(super) const K_PARENT_SESSION: &str = "parent_session";
-pub(super) const K_PARENT_SUB_AGENT: &str = "parent_sub_agent";
 pub(super) const K_DEPTH: &str = "depth";
 pub(super) const K_BUDGET_REMAINING: &str = "budget_remaining";
 pub(super) const K_TOKENS_USED: &str = "tokens_used";
@@ -25,17 +24,25 @@ pub(super) const K_ACTIVE_TURN_ID: &str = "active_turn_id";
 pub(super) const K_LAST_OUTCOME: &str = "last_outcome";
 pub(super) const K_NOTIFICATION_DELIVERED: &str = "notification_delivered";
 pub(super) const K_RESULT_WAITERS: &str = "result_waiters";
+pub(super) const K_LAST_HEARTBEAT_AT: &str = "last_heartbeat_at";
+pub(super) const K_CLEANUP_GENERATION: &str = "cleanup_generation";
+pub(super) const K_CLEANUP_RELEASE_ATTEMPTS: &str = "cleanup_release_attempts";
+pub(super) const K_PENDING_INPUT_REQUESTS: &str = "pending_input_requests";
 pub(super) const MAX_TURNS_PER_POST: usize = 50;
+/// Maximum consecutive failed hand-release attempts before self-clean force-clears the VO.
+///
+/// Bounds the reschedule loop so a permanently-failing release (e.g. a provider absent from
+/// the router registry) cannot pin the Worker VO forever.
+pub(super) const MAX_CLEANUP_RELEASE_ATTEMPTS: u32 = 5;
+pub(super) const WORKER_BUDGET_EXHAUSTED_MESSAGE: &str = "MOA stopped because this worker exhausted its token budget. Narrow the scope or ask MOA to continue.";
 
-/// Serializable projection of the SubAgent VO's durable state keys.
+/// Serializable projection of the Worker VO's durable state keys.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct SubAgentVoState {
+pub struct WorkerVoState {
     /// Current lifecycle state.
-    pub status: Option<SubAgentState>,
+    pub status: Option<WorkerState>,
     /// Root session that owns this child.
     pub parent_session: Option<SessionId>,
-    /// Optional parent child when this is a nested sub-agent.
-    pub parent_sub_agent: Option<SubAgentId>,
     /// Current depth in the child tree.
     pub depth: u32,
     /// Remaining token budget for future turns.
@@ -60,41 +67,66 @@ pub struct SubAgentVoState {
     pub pending: Vec<UserMessage>,
     /// Buffered conversation history carried across turns.
     pub history: Vec<ContextMessage>,
-    /// Child sub-agents currently owned by this sub-agent.
-    pub children: Vec<SubAgentChildRef>,
+    /// Child workers currently owned by this worker.
+    pub children: Vec<WorkerChildRef>,
     /// Summary of the last assistant response.
     pub last_turn_summary: Option<String>,
     /// Number of tools invoked so far.
     pub tools_invoked: u32,
     /// Cooperative cancellation reason, when requested.
     pub cancel_reason: Option<String>,
-    /// Active workflow-backed sub-agent turn id, when one is running.
+    /// Active workflow-backed worker turn id, when one is running.
     pub active_turn_id: Option<String>,
     /// Last workflow terminal outcome recorded for this child.
     pub last_outcome: Option<moa_core::wire::turn::TurnOutcome>,
     /// Whether the terminal parent-session notification has been appended.
     pub notification_delivered: bool,
-    /// Awakeable ids waiting for this sub-agent's terminal result.
+    /// Awakeable ids waiting for this worker's terminal result.
     pub result_waiters: Vec<String>,
+    /// Last telemetry-plane heartbeat timestamp, refreshed at the progress cadence.
+    ///
+    /// Updated by `Worker/record_heartbeat` (VO state only, no event per tick) so
+    /// `progress_summary` and the watchdog can detect a stuck child.
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    /// Generation guarding the report-then-self-clean delayed self-call.
+    ///
+    /// Bumped when terminal delivery schedules a cleanup tick and again on any accepted
+    /// `post_message` (initial task or revive follow-up). A fired `Worker/cleanup`
+    /// whose carried generation no longer matches this value is stale — the child was
+    /// revived or re-scheduled during the grace window — and is ignored.
+    pub cleanup_generation: u64,
+    /// Consecutive failed hand-release attempts during self-clean.
+    ///
+    /// Incremented each time `release_and_clear_worker` reports an incomplete release and the
+    /// cleanup tick is rescheduled. Once it reaches `MAX_CLEANUP_RELEASE_ATTEMPTS` (or grace is
+    /// disabled), the VO is force-cleared to bound the retry loop rather than rescheduling
+    /// forever on a permanent failure (e.g. a provider missing from the router registry).
+    pub cleanup_release_attempts: u32,
+    /// In-flight `request_input` round-trips, mapping each `input_request_id` to the
+    /// Restate awakeable id the blocked child turn is parked on.
+    ///
+    /// Populated by `Worker/register_input_request` and drained by a `ProvideInput`
+    /// message (resolve) or `Worker/clear_input_request` (timeout). Kept tiny —
+    /// at most a few concurrent requests per child.
+    pub pending_input_requests: Vec<WorkerPendingInput>,
 }
 
-impl SubAgentVoState {
+impl WorkerVoState {
     /// Bootstraps state from the initial child-task payload.
-    pub fn initialize(&mut self, msg: &SubAgentMessage) -> moa_core::Result<()> {
-        let SubAgentMessage::InitialTask(initial) = msg else {
+    pub fn initialize(&mut self, msg: &WorkerMessage) -> moa_core::Result<()> {
+        let WorkerMessage::InitialTask(initial) = msg else {
             return Err(MoaError::ValidationError(
-                "sub-agent initialization requires an InitialTask message".to_string(),
+                "worker initialization requires an InitialTask message".to_string(),
             ));
         };
         if matches!(initial.max_turns, Some(0)) {
             return Err(MoaError::ValidationError(
-                "sub-agent max_turns must be at least 1".to_string(),
+                "worker max_turns must be at least 1".to_string(),
             ));
         }
 
-        self.status = Some(SubAgentState::Running);
+        self.status = Some(WorkerState::Running);
         self.parent_session = Some(initial.parent_session);
-        self.parent_sub_agent = initial.parent_sub_agent.clone();
         self.depth = initial.depth;
         self.budget_remaining = initial.budget_tokens;
         self.tokens_used = 0;
@@ -118,13 +150,14 @@ impl SubAgentVoState {
         self.last_outcome = None;
         self.notification_delivered = false;
         self.result_waiters.clear();
+        self.pending_input_requests.clear();
         Ok(())
     }
 
     /// Returns the current lifecycle state, defaulting to `Uninitialized` when empty.
     #[must_use]
-    pub(super) fn current_status(&self) -> SubAgentState {
-        self.status.unwrap_or(SubAgentState::Uninitialized)
+    pub(super) fn current_status(&self) -> WorkerState {
+        self.status.unwrap_or(WorkerState::Uninitialized)
     }
 
     /// Ensures the child was initialized before handling follow-up messages or turns.
@@ -139,8 +172,30 @@ impl SubAgentVoState {
         }
 
         Err(MoaError::ValidationError(
-            "sub-agent state is not initialized".to_string(),
+            "worker state is not initialized".to_string(),
         ))
+    }
+
+    /// Returns whether a follow-up may revive this child.
+    ///
+    /// A child whose VO state was cleared by self-cleanup reads back as
+    /// `Uninitialized`, so a follow-up to it must be rejected rather than
+    /// re-bootstrapped. A still-initialized terminal child (within the grace window)
+    /// is revivable, preserving the existing revive behavior.
+    #[must_use]
+    pub(super) fn accepts_follow_up(&self) -> bool {
+        !matches!(self.current_status(), WorkerState::Uninitialized)
+    }
+
+    /// Bumps the self-cleanup generation, invalidating any pending cleanup tick.
+    ///
+    /// Called when terminal delivery schedules a cleanup and on any accepted
+    /// `post_message`, so a message arriving during the grace window supersedes the
+    /// pending cleanup and revives the child instead.
+    pub(super) fn bump_cleanup_generation(&mut self) {
+        self.cleanup_generation = self.cleanup_generation.wrapping_add(1);
+        // A fresh cleanup cycle (or a revive) starts with a clean release-attempt budget.
+        self.cleanup_release_attempts = 0;
     }
 
     /// Queues a follow-up message and transitions the child into `Running`.
@@ -150,7 +205,7 @@ impl SubAgentVoState {
             text,
             attachments: Vec::new(),
         });
-        self.status = Some(SubAgentState::Running);
+        self.status = Some(WorkerState::Running);
         Ok(())
     }
 
@@ -160,7 +215,7 @@ impl SubAgentVoState {
             return false;
         }
         self.active_turn_id = Some(turn_id);
-        self.status = Some(SubAgentState::Running);
+        self.status = Some(WorkerState::Running);
         true
     }
 
@@ -180,11 +235,11 @@ impl SubAgentVoState {
     }
 
     /// Applies the latest turn outcome to the lifecycle state.
-    pub(super) fn apply_turn_outcome(&mut self, outcome: TurnOutcome) -> SubAgentState {
+    pub(super) fn apply_turn_outcome(&mut self, outcome: TurnOutcome) -> WorkerState {
         let state = match outcome {
-            TurnOutcome::Continue => SubAgentState::Running,
-            TurnOutcome::Idle => SubAgentState::Completed,
-            TurnOutcome::Cancelled => SubAgentState::Cancelled,
+            TurnOutcome::Continue => WorkerState::Running,
+            TurnOutcome::Idle => WorkerState::Completed,
+            TurnOutcome::Cancelled => WorkerState::Cancelled,
         };
         self.status = Some(state);
         state
@@ -202,10 +257,18 @@ impl SubAgentVoState {
         self.budget_remaining == 0
     }
 
+    /// Completes this worker with a visible budget-exhaustion result.
+    pub(super) fn complete_after_budget_exhausted(&mut self) {
+        let message = WORKER_BUDGET_EXHAUSTED_MESSAGE.to_string();
+        self.last_turn_summary = Some(message.clone());
+        self.history.push(ContextMessage::assistant(message));
+        self.apply_turn_outcome(TurnOutcome::Idle);
+    }
+
     /// Builds the public status projection returned by the shared status handler.
     #[must_use]
-    pub(super) fn status_view(&self) -> SubAgentStatus {
-        SubAgentStatus {
+    pub(super) fn status_view(&self) -> WorkerStatus {
+        WorkerStatus {
             state: self.current_status(),
             depth: self.depth,
             tokens_used: self.tokens_used,
@@ -221,44 +284,41 @@ impl SubAgentVoState {
 
     /// Builds a terminal result projection when this child has reached a terminal state.
     #[must_use]
-    pub(super) fn terminal_result(
-        &self,
-        sub_agent_id: SubAgentId,
-    ) -> Option<SubAgentTerminalResult> {
+    pub(super) fn terminal_result(&self, worker_id: WorkerId) -> Option<WorkerTerminalResult> {
         let state = self.current_status();
-        if !crate::delegation::is_terminal_sub_agent_state(state) {
+        if !crate::delegation::is_terminal_worker_state(state) {
             return None;
         }
-        Some(SubAgentTerminalResult {
+        Some(WorkerTerminalResult {
             state,
-            result: self.build_result(sub_agent_id),
+            result: self.build_result(worker_id),
         })
     }
 
     /// Builds the final payload resolved back to the parent awakeable.
     #[must_use]
-    pub(super) fn build_result(&self, sub_agent_id: SubAgentId) -> SubAgentResult {
-        let success = matches!(self.current_status(), SubAgentState::Completed);
+    pub(super) fn build_result(&self, worker_id: WorkerId) -> WorkerResult {
+        let success = matches!(self.current_status(), WorkerState::Completed);
         let output = self
             .last_turn_summary
             .clone()
             .or_else(|| latest_assistant_text(&self.history))
             .unwrap_or_else(|| self.task.clone().unwrap_or_default());
         let error = match self.current_status() {
-            SubAgentState::Completed => None,
-            SubAgentState::Cancelled => Some(
+            WorkerState::Completed => None,
+            WorkerState::Cancelled => Some(
                 self.cancel_reason
                     .clone()
-                    .unwrap_or_else(|| "sub-agent cancelled".to_string()),
+                    .unwrap_or_else(|| "worker cancelled".to_string()),
             ),
-            SubAgentState::Failed => Some("sub-agent failed".to_string()),
-            SubAgentState::Uninitialized | SubAgentState::Running => {
-                Some("sub-agent finished before reaching a terminal state".to_string())
+            WorkerState::Failed => Some("worker failed".to_string()),
+            WorkerState::Uninitialized | WorkerState::Running => {
+                Some("worker finished before reaching a terminal state".to_string())
             }
         };
 
-        SubAgentResult {
-            sub_agent_id,
+        WorkerResult {
+            worker_id,
             success,
             output,
             tokens_used: self.tokens_used,
@@ -266,14 +326,44 @@ impl SubAgentVoState {
             error,
         }
     }
+
+    /// Builds the compact fan-in progress summary returned by `progress_summary`.
+    ///
+    /// `now` and `stale_threshold_ms` are passed in (journaled by the handler) so
+    /// the staleness derivation stays replay-deterministic and unit-testable. The
+    /// child is considered stale when a heartbeat exists and its age exceeds the
+    /// threshold; a child without a heartbeat yet is never reported stale.
+    #[must_use]
+    pub(super) fn progress_summary(
+        &self,
+        worker_id: WorkerId,
+        now: DateTime<Utc>,
+        stale_threshold_ms: u64,
+    ) -> WorkerProgressSummary {
+        let stale = self
+            .last_heartbeat_at
+            .is_some_and(|last| (now - last).num_milliseconds() > stale_threshold_ms as i64);
+        WorkerProgressSummary {
+            worker_id,
+            state: self.current_status(),
+            active_turn_id: self.active_turn_id.clone(),
+            last_summary: self.last_turn_summary.clone(),
+            tokens_used: self.tokens_used,
+            budget_remaining: self.budget_remaining,
+            last_heartbeat_at: self.last_heartbeat_at,
+            stale,
+            // A child parked on an in-flight `request_input` round-trip emits no
+            // heartbeats but is legitimately waiting, so the watchdog must not flag it.
+            awaiting_input: !self.pending_input_requests.is_empty(),
+        }
+    }
 }
 
-impl VoState for SubAgentVoState {
+impl VoState for WorkerVoState {
     async fn load_from<R: VoReader>(reader: &R) -> Result<Self, HandlerError> {
         Ok(Self {
             status: reader.get_json(K_STATUS).await?,
             parent_session: reader.get_json(K_PARENT_SESSION).await?,
-            parent_sub_agent: reader.get_json(K_PARENT_SUB_AGENT).await?,
             depth: reader.get_json(K_DEPTH).await?.unwrap_or_default(),
             budget_remaining: reader
                 .get_json(K_BUDGET_REMAINING)
@@ -300,13 +390,25 @@ impl VoState for SubAgentVoState {
                 .await?
                 .unwrap_or_default(),
             result_waiters: reader.get_json(K_RESULT_WAITERS).await?.unwrap_or_default(),
+            last_heartbeat_at: reader.get_json(K_LAST_HEARTBEAT_AT).await?,
+            cleanup_generation: reader
+                .get_json(K_CLEANUP_GENERATION)
+                .await?
+                .unwrap_or_default(),
+            cleanup_release_attempts: reader
+                .get_json(K_CLEANUP_RELEASE_ATTEMPTS)
+                .await?
+                .unwrap_or_default(),
+            pending_input_requests: reader
+                .get_json(K_PENDING_INPUT_REQUESTS)
+                .await?
+                .unwrap_or_default(),
         })
     }
 
     fn persist_into(&self, ctx: &ObjectContext<'_>) {
         set_or_clear_opt(ctx, K_STATUS, self.status.as_ref());
         set_or_clear_opt(ctx, K_PARENT_SESSION, self.parent_session.as_ref());
-        set_or_clear_opt(ctx, K_PARENT_SUB_AGENT, self.parent_sub_agent.as_ref());
         set_or_clear_scalar(ctx, K_DEPTH, self.depth, 0);
         set_or_clear_scalar(ctx, K_BUDGET_REMAINING, self.budget_remaining, 0);
         set_or_clear_scalar(ctx, K_TOKENS_USED, self.tokens_used, 0);
@@ -336,6 +438,15 @@ impl VoState for SubAgentVoState {
             false,
         );
         set_or_clear_vec(ctx, K_RESULT_WAITERS, &self.result_waiters);
+        set_or_clear_opt(ctx, K_LAST_HEARTBEAT_AT, self.last_heartbeat_at.as_ref());
+        set_or_clear_scalar(ctx, K_CLEANUP_GENERATION, self.cleanup_generation, 0);
+        set_or_clear_scalar(
+            ctx,
+            K_CLEANUP_RELEASE_ATTEMPTS,
+            self.cleanup_release_attempts,
+            0,
+        );
+        set_or_clear_vec(ctx, K_PENDING_INPUT_REQUESTS, &self.pending_input_requests);
     }
 }
 
@@ -350,10 +461,10 @@ fn latest_assistant_text(history: &[ContextMessage]) -> Option<String> {
         .map(|message| message.content.clone())
 }
 
-impl SubAgentVoState {
-    /// Returns the duplicate-detection hash for this sub-agent's own task.
+impl WorkerVoState {
+    /// Returns the duplicate-detection hash for this worker's own task.
     pub(super) fn task_hash(&self) -> String {
-        crate::sub_agent_dispatch::task_hash(
+        crate::worker_dispatch::task_hash(
             self.task.as_deref().unwrap_or_default(),
             &self.tool_subset,
         )
@@ -380,56 +491,52 @@ impl SubAgentVoState {
         std::mem::take(&mut self.result_waiters)
     }
 
-    /// Caches a terminal child result and refunds unused reserved budget once.
-    pub(super) fn mark_child_terminal(
-        &mut self,
-        input: MarkSubAgentChildTerminalInput,
-    ) -> Option<u64> {
-        let child = self
-            .children
-            .iter_mut()
-            .find(|child| child.id == input.sub_agent_id)?;
-        if child.terminal.is_some() {
-            return None;
+    /// Registers an in-flight `request_input` awakeable mapping if not already present.
+    ///
+    /// Returns whether the mapping was newly inserted (a retried registration of the same
+    /// `input_request_id` is a no-op so persistence stays minimal).
+    pub(super) fn register_input_request(&mut self, pending: WorkerPendingInput) -> bool {
+        if self
+            .pending_input_requests
+            .iter()
+            .any(|entry| entry.input_request_id == pending.input_request_id)
+        {
+            return false;
         }
-
-        let tokens_used = input.terminal.result.tokens_used;
-        self.budget_remaining =
-            refund_child_budget(self.budget_remaining, child.budget_tokens, tokens_used);
-        child.terminal = Some(input.terminal);
-        Some(tokens_used)
+        self.pending_input_requests.push(pending);
+        true
     }
 
-    /// Removes and returns a cached terminal child result.
-    pub(super) fn consume_child_terminal(
-        &mut self,
-        sub_agent_id: &str,
-    ) -> Option<SubAgentTerminalResult> {
+    /// Removes and returns the awakeable id for one `input_request_id`, if pending.
+    ///
+    /// Used by a `ProvideInput` message to resolve exactly the matching awakeable and by
+    /// a wait timeout to clear it. A missing entry returns `None` so both paths stay
+    /// idempotent.
+    pub(super) fn take_input_awakeable(&mut self, input_request_id: &str) -> Option<String> {
         let index = self
-            .children
+            .pending_input_requests
             .iter()
-            .position(|child| child.id == sub_agent_id && child.terminal.is_some())?;
-        self.children.remove(index).terminal
+            .position(|entry| entry.input_request_id == input_request_id)?;
+        Some(self.pending_input_requests.remove(index).awakeable_id)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        ModelId, SessionId, SubAgentInitialTask, SubAgentMessage, TenantId, TurnOutcome, UserId,
+        ModelId, SessionId, TenantId, TurnOutcome, UserId, WorkerInitialTask, WorkerMessage,
     };
 
-    use super::SubAgentVoState;
-    use moa_core::SubAgentState;
+    use super::{WORKER_BUDGET_EXHAUSTED_MESSAGE, WorkerVoState, latest_assistant_text};
+    use moa_core::WorkerState;
 
-    fn initial_task() -> SubAgentMessage {
-        SubAgentMessage::InitialTask(Box::new(SubAgentInitialTask {
+    fn initial_task() -> WorkerMessage {
+        WorkerMessage::InitialTask(Box::new(WorkerInitialTask {
             task: "summarize repo status".to_string(),
             tool_subset: vec!["web_fetch".to_string()],
             budget_tokens: 512,
             max_turns: Some(3),
             parent_session: SessionId::new(),
-            parent_sub_agent: None,
             depth: 1,
             tenant_id: TenantId::new(),
             user_id: UserId::new("user-1"),
@@ -440,12 +547,12 @@ mod tests {
 
     #[test]
     fn initial_task_seeds_state() {
-        let mut state = SubAgentVoState::default();
+        let mut state = WorkerVoState::default();
         state
             .initialize(&initial_task())
             .expect("initial task should seed state");
 
-        assert_eq!(state.current_status(), SubAgentState::Running);
+        assert_eq!(state.current_status(), WorkerState::Running);
         assert_eq!(state.pending.len(), 1);
         assert_eq!(state.tool_subset, vec!["web_fetch".to_string()]);
         assert_eq!(state.budget_remaining, 512);
@@ -456,12 +563,12 @@ mod tests {
     fn initial_task_rejects_zero_max_turns() {
         // Pins: max_turns is a real execution cap and zero is never treated as unlimited.
         let mut message = initial_task();
-        let SubAgentMessage::InitialTask(initial) = &mut message else {
+        let WorkerMessage::InitialTask(initial) = &mut message else {
             panic!("helper should build initial task");
         };
         initial.max_turns = Some(0);
 
-        let error = SubAgentVoState::default()
+        let error = WorkerVoState::default()
             .initialize(&message)
             .expect_err("zero max_turns should fail closed");
 
@@ -470,7 +577,7 @@ mod tests {
 
     #[test]
     fn follow_up_queues_message() {
-        let mut state = SubAgentVoState::default();
+        let mut state = WorkerVoState::default();
         state
             .initialize(&initial_task())
             .expect("initial task should seed state");
@@ -484,7 +591,7 @@ mod tests {
 
     #[test]
     fn token_usage_reduces_budget() {
-        let mut state = SubAgentVoState::default();
+        let mut state = WorkerVoState::default();
         state
             .initialize(&initial_task())
             .expect("initial task should seed state");
@@ -496,12 +603,33 @@ mod tests {
     }
 
     #[test]
-    fn build_result_uses_terminal_state() {
-        let mut state = SubAgentVoState::default();
+    fn exhausted_budget_completion_preserves_visible_result() {
+        // Pins: budget-capped workers must return a useful terminal result, not the
+        // previous progress summary such as "Calling tool session_search".
+        let mut state = WorkerVoState::default();
         state
             .initialize(&initial_task())
             .expect("initial task should seed state");
-        state.status = Some(SubAgentState::Completed);
+        state.budget_remaining = 0;
+
+        state.complete_after_budget_exhausted();
+        let result = state.build_result("worker-1".to_string());
+
+        assert!(result.success);
+        assert_eq!(result.output, WORKER_BUDGET_EXHAUSTED_MESSAGE);
+        assert_eq!(
+            latest_assistant_text(&state.history).as_deref(),
+            Some(WORKER_BUDGET_EXHAUSTED_MESSAGE)
+        );
+    }
+
+    #[test]
+    fn build_result_uses_terminal_state() {
+        let mut state = WorkerVoState::default();
+        state
+            .initialize(&initial_task())
+            .expect("initial task should seed state");
+        state.status = Some(WorkerState::Completed);
         state.last_turn_summary = Some("finished".to_string());
         let result = state.build_result("parent-1-child-1".to_string());
 
@@ -511,13 +639,13 @@ mod tests {
 
     #[test]
     fn default_state_is_not_terminal_successful() {
-        // Pins: an uninitialized SubAgent VO must not look like a completed child result.
-        let state = SubAgentVoState::default();
+        // Pins: an uninitialized Worker VO must not look like a completed child result.
+        let state = WorkerVoState::default();
 
         assert!(
             !matches!(
                 state.status_view().state,
-                SubAgentState::Completed | SubAgentState::Failed | SubAgentState::Cancelled
+                WorkerState::Completed | WorkerState::Failed | WorkerState::Cancelled
             ),
             "default state should not be terminal, got {:?}",
             state.status_view().state
@@ -533,7 +661,7 @@ mod tests {
     #[test]
     fn terminal_result_requires_explicit_terminal_lifecycle() {
         // Pins: result success comes from an explicit terminal lifecycle, not from resident state.
-        let mut running = SubAgentVoState::default();
+        let mut running = WorkerVoState::default();
         running
             .initialize(&initial_task())
             .expect("initial task should seed running state");
@@ -542,10 +670,10 @@ mod tests {
         assert!(!running_result.success);
         assert_eq!(
             running_result.error.as_deref(),
-            Some("sub-agent finished before reaching a terminal state")
+            Some("worker finished before reaching a terminal state")
         );
 
-        let mut completed = SubAgentVoState::default();
+        let mut completed = WorkerVoState::default();
         completed
             .initialize(&initial_task())
             .expect("initial task should seed completed state");
@@ -559,18 +687,18 @@ mod tests {
 
     #[test]
     fn task_hash_uses_shared_dispatch_hash() {
-        let mut state = SubAgentVoState::default();
+        let mut state = WorkerVoState::default();
         state
             .initialize(&initial_task())
             .expect("initial task should seed state");
 
-        assert_eq!(state.task_hash(), "9be010055aa996c5");
+        assert_eq!(state.task_hash(), "c024b456687bf734");
     }
 
     #[test]
     fn workflow_turn_ownership_is_single_active_id() {
-        // Pins: sub-agent workflow admission keeps exactly one active turn owner.
-        let mut state = SubAgentVoState::default();
+        // Pins: worker workflow admission keeps exactly one active turn owner.
+        let mut state = WorkerVoState::default();
         state
             .initialize(&initial_task())
             .expect("initial task should seed state");
@@ -582,8 +710,8 @@ mod tests {
 
     #[test]
     fn workflow_turn_clear_requires_matching_owner() {
-        // Pins: stale workflow completions cannot clear a newer active sub-agent turn.
-        let mut state = SubAgentVoState::default();
+        // Pins: stale workflow completions cannot clear a newer active worker turn.
+        let mut state = WorkerVoState::default();
         state
             .initialize(&initial_task())
             .expect("initial task should seed state");
@@ -600,55 +728,156 @@ mod tests {
     }
 
     #[test]
-    fn nested_child_terminal_result_refunds_once_and_consumes_once() {
-        // Pins: nested child terminal delivery refunds reserved budget once, then wait consumes the cache.
-        let mut state = SubAgentVoState::default();
+    fn progress_summary_reports_state_and_heartbeat_fields() {
+        // Pins: the compact fan-in summary carries the child's live state, last summary,
+        // budget, and heartbeat, and derives staleness from the heartbeat age.
+        use chrono::{Duration, Utc};
+
+        let mut state = WorkerVoState::default();
         state
             .initialize(&initial_task())
             .expect("initial task should seed state");
-        state.children.push(moa_core::SubAgentChildRef {
-            id: "child-1".to_string(),
-            task_hash: "hash-1".to_string(),
-            budget_tokens: 300,
-            terminal: None,
-        });
-        state.budget_remaining = 100;
-        let terminal = moa_core::SubAgentTerminalResult {
-            state: SubAgentState::Completed,
-            result: moa_core::SubAgentResult {
-                sub_agent_id: "child-1".to_string(),
-                success: true,
-                output: "done".to_string(),
-                tokens_used: 125,
-                tools_invoked: 1,
-                error: None,
-            },
-        };
+        state.record_token_usage(100);
+        state.last_turn_summary = Some("searching docs".to_string());
+        state.active_turn_id = Some("turn-1".to_string());
+        let now = Utc::now();
+        let heartbeat = now - Duration::milliseconds(5_000);
+        state.last_heartbeat_at = Some(heartbeat);
 
-        assert_eq!(
-            state.mark_child_terminal(moa_core::MarkSubAgentChildTerminalInput {
-                sub_agent_id: "child-1".to_string(),
-                terminal: terminal.clone(),
-            }),
-            Some(125)
+        let fresh = state.progress_summary("child-1".to_string(), now, 60_000);
+        assert_eq!(fresh.worker_id, "child-1");
+        assert_eq!(fresh.state, WorkerState::Running);
+        assert_eq!(fresh.active_turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(fresh.last_summary.as_deref(), Some("searching docs"));
+        assert_eq!(fresh.tokens_used, 100);
+        assert_eq!(fresh.budget_remaining, 412);
+        assert_eq!(fresh.last_heartbeat_at, Some(heartbeat));
+        assert!(!fresh.stale, "a recent heartbeat must not be stale");
+
+        // A heartbeat older than the threshold flips the stale flag.
+        let stale = state.progress_summary("child-1".to_string(), now, 1_000);
+        assert!(stale.stale, "an aged heartbeat must be stale");
+
+        // No heartbeat yet is never stale.
+        state.last_heartbeat_at = None;
+        let no_heartbeat = state.progress_summary("child-1".to_string(), now, 1);
+        assert!(!no_heartbeat.stale);
+        assert_eq!(no_heartbeat.last_heartbeat_at, None);
+        // No pending input request: the child is not awaiting input.
+        assert!(!no_heartbeat.awaiting_input);
+
+        // A pending request_input round-trip surfaces awaiting_input so the watchdog can
+        // exempt the child even with an aged (or absent) heartbeat.
+        state.register_input_request(moa_core::WorkerPendingInput {
+            input_request_id: "req-1".to_string(),
+            awakeable_id: "awk-1".to_string(),
+        });
+        let awaiting = state.progress_summary("child-1".to_string(), now, 1);
+        assert!(
+            awaiting.awaiting_input,
+            "a pending request_input must surface awaiting_input"
         );
-        assert_eq!(state.budget_remaining, 275);
-        assert_eq!(
-            state.mark_child_terminal(moa_core::MarkSubAgentChildTerminalInput {
-                sub_agent_id: "child-1".to_string(),
-                terminal: terminal.clone(),
-            }),
-            None
+    }
+
+    #[test]
+    fn cleaned_state_rejects_follow_up_but_terminal_child_is_revivable() {
+        // Pins: a follow-up to a cleaned (cleared) VO must be rejected, while a
+        // still-initialized terminal child within the grace window stays revivable.
+        let cleaned = WorkerVoState::default();
+        assert!(
+            !cleaned.accepts_follow_up(),
+            "a cleared/uninitialized child must not accept follow-ups"
         );
-        assert_eq!(state.budget_remaining, 275);
-        assert_eq!(state.consume_child_terminal("child-1"), Some(terminal));
-        assert_eq!(state.consume_child_terminal("child-1"), None);
+
+        let mut terminal = WorkerVoState::default();
+        terminal
+            .initialize(&initial_task())
+            .expect("initial task should seed state");
+        terminal.apply_turn_outcome(TurnOutcome::Idle);
+        assert_eq!(terminal.current_status(), WorkerState::Completed);
+        assert!(
+            terminal.accepts_follow_up(),
+            "a terminal-but-not-cleaned child must still be revivable"
+        );
+    }
+
+    #[test]
+    fn accepted_message_bumps_cleanup_generation_invalidating_pending_cleanup() {
+        // Pins: a message arriving during the grace window bumps cleanup_generation so a
+        // cleanup tick scheduled for the prior generation is recognized as stale.
+        let mut state = WorkerVoState::default();
+        state
+            .initialize(&initial_task())
+            .expect("initial task should seed state");
+
+        // Terminal delivery schedules cleanup for this generation.
+        state.bump_cleanup_generation();
+        let scheduled_generation = state.cleanup_generation;
+
+        // A revive follow-up arriving mid-grace bumps the generation again.
+        state.bump_cleanup_generation();
+
+        assert_ne!(
+            scheduled_generation, state.cleanup_generation,
+            "an accepted message must supersede the pending cleanup generation"
+        );
+    }
+
+    #[test]
+    fn bump_cleanup_generation_resets_release_attempts() {
+        // Pins: a fresh cleanup cycle (or a revive) starts with a clean release-attempt
+        // budget, so a stale counter from a prior cycle cannot prematurely force-clear.
+        let mut state = WorkerVoState {
+            cleanup_release_attempts: super::MAX_CLEANUP_RELEASE_ATTEMPTS - 1,
+            ..WorkerVoState::default()
+        };
+        state.bump_cleanup_generation();
+        assert_eq!(state.cleanup_release_attempts, 0);
+    }
+
+    #[test]
+    fn pending_input_request_resolves_matching_awakeable_and_clears_it() {
+        // Pins: register stores one awakeable per input_request_id (idempotent), take
+        // returns the matching awakeable id and removes only that entry, and a missing or
+        // already-taken id yields None so ProvideInput/timeout stay idempotent.
+        use moa_core::WorkerPendingInput;
+
+        let mut state = WorkerVoState::default();
+        assert!(state.register_input_request(WorkerPendingInput {
+            input_request_id: "req-1".to_string(),
+            awakeable_id: "awk-1".to_string(),
+        }));
+        // Duplicate registration of the same request id is a no-op.
+        assert!(!state.register_input_request(WorkerPendingInput {
+            input_request_id: "req-1".to_string(),
+            awakeable_id: "awk-1b".to_string(),
+        }));
+        assert!(state.register_input_request(WorkerPendingInput {
+            input_request_id: "req-2".to_string(),
+            awakeable_id: "awk-2".to_string(),
+        }));
+
+        // Resolving req-1 returns its awakeable and leaves req-2 intact.
+        assert_eq!(
+            state.take_input_awakeable("req-1"),
+            Some("awk-1".to_string())
+        );
+        assert_eq!(state.pending_input_requests.len(), 1);
+        assert_eq!(state.pending_input_requests[0].input_request_id, "req-2");
+        // A second resolve of the same id is a no-op.
+        assert_eq!(state.take_input_awakeable("req-1"), None);
+        assert_eq!(state.take_input_awakeable("unknown"), None);
+        assert_eq!(
+            state.take_input_awakeable("req-2"),
+            Some("awk-2".to_string())
+        );
+        assert!(state.pending_input_requests.is_empty());
     }
 
     #[test]
     fn result_waiters_are_unique_and_take_clears_registry() {
         // Pins: wait timeouts cannot accumulate duplicate result awakeables.
-        let mut state = SubAgentVoState::default();
+        let mut state = WorkerVoState::default();
 
         assert!(state.add_result_waiter("awake-1".to_string()));
         assert!(!state.add_result_waiter("awake-1".to_string()));

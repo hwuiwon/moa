@@ -65,7 +65,7 @@ pub fn experience_from_assessment(
     );
     let fingerprint = fingerprint_for_task(summary, &facets);
     ExperienceRecord {
-        id: Uuid::now_v7(),
+        id: deterministic_experience_id(segment.id, EXPERIENCE_EXTRACTION_POLICY_VERSION),
         segment_id: segment.id,
         session_id: segment.session_id,
         tenant_id: session.tenant_id,
@@ -96,6 +96,19 @@ fn experience_user_id(session: &SessionMeta) -> UserId {
         .map(|contact| contact.contact_id.to_string())
         .unwrap_or_else(|| format!("tenant:{}", session.tenant_id));
     UserId::new(id)
+}
+
+fn deterministic_experience_id(segment_id: moa_core::SegmentId, extraction_policy: &str) -> Uuid {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"moa:experience-record:v1");
+    hasher.update(segment_id.0.as_bytes());
+    hasher.update(extraction_policy.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 /// Builds an experience record from a segment when the segment already carries an assessment.
@@ -571,6 +584,65 @@ mod tests {
         );
         assert_eq!(experience.task_facets.tool_pattern, vec!["bash"]);
         assert_eq!(experience.resources.len(), 2);
+    }
+
+    #[test]
+    fn experience_id_is_stable_for_reassessed_segment() {
+        // Pins: repeated active-segment assessments upsert the same experience parent row.
+        let session_id = SessionId::new();
+        let segment_id = SegmentId::new();
+        let now = Utc
+            .with_ymd_and_hms(2026, 6, 15, 12, 0, 0)
+            .single()
+            .expect("fixed test timestamp should be valid");
+        let session = SessionMeta {
+            id: session_id,
+            tenant_id: TenantId::new(),
+            ..SessionMeta::default()
+        };
+        let assessment = SegmentAssessment {
+            outcome: moa_core::SegmentOutcome::Partial,
+            confidence: 0.7,
+            phase: moa_core::AssessmentPhase::Immediate,
+            evidence: Vec::new(),
+            assessed_at: now,
+            policy_version: "assessment_v1".to_string(),
+        };
+        let segment = TaskSegment {
+            id: segment_id,
+            session_id,
+            tenant_id: "tenant".to_string(),
+            segment_index: 0,
+            task_summary: Some("Reassess the same work".to_string()),
+            started_at: now,
+            ended_at: None,
+            turn_count: 1,
+            tools_used: vec!["session_search".to_string()],
+            skills_activated: Vec::new(),
+            token_cost: 10,
+            previous_segment_id: None,
+            outcome: None,
+            assessment: Some(assessment.clone()),
+            outcome_confidence: Some(0.7),
+        };
+
+        let first =
+            experience_from_assessment(&session, &segment, &assessment, &[], None, None, now);
+        let second = experience_from_assessment(
+            &session,
+            &segment,
+            &assessment,
+            &[],
+            None,
+            Some(100),
+            now + chrono::Duration::seconds(1),
+        );
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(
+            first.id,
+            deterministic_experience_id(segment_id, EXPERIENCE_EXTRACTION_POLICY_VERSION)
+        );
     }
 
     #[test]

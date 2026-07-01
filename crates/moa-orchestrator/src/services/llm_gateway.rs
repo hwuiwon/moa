@@ -18,6 +18,7 @@ use serde_json::Value;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
+use crate::services::narration::NarrateSessionRequest;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::workflows::errors::moa_error_to_handler_error;
 use moa_observability::restate_observability::annotate_restate_handler_span;
@@ -29,6 +30,13 @@ pub trait LLMGateway {
     async fn complete(
         request: Json<CompletionRequest>,
     ) -> Result<Json<CompletionResponse>, HandlerError>;
+
+    /// Produces at most one durable progress narration for a session.
+    ///
+    /// Invoked as a detached job by the per-session narration tick. Hosted on
+    /// this service to reuse its provider registry and avoid a new Restate
+    /// binding; the narration logic lives in [`crate::services::narration`].
+    async fn narrate_session(request: Json<NarrateSessionRequest>) -> Result<(), HandlerError>;
 }
 
 /// Concrete Restate service implementation backed by configured providers.
@@ -146,7 +154,11 @@ impl LLMGateway for LLMGatewayImpl {
 
             let turn_seq = ctx
                 .service_client::<RestateSessionStoreClient>()
-                .append_event(Json(AppendEventRequest { session_id, event }))
+                .append_event(Json(AppendEventRequest {
+                    session_id,
+                    event,
+                    dedupe_key: None,
+                }))
                 .call()
                 .await?;
 
@@ -164,6 +176,17 @@ impl LLMGateway for LLMGatewayImpl {
         }
 
         Ok(Json::from(response))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: dispatched as a detached job by the per-session narration tick, which forwards the session participant identity used to authorize the gated progress read.
+    async fn narrate_session(
+        &self,
+        ctx: Context<'_>,
+        request: Json<NarrateSessionRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("LLMGateway", "narrate_session");
+        crate::services::narration::run_narration_job(&ctx, self, request.into_inner()).await
     }
 }
 

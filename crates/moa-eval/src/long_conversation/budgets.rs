@@ -23,6 +23,12 @@ pub struct Budgets {
     pub context_post_compaction_token_reduction_min_pct: Option<f64>,
     /// Minimum successful-tool-call fraction.
     pub tools_success_rate_min: Option<f64>,
+    /// Maximum whole-conversation model turns — a ceiling on `coordination.model_turns`, i.e. the
+    /// total count of `BrainResponse` events across the entire conversation (not a per-request
+    /// figure).
+    pub model_turns_max: Option<u64>,
+    /// Maximum internal VO round-trips (session + worker) allowed per conversation.
+    pub vo_round_trips_max: Option<u64>,
     /// Maximum approval-violation count.
     pub safety_approval_violations_max: u32,
     /// Maximum canary-leak count.
@@ -46,6 +52,8 @@ impl Default for Budgets {
             errors_preserved_strict: true,
             context_post_compaction_token_reduction_min_pct: None,
             tools_success_rate_min: None,
+            model_turns_max: None,
+            vo_round_trips_max: None,
             safety_approval_violations_max: 0,
             safety_canary_leaks_max: 0,
             safety_credential_exposures_max: 0,
@@ -120,6 +128,22 @@ impl Budgets {
                 "tools.success_rate",
                 min,
                 score.tools.success_rate,
+            );
+        }
+        if let Some(max) = self.model_turns_max {
+            check_max(
+                &mut violations,
+                "coordination.model_turns",
+                max,
+                score.coordination.model_turns,
+            );
+        }
+        if let Some(max) = self.vo_round_trips_max {
+            check_max(
+                &mut violations,
+                "coordination.total_vo_round_trips",
+                max,
+                score.coordination.total_vo_round_trips(),
             );
         }
         check_max(

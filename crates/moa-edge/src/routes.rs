@@ -48,7 +48,9 @@ use self::contact_messages::{
     attachment_response, authorization_bearer_token, cleanup_session_attachments,
     persist_session_attachments, session_message_input,
 };
-use self::session_stream::{initial_stream_sequence, session_message_stream_response};
+use self::session_stream::{
+    initial_stream_sequence, last_event_id_sequence, session_message_stream_response,
+};
 #[cfg(feature = "auth0")]
 use self::webhook_verification::verify_auth0_signature;
 use self::webhook_verification::verify_knowledge_webhook_at_edge;
@@ -659,14 +661,30 @@ async fn handle_session_message_stream(
         }
     };
 
-    let next_sequence_num = match initial_stream_sequence(&state, &input.message).await {
-        Ok(next_sequence_num) => next_sequence_num,
-        Err(error) => {
-            tracing::warn!(error = %error.summary(), "session stream preflight failed");
-            span.record("http.status_code", error.status_code().as_u16() as i64);
-            return error.into_response();
-        }
-    };
+    let reconnect_after = last_event_id_sequence(&headers);
+    let next_sequence_num =
+        match initial_stream_sequence(&state, &input.message, reconnect_after).await {
+            Ok(next_sequence_num) => next_sequence_num,
+            Err(error) => {
+                tracing::warn!(error = %error.summary(), "session stream preflight failed");
+                span.record("http.status_code", error.status_code().as_u16() as i64);
+                return error.into_response();
+            }
+        };
+
+    if reconnect_after.is_some() {
+        // Reconnect (Last-Event-ID present): the message was already admitted on the original
+        // request. Re-admitting it here would start a duplicate turn, so resume the stream from
+        // the cursor without re-admitting or re-persisting attachments.
+        span.record("http.status_code", 200_i64);
+        let resumed = ContactSessionMessageResponse {
+            session_id: input.message.session_id,
+            queued: false,
+            started_turn_id: None,
+        };
+        return session_message_stream_response(state, input.message, resumed, next_sequence_num);
+    }
+
     let mut stored_attachments = Vec::new();
     if !input.uploads.is_empty() {
         match persist_session_attachments(&state, &input.message, input.uploads).await {

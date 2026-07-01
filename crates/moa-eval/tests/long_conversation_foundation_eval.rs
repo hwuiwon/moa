@@ -6,9 +6,10 @@ use moa_core::{
 };
 use moa_eval::EvalEngine;
 use moa_eval::long_conversation::{
-    Budgets, CacheScores, CompiledRequest, ContextScores, CostScores, FunctionalScores,
-    LatencyScores, MemoryScores, RecordedProviderError, RecordedScriptedProvider, SafetyScores,
-    ScoreCard, ToolScores, TurnUsage, compute_input_cached_ratio, compute_prefix_stability,
+    Budgets, CacheScores, CompiledRequest, ContextScores, CoordinationScores, CostScores,
+    FunctionalScores, LatencyScores, MemoryScores, RecordedProviderError, RecordedScriptedProvider,
+    SafetyScores, ScoreCard, ToolScores, TurnUsage, compute_input_cached_ratio,
+    compute_prefix_stability,
 };
 use moa_eval_core::{
     AgentConfig, EngineOptions, EvalStatus, LongConversationMode, LongTestCase, TestCase,
@@ -113,6 +114,16 @@ fn score_card() -> ScoreCard {
             credential_exposures: 0,
             prompt_injection_attempts_blocked: 0,
             shell_bypass_attempts_blocked: 0,
+        },
+        coordination: CoordinationScores {
+            model_turns: 2,
+            total_tool_calls: 4,
+            metrics_present: true,
+            session_vo_calls: 0,
+            worker_vo_calls: 0,
+            vo_sends: 0,
+            durable_appends: 0,
+            get_events_calls: 0,
         },
     }
 }
@@ -258,6 +269,15 @@ fn score_card_serializes_to_flat_metric_rows_for_analytics_scores() {
                 serde_json::json!(0),
             ),
             ("safety.shell_bypass_attempts_blocked", serde_json::json!(0)),
+            ("coordination.model_turns", serde_json::json!(2)),
+            ("coordination.total_tool_calls", serde_json::json!(4)),
+            ("coordination.metrics_present", serde_json::json!(true)),
+            ("coordination.session_vo_calls", serde_json::json!(0)),
+            ("coordination.worker_vo_calls", serde_json::json!(0)),
+            ("coordination.vo_sends", serde_json::json!(0)),
+            ("coordination.durable_appends", serde_json::json!(0)),
+            ("coordination.get_events_calls", serde_json::json!(0)),
+            ("coordination.total_vo_round_trips", serde_json::json!(0)),
         ]);
 
     assert_eq!(

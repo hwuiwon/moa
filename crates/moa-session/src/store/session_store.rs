@@ -529,16 +529,25 @@ impl SessionStore for PostgresSessionStore {
     /// Appends an event to the session log.
     async fn emit_event(&self, session_id: moa_core::SessionId, event: Event) -> Result<u64> {
         Ok(self
-            .emit_event_record(session_id, event)
+            .emit_event_record(session_id, event, None)
             .await?
             .sequence_num)
     }
 
-    /// Appends an event and returns the persisted event record.
+    /// Appends an event under the session-row lock, optionally deduplicated,
+    /// returning the persisted record.
+    ///
+    /// When `dedupe_key` is `None` the event is always appended. When it is
+    /// `Some` and a `session_event_dedupe` row already exists for
+    /// `(session_id, dedupe_key)`, the previously persisted event is returned
+    /// without inserting a second event; otherwise the event and a matching
+    /// dedupe row are inserted together in the same transaction so a retry
+    /// short-circuits.
     async fn emit_event_record(
         &self,
         session_id: moa_core::SessionId,
         event: Event,
+        dedupe_key: Option<String>,
     ) -> Result<EventRecord> {
         let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
         let event_id = Uuid::now_v7();
@@ -571,6 +580,50 @@ impl SessionStore for PostgresSessionStore {
         let actor_storage_key = locked_session.col::<String>("user_id")?;
         let contact_id = locked_session.col::<Option<Uuid>>("contact_id")?;
 
+        // Idempotency fast path: if this `(session_id, dedupe_key)` was already
+        // appended, return the first persisted record without inserting again.
+        if let Some(key) = dedupe_key.as_deref() {
+            let dedupe = self.table_name("session_event_dedupe");
+            if let Some(existing) = sqlx::query(&format!(
+                "SELECT sequence_num FROM {dedupe} WHERE session_id = $1 AND dedupe_key = $2"
+            ))
+            .bind(session_id.0)
+            .bind(key)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(map_sqlx_error)?
+            {
+                let existing_seq = existing.col::<i64>("sequence_num")? as u64;
+                let existing_event = sqlx::query(&format!(
+                    "SELECT id, timestamp FROM {events} WHERE session_id = $1 AND sequence_num = $2"
+                ))
+                .bind(session_id.0)
+                .bind(existing_seq as i64)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(map_sqlx_error)?;
+                transaction.commit().await.map_err(map_sqlx_error)?;
+                let (existing_id, existing_timestamp) = match existing_event {
+                    Some(row) => (
+                        row.col::<Uuid>("id")?,
+                        row.col::<DateTime<Utc>>("timestamp")?,
+                    ),
+                    None => (event_id, now),
+                };
+                return Ok(EventRecord {
+                    id: existing_id,
+                    session_id,
+                    sequence_num: existing_seq,
+                    event_type: event_type_record,
+                    event,
+                    timestamp: existing_timestamp,
+                    brain_id: None,
+                    hand_id,
+                    token_count: Some(token_count),
+                });
+            }
+        }
+
         sqlx::query(&format!(
             "INSERT INTO {events} \
              (id, session_id, tenant_id, contact_id, storage_partition_id, user_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
@@ -592,6 +645,21 @@ impl SessionStore for PostgresSessionStore {
         .execute(&mut *transaction)
         .await
         .map_err(map_sqlx_error)?;
+
+        // Record the dedupe key in the same transaction so a retry of the same
+        // logical append short-circuits on the fast path above.
+        if let Some(key) = dedupe_key.as_deref() {
+            let dedupe = self.table_name("session_event_dedupe");
+            sqlx::query(&format!(
+                "INSERT INTO {dedupe} (session_id, dedupe_key, sequence_num) VALUES ($1, $2, $3)"
+            ))
+            .bind(session_id.0)
+            .bind(key)
+            .bind(sequence_num as i64)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
 
         transaction.commit().await.map_err(map_sqlx_error)?;
         if let Event::BrainResponse {

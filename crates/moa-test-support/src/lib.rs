@@ -14,5 +14,6 @@ pub mod pricing;
 mod orchestrator_fixture;
 
 pub use orchestrator_fixture::{
-    IsolatedTest, OrchestratorTestFixture, TestApiClient, TestSessionHandle,
+    ConversationOptions, IsolatedTest, OrchestratorTestFixture, TestApiClient, TestSessionHandle,
+    drive_conversation,
 };

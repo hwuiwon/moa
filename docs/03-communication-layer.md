@@ -87,7 +87,7 @@ Admin actions are:
 - Clear, which executes the stored request with a fresh tool-call ID.
 - Deny, which records the decision and does not execute the action.
 
-Conversation clients do not resolve blocking tool gates. Admin review returns a pending-review tool result to the model and the root or sub-agent workflow continues.
+Conversation clients do not resolve blocking tool gates. Admin review returns a pending-review tool result to the model and the root or worker workflow continues.
 
 ## Observation
 
@@ -105,6 +105,7 @@ This avoids losing information when a client disconnects or a messaging process 
 - approval requests and decisions
 - segment start/completion events
 - memory and checkpoint events
+- worker progress narration, attention signals, and stale notices
 - status snapshots from the Restate-backed orchestrator
 
 Clients choose their own verbosity, but durable events are the source of truth.
@@ -118,6 +119,28 @@ generic `session_event` frames keyed by event sequence number, and finally a
 `done` frame. This lets the browser render the turn without holding a second
 live progress connection. `Session/progress` remains the compact
 history/recovery projection used by the stream and by reload flows.
+
+When a coordinator turn delegates to workers, the stream stays open across the
+**detached window**. `session_message_terminal_done` closes only when the started
+turn has completed **and** `Session/progress.child_progress` shows no non-terminal
+child; with no children it collapses to the previous turn-completion-only close.
+While children run, the stream keeps emitting durable coordination frames mapped
+from the new `Event` variants: `progress_narration` (`ProgressNarrated`, the
+primary user-facing liveness, rendered in the assistant's voice), `worker_signal`
+(`WorkerSignalReceived`), `worker_resume` (`WorkerParentResumeRequested`),
+and `worker_stale` (`WorkerHeartbeatStale`); terminal
+`WorkerNotificationDelivered` stays on the generic `session_event` frame. During
+event silence with an active descendant, the edge also emits a templated, **non-durable**
+`working` frame (active child summary + elapsed seconds) after a fixed 10s
+interval, so the user never sees a frozen screen even when narration correctly
+skips a no-change period or is disabled. `child_progress` is built by bounded
+fan-in (active children only, capped) so the projection stays compact.
+
+Each durable frame's SSE `id` is the event `sequence_num`, which clients use for
+their own ordering and dedupe. The endpoint does not honor an inbound
+`Last-Event-ID`: a fresh connection re-seeds the cursor to the current head rather
+than replaying history, so a client that wants missed narration replays it through
+a separate `Session/progress` read.
 
 The same route accepts multipart contact messages with text, photo uploads, or
 both. Upload bytes are validated by the edge and stored through `object_store`

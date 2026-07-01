@@ -16,10 +16,11 @@ pub mod knowledge_sync_ingestion;
 pub(crate) mod progress_delivery;
 #[cfg(feature = "skill-learning")]
 pub mod skill_learning;
-pub mod sub_agent_turn_execution;
+pub(crate) mod turn_events;
 pub mod turn_execution;
 pub(crate) mod turn_progress;
 pub(crate) mod turn_responsiveness;
+pub mod worker_turn_execution;
 pub mod workflow_node_actions;
 
 /// Durably samples the current UTC time inside a workflow as a named replayable step.

@@ -62,6 +62,7 @@ fn tool_request(
         user_id: fallback_tool_user_id(meta),
         idempotency_key: None,
         trusted_sandbox_manifest: None,
+        worker_id: None,
     }
 }
 
@@ -84,6 +85,7 @@ fn tool_request_with_provider_id(
         user_id: fallback_tool_user_id(meta),
         idempotency_key: None,
         trusted_sandbox_manifest: None,
+        worker_id: None,
     }
 }
 

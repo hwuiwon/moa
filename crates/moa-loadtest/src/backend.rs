@@ -278,7 +278,11 @@ impl RemoteHttpClient {
     ) -> std::result::Result<u64, RemoteHttpError> {
         self.post_call(
             "/SessionStore/append_event",
-            &AppendEventRequest { session_id, event },
+            &AppendEventRequest {
+                session_id,
+                event,
+                dedupe_key: None,
+            },
         )
         .await
     }

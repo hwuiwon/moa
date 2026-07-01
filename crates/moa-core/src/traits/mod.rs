@@ -46,12 +46,22 @@ pub trait SessionStore: Send + Sync {
     /// Appends an event to the session log.
     async fn emit_event(&self, session_id: SessionId, event: Event) -> Result<SequenceNum>;
 
-    /// Appends an event and returns the persisted record.
+    /// Appends an event and returns the persisted record, optionally deduplicated.
+    ///
+    /// When `dedupe_key` is `Some`, a retried append with the same
+    /// `(session_id, dedupe_key)` returns the first persisted record without
+    /// inserting a second event; when `None`, the event is always appended.
     ///
     /// Store implementations can override this to avoid a reload when insert
-    /// metadata is already available. The default preserves existing stores by
-    /// appending first and then loading exactly the inserted sequence number.
-    async fn emit_event_record(&self, session_id: SessionId, event: Event) -> Result<EventRecord> {
+    /// metadata is already available. The default appends via [`Self::emit_event`]
+    /// and reloads exactly the inserted sequence number; it has no dedupe table,
+    /// so it ignores `dedupe_key` and always appends.
+    async fn emit_event_record(
+        &self,
+        session_id: SessionId,
+        event: Event,
+        _dedupe_key: Option<String>,
+    ) -> Result<EventRecord> {
         let sequence_num = self.emit_event(session_id, event).await?;
         let mut events = self
             .get_events(
@@ -136,6 +146,7 @@ pub trait SessionStore: Send + Sync {
                     from: previous,
                     to: status,
                 },
+                None,
             )
             .await?;
         Ok(Some(record))

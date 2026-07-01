@@ -421,7 +421,7 @@ async fn register_selected_skill_files(
     };
     let files = ctx.take_trusted_sandbox_files();
     let file_count = files.len();
-    router.set_trusted_sandbox_files(session, files).await;
+    router.set_trusted_sandbox_files(session, None, files).await;
     tracing::info!(
         session_id = %session.id,
         tenant_id = %session.tenant_id,

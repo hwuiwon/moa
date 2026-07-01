@@ -47,7 +47,11 @@ impl TestApiClient {
     pub async fn append_event(&self, session_id: SessionId, event: Event) -> Result<u64> {
         self.post_call(
             "/SessionStore/append_event",
-            &AppendEventRequest { session_id, event },
+            &AppendEventRequest {
+                session_id,
+                event,
+                dedupe_key: None,
+            },
         )
         .await
     }
@@ -189,6 +193,18 @@ impl TestSessionHandle<'_> {
     pub async fn snapshot(&self) -> Result<SessionSnapshot> {
         self.client
             .post_empty_call(&format!("/Session/{}/snapshot", self.session_id))
+            .await
+    }
+
+    /// Reads the current durable session lifecycle status.
+    ///
+    /// This is the authoritative "conversation settled" signal: it stays `Running` while an
+    /// auto-delegation run is still waiting for workers or a synthesis turn (even during
+    /// transient windows where `active_turn_id` is momentarily `None`), and flips to `Paused`
+    /// only when the whole user message is fully resolved.
+    pub async fn status(&self) -> Result<SessionStatus> {
+        self.client
+            .post_empty_call(&format!("/Session/{}/status", self.session_id))
             .await
     }
 

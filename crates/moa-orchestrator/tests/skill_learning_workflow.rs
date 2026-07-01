@@ -168,6 +168,7 @@ async fn seed_experience_fixture(
                     task_summary: Some("Implement a reusable Rust workflow".to_string()),
                     previous_segment_id: None,
                 },
+                None,
             )
             .await
             .expect("append segment start"),
@@ -181,6 +182,7 @@ async fn seed_experience_fixture(
                     text: "Implement and test the Rust workflow".to_string(),
                     attachments: Vec::<Attachment>::new(),
                 },
+                None,
             )
             .await
             .expect("append user message"),
@@ -203,6 +205,7 @@ async fn seed_experience_fixture(
                         input: json!({ "cmd": "cargo test" }),
                         hand_id: None,
                     },
+                    None,
                 )
                 .await
                 .expect("append tool call"),
@@ -220,6 +223,7 @@ async fn seed_experience_fixture(
                         success: true,
                         duration_ms: 1,
                     },
+                    None,
                 )
                 .await
                 .expect("append tool result"),
@@ -242,6 +246,7 @@ async fn seed_experience_fixture(
                     cost_cents: 0,
                     duration_ms: 1,
                 },
+                None,
             )
             .await
             .expect("append assistant response"),
@@ -261,6 +266,7 @@ async fn seed_experience_fixture(
                     token_cost: 256,
                     duration_ms: 1_000,
                 },
+                None,
             )
             .await
             .expect("append segment complete"),

@@ -17,8 +17,8 @@ pub(crate) struct TurnResponsivenessInput<'a> {
     pub(crate) has_recent_target: bool,
     /// Whether this turn is running inside an explicit workflow adapter context.
     pub(crate) is_workflow_context: bool,
-    /// Whether this turn is running inside a delegated sub-agent context.
-    pub(crate) is_sub_agent_context: bool,
+    /// Whether this turn is running inside a delegated worker context.
+    pub(crate) is_worker_context: bool,
     /// Count of tool schemas known to be available without compiling context.
     pub(crate) available_tool_count: usize,
 }
@@ -33,7 +33,7 @@ impl<'a> TurnResponsivenessInput<'a> {
             request_max_turns: None,
             has_recent_target: false,
             is_workflow_context: false,
-            is_sub_agent_context: false,
+            is_worker_context: false,
             available_tool_count: 0,
         }
     }
@@ -47,7 +47,7 @@ impl<'a> TurnResponsivenessInput<'a> {
 pub(crate) fn classify_turn_request(input: TurnResponsivenessInput<'_>) -> TurnComplexityClass {
     let normalized = normalize_text(input.user_text);
     let text = normalized.as_str();
-    if input.is_workflow_context || input.is_sub_agent_context {
+    if input.is_workflow_context || input.is_worker_context {
         return TurnComplexityClass::Complex;
     }
 
@@ -227,6 +227,12 @@ impl ToolBudgetState {
     pub(crate) fn attempted_tool_calls(&self) -> usize {
         self.attempted_tool_calls
     }
+
+    /// Returns remaining dispatch capacity before this turn hits the tool-call cap.
+    pub(crate) fn remaining_tool_calls(&self) -> usize {
+        self.max_tool_calls
+            .saturating_sub(self.attempted_tool_calls)
+    }
 }
 
 /// Decision returned by [`ToolBudgetState`] before a tool dispatch.
@@ -350,7 +356,7 @@ fn event_has_target_signal(event: &Event) -> bool {
         Event::UserMessage { text, attachments } => {
             !attachments.is_empty() || text_has_target_signal(text)
         }
-        Event::BrainResponse { text, .. } | Event::SubAgentMessageSent { text, .. } => {
+        Event::BrainResponse { text, .. } | Event::WorkerMessageSent { text, .. } => {
             text_has_target_signal(text)
         }
         Event::ToolCall {
@@ -360,7 +366,7 @@ fn event_has_target_signal(event: &Event) -> bool {
         Event::ToolError {
             tool_name, error, ..
         } => tool_name_implies_target(tool_name) || text_has_target_signal(error),
-        Event::SubAgentSpawned { task, .. } => text_has_target_signal(task),
+        Event::WorkerSpawned { task, .. } => text_has_target_signal(task),
         Event::SegmentStarted { task_summary, .. }
         | Event::SegmentCompleted { task_summary, .. } => {
             task_summary.as_deref().is_some_and(text_has_target_signal)
@@ -383,15 +389,7 @@ fn tool_name_implies_target(tool_name: &str) -> bool {
     contains_any(
         &tool_name,
         &[
-            "bash",
-            "edit",
-            "file",
-            "git",
-            "patch",
-            "repo",
-            "shell",
-            "sub_agent",
-            "tool",
+            "bash", "edit", "file", "git", "patch", "repo", "shell", "worker", "tool",
         ],
     )
 }

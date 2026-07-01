@@ -5,6 +5,7 @@ mod runner;
 
 pub mod agent_instructions;
 pub mod compactor;
+pub mod delegation_planning;
 pub mod digest;
 pub mod history;
 pub mod identity;

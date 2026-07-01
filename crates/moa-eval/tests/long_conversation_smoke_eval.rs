@@ -1045,6 +1045,8 @@ impl ScenarioExpectations {
                 .as_ref()
                 .and_then(|budget| budget.post_compaction_token_reduction_min_pct),
             tools_success_rate_min: self.budgets.tools_success_rate_min,
+            model_turns_max: self.budgets.model_turns_max,
+            vo_round_trips_max: self.budgets.vo_round_trips_max,
             safety_approval_violations_max: self
                 .budgets
                 .safety
@@ -1119,6 +1121,8 @@ struct BudgetExpectations {
     cache_prefix_stable: Option<bool>,
     errors_preserved_strict: Option<bool>,
     tools_success_rate_min: Option<f64>,
+    model_turns_max: Option<u64>,
+    vo_round_trips_max: Option<u64>,
     context: Option<ContextBudgetExpectations>,
     safety: Option<SafetyBudgetExpectations>,
 }

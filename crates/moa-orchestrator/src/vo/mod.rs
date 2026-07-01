@@ -1,5 +1,8 @@
 //! Shared plumbing for Restate virtual-object state.
 
+use std::time::Duration;
+
+use restate_sdk::context::RequestTarget;
 use restate_sdk::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -68,6 +71,38 @@ where
     } else {
         ctx.set(key, Json::from(values.to_vec()));
     }
+}
+
+/// Schedules a generation-guarded delayed self-call on the current virtual object.
+///
+/// This is the shared mechanism behind periodic VO ticks. It issues one Restate
+/// delayed send back to `handler` on the *same* object key, carrying `generation` so
+/// a tick scheduled before a reconfiguration can be recognized as stale and ignored
+/// when it eventually fires. The idempotency key combines the object, handler, key,
+/// generation, and a per-tick `nonce`, so a replayed handler never double-schedules
+/// the same logical tick while successive ticks stay distinct.
+///
+/// Modeled on the `CronJob` virtual object's delayed self-tick — same
+/// `idempotency_key` + `send_after` Restate SDK calls — but kept generic over the
+/// target handler, generation, payload, and delay so the progress-narration tick and,
+/// later, the heartbeat/stale watchdog share one scheduler rather than diverging.
+pub(crate) fn schedule_generation_guarded_self_call<T>(
+    ctx: &ObjectContext<'_>,
+    object_name: &str,
+    handler: &str,
+    generation: u64,
+    nonce: impl std::fmt::Display,
+    payload: Json<T>,
+    delay: Duration,
+) where
+    T: Serialize + 'static,
+{
+    let key = ctx.key().to_string();
+    let idempotency_key =
+        format!("vo-self-call-{object_name}-{handler}-{key}-{generation}-{nonce}");
+    ctx.request::<Json<T>, ()>(RequestTarget::object(object_name, key, handler), payload)
+        .idempotency_key(idempotency_key)
+        .send_after(delay);
 }
 
 /// Sets `key` to `value` unless it equals `empty_sentinel`, in which case clears.

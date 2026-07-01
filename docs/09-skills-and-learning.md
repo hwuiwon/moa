@@ -103,6 +103,17 @@ hand under `.moa/skills/<skill>/...` before the first hand tool executes.
 | Resources | scripts, references, assets | only when needed for execution |
 
 The skill manifest is budgeted and sorted deterministically for cache stability.
+When a skill applies to a larger task, the coordinator uses the manifest and any
+activated `SKILL.md` content to build a subtask DAG. Independent ready nodes are
+delegated to workers in parallel, and dependent nodes receive the relevant
+worker results in their task text. Skills and action names guide decomposition;
+they are not strict worker-wire fields.
+
+The context pipeline also emits a conservative `delegation_plan` metadata object
+when the current request clearly names independent workstreams. That object can
+reference the selected skill context. Root `TurnExecution` may consume it to
+auto-spawn dependency-free ready nodes, but skill selection alone does not imply
+workflow routing and worker task payloads stay generic text envelopes.
 
 ## Skill Ranking
 

@@ -6,10 +6,11 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::types::{
-    ActionEnvelope, ActionReviewDecision, ActionReviewPreview, Attachment, CacheReport, Channel,
-    ContactId, GuardrailDirection, GuardrailMode, ModelId, ModelTier, SegmentId, SessionActorRef,
-    SessionChannelBindingId, SessionStatus, SubAgentId, SubAgentState, TenantId, ToolCallId,
-    ToolOutput,
+    ActionEnvelope, ActionReviewDecision, ActionReviewPreview, AgentSignalId, Attachment,
+    CacheReport, Channel, ChildSignalKind, ContactId, GuardrailDirection, GuardrailMode,
+    InputAudience, ModelId, ModelTier, NarrationSegment, NarrationSource, SegmentId,
+    SessionActorRef, SessionChannelBindingId, SessionStatus, SignalSeverity, TenantId, ToolCallId,
+    ToolOutput, WorkerId, WorkerState, WorkerTerminalResult,
 };
 
 /// Append-only session event payload.
@@ -277,13 +278,10 @@ pub enum Event {
         /// Decision timestamp.
         decided_at: DateTime<Utc>,
     },
-    /// A child sub-agent was spawned by a root session or parent sub-agent.
-    SubAgentSpawned {
-        /// Child sub-agent identifier.
-        sub_agent_id: SubAgentId,
-        /// Parent sub-agent identifier for nested children.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        parent_sub_agent_id: Option<SubAgentId>,
+    /// A child worker was spawned by the root session coordinator.
+    WorkerSpawned {
+        /// Child worker identifier.
+        worker_id: WorkerId,
         /// Stable model-visible child path.
         path: String,
         /// Delegated task text.
@@ -291,37 +289,158 @@ pub enum Event {
         /// Reserved token budget for the child.
         budget_tokens: u64,
     },
-    /// A parent sent a follow-up or steering message to a child sub-agent.
-    SubAgentMessageSent {
-        /// Child sub-agent identifier.
-        sub_agent_id: SubAgentId,
-        /// Parent sub-agent identifier for nested children.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        parent_sub_agent_id: Option<SubAgentId>,
+    /// A parent sent a follow-up or steering message to a child worker.
+    WorkerMessageSent {
+        /// Child worker identifier.
+        worker_id: WorkerId,
+        /// Input request answered by this message, when it is a `provide_worker_input`
+        /// reply rather than a general follow-up.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_request_id: Option<String>,
         /// Message text sent to the child.
         text: String,
     },
-    /// A child sub-agent lifecycle state changed.
-    SubAgentStatusChanged {
-        /// Child sub-agent identifier.
-        sub_agent_id: SubAgentId,
+    /// A child worker lifecycle state changed.
+    WorkerStatusChanged {
+        /// Child worker identifier.
+        worker_id: WorkerId,
         /// Previous known state, when available.
         #[serde(skip_serializing_if = "Option::is_none")]
-        from: Option<SubAgentState>,
+        from: Option<WorkerState>,
         /// New state.
-        to: SubAgentState,
+        to: WorkerState,
         /// Optional status summary.
         #[serde(skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
     },
-    /// A child sub-agent terminal notification was delivered to the parent session log.
-    SubAgentNotificationDelivered {
-        /// Child sub-agent identifier.
-        sub_agent_id: SubAgentId,
+    /// A child worker terminal notification was delivered to the parent session log.
+    WorkerNotificationDelivered {
+        /// Child worker identifier.
+        worker_id: WorkerId,
         /// Terminal state delivered.
-        state: SubAgentState,
+        state: WorkerState,
         /// Short result or error summary.
         summary: String,
+    },
+    /// A root coordinator bundled completed auto-delegated worker results for synthesis.
+    WorkerResultBundle {
+        /// User-message sequence that triggered the auto-delegated workers.
+        user_sequence_num: u64,
+        /// Terminal worker results in the original scheduled order.
+        results: Vec<WorkerTerminalResult>,
+    },
+    /// A coordinator synthesis turn was requested for a completed worker result bundle.
+    WorkerResultSynthesisRequested {
+        /// User-message sequence whose worker bundle should be synthesized.
+        user_sequence_num: u64,
+        /// Coordinator turn id dispatched for synthesis.
+        turn_id: String,
+        /// System-visible instruction for the synthesis turn.
+        reason: String,
+    },
+    /// Per-turn coordination / replay / latency telemetry, appended at turn end when metrics
+    /// persistence is enabled (`MOA_PERSIST_TURN_METRICS`). Purely informational: it is not shown
+    /// to the model, does not require processing, and is skipped by history compilation and
+    /// compaction (all handled by their catch-all match arms). It exists so per-turn tool-call /
+    /// round-trip / replay cost is reconstructable post-hoc from the durable event log — the
+    /// substrate for the conversation-cost analyzer and the deterministic coordination tests.
+    TurnMetrics {
+        /// Turn id this summary describes.
+        turn_id: String,
+        /// Actor whose turn this was ("coordinator" or "worker").
+        actor: String,
+        /// Blocking Session-VO round-trips during the turn.
+        #[serde(default)]
+        session_vo_calls: u64,
+        /// Blocking Worker-VO round-trips during the turn.
+        #[serde(default)]
+        worker_vo_calls: u64,
+        /// Fire-and-forget VO dispatches during the turn.
+        #[serde(default)]
+        vo_sends: u64,
+        /// Durable event appends during the turn.
+        #[serde(default)]
+        durable_appends: u64,
+        /// `get_events` replay reads during the turn.
+        #[serde(default)]
+        get_events_calls: u64,
+        /// Bytes deserialized across replay reads.
+        #[serde(default)]
+        events_bytes: u64,
+        /// LLM-call wall-clock for the turn (ms).
+        #[serde(default)]
+        llm_ms: u64,
+        /// Tool-dispatch wall-clock for the turn (ms).
+        #[serde(default)]
+        tool_ms: u64,
+        /// Event-persist wall-clock for the turn (ms).
+        #[serde(default)]
+        persist_ms: u64,
+    },
+    /// A control-plane attention signal from a child was recorded on the coordinator.
+    WorkerSignalReceived {
+        /// Stable identifier for the recorded signal.
+        signal_id: AgentSignalId,
+        /// Child worker that raised the signal.
+        worker_id: WorkerId,
+        /// Kind of attention requested.
+        kind: ChildSignalKind,
+        /// Relative urgency of the signal.
+        severity: SignalSeverity,
+        /// Short, safe summary of the signal.
+        summary: String,
+        /// Awakeable id the child is blocked on; `Some` only for `NeedsInput`.
+        ///
+        /// Persisted on the event (not only the compact VO projection) so that any
+        /// later coordinator turn rendered from the history window — including a
+        /// plain `UserMessage` turn, not just a guarded `ChildSignal` resume — can
+        /// answer the request via `provide_worker_input`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_request_id: Option<String>,
+        /// Who should answer the request; `Some` only for `NeedsInput`.
+        ///
+        /// `User` means the question must be surfaced to the human; `Coordinator`
+        /// means the coordinator may answer it autonomously.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_audience: Option<InputAudience>,
+    },
+    /// A child signal triggered a guarded coordinator auto-resume turn.
+    WorkerParentResumeRequested {
+        /// Signal that triggered the resume.
+        signal_id: AgentSignalId,
+        /// Child worker associated with the resume.
+        worker_id: WorkerId,
+        /// Coordinator turn id dispatched for the resume.
+        turn_id: String,
+        /// Short reason the resume was requested.
+        reason: String,
+    },
+    /// A child's heartbeat was detected stale by the watchdog.
+    WorkerHeartbeatStale {
+        /// Child worker whose heartbeat went stale.
+        worker_id: WorkerId,
+        /// Last heartbeat timestamp observed before the staleness was detected.
+        last_heartbeat_at: DateTime<Utc>,
+        /// Stale threshold, in milliseconds, that was exceeded.
+        threshold_ms: u64,
+    },
+    /// One durable, rate-limited natural-language progress narration for the session.
+    ///
+    /// Emitted by the per-session narrator: one merged update per period covering
+    /// all active workers (and the active coordinator step). Carries
+    /// `model`/`tokens_used` for cost observability.
+    ProgressNarrated {
+        /// Source attributed to the merged narration (`Coordinator` for the merge).
+        source: NarrationSource,
+        /// Merged human-readable update streamed to the user.
+        text: String,
+        /// Optional per-source breakdown produced by the same single call.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        segments: Vec<NarrationSegment>,
+        /// Model used for the narration call (`"none"` for the 0-call short-circuit).
+        model: String,
+        /// Tokens consumed by the narration call (`0` for the short-circuit).
+        tokens_used: u32,
     },
     /// Memory read operation.
     MemoryRead {
@@ -554,7 +673,7 @@ mod tests {
                 id: Uuid::from_u128(2),
             },
             session_id: Some(crate::types::SessionId::new()),
-            sub_agent_id: None,
+            worker_id: None,
             tool_call_id: ToolCallId::from(review_id),
             tool_name: tool_name.to_string(),
             normalized_input: input_summary.to_string(),
@@ -724,53 +843,168 @@ mod tests {
     }
 
     #[test]
-    fn sub_agent_lifecycle_events_use_stable_type_names() {
-        // Pins: sub-agent lifecycle events have stable event-log discriminators.
+    fn worker_lifecycle_events_use_stable_type_names() {
+        // Pins: worker lifecycle events have stable event-log discriminators.
         let events = [
             (
-                Event::SubAgentSpawned {
-                    sub_agent_id: "child-1".to_string(),
-                    parent_sub_agent_id: None,
+                Event::WorkerSpawned {
+                    worker_id: "child-1".to_string(),
                     path: "/root/research".to_string(),
                     task: "research".to_string(),
                     budget_tokens: 512,
                 },
-                EventType::SubAgentSpawned,
-                "SubAgentSpawned",
+                EventType::WorkerSpawned,
+                "WorkerSpawned",
             ),
             (
-                Event::SubAgentMessageSent {
-                    sub_agent_id: "child-1".to_string(),
-                    parent_sub_agent_id: None,
+                Event::WorkerMessageSent {
+                    worker_id: "child-1".to_string(),
+                    input_request_id: None,
                     text: "continue".to_string(),
                 },
-                EventType::SubAgentMessageSent,
-                "SubAgentMessageSent",
+                EventType::WorkerMessageSent,
+                "WorkerMessageSent",
             ),
             (
-                Event::SubAgentStatusChanged {
-                    sub_agent_id: "child-1".to_string(),
-                    from: Some(SubAgentState::Running),
-                    to: SubAgentState::Completed,
+                Event::WorkerStatusChanged {
+                    worker_id: "child-1".to_string(),
+                    from: Some(WorkerState::Running),
+                    to: WorkerState::Completed,
                     summary: Some("done".to_string()),
                 },
-                EventType::SubAgentStatusChanged,
-                "SubAgentStatusChanged",
+                EventType::WorkerStatusChanged,
+                "WorkerStatusChanged",
             ),
             (
-                Event::SubAgentNotificationDelivered {
-                    sub_agent_id: "child-1".to_string(),
-                    state: SubAgentState::Completed,
+                Event::WorkerNotificationDelivered {
+                    worker_id: "child-1".to_string(),
+                    state: WorkerState::Completed,
                     summary: "done".to_string(),
                 },
-                EventType::SubAgentNotificationDelivered,
-                "SubAgentNotificationDelivered",
+                EventType::WorkerNotificationDelivered,
+                "WorkerNotificationDelivered",
+            ),
+            (
+                Event::WorkerResultBundle {
+                    user_sequence_num: 42,
+                    results: vec![crate::WorkerTerminalResult {
+                        state: WorkerState::Completed,
+                        result: crate::WorkerResult {
+                            worker_id: "child-1".to_string(),
+                            success: true,
+                            output: "done".to_string(),
+                            tokens_used: 17,
+                            tools_invoked: 2,
+                            error: None,
+                        },
+                    }],
+                },
+                EventType::WorkerResultBundle,
+                "WorkerResultBundle",
+            ),
+            (
+                Event::WorkerResultSynthesisRequested {
+                    user_sequence_num: 42,
+                    turn_id: "turn-1".to_string(),
+                    reason: "bundle complete".to_string(),
+                },
+                EventType::WorkerResultSynthesisRequested,
+                "WorkerResultSynthesisRequested",
+            ),
+            (
+                Event::WorkerSignalReceived {
+                    signal_id: AgentSignalId::new(),
+                    worker_id: "child-1".to_string(),
+                    kind: ChildSignalKind::Blocked,
+                    severity: SignalSeverity::Warning,
+                    summary: "blocked on input".to_string(),
+                    input_request_id: None,
+                    input_audience: None,
+                },
+                EventType::WorkerSignalReceived,
+                "WorkerSignalReceived",
+            ),
+            (
+                Event::WorkerParentResumeRequested {
+                    signal_id: AgentSignalId::new(),
+                    worker_id: "child-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    reason: "child blocked".to_string(),
+                },
+                EventType::WorkerParentResumeRequested,
+                "WorkerParentResumeRequested",
+            ),
+            (
+                Event::WorkerHeartbeatStale {
+                    worker_id: "child-1".to_string(),
+                    last_heartbeat_at: Utc::now(),
+                    threshold_ms: 30_000,
+                },
+                EventType::WorkerHeartbeatStale,
+                "WorkerHeartbeatStale",
+            ),
+            (
+                Event::ProgressNarrated {
+                    source: NarrationSource::Coordinator,
+                    text: "Searching the pricing docs".to_string(),
+                    segments: Vec::new(),
+                    model: "none".to_string(),
+                    tokens_used: 0,
+                },
+                EventType::ProgressNarrated,
+                "ProgressNarrated",
             ),
         ];
 
         for (event, expected_type, expected_name) in events {
             assert_eq!(event.event_type(), expected_type);
             assert_eq!(event.type_name(), expected_name);
+        }
+    }
+
+    #[test]
+    fn worker_signal_received_round_trips_needs_input_routing() {
+        // Pins: NeedsInput signals persist the awakeable id and audience on the event
+        // so a later coordinator turn can answer via `provide_worker_input`, and a
+        // payload that omits those optional input fields decodes to `None` for both.
+        let event = Event::WorkerSignalReceived {
+            signal_id: AgentSignalId::new(),
+            worker_id: "child-7".to_string(),
+            kind: ChildSignalKind::NeedsInput,
+            severity: SignalSeverity::Warning,
+            summary: "needs the staging API key".to_string(),
+            input_request_id: Some("req-42".to_string()),
+            input_audience: Some(InputAudience::User),
+        };
+
+        let encoded = serde_json::to_string(&event).expect("serialize signal event");
+        assert_eq!(
+            serde_json::from_str::<Event>(&encoded).expect("deserialize signal event"),
+            event
+        );
+
+        let without_input_fields = serde_json::json!({
+            "type": "WorkerSignalReceived",
+            "data": {
+                "signal_id": Uuid::now_v7(),
+                "worker_id": "child-7",
+                "kind": "needs_input",
+                "severity": "warning",
+                "summary": "needs the staging API key"
+            }
+        });
+        let decoded = serde_json::from_value::<Event>(without_input_fields)
+            .expect("decode signal event without input fields");
+        match decoded {
+            Event::WorkerSignalReceived {
+                input_request_id,
+                input_audience,
+                ..
+            } => {
+                assert!(input_request_id.is_none());
+                assert!(input_audience.is_none());
+            }
+            other => panic!("unexpected decoded event: {other:?}"),
         }
     }
 

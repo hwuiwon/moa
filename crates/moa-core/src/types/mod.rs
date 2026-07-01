@@ -25,8 +25,8 @@ mod segment_assessment;
 mod segments;
 mod session;
 mod snapshot;
-mod sub_agent;
 mod tools;
+mod worker;
 
 pub use crate::events::EventType;
 pub use action_policy::{
@@ -88,8 +88,8 @@ pub use hands::{
     validate_sandbox_file_path,
 };
 pub use identifiers::{
-    BrainId, ModelId, SegmentId, SessionAttachmentId, SessionId, StoragePartitionId, TenantId,
-    ToolCallId, UserId,
+    AgentSignalId, BrainId, ModelId, SegmentId, SessionAttachmentId, SessionId, StoragePartitionId,
+    TenantId, ToolCallId, UserId,
 };
 pub use learning::LearningEntry;
 pub use memory::{RlsContext, SkillMetadata};
@@ -108,32 +108,36 @@ pub use segment_assessment::{
 };
 pub use segments::{ActiveSegment, SegmentCompletion, TaskSegment, deterministic_segment_id};
 pub use session::{
-    CancelMode, CheckpointHandle, CheckpointInfo, SessionFilter, SessionMeta, SessionSignal,
+    CancelScope, CheckpointHandle, CheckpointInfo, SessionFilter, SessionMeta, SessionSignal,
     SessionStatus, SessionSummary, TurnOutcome, UserMessage,
 };
 pub use snapshot::{
     CONTEXT_SNAPSHOT_FORMAT_VERSION, ContextSnapshot, FileReadDedupState, SnapshotFileReadState,
-};
-pub use sub_agent::{
-    AgentPath, AttachSubAgentResultWaiterInput, AttachSubAgentResultWaiterOutput,
-    CancelSubAgentInput, CompleteSubAgentChildInput, ConsumeSubAgentChildResultInput,
-    ConsumeSubAgentChildResultOutput, DelegationTool, DelegationToolKind, ListSubAgentsInput,
-    ListSubAgentsOutput, ListedSubAgent, MarkSubAgentChildTerminalInput, MessageSubAgentInput,
-    RemoveSubAgentResultWaiterInput, ReserveSubAgentInput, ReservedSubAgent, SpawnSubAgentInput,
-    SpawnSubAgentOutput, SubAgentChildRef, SubAgentChildRequest, SubAgentId, SubAgentInitialTask,
-    SubAgentMessage, SubAgentResult, SubAgentState, SubAgentStatus, SubAgentTerminalResult,
-    SubAgentToolRecord, SubAgentTurnOutcomeRecord, SubAgentTurnPreparation,
-    SubAgentTurnResponseRecord, WaitSubAgentInput, WaitSubAgentOutput,
-    cancel_sub_agent_tool_schema, default_sub_agent_budget_tokens, default_wait_timeout_ms,
-    delegation_tool_schema, delegation_tool_schemas, is_delegation_tool_name,
-    list_sub_agents_tool_schema, message_sub_agent_tool_schema, parse_delegation_tool_input,
-    spawn_sub_agent_tool_schema, wait_sub_agent_tool_schema,
 };
 pub use tools::{
     IdempotencyClass, ToolArtifactStream, ToolCallRequest, ToolContent, ToolDefinition,
     ToolDiffStrategy, ToolInputShape, ToolOutput, ToolOutputArtifact, ToolPolicyInput,
     ToolPolicySpec, TrustedSandboxFileEntry, TrustedSandboxFileManifestPayload,
     TrustedSandboxFileManifestRef, read_tool_policy, write_tool_policy,
+};
+pub use worker::{
+    AgentPath, AttachWorkerResultWaiterInput, AttachWorkerResultWaiterOutput, CancelWorkerInput,
+    ChildReportKind, ChildReportTool, ChildReportToolKind, ChildSignalKind,
+    CompleteWorkerChildInput, ConsumeWorkerChildResultInput, ConsumeWorkerChildResultOutput,
+    DelegationTool, DelegationToolKind, InputAudience, ListWorkersInput, ListWorkersOutput,
+    MarkWorkerChildTerminalInput, MessageWorkerInput, NarrationSegment, NarrationSource,
+    ParentResumePolicy, ProvideWorkerInputInput, RemoveWorkerResultWaiterInput,
+    ReportToParentInput, RequestInputInput, ReserveWorkerInput, ReservedWorker, SignalSeverity,
+    SpawnWorkerInput, SpawnWorkerOutput, UnreadChildSignal, WaitWorkerInput, WaitWorkerOutput,
+    WorkerChildRef, WorkerChildRequest, WorkerId, WorkerInitialTask, WorkerMessage,
+    WorkerPendingInput, WorkerProgressSummary, WorkerResult, WorkerSignal, WorkerState,
+    WorkerStatus, WorkerTerminalResult, WorkerToolRecord, WorkerTurnOutcomeRecord,
+    WorkerTurnPreparation, WorkerTurnResponseRecord, cancel_worker_tool_schema,
+    child_report_tool_schemas, default_wait_timeout_ms, default_worker_budget_tokens,
+    delegation_tool_schema, delegation_tool_schemas, is_child_report_tool_name,
+    is_delegation_tool_name, list_workers_tool_schema, message_worker_tool_schema,
+    parse_delegation_tool_input, provide_worker_input_tool_schema, report_to_parent_tool_schema,
+    request_input_tool_schema, spawn_worker_tool_schema, wait_worker_tool_schema,
 };
 
 #[cfg(test)]

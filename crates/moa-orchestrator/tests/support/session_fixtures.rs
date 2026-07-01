@@ -10,7 +10,11 @@ use moa_test_support::fixtures::contact_ref_fixture;
 
 /// Returns a request payload for `append_event`.
 pub fn append_event_request(session_id: SessionId, event: Event) -> AppendEventRequest {
-    AppendEventRequest { session_id, event }
+    AppendEventRequest {
+        session_id,
+        event,
+        dedupe_key: None,
+    }
 }
 
 /// Returns a request payload for `get_events`.

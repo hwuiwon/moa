@@ -240,6 +240,8 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
             truncate(message)
         )),
         Event::GuardrailCheck { .. } => None,
+        // Per-turn telemetry (coordination/replay/latency) is never part of a compaction summary.
+        Event::TurnMetrics { .. } => None,
         Event::ActionReviewRequested { envelope, .. } => Some(format!(
             "#{} action_review_requested {}: {}",
             record.sequence_num,
@@ -250,41 +252,88 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
             "#{} action_review_decided: {decision:?}",
             record.sequence_num
         )),
-        Event::SubAgentSpawned {
-            sub_agent_id,
+        Event::WorkerSpawned {
+            worker_id,
             path,
             task,
             ..
         } => Some(format!(
-            "#{} sub_agent_spawned {sub_agent_id} path={path}: {}",
+            "#{} worker_spawned {worker_id} path={path}: {}",
             record.sequence_num,
             truncate(task)
         )),
-        Event::SubAgentMessageSent {
-            sub_agent_id, text, ..
+        Event::WorkerMessageSent {
+            worker_id, text, ..
         } => Some(format!(
-            "#{} sub_agent_message {sub_agent_id}: {}",
+            "#{} worker_message {worker_id}: {}",
             record.sequence_num,
             truncate(text)
         )),
-        Event::SubAgentStatusChanged {
-            sub_agent_id,
+        Event::WorkerStatusChanged {
+            worker_id,
             to,
             summary,
             ..
         } => Some(format!(
-            "#{} sub_agent_status {sub_agent_id} -> {to:?}: {}",
+            "#{} worker_status {worker_id} -> {to:?}: {}",
             record.sequence_num,
             truncate(summary.as_deref().unwrap_or(""))
         )),
-        Event::SubAgentNotificationDelivered {
-            sub_agent_id,
+        Event::WorkerNotificationDelivered {
+            worker_id,
             state,
             summary,
         } => Some(format!(
-            "#{} sub_agent_notification {sub_agent_id} state={state:?}: {}",
+            "#{} worker_notification {worker_id} state={state:?}: {}",
             record.sequence_num,
             truncate(summary)
+        )),
+        Event::WorkerResultBundle {
+            results,
+            user_sequence_num,
+        } => Some(format!(
+            "#{} worker_result_bundle user_sequence_num={user_sequence_num} count={}",
+            record.sequence_num,
+            results.len()
+        )),
+        Event::WorkerResultSynthesisRequested {
+            user_sequence_num,
+            reason,
+            ..
+        } => Some(format!(
+            "#{} worker_result_synthesis user_sequence_num={user_sequence_num}: {}",
+            record.sequence_num,
+            truncate(reason)
+        )),
+        Event::WorkerSignalReceived {
+            worker_id,
+            kind,
+            summary,
+            ..
+        } => Some(format!(
+            "#{} worker_signal {worker_id} {kind:?}: {}",
+            record.sequence_num,
+            truncate(summary)
+        )),
+        Event::WorkerParentResumeRequested {
+            worker_id, reason, ..
+        } => Some(format!(
+            "#{} worker_resume {worker_id}: {}",
+            record.sequence_num,
+            truncate(reason)
+        )),
+        Event::WorkerHeartbeatStale {
+            worker_id,
+            threshold_ms,
+            ..
+        } => Some(format!(
+            "#{} worker_stale {worker_id} threshold_ms={threshold_ms}",
+            record.sequence_num
+        )),
+        Event::ProgressNarrated { text, .. } => Some(format!(
+            "#{} progress_narration: {}",
+            record.sequence_num,
+            truncate(text)
         )),
         Event::MemoryRead { path, scope } => Some(format!(
             "#{} memory read {scope}:{path}",

@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequest};
 use moa_core::wire::turn::TurnPhase;
 use moa_core::{
-    ActionPolicyEffect, Event, SessionActorRef, SessionId, SessionMeta, SubAgentId,
-    ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput,
-    TrustedSandboxFileManifestRef, UserId, is_delegation_tool_name,
+    ActionPolicyEffect, Event, SessionActorRef, SessionId, SessionMeta, ToolCallContent,
+    ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput, TrustedSandboxFileManifestRef, UserId,
+    WorkerId, is_delegation_tool_name,
 };
 use moa_observability::restate_observability::{event_persist_span, tool_dispatch_span};
 use moa_observability::{record_turn_event_persist_duration, record_turn_tool_dispatch_duration};
@@ -31,11 +31,11 @@ use crate::workflows::turn_progress;
 pub(crate) enum GovernedInvocationOrigin<'a> {
     /// Tool call came from the root session turn.
     RootTurn,
-    /// Tool call came from a sub-agent turn.
-    SubAgent {
-        /// Sub-agent object id.
-        sub_agent_id: &'a str,
-        /// Sub-agent turn id that produced the tool call.
+    /// Tool call came from a worker turn.
+    Worker {
+        /// Worker object id.
+        worker_id: &'a str,
+        /// Worker turn id that produced the tool call.
         turn_id: &'a str,
     },
 }
@@ -68,7 +68,7 @@ pub(crate) struct GovernedInvocationRequest<'a> {
     pub(crate) active_canary: Option<&'a str>,
     /// Trusted sandbox file manifest selected by the runtime that built this tool call.
     pub(crate) trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
-    /// Root or sub-agent origin metadata.
+    /// Root or worker origin metadata.
     pub(crate) origin: GovernedInvocationOrigin<'a>,
     /// Caller-owned progress cadence for allowed execution.
     pub(crate) progress: GovernedInvocationProgress<'a>,
@@ -77,7 +77,7 @@ pub(crate) struct GovernedInvocationRequest<'a> {
 /// Completed governed tool invocation result.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct GovernedInvocationResult {
-    /// Stable tool-call id used for session and sub-agent records.
+    /// Stable tool-call id used for session and worker records.
     pub(crate) tool_id: ToolCallId,
     /// Tool invocation copied from the provider tool call.
     pub(crate) invocation: ToolInvocation,
@@ -95,8 +95,8 @@ impl GovernedInvocationResult {
         self.disposition == GovernedInvocationDisposition::Executed && !self.output.is_error
     }
 
-    /// Returns whether a sub-agent should record the result as denied.
-    pub(crate) fn should_record_denied_sub_agent_tool(&self) -> bool {
+    /// Returns whether a worker should record the result as denied.
+    pub(crate) fn should_record_denied_worker_tool(&self) -> bool {
         matches!(
             self.disposition,
             GovernedInvocationDisposition::Disallowed
@@ -315,15 +315,12 @@ fn prepare_action_review_request(
     request: &GovernedInvocationRequest<'_>,
     invocation: &ToolInvocation,
 ) -> PrepareActionReviewRequest {
-    let (sub_agent_id, origin_kind, origin_id, origin_step_id) = match request.origin {
+    let (worker_id, origin_kind, origin_id, origin_step_id) = match request.origin {
         GovernedInvocationOrigin::RootTurn => (None, None, None, None),
-        GovernedInvocationOrigin::SubAgent {
-            sub_agent_id,
-            turn_id,
-        } => (
-            Some(SubAgentId::from(sub_agent_id)),
-            Some("sub_agent".to_string()),
-            Some(sub_agent_id.to_string()),
+        GovernedInvocationOrigin::Worker { worker_id, turn_id } => (
+            Some(WorkerId::from(worker_id)),
+            Some("worker".to_string()),
+            Some(worker_id.to_string()),
             Some(turn_id.to_string()),
         ),
     };
@@ -333,7 +330,7 @@ fn prepare_action_review_request(
         invocation: invocation.clone(),
         review_id: request.tool_id.0,
         tool_call_id: request.tool_id,
-        sub_agent_id,
+        worker_id,
         origin_kind,
         origin_id,
         origin_step_id,
@@ -356,6 +353,10 @@ fn tool_call_request(
         user_id: storage_user_id(request.session),
         idempotency_key: invocation.id.clone(),
         trusted_sandbox_manifest: request.trusted_sandbox_manifest.cloned(),
+        worker_id: match request.origin {
+            GovernedInvocationOrigin::RootTurn => None,
+            GovernedInvocationOrigin::Worker { worker_id, .. } => Some(worker_id.to_string()),
+        },
     }
 }
 
@@ -440,7 +441,11 @@ async fn append_session_event(
     let persist_started = Instant::now();
     let sequence_num = ctx
         .service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest { session_id, event }))
+        .append_event(Json(AppendEventRequest {
+            session_id,
+            event,
+            dedupe_key: None,
+        }))
         .call()
         .instrument(persist_span)
         .await?;
@@ -548,7 +553,7 @@ mod tests {
         assert_eq!(policy_request.invocation, tool_call.invocation);
         assert_eq!(policy_request.review_id, request.tool_id.0);
         assert_eq!(policy_request.tool_call_id, request.tool_id);
-        assert_eq!(policy_request.sub_agent_id, None);
+        assert_eq!(policy_request.worker_id, None);
         assert_eq!(policy_request.origin_kind, None);
         assert_eq!(policy_request.origin_id, None);
         assert_eq!(policy_request.origin_step_id, None);
@@ -559,8 +564,8 @@ mod tests {
     }
 
     #[test]
-    fn sub_agent_policy_request_sets_origin_fields() {
-        // Pins: sub-agent review records remain traceable to the child turn.
+    fn worker_policy_request_sets_origin_fields() {
+        // Pins: worker review records remain traceable to the child turn.
         let session = test_session_meta();
         let tool_call = tool_call();
         let allowed_tools = BTreeSet::from(["file_read".to_string()]);
@@ -568,17 +573,17 @@ mod tests {
             &session,
             &tool_call,
             &allowed_tools,
-            GovernedInvocationOrigin::SubAgent {
-                sub_agent_id: "sub-agent-1",
+            GovernedInvocationOrigin::Worker {
+                worker_id: "worker-1",
                 turn_id: "child-turn-1",
             },
         );
 
         let policy_request = prepare_action_review_request(&request, &tool_call.invocation);
 
-        assert_eq!(policy_request.sub_agent_id.as_deref(), Some("sub-agent-1"));
-        assert_eq!(policy_request.origin_kind.as_deref(), Some("sub_agent"));
-        assert_eq!(policy_request.origin_id.as_deref(), Some("sub-agent-1"));
+        assert_eq!(policy_request.worker_id.as_deref(), Some("worker-1"));
+        assert_eq!(policy_request.origin_kind.as_deref(), Some("worker"));
+        assert_eq!(policy_request.origin_id.as_deref(), Some("worker-1"));
         assert_eq!(
             policy_request.origin_step_id.as_deref(),
             Some("child-turn-1")
@@ -618,6 +623,46 @@ mod tests {
             Some("provider-tool-1")
         );
         assert_eq!(tool_request.trusted_sandbox_manifest, None);
+        assert_eq!(tool_request.worker_id, None);
+    }
+
+    #[test]
+    fn worker_origin_request_carries_worker_hand_scope() {
+        // Pins: a worker tool call provisions a hand scoped to its worker_id.
+        let session = test_session_meta();
+        let tool_call = tool_call();
+        let allowed_tools = BTreeSet::from(["file_read".to_string()]);
+        let request = request(
+            &session,
+            &tool_call,
+            &allowed_tools,
+            GovernedInvocationOrigin::Worker {
+                worker_id: "worker-1",
+                turn_id: "child-turn-1",
+            },
+        );
+
+        let tool_request = tool_call_request(&request, &tool_call.invocation);
+
+        assert_eq!(tool_request.worker_id.as_deref(), Some("worker-1"));
+    }
+
+    #[test]
+    fn root_origin_request_keeps_session_level_hand_scope() {
+        // Pins: the root coordinator stays on the session-level hand scope (no isolation).
+        let session = test_session_meta();
+        let tool_call = tool_call();
+        let allowed_tools = BTreeSet::from(["file_read".to_string()]);
+        let request = request(
+            &session,
+            &tool_call,
+            &allowed_tools,
+            GovernedInvocationOrigin::RootTurn,
+        );
+
+        let tool_request = tool_call_request(&request, &tool_call.invocation);
+
+        assert_eq!(tool_request.worker_id, None);
     }
 
     #[test]
@@ -671,7 +716,7 @@ mod tests {
             result.event_plan,
             GovernedInvocationEventPlan::WorkflowSyntheticResult { success: false }
         );
-        assert!(result.should_record_denied_sub_agent_tool());
+        assert!(result.should_record_denied_worker_tool());
         assert!(!result.should_record_segment_tool_use());
     }
 
@@ -686,7 +731,7 @@ mod tests {
             event_plan: GovernedInvocationEventPlan::ToolExecutorResult,
         };
 
-        assert!(!result.should_record_denied_sub_agent_tool());
+        assert!(!result.should_record_denied_worker_tool());
         assert!(result.should_record_segment_tool_use());
     }
 

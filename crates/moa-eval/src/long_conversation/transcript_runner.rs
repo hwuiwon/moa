@@ -23,8 +23,8 @@ use moa_core::{
     deterministic_segment_id,
 };
 use moa_eval_core::{
-    AgentConfig, EngineOptions, EvalError, EvalResult, EvalScore, EvalScoreValue, EvalStatus,
-    LongConversationMode, LongSessionInterleaving, LongTestCase, Result, TestCase,
+    AgentConfig, ConversationCost, EngineOptions, EvalError, EvalResult, EvalScore, EvalScoreValue,
+    EvalStatus, LongConversationMode, LongSessionInterleaving, LongTestCase, Result, TestCase,
 };
 use moa_lineage_core::LineageEvent;
 use serde_json::Value;
@@ -37,8 +37,8 @@ use super::memory_metrics::{
 };
 use super::provider_recorded::RecordedScriptedProvider;
 use super::score_card::{
-    CacheScores, ContextScores, CostScores, FunctionalScores, LatencyScores, MemoryScores,
-    SafetyScores, ScoreCard, ToolScores,
+    CacheScores, ContextScores, CoordinationScores, CostScores, FunctionalScores, LatencyScores,
+    MemoryScores, SafetyScores, ScoreCard, ToolScores,
 };
 use super::scripted_user::{ScriptedUserScript, ScriptedUserTurn};
 use crate::collector::{CollectedExecution, TrajectoryCollector};
@@ -535,17 +535,15 @@ async fn emit_user_turn(
     turn_index: usize,
     text: &str,
 ) -> Result<()> {
-    let event = if turn_index == 0 {
-        Event::UserMessage {
-            text: text.to_string(),
-            attachments: Vec::new(),
-        }
-    } else {
-        Event::QueuedMessage {
-            text: text.to_string(),
-            attachments: Vec::new(),
-            queued_at: Utc::now(),
-        }
+    // Recorded transcripts model sequential *delivered* user turns, each of which drives a model
+    // response. Under the current history semantics a delivered turn is a `UserMessage`; a
+    // `QueuedMessage` is a replay breadcrumb that stays model-invisible until it is drained into a
+    // `UserMessage` (see moa-brain history conversion and session-engine drain tests), so emitting
+    // one here would hide every turn after the first from the model-visible context.
+    let _ = turn_index;
+    let event = Event::UserMessage {
+        text: text.to_string(),
+        attachments: Vec::new(),
     };
     environment
         .session_store
@@ -1308,6 +1306,12 @@ async fn build_score_card(
                 .unwrap_or(0),
             ..SafetyScores::default()
         },
+        // Reconstructed from the same durable log: model turns + internal VO round-trips. VO
+        // round-trip fields are only populated when the run persisted TurnMetrics; model-turn and
+        // tool-call fields are always meaningful.
+        coordination: CoordinationScores::from_conversation_cost(&ConversationCost::from_events(
+            event_records,
+        )),
     }
 }
 

@@ -9,11 +9,11 @@ operates them.
 An agent is a first-class principal with its own UUID, operator, API keys, and
 delegation grants. It is not instantiated from a template. Task specialization
 comes from the compiled context, ranked Agent Skills, tool schemas, memory, and
-bounded sub-agents.
+bounded workers.
 
 There is no durable agent-template taxonomy for routing. Runtime routing and
 task specialization are handled by skills, context, tools, memory, and bounded
-sub-agents.
+workers.
 
 ## Permission tuples
 

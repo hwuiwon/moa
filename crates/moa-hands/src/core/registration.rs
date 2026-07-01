@@ -209,6 +209,20 @@ impl ToolRegistry {
         self.tools.get(name).map(|tool| &tool.definition)
     }
 
+    /// Returns whether the named tool provisions a hand/sandbox to execute.
+    ///
+    /// Hand-routed tools ([`ToolExecution::Hand`]) are the only tools that
+    /// provision a sandbox when invoked; built-in (in-process) and MCP tools
+    /// never do. This execution-routing fact is the authoritative signal used to
+    /// keep sandbox/compute tools out of the sandbox-free root coordinator's
+    /// tool set. Unknown tool names are treated as not requiring a sandbox.
+    pub fn tool_requires_sandbox(&self, name: &str) -> bool {
+        matches!(
+            self.tools.get(name).map(|tool| &tool.execution),
+            Some(ToolExecution::Hand { .. })
+        )
+    }
+
     /// Returns the ordered default tool schemas for prompt compilation.
     pub fn default_tool_schemas(&self) -> Vec<Value> {
         self.default_loadout
@@ -318,6 +332,41 @@ mod tests {
             ],
             "default local loadout order changed"
         );
+    }
+
+    #[test]
+    fn tool_requires_sandbox_flags_hand_tools_only() {
+        // Pins: the coordinator-exclusion predicate tracks `ToolExecution::Hand`, so every
+        // sandbox descriptor tool is hand-routed while built-in tools and unknown names are not.
+        let registry = ToolRegistry::default_local();
+
+        for descriptor in sandbox_tool_descriptors() {
+            assert!(
+                registry.tool_requires_sandbox(descriptor.name),
+                "{} is a sandbox tool and must require a hand",
+                descriptor.name
+            );
+        }
+        assert!(registry.tool_requires_sandbox("bash"));
+        assert!(registry.tool_requires_sandbox("file_read"));
+
+        for builtin in [
+            "memory_remember",
+            "memory_forget",
+            "memory_supersede",
+            "session_search",
+            "tool_result_read",
+            "tool_result_search",
+        ] {
+            assert!(
+                !registry.tool_requires_sandbox(builtin),
+                "{builtin} is a built-in tool and must not require a hand"
+            );
+        }
+        // Delegation tools are injected at the orchestrator layer and are never registered
+        // as hand-routed router tools, so the predicate reports them as coordinator-safe.
+        assert!(!registry.tool_requires_sandbox("spawn_worker"));
+        assert!(!registry.tool_requires_sandbox("nonexistent_tool"));
     }
 
     #[test]

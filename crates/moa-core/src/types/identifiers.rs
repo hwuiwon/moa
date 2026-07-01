@@ -58,6 +58,11 @@ uuid_id!(
     pub struct ToolCallId
 );
 
+uuid_id!(
+    /// Identifier for one durable child-to-parent attention signal.
+    pub struct AgentSignalId
+);
+
 impl From<uuid::Uuid> for ToolCallId {
     fn from(value: uuid::Uuid) -> Self {
         Self(value)

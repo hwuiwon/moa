@@ -90,8 +90,8 @@ pub enum WorkflowNodeKind {
     Tool,
     /// Skill-declared action invocation node.
     SkillAction,
-    /// Sub-agent invocation node.
-    SubAgent,
+    /// Worker invocation node.
+    Worker,
     /// Parallel branch fan-out.
     Parallel,
     /// Parallel branch join.

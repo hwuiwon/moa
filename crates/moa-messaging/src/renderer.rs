@@ -401,7 +401,7 @@ mod tests {
                             .expect("fixture identity id parses"),
                     },
                     session_id: None,
-                    sub_agent_id: None,
+                    worker_id: None,
                     tool_call_id: ToolCallId::new(),
                     tool_name: "bash".to_string(),
                     normalized_input: "npm test".to_string(),

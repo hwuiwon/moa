@@ -204,7 +204,7 @@ impl MoaConfig {
             crate::ModelTask::Summarization
             | crate::ModelTask::Consolidation
             | crate::ModelTask::SkillDistillation
-            | crate::ModelTask::Subagent => self
+            | crate::ModelTask::Worker => self
                 .models
                 .auxiliary
                 .as_deref()
@@ -460,7 +460,7 @@ mod tests {
             crate::ModelTask::Summarization,
             crate::ModelTask::Consolidation,
             crate::ModelTask::SkillDistillation,
-            crate::ModelTask::Subagent,
+            crate::ModelTask::Worker,
         ];
 
         let mut config = MoaConfig::default();

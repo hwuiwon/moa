@@ -23,7 +23,7 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 
 ## What MOA Provides
 
-- **Durable work:** sessions and sub-agents survive process restarts because Restate owns orchestration and Postgres owns product data.
+- **Durable work:** sessions and workers survive process restarts because Restate owns orchestration and Postgres owns product data.
 - **Task segmentation:** conversations are split into discrete task segments so one long session can contain many independently tracked outcomes.
 - **Outcome assessment:** MOA records whether each task segment resolved, partially resolved, failed, was abandoned, or remains unknown without requiring explicit user feedback.
 - **Per-tenant learning:** task outcomes become experience records, attributions, candidates, skill changes, and memory updates at tenant scope without requiring a fixed session intent taxonomy.
@@ -50,7 +50,7 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 
 MOA's differentiators are architectural, not cosmetic:
 
-- **Restate-native agents:** sessions and sub-agents map to virtual objects with single-writer semantics and durable waits.
+- **Restate-native agents:** sessions and workers map to virtual objects with single-writer semantics and durable waits.
 - **Experience-level analytics:** learning is derived from assessed task segments, not whole-session guesses.
 - **Resolution-weighted improvement:** skills and future retrieval decisions can use measured success rates.
 - **Candidate-gated adaptation:** reusable skills, memory proposals, policy proposals, and eval proposals start as learning candidates before promotion.

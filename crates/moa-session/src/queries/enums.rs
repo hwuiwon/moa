@@ -59,8 +59,8 @@ mod tests {
             (EventType::SessionCreated, "SessionCreated"),
             (EventType::ToolError, "ToolError"),
             (
-                EventType::SubAgentNotificationDelivered,
-                "SubAgentNotificationDelivered",
+                EventType::WorkerNotificationDelivered,
+                "WorkerNotificationDelivered",
             ),
             (EventType::GuardrailCheck, "GuardrailCheck"),
             (EventType::Warning, "Warning"),

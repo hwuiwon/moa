@@ -111,8 +111,13 @@ spec:
               value: "true"
             - name: MOA_METRICS_LISTEN
               value: 0.0.0.0:9090
+            # Gate readiness on the orchestrator's Restate services (Session, Worker,
+            # TurnExecution, WorkerTurnExecution, ...) being registered with the cluster,
+            # so non-sticky traffic never lands on a replica whose handlers aren't live.
+            # Bootstrap is deadlock-free: the pod goes live via /_health/live, the
+            # RestateDeployment operator registers it, then /_health/ready passes.
             - name: MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS
-              value: "false"
+              value: "true"
           resources:
             requests:
               cpu: "500m"

@@ -18,7 +18,9 @@ use crate::compaction::recent_turn_boundary;
 use moa_core::{estimate_text_tokens, sum_message_tokens};
 
 use super::budgeting::keep_budgeted_older_messages;
-use super::conversion::{CompiledRecordMessage, compile_records};
+use super::conversion::{
+    CompiledRecordMessage, answered_worker_inputs, child_report_tool_ids, compile_records,
+};
 use super::prune::{
     build_file_read_dedup_state, build_full_file_read_path_map, deduplicate_file_reads,
     latest_full_file_read_results, placeholder_tool_result_from_snapshot,
@@ -103,16 +105,30 @@ impl HistoryCompiler {
         let file_read_paths = build_full_file_read_path_map(&delta_refs);
         let replay_latest_reads = latest_full_file_read_results(&delta_refs, &file_read_paths);
 
-        let recent_messages =
-            match compile_records(recent_events, &self.tool_output, &file_read_paths) {
-                Ok(records) => records,
-                Err(error) => return Some(Err(error)),
-            };
-        let mut older_messages =
-            match compile_records(older_events, &self.tool_output, &file_read_paths) {
-                Ok(records) => records,
-                Err(error) => return Some(Err(error)),
-            };
+        // Suppression sets are computed over the full replay delta (both slices) so a call/result
+        // pair split across the older/recent boundary stays paired (no dangling `tool_result`).
+        let answered_input_requests = answered_worker_inputs(&delta_refs);
+        let child_report_ids = child_report_tool_ids(&delta_refs);
+        let recent_messages = match compile_records(
+            recent_events,
+            &self.tool_output,
+            &file_read_paths,
+            &answered_input_requests,
+            &child_report_ids,
+        ) {
+            Ok(records) => records,
+            Err(error) => return Some(Err(error)),
+        };
+        let mut older_messages = match compile_records(
+            older_events,
+            &self.tool_output,
+            &file_read_paths,
+            &answered_input_requests,
+            &child_report_ids,
+        ) {
+            Ok(records) => records,
+            Err(error) => return Some(Err(error)),
+        };
 
         let mut latest_tool_ids = snapshot
             .file_read_dedup_state

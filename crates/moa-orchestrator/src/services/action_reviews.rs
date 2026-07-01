@@ -28,8 +28,8 @@ pub struct ActionReviewSummary {
     pub tenant_id: TenantId,
     /// Owning session, when the action came from a session turn.
     pub session_id: Option<moa_core::SessionId>,
-    /// Sub-agent that requested the action, when present.
-    pub sub_agent_id: Option<String>,
+    /// Worker that requested the action, when present.
+    pub worker_id: Option<String>,
     /// Original tool call identifier.
     pub tool_call_id: ToolCallId,
     /// Tool name.
@@ -124,7 +124,7 @@ pub struct ActionReviewsImpl;
 
 impl ActionReviews for ActionReviewsImpl {
     #[tracing::instrument(skip(self, ctx, request))]
-    // SAFETY: request is an internal workflow call after the owning session or sub-agent has already checked participant authorization before tool execution.
+    // SAFETY: request is an internal workflow call after the owning session or worker has already checked participant authorization before tool execution.
     async fn request(
         &self,
         ctx: Context<'_>,
@@ -159,7 +159,11 @@ impl ActionReviews for ActionReviewsImpl {
                 .await?;
                 if !event_exists {
                     ctx.service_client::<RestateSessionStoreClient>()
-                        .append_event(Json(AppendEventRequest { session_id, event }))
+                        .append_event(Json(AppendEventRequest {
+                            session_id,
+                            event,
+                            dedupe_key: None,
+                        }))
                         .call()
                         .await?;
                 }
@@ -168,7 +172,7 @@ impl ActionReviews for ActionReviewsImpl {
                 tracing::warn!(
                     action_review.id = %stored.summary.id,
                     tenant_id = %stored.summary.tenant_id,
-                    sub_agent_id = ?stored.summary.sub_agent_id,
+                    worker_id = ?stored.summary.worker_id,
                     "action review has no session id; skipping session event append"
                 );
             }
@@ -255,6 +259,7 @@ impl ActionReviews for ActionReviewsImpl {
                                 decided_by: decided.decided_by.clone(),
                                 decided_at: decided.decided_at,
                             },
+                            dedupe_key: None,
                         }))
                         .call()
                         .await?;

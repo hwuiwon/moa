@@ -54,14 +54,31 @@ pub struct UserMessage {
     pub attachments: Vec<Attachment>,
 }
 
-/// Cancellation mode requested for a session virtual object.
+/// Scope of a cancellation requested for a session virtual object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CancelMode {
-    /// Finish the current step, then stop at the next cooperative boundary.
-    Soft,
-    /// Abort as soon as the session reaches the next cancellation check.
-    Hard,
+pub enum CancelScope {
+    /// Stop only the active coordinator turn; leave children running.
+    CoordinatorOnly,
+    /// Cancel the active coordinator turn and the whole child task tree (today's behavior).
+    TaskTree,
+}
+
+impl Default for CancelScope {
+    /// Defaults to [`CancelScope::TaskTree`] so a bare "stop" cancels the coordinator turn and
+    /// the whole child task tree, preserving the historical cancel-everything behavior.
+    fn default() -> Self {
+        Self::TaskTree
+    }
+}
+
+impl CancelScope {
+    /// Returns whether this scope cancels the whole child task tree in addition to the active
+    /// coordinator turn. [`CancelScope::CoordinatorOnly`] leaves registered children running.
+    #[must_use]
+    pub fn cancels_task_tree(self) -> bool {
+        matches!(self, Self::TaskTree)
+    }
 }
 
 /// Outcome returned by one brain-loop iteration.

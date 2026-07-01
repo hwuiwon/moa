@@ -310,6 +310,7 @@ mod tests {
                 user_id: UserId::new("user-1"),
                 idempotency_key: None,
                 trusted_sandbox_manifest: None,
+                worker_id: None,
             },
             decided_by: None,
             deny_reason: None,
@@ -353,6 +354,7 @@ mod tests {
                 user_id: UserId::new("user-1"),
                 idempotency_key: None,
                 trusted_sandbox_manifest: None,
+                worker_id: None,
             },
             decided_by: Some("admin".to_string()),
             deny_reason: None,
@@ -386,6 +388,7 @@ mod tests {
             user_id: UserId::new("user-1"),
             idempotency_key: None,
             trusted_sandbox_manifest: None,
+            worker_id: None,
         };
 
         let error =

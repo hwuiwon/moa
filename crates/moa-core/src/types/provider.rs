@@ -14,8 +14,8 @@ pub enum ModelTask {
     Consolidation,
     /// Skill distillation and improvement work.
     SkillDistillation,
-    /// Delegated subagent work.
-    Subagent,
+    /// Delegated worker work.
+    Worker,
 }
 
 /// Stable high-level pricing tier used for analytics and event attribution.
@@ -35,10 +35,9 @@ impl ModelTask {
     pub fn tier(self) -> ModelTier {
         match self {
             Self::MainLoop => ModelTier::Main,
-            Self::Summarization
-            | Self::Consolidation
-            | Self::SkillDistillation
-            | Self::Subagent => ModelTier::Auxiliary,
+            Self::Summarization | Self::Consolidation | Self::SkillDistillation | Self::Worker => {
+                ModelTier::Auxiliary
+            }
         }
     }
 }

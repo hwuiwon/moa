@@ -1,4 +1,4 @@
-//! Parent session persistence helpers for sub-agent events.
+//! Parent session persistence helpers for worker events.
 
 use super::*;
 
@@ -8,7 +8,11 @@ pub(super) async fn persist_parent_session_event(
     event: Event,
 ) -> Result<(), HandlerError> {
     ctx.service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest { session_id, event }))
+        .append_event(Json(AppendEventRequest {
+            session_id,
+            event,
+            dedupe_key: None,
+        }))
         .call()
         .await?;
     Ok(())

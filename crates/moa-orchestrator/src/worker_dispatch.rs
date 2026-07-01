@@ -1,18 +1,18 @@
-//! Pure helpers for sub-agent limits, budgets, and paths.
+//! Pure helpers for worker limits, budgets, and paths.
 
-use moa_core::SubAgentChildRef;
+use moa_core::WorkerChildRef;
 use restate_sdk::prelude::*;
 
-/// Maximum nested sub-agent depth allowed for one tree.
-pub const MAX_SUB_AGENT_DEPTH: u32 = 3;
+/// Maximum nested worker depth allowed for one tree.
+pub const MAX_WORKER_DEPTH: u32 = 3;
 
-/// Maximum number of active child sub-agents owned by one parent at a time.
-pub const MAX_SUB_AGENT_FAN_OUT: usize = 4;
+/// Maximum number of active child workers owned by one parent at a time.
+pub const MAX_WORKER_FAN_OUT: usize = 4;
 
 /// Computes a stable hash used for duplicate child-task detection.
 pub fn task_hash(task: &str, tool_subset: &[String]) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"moa.orchestrator.sub_agent_task_hash.v1");
+    hasher.update(b"moa.orchestrator.worker_task_hash.v1");
     update_len_prefixed(&mut hasher, task.as_bytes());
 
     let mut sorted = tool_subset.to_vec();
@@ -32,23 +32,22 @@ fn update_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
 /// Validates depth, fan-out, and duplicate-task constraints before dispatch.
 pub fn validate_dispatch_limits(
     current_depth: u32,
-    children: &[SubAgentChildRef],
+    children: &[WorkerChildRef],
     task: &str,
     tool_subset: &[String],
 ) -> Result<String, HandlerError> {
-    if current_depth >= MAX_SUB_AGENT_DEPTH {
-        return Err(TerminalError::new(format!(
-            "sub-agent depth limit reached ({MAX_SUB_AGENT_DEPTH})"
-        ))
-        .into());
+    if current_depth >= MAX_WORKER_DEPTH {
+        return Err(
+            TerminalError::new(format!("worker depth limit reached ({MAX_WORKER_DEPTH})")).into(),
+        );
     }
     let active_children = children
         .iter()
         .filter(|child| child.terminal.is_none())
         .collect::<Vec<_>>();
-    if active_children.len() >= MAX_SUB_AGENT_FAN_OUT {
+    if active_children.len() >= MAX_WORKER_FAN_OUT {
         return Err(TerminalError::new(format!(
-            "sub-agent fan-out limit reached ({MAX_SUB_AGENT_FAN_OUT})"
+            "worker fan-out limit reached ({MAX_WORKER_FAN_OUT})"
         ))
         .into());
     }
@@ -56,7 +55,7 @@ pub fn validate_dispatch_limits(
     let hash = task_hash(task, tool_subset);
     if active_children.iter().any(|child| child.task_hash == hash) {
         return Err(TerminalError::new(
-            "duplicate sub-agent task detected (loop prevention)".to_string(),
+            "duplicate worker task detected (loop prevention)".to_string(),
         )
         .into());
     }
@@ -71,7 +70,7 @@ pub(crate) fn validate_dispatch_budget(
 ) -> Result<(), HandlerError> {
     if requested_budget == 0 {
         return Err(
-            TerminalError::new("sub-agent budget must be greater than zero".to_string()).into(),
+            TerminalError::new("worker budget must be greater than zero".to_string()).into(),
         );
     }
 
@@ -79,7 +78,7 @@ pub(crate) fn validate_dispatch_budget(
         && requested_budget > remaining
     {
         return Err(TerminalError::new(format!(
-            "sub-agent budget request ({requested_budget}) exceeds remaining parent budget ({remaining})"
+            "worker budget request ({requested_budget}) exceeds remaining parent budget ({remaining})"
         ))
         .into());
     }
@@ -87,34 +86,15 @@ pub(crate) fn validate_dispatch_budget(
     Ok(())
 }
 
-/// Returns the parent budget remaining after reserving the requested child budget.
-pub(crate) fn reserve_child_budget(
-    remaining_parent_budget: u64,
-    requested_budget: u64,
-) -> Result<u64, HandlerError> {
-    validate_dispatch_budget(requested_budget, Some(remaining_parent_budget))?;
-    Ok(remaining_parent_budget - requested_budget)
-}
-
-/// Returns the parent budget after refunding any unused child reservation.
-#[must_use]
-pub(crate) fn refund_child_budget(
-    current_parent_budget: u64,
-    requested_budget: u64,
-    child_tokens_used: u64,
-) -> u64 {
-    current_parent_budget.saturating_add(requested_budget.saturating_sub(child_tokens_used))
-}
-
 /// Returns whether the given child id is owned by this parent state.
-pub(crate) fn child_is_owned(children: &[SubAgentChildRef], sub_agent_id: &str) -> bool {
-    children.iter().any(|child| child.id == sub_agent_id)
+pub(crate) fn child_is_owned(children: &[WorkerChildRef], worker_id: &str) -> bool {
+    children.iter().any(|child| child.id == worker_id)
 }
 
 /// Removes a completed or cancelled child reference from parent state.
 #[cfg(test)]
-pub(crate) fn remove_child_ref(children: &mut Vec<SubAgentChildRef>, sub_agent_id: &str) {
-    children.retain(|child| child.id != sub_agent_id);
+pub(crate) fn remove_child_ref(children: &mut Vec<WorkerChildRef>, worker_id: &str) {
+    children.retain(|child| child.id != worker_id);
 }
 
 pub(crate) fn child_agent_path(parent_key: &str, sub_id: &str, task_name: Option<&str>) -> String {
@@ -146,11 +126,11 @@ fn sanitize_path_segment(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::SubAgentChildRef;
+    use moa_core::WorkerChildRef;
 
     use super::{
-        MAX_SUB_AGENT_DEPTH, MAX_SUB_AGENT_FAN_OUT, refund_child_budget, reserve_child_budget,
-        task_hash, validate_dispatch_budget, validate_dispatch_limits,
+        MAX_WORKER_DEPTH, MAX_WORKER_FAN_OUT, task_hash, validate_dispatch_budget,
+        validate_dispatch_limits,
     };
 
     #[test]
@@ -165,12 +145,12 @@ mod tests {
         );
 
         assert_eq!(left, right);
-        assert_eq!(left, "926925371cadf8cf");
+        assert_eq!(left, "ecd426499d6d5d5f");
     }
 
     #[test]
     fn validate_dispatch_limits_rejects_depth_overflow() {
-        let error = validate_dispatch_limits(MAX_SUB_AGENT_DEPTH, &[], "task", &[])
+        let error = validate_dispatch_limits(MAX_WORKER_DEPTH, &[], "task", &[])
             .expect_err("depth limit should fail");
 
         assert!(format!("{error:?}").contains("depth limit"));
@@ -178,8 +158,8 @@ mod tests {
 
     #[test]
     fn validate_dispatch_limits_rejects_fan_out_overflow() {
-        let children = (0..MAX_SUB_AGENT_FAN_OUT)
-            .map(|index| SubAgentChildRef {
+        let children = (0..MAX_WORKER_FAN_OUT)
+            .map(|index| WorkerChildRef {
                 id: format!("child-{index}"),
                 task_hash: format!("hash-{index}"),
                 budget_tokens: 0,
@@ -195,7 +175,7 @@ mod tests {
     #[test]
     fn validate_dispatch_limits_rejects_duplicate_hashes() {
         let existing_hash = task_hash("repeat", &["bash".to_string()]);
-        let children = vec![SubAgentChildRef {
+        let children = vec![WorkerChildRef {
             id: "child-1".to_string(),
             task_hash: existing_hash,
             budget_tokens: 0,
@@ -204,13 +184,13 @@ mod tests {
         let error = validate_dispatch_limits(0, &children, "repeat", &["bash".to_string()])
             .expect_err("duplicate task hash should fail");
 
-        assert!(format!("{error:?}").contains("duplicate sub-agent task"));
+        assert!(format!("{error:?}").contains("duplicate worker task"));
     }
 
     #[test]
     fn validate_dispatch_limits_allows_deepest_runnable_child() {
         // Pins: max depth is the deepest child that may run, not an off-by-one rejected state.
-        let hash = validate_dispatch_limits(MAX_SUB_AGENT_DEPTH - 1, &[], "task", &[])
+        let hash = validate_dispatch_limits(MAX_WORKER_DEPTH - 1, &[], "task", &[])
             .expect("parent just before max depth should be able to create the deepest child");
 
         assert_eq!(hash, task_hash("task", &[]));
@@ -219,10 +199,10 @@ mod tests {
     #[test]
     fn validate_dispatch_limits_ignores_terminal_cached_children() {
         // Pins: consumed-later terminal children prove ownership but do not consume active fan-out.
-        let terminal = moa_core::SubAgentTerminalResult {
-            state: moa_core::SubAgentState::Completed,
-            result: moa_core::SubAgentResult {
-                sub_agent_id: "child-done".to_string(),
+        let terminal = moa_core::WorkerTerminalResult {
+            state: moa_core::WorkerState::Completed,
+            result: moa_core::WorkerResult {
+                worker_id: "child-done".to_string(),
                 success: true,
                 output: "done".to_string(),
                 tokens_used: 10,
@@ -230,8 +210,8 @@ mod tests {
                 error: None,
             },
         };
-        let children = (0..MAX_SUB_AGENT_FAN_OUT)
-            .map(|index| SubAgentChildRef {
+        let children = (0..MAX_WORKER_FAN_OUT)
+            .map(|index| WorkerChildRef {
                 id: format!("child-{index}"),
                 task_hash: task_hash("repeat", &[]),
                 budget_tokens: 0,
@@ -259,27 +239,16 @@ mod tests {
     }
 
     #[test]
-    fn child_budget_reservation_and_refund_are_zero_sum() {
-        // Pins: parent budgets reserve requested child tokens and refund only the unused amount.
-        let after_reserve =
-            reserve_child_budget(1_000, 400).expect("reservation within budget should succeed");
-        let after_refund = refund_child_budget(after_reserve, 400, 125);
-
-        assert_eq!(after_reserve, 600);
-        assert_eq!(after_refund, 875);
-    }
-
-    #[test]
     fn child_ownership_and_removal_are_exact() {
         // Pins: v2 message/wait/cancel cannot target children outside the current parent registry.
         let mut children = vec![
-            SubAgentChildRef {
+            WorkerChildRef {
                 id: "child-a".to_string(),
                 task_hash: "hash-a".to_string(),
                 budget_tokens: 100,
                 terminal: None,
             },
-            SubAgentChildRef {
+            WorkerChildRef {
                 id: "child-b".to_string(),
                 task_hash: "hash-b".to_string(),
                 budget_tokens: 200,
@@ -292,7 +261,7 @@ mod tests {
         super::remove_child_ref(&mut children, "child-a");
         assert_eq!(
             children,
-            vec![SubAgentChildRef {
+            vec![WorkerChildRef {
                 id: "child-b".to_string(),
                 task_hash: "hash-b".to_string(),
                 budget_tokens: 200,

@@ -374,6 +374,24 @@ pub fn pricing_for_model(model_id: &str) -> Option<TokenPricing> {
     find_model(model_id).map(|model| model.pricing.clone())
 }
 
+/// Combined per-MTok input plus output price used to rank chat models by cost.
+fn chat_price_rank(model: &ProviderModel) -> f64 {
+    model.pricing.input_per_mtok + model.pricing.output_per_mtok
+}
+
+/// Returns the cheapest chat-capable catalog model by combined input+output
+/// token price.
+///
+/// Every [`CATALOG`] entry is a token-billed chat completion model (embedding
+/// and rerank ids are deliberately absent), so this ranks the whole catalog by
+/// `input_per_mtok + output_per_mtok` and returns the minimum. Returns `None`
+/// only if the catalog is empty.
+pub fn cheapest_chat_model() -> Option<&'static ProviderModel> {
+    CATALOG
+        .iter()
+        .min_by(|left, right| chat_price_rank(left).total_cmp(&chat_price_rank(right)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,6 +506,24 @@ mod tests {
                 "{id} should be uncosted via the chat catalog"
             );
         }
+    }
+
+    #[test]
+    fn cheapest_chat_model_picks_min_combined_price() {
+        // Pins: narration's default model is the catalog's lowest input+output priced chat model.
+        let cheapest = cheapest_chat_model().expect("catalog is non-empty");
+        let cheapest_rank = chat_price_rank(cheapest);
+        for model in CATALOG {
+            assert!(
+                cheapest_rank <= chat_price_rank(model),
+                "{} (rank {}) is cheaper than the selected {} (rank {cheapest_rank})",
+                model.id,
+                chat_price_rank(model),
+                cheapest.id,
+            );
+        }
+        // The 2026-04 catalog's cheapest combined price is GPT-5 nano.
+        assert_eq!(cheapest.id, "gpt-5-nano");
     }
 
     #[test]

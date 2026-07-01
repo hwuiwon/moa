@@ -221,9 +221,12 @@ impl SessionStoreImpl {
         if matches!(&request.event, Event::Error { .. }) {
             record_session_error("event_log");
         }
+        // Thread the optional idempotency key so retried Restate appends with the
+        // same `(session_id, dedupe_key)` do not double-insert; `None` always appends.
         self.store
-            .emit_event(request.session_id, request.event)
+            .emit_event_record(request.session_id, request.event, request.dedupe_key)
             .await
+            .map(|record| record.sequence_num)
             .map_err(HandlerError::from)
     }
 

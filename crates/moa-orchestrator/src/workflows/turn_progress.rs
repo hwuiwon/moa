@@ -200,6 +200,7 @@ async fn append_progress_event(
                 summary: summary.to_string(),
                 elapsed_ms,
             },
+            dedupe_key: None,
         }))
         .call()
         .instrument(persist_span)
@@ -389,8 +390,8 @@ mod tests {
         // Pins: progress summaries reveal only bounded tool names, never inputs.
         assert_eq!(running_tool_summary("bash"), "Running tool: bash");
         assert_eq!(
-            running_tool_summary("sub_agent.spawn"),
-            "Running tool: sub_agent.spawn"
+            running_tool_summary("worker.spawn"),
+            "Running tool: worker.spawn"
         );
         assert_eq!(running_tool_summary("bash\nsecret"), "Running tool: tool");
         assert_eq!(running_tool_summary(""), "Running tool: tool");

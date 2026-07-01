@@ -200,6 +200,7 @@ async fn append_event_db_increments_sequence() -> Result<()> {
                 text: "first".to_string(),
                 attachments: vec![],
             },
+            dedupe_key: None,
         })
         .await
         .map_err(into_anyhow)?;
@@ -210,6 +211,7 @@ async fn append_event_db_increments_sequence() -> Result<()> {
                 text: "second".to_string(),
                 attachments: vec![],
             },
+            dedupe_key: None,
         })
         .await
         .map_err(into_anyhow)?;
@@ -220,6 +222,7 @@ async fn append_event_db_increments_sequence() -> Result<()> {
                 text: "third".to_string(),
                 attachments: vec![],
             },
+            dedupe_key: None,
         })
         .await
         .map_err(into_anyhow)?;
@@ -245,6 +248,7 @@ async fn get_events_db_respects_range() -> Result<()> {
                     text: format!("message {index}"),
                     attachments: vec![],
                 },
+                dedupe_key: None,
             })
             .await
             .map_err(into_anyhow)?;
@@ -311,6 +315,7 @@ async fn search_events_db_finds_by_payload() -> Result<()> {
                 text: "Fix the OAuth refresh token bug".to_string(),
                 attachments: vec![],
             },
+            dedupe_key: None,
         })
         .await
         .map_err(into_anyhow)?;
@@ -321,6 +326,7 @@ async fn search_events_db_finds_by_payload() -> Result<()> {
                 text: "Debug the refresh-token rotation failure".to_string(),
                 attachments: vec![],
             },
+            dedupe_key: None,
         })
         .await
         .map_err(into_anyhow)?;

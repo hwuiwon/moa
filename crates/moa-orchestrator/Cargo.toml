@@ -132,6 +132,7 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
+moa-eval-core.workspace = true
 moa-test-support.workspace = true
 serde_canonical_json.workspace = true
 tempfile.workspace = true

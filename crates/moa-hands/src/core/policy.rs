@@ -3,7 +3,7 @@
 use moa_core::{
     ActionEnvelope, ActionPolicyEffect, ActionPolicyRule, ActionReviewField, ActionReviewFileDiff,
     ActionReviewPreview, ActionRuleScope, MoaError, Result, SessionActorRef, SessionMeta,
-    SubAgentId, ToolCallId, ToolInvocation, ToolPolicyInput, UserId,
+    ToolCallId, ToolInvocation, ToolPolicyInput, UserId, WorkerId,
 };
 use uuid::Uuid;
 
@@ -62,7 +62,7 @@ impl PreparedActionInvocation {
         review_id: Uuid,
         session: &SessionMeta,
         tool_call_id: ToolCallId,
-        sub_agent_id: Option<SubAgentId>,
+        worker_id: Option<WorkerId>,
         origin: ActionOrigin,
     ) -> ActionEnvelope {
         ActionEnvelope {
@@ -73,7 +73,7 @@ impl PreparedActionInvocation {
                 .clone()
                 .unwrap_or(SessionActorRef::Anonymous),
             session_id: Some(session.id),
-            sub_agent_id,
+            worker_id,
             tool_call_id,
             tool_name: self.policy_input.tool_name.clone(),
             normalized_input: self.policy_input.normalized_input.clone(),

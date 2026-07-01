@@ -150,7 +150,7 @@ impl ToolRouter {
             );
             let result = match &prepared.policy().effect {
                 moa_core::ActionPolicyEffect::Allow => {
-                    self.execute_authorized_with_recovery_inner(session, invocation)
+                    self.execute_authorized_with_recovery_inner(session, None, invocation)
                         .await
                 }
                 moa_core::ActionPolicyEffect::Deny => {
@@ -182,9 +182,14 @@ impl ToolRouter {
     }
 
     /// Executes an already-authorized tool invocation with retry and recovery enabled.
+    ///
+    /// `worker_id` selects the hand scope: `None` provisions the
+    /// session-level (coordinator) hand used today; `Some(id)` provisions and
+    /// reuses a hand owned exclusively by that worker.
     pub async fn execute_authorized_with_recovery(
         &self,
         session: &SessionMeta,
+        worker_id: Option<&str>,
         invocation: &ToolInvocation,
     ) -> Result<(Option<String>, ToolOutput)> {
         let tool_span = tool_execution_span(session, invocation);
@@ -203,7 +208,7 @@ impl ToolRouter {
                 &moa_core::ActionPolicyEffect::Allow,
             );
             let result = self
-                .execute_authorized_with_recovery_inner(session, invocation)
+                .execute_authorized_with_recovery_inner(session, worker_id, invocation)
                 .await;
             record_tool_execution_result(
                 &tool_span,
@@ -243,6 +248,9 @@ impl ToolRouter {
             ToolExecution::Hand { provider, tier } => {
                 self.execute_hand_once(
                     session,
+                    // The local (non-durable) dispatch path has no worker
+                    // scope; it provisions the session-level hand.
+                    None,
                     invocation,
                     &registered_tool.definition,
                     provider,
@@ -298,9 +306,11 @@ impl ToolRouter {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_hand_once(
         &self,
         session: &SessionMeta,
+        worker_id: Option<&str>,
         invocation: &ToolInvocation,
         tool_definition: &ToolDefinition,
         provider: &str,
@@ -308,7 +318,7 @@ impl ToolRouter {
         hard_cancel_token: Option<&CancellationToken>,
     ) -> Result<(Option<String>, ToolOutput)> {
         let hand = self
-            .get_or_provision_hand(provider, tier.clone(), session)
+            .get_or_provision_hand(provider, tier.clone(), session, worker_id)
             .await?;
         let provider_impl = self
             .providers
@@ -318,7 +328,7 @@ impl ToolRouter {
         if matches!(status, HandStatus::Paused) {
             provider_impl.resume(&hand).await?;
         }
-        self.install_trusted_files_for_hand(session, provider, &hand)
+        self.install_trusted_files_for_hand(session, worker_id, provider, &hand)
             .await?;
 
         let serialized_input = serde_json::to_string(&invocation.input)?;

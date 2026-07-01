@@ -2,8 +2,8 @@
 
 pub mod cron_job;
 pub mod session;
-pub mod sub_agent;
 pub mod tenant;
+pub mod worker;
 
 use chrono::{DateTime, Utc};
 use restate_sdk::prelude::*;

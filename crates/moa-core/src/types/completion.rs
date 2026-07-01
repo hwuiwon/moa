@@ -1,9 +1,9 @@
 //! Provider completion request, response, and streaming types.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Formatter};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -138,6 +138,7 @@ pub struct CompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<JsonResponseFormat>,
     /// Request-scoped metadata.
+    #[serde(serialize_with = "serialize_metadata_deterministically")]
     pub metadata: HashMap<String, Value>,
 }
 
@@ -159,6 +160,19 @@ impl CompletionRequest {
     pub fn simple(prompt: impl Into<String>) -> Self {
         Self::new(prompt)
     }
+}
+
+fn serialize_metadata_deterministically<S>(
+    metadata: &HashMap<String, Value>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    metadata
+        .iter()
+        .collect::<BTreeMap<_, _>>()
+        .serialize(serializer)
 }
 
 /// Normalized provider token-usage counters.
@@ -305,10 +319,16 @@ impl fmt::Debug for CompletionStream {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use serde_json::json;
     use tokio::sync::mpsc;
     use tokio::time::{Duration as TokioDuration, sleep};
 
-    use super::{CompletionContent, CompletionResponse, CompletionStream, StopReason, TokenUsage};
+    use super::{
+        CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, StopReason,
+        TokenUsage,
+    };
     use crate::ModelId;
     use crate::error::MoaError;
 
@@ -325,6 +345,34 @@ mod tests {
 
         assert_eq!(usage.total_input_tokens(), 100);
         assert!((usage.cache_hit_rate() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn completion_request_serializes_metadata_deterministically() {
+        let mut first = CompletionRequest::new("hello");
+        first.metadata = HashMap::from([
+            ("zeta".to_string(), json!(3)),
+            ("alpha".to_string(), json!(1)),
+            ("middle".to_string(), json!(2)),
+        ]);
+
+        let mut second = CompletionRequest::new("hello");
+        second.metadata = HashMap::from([
+            ("middle".to_string(), json!(2)),
+            ("zeta".to_string(), json!(3)),
+            ("alpha".to_string(), json!(1)),
+        ]);
+
+        let first_json =
+            serde_json::to_string(&first).expect("completion request should serialize");
+        let second_json =
+            serde_json::to_string(&second).expect("completion request should serialize");
+
+        assert_eq!(first_json, second_json);
+        assert!(
+            first_json.contains(r#""metadata":{"alpha":1,"middle":2,"zeta":3}"#),
+            "metadata should be serialized in stable key order: {first_json}"
+        );
     }
 
     #[tokio::test]

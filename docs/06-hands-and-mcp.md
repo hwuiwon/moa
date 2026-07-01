@@ -4,10 +4,13 @@ _Hand providers, tool routing, MCP, sandbox lifecycle, and recovery._
 
 ## Contract
 
-Hands are temporary execution environments. They are provisioned on first use,
-reused while a session is active, and destroyed when the session reaches a
-terminal state. The brain never talks to hands directly; it asks the
-`ToolRouter` to execute a named tool with structured input.
+Hands are temporary execution environments. They are provisioned on first use
+and destroyed when their owning scope reaches a terminal state. The root
+coordinator runs sandbox-free; each worker owns its own hand, so a hand is
+released when that worker self-cleans and any remaining hands are released at
+session teardown (see Per-Worker Sandbox Model below). The brain never talks
+to hands directly; it asks the `ToolRouter` to execute a named tool with
+structured input.
 
 Credentials must not be visible to generated code. Git, MCP, and external API
 credentials are fetched or injected by trusted host-side code, not placed in
@@ -52,7 +55,7 @@ across handlers. These maps are process-local caches or transport internals;
 they must not be the source of cross-request correctness in Kubernetes.
 
 `ActionEnvelope` is the durable policy-facing record for one tool invocation.
-It includes the review id, tenant, user, session or sub-agent origin, tool
+It includes the review id, tenant, user, session or worker origin, tool
 call id, tool name, normalized input, input summary, risk level, action class,
 optional workflow/artifact origin metadata, idempotency key, and creation time.
 The envelope is persisted only when action policy returns
@@ -71,7 +74,7 @@ Action-policy decisions are ordered:
 tenant-admin action review through `ActionReviews/request`, writes an
 `ActionReviewRequested` event for session history, returns a pending-review
 tool result to preserve LLM protocol continuity, and continues the root or
-sub-agent turn without moving the session into a waiting state. Tenant admins
+worker turn without moving the session into a waiting state. Tenant admins
 list pending reviews through `ActionReviews/list_pending`. Review
 requests are canary-screened before persistence and store no canary token; a
 cleared review rewrites the stored tool request with a fresh tool-call id before
@@ -95,23 +98,58 @@ stability.
 
 ## Lifecycle
 
-Active hands are keyed by session and provider. The authoritative binding lives
-in Postgres `moa.hand_leases`; `ToolRouter` process maps are reconnect caches
-only. A first tool call claims a durable lease before provisioning the hand.
-Later tool calls on any Kubernetes replica load the lease, reconnect or resume
-the provider handle when healthy, or mark it stale and reprovision with a new
-generation. On terminal session status, cancellation, failure, or panic
-cleanup, the orchestrator calls `destroy_session_hands(session_id)`, which
-lists durable leases rather than only handles cached in the current process.
+Active hands are keyed by session, worker, and provider. The authoritative
+binding lives in Postgres `moa.hand_leases` with primary key `(session_id,
+worker_id, provider)`; `ToolRouter` process maps are reconnect caches only. A
+first tool call claims a durable lease before provisioning the hand. Later tool
+calls on any Kubernetes replica load the lease, reconnect or resume the provider
+handle when healthy, or mark it stale and reprovision with a new generation. On
+terminal session status, cancellation, failure, or panic cleanup, the
+orchestrator calls `reclaim_hands(session_id, None)`, which lists durable
+leases for every worker scope rather than only handles cached in the current
+process.
+
+### Per-Worker Sandbox Model
+
+Worker compute is keyed by `worker_id`, not by the parent session, so each
+worker owns exactly one sandbox and siblings never share one:
+
+- **The coordinator is sandbox-free.** Root-turn preparation in `brain_bridge.rs`
+  filters the coordinator's tool schemas through `ToolRouter::tool_requires_sandbox`
+  (true only for `ToolExecution::Hand` tools) and hard-excludes those tools except
+  manifest-backed selected-skill `file_read`. The root `file_read` path is served
+  directly from the trusted manifest by `ToolExecutor`; it does not provision a
+  hand. The worker tool subsets keep the hand tools, so all real computation is
+  delegated. Zero workers means zero sandboxes.
+- **Each worker owns one hand.** `ToolCallRequest.worker_id` is populated
+  from `GovernedInvocationOrigin::Worker` and threaded through the tool executor
+  into the lease/cache key `(session_id, worker_id, provider)`. The
+  pre-existing coordinator scope is the empty `worker_id`. N parallel
+  workers hold N independent sandboxes.
+- **Per-worker release.** Because each sandbox has exactly one owner, a child
+  can release its own hand without over-releasing siblings. `Worker::cleanup`
+  (the generation-guarded self-cleanup) dispatches
+  `ToolExecutor::release_worker_hands` → `reclaim_hands(session_id,
+  Some(worker_id))`, which reclaims only that scope. The VO holds no
+  `ToolRouter`, so the release is a detached service call. Session teardown
+  still reclaims any remaining coordinator/orphan hands via
+  `reclaim_hands(session_id, None)`.
+- **Sandboxes are refreshable, never the primary state source.** Durable agent
+  state lives in the event log, artifacts, and object store, so a sandbox crash is
+  recovered by marking the durable lease stale, claiming a new fenced
+  `generation`, provisioning a fresh hand, and replaying the hash-validated
+  `trusted_sandbox_manifest` to reinstall the prior files. No agent work product
+  may live only in a sandbox.
 
 Before the LLM call for a turn, the context pipeline selects relevant skills.
-The selected trusted sandbox file references are copied into `ToolCallRequest`
-so the `ToolExecutor` can materialize files even when the turn workflow and tool
-executor land on different pods. The router still caches installed-file markers
-to avoid duplicate installs inside one hand, but that cache is not the source of
-install intent. The model only sees the manifest paths; full `SKILL.md` and
-supporting scripts remain filesystem resources that are read or executed on
-demand.
+The selected trusted sandbox file references are copied into `ToolCallRequest`.
+The root coordinator may read exact selected skill files directly from that
+manifest without a hand; worker tool calls materialize the same files in the
+worker hand even when the turn workflow and tool executor land on different pods.
+The router still caches installed-file markers to avoid duplicate installs
+inside one hand, but that cache is not the source of install intent. The model
+only sees the manifest paths; full `SKILL.md` and supporting scripts remain
+filesystem resources that are read or executed on demand.
 
 Provider implementations must make cleanup best-effort and observable. Failed
 cleanup should warn through `tracing`, not panic or hide the terminal session

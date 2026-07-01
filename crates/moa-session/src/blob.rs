@@ -507,7 +507,7 @@ mod tests {
                     id: uuid::Uuid::from_u128(2),
                 },
                 session_id: Some(session_id),
-                sub_agent_id: None,
+                worker_id: None,
                 tool_call_id: moa_core::ToolCallId(review_id),
                 tool_name: "file_write".to_string(),
                 normalized_input: "src/lib.rs".to_string(),
