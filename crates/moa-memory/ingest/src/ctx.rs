@@ -9,7 +9,7 @@ use std::{
 use moa_core::{MoaConfig, traits::EmbeddingProvider};
 use moa_memory_graph::GraphStore;
 use moa_memory_pii::PiiClassifier;
-use moa_memory_vector::VectorStore;
+use moa_memory_vector::{VectorStore, VectorStoreFactory};
 use moa_providers::CohereV4Embedder;
 use sqlx::PgPool;
 
@@ -47,6 +47,7 @@ struct IngestRuntimeFingerprint {
     entity_blocking_enabled: bool,
     contradiction_detector_name: &'static str,
     memory_config_hash: u64,
+    observability_environment: Option<String>,
 }
 
 impl IngestRuntimeFingerprint {
@@ -68,12 +69,13 @@ impl IngestRuntimeFingerprint {
             entity_blocking_enabled,
             contradiction_detector_name,
             memory_config_hash: hash_debug(&config.memory),
+            observability_environment: config.observability.environment.clone(),
         }
     }
 
     fn summary(&self) -> String {
         format!(
-            "pool={}, pii={}, cohere_api_key_configured={}, cohere_api_key_hash={}, extractor={}, entity_resolver={}, entity_blocking={}, contradiction={}, memory_config={}",
+            "pool={}, pii={}, cohere_api_key_configured={}, cohere_api_key_hash={}, extractor={}, entity_resolver={}, entity_blocking={}, contradiction={}, memory_config={}, observability_environment={}",
             self.pool_options_hash,
             self.pii_service_url.as_deref().unwrap_or("<none>"),
             self.cohere_api_key_configured,
@@ -82,7 +84,10 @@ impl IngestRuntimeFingerprint {
             self.entity_resolver_name,
             self.entity_blocking_enabled,
             self.contradiction_detector_name,
-            self.memory_config_hash
+            self.memory_config_hash,
+            self.observability_environment
+                .as_deref()
+                .unwrap_or("<none>")
         )
     }
 }
@@ -197,6 +202,7 @@ pub struct IngestRuntime {
     entity_blocking_enabled: bool,
     contradiction_detector: Arc<dyn ContradictionDetector>,
     contradiction_detector_name: &'static str,
+    vector_store_factory: VectorStoreFactory,
     fingerprint: IngestRuntimeFingerprint,
 }
 
@@ -212,6 +218,7 @@ impl IngestRuntime {
         let entity_resolver_name = "deterministic";
         let entity_blocking_enabled = false;
         let contradiction_detector_name = "rrf_plus_judge";
+        let vector_store_factory = VectorStoreFactory::from_config(&default_config);
         let fingerprint = IngestRuntimeFingerprint::new(
             &pool,
             &default_config,
@@ -231,6 +238,7 @@ impl IngestRuntime {
             entity_blocking_enabled,
             contradiction_detector,
             contradiction_detector_name,
+            vector_store_factory,
             fingerprint,
         }
     }
@@ -263,6 +271,7 @@ impl IngestRuntime {
                 config,
             )),
             contradiction_detector_name,
+            vector_store_factory: VectorStoreFactory::from_config(config),
             fingerprint,
         }
     }
@@ -363,6 +372,12 @@ impl IngestRuntime {
     #[must_use]
     pub fn contradiction_detector(&self) -> Arc<dyn ContradictionDetector> {
         self.contradiction_detector.clone()
+    }
+
+    /// Returns the configured vector-store factory.
+    #[must_use]
+    pub fn vector_store_factory(&self) -> VectorStoreFactory {
+        self.vector_store_factory.clone()
     }
 
     fn is_compatible_with(&self, other: &Self) -> bool {

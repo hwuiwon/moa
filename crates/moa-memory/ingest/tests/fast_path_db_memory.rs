@@ -15,7 +15,7 @@ use moa_memory_ingest::{
     fast_remember,
 };
 use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan};
-use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
+use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorStoreFactory};
 use moa_session::testing;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
@@ -408,6 +408,45 @@ async fn seed_tenant_embedder_state(pool: &PgPool, tenant_id: Uuid) {
     conn.commit().await.expect("commit tenant embedder state");
 }
 
+async fn set_tenant_vector_backend(pool: &PgPool, tenant_id: Uuid, vector_backend: &str) {
+    let mut conn = tenant_scoped_conn(pool, tenant_id).await;
+    sqlx::query(
+        r#"
+        UPDATE moa.storage_partition_state
+           SET vector_backend = $2,
+               vector_backend_state = 'steady'
+         WHERE storage_partition_id = $1
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(vector_backend)
+    .execute(conn.as_mut())
+    .await
+    .expect("set tenant vector backend");
+    conn.commit().await.expect("commit tenant vector backend");
+}
+
+async fn seed_active_tenant_node(pool: &PgPool, tenant_id: Uuid, name: &str) -> Uuid {
+    let uid = Uuid::now_v7();
+    let mut conn = tenant_scoped_conn(pool, tenant_id).await;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.node_index
+            (uid, label, storage_partition_id, name, pii_class, confidence, properties_summary)
+        VALUES ($1, 'Fact', $2, $3, 'none', 0.9, $4)
+        "#,
+    )
+    .bind(uid)
+    .bind(tenant_id.to_string())
+    .bind(name)
+    .bind(serde_json::json!({ "summary": name }))
+    .execute(conn.as_mut())
+    .await
+    .expect("seed active tenant node");
+    conn.commit().await.expect("commit active tenant node");
+    uid
+}
+
 #[tokio::test]
 async fn fast_remember_db_memory() {
     let _guard = TEST_LOCK.lock().await;
@@ -686,6 +725,65 @@ async fn fast_forget_idempotent_by_name() {
         .expect("second forget");
     assert_eq!(first, 1);
     assert_eq!(second, 0);
+    assert!(
+        node_valid_to(session_store.pool(), tenant_id, uid)
+            .await
+            .is_some()
+    );
+
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn fast_forget_does_not_select_read_vector_backend_db_memory() {
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let tenant_id = Uuid::now_v7();
+    seed_tenant_embedder_state(session_store.pool(), tenant_id).await;
+    set_tenant_vector_backend(session_store.pool(), tenant_id, "turbopuffer").await;
+    let uid = seed_active_tenant_node(session_store.pool(), tenant_id, "lazy-forget-target").await;
+
+    let scope = RlsContext::tenant(TenantId::from(tenant_id));
+    let vector_factory = VectorStoreFactory::default();
+    let graph_vector = vector_factory.transactional_graph_backend(
+        session_store.pool().clone(),
+        scope.clone(),
+        true,
+    );
+    let graph = Arc::new(
+        PostgresGraphStore::scoped_for_app_role(session_store.pool().clone(), scope.clone())
+            .with_vector_store(graph_vector.vector_store())
+            .with_vector_post_commit_sync(graph_vector.post_commit_sync()),
+    );
+    let ctx = FastPathCtx::new_with_vector_factory(
+        session_store.pool().clone(),
+        scope,
+        graph,
+        vector_factory,
+        Arc::new(RecordingEmbedder::new()),
+        Arc::new(FixedPiiClassifier {
+            result: pii_result(PiiClass::None),
+        }),
+        Arc::new(ScriptedConflictDetector {
+            conflict: Conflict::Insert,
+            delay: Duration::ZERO,
+        }),
+    )
+    .with_assume_app_role(true);
+
+    let forgotten = fast_forget(
+        ForgetPattern::NameMatch("lazy-forget-target".to_string()),
+        &ctx,
+    )
+    .await
+    .expect("forget should not need read-side configured vector selection");
+
+    assert_eq!(forgotten, 1);
     assert!(
         node_valid_to(session_store.pool(), tenant_id, uid)
             .await

@@ -18,12 +18,13 @@ use moa_memory_graph::{
 use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiClassifier, PiiError, PiiResult, redact_text,
 };
-use moa_memory_vector::{Error as VectorError, PgvectorStore, VECTOR_DIMENSION, VectorStore};
+use moa_memory_vector::VectorStoreFactory;
+use moa_memory_vector::{Error as VectorError, VECTOR_DIMENSION, VectorStore};
 use moa_providers::CohereV4Embedder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use tokio::time::timeout;
+use tokio::{sync::OnceCell, time::timeout};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -70,7 +71,8 @@ pub struct FastPathCtx {
     pool: PgPool,
     scope: RlsContext,
     graph: Arc<dyn GraphStore>,
-    vector: Arc<dyn VectorStore>,
+    vector_factory: VectorStoreFactory,
+    vector: Arc<OnceCell<Arc<dyn VectorStore>>>,
     embedder: Arc<dyn EmbeddingProvider>,
     pii: Arc<dyn PiiClassifier>,
     contradict: Arc<dyn ContradictionDetector>,
@@ -89,11 +91,38 @@ impl FastPathCtx {
         pii: Arc<dyn PiiClassifier>,
         contradict: Arc<dyn ContradictionDetector>,
     ) -> Self {
+        let vector_cell = OnceCell::const_new();
+        let _ = vector_cell.set(vector);
         Self {
             pool,
             scope,
             graph,
-            vector,
+            vector_factory: VectorStoreFactory::default(),
+            vector: Arc::new(vector_cell),
+            embedder,
+            pii,
+            contradict,
+            assume_app_role: false,
+        }
+    }
+
+    /// Creates a fast-path context that selects the read-side vector store lazily.
+    #[must_use]
+    pub fn new_with_vector_factory(
+        pool: PgPool,
+        scope: RlsContext,
+        graph: Arc<dyn GraphStore>,
+        vector_factory: VectorStoreFactory,
+        embedder: Arc<dyn EmbeddingProvider>,
+        pii: Arc<dyn PiiClassifier>,
+        contradict: Arc<dyn ContradictionDetector>,
+    ) -> Self {
+        Self {
+            pool,
+            scope,
+            graph,
+            vector_factory,
+            vector: Arc::new(OnceCell::const_new()),
             embedder,
             pii,
             contradict,
@@ -114,16 +143,37 @@ impl FastPathCtx {
         &self.scope
     }
 
-    fn contradiction_context(&self) -> ContradictionContext {
+    async fn contradiction_context(&self) -> Result<ContradictionContext, FastError> {
+        let vector = self.read_vector().await?;
         if self.assume_app_role {
-            ContradictionContext::for_app_role(
+            Ok(ContradictionContext::for_app_role(
                 self.pool.clone(),
                 self.scope.clone(),
-                self.vector.clone(),
-            )
+                vector,
+            ))
         } else {
-            ContradictionContext::new(self.pool.clone(), self.scope.clone(), self.vector.clone())
+            Ok(ContradictionContext::new(
+                self.pool.clone(),
+                self.scope.clone(),
+                vector,
+            ))
         }
+    }
+
+    async fn read_vector(&self) -> Result<Arc<dyn VectorStore>, FastError> {
+        let pool = self.pool.clone();
+        let scope = self.scope.clone();
+        let assume_app_role = self.assume_app_role;
+        let vector_factory = self.vector_factory.clone();
+        self.vector
+            .get_or_try_init(|| async move {
+                vector_factory
+                    .configured_for_scope(&pool, scope, assume_app_role)
+                    .await
+                    .map_err(FastError::from)
+            })
+            .await
+            .map(Clone::clone)
     }
 }
 
@@ -284,7 +334,7 @@ async fn fast_remember_inner(
     let conflict = if let Some(old_uid) = req.supersedes_specific {
         Conflict::Supersede(old_uid)
     } else {
-        let contradiction_ctx = ctx.contradiction_context();
+        let contradiction_ctx = ctx.contradiction_context().await?;
         match timeout(
             JUDGE_TIMEOUT,
             ctx.contradict.check_one_fast(
@@ -519,7 +569,7 @@ async fn execute_remember_tool(
         return Ok(contact_scope_without_contact_output(started));
     }
     let scope = requested_write_scope(params.scope.as_deref());
-    let (ctx, tenant_id, contact_id) = runtime_ctx_for_scope(session, &scope)?;
+    let (ctx, tenant_id, contact_id) = runtime_ctx_for_scope(session, &scope).await?;
     let actor_id = actor_id_from_session(session);
     let uid = fast_remember(
         FastRememberRequest {
@@ -550,15 +600,15 @@ async fn execute_forget_tool(
     let params: ForgetToolInput = serde_json::from_value(input.clone())?;
     let count = match (params.uid, params.name, params.soft_all_contact_id) {
         (Some(uid), None, None) => {
-            let ctx = runtime_ctx_for_visible_session_scope(session)?;
+            let ctx = runtime_ctx_for_visible_session_scope(session).await?;
             fast_forget(ForgetPattern::Uid(uid), &ctx).await?
         }
         (None, Some(name), None) => {
-            let ctx = runtime_ctx_for_visible_session_scope(session)?;
+            let ctx = runtime_ctx_for_visible_session_scope(session).await?;
             fast_forget(ForgetPattern::NameMatch(name), &ctx).await?
         }
         (None, None, Some(contact_id)) => {
-            let ctx = runtime_ctx_for_contact(session, contact_id)?;
+            let ctx = runtime_ctx_for_contact(session, contact_id).await?;
             fast_forget(ForgetPattern::SoftAll(contact_id), &ctx).await?
         }
         _ => {
@@ -593,7 +643,7 @@ async fn execute_supersede_tool(
     execute_remember_tool(session, &serde_json::to_value(remember)?, started).await
 }
 
-fn runtime_ctx_for_scope(
+async fn runtime_ctx_for_scope(
     session: &SessionMeta,
     scope: &str,
 ) -> Result<(FastPathCtx, Uuid, Option<Uuid>), FastError> {
@@ -611,7 +661,7 @@ fn runtime_ctx_for_scope(
         Some(contact_id) => RlsContext::contact(TenantId::from(tenant_id), ContactId(contact_id)),
         None => RlsContext::tenant(TenantId::from(tenant_id)),
     };
-    Ok((runtime_fast_ctx(scope_ctx)?, tenant_id, contact_id))
+    Ok((runtime_fast_ctx(scope_ctx).await?, tenant_id, contact_id))
 }
 
 fn requested_contact_scope_without_contact(
@@ -656,20 +706,22 @@ fn memory_tool_failure_output(tool_name: &str, error: &FastError, started: Insta
     ToolOutput::error(message, started.elapsed())
 }
 
-fn runtime_ctx_for_contact(
+async fn runtime_ctx_for_contact(
     session: &SessionMeta,
     contact_id: Uuid,
 ) -> Result<FastPathCtx, FastError> {
     let tenant_id = tenant_uuid(session);
     let scope_ctx = RlsContext::contact(TenantId::from(tenant_id), ContactId(contact_id));
-    runtime_fast_ctx(scope_ctx)
+    runtime_fast_ctx(scope_ctx).await
 }
 
-fn runtime_ctx_for_visible_session_scope(session: &SessionMeta) -> Result<FastPathCtx, FastError> {
+async fn runtime_ctx_for_visible_session_scope(
+    session: &SessionMeta,
+) -> Result<FastPathCtx, FastError> {
     if let Some(contact) = &session.contact {
-        runtime_ctx_for_contact(session, contact.contact_id.0)
+        runtime_ctx_for_contact(session, contact.contact_id.0).await
     } else {
-        let (ctx, _, _) = runtime_ctx_for_scope(session, "tenant")?;
+        let (ctx, _, _) = runtime_ctx_for_scope(session, "tenant").await?;
         Ok(ctx)
     }
 }
@@ -696,12 +748,16 @@ fn actor_id_from_session(session: &SessionMeta) -> Uuid {
     }
 }
 
-fn runtime_fast_ctx(scope: RlsContext) -> Result<FastPathCtx, FastError> {
+async fn runtime_fast_ctx(scope: RlsContext) -> Result<FastPathCtx, FastError> {
     let runtime = current_runtime()?;
     let pool = runtime.pool().clone();
-    let vector: Arc<dyn VectorStore> = Arc::new(PgvectorStore::new(pool.clone(), scope.clone()));
+    let vector_factory = runtime.vector_store_factory();
+    let graph_vector =
+        vector_factory.transactional_graph_backend(pool.clone(), scope.clone(), false);
     let graph = Arc::new(
-        PostgresGraphStore::scoped(pool.clone(), scope.clone()).with_vector_store(vector.clone()),
+        PostgresGraphStore::scoped(pool.clone(), scope.clone())
+            .with_vector_store(graph_vector.vector_store())
+            .with_vector_post_commit_sync(graph_vector.post_commit_sync()),
     );
     let embedder = Arc::new(
         CohereV4Embedder::new(cohere_api_key(runtime.cohere_api_key())?)
@@ -713,8 +769,14 @@ fn runtime_fast_ctx(scope: RlsContext) -> Result<FastPathCtx, FastError> {
     };
     let contradict = runtime.contradiction_detector();
 
-    Ok(FastPathCtx::new(
-        pool, scope, graph, vector, embedder, pii, contradict,
+    Ok(FastPathCtx::new_with_vector_factory(
+        pool,
+        scope,
+        graph,
+        vector_factory,
+        embedder,
+        pii,
+        contradict,
     ))
 }
 

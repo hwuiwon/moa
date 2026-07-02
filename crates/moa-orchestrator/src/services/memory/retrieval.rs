@@ -18,7 +18,7 @@ use moa_lineage_core::{
 };
 use moa_memory_graph::{GraphStore, NodeLabel, PiiClass, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
-use moa_memory_vector::PgvectorStore;
+use moa_memory_vector::VectorStoreFactory;
 use moa_observability::record_memory_operation;
 use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
 use restate_sdk::prelude::*;
@@ -36,7 +36,7 @@ pub(super) async fn search_inner(
     scope: MemoryScope,
 ) -> Result<MemorySearchResponse, HandlerError> {
     let started = Instant::now();
-    let (graph, retriever) = memory_stack(&scope);
+    let (graph, retriever) = memory_stack(&scope).await?;
     let seeds = lookup_seed_uids(graph.as_ref(), &request.query, request.limit).await?;
     let hits = retrieve_hits(
         retriever.as_ref(),
@@ -117,7 +117,7 @@ pub(super) async fn retrieve_debug_inner(
     identity: &Identity,
 ) -> Result<MemoryRetrieveDebugResponse, HandlerError> {
     let started = Instant::now();
-    let (graph, retriever) = memory_stack(&scope);
+    let (graph, retriever) = memory_stack(&scope).await?;
     let seeds = lookup_seed_uids(graph.as_ref(), &request.query, request.limit).await?;
     let hits = retrieve_hits(
         retriever.as_ref(),
@@ -240,18 +240,21 @@ async fn lookup_seed_uids(
         .map_err(memory_handler_error)
 }
 
-fn memory_stack(scope: &MemoryScope) -> (Arc<dyn GraphStore>, Arc<HybridRetriever>) {
+async fn memory_stack(
+    scope: &MemoryScope,
+) -> Result<(Arc<dyn GraphStore>, Arc<HybridRetriever>), HandlerError> {
     let graph = Arc::new(graph_store(scope));
     let runtime = OrchestratorCtx::current();
     let pool = runtime.graph_pool();
     let config = runtime.config();
-    let vector = Arc::new(PgvectorStore::new_for_app_role(
-        pool.clone(),
-        scope.to_rls_context(),
-    ));
+    let vector_factory = VectorStoreFactory::from_config(config.as_ref());
+    let vector = vector_factory
+        .configured_for_scope(&pool, scope.to_rls_context(), true)
+        .await
+        .map_err(memory_handler_error)?;
     let retriever = HybridRetriever::from_config(config.as_ref(), pool, graph.clone(), vector)
         .with_assume_app_role(true);
-    (graph, Arc::new(retriever))
+    Ok((graph, Arc::new(retriever)))
 }
 
 fn graph_store(scope: &MemoryScope) -> PostgresGraphStore {

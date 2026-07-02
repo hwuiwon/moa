@@ -1,7 +1,7 @@
 //! Restate virtual object for slow-path graph-memory ingestion.
 
-use std::sync::Arc;
 use std::time::Duration;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     ClassifiedFact, Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact,
@@ -20,7 +20,7 @@ use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiClassifier, PiiResult, PiiSpan, classify_heuristic,
     redact_text,
 };
-use moa_memory_vector::{PgvectorStore, VectorStore};
+use moa_memory_vector::{VectorStore, VectorStoreFactory};
 use moa_providers::CohereV4Embedder;
 use restate_sdk::prelude::*;
 use serde_json::json;
@@ -64,6 +64,7 @@ impl IngestionVO for IngestionVOImpl {
         let pii_service_url = runtime.pii_service_url().map(str::to_string);
         let cohere_api_key = runtime.cohere_api_key().to_string();
         let contradiction_detector = runtime.contradiction_detector();
+        let vector_factory = runtime.vector_store_factory();
         let degraded = storage_partition_degraded(&pool, &turn).await?;
         if degraded && !should_ingest_degraded(&turn) {
             ctx.set(&done_key, Json::from(true));
@@ -133,11 +134,13 @@ impl IngestionVO for IngestionVOImpl {
         let contradiction_input = embedded.clone();
         let contradiction_pool = pool.clone();
         let contradiction_detector = contradiction_detector.clone();
+        let contradiction_vector_factory = vector_factory.clone();
         let decisions = ctx
             .run(|| async move {
                 detect_contradictions_with(
                     contradiction_detector.as_ref(),
                     contradiction_pool,
+                    &contradiction_vector_factory,
                     &contradiction_turn,
                     &contradiction_input,
                 )
@@ -153,10 +156,12 @@ impl IngestionVO for IngestionVOImpl {
         let upsert_pool = pool.clone();
         let upsert_entity_resolver = runtime.entity_resolver();
         let upsert_entity_blocking_embedder = runtime.entity_blocking_embedder();
+        let upsert_vector_factory = vector_factory.clone();
         let report = ctx
             .run(|| async move {
                 apply_decisions(
                     &upsert_pool,
+                    &upsert_vector_factory,
                     upsert_entity_resolver.as_ref(),
                     upsert_entity_blocking_embedder,
                     &upsert_turn,
@@ -193,6 +198,7 @@ pub async fn ingest_turn_direct(turn: SessionTurn) -> Result<IngestApplyReport, 
             entity_resolver: runtime.entity_resolver(),
             entity_blocking_embedder: runtime.entity_blocking_embedder(),
             contradiction_detector: runtime.contradiction_detector(),
+            vector_factory: runtime.vector_store_factory(),
         },
         turn,
     )
@@ -212,6 +218,7 @@ pub async fn ingest_turn_direct_with_pool(
 ) -> Result<IngestApplyReport, HandlerError> {
     let config = MoaConfig::load_from_env().map_err(HandlerError::from)?;
     let contradiction_detector = Arc::new(RrfPlusJudgeDetector::from_config_or_heuristic(&config));
+    let vector_factory = VectorStoreFactory::from_config(&config);
     let memory = config.memory;
     let cohere_api_key = config.providers.cohere.api_key;
     ingest_turn_direct_with_pool_and_pii(
@@ -223,6 +230,7 @@ pub async fn ingest_turn_direct_with_pool(
             entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
             entity_blocking_embedder: None,
             contradiction_detector,
+            vector_factory,
         },
         turn,
     )
@@ -237,6 +245,7 @@ struct DirectIngestDeps {
     entity_resolver: Arc<EntityResolver>,
     entity_blocking_embedder: Option<Arc<dyn EmbeddingProvider>>,
     contradiction_detector: Arc<dyn ContradictionDetector>,
+    vector_factory: VectorStoreFactory,
 }
 
 async fn ingest_turn_direct_with_pool_and_pii(
@@ -251,6 +260,7 @@ async fn ingest_turn_direct_with_pool_and_pii(
         entity_resolver,
         entity_blocking_embedder,
         contradiction_detector,
+        vector_factory,
     } = deps;
     let direct_claim = claim_direct_ingest_turn(&pool, &turn).await?;
     let degraded = storage_partition_degraded(&pool, &turn).await?;
@@ -274,12 +284,14 @@ async fn ingest_turn_direct_with_pool_and_pii(
     let decisions = detect_contradictions_with(
         contradiction_detector.as_ref(),
         pool.clone(),
+        &vector_factory,
         &turn,
         &embedded,
     )
     .await?;
     let report = apply_decisions(
         &pool,
+        &vector_factory,
         entity_resolver.as_ref(),
         entity_blocking_embedder,
         &turn,
@@ -320,12 +332,19 @@ pub async fn ingest_turn_direct_with_ctx(
         .map_err(HandlerError::from)?;
     let classified = classify_facts_with(ctx.pii.as_ref(), &extracted).await?;
     let embedded = embed_batch_with(ctx.embedder.as_ref(), &classified).await?;
-    let decisions =
-        detect_contradictions_with(ctx.contradict.as_ref(), ctx.pool.clone(), &turn, &embedded)
-            .await?;
+    let vector_factory = VectorStoreFactory::default();
+    let decisions = detect_contradictions_with(
+        ctx.contradict.as_ref(),
+        ctx.pool.clone(),
+        &vector_factory,
+        &turn,
+        &embedded,
+    )
+    .await?;
     let entity_blocking_embedder = ctx.entity_blocking_enabled.then(|| ctx.embedder.clone());
     let report = apply_decisions(
         &ctx.pool,
+        &vector_factory,
         ctx.entity_resolver.as_ref(),
         entity_blocking_embedder,
         &turn,
@@ -519,14 +538,19 @@ async fn embed_batch_with(
 async fn detect_contradictions_with(
     detector: &dyn ContradictionDetector,
     pool: PgPool,
+    vector_factory: &VectorStoreFactory,
     turn: &SessionTurn,
     embedded: &[EmbeddedFact],
 ) -> Result<Vec<IngestDecision>, HandlerError> {
     let mut decisions = Vec::with_capacity(embedded.len());
+    let mut vector_cache = ConfiguredVectorStoreCache::default();
 
     for fact in embedded {
         let scope = fact_scope(turn, fact);
-        let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
+        let vector = vector_cache
+            .configured_for_scope(&pool, vector_factory, scope.clone(), true)
+            .await
+            .map_err(HandlerError::from)?;
         let ctx = ContradictionContext::for_app_role(pool.clone(), scope, vector);
         let conflict = detector
             .check_one_slow(fact, &ctx)
@@ -609,25 +633,24 @@ fn turn_default_scope(turn: &SessionTurn) -> RlsContext {
 
 async fn apply_decisions(
     pool: &PgPool,
+    vector_factory: &VectorStoreFactory,
     entity_resolver: &EntityResolver,
     entity_blocking_embedder: Option<Arc<dyn EmbeddingProvider>>,
     turn: &SessionTurn,
     decisions: &[IngestDecision],
 ) -> Result<IngestApplyReport, HandlerError> {
     let mut report = IngestApplyReport::default();
+    let mut deps = ApplyDecisionDeps {
+        pool,
+        vector_factory,
+        vector_cache: ConfiguredVectorStoreCache::default(),
+        entity_resolver,
+        entity_blocking_embedder,
+    };
 
     for decision in decisions {
         let scope = decision_scope(turn, decision);
-        match apply_one_decision(
-            pool,
-            &scope,
-            entity_resolver,
-            entity_blocking_embedder.clone(),
-            turn,
-            decision,
-        )
-        .await
-        {
+        match apply_one_decision(&mut deps, &scope, turn, decision).await {
             Ok(ApplyOutcome::Inserted) => report.inserted += 1,
             Ok(ApplyOutcome::Superseded) => report.superseded += 1,
             Ok(ApplyOutcome::Skipped) => report.skipped += 1,
@@ -648,32 +671,51 @@ async fn apply_decisions(
     Ok(report)
 }
 
-async fn apply_one_decision(
-    pool: &PgPool,
-    scope: &RlsContext,
-    entity_resolver: &EntityResolver,
+struct ApplyDecisionDeps<'a> {
+    pool: &'a PgPool,
+    vector_factory: &'a VectorStoreFactory,
+    vector_cache: ConfiguredVectorStoreCache,
     entity_blocking_embedder: Option<Arc<dyn EmbeddingProvider>>,
+    entity_resolver: &'a EntityResolver,
+}
+
+async fn apply_one_decision(
+    deps: &mut ApplyDecisionDeps<'_>,
+    scope: &RlsContext,
     turn: &SessionTurn,
     decision: &IngestDecision,
 ) -> Result<ApplyOutcome, HandlerError> {
     let Some(fact) = decision_fact(decision) else {
         return Ok(ApplyOutcome::Skipped);
     };
-    let entity_vector = entity_blocking_embedder.as_ref().map(|_| {
-        Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()))
-            as Arc<dyn VectorStore>
-    });
-    let scoped_resolver =
-        entity_blocking_embedder
-            .zip(entity_vector.clone())
-            .map(|(embedder, vector)| {
-                entity_resolver
-                    .clone()
-                    .with_embedding_blocking(embedder, vector, 0.80)
-            });
-    let resolver = scoped_resolver.as_ref().unwrap_or(entity_resolver);
-    let graph = graph_store(pool.clone(), scope.clone(), fact, entity_vector);
-    apply_one_decision_with_graph(pool, scope, &graph, resolver, turn, decision).await
+    let entity_vector = if deps.entity_blocking_embedder.is_some() {
+        Some(
+            deps.vector_cache
+                .configured_for_scope(deps.pool, deps.vector_factory, scope.clone(), true)
+                .await
+                .map_err(HandlerError::from)?,
+        )
+    } else {
+        None
+    };
+    let scoped_resolver = deps
+        .entity_blocking_embedder
+        .clone()
+        .zip(entity_vector)
+        .map(|(embedder, vector)| {
+            deps.entity_resolver
+                .clone()
+                .with_embedding_blocking(embedder, vector, 0.80)
+        });
+    let resolver = scoped_resolver.as_ref().unwrap_or(deps.entity_resolver);
+    let graph = graph_store(
+        deps.pool.clone(),
+        scope.clone(),
+        fact,
+        deps.vector_factory,
+        scoped_resolver.is_some(),
+    );
+    apply_one_decision_with_graph(deps.pool, scope, &graph, resolver, turn, decision).await
 }
 
 async fn apply_one_decision_with_graph(
@@ -717,17 +759,44 @@ async fn apply_one_decision_with_graph(
     }
 }
 
+#[derive(Default)]
+struct ConfiguredVectorStoreCache {
+    stores: HashMap<(RlsContext, bool), Arc<dyn VectorStore>>,
+}
+
+impl ConfiguredVectorStoreCache {
+    async fn configured_for_scope(
+        &mut self,
+        pool: &PgPool,
+        vector_factory: &VectorStoreFactory,
+        scope: RlsContext,
+        assume_app_role: bool,
+    ) -> moa_memory_vector::Result<Arc<dyn VectorStore>> {
+        let key = (scope.clone(), assume_app_role);
+        if let Some(store) = self.stores.get(&key) {
+            return Ok(store.clone());
+        }
+        let store = vector_factory
+            .configured_for_scope(pool, scope, assume_app_role)
+            .await?;
+        self.stores.insert(key, store.clone());
+        Ok(store)
+    }
+}
+
 fn graph_store(
     pool: PgPool,
     scope: RlsContext,
     fact: &EmbeddedFact,
-    entity_vector: Option<Arc<dyn VectorStore>>,
+    vector_factory: &VectorStoreFactory,
+    needs_entity_vector_writes: bool,
 ) -> PostgresGraphStore {
     let store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope.clone());
-    if fact.embedding.is_some() {
-        store.with_vector_store(Arc::new(PgvectorStore::new_for_app_role(pool, scope)))
-    } else if let Some(vector) = entity_vector {
-        store.with_vector_store(vector)
+    if fact.embedding.is_some() || needs_entity_vector_writes {
+        let vector_backend = vector_factory.transactional_graph_backend(pool, scope, true);
+        store
+            .with_vector_store(vector_backend.vector_store())
+            .with_vector_post_commit_sync(vector_backend.post_commit_sync())
     } else {
         store
     }

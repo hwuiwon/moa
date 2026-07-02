@@ -1,10 +1,384 @@
 //! Storage-partition vector-backend selection.
 
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+};
 
-use sqlx::PgPool;
+use async_trait::async_trait;
+use moa_core::{MoaConfig, RlsContext};
+use sqlx::{PgConnection, PgPool};
+use uuid::Uuid;
 
-use crate::{Error, PgvectorStore, Result, TurbopufferStore, VectorStore};
+use crate::{
+    Error, PgvectorStore, Result, TurbopufferStore, VectorItem, VectorPostCommitSync, VectorQuery,
+    VectorStore, VectorSyncOperation, VectorSyncReport,
+    sync::{
+        VECTOR_SYNC_POST_COMMIT_LIMIT, VectorSyncJob, claim_pending_vector_sync,
+        enqueue_external_vector_sync, fetch_current_vector_items, mark_vector_sync_failed_batch,
+        mark_vector_sync_processed_batch,
+    },
+};
+
+/// Configured vector backend registry for graph-memory call sites.
+///
+/// The registry owns external backend clients and centralizes the policy for
+/// when a caller needs the configured backend versus pgvector as the
+/// transactional Postgres source. New vector backends should be added here
+/// instead of constructing them from ingestion, lifecycle, or retrieval code.
+#[derive(Clone, Default)]
+pub struct VectorStoreFactory {
+    turbopuffer: Option<Arc<TurbopufferStore>>,
+}
+
+impl VectorStoreFactory {
+    /// Builds a vector store factory from shared MOA configuration.
+    #[must_use]
+    pub fn from_config(config: &MoaConfig) -> Self {
+        Self {
+            turbopuffer: TurbopufferStore::from_config(config).ok().map(Arc::new),
+        }
+    }
+
+    /// Returns the pgvector source store for normal application-role callers.
+    #[must_use]
+    pub fn pgvector_source(&self, pool: PgPool, scope: RlsContext) -> Arc<PgvectorStore> {
+        Arc::new(PgvectorStore::new(pool, scope))
+    }
+
+    /// Returns the pgvector source store while assuming `moa_app` inside each transaction.
+    #[must_use]
+    pub fn pgvector_source_for_app_role(
+        &self,
+        pool: PgPool,
+        scope: RlsContext,
+    ) -> Arc<PgvectorStore> {
+        Arc::new(PgvectorStore::new_for_app_role(pool, scope))
+    }
+
+    /// Returns the pgvector source store for tenant control-plane validation reads.
+    #[must_use]
+    pub fn pgvector_source_for_control_plane(
+        &self,
+        pool: PgPool,
+        scope: RlsContext,
+    ) -> Arc<PgvectorStore> {
+        Arc::new(PgvectorStore::new_for_control_plane(pool, scope))
+    }
+
+    /// Returns the vector store used by transactional graph writes.
+    ///
+    /// External vector backends cannot participate in the Postgres transaction
+    /// driven by `PostgresGraphStore::with_vector_store`. This store writes
+    /// pgvector as the transactional source and queues post-commit sync work
+    /// for storage partitions configured for an external backend.
+    #[must_use]
+    pub fn transactional_graph_backend(
+        &self,
+        pool: PgPool,
+        scope: RlsContext,
+        assume_app_role: bool,
+    ) -> TransactionalGraphVectorBackend {
+        let storage_partition_id = scope.storage_partition_id().to_string();
+        let source = if assume_app_role {
+            self.pgvector_source_for_app_role(pool.clone(), scope)
+        } else {
+            self.pgvector_source(pool.clone(), scope)
+        };
+        TransactionalGraphVectorBackend {
+            store: Arc::new(TransactionalGraphVectorStore {
+                source,
+                pool,
+                factory: self.clone(),
+                storage_partition_id,
+                post_commit_limit: VECTOR_SYNC_POST_COMMIT_LIMIT,
+            }),
+        }
+    }
+
+    /// Selects the configured vector store for non-transactional reads or writes.
+    ///
+    /// Missing `storage_partition_state` rows default to pgvector. Storage
+    /// partitions explicitly configured for Turbopuffer require a configured
+    /// Turbopuffer client.
+    pub async fn configured_for_scope(
+        &self,
+        pool: &PgPool,
+        scope: RlsContext,
+        assume_app_role: bool,
+    ) -> Result<Arc<dyn VectorStore>> {
+        let storage_partition_id = scope.storage_partition_id();
+        let pgvector = if assume_app_role {
+            self.pgvector_source_for_app_role(pool.clone(), scope)
+        } else {
+            self.pgvector_source(pool.clone(), scope)
+        };
+        vector_store_for_storage_partition(
+            storage_partition_id.as_str(),
+            pool,
+            pgvector,
+            self.turbopuffer.clone(),
+        )
+        .await
+    }
+
+    /// Drains committed vector-sync outbox rows into configured external backends.
+    ///
+    /// The drain claims rows with a short lease, applies each operation outside
+    /// the graph transaction, and leaves failed rows pending for retry. Partitions
+    /// that still use pgvector are marked processed because pgvector is already
+    /// the committed source.
+    pub async fn drain_external_sync(&self, pool: &PgPool, limit: i64) -> Result<VectorSyncReport> {
+        self.drain_external_sync_for_storage_partition(pool, None, limit)
+            .await
+    }
+
+    async fn drain_external_sync_for_storage_partition(
+        &self,
+        pool: &PgPool,
+        storage_partition_id: Option<&str>,
+        limit: i64,
+    ) -> Result<VectorSyncReport> {
+        let jobs = claim_pending_vector_sync(pool, storage_partition_id, limit).await?;
+        let mut report = VectorSyncReport {
+            attempted: jobs.len() as u64,
+            ..VectorSyncReport::default()
+        };
+
+        for (storage_partition_id, jobs) in group_jobs_by_partition(jobs) {
+            let target = match self
+                .external_for_storage_partition(pool, &storage_partition_id)
+                .await
+            {
+                Ok(Some(target)) => target,
+                Ok(None) => {
+                    let job_refs = jobs.iter().collect::<Vec<_>>();
+                    mark_vector_sync_processed_batch(pool, &job_refs).await?;
+                    report.skipped += jobs.len() as u64;
+                    continue;
+                }
+                Err(error) => {
+                    let job_refs = jobs.iter().collect::<Vec<_>>();
+                    mark_vector_sync_failed_batch(pool, &job_refs, &error).await?;
+                    report.failed += jobs.len() as u64;
+                    continue;
+                }
+            };
+
+            self.drain_external_sync_partition(
+                pool,
+                target,
+                &storage_partition_id,
+                &jobs,
+                &mut report,
+            )
+            .await?;
+        }
+
+        Ok(report)
+    }
+
+    async fn drain_external_sync_partition(
+        &self,
+        pool: &PgPool,
+        target: Arc<dyn VectorStore>,
+        storage_partition_id: &str,
+        jobs: &[crate::sync::VectorSyncJob],
+        report: &mut VectorSyncReport,
+    ) -> Result<()> {
+        let upsert_jobs = jobs
+            .iter()
+            .filter(|job| job.operation == VectorSyncOperation::Upsert)
+            .collect::<Vec<_>>();
+        let delete_jobs = jobs
+            .iter()
+            .filter(|job| job.operation == VectorSyncOperation::Delete)
+            .collect::<Vec<_>>();
+
+        let mut delete_after_commit_jobs = Vec::new();
+        let upsert_uids = upsert_jobs.iter().map(|job| job.uid).collect::<Vec<_>>();
+        match fetch_current_vector_items(pool, storage_partition_id, &upsert_uids).await {
+            Ok(items) => {
+                let found_uids = items.iter().map(|item| item.uid).collect::<HashSet<_>>();
+                let found_upsert_jobs = upsert_jobs
+                    .iter()
+                    .copied()
+                    .filter(|job| found_uids.contains(&job.uid))
+                    .collect::<Vec<_>>();
+                delete_after_commit_jobs = upsert_jobs
+                    .iter()
+                    .copied()
+                    .filter(|job| !found_uids.contains(&job.uid))
+                    .collect::<Vec<_>>();
+                if !items.is_empty() {
+                    match target.upsert(&items).await {
+                        Ok(()) => {
+                            mark_vector_sync_processed_batch(pool, &found_upsert_jobs).await?;
+                            report.succeeded += found_upsert_jobs.len() as u64;
+                        }
+                        Err(error) => {
+                            mark_vector_sync_failed_batch(pool, &found_upsert_jobs, &error).await?;
+                            report.failed += found_upsert_jobs.len() as u64;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                mark_vector_sync_failed_batch(pool, &upsert_jobs, &error).await?;
+                report.failed += upsert_jobs.len() as u64;
+            }
+        }
+
+        let mut delete_uids = Vec::new();
+        let mut seen_delete_uids = HashSet::new();
+        let mut delete_mark_jobs = Vec::new();
+        for job in delete_jobs.into_iter().chain(delete_after_commit_jobs) {
+            if seen_delete_uids.insert(job.uid) {
+                delete_uids.push(job.uid);
+            }
+            delete_mark_jobs.push(job);
+        }
+        if delete_uids.is_empty() {
+            return Ok(());
+        }
+
+        match target.delete(&delete_uids).await {
+            Ok(()) => {
+                mark_vector_sync_processed_batch(pool, &delete_mark_jobs).await?;
+                report.succeeded += delete_mark_jobs.len() as u64;
+            }
+            Err(error) => {
+                mark_vector_sync_failed_batch(pool, &delete_mark_jobs, &error).await?;
+                report.failed += delete_mark_jobs.len() as u64;
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the configured Turbopuffer client, when available.
+    #[must_use]
+    pub fn turbopuffer(&self) -> Option<Arc<TurbopufferStore>> {
+        self.turbopuffer.clone()
+    }
+
+    async fn external_for_storage_partition(
+        &self,
+        pool: &PgPool,
+        storage_partition_id: &str,
+    ) -> Result<Option<Arc<dyn VectorStore>>> {
+        let state = load_vector_backend_state(pool, storage_partition_id).await?;
+        resolve_external_backend_choice(
+            storage_partition_id,
+            &state.backend,
+            &state.hipaa_tier,
+            self.turbopuffer.clone(),
+        )
+    }
+}
+
+fn group_jobs_by_partition(jobs: Vec<VectorSyncJob>) -> BTreeMap<String, Vec<VectorSyncJob>> {
+    let mut grouped = BTreeMap::new();
+    for job in jobs {
+        grouped
+            .entry(job.storage_partition_id.clone())
+            .or_insert_with(Vec::new)
+            .push(job);
+    }
+    grouped
+}
+
+/// Vector backend bundle for transactional graph writes.
+#[derive(Clone)]
+pub struct TransactionalGraphVectorBackend {
+    store: Arc<TransactionalGraphVectorStore>,
+}
+
+impl TransactionalGraphVectorBackend {
+    /// Returns the pgvector-backed transactional vector store.
+    #[must_use]
+    pub fn vector_store(&self) -> Arc<dyn VectorStore> {
+        self.store.clone()
+    }
+
+    /// Returns the post-commit sync hook for external vector projections.
+    #[must_use]
+    pub fn post_commit_sync(&self) -> Arc<dyn VectorPostCommitSync> {
+        self.store.clone()
+    }
+
+    /// Runs the post-commit sync hook.
+    pub async fn sync_post_commit(&self) -> Result<()> {
+        VectorPostCommitSync::sync_post_commit(self.store.as_ref()).await
+    }
+}
+
+struct TransactionalGraphVectorStore {
+    source: Arc<PgvectorStore>,
+    pool: PgPool,
+    factory: VectorStoreFactory,
+    storage_partition_id: String,
+    post_commit_limit: i64,
+}
+
+#[async_trait]
+impl VectorStore for TransactionalGraphVectorStore {
+    fn backend(&self) -> &'static str {
+        self.source.backend()
+    }
+
+    fn dimension(&self) -> usize {
+        self.source.dimension()
+    }
+
+    async fn upsert(&self, items: &[VectorItem]) -> Result<()> {
+        self.source.upsert(items).await
+    }
+
+    async fn upsert_in_tx(&self, conn: &mut PgConnection, items: &[VectorItem]) -> Result<()> {
+        self.source.upsert_in_tx(conn, items).await?;
+        let uids = items.iter().map(|item| item.uid).collect::<Vec<_>>();
+        enqueue_external_vector_sync(
+            conn,
+            &self.storage_partition_id,
+            VectorSyncOperation::Upsert,
+            &uids,
+        )
+        .await
+    }
+
+    async fn knn(&self, query: &VectorQuery) -> Result<Vec<crate::VectorMatch>> {
+        self.source.knn(query).await
+    }
+
+    async fn delete(&self, uids: &[Uuid]) -> Result<()> {
+        self.source.delete(uids).await
+    }
+
+    async fn delete_in_tx(&self, conn: &mut PgConnection, uids: &[Uuid]) -> Result<()> {
+        self.source.delete_in_tx(conn, uids).await?;
+        enqueue_external_vector_sync(
+            conn,
+            &self.storage_partition_id,
+            VectorSyncOperation::Delete,
+            uids,
+        )
+        .await
+    }
+}
+
+#[async_trait]
+impl VectorPostCommitSync for TransactionalGraphVectorStore {
+    async fn sync_post_commit(&self) -> Result<()> {
+        self.factory
+            .drain_external_sync_for_storage_partition(
+                &self.pool,
+                Some(&self.storage_partition_id),
+                self.post_commit_limit,
+            )
+            .await?;
+        Ok(())
+    }
+}
 
 /// Selects the configured vector store for one storage partition.
 ///
@@ -17,6 +391,25 @@ pub async fn vector_store_for_storage_partition(
     pgvector: Arc<PgvectorStore>,
     turbopuffer: Option<Arc<TurbopufferStore>>,
 ) -> Result<Arc<dyn VectorStore>> {
+    let state = load_vector_backend_state(pool, storage_partition_id).await?;
+    resolve_backend_choice(
+        storage_partition_id,
+        &state.backend,
+        &state.hipaa_tier,
+        pgvector,
+        turbopuffer,
+    )
+}
+
+struct VectorBackendState {
+    backend: String,
+    hipaa_tier: String,
+}
+
+async fn load_vector_backend_state(
+    pool: &PgPool,
+    storage_partition_id: &str,
+) -> Result<VectorBackendState> {
     let row = sqlx::query_as::<_, (String, String)>(
         r#"
         SELECT vector_backend, hipaa_tier
@@ -30,13 +423,10 @@ pub async fn vector_store_for_storage_partition(
 
     let (backend, hipaa_tier) =
         row.unwrap_or_else(|| ("pgvector".to_string(), "standard".to_string()));
-    resolve_backend_choice(
-        storage_partition_id,
-        &backend,
-        &hipaa_tier,
-        pgvector,
-        turbopuffer,
-    )
+    Ok(VectorBackendState {
+        backend,
+        hipaa_tier,
+    })
 }
 
 fn resolve_backend_choice(
@@ -46,7 +436,22 @@ fn resolve_backend_choice(
     pgvector: Arc<PgvectorStore>,
     turbopuffer: Option<Arc<TurbopufferStore>>,
 ) -> Result<Arc<dyn VectorStore>> {
+    let Some(external) =
+        resolve_external_backend_choice(storage_partition_id, backend, hipaa_tier, turbopuffer)?
+    else {
+        return Ok(pgvector);
+    };
+    Ok(external)
+}
+
+fn resolve_external_backend_choice(
+    storage_partition_id: &str,
+    backend: &str,
+    hipaa_tier: &str,
+    turbopuffer: Option<Arc<TurbopufferStore>>,
+) -> Result<Option<Arc<dyn VectorStore>>> {
     match backend {
+        "pgvector" => Ok(None),
         "turbopuffer" => {
             let store = turbopuffer.ok_or_else(|| Error::TurbopufferUnavailable {
                 storage_partition_id: storage_partition_id.to_string(),
@@ -56,11 +461,14 @@ fn resolve_backend_choice(
                     storage_partition_id: storage_partition_id.to_string(),
                 });
             }
-            Ok(Arc::new(store.with_storage_partition_id(
-                storage_partition_id.to_string(),
-            )))
+            let store: Arc<dyn VectorStore> =
+                Arc::new(store.with_storage_partition_id(storage_partition_id.to_string()));
+            Ok(Some(store))
         }
-        _ => Ok(pgvector),
+        other => Err(Error::UnsupportedVectorBackend {
+            storage_partition_id: storage_partition_id.to_string(),
+            backend: other.to_string(),
+        }),
     }
 }
 
@@ -68,12 +476,16 @@ fn resolve_backend_choice(
 mod tests {
     use std::sync::Arc;
 
+    use moa_core::MoaConfig;
     use moa_core::RlsContext;
     use moa_core::TenantId;
     use secrecy::SecretString;
     use sqlx::PgPool;
 
-    use crate::{Error, PgvectorStore, TurbopufferStore, backend::resolve_backend_choice};
+    use crate::{
+        Error, PgvectorStore, TurbopufferStore,
+        backend::{VectorStoreFactory, resolve_backend_choice},
+    };
 
     fn pg_store() -> Arc<PgvectorStore> {
         Arc::new(PgvectorStore::new(
@@ -120,5 +532,76 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(err, Error::TurbopufferBaaRequired { .. }));
+    }
+
+    #[tokio::test]
+    async fn factory_transactional_graph_backend_uses_pgvector_source() {
+        // Pins: graph writes keep a transaction-capable pgvector source even when
+        // external vector backends are configured for read-side retrieval.
+        let mut config = MoaConfig::default();
+        config.memory.vector.turbopuffer.api_key = "test-key".to_string();
+        let factory = VectorStoreFactory::from_config(&config);
+        assert!(
+            factory.turbopuffer().is_some(),
+            "fixture should configure a Turbopuffer client"
+        );
+
+        let backend = factory.transactional_graph_backend(
+            PgPool::connect_lazy("postgres://localhost/moa").expect("lazy pool"),
+            RlsContext::tenant(TenantId::new()),
+            true,
+        );
+
+        assert_eq!(backend.vector_store().backend(), "pgvector");
+    }
+
+    #[test]
+    fn production_call_sites_do_not_construct_pgvector_directly() {
+        // Pins: production ingestion, retrieval, and lifecycle paths route vector
+        // construction through VectorStoreFactory instead of choosing pgvector ad hoc.
+        let sources = [
+            (
+                "moa-brain pipeline memory",
+                include_str!("../../../moa-brain/src/pipeline/memory.rs"),
+            ),
+            (
+                "orchestrator knowledge ingest",
+                include_str!("../../../moa-orchestrator/src/services/knowledge/ingest.rs"),
+            ),
+            (
+                "orchestrator memory retrieval",
+                include_str!("../../../moa-orchestrator/src/services/memory/retrieval.rs"),
+            ),
+            (
+                "orchestrator admin maintenance",
+                include_str!("../../../moa-orchestrator/src/services/admin_maintenance.rs"),
+            ),
+            (
+                "memory fast path",
+                include_str!("../../ingest/src/fast_path.rs"),
+            ),
+            (
+                "memory slow path",
+                include_str!("../../ingest/src/slow_path.rs"),
+            ),
+            (
+                "memory lifecycle consolidation",
+                include_str!("../../lifecycle/src/consolidate.rs"),
+            ),
+        ];
+        let constructors = [
+            "PgvectorStore::new(",
+            "PgvectorStore::new_for_app_role(",
+            "PgvectorStore::new_for_control_plane(",
+        ];
+
+        for (name, source) in sources {
+            for constructor in constructors {
+                assert!(
+                    !source.contains(constructor),
+                    "{name} must use VectorStoreFactory instead of {constructor}"
+                );
+            }
+        }
     }
 }

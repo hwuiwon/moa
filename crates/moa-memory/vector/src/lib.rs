@@ -6,16 +6,21 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 
 pub mod backend;
+pub(crate) mod embedding_row;
 pub mod pgvector_store;
 pub mod promotion;
+pub mod sync;
 pub mod turbopuffer;
 
-pub use backend::vector_store_for_storage_partition;
+pub use backend::{
+    TransactionalGraphVectorBackend, VectorStoreFactory, vector_store_for_storage_partition,
+};
 pub use pgvector_store::PgvectorStore;
 pub use promotion::{
     PROMOTION_BATCH_SIZE, PROMOTION_OVERLAP_THRESHOLD, PromotionOptions, PromotionReport,
     VectorPartitionPromotion, finalize_promotion, rollback_promotion,
 };
+pub use sync::{VECTOR_SYNC_POST_COMMIT_LIMIT, VectorSyncOperation, VectorSyncReport};
 pub use turbopuffer::{TurbopufferStore, TurbopufferTextQuery};
 
 /// Fixed graph-memory embedding dimensionality.
@@ -165,6 +170,17 @@ pub enum Error {
     /// The vector backend cannot participate in the caller's Postgres transaction.
     #[error("vector backend `{0}` does not support Postgres transactional writes")]
     TransactionalWritesUnsupported(&'static str),
+    /// A persisted vector-sync operation was not recognized.
+    #[error("invalid vector sync operation `{0}`")]
+    InvalidVectorSyncOperation(String),
+    /// A storage partition selected a backend this binary cannot construct.
+    #[error("storage partition {storage_partition_id} uses unsupported vector backend `{backend}`")]
+    UnsupportedVectorBackend {
+        /// Storage partition with the unsupported backend.
+        storage_partition_id: String,
+        /// Persisted backend identifier.
+        backend: String,
+    },
     /// The vector backend cannot satisfy a requested query feature.
     #[error("vector backend `{backend}` does not support query feature `{feature}`")]
     UnsupportedQueryFeature {
@@ -282,6 +298,15 @@ pub trait VectorStore: Send + Sync {
         let _ = conn;
         let _ = uids;
         Err(Error::TransactionalWritesUnsupported(self.backend()))
+    }
+}
+
+/// Post-commit sync hook for graph writes that maintain external vector projections.
+#[async_trait]
+pub trait VectorPostCommitSync: Send + Sync {
+    /// Flushes durable post-commit work owned by a graph-vector attachment.
+    async fn sync_post_commit(&self) -> Result<()> {
+        Ok(())
     }
 }
 

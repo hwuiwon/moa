@@ -153,6 +153,10 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         name: "V000319__session_event_dedupe.sql",
         sql: include_str!("../migrations/postgres/V000319__session_event_dedupe.sql"),
     },
+    SchemaMigration {
+        name: "V000321__vector_sync_outbox.sql",
+        sql: include_str!("../migrations/postgres/V000321__vector_sync_outbox.sql"),
+    },
 ];
 
 const AUTH_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[

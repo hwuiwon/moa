@@ -22,7 +22,7 @@ use moa_knowledge::{
 };
 use moa_memory_graph::PostgresGraphStore;
 use moa_memory_types::MemoryScope;
-use moa_memory_vector::{PgvectorStore, VectorStore};
+use moa_memory_vector::VectorStoreFactory;
 use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
 
 use super::KnowledgeServiceError;
@@ -156,10 +156,16 @@ fn build_ingestion_pipeline(
         build_embedder_from_config(config, EmbedderConstructionRole::Ingestion)
             .map_err(embedder_config_error)?,
     ));
-    let vector_store: Arc<dyn VectorStore> =
-        Arc::new(PgvectorStore::new(pool.clone(), scope.clone()));
-    let graph_store =
-        Arc::new(PostgresGraphStore::scoped(pool, scope).with_vector_store(vector_store));
+    let vector_backend = VectorStoreFactory::from_config(config).transactional_graph_backend(
+        pool.clone(),
+        scope.clone(),
+        false,
+    );
+    let graph_store = Arc::new(
+        PostgresGraphStore::scoped(pool, scope)
+            .with_vector_store(vector_backend.vector_store())
+            .with_vector_post_commit_sync(vector_backend.post_commit_sync()),
+    );
     let graph = Arc::new(MemoryKnowledgeGraphWriter::new(
         graph_store,
         MemoryScope::Tenant { tenant_id },

@@ -1,6 +1,9 @@
 //! Integration coverage for atomic graph-memory write modes.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use chrono::{Duration, Utc};
 use moa_core::RlsContext;
@@ -10,7 +13,9 @@ use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
     PostgresGraphStore,
 };
-use moa_memory_vector::{PgvectorStore, VectorQuery, VectorStore};
+use moa_memory_vector::{
+    PgvectorStore, VectorItem, VectorPostCommitSync, VectorQuery, VectorStore,
+};
 use moa_session::testing;
 use moa_test_support::fixtures::stable_uuid_from_label;
 use serde_json::json;
@@ -30,6 +35,72 @@ struct EdgeIndexRow {
     user_id: Option<String>,
     scope: String,
     properties: serde_json::Value,
+}
+
+struct RecordingVectorStore {}
+
+struct RecordingPostCommitSync {
+    pool: PgPool,
+    target_uid: Uuid,
+    post_commit_calls: Arc<AtomicUsize>,
+    visible_rows_at_sync: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl VectorStore for RecordingVectorStore {
+    fn backend(&self) -> &'static str {
+        "recording-test"
+    }
+
+    fn dimension(&self) -> usize {
+        1024
+    }
+
+    async fn upsert(&self, _items: &[VectorItem]) -> Result<(), moa_memory_vector::Error> {
+        Ok(())
+    }
+
+    async fn upsert_in_tx(
+        &self,
+        _conn: &mut sqlx::PgConnection,
+        _items: &[VectorItem],
+    ) -> Result<(), moa_memory_vector::Error> {
+        Ok(())
+    }
+
+    async fn knn(
+        &self,
+        _query: &VectorQuery,
+    ) -> Result<Vec<moa_memory_vector::VectorMatch>, moa_memory_vector::Error> {
+        Ok(Vec::new())
+    }
+
+    async fn delete(&self, _uids: &[Uuid]) -> Result<(), moa_memory_vector::Error> {
+        Ok(())
+    }
+
+    async fn delete_in_tx(
+        &self,
+        _conn: &mut sqlx::PgConnection,
+        _uids: &[Uuid],
+    ) -> Result<(), moa_memory_vector::Error> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl VectorPostCommitSync for RecordingPostCommitSync {
+    async fn sync_post_commit(&self) -> Result<(), moa_memory_vector::Error> {
+        let visible_rows =
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM moa.node_index WHERE uid = $1")
+                .bind(self.target_uid)
+                .fetch_one(&self.pool)
+                .await?;
+        self.visible_rows_at_sync
+            .store(visible_rows as usize, Ordering::SeqCst);
+        self.post_commit_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 fn tenant_scope(storage_partition_id: impl AsRef<str>) -> RlsContext {
@@ -316,6 +387,56 @@ async fn erase_payload_hash_exists(pool: &PgPool, storage_partition_id: &str, ui
     .expect("decode erase payload");
     assert!(payload.get("properties_hash").is_some(), "{payload}");
     conn.commit().await.expect("commit erase payload read");
+}
+
+#[tokio::test]
+async fn graph_write_runs_vector_sync_after_commit_db_memory() {
+    // Pins: external vector sync is a post-commit hook. The hook reads the node
+    // through a separate connection and must see the committed graph row.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = Uuid::now_v7().to_string();
+    let intent = node_intent(
+        &storage_partition_id,
+        NodeLabel::Fact,
+        "post commit vector sync fact",
+        Utc::now(),
+        Some(basis_vector(0)),
+    );
+    let post_commit_calls = Arc::new(AtomicUsize::new(0));
+    let visible_rows_at_sync = Arc::new(AtomicUsize::new(0));
+    let vector = RecordingVectorStore {};
+    let hook = RecordingPostCommitSync {
+        pool: session_store.pool().clone(),
+        target_uid: intent.uid,
+        post_commit_calls: post_commit_calls.clone(),
+        visible_rows_at_sync: visible_rows_at_sync.clone(),
+    };
+    let graph = PostgresGraphStore::scoped_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(storage_partition_id.clone()),
+    )
+    .with_vector_store(Arc::new(vector))
+    .with_vector_post_commit_sync(Arc::new(hook));
+
+    let uid = graph
+        .create_node(intent)
+        .await
+        .expect("create node with vector post-commit hook");
+
+    assert_eq!(post_commit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(visible_rows_at_sync.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        node_valid_to(session_store.pool(), &storage_partition_id, uid).await,
+        None
+    );
+
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
 }
 
 #[tokio::test]

@@ -16,7 +16,7 @@ use moa_core::{
 };
 use moa_memory_graph::{GraphStore, PiiClass, PostgresGraphStore};
 use moa_memory_types::{MemoryScope, ScopeTier};
-use moa_memory_vector::{PgvectorStore, VectorStore};
+use moa_memory_vector::VectorStoreFactory;
 use sqlx::PgPool;
 
 use crate::retrieval::PlannedRetriever;
@@ -104,43 +104,43 @@ impl ScopedRetrievalRuntime {
 }
 
 /// Factory for building graph-memory retrieval runtimes for individual scopes.
+#[async_trait]
 pub trait ScopedRetrievalRuntimeFactory: Send + Sync {
     /// Builds graph-memory backends for one memory scope.
-    fn build_runtime(
+    async fn build_runtime(
         &self,
         scope: &MemoryScope,
         config: &moa_core::MoaConfig,
         pool: &PgPool,
         assume_app_role: bool,
-    ) -> ScopedRetrievalRuntime;
+    ) -> Result<ScopedRetrievalRuntime>;
 }
 
 #[derive(Debug, Default)]
 struct PostgresScopedRetrievalRuntimeFactory;
 
+#[async_trait]
 impl ScopedRetrievalRuntimeFactory for PostgresScopedRetrievalRuntimeFactory {
-    fn build_runtime(
+    async fn build_runtime(
         &self,
         scope: &MemoryScope,
         config: &moa_core::MoaConfig,
         pool: &PgPool,
         assume_app_role: bool,
-    ) -> ScopedRetrievalRuntime {
+    ) -> Result<ScopedRetrievalRuntime> {
         let scope_context = RlsContext::from(scope.clone());
-        let vector: Arc<dyn VectorStore> = if assume_app_role {
-            Arc::new(PgvectorStore::new_for_app_role(
-                pool.clone(),
-                scope_context.clone(),
-            ))
-        } else {
-            Arc::new(PgvectorStore::new(pool.clone(), scope_context.clone()))
-        };
+        let vector_factory = VectorStoreFactory::from_config(config);
+        let vector = vector_factory
+            .configured_for_scope(pool, scope_context.clone(), assume_app_role)
+            .await
+            .map_err(|error| {
+                MoaError::StorageError(format!("vector backend selection failed: {error}"))
+            })?;
         let graph_store = if assume_app_role {
             PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_context)
         } else {
             PostgresGraphStore::scoped(pool.clone(), scope_context)
-        }
-        .with_vector_store(vector.clone());
+        };
         let graph: Arc<dyn GraphStore> = Arc::new(graph_store);
         let hybrid = Arc::new(
             crate::retrieval::HybridRetriever::from_config(
@@ -162,7 +162,7 @@ impl ScopedRetrievalRuntimeFactory for PostgresScopedRetrievalRuntimeFactory {
                 pool.clone(),
             ))
         };
-        ScopedRetrievalRuntime::new(graph, cached)
+        Ok(ScopedRetrievalRuntime::new(graph, cached))
     }
 }
 
@@ -284,7 +284,7 @@ impl GraphMemoryRetriever {
             max_pii_class,
         } = input;
         let scope = &scope_plan.scope;
-        let runtime = self.runtime_for_scope(scope)?;
+        let runtime = self.runtime_for_scope(scope).await?;
         let planning = crate::planning::PlanningCtx::new(scope.clone(), runtime.graph.clone());
         let planned = self.planner.plan(query, &planning).await.map_err(|error| {
             moa_core::MoaError::StorageError(format!("graph memory planning failed: {error}"))
@@ -311,26 +311,37 @@ impl GraphMemoryRetriever {
             })
     }
 
-    fn runtime_for_scope(&self, scope: &MemoryScope) -> Result<Arc<ScopedRetrievalRuntime>> {
+    async fn runtime_for_scope(&self, scope: &MemoryScope) -> Result<Arc<ScopedRetrievalRuntime>> {
         if matches!(scope.tier(), ScopeTier::Contact) {
-            return Ok(Arc::new(self.build_runtime_for_scope(scope)));
+            return Ok(Arc::new(self.build_runtime_for_scope(scope).await?));
         }
 
+        {
+            let runtimes = self.scoped_runtimes.lock().map_err(|_| {
+                moa_core::MoaError::StorageError(
+                    "graph memory runtime cache lock poisoned".to_string(),
+                )
+            })?;
+            if let Some(runtime) = runtimes.get(scope) {
+                return Ok(runtime.clone());
+            }
+        }
+
+        let runtime = Arc::new(self.build_runtime_for_scope(scope).await?);
         let mut runtimes = self.scoped_runtimes.lock().map_err(|_| {
             moa_core::MoaError::StorageError("graph memory runtime cache lock poisoned".to_string())
         })?;
-        if let Some(runtime) = runtimes.get(scope) {
-            return Ok(runtime.clone());
+        if let Some(existing) = runtimes.get(scope) {
+            return Ok(existing.clone());
         }
-
-        let runtime = Arc::new(self.build_runtime_for_scope(scope));
         runtimes.insert(scope.clone(), runtime.clone());
         Ok(runtime)
     }
 
-    fn build_runtime_for_scope(&self, scope: &MemoryScope) -> ScopedRetrievalRuntime {
+    async fn build_runtime_for_scope(&self, scope: &MemoryScope) -> Result<ScopedRetrievalRuntime> {
         self.runtime_factory
             .build_runtime(scope, &self.config, &self.pool, self.assume_app_role)
+            .await
     }
 }
 
@@ -602,16 +613,20 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    #[async_trait]
     impl ScopedRetrievalRuntimeFactory for CountingRuntimeFactory {
-        fn build_runtime(
+        async fn build_runtime(
             &self,
             _scope: &MemoryScope,
             _config: &moa_core::MoaConfig,
             _pool: &sqlx::PgPool,
             _assume_app_role: bool,
-        ) -> ScopedRetrievalRuntime {
+        ) -> moa_core::Result<ScopedRetrievalRuntime> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            ScopedRetrievalRuntime::new(Arc::new(NoopGraphStore), Arc::new(NoopPlannedRetriever))
+            Ok(ScopedRetrievalRuntime::new(
+                Arc::new(NoopGraphStore),
+                Arc::new(NoopPlannedRetriever),
+            ))
         }
     }
 
@@ -654,16 +669,20 @@ mod tests {
         retriever: Arc<ScriptedPlannedRetriever>,
     }
 
+    #[async_trait]
     impl ScopedRetrievalRuntimeFactory for ScriptedRuntimeFactory {
-        fn build_runtime(
+        async fn build_runtime(
             &self,
             _scope: &MemoryScope,
             _config: &moa_core::MoaConfig,
             _pool: &sqlx::PgPool,
             _assume_app_role: bool,
-        ) -> ScopedRetrievalRuntime {
+        ) -> moa_core::Result<ScopedRetrievalRuntime> {
             let retriever: Arc<dyn crate::retrieval::PlannedRetriever> = self.retriever.clone();
-            ScopedRetrievalRuntime::new(Arc::new(NoopGraphStore), retriever)
+            Ok(ScopedRetrievalRuntime::new(
+                Arc::new(NoopGraphStore),
+                retriever,
+            ))
         }
     }
 
@@ -687,7 +706,12 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://localhost/moa_test")
             .expect("lazy test pool should not connect");
-        let retriever = GraphMemoryRetriever::new(pool, None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let retriever = GraphMemoryRetriever::new(pool, None).with_scoped_runtime_factory(
+            Arc::new(CountingRuntimeFactory {
+                calls: calls.clone(),
+            }),
+        );
         let tenant_id = TenantId::new();
         let contact_scope = MemoryScope::Contact {
             tenant_id,
@@ -697,7 +721,9 @@ mod tests {
 
         retriever
             .runtime_for_scope(&contact_scope)
+            .await
             .expect("contact runtime should build");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             retriever
                 .scoped_runtimes
@@ -710,10 +736,13 @@ mod tests {
 
         retriever
             .runtime_for_scope(&tenant_scope)
+            .await
             .expect("tenant runtime should build");
         retriever
             .runtime_for_scope(&tenant_scope)
+            .await
             .expect("tenant runtime should be reused");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(
             retriever
                 .scoped_runtimes
@@ -746,14 +775,17 @@ mod tests {
 
         retriever
             .runtime_for_scope(&tenant_scope)
+            .await
             .expect("tenant runtime should build from injected factory");
         retriever
             .runtime_for_scope(&tenant_scope)
+            .await
             .expect("tenant runtime should be cached");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         retriever
             .runtime_for_scope(&contact_scope)
+            .await
             .expect("contact runtime should build from injected factory");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }

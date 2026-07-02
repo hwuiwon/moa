@@ -11,8 +11,8 @@ use moa_core::wire::admin::{
 };
 use moa_core::{BranchManager, StoragePartitionId, TenantId};
 use moa_memory_vector::{
-    PgvectorStore, PromotionOptions, PromotionReport, TurbopufferStore, VectorPartitionPromotion,
-    finalize_promotion, rollback_promotion,
+    PromotionOptions, PromotionReport, TurbopufferStore, VectorPartitionPromotion,
+    VectorStoreFactory, finalize_promotion, rollback_promotion,
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
@@ -84,7 +84,8 @@ impl AdminMaintenance for AdminMaintenanceImpl {
                 let storage_partition_id =
                     StoragePartitionId::for_tenant(request.tenant_id).to_string();
                 let scope = RlsContext::tenant(request.tenant_id);
-                let pgvector = Arc::new(PgvectorStore::new_for_control_plane(pool.clone(), scope));
+                let pgvector = VectorStoreFactory::from_config(&config)
+                    .pgvector_source_for_control_plane(pool.clone(), scope);
                 let turbopuffer = Arc::new(
                     TurbopufferStore::from_config(&config)
                         .map_err(|error| {

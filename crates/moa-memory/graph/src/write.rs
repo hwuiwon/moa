@@ -24,6 +24,7 @@ pub async fn create_node(store: &PostgresGraphStore, intent: NodeWriteIntent) ->
     let mut conn = store.begin_required().await?;
     let uid = create_node_in_conn(store, conn.as_mut(), intent).await?;
     conn.commit().await?;
+    sync_vector_post_commit(store, "create_node").await;
     Ok(uid)
 }
 
@@ -125,6 +126,7 @@ pub async fn supersede_node(
     write_and_bump(conn.as_mut(), create_changelog(&new, Some(old_change))).await?;
 
     conn.commit().await?;
+    sync_vector_post_commit(store, "supersede_node").await;
     Ok(new.uid)
 }
 
@@ -180,6 +182,7 @@ pub async fn invalidate_node(store: &PostgresGraphStore, uid: Uuid, reason: &str
     .await?;
 
     conn.commit().await?;
+    sync_vector_post_commit(store, "invalidate_node").await;
     Ok(())
 }
 
@@ -264,6 +267,7 @@ pub async fn close_existing_node_with_supersession(
     .await?;
 
     conn.commit().await?;
+    sync_vector_post_commit(store, "close_existing_node_with_supersession").await;
     Ok(())
 }
 
@@ -391,6 +395,7 @@ pub async fn upsert_node_embedding(
     .await?;
 
     conn.commit().await?;
+    sync_vector_post_commit(store, "upsert_node_embedding").await;
     Ok(())
 }
 
@@ -455,6 +460,7 @@ pub async fn hard_purge_with_audit(
         .await?;
 
     conn.commit().await?;
+    sync_vector_post_commit(store, "hard_purge").await;
     Ok(())
 }
 
@@ -858,6 +864,19 @@ fn require_vector_store(store: &PostgresGraphStore) -> Result<&dyn VectorStore> 
     store.vector().ok_or_else(|| {
         GraphError::Conflict("embedding provided but no vector store is configured".to_string())
     })
+}
+
+async fn sync_vector_post_commit(store: &PostgresGraphStore, operation: &'static str) {
+    let Some(hook) = store.vector_post_commit_sync() else {
+        return;
+    };
+    if let Err(error) = hook.sync_post_commit().await {
+        tracing::warn!(
+            error = %error,
+            operation,
+            "post-commit vector sync failed; queued rows remain pending"
+        );
+    }
 }
 
 fn create_changelog(intent: &NodeWriteIntent, cause_change_id: Option<i64>) -> ChangelogRecord {

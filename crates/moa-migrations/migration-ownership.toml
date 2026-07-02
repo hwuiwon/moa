@@ -130,6 +130,12 @@ owner = "moa-memory/vector"
 readers = ["moa-memory/graph", "moa-brain"]
 
 [[table]]
+name = "moa.vector_sync_outbox"
+schema = "moa"
+owner = "moa-memory/vector"
+readers = ["moa-memory/graph"]
+
+[[table]]
 name = "moa.graph_changelog"
 schema = "moa"
 owner = "moa-memory/graph"

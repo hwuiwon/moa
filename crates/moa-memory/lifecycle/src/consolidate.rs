@@ -13,7 +13,7 @@ use moa_memory_graph::{
     NodePropertyUpdateIntent, PiiClass, PostgresGraphStore,
 };
 use moa_memory_ingest::normalize_entity_name;
-use moa_memory_vector::PgvectorStore;
+use moa_memory_vector::VectorStoreFactory;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
@@ -687,8 +687,14 @@ fn lifecycle_row_from_sql(
 
 fn scoped_graph(pool: &PgPool, row: &LifecycleNodeRow) -> PostgresGraphStore {
     let scope = row.scope_context();
-    let vector = Arc::new(PgvectorStore::new(pool.clone(), scope.clone()));
-    PostgresGraphStore::scoped(pool.clone(), scope).with_vector_store(vector)
+    let vector_backend = VectorStoreFactory::default().transactional_graph_backend(
+        pool.clone(),
+        scope.clone(),
+        false,
+    );
+    PostgresGraphStore::scoped(pool.clone(), scope)
+        .with_vector_store(vector_backend.vector_store())
+        .with_vector_post_commit_sync(vector_backend.post_commit_sync())
 }
 
 fn normalized_entity_name(entity: &LifecycleNodeRow) -> String {

@@ -150,6 +150,17 @@ fn default_cron_jobs() -> Vec<DefaultCronJob> {
             version: "v1",
         },
         DefaultCronJob {
+            key: "vector_sync_outbox_drain",
+            body: serde_json::json!({
+                "schedule": "0 * * * * *",
+                "timezone": "UTC",
+                "target_service": "GraphMemoryMaint",
+                "target_handler": "sync_vectors",
+                "payload": { "limit": 512 }
+            }),
+            version: "v1",
+        },
+        DefaultCronJob {
             key: "segment_materialized_views_refresh",
             body: serde_json::json!({
                 "schedule": "0 */15 * * * *",
@@ -172,4 +183,25 @@ fn default_cron_jobs() -> Vec<DefaultCronJob> {
             version: "v1",
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_cron_jobs_include_vector_sync_drain() {
+        // Pins: external vector backend backlog draining is a background maintenance path,
+        // not only a graph-write post-commit side effect.
+        let jobs = default_cron_jobs();
+        let job = jobs
+            .iter()
+            .find(|job| job.key == "vector_sync_outbox_drain")
+            .expect("default vector sync drain cron job should be installed");
+
+        assert_eq!(job.version, "v1");
+        assert_eq!(job.body["target_service"], "GraphMemoryMaint");
+        assert_eq!(job.body["target_handler"], "sync_vectors");
+        assert_eq!(job.body["payload"]["limit"], 512);
+    }
 }

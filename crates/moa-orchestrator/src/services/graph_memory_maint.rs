@@ -2,6 +2,7 @@
 
 use chrono::{NaiveDate, Utc};
 use moa_core::TenantId;
+use moa_memory_vector::{VectorStoreFactory, VectorSyncReport};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,22 @@ pub struct CompactReport {
     pub workflows_started: u64,
 }
 
+/// Request payload for draining committed vector sync outbox rows.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct VectorSyncDrainRequest {
+    /// Maximum number of outbox rows to claim in one maintenance pass.
+    #[serde(default = "default_vector_sync_drain_limit")]
+    pub limit: i64,
+}
+
+impl Default for VectorSyncDrainRequest {
+    fn default() -> Self {
+        Self {
+            limit: default_vector_sync_drain_limit(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConsolidationDispatch {
     workflow_id: String,
@@ -50,6 +67,11 @@ struct ConsolidationDispatch {
 pub trait GraphMemoryMaint {
     /// Runs one graph-memory compaction pass.
     async fn compact(req: Json<CompactRequest>) -> Result<Json<CompactReport>, HandlerError>;
+
+    /// Drains committed vector sync rows into configured external vector backends.
+    async fn sync_vectors(
+        req: Json<VectorSyncDrainRequest>,
+    ) -> Result<Json<VectorSyncReport>, HandlerError>;
 }
 
 /// Concrete graph-memory maintenance service implementation.
@@ -101,6 +123,36 @@ impl GraphMemoryMaint for GraphMemoryMaintImpl {
         );
         Ok(Json::from(report))
     }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: Internal CronJob/maintenance handler; drains durable vector projection outbox rows only.
+    async fn sync_vectors(
+        &self,
+        ctx: Context<'_>,
+        request: Json<VectorSyncDrainRequest>,
+    ) -> Result<Json<VectorSyncReport>, HandlerError> {
+        annotate_restate_handler_span("GraphMemoryMaint", "sync_vectors");
+        let request = request.into_inner();
+        if request.limit <= 0 {
+            return Err(TerminalError::new("vector sync drain limit must be positive").into());
+        }
+        let pool = OrchestratorCtx::current_graph_pool();
+        let config = OrchestratorCtx::current_config();
+        Ok(ctx
+            .run(|| async move {
+                let report = VectorStoreFactory::from_config(config.as_ref())
+                    .drain_external_sync(&pool, request.limit)
+                    .await
+                    .map_err(|error| TerminalError::new(format!("drain vector sync: {error}")))?;
+                Ok::<_, HandlerError>(Json::from(report))
+            })
+            .name("graph-memory-vector-sync")
+            .await?)
+    }
+}
+
+fn default_vector_sync_drain_limit() -> i64 {
+    512
 }
 
 async fn discover_tenant_ids(
