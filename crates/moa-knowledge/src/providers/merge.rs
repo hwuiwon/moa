@@ -11,8 +11,8 @@ use sha2::Sha256;
 use crate::{
     domain::{
         CreateLinkTokenRequest, ExchangePublicTokenRequest, LinkToken, LinkedAccount,
-        ListChangedRecordsRequest, ProviderRecord, RecordPage, TriggerSyncRequest, TriggeredSync,
-        WebhookEvent,
+        ListChangedRecordsRequest, ProviderIntegration, ProviderRecord, RecordPage,
+        TriggerSyncRequest, TriggeredSync, WebhookEvent,
     },
     error::{Error, Result},
     normalize::redact_provider_metadata,
@@ -84,8 +84,31 @@ impl MergeProvider {
     }
 }
 
+/// Merge unified-API product categories MOA can sync knowledge from, as
+/// `(category id, display name)`. Merge models integrations as categories rather
+/// than a per-vendor catalog, so the `connector` in the link flow is a category
+/// id (e.g. `knowledgebase`) that fans out to every vendor Merge supports for it.
+const MERGE_KNOWLEDGE_CATEGORIES: &[(&str, &str)] = &[
+    ("knowledgebase", "Knowledge Base"),
+    ("filestorage", "File Storage"),
+];
+
 #[async_trait::async_trait]
 impl LinkedIntegrationProvider for MergeProvider {
+    async fn list_integrations(&self) -> Result<Vec<ProviderIntegration>> {
+        // Static category list: Merge exposes integrations as unified-API product
+        // categories, and the category id is what the link flow passes as
+        // `connector`.
+        Ok(MERGE_KNOWLEDGE_CATEGORIES
+            .iter()
+            .map(|(id, display_name)| ProviderIntegration {
+                id: (*id).to_string(),
+                display_name: (*display_name).to_string(),
+                logo_url: None,
+            })
+            .collect())
+    }
+
     async fn create_link_token(&self, req: CreateLinkTokenRequest) -> Result<LinkToken> {
         #[derive(Deserialize)]
         struct Response {

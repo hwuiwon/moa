@@ -1,10 +1,13 @@
 //! Policy evaluation and action-review rendering for tool invocations.
 
 use moa_core::{
-    ActionEnvelope, ActionPolicyEffect, ActionPolicyRule, ActionReviewField, ActionReviewFileDiff,
-    ActionReviewPreview, ActionRuleScope, MoaError, Result, SessionActorRef, SessionMeta,
-    ToolCallId, ToolInvocation, ToolPolicyInput, UserId, WorkerId,
+    ActionClass, ActionEnvelope, ActionPolicyEffect, ActionPolicyRule, ActionReviewField,
+    ActionReviewFileDiff, ActionReviewPreview, ActionRuleScope, IdempotencyClass, MoaError,
+    ProcedureToolKind, Result, RiskLevel, SessionActorRef, SessionMeta, ToolCallId, ToolDefinition,
+    ToolDiffStrategy, ToolInputShape, ToolInvocation, ToolPolicyInput, ToolPolicySpec, UserId,
+    WorkerId, is_procedure_tool_name,
 };
+use serde_json::Value;
 use uuid::Uuid;
 
 use super::ToolRouter;
@@ -122,10 +125,23 @@ impl ToolRouter {
         session: &SessionMeta,
         invocation: &ToolInvocation,
     ) -> Result<PreparedActionInvocation> {
-        let tool_definition = self
-            .registry
-            .get(&invocation.name)
-            .ok_or_else(|| MoaError::ToolError(format!("unknown tool: {}", invocation.name)))?;
+        // Workflow-owned procedure tools are not registered in the `ToolRegistry`
+        // because they execute on the Restate workflow path rather than through a
+        // hand/builtin/MCP executor. They still need a resolvable policy identity so
+        // tenant tool-policy rules can match them; genuinely unknown tools continue
+        // to fail closed.
+        let registered = self.registry.get(&invocation.name);
+        let synthetic_procedure_definition = if registered.is_none() {
+            procedure_tool_definition(&invocation.name)
+        } else {
+            None
+        };
+        let tool_definition = match registered {
+            Some(definition) => definition,
+            None => synthetic_procedure_definition
+                .as_ref()
+                .ok_or_else(|| MoaError::ToolError(format!("unknown tool: {}", invocation.name)))?,
+        };
         let policy_input = self.describe_invocation(tool_definition, invocation)?;
         let rules = if let Some(rule_store) = &self.rule_store {
             let policy_actor = identity_actor_for_policy_lookup(session);
@@ -251,9 +267,194 @@ impl ToolRouter {
     }
 }
 
+/// Builds a synthetic policy-only definition for a workflow-owned procedure tool.
+///
+/// `run_procedure`/`procedure_status` run on the Restate workflow path and are
+/// deliberately absent from the [`ToolRegistry`]. Returning a definition here gives
+/// the policy service a resolvable identity for them — defaulting to `Allow` so the
+/// effective decision is unchanged unless a tenant rule matches — without registering
+/// them as executable tools. Returns `None` for any other name so unregistered tools
+/// still fail closed at the caller.
+fn procedure_tool_definition(name: &str) -> Option<ToolDefinition> {
+    if !is_procedure_tool_name(name) {
+        return None;
+    }
+    let kind = ProcedureToolKind::from_name(name);
+    let (risk_level, action_class, idempotency_class) = match kind {
+        // Starting a run creates durable run state; individual side-effecting nodes
+        // remain separately action-policy governed inside the procedure executor.
+        Some(ProcedureToolKind::Run) => (
+            RiskLevel::Medium,
+            ActionClass::LocalWrite,
+            IdempotencyClass::IdempotentWithKey,
+        ),
+        // Polling only reads an existing run projection.
+        _ => (
+            RiskLevel::Low,
+            ActionClass::Read,
+            IdempotencyClass::Idempotent,
+        ),
+    };
+    Some(ToolDefinition {
+        name: name.to_string(),
+        description: String::new(),
+        schema: kind.map(ProcedureToolKind::schema).unwrap_or(Value::Null),
+        policy: ToolPolicySpec {
+            risk_level,
+            default_effect: ActionPolicyEffect::Allow,
+            action_class,
+            input_shape: ToolInputShape::Json,
+            diff_strategy: ToolDiffStrategy::None,
+        },
+        idempotency_class,
+        // The policy path never persists procedure-tool output through this budget;
+        // matches the shared default tool output budget for consistency.
+        max_output_tokens: 8_000,
+    })
+}
+
 fn identity_actor_for_policy_lookup(session: &SessionMeta) -> UserId {
     match &session.created_by {
         Some(SessionActorRef::Identity { id }) => UserId(id.to_string()),
         _ => UserId(Uuid::nil().to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use moa_core::{
+        ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, Result, SessionMeta, TenantId,
+        ToolInvocation, UserId,
+    };
+    use moa_security::ActionPolicyRuleStore;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::{ToolRouter, procedure_tool_definition};
+    use crate::core::registration::ToolRegistry;
+
+    fn session() -> SessionMeta {
+        SessionMeta {
+            tenant_id: TenantId::from(Uuid::from_u128(7)),
+            ..SessionMeta::default()
+        }
+    }
+
+    fn run_procedure_invocation() -> ToolInvocation {
+        ToolInvocation {
+            id: None,
+            name: "run_procedure".to_string(),
+            input: json!({}),
+        }
+    }
+
+    struct StaticRuleStore {
+        rules: Vec<ActionPolicyRule>,
+    }
+
+    #[async_trait]
+    impl ActionPolicyRuleStore for StaticRuleStore {
+        async fn list_action_policy_rules_for_tool(
+            &self,
+            _tenant_id: &TenantId,
+            _user_id: &UserId,
+            tool: &str,
+        ) -> Result<Vec<ActionPolicyRule>> {
+            Ok(self
+                .rules
+                .iter()
+                .filter(|rule| rule.tool == tool)
+                .cloned()
+                .collect())
+        }
+
+        async fn upsert_action_policy_rule(&self, _rule: ActionPolicyRule) -> Result<()> {
+            Ok(())
+        }
+
+        async fn delete_action_policy_rule(
+            &self,
+            _tenant_id: &TenantId,
+            _user_id: Option<&UserId>,
+            _tool: &str,
+            _pattern: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn procedure_tools_resolve_to_allow_and_unknown_tools_do_not() {
+        // Pins: workflow-owned procedure tools get a resolvable policy identity that
+        // defaults to Allow, while any other unregistered tool stays unresolved so it
+        // fails closed at the caller.
+        let run = procedure_tool_definition("run_procedure").expect("run_procedure resolves");
+        assert_eq!(run.policy.default_effect, ActionPolicyEffect::Allow);
+        let status =
+            procedure_tool_definition("procedure_status").expect("procedure_status resolves");
+        assert_eq!(status.policy.default_effect, ActionPolicyEffect::Allow);
+        assert!(procedure_tool_definition("bash").is_none());
+        assert!(procedure_tool_definition("spawn_worker").is_none());
+    }
+
+    #[tokio::test]
+    async fn check_policy_resolves_procedure_tools_but_rejects_unknown_tools() {
+        // Pins: the policy service can evaluate a procedure tool that is absent from the
+        // registry (default Allow), yet a genuinely unknown tool still errors, so the
+        // default-deny posture for unregistered tools is preserved.
+        let router = ToolRouter::new(ToolRegistry::new(), HashMap::new());
+        let session = session();
+
+        let allowed = router
+            .check_policy(&session, &run_procedure_invocation())
+            .await
+            .expect("procedure tool resolves");
+        assert_eq!(allowed.effect, ActionPolicyEffect::Allow);
+
+        let unknown = router
+            .check_policy(
+                &session,
+                &ToolInvocation {
+                    id: None,
+                    name: "not_a_real_tool".to_string(),
+                    input: json!({}),
+                },
+            )
+            .await;
+        assert!(unknown.is_err(), "unknown tools remain unresolved");
+    }
+
+    #[tokio::test]
+    async fn tenant_deny_rule_for_run_procedure_now_fires() {
+        // Pins: because run_procedure is now policy-resolvable, a tenant Deny rule
+        // targeting it is applied instead of being silently unreachable.
+        let session = session();
+        let deny_rule = ActionPolicyRule {
+            id: Uuid::now_v7(),
+            tool: "run_procedure".to_string(),
+            pattern: "*".to_string(),
+            effect: ActionPolicyEffect::Deny,
+            scope: ActionRuleScope::Tenant {
+                tenant_id: session.tenant_id,
+            },
+            reason: Some("procedures disabled for this tenant".to_string()),
+            created_by: UserId::new("admin"),
+            created_at: chrono::Utc::now(),
+        };
+        let router = ToolRouter::new(ToolRegistry::new(), HashMap::new()).with_rule_store(
+            Arc::new(StaticRuleStore {
+                rules: vec![deny_rule],
+            }),
+        );
+
+        let decision = router
+            .check_policy(&session, &run_procedure_invocation())
+            .await
+            .expect("procedure tool resolves");
+        assert_eq!(decision.effect, ActionPolicyEffect::Deny);
     }
 }

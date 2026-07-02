@@ -714,6 +714,44 @@ pub struct ProviderRecord {
     pub payload: Value,
 }
 
+/// Request to fetch the byte content of one provider record.
+///
+/// Mirrors the owned-request shape of [`ListChangedRecordsRequest`] and
+/// [`TriggerSyncRequest`]: the connection carries the provider account identity
+/// and connector needed to authorize the fetch, and the record identifies the
+/// specific source object whose content should be downloaded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FetchRecordContentRequest {
+    /// Connection whose provider account authorizes the fetch.
+    pub connection: KnowledgeConnection,
+    /// Normalized record whose byte content should be downloaded.
+    pub record: ProviderRecord,
+}
+
+/// Byte content downloaded for one provider record.
+///
+/// Kept in memory only for the duration of one ingestion pass; the bytes are
+/// handed straight to a document parser and never persisted or serialized into
+/// the durable sync journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedRecordContent {
+    /// Raw downloaded bytes, subject to the provider size cap.
+    pub bytes: Vec<u8>,
+    /// Reported content MIME type, when the provider supplies one.
+    pub mime_type: Option<String>,
+}
+
+/// One integration a linked-account provider can connect for a tenant.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderIntegration {
+    /// Stable integration identifier passed as `connector` in the link flow.
+    pub id: String,
+    /// Human-readable name for connect UIs.
+    pub display_name: String,
+    /// Optional logo URL supplied by the provider.
+    pub logo_url: Option<String>,
+}
+
 /// Verified provider webhook event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WebhookEvent {

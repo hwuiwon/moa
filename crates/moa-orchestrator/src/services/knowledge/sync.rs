@@ -3,15 +3,17 @@
 use chrono::Utc;
 use moa_core::wire::knowledge::{
     KnowledgeConnectionListRequest, KnowledgeConnectionListResponse, KnowledgeConnectionSummary,
+    KnowledgeIntegrationListRequest, KnowledgeIntegrationListResponse, KnowledgeIntegrationSummary,
     KnowledgeSyncEventsRequest, KnowledgeSyncEventsResponse, KnowledgeSyncRequest,
     KnowledgeSyncResponse, KnowledgeSyncStatusRequest, KnowledgeSyncStatusResponse,
-    KnowledgeSyncStepView,
+    KnowledgeSyncStepView, KnowledgeUnavailableProvider,
 };
 use moa_knowledge::domain::{
     IngestionStepStatus, KnowledgeIngestionStep, KnowledgeSyncRun, SyncRunStatus,
     TriggerSyncRequest,
 };
 use moa_knowledge::observability::{build_step_row, classify_failure, failed_outcome};
+use moa_knowledge::providers::LinkedIntegrationProvider;
 use moa_knowledge::repository::SyncRunClaim;
 use moa_observability::record_knowledge_sync_run;
 use serde_json::json;
@@ -279,6 +281,77 @@ impl KnowledgeService {
 
         Ok(KnowledgeConnectionListResponse { connections })
     }
+
+    /// Lists the integrations tenants can connect, across linked-account providers.
+    ///
+    /// With an explicit `provider` filter, resolver and provider errors propagate
+    /// so misconfiguration is visible. Without a filter, providers that fail to
+    /// resolve or list keep the response partial but are reported in
+    /// `unavailable_providers`, so connect UIs can distinguish "no integrations"
+    /// from provider misconfiguration. Results are sorted by provider, then
+    /// integration id.
+    pub async fn list_integrations(
+        &self,
+        request: KnowledgeIntegrationListRequest,
+    ) -> Result<KnowledgeIntegrationListResponse, KnowledgeServiceError> {
+        let mut integrations = Vec::new();
+        let mut unavailable_providers = Vec::new();
+        match request.provider.as_deref() {
+            Some(provider_id) => {
+                let provider = self.provider(provider_id)?;
+                append_provider_integrations(&mut integrations, provider_id, provider.as_ref())
+                    .await?;
+            }
+            None => {
+                for provider_id in self.providers.provider_ids() {
+                    let listing = match self.provider(&provider_id) {
+                        Ok(provider) => {
+                            append_provider_integrations(
+                                &mut integrations,
+                                &provider_id,
+                                provider.as_ref(),
+                            )
+                            .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = listing {
+                        tracing::warn!(
+                            provider = %provider_id,
+                            ?error,
+                            "knowledge provider unavailable for integration listing"
+                        );
+                        unavailable_providers.push(KnowledgeUnavailableProvider {
+                            provider: provider_id,
+                            reason: error.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        integrations.sort_by(|a, b| a.provider.cmp(&b.provider).then_with(|| a.id.cmp(&b.id)));
+        Ok(KnowledgeIntegrationListResponse {
+            integrations,
+            unavailable_providers,
+        })
+    }
+}
+
+/// Appends one provider's connectable integrations as wire summaries.
+async fn append_provider_integrations(
+    integrations: &mut Vec<KnowledgeIntegrationSummary>,
+    provider_id: &str,
+    provider: &dyn LinkedIntegrationProvider,
+) -> Result<(), KnowledgeServiceError> {
+    for integration in provider.list_integrations().await? {
+        integrations.push(KnowledgeIntegrationSummary {
+            provider: provider_id.to_string(),
+            id: integration.id,
+            display_name: integration.display_name,
+            logo_url: integration.logo_url,
+        });
+    }
+    Ok(())
 }
 
 fn provider_trigger_completed(status: &str) -> bool {

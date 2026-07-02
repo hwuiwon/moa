@@ -55,6 +55,7 @@ use crate::workflows::turn_events::{
     append_zero_cost_assistant_response, emit_tool_budget_exceeded, record_segment_tool_use,
     turn_outcome_kind_label,
 };
+use crate::workflows::turn_execution::selected_procedure_skill_refs;
 use crate::workflows::turn_progress::{self, SUMMARY_CALLING_MODEL};
 use crate::workflows::turn_responsiveness::{
     ToolBudgetDecision, ToolBudgetExhausted, ToolBudgetState,
@@ -309,6 +310,10 @@ async fn run_worker_iteration(
     attach_active_segment_metadata(ctx, input.parent_session, &mut input.completion_request)
         .await?;
     let allowed_tools = allowed_tool_names(&input.completion_request);
+    // Captured before the completion request is moved into the model call below, so a
+    // worker `run_procedure` call is gated by the same selected-skill set as the root.
+    let selected_procedure_skills =
+        selected_procedure_skill_refs(&input.completion_request.metadata);
 
     driver_progress::set_phase(ctx, TurnPhase::Streaming);
     let cadence = driver_progress::current_cadence();
@@ -405,6 +410,7 @@ async fn run_worker_iteration(
             session_id: input.parent_session,
             active_canary: input.active_canary.as_deref(),
             trusted_sandbox_manifest: input.request.trusted_sandbox_manifest.as_ref(),
+            selected_procedure_skills: &selected_procedure_skills,
         };
         handle_tool_call(
             ctx,
@@ -472,6 +478,7 @@ struct WorkerToolContext<'a> {
     session_id: SessionId,
     active_canary: Option<&'a str>,
     trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
+    selected_procedure_skills: &'a BTreeSet<String>,
 }
 
 async fn handle_tool_call(
@@ -519,6 +526,7 @@ async fn handle_tool_call(
             tool_id,
             tool_call,
             allowed_tools,
+            selected_procedure_skills: tool_context.selected_procedure_skills,
             active_canary: tool_context.active_canary,
             trusted_sandbox_manifest: tool_context.trusted_sandbox_manifest,
             origin: GovernedInvocationOrigin::Worker {

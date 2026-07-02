@@ -9,7 +9,7 @@ use moa_core::wire::turn::{QueueMessageRequest, TurnOutcome, TurnOutcomeKind};
 use moa_core::{
     ActionPolicyEffect, ContactId, DelegationTool, SessionActorRef, SessionId, SessionMeta,
     SessionStatus, SpawnWorkerInput, TenantId, ToolCallId, ToolCallRequest, ToolInvocation,
-    ToolOutput, UserId, WaitWorkerInput,
+    ToolOutput, WaitWorkerInput,
 };
 use moa_skills::procedure::interpreter::ProcedureNodeRequest;
 use restate_sdk::prelude::*;
@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-use crate::delegation::{DelegationParent, execute_delegation_tool};
+use crate::OrchestratorCtx;
+use crate::delegation::{DelegationParent, execute_delegation_tool, storage_user_id};
 use crate::objects::session::{
     AttachSessionTurnWaiterInput, RemoveSessionTurnWaiterInput, SessionClient,
 };
@@ -127,7 +128,7 @@ pub async fn execute_procedure_node_action(
         "procedure:{}:{}",
         action_context.run_uid, action_context.node_id
     ));
-    let session = procedure_session_meta(&action_context);
+    let session = procedure_session_meta(ctx, &action_context).await?;
     let prepared_action = ctx
         .service_client::<ActionPolicyClient>()
         .prepare_action_review(Json(PrepareActionReviewRequest {
@@ -162,7 +163,7 @@ pub async fn execute_procedure_node_action(
         active_canary: None,
         session_id: action_context.session_id,
         tenant_id: action_context.tenant_id,
-        user_id: procedure_user_id(&action_context.identity),
+        user_id: storage_user_id(&session),
         idempotency_key,
         trusted_sandbox_manifest: None,
         worker_id: None,
@@ -828,7 +829,40 @@ fn tool_input(input: &Value) -> Value {
     Value::Object(payload)
 }
 
-fn procedure_session_meta(context: &ProcedureNodeActionContext) -> SessionMeta {
+/// Loads the session metadata that governs a procedure node's tool execution.
+///
+/// When the procedure run is linked to a session, this loads the real stored
+/// [`SessionMeta`] so action-policy evaluation and event attribution use the
+/// session's true contact, actor, model, and agent context — matching the
+/// governed tool flow. Session-less runs (for example API-started procedures
+/// with no linked session) fall back to a synthetic meta derived from the
+/// authorizing identity.
+async fn procedure_session_meta(
+    ctx: &WorkflowContext<'_>,
+    context: &ProcedureNodeActionContext,
+) -> Result<SessionMeta, HandlerError> {
+    let Some(session_id) = context.session_id else {
+        return Ok(synthetic_procedure_session_meta(context));
+    };
+    let store = OrchestratorCtx::current_session_store();
+    Ok(ctx
+        .run(|| async move {
+            store
+                .get_session(session_id)
+                .await
+                .map(Json::from)
+                .map_err(HandlerError::from)
+        })
+        .name("procedure_load_session_meta")
+        .await?
+        .into_inner())
+}
+
+/// Builds a synthetic session meta for a session-less procedure run.
+///
+/// Session-less runs have no stored session to read, so tool attribution falls
+/// back to the identity that authorized the procedure run.
+fn synthetic_procedure_session_meta(context: &ProcedureNodeActionContext) -> SessionMeta {
     SessionMeta {
         id: context.session_id.unwrap_or_default(),
         tenant_id: context.tenant_id,
@@ -839,10 +873,6 @@ fn procedure_session_meta(context: &ProcedureNodeActionContext) -> SessionMeta {
         agent_context: None,
         ..SessionMeta::default()
     }
-}
-
-fn procedure_user_id(identity: &Identity) -> UserId {
-    UserId::new(format!("identity:{}", identity.id))
 }
 
 fn tool_output_value(output: ToolOutput) -> Value {
@@ -1155,6 +1185,37 @@ mod tests {
             .expect_err("empty memory write input should fail");
 
         assert!(error.contains("requires input.content"));
+    }
+
+    #[test]
+    fn session_less_procedure_uses_synthetic_meta_and_identity_attribution() {
+        // Pins: an API-started procedure with no linked session falls back to a
+        // synthetic session meta and attributes governed tool calls to the
+        // authorizing identity, not the tenant.
+        let identity_id = Uuid::now_v7();
+        let tenant_id = TenantId::new();
+        let context = procedure_action_context(Identity {
+            identity_type: IdentityType::User,
+            id: identity_id,
+            tenant_id,
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        });
+        assert!(
+            context.session_id.is_none(),
+            "fallback path requires a session-less run"
+        );
+
+        let meta = synthetic_procedure_session_meta(&context);
+        assert_eq!(meta.tenant_id, tenant_id);
+        assert_eq!(
+            meta.created_by,
+            Some(SessionActorRef::Identity { id: identity_id })
+        );
+        assert_eq!(
+            storage_user_id(&meta),
+            moa_core::UserId::new(format!("identity:{identity_id}"))
+        );
     }
 
     fn procedure_action_context(identity: Identity) -> ProcedureNodeActionContext {

@@ -700,8 +700,8 @@
     "semantic_hash": ""
   },
   "crates/moa-core/src/types/mod.rs": {
-    "mtime": 1782956172.3663125,
-    "ast_hash": "7192322e4e6832932486177cc4046618",
+    "mtime": 1782961047.0320945,
+    "ast_hash": "9870496514b77d125684a412980e6540",
     "semantic_hash": ""
   },
   "crates/moa-core/src/types/model.rs": {
@@ -855,9 +855,9 @@
     "semantic_hash": "208f07b16a6205a15cb02c37583cfc56"
   },
   "crates/moa-eval/pentest_report.json": {
-    "mtime": 1782744979.1788108,
-    "ast_hash": "c0e872e10a1b887bdeeeb8b49dcd01e1",
-    "semantic_hash": "c0e872e10a1b887bdeeeb8b49dcd01e1"
+    "mtime": 1783000363.0156176,
+    "ast_hash": "f1e9ef5f5bbfe1f424442e53c56e18e3",
+    "semantic_hash": ""
   },
   "crates/moa-eval/src/collector.rs": {
     "mtime": 1782835590.6932929,
@@ -1625,9 +1625,9 @@
     "semantic_hash": "328c4ff463d00db93c8503b43fc6dd46"
   },
   "crates/moa-hands/src/core/policy.rs": {
-    "mtime": 1782944588.1648815,
-    "ast_hash": "99fe5c1818348b179fb2f422e172d7a4",
-    "semantic_hash": "99fe5c1818348b179fb2f422e172d7a4"
+    "mtime": 1782962061.1124642,
+    "ast_hash": "10b0eb3c8c4e8814616c55de8816c226",
+    "semantic_hash": ""
   },
   "crates/moa-hands/src/core/recovery.rs": {
     "mtime": 1782944588.167097,
@@ -2265,8 +2265,8 @@
     "semantic_hash": "ff3d38f4fb314aec925ef4bd04e567a0"
   },
   "crates/moa-orchestrator/src/delegation.rs": {
-    "mtime": 1782944588.1709967,
-    "ast_hash": "e003a0db3c1c2db85ff82a85e76fa00a",
+    "mtime": 1782962217.9569986,
+    "ast_hash": "cdcd810763f56164904ef96f702c3b88",
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/handlers/authz_shim.rs": {
@@ -2420,8 +2420,8 @@
     "semantic_hash": "a7bde5df131d7b55fa3eec015dfc4ef1"
   },
   "crates/moa-orchestrator/src/services/skills.rs": {
-    "mtime": 1782954068.5819983,
-    "ast_hash": "aa28430c505d8ab859207237e6bc332f",
+    "mtime": 1782960572.0085812,
+    "ast_hash": "5887161e775d4974806a43d2c3ea30f9",
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/services/tenants.rs": {
@@ -2455,13 +2455,13 @@
     "semantic_hash": "011e8c3d281fad4bff199452d6d12deb"
   },
   "crates/moa-orchestrator/src/workflows/mod.rs": {
-    "mtime": 1782956172.9452336,
-    "ast_hash": "1594bf54e11b30378d6d0999af0ff29b",
+    "mtime": 1782992721.527096,
+    "ast_hash": "4d91a69f0a1f2f3f879e98ef04778551",
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/workflows/turn_execution.rs": {
-    "mtime": 1782955901.6420763,
-    "ast_hash": "9a460fdefd8d9768653f8af8e3682857",
+    "mtime": 1782962061.5899704,
+    "ast_hash": "08f0703ace83b7c18b2785f42ef9b259",
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/tests/admin_maintenance.rs": {
@@ -2845,9 +2845,9 @@
     "semantic_hash": "bd5ac73f33abfa1eec2aeebc246100a0"
   },
   "crates/moa-session/src/testing.rs": {
-    "mtime": 1782835592.2516499,
-    "ast_hash": "9e7f84316ca484924f9db6bd7989f61d",
-    "semantic_hash": "9e7f84316ca484924f9db6bd7989f61d"
+    "mtime": 1782967711.8577988,
+    "ast_hash": "77c1730eb3480b2f604f531124435fce",
+    "semantic_hash": ""
   },
   "crates/moa-session/tests/shared/mod.rs": {
     "mtime": 1782835592.272711,
@@ -3635,8 +3635,8 @@
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/workflows/experiment_run.rs": {
-    "mtime": 1782956831.6099894,
-    "ast_hash": "6cdd45efb3864b090578e011c6c2166d",
+    "mtime": 1782992454.5681157,
+    "ast_hash": "6e1a7e9aa13cd0d5ea8cd2abbef2a0a9",
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/workflows/experiment_run/plan_expansion.rs": {
@@ -3650,13 +3650,13 @@
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs": {
-    "mtime": 1782956607.9893472,
-    "ast_hash": "915356c30264d396c786e67cf8bd59e5",
+    "mtime": 1782992721.5191412,
+    "ast_hash": "688fa6994aab2b3c4e150324afaec6a7",
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/workflows/experiment_trial_run.rs": {
-    "mtime": 1782956831.615229,
-    "ast_hash": "3dea8ad894d64c57410cefab96dce6b8",
+    "mtime": 1782992616.4864748,
+    "ast_hash": "47d37f7d690c303c5b821ab5f4ab6091",
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/workflows/experiment_trial_run/status.rs": {
@@ -3665,8 +3665,8 @@
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/workflows/experiment_trial_run/target_execution.rs": {
-    "mtime": 1782956831.6134524,
-    "ast_hash": "7b25706877c2575822404f499b913758",
+    "mtime": 1782992703.184188,
+    "ast_hash": "a429d0c7ae9f1ae6879de57282e0dafc",
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/workflows/experiment_trial_run/trial_simulator.rs": {
@@ -3690,8 +3690,8 @@
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/tests/experiment_trial_run_e2e.rs": {
-    "mtime": 1782955545.9485126,
-    "ast_hash": "083b7b393b96981134b26e60189f6ff4",
+    "mtime": 1782963078.26988,
+    "ast_hash": "a36cc45ac748ca3dec69641598a814dc",
     "semantic_hash": ""
   },
   "crates/moa-scoring/src/lib.rs": {
@@ -4065,9 +4065,9 @@
     "semantic_hash": ""
   },
   "crates/xtask/src/check_architecture_boundaries.rs": {
-    "mtime": 1782944588.180885,
-    "ast_hash": "92940553604d9af742180d965c7abba6",
-    "semantic_hash": "92940553604d9af742180d965c7abba6"
+    "mtime": 1783000364.4048386,
+    "ast_hash": "19bd6ee61e044821468975943f630d32",
+    "semantic_hash": ""
   },
   "crates/moa-brain/src/lineage.rs": {
     "mtime": 1782835590.1908846,
@@ -4410,8 +4410,8 @@
     "semantic_hash": "1d745d2bceba703917ae42de7204e785"
   },
   "crates/moa-core/src/wire/mod.rs": {
-    "mtime": 1782951056.670214,
-    "ast_hash": "35dc43bcc17266e5325faeea7910e613",
+    "mtime": 1782959762.6534405,
+    "ast_hash": "6f025854ac4f1e8ae1007b1280e210ac",
     "semantic_hash": ""
   },
   "crates/moa-core/src/wire/privacy.rs": {
@@ -4530,9 +4530,9 @@
     "semantic_hash": "9697b3f7e49b140bb2df2e10bf7c6c07"
   },
   "crates/moa-core/src/wire/knowledge.rs": {
-    "mtime": 1782835590.5771122,
-    "ast_hash": "f97974ca62d7cbebf0b8674dc6feb52c",
-    "semantic_hash": "f97974ca62d7cbebf0b8674dc6feb52c"
+    "mtime": 1782996873.5725687,
+    "ast_hash": "3a33e023940316e209943c5facf58668",
+    "semantic_hash": ""
   },
   "crates/moa-knowledge/src/chunking.rs": {
     "mtime": 1782835590.946419,
@@ -4545,9 +4545,9 @@
     "semantic_hash": "e77fc7dde0eb7b08dbd09dfb852bc3c5"
   },
   "crates/moa-knowledge/src/domain.rs": {
-    "mtime": 1782835590.9516342,
-    "ast_hash": "7764c371ed306975bcbd5bc646f29782",
-    "semantic_hash": "7764c371ed306975bcbd5bc646f29782"
+    "mtime": 1782994044.1932566,
+    "ast_hash": "905a34174c98d3f63db0ddeb6af80f90",
+    "semantic_hash": ""
   },
   "crates/moa-knowledge/src/error.rs": {
     "mtime": 1782835590.9539132,
@@ -4560,9 +4560,9 @@
     "semantic_hash": "3cb531a3b9a304b1e736bca4cf744e81"
   },
   "crates/moa-knowledge/src/ingestion.rs": {
-    "mtime": 1782835590.9593117,
-    "ast_hash": "7fba83070e911b6d5b4125a6c3ce67b6",
-    "semantic_hash": "7fba83070e911b6d5b4125a6c3ce67b6"
+    "mtime": 1782996988.9055736,
+    "ast_hash": "84327c1e4145a28938dde5a5cd2ebac1",
+    "semantic_hash": ""
   },
   "crates/moa-knowledge/src/lib.rs": {
     "mtime": 1782835590.9616463,
@@ -4585,9 +4585,9 @@
     "semantic_hash": "6755cc6121a60844a40800a30e1b9ca2"
   },
   "crates/moa-knowledge/src/parser/mod.rs": {
-    "mtime": 1782835590.972057,
-    "ast_hash": "5cc574081b8eeaf6df512ca4071fc2ea",
-    "semantic_hash": "5cc574081b8eeaf6df512ca4071fc2ea"
+    "mtime": 1782960237.211602,
+    "ast_hash": "fbaec5fb6a4b69a409646b829e79c492",
+    "semantic_hash": ""
   },
   "crates/moa-knowledge/src/parser/native.rs": {
     "mtime": 1782835590.9747298,
@@ -4605,19 +4605,14 @@
     "semantic_hash": "32256618b42d53497b16d9331fd56fad"
   },
   "crates/moa-knowledge/src/providers/merge.rs": {
-    "mtime": 1782835590.9826133,
-    "ast_hash": "ad9632059ca80b6923bf3ebbcd0f0fa2",
-    "semantic_hash": "ad9632059ca80b6923bf3ebbcd0f0fa2"
+    "mtime": 1782994268.373827,
+    "ast_hash": "254610458c86868ae067d933707da410",
+    "semantic_hash": ""
   },
   "crates/moa-knowledge/src/providers/mod.rs": {
-    "mtime": 1782835590.9850092,
-    "ast_hash": "7d1eee190da6928b48080a9bc65df18e",
-    "semantic_hash": "7d1eee190da6928b48080a9bc65df18e"
-  },
-  "crates/moa-knowledge/src/providers/nango.rs": {
-    "mtime": 1782835590.9875782,
-    "ast_hash": "bd9eb31256fc3ac7fa1cdaa3d7ce29db",
-    "semantic_hash": "bd9eb31256fc3ac7fa1cdaa3d7ce29db"
+    "mtime": 1782994059.3741539,
+    "ast_hash": "341508bfcb44d564cc7f00a30708c436",
+    "semantic_hash": ""
   },
   "crates/moa-knowledge/src/repository.rs": {
     "mtime": 1782835590.9940248,
@@ -4660,14 +4655,14 @@
     "semantic_hash": "8c7fcb61496abe4d3a28a5d74e21d4bb"
   },
   "crates/moa-knowledge/tests/provider_merge.rs": {
-    "mtime": 1782835591.0235398,
-    "ast_hash": "aef95c91930a6bf147ce8f53e53c82a3",
-    "semantic_hash": "aef95c91930a6bf147ce8f53e53c82a3"
+    "mtime": 1782994446.765043,
+    "ast_hash": "694ce7603c1672304b3b8a3148317b85",
+    "semantic_hash": ""
   },
   "crates/moa-knowledge/tests/provider_nango.rs": {
-    "mtime": 1782835591.0258598,
-    "ast_hash": "dde66f73288374cd7dd356bf3be5a2e6",
-    "semantic_hash": "dde66f73288374cd7dd356bf3be5a2e6"
+    "mtime": 1782994417.6509244,
+    "ast_hash": "f63c4caf845d119300aba426b57710bc",
+    "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/services/knowledge/inspect.rs": {
     "mtime": 1782835591.6017435,
@@ -4675,19 +4670,19 @@
     "semantic_hash": "db0e0898eef0fb70591b8041584b3123"
   },
   "crates/moa-orchestrator/src/services/knowledge/link.rs": {
-    "mtime": 1782835591.6038368,
-    "ast_hash": "c643499f72a7489d276311de8398e0fa",
-    "semantic_hash": "c643499f72a7489d276311de8398e0fa"
+    "mtime": 1782996855.0370328,
+    "ast_hash": "4f480bbf6417cfecca2682978d579ded",
+    "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/services/knowledge/mod.rs": {
-    "mtime": 1782835591.6065595,
-    "ast_hash": "bfbd802ff6f61c684406f164d9b537e3",
-    "semantic_hash": "bfbd802ff6f61c684406f164d9b537e3"
+    "mtime": 1782995257.2939317,
+    "ast_hash": "44040657fc757aedf55de0070384867a",
+    "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/services/knowledge/sync.rs": {
-    "mtime": 1782835591.6091723,
-    "ast_hash": "72a375bfae8066e1c044dd92baf79d50",
-    "semantic_hash": "72a375bfae8066e1c044dd92baf79d50"
+    "mtime": 1782996938.9697793,
+    "ast_hash": "092cb8c8820ab508ac02ee8720a18c85",
+    "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/services/knowledge/webhook.rs": {
     "mtime": 1782835591.6118891,
@@ -4700,9 +4695,9 @@
     "semantic_hash": "b15f88d45ae5f979f6c43cbd834d1121"
   },
   "crates/moa-orchestrator/tests/knowledge_service.rs": {
-    "mtime": 1782835591.8528605,
-    "ast_hash": "e24d89f9004e1c762e458479944c1622",
-    "semantic_hash": "e24d89f9004e1c762e458479944c1622"
+    "mtime": 1782997042.6475546,
+    "ast_hash": "a3dac98f27c6358a6df10af6fb5734df",
+    "semantic_hash": ""
   },
   "crates/moa-knowledge/tests/parser_live.rs": {
     "mtime": 1782835591.0115204,
@@ -4710,19 +4705,19 @@
     "semantic_hash": "75c27a186151d9aec279b0cf4210573c"
   },
   "crates/moa-knowledge/tests/provider_live.rs": {
-    "mtime": 1782835591.021156,
-    "ast_hash": "600c404a0e4411a73deb0636c4fc7c9c",
-    "semantic_hash": "600c404a0e4411a73deb0636c4fc7c9c"
+    "mtime": 1782994490.894232,
+    "ast_hash": "07887d1b13f82631c2526eb5e38754f7",
+    "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/services/knowledge/ingest.rs": {
-    "mtime": 1782835591.5991719,
-    "ast_hash": "85f9c4826efdd3c52378de47fa1507c0",
-    "semantic_hash": "85f9c4826efdd3c52378de47fa1507c0"
+    "mtime": 1782992674.6122947,
+    "ast_hash": "fe3c186a56c75221baeaafa5219184b7",
+    "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/workflows/knowledge_sync_ingestion.rs": {
-    "mtime": 1782835591.7559736,
-    "ast_hash": "5b01bee6b7f20ee5e013ea8354da2280",
-    "semantic_hash": "5b01bee6b7f20ee5e013ea8354da2280"
+    "mtime": 1782992735.720684,
+    "ast_hash": "66c8f0b97e29d923c6b1e8a9e6cafc76",
+    "semantic_hash": ""
   },
   "crates/moa-brain/tests/brain_turn_artifacts_db.rs": {
     "mtime": 1782835590.356939,
@@ -4750,8 +4745,8 @@
     "semantic_hash": "6af2aa8c6748fbf59f6bbdc167806cfc"
   },
   "crates/moa-edge/src/routes/artifacts.rs": {
-    "mtime": 1782951088.0061195,
-    "ast_hash": "334e5f4d68d2d2c197762274d2eee08b",
+    "mtime": 1782959873.4571714,
+    "ast_hash": "3543ece2e76ec954ef996d53ac1a76ad",
     "semantic_hash": ""
   },
   "crates/moa-edge/src/routes/auth.rs": {
@@ -4760,9 +4755,9 @@
     "semantic_hash": "b2df3b1f46bd355254650c72d1edce0d"
   },
   "crates/moa-edge/src/routes/knowledge.rs": {
-    "mtime": 1782835590.6384315,
-    "ast_hash": "6c72dec75ab2c7b7967317ad40aaed40",
-    "semantic_hash": "6c72dec75ab2c7b7967317ad40aaed40"
+    "mtime": 1782995328.8401713,
+    "ast_hash": "61af2690db18784abc5c453c1cdab387",
+    "semantic_hash": ""
   },
   "crates/moa-edge/src/routes/memory.rs": {
     "mtime": 1782835590.642803,
@@ -4830,9 +4825,9 @@
     "semantic_hash": "a204420905390fdac2132e91d542ed90"
   },
   "crates/moa-knowledge/tests/ingestion_pipeline_db_memory.rs": {
-    "mtime": 1782835591.0033283,
-    "ast_hash": "d3c5940d4757bb313e14faafbfd4b1ed",
-    "semantic_hash": "d3c5940d4757bb313e14faafbfd4b1ed"
+    "mtime": 1782997127.8758662,
+    "ast_hash": "dd64cf513f6f1f13ee9b1667f36f4942",
+    "semantic_hash": ""
   },
   "crates/moa-knowledge/tests/observability_db_memory.rs": {
     "mtime": 1782835591.0089374,
@@ -4850,8 +4845,8 @@
     "semantic_hash": "d78fe13dec082111481c226823709eac"
   },
   "crates/moa-orchestrator/src/tool_invocation/governed.rs": {
-    "mtime": 1782955769.6117196,
-    "ast_hash": "ec8358bd06746749107ec6f00034a6c8",
+    "mtime": 1782991589.7037275,
+    "ast_hash": "8cf26f1b88f7a8a074ab4c4ce55c51a4",
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/tool_invocation/mod.rs": {
@@ -5675,8 +5670,8 @@
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/workflows/worker_turn_execution.rs": {
-    "mtime": 1782944588.176147,
-    "ast_hash": "16aafe40aee31694fd3ab95990a23613",
+    "mtime": 1782961464.9234853,
+    "ast_hash": "dd1c56923911d119d8fe86c279f93844",
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/tests/worker_coordination_service_e2e.rs": {
@@ -5740,8 +5735,8 @@
     "semantic_hash": ""
   },
   "crates/moa-core/src/types/procedure_tools.rs": {
-    "mtime": 1782956172.368189,
-    "ast_hash": "6afd497bde506bae1b4a0a85a30dc08c",
+    "mtime": 1782961040.8360498,
+    "ast_hash": "7e7263fadc523fd3315a6ca6b2e154b9",
     "semantic_hash": ""
   },
   "crates/moa-core/src/wire/procedures.rs": {
@@ -5750,23 +5745,23 @@
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/procedure_tools.rs": {
-    "mtime": 1782956172.8672638,
-    "ast_hash": "84132e8261e3abab551362119f39b515",
+    "mtime": 1782996798.1985047,
+    "ast_hash": "6550024875be096270917daa3dd3ac08",
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/workflows/procedure_execution.rs": {
-    "mtime": 1782956172.9504561,
-    "ast_hash": "68dab2789494095a83f321ddad1f8d5b",
+    "mtime": 1782962449.6696718,
+    "ast_hash": "2f31e4122db43498f9abc9c288285c5c",
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/src/workflows/procedure_node_actions.rs": {
-    "mtime": 1782952288.3920548,
-    "ast_hash": "035adea9c6b185a9ffcae28b6abb0c48",
+    "mtime": 1782962348.3468273,
+    "ast_hash": "fb718ffe8c1a898bcbf74e0ad97b8613",
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/tests/experiment_procedure_e2e.rs": {
-    "mtime": 1782955617.522279,
-    "ast_hash": "89a0393ab017a9fae1cf0fdb7d5aadc4",
+    "mtime": 1782993033.9379914,
+    "ast_hash": "e650aa02ad3d8c4f716a1448490abc37",
     "semantic_hash": ""
   },
   "crates/moa-orchestrator/tests/procedure_execution_nodes_service_e2e.rs": {
@@ -5837,6 +5832,36 @@
   "crates/moa-skills/src/procedure/runtime.rs": {
     "mtime": 1782955202.0999906,
     "ast_hash": "1ad40945346e497afda4cfc1fe6f9074",
+    "semantic_hash": ""
+  },
+  "crates/moa-core/src/wire/capabilities.rs": {
+    "mtime": 1782959757.385857,
+    "ast_hash": "b37e938757cb3b29b12f9bb6166c4a1b",
+    "semantic_hash": ""
+  },
+  "crates/moa-knowledge/src/providers/nango/google_drive.rs": {
+    "mtime": 1782994490.8657978,
+    "ast_hash": "d35f96aff0adead13e9ff00c4d0beb95",
+    "semantic_hash": ""
+  },
+  "crates/moa-knowledge/src/providers/nango/mod.rs": {
+    "mtime": 1782997026.853233,
+    "ast_hash": "cc27eef93acee63cb156490629a49d55",
+    "semantic_hash": ""
+  },
+  "crates/moa-orchestrator/src/workflows/procedure_target_wait.rs": {
+    "mtime": 1782996825.4162884,
+    "ast_hash": "e32a0ae9cdeb95ad7064538786926bff",
+    "semantic_hash": ""
+  },
+  "crates/moa-orchestrator/tests/procedure_execution_support/run_procedure_turn.rs": {
+    "mtime": 1782996378.114397,
+    "ast_hash": "4c0de64436a9e2c03bd7b1b320445610",
+    "semantic_hash": ""
+  },
+  "crates/moa-orchestrator/tests/procedure_run_procedure_tool_service_e2e.rs": {
+    "mtime": 1782996367.080864,
+    "ast_hash": "fcf7c2e2b7e38845237e5e3554e5e565",
     "semantic_hash": ""
   }
 }

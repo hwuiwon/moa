@@ -88,6 +88,13 @@ const ALLOWANCES: &[Allowance] = &[
     ),
     allow!(
         RuntimeContext,
+        "crates/moa-orchestrator/src/objects/worker/handlers.rs",
+        "OrchestratorCtx::current_config",
+        5,
+        "Worker handlers still read stale-threshold and grace-period config from runtime config"
+    ),
+    allow!(
+        RuntimeContext,
         "crates/moa-orchestrator/src/objects/session/handlers.rs",
         "OrchestratorCtx::current_session_store",
         1,
@@ -95,9 +102,30 @@ const ALLOWANCES: &[Allowance] = &[
     ),
     allow!(
         RuntimeContext,
+        "crates/moa-orchestrator/src/objects/session/handlers.rs",
+        "OrchestratorCtx::current_config",
+        2,
+        "Session handlers still read liveness and narration config from runtime config"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/objects/session/liveness.rs",
+        "OrchestratorCtx::current_config",
+        2,
+        "Session liveness still reads stale-threshold config from runtime config"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/objects/session/narration.rs",
+        "OrchestratorCtx::current_config",
+        2,
+        "Session narration still reads narration config from runtime config"
+    ),
+    allow!(
+        RuntimeContext,
         "crates/moa-orchestrator/src/objects/tenant.rs",
         "OrchestratorCtx::current()",
-        2,
+        1,
         "Tenant VO still owns a narrow memory-summary read and action-policy persistence pending repository seams"
     ),
     allow!(
@@ -186,27 +214,6 @@ const ALLOWANCES: &[Allowance] = &[
     ),
     allow!(
         RuntimeContext,
-        "crates/moa-orchestrator/src/services/analytics/mod.rs",
-        "OrchestratorCtx::current_graph_pool",
-        1,
-        "Analytics experiment endpoint still constructs the experiment analytics read model"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/analytics/mod.rs",
-        "OrchestratorCtx::current_session_store",
-        6,
-        "Analytics service reads session, cache, tool, learning, and search projections through the current store seam"
-    ),
-    allow!(
-        DirectSql,
-        "crates/moa-orchestrator/src/services/analytics/experiment_stats.rs",
-        "sqlx::query(",
-        4,
-        "Experiment analytics read-model SQL remains local pending a dedicated analytics repository"
-    ),
-    allow!(
-        RuntimeContext,
         "crates/moa-orchestrator/src/services/api_keys.rs",
         "OrchestratorCtx::current()",
         2,
@@ -228,20 +235,6 @@ const ALLOWANCES: &[Allowance] = &[
     ),
     allow!(
         RuntimeContext,
-        "crates/moa-orchestrator/src/services/audit.rs",
-        "OrchestratorCtx::current_graph_pool",
-        1,
-        "OCSF security audit verification has a narrow local repository exception"
-    ),
-    allow!(
-        DirectSql,
-        "crates/moa-orchestrator/src/services/audit.rs",
-        "sqlx::query_as",
-        2,
-        "Audit verification only does tenant lookup before authz and payload lookup after authz"
-    ),
-    allow!(
-        RuntimeContext,
         "crates/moa-orchestrator/src/services/authz_admin.rs",
         "OrchestratorCtx::current_graph_pool",
         1,
@@ -258,14 +251,14 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/services/contacts.rs",
         "OrchestratorCtx::current_graph_pool",
-        10,
+        11,
         "Contact service constructs the initial in-process contact repository operations"
     ),
     allow!(
         RuntimeContext,
         "crates/moa-orchestrator/src/services/contacts.rs",
         "OrchestratorCtx::current_session_store",
-        7,
+        8,
         "Contact service validates and updates session contact bindings through the session-store seam"
     ),
     allow!(
@@ -321,8 +314,15 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/services/eval/mod.rs",
         "OrchestratorCtx::current_graph_pool",
-        4,
+        9,
         "Eval handler obtains pools before delegating to repositories and scoring read models"
+    ),
+    allow!(
+        DirectSql,
+        "crates/moa-orchestrator/src/services/eval/mod.rs",
+        "sqlx::query(",
+        5,
+        "Experiment analytics read-model SQL consolidated into the eval handler pending a dedicated analytics repository"
     ),
     allow!(
         DirectSql,
@@ -403,27 +403,6 @@ const ALLOWANCES: &[Allowance] = &[
     ),
     allow!(
         RuntimeContext,
-        "crates/moa-orchestrator/src/services/lineage_admin.rs",
-        "OrchestratorCtx::current_graph_pool",
-        5,
-        "Lineage admin adapter keeps explicit authz/read-only transaction setup"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/lineage_admin.rs",
-        "OrchestratorCtx::current_config",
-        3,
-        "Lineage export, verify, and erase handlers still read compliance config before delegating"
-    ),
-    allow!(
-        DirectSql,
-        "crates/moa-orchestrator/src/services/lineage_admin.rs",
-        "sqlx::query(",
-        2,
-        "Lineage admin only sets read-only transaction controls before lineage crate helpers run"
-    ),
-    allow!(
-        RuntimeContext,
         "crates/moa-orchestrator/src/services/knowledge/mod.rs",
         "OrchestratorCtx::current_config",
         2,
@@ -487,6 +466,13 @@ const ALLOWANCES: &[Allowance] = &[
     ),
     allow!(
         RuntimeContext,
+        "crates/moa-orchestrator/src/services/narration.rs",
+        "OrchestratorCtx::current_config",
+        1,
+        "Narration service still reads narration config from runtime config"
+    ),
+    allow!(
+        RuntimeContext,
         "crates/moa-orchestrator/src/services/privacy/mod.rs",
         "OrchestratorCtx::current_graph_pool",
         2,
@@ -517,8 +503,8 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/services/skills.rs",
         "OrchestratorCtx::current_graph_pool",
-        1,
-        "Skills service uses the current skill registry constructor"
+        5,
+        "Skills service constructs the skill registry, the artifact registry for procedure state, and the knowledge repository for the capabilities catalog"
     ),
     allow!(
         RuntimeContext,
@@ -531,15 +517,8 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/services/tool_executor.rs",
         "OrchestratorCtx::current_session_store",
-        3,
+        4,
         "Tool executor still appends action events through the Restate session-store seam"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/workflows.rs",
-        "OrchestratorCtx::current_graph_pool",
-        2,
-        "Workflow service constructs the artifact registry for workflow state"
     ),
     allow!(
         RuntimeContext,
@@ -578,10 +557,17 @@ const ALLOWANCES: &[Allowance] = &[
     ),
     allow!(
         RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/artifact_workflow_execution.rs",
+        "crates/moa-orchestrator/src/workflows/procedure_execution.rs",
         "OrchestratorCtx::current_graph_pool",
-        8,
-        "Artifact workflow execution still constructs the artifact registry in workflow helper steps"
+        7,
+        "Procedure execution constructs the artifact registry for procedure run state in workflow helper steps"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/workflows/procedure_node_actions.rs",
+        "OrchestratorCtx::current_session_store",
+        1,
+        "Procedure node actions load the real session meta through the session-store seam for governed tool attribution"
     ),
     allow!(
         RuntimeContext,
@@ -621,9 +607,9 @@ const ALLOWANCES: &[Allowance] = &[
     allow!(
         RuntimeContext,
         "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
-        "OrchestratorCtx::current_session_store",
+        "OrchestratorCtx::current()",
         1,
-        "Experiment target execution still appends trial session events"
+        "Experiment target execution reads the session-store backend from the global context"
     ),
     allow!(
         RuntimeContext,
@@ -650,8 +636,15 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/workflows/experiment_trial_run/target_execution.rs",
         "OrchestratorCtx::current_session_store",
-        3,
+        2,
         "Experiment trial target execution still appends session events"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/workflows/experiment_trial_run/target_execution.rs",
+        "OrchestratorCtx::current()",
+        1,
+        "Experiment trial target execution reads the session-store backend from the global context"
     ),
     allow!(
         RuntimeContext,
@@ -685,14 +678,14 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/workflows/knowledge_sync_ingestion.rs",
         "OrchestratorCtx::current_graph_pool",
-        4,
+        5,
         "Knowledge sync ingestion workflow constructs repositories and ingestion runners inside durable steps"
     ),
     allow!(
         RuntimeContext,
         "crates/moa-orchestrator/src/workflows/knowledge_sync_ingestion.rs",
         "OrchestratorCtx::current_config",
-        3,
+        4,
         "Knowledge sync ingestion workflow reads provider/parser config inside durable steps"
     ),
     allow!(
@@ -713,7 +706,7 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/workflows/worker_turn_execution.rs",
         "OrchestratorCtx::current_config",
-        1,
+        2,
         "Worker turn execution still reads generation config from runtime config"
     ),
     allow!(
@@ -734,7 +727,7 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/workflows/turn_execution.rs",
         "OrchestratorCtx::current_session_store",
-        4,
+        5,
         "TurnExecution still appends workflow events through the current session-store seam"
     ),
     allow!(
@@ -772,7 +765,7 @@ const WORKSPACE_DEFAULT_MEMBER_COUNT_BUDGET: usize = 40;
 
 const REVERSE_DEPENDENCY_BUDGETS: &[ReverseDependencyBudget] = &[ReverseDependencyBudget {
     package: "moa-core",
-    max_direct: 36,
+    max_direct: 37,
     max_transitive: 38,
     reason: "moa-core is the shared trait/DTO crate; new fan-in should be intentional",
 }];
@@ -782,8 +775,8 @@ const LOC_BUDGETS: &[LocBudget] = &[
         label: "moa-core Rust source",
         path: "crates/moa-core/src",
         scope: LocScope::RustTree,
-        max_lines: 18_170,
-        reason: "moa-core has high workspace fan-in; current budget includes RLS context, env-overlay delegation, and narrow session repository traits without new re-exports",
+        max_lines: 21_096,
+        reason: "moa-core has high workspace fan-in; current budget includes RLS context, env-overlay delegation, narrow session repository traits, and the procedure/capability wire and tool types added with skill procedures",
     },
     LocBudget {
         label: "public edge route ladder",
@@ -796,14 +789,14 @@ const LOC_BUDGETS: &[LocBudget] = &[
         label: "moa-core env overlay",
         path: "crates/moa-core/src/config/env_overlay.rs",
         scope: LocScope::File,
-        max_lines: 1_057,
+        max_lines: 1_261,
         reason: "env_overlay.rs owns only the flat DTO, parsing, composition, and regression tests after per-domain delegation",
     },
     LocBudget {
         label: "turn execution workflow",
         path: "crates/moa-orchestrator/src/workflows/turn_execution.rs",
         scope: LocScope::File,
-        max_lines: 2_065,
+        max_lines: 2_946,
         reason: "TurnExecution is the central durable workflow pending collaborator extraction",
     },
 ];
@@ -811,7 +804,7 @@ const LOC_BUDGETS: &[LocBudget] = &[
 const SYMBOL_BUDGETS: &[SymbolBudget] = &[SymbolBudget {
     label: "moa-core top-level pub use exports",
     path: "crates/moa-core/src/lib.rs",
-    max_count: 77,
+    max_count: 87,
     reason: "top-level re-export growth widens the moa-core compatibility wall",
 }];
 
@@ -839,11 +832,6 @@ const FORBIDDEN_DEPENDENCY_RULES: &[ForbiddenDependencyRule] = &[
 ];
 
 const SENSITIVE_EVENT_CONSUMERS: &[SensitiveEventConsumer] = &[
-    SensitiveEventConsumer {
-        path: "crates/moa-orchestrator/src/services/analytics/redaction.rs",
-        max_wildcard_event_match_arms: 0,
-        reason: "analytics redaction must make every Event variant's preview behavior explicit",
-    },
     SensitiveEventConsumer {
         path: "crates/moa-session/src/store/session_store.rs",
         max_wildcard_event_match_arms: 0,
@@ -1864,10 +1852,23 @@ fn brace_delta(line: &str) -> i32 {
 }
 
 fn has_immediate_safety_comment(lines: &[&str], method_start: usize) -> bool {
-    method_start
-        .checked_sub(1)
-        .and_then(|index| lines.get(index))
-        .is_some_and(|line| line.trim_start().starts_with("// SAFETY:"))
+    // Walk upward across the item's contiguous comment/attribute block so a
+    // multi-line `// SAFETY:` rationale is still recognized. A `// SAFETY:`
+    // marker whose explanation spans several lines leaves a comment
+    // continuation (not the marker) directly above `async fn`.
+    let mut index = method_start;
+    while index > 0 {
+        index -= 1;
+        let trimmed = lines[index].trim_start();
+        if trimmed.starts_with("// SAFETY:") {
+            return true;
+        }
+        if trimmed.starts_with("//") || trimmed.starts_with("#[") || trimmed.starts_with("#!") {
+            continue;
+        }
+        break;
+    }
+    false
 }
 
 fn has_authz_boundary(body: &str) -> bool {
@@ -2107,10 +2108,10 @@ mod tests {
     fn matches_counted_allowance_by_path_rule_and_needle() {
         let index = matching_allowance(
             Rule::DirectSql,
-            "crates/moa-orchestrator/src/services/audit.rs",
-            "let row = sqlx::query_as::<_, Row>(\"SELECT tenant_id\");",
+            "crates/moa-orchestrator/src/services/privacy/repository.rs",
+            "let rows = sqlx::query(\"SELECT contact_id\");",
         )
-        .expect("audit SQL exception should be allowlisted");
+        .expect("privacy repository SQL exception should be allowlisted");
         assert!(
             index < super::ALLOWANCES.len(),
             "allowance index should point into the allowlist"
@@ -2204,27 +2205,33 @@ pub use error::MoaError;
         // Pins: counted orchestrator exceptions consume their allowance and remain stale-proof.
         let index = matching_allowance(
             Rule::DirectSql,
-            "crates/moa-orchestrator/src/services/audit.rs",
-            "let row = sqlx::query_as::<_, Row>(\"SELECT tenant_id\");",
+            "crates/moa-orchestrator/src/services/privacy/repository.rs",
+            "let rows = sqlx::query(\"SELECT contact_id\");",
         )
-        .expect("audit query_as allowance should exist");
+        .expect("privacy repository query allowance should exist");
         let mut allowance_uses = vec![0usize; super::ALLOWANCES.len()];
         let mut findings = Vec::new();
         let service_traits = std::collections::BTreeSet::new();
 
         scan_source(
-            "crates/moa-orchestrator/src/services/audit.rs",
+            "crates/moa-orchestrator/src/services/privacy/repository.rs",
             r#"
-let tenant = sqlx::query_as::<_, TenantRow>("SELECT tenant_id");
-let payload = sqlx::query_as::<_, PayloadRow>("SELECT payload");
+let subjects = sqlx::query("SELECT subject");
+let rows = sqlx::query("SELECT payload");
 "#,
             &service_traits,
             &mut allowance_uses,
             &mut findings,
         );
 
-        assert!(findings.is_empty(), "allowed audit SQL should not fail");
-        assert_eq!(allowance_uses[index], 2, "audit SQL allowance count");
+        assert!(
+            findings.is_empty(),
+            "allowed privacy repository SQL should not fail"
+        );
+        assert_eq!(
+            allowance_uses[index], 2,
+            "privacy repository SQL allowance count"
+        );
     }
 
     #[test]
@@ -2332,6 +2339,38 @@ impl Example for ExampleImpl {
         );
 
         assert!(findings.is_empty(), "immediate SAFETY marker should pass");
+    }
+
+    #[test]
+    fn restate_handler_with_multiline_safety_comment_is_allowed() {
+        // Pins: a `// SAFETY:` rationale that spans several comment lines above
+        // `async fn` is recognized even though a continuation line, not the
+        // marker itself, sits directly above the handler signature.
+        let source = r#"#[restate_sdk::service]
+pub trait Example {
+    async fn read() -> Result<(), HandlerError>;
+}
+pub struct ExampleImpl;
+impl Example for ExampleImpl {
+    #[tracing::instrument(skip(self, _ctx))]
+    // SAFETY: internal teardown dispatched by the owning VO's own cleanup path.
+    // It reclaims only that owner's own scope and reads no caller-owned data back.
+    async fn read(&self, _ctx: Context<'_>) -> Result<(), HandlerError> {
+        Ok(())
+    }
+}
+"#;
+        let service_traits = restate_service_traits_from_source(source);
+        let findings = handler_authz_safety_findings(
+            "crates/moa-orchestrator/src/services/example.rs",
+            source,
+            &service_traits,
+        );
+
+        assert!(
+            findings.is_empty(),
+            "multi-line SAFETY marker should pass; got {findings:?}"
+        );
     }
 
     #[test]

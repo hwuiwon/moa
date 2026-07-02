@@ -154,6 +154,7 @@ context.
 
 Task 9 defines the public HTTP routes for this surface:
 
+- `POST /v1/knowledge/integrations`
 - `POST /v1/knowledge/link-token`
 - `POST /v1/knowledge/exchange-token`
 - `POST /v1/knowledge/sync`
@@ -171,6 +172,20 @@ Task 9 defines the public HTTP routes for this surface:
 Authenticated routes inject tenant identity before calling Restate. Provider
 webhook routes do not expose tenant reads; the orchestrator verifies provider
 signatures or configured webhook secrets before trusting payload contents.
+
+The connect flow is integration-generic: `/v1/knowledge/integrations` lists the
+integrations each enabled provider can connect (Nango reports its live project
+catalog; Merge reports its unified-API categories), and the returned integration
+id is the exact `connector` value the link-token flow accepts. Connect UIs
+should render this list instead of hardcoding integration names.
+
+Record content materializes provider-agnostically: inline `text`/`content`
+payload fields ingest directly, downloadable URLs pass through to parsers, and
+metadata-only records go through the provider's `fetch_record_content` hook
+(Nango implements it via the Nango proxy with a per-integration strategy
+registry — Google Drive today; adding an integration is one strategy module
+plus a registry entry). Auth-walled viewer links such as Drive's `webViewLink`
+are provenance only and are never fetched.
 
 ## Inspection And Observability
 

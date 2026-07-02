@@ -500,6 +500,11 @@ async fn persist_cancel_step(
         .into_inner())
 }
 
+/// Runs the effectful side of each traversed procedure node.
+///
+/// Parallel nodes express graph fan-out/join semantics for the interpreter;
+/// their side effects currently execute sequentially here in a deterministic
+/// order rather than concurrently.
 async fn execute_node_actions(
     ctx: &WorkflowContext<'_>,
     request: &RunProcedureRequest,
@@ -1159,7 +1164,7 @@ async fn advance_and_persist(
                     .collect::<Vec<_>>()
                     .join(", ");
                 let message = format!(
-                    "parallel workflow branches cannot wait on review or signal nodes in v1: {node_ids}"
+                    "parallel procedure branches cannot wait on review or signal nodes in v1: {node_ids}"
                 );
                 let updated = registry
                     .update_run(
@@ -1351,17 +1356,14 @@ async fn append_completed_node_runs(
     state: &ProcedureExecutionState,
     terminal_output: Option<&Value>,
 ) -> Result<(), HandlerError> {
-    let mut existing_node_ids = registry
-        .list_node_runs(scope, state.run_uid)
-        .await
-        .map_err(artifact_handler_error)?
-        .into_iter()
-        .map(|node_run| node_run.node_id)
-        .collect::<BTreeSet<_>>();
+    // `append_node_runs` dedupes against already-persisted rows inside its own
+    // transaction, so no pre-list read is needed here. Only collapse duplicate
+    // ids within this traversal locally before handing them off.
     let node_ids = traversed_node_ids(definition, state)?;
+    let mut seen = BTreeSet::new();
     let mut node_runs = Vec::new();
     for node_id in node_ids {
-        if existing_node_ids.contains(&node_id) {
+        if !seen.insert(node_id.clone()) {
             continue;
         }
         let output = if state.current_node_id.as_deref() == Some(node_id.as_str()) {
@@ -1377,14 +1379,13 @@ async fn append_completed_node_runs(
             .unwrap_or_else(|| json!({}));
         node_runs.push(NewArtifactNodeRun {
             run_uid: state.run_uid,
-            node_id: node_id.clone(),
+            node_id,
             status: ArtifactNodeRunStatus::Completed,
             input,
             output,
             error: None,
             completed_at: Some(Utc::now()),
         });
-        existing_node_ids.insert(node_id);
     }
     registry
         .append_node_runs(scope, node_runs)

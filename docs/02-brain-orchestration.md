@@ -314,7 +314,9 @@ node-run persistence.
 Procedure nodes stay decomposable for future dashboard editing:
 
 - deterministic nodes such as `start`, `condition`, `parallel`, `join`, and
-  `end` are interpreted directly by `moa-skills`;
+  `end` are interpreted directly by `moa-skills`; `parallel` nodes express graph
+  fan-out/join semantics, and their side effects currently execute sequentially
+  in a deterministic order rather than concurrently;
 - governed tool/action/skill-action nodes call existing action policy,
   review, and `ToolExecutor` services;
 - `review` nodes pause the run until `Skills/decide_review` resumes or

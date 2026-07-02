@@ -27,6 +27,20 @@ pub trait DocumentParser: Send + Sync {
     async fn parse(&self, input: ParseInput) -> Result<ParsedDocument>;
 }
 
+/// Returns whether a parser label denotes an external document parser that must
+/// fetch or upload a document (via `source_url` or `bytes`) rather than parse
+/// already-materialized inline text.
+///
+/// Text-only provider records carry neither bytes nor a fetchable URL, so these
+/// parsers have nothing to submit for them; ingestion falls back to the native
+/// parser for such records regardless of the configured external default. Any
+/// label outside this set (including `native` and test parsers) is treated as
+/// able to handle inline text directly.
+#[must_use]
+pub fn is_external_document_parser(label: &str) -> bool {
+    matches!(label, "llamaparse" | "unstructured" | "reducto")
+}
+
 /// Verifies a parser-origin webhook and maps safe job/object metadata.
 pub fn verify_parser_webhook(
     parser: &str,

@@ -6,9 +6,10 @@ use base64::{Engine as _, engine::general_purpose};
 use moa_core::TenantId;
 use moa_core::wire::knowledge::{
     KnowledgeConnectionListRequest, KnowledgeCreateLinkTokenRequest, KnowledgeExchangeTokenRequest,
-    KnowledgeObjectInspectRequest, KnowledgeObjectListRequest, KnowledgeProviderWebhookRequest,
-    KnowledgeQueryTraceRequest, KnowledgeSyncEventsRequest, KnowledgeSyncRequest,
-    KnowledgeSyncStatusRequest, KnowledgeUpdateConnectionSourceSelectionRequest,
+    KnowledgeIntegrationListRequest, KnowledgeObjectInspectRequest, KnowledgeObjectListRequest,
+    KnowledgeProviderWebhookRequest, KnowledgeQueryTraceRequest, KnowledgeSyncEventsRequest,
+    KnowledgeSyncRequest, KnowledgeSyncStatusRequest,
+    KnowledgeUpdateConnectionSourceSelectionRequest,
 };
 
 use super::{
@@ -53,6 +54,9 @@ pub(super) fn translate(
         "/v1/knowledge/connections" => translate_knowledge_json_body::<
             KnowledgeConnectionListRequest,
         >(body, "/Knowledge/list_connections", tenant_id),
+        "/v1/knowledge/integrations" => translate_knowledge_json_body::<
+            KnowledgeIntegrationListRequest,
+        >(body, "/Knowledge/list_integrations", tenant_id),
         "/v1/knowledge/connections/source-selection" => {
             translate_knowledge_json_body::<KnowledgeUpdateConnectionSourceSelectionRequest>(
                 body,
@@ -195,6 +199,14 @@ mod tests {
                     "object_uid": object_uid,
                     "cursor": "page-2",
                     "limit": 50
+                }),
+            ),
+            (
+                "/v1/knowledge/integrations",
+                "/Knowledge/list_integrations",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "provider": "nango"
                 }),
             ),
             (

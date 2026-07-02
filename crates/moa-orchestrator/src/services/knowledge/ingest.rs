@@ -17,6 +17,7 @@ use moa_knowledge::{
         DocumentParser, llamaparse::LlamaParseParser, native::NativeDocumentParser,
         reducto::ReductoParser, unstructured::UnstructuredParser,
     },
+    providers::RecordContentFetcher,
     repository::PostgresKnowledgeRepository,
 };
 use moa_memory_graph::PostgresGraphStore;
@@ -51,13 +52,29 @@ pub trait KnowledgeIngestionRunner: Send + Sync {
 pub struct ProductionKnowledgeIngestionRunner {
     pool: sqlx::PgPool,
     config: MoaConfig,
+    content_fetcher: Option<Arc<dyn RecordContentFetcher>>,
 }
 
 impl ProductionKnowledgeIngestionRunner {
     /// Creates a production ingestion runner from the shared graph pool and runtime config.
     #[must_use]
     pub fn new(pool: sqlx::PgPool, config: MoaConfig) -> Self {
-        Self { pool, config }
+        Self {
+            pool,
+            config,
+            content_fetcher: None,
+        }
+    }
+
+    /// Attaches a per-page content fetcher used to download byte content for
+    /// records that carry neither inline text nor a directly fetchable URL.
+    #[must_use]
+    pub fn with_content_fetcher(
+        mut self,
+        content_fetcher: Option<Arc<dyn RecordContentFetcher>>,
+    ) -> Self {
+        self.content_fetcher = content_fetcher;
+        self
     }
 }
 
@@ -76,6 +93,7 @@ impl KnowledgeIngestionRunner for ProductionKnowledgeIngestionRunner {
             &self.config,
             provider.to_string(),
             parser_label,
+            self.content_fetcher.clone(),
         )?;
         pipeline
             .ingest_record_page(run.sync_run_uid, run.connection_uid, run.tenant_id, page)
@@ -90,12 +108,15 @@ impl KnowledgeIngestionRunner for ProductionKnowledgeIngestionRunner {
         seen_source_ids: &HashSet<String>,
     ) -> Result<PageIngestionReport, KnowledgeServiceError> {
         let parser_label = selected_parser_label(&self.config, run);
+        // Pruning never materializes record content, so no content fetcher is
+        // needed for this pipeline.
         let pipeline = build_ingestion_pipeline(
             self.pool.clone(),
             run.tenant_id,
             &self.config,
             provider.to_string(),
             parser_label,
+            None,
         )?;
         pipeline
             .prune_unseen_objects(
@@ -123,6 +144,7 @@ fn build_ingestion_pipeline(
     config: &MoaConfig,
     provider: String,
     parser_label: String,
+    content_fetcher: Option<Arc<dyn RecordContentFetcher>>,
 ) -> Result<ProductionKnowledgeIngestionPipeline, KnowledgeServiceError> {
     let scope = RlsContext::tenant(tenant_id);
     let repository = Arc::new(PostgresKnowledgeRepository::scoped(
@@ -156,7 +178,8 @@ fn build_ingestion_pipeline(
             provider,
             parser_label,
         },
-    ))
+    )
+    .with_content_fetcher(content_fetcher))
 }
 
 fn build_document_parser(

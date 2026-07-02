@@ -3,8 +3,17 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use moa_artifacts::registry::ArtifactRegistry;
+use moa_artifacts::action::ActionDefinition;
+use moa_artifacts::connector::ConnectorDefinition;
+use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
+use moa_artifacts::reference::ArtifactRef;
+use moa_artifacts::registry::{ArtifactRegistry, StoredArtifactRevision};
+use moa_artifacts::skill::SkillActionDefinition;
 use moa_authz_schema::Relation;
+use moa_core::wire::capabilities::{
+    CapabilitiesListRequest, CapabilitiesListResponse, CapabilityEntry, CapabilityKind,
+};
+use moa_core::wire::knowledge::KnowledgeConnectionSummary;
 use moa_core::wire::procedures::{
     ProcedureCancelRequest, ProcedureCancelResponse, ProcedureNodeRunSummary,
     ProcedureReviewDecisionRequest, ProcedureReviewDecisionResponse, ProcedureRunRequest,
@@ -16,13 +25,18 @@ use moa_core::wire::skills::{
     SkillListRequest, SkillListResponse, SkillPackageDocument, SkillPackageDocumentFile,
     SkillSummary,
 };
-use moa_core::{ActionRuleScope, TenantId};
+use moa_core::{
+    ActionRuleScope, RlsContext, TenantId, delegation_tool_schemas, procedure_tool_schemas,
+};
+use moa_hands::ToolRegistry;
+use moa_knowledge::repository::{KnowledgeRepository, PostgresKnowledgeRepository};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_skills::package::{SkillPackage, SkillPackageFile};
 use moa_skills::procedure::error::ProcedureError;
 use moa_skills::procedure::runtime::{ProcedureRuntime, StartProcedureRun};
 use moa_skills::registry::{NewSkill, Skill, SkillRegistry, StoredSkillPackage};
 use restate_sdk::prelude::*;
+use serde_json::Value;
 
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
@@ -50,6 +64,17 @@ pub trait Skills {
     /// Lists visible tenant skills after a tenant operator check.
     async fn list(request: Json<SkillListRequest>)
     -> Result<Json<SkillListResponse>, HandlerError>;
+
+    /// Lists the tenant capabilities a procedure step can attach to.
+    ///
+    /// Merges built-in tools, published action/connector and skill artifacts,
+    /// graph-memory operations, and knowledge datasources into one deterministic
+    /// catalog after a tenant operator check. Tool coverage is limited to the
+    /// statically declarable set; see `list_capabilities_inner` for the exact
+    /// limitation.
+    async fn list_capabilities(
+        request: Json<CapabilitiesListRequest>,
+    ) -> Result<Json<CapabilitiesListResponse>, HandlerError>;
 
     /// Creates a durable procedure run for a published skill that carries a procedure.
     async fn run(
@@ -128,6 +153,22 @@ impl Skills for SkillsImpl {
         Ok(ctx
             .run(|| async move { list_inner(request).await.map(Json::from) })
             .name("skills_list")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn list_capabilities(
+        &self,
+        ctx: Context<'_>,
+        request: Json<CapabilitiesListRequest>,
+    ) -> Result<Json<CapabilitiesListResponse>, HandlerError> {
+        annotate_restate_handler_span("Skills", "list_capabilities");
+        let request = request.into_inner();
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+
+        Ok(ctx
+            .run(|| async move { list_capabilities_inner(request).await.map(Json::from) })
+            .name("skills_list_capabilities")
             .await?)
     }
 
@@ -409,6 +450,309 @@ async fn list_inner(request: SkillListRequest) -> Result<SkillListResponse, Hand
     Ok(SkillListResponse { skills })
 }
 
+/// Builds the tenant capabilities catalog from every attachable source.
+///
+/// Merges statically declared built-in tools, published action/connector and
+/// skill artifacts, the two graph-memory operations, and tenant knowledge
+/// datasources into one deterministic, sorted list. All source loading happens
+/// here so the ordering and reference-construction logic can live in the pure,
+/// unit-testable [`build_capabilities`].
+///
+/// Tool coverage is limited to the statically declarable set: the default local
+/// hand/built-in tool registry plus the built-in delegation and procedure tools.
+/// Per-turn or configuration-dependent tools — MCP-discovered tools and the
+/// child-only report tools exposed only inside a worker subset — cannot be
+/// enumerated from a tenant-scoped read and are intentionally omitted.
+async fn list_capabilities_inner(
+    request: CapabilitiesListRequest,
+) -> Result<CapabilitiesListResponse, HandlerError> {
+    let tenant_id = request.tenant_id;
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    let registry = ArtifactRegistry::new(OrchestratorCtx::current_graph_pool());
+
+    let tool_sources = builtin_tool_sources();
+    let action_artifacts = load_action_artifacts(&registry, &scope).await?;
+    let connector_artifacts = load_connector_artifacts(&registry, &scope).await?;
+    let skill_actions = load_skill_actions(&registry, &scope).await?;
+    let datasources = load_datasource_summaries(tenant_id).await?;
+
+    let capabilities = build_capabilities(
+        &tool_sources,
+        &action_artifacts,
+        &connector_artifacts,
+        &skill_actions,
+        &datasources,
+    );
+    Ok(CapabilitiesListResponse { capabilities })
+}
+
+/// One statically declared built-in tool contributing a `Tool` capability entry.
+struct ToolCapabilitySource {
+    /// Provider-facing tool name, reused as the stable attachment reference.
+    name: String,
+    /// Tool description surfaced to the builder.
+    description: String,
+    /// Tool input JSON schema.
+    input_schema: Value,
+}
+
+impl ToolCapabilitySource {
+    /// Extracts a tool source from an Anthropic-shaped tool schema, if well-formed.
+    fn from_anthropic_schema(schema: &Value) -> Option<Self> {
+        Some(Self {
+            name: schema.get("name")?.as_str()?.to_string(),
+            description: schema
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            input_schema: schema
+                .get("input_schema")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+        })
+    }
+}
+
+/// Collects the statically declarable built-in tool schemas as capability sources.
+///
+/// Combines the default local hand/built-in tool registry with the built-in
+/// delegation and procedure tool schemas; all three expose Anthropic-shaped
+/// `{name, description, input_schema}` payloads.
+fn builtin_tool_sources() -> Vec<ToolCapabilitySource> {
+    ToolRegistry::default_local()
+        .default_tool_schemas()
+        .into_iter()
+        .chain(delegation_tool_schemas())
+        .chain(procedure_tool_schemas())
+        .filter_map(|schema| ToolCapabilitySource::from_anthropic_schema(&schema))
+        .collect()
+}
+
+/// Loads published standalone action artifacts as `(artifact_name, definition)` pairs.
+async fn load_action_artifacts(
+    registry: &ArtifactRegistry,
+    scope: &ActionRuleScope,
+) -> Result<Vec<(String, ActionDefinition)>, HandlerError> {
+    let mut sources = Vec::new();
+    for revision in load_published_revisions(registry, scope, ArtifactKind::Action).await? {
+        let StoredArtifactRevision { name, document, .. } = revision;
+        if let ArtifactDefinition::Action(definition) = document.definition {
+            sources.push((name, definition));
+        }
+    }
+    Ok(sources)
+}
+
+/// Loads published connector artifacts as `(connector_name, definition)` pairs.
+async fn load_connector_artifacts(
+    registry: &ArtifactRegistry,
+    scope: &ActionRuleScope,
+) -> Result<Vec<(String, ConnectorDefinition)>, HandlerError> {
+    let mut sources = Vec::new();
+    for revision in load_published_revisions(registry, scope, ArtifactKind::Connector).await? {
+        let StoredArtifactRevision { name, document, .. } = revision;
+        if let ArtifactDefinition::Connector(definition) = document.definition {
+            sources.push((name, definition));
+        }
+    }
+    Ok(sources)
+}
+
+/// Loads published skill artifacts as `(skill_name, actions)` pairs, ignoring procedures.
+async fn load_skill_actions(
+    registry: &ArtifactRegistry,
+    scope: &ActionRuleScope,
+) -> Result<Vec<(String, Vec<SkillActionDefinition>)>, HandlerError> {
+    let mut sources = Vec::new();
+    for revision in load_published_revisions(registry, scope, ArtifactKind::Skill).await? {
+        let StoredArtifactRevision { name, document, .. } = revision;
+        if let ArtifactDefinition::Skill(definition) = document.definition {
+            sources.push((name, definition.actions));
+        }
+    }
+    Ok(sources)
+}
+
+/// Loads every published revision document for one artifact kind in a scope.
+///
+/// The list query returns summaries without the definition body, so each visible
+/// revision is loaded to read its callable actions and input schemas. This N+1
+/// read is acceptable for a low-frequency, bounded tenant-admin catalog request.
+async fn load_published_revisions(
+    registry: &ArtifactRegistry,
+    scope: &ActionRuleScope,
+    kind: ArtifactKind,
+) -> Result<Vec<StoredArtifactRevision>, HandlerError> {
+    let summaries = registry
+        .list_visible(scope, Some(kind), Some(ArtifactStatus::Published))
+        .await
+        .map_err(|error| procedure_handler_error(ProcedureError::Artifact(error)))?;
+    let mut revisions = Vec::with_capacity(summaries.len());
+    for summary in summaries {
+        if let Some(revision) = registry
+            .load_revision(scope, summary.revision_uid)
+            .await
+            .map_err(|error| procedure_handler_error(ProcedureError::Artifact(error)))?
+        {
+            revisions.push(revision);
+        }
+    }
+    Ok(revisions)
+}
+
+/// Lists tenant knowledge connections as datasource summaries, read-only.
+///
+/// Reuses the same tenant-scoped repository read the `Knowledge` service uses for
+/// `list_connections`, without touching that service's internals.
+async fn load_datasource_summaries(
+    tenant_id: TenantId,
+) -> Result<Vec<KnowledgeConnectionSummary>, HandlerError> {
+    let repository = PostgresKnowledgeRepository::scoped(
+        OrchestratorCtx::current_graph_pool(),
+        RlsContext::tenant(tenant_id),
+    );
+    let projections = repository
+        .list_connections(tenant_id, None)
+        .await
+        .map_err(datasource_handler_error)?;
+    Ok(projections
+        .into_iter()
+        .map(|projection| KnowledgeConnectionSummary {
+            connection_uid: projection.connection.connection_uid,
+            provider: projection.connection.provider,
+            connector: projection.connection.connector,
+            provider_account_id: projection.connection.provider_account_id,
+            status: projection.connection.status.as_str().to_string(),
+            last_sync_status: projection
+                .last_sync_status
+                .map(|status| status.as_str().to_string()),
+            last_synced_at: projection.connection.last_synced_at,
+            source_selection: projection.connection.source_selection,
+        })
+        .collect())
+}
+
+/// Maps a knowledge datasource read failure into a terminal handler error.
+fn datasource_handler_error(error: moa_knowledge::Error) -> HandlerError {
+    tracing::error!(error = %error, "capabilities datasource listing failed");
+    TerminalError::new_with_code(500, "failed to list knowledge datasources").into()
+}
+
+/// Merges pre-fetched capability sources into one deterministic, sorted catalog.
+///
+/// Pure and side-effect free so the ordering and reference construction can be
+/// unit-tested without a database or Restate context. Output is sorted by kind,
+/// then display name, then reference so equal names stay stably ordered.
+fn build_capabilities(
+    tools: &[ToolCapabilitySource],
+    action_artifacts: &[(String, ActionDefinition)],
+    connector_artifacts: &[(String, ConnectorDefinition)],
+    skill_actions: &[(String, Vec<SkillActionDefinition>)],
+    datasources: &[KnowledgeConnectionSummary],
+) -> Vec<CapabilityEntry> {
+    let mut entries = Vec::new();
+
+    for tool in tools {
+        entries.push(CapabilityEntry {
+            kind: CapabilityKind::Tool,
+            name: tool.name.clone(),
+            reference: tool.name.clone(),
+            description: tool.description.clone(),
+            input_schema: Some(tool.input_schema.clone()),
+            source: "builtin".to_string(),
+        });
+    }
+
+    for (artifact_name, action) in action_artifacts {
+        entries.push(CapabilityEntry {
+            kind: CapabilityKind::ConnectorAction,
+            name: artifact_name.clone(),
+            reference: ArtifactRef::action_artifact(artifact_name.clone()).to_string(),
+            description: action.description.clone(),
+            input_schema: Some(action.input_schema.clone()),
+            source: "artifact".to_string(),
+        });
+    }
+
+    for (connector_name, connector) in connector_artifacts {
+        for action in &connector.actions {
+            entries.push(CapabilityEntry {
+                kind: CapabilityKind::ConnectorAction,
+                name: format!("{connector_name}.{}", action.id),
+                reference: ArtifactRef::action(connector_name.clone(), action.id.clone())
+                    .to_string(),
+                description: action.description.clone(),
+                input_schema: Some(action.input_schema.clone()),
+                source: "artifact".to_string(),
+            });
+        }
+    }
+
+    for (skill_name, actions) in skill_actions {
+        for action in actions {
+            entries.push(CapabilityEntry {
+                kind: CapabilityKind::SkillAction,
+                name: format!("{skill_name}#{}", action.id),
+                reference: format!("skill://{skill_name}#{}", action.id),
+                description: action.description.clone(),
+                input_schema: Some(action.input_schema.clone()),
+                source: "artifact".to_string(),
+            });
+        }
+    }
+
+    entries.extend(memory_capability_entries());
+
+    for datasource in datasources {
+        entries.push(CapabilityEntry {
+            kind: CapabilityKind::Datasource,
+            name: datasource.connector.clone(),
+            reference: datasource.connection_uid.to_string(),
+            description: format!(
+                "{} datasource '{}' (status: {})",
+                datasource.provider, datasource.connector, datasource.status
+            ),
+            input_schema: None,
+            source: format!("knowledge_connection:{}", datasource.provider),
+        });
+    }
+
+    entries.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.reference.cmp(&right.reference))
+    });
+    entries
+}
+
+/// Returns the two static graph-memory capability entries.
+///
+/// Descriptions mirror the `MemoryRead`/`MemoryWrite` procedure nodes: a read
+/// retrieves graph-memory facts for the scope matching a query, and a write
+/// persists facts or documents into graph memory for the scope.
+fn memory_capability_entries() -> [CapabilityEntry; 2] {
+    [
+        CapabilityEntry {
+            kind: CapabilityKind::Memory,
+            name: "Memory read".to_string(),
+            reference: "memory_read".to_string(),
+            description: "Retrieve facts from graph memory for the tenant and contact scope that match a query.".to_string(),
+            input_schema: None,
+            source: "builtin".to_string(),
+        },
+        CapabilityEntry {
+            kind: CapabilityKind::Memory,
+            name: "Memory write".to_string(),
+            reference: "memory_write".to_string(),
+            description: "Persist a fact or documents into graph memory for the tenant and contact scope.".to_string(),
+            input_schema: None,
+            source: "builtin".to_string(),
+        },
+    ]
+}
+
 fn skill_registry() -> SkillRegistry {
     SkillRegistry::new(OrchestratorCtx::current_graph_pool())
 }
@@ -501,4 +845,237 @@ fn decode_skill_package_files(
 
 fn memory_scope_from_skill(skill: &Skill) -> Result<ActionRuleScope, HandlerError> {
     skill_scope_from_stored_parts(&skill.scope, skill.tenant_id)
+}
+
+#[cfg(test)]
+mod capabilities_tests {
+    use moa_artifacts::skill::SkillActionKind;
+    use uuid::Uuid;
+
+    use super::*;
+
+    fn action_definition(id: &str, description: &str, input_schema: Value) -> ActionDefinition {
+        ActionDefinition {
+            id: id.to_string(),
+            description: description.to_string(),
+            connector_ref: None,
+            tool_name: None,
+            input_schema,
+            output_schema: serde_json::json!({}),
+            admin_review_required: false,
+            ui: serde_json::json!({}),
+        }
+    }
+
+    fn connector_action(
+        id: &str,
+        input_schema: Value,
+    ) -> moa_artifacts::connector::ConnectorActionDefinition {
+        moa_artifacts::connector::ConnectorActionDefinition {
+            id: id.to_string(),
+            description: format!("{id} action"),
+            tool_name: None,
+            input_schema,
+            output_schema: serde_json::json!({}),
+            admin_review_required: false,
+            ui: serde_json::json!({}),
+        }
+    }
+
+    fn skill_action(id: &str, input_schema: Value) -> SkillActionDefinition {
+        SkillActionDefinition {
+            id: id.to_string(),
+            description: format!("{id} skill action"),
+            kind: SkillActionKind::Tool,
+            artifact_ref: None,
+            runtime: None,
+            entrypoint: None,
+            input_schema,
+            output_schema: serde_json::json!({}),
+            ui: serde_json::json!({}),
+        }
+    }
+
+    fn datasource(
+        uid: u128,
+        connector: &str,
+        provider: &str,
+        status: &str,
+    ) -> KnowledgeConnectionSummary {
+        KnowledgeConnectionSummary {
+            connection_uid: Uuid::from_u128(uid),
+            provider: provider.to_string(),
+            connector: connector.to_string(),
+            provider_account_id: "acct-1".to_string(),
+            status: status.to_string(),
+            last_sync_status: None,
+            last_synced_at: None,
+            source_selection: serde_json::json!({}),
+        }
+    }
+
+    fn entry<'a>(entries: &'a [CapabilityEntry], reference: &str) -> &'a CapabilityEntry {
+        entries
+            .iter()
+            .find(|entry| entry.reference == reference)
+            .unwrap_or_else(|| panic!("expected an entry with reference {reference}"))
+    }
+
+    #[test]
+    fn build_capabilities_assigns_stable_references_per_kind() {
+        // Pins: each source kind maps to the stable attachment reference a ProcedureNode
+        // uses — bare tool name, action://<name>, action://<connector>.<action>,
+        // skill://<skill>#<action>, memory_read/memory_write, and the connection id.
+        let tools = vec![ToolCapabilitySource {
+            name: "bash".to_string(),
+            description: "run a command".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+        let action_artifacts = vec![(
+            "refund".to_string(),
+            action_definition(
+                "refund",
+                "issue a refund",
+                serde_json::json!({"type": "object"}),
+            ),
+        )];
+        let connector_artifacts = vec![(
+            "stripe".to_string(),
+            ConnectorDefinition {
+                auth: serde_json::json!({}),
+                actions: vec![connector_action(
+                    "charge",
+                    serde_json::json!({"type": "object"}),
+                )],
+                ui: serde_json::json!({}),
+            },
+        )];
+        let skill_actions = vec![(
+            "onboarding".to_string(),
+            vec![skill_action(
+                "welcome",
+                serde_json::json!({"type": "object"}),
+            )],
+        )];
+        // Two linked-account providers prove datasource entries stay provider-agnostic:
+        // the store's provider id is carried in `source`, never special-cased.
+        let datasources = vec![
+            datasource(0x1234, "google-drive", "nango", "active"),
+            datasource(0x5678, "salesforce", "merge", "syncing"),
+        ];
+
+        let entries = build_capabilities(
+            &tools,
+            &action_artifacts,
+            &connector_artifacts,
+            &skill_actions,
+            &datasources,
+        );
+
+        let bash = entry(&entries, "bash");
+        assert_eq!(bash.kind, CapabilityKind::Tool);
+        assert_eq!(bash.source, "builtin");
+        assert!(bash.input_schema.is_some());
+
+        let refund = entry(&entries, "action://refund");
+        assert_eq!(refund.kind, CapabilityKind::ConnectorAction);
+        assert_eq!(refund.name, "refund");
+        assert_eq!(refund.source, "artifact");
+
+        let charge = entry(&entries, "action://stripe.charge");
+        assert_eq!(charge.kind, CapabilityKind::ConnectorAction);
+        assert_eq!(charge.name, "stripe.charge");
+
+        let welcome = entry(&entries, "skill://onboarding#welcome");
+        assert_eq!(welcome.kind, CapabilityKind::SkillAction);
+        assert_eq!(welcome.name, "onboarding#welcome");
+
+        let read = entry(&entries, "memory_read");
+        assert_eq!(read.kind, CapabilityKind::Memory);
+        assert!(read.input_schema.is_none());
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.reference == "memory_write")
+        );
+
+        let nango = entry(&entries, &Uuid::from_u128(0x1234).to_string());
+        assert_eq!(nango.kind, CapabilityKind::Datasource);
+        assert_eq!(nango.name, "google-drive");
+        assert_eq!(nango.source, "knowledge_connection:nango");
+        assert!(nango.input_schema.is_none());
+        assert!(nango.description.contains("nango"));
+
+        let merge = entry(&entries, &Uuid::from_u128(0x5678).to_string());
+        assert_eq!(merge.kind, CapabilityKind::Datasource);
+        assert_eq!(merge.name, "salesforce");
+        assert_eq!(merge.source, "knowledge_connection:merge");
+    }
+
+    #[test]
+    fn build_capabilities_sorts_by_kind_then_name() {
+        // Pins: output is deterministic — grouped by kind in declaration order, then by name,
+        // so the dashboard dropdown renders the same list for the same tenant state.
+        let tools = vec![
+            ToolCapabilitySource {
+                name: "grep".to_string(),
+                description: String::new(),
+                input_schema: serde_json::json!({}),
+            },
+            ToolCapabilitySource {
+                name: "bash".to_string(),
+                description: String::new(),
+                input_schema: serde_json::json!({}),
+            },
+        ];
+
+        let entries = build_capabilities(&tools, &[], &[], &[], &[]);
+
+        let kinds: Vec<CapabilityKind> = entries.iter().map(|entry| entry.kind).collect();
+        let mut sorted_kinds = kinds.clone();
+        sorted_kinds.sort();
+        assert_eq!(kinds, sorted_kinds, "entries must be grouped by kind order");
+
+        let tool_names: Vec<&str> = entries
+            .iter()
+            .filter(|entry| entry.kind == CapabilityKind::Tool)
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(
+            tool_names,
+            vec!["bash", "grep"],
+            "tools must be name-sorted"
+        );
+
+        // Memory entries are always present even with no artifacts or datasources.
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.kind == CapabilityKind::Memory)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn builtin_tool_sources_enumerate_static_registry_and_agent_tools() {
+        // Pins: the statically declarable tool set is enumerable offline and includes the
+        // hand registry, delegation, and procedure tools that a procedure step can attach to.
+        let names: Vec<String> = builtin_tool_sources()
+            .into_iter()
+            .map(|source| source.name)
+            .collect();
+        assert!(
+            names.iter().any(|name| name == "bash"),
+            "hand tools present"
+        );
+        assert!(
+            names.iter().any(|name| name == "spawn_worker"),
+            "delegation tools present"
+        );
+        assert!(
+            names.iter().any(|name| name == "run_procedure"),
+            "procedure tools present"
+        );
+    }
 }

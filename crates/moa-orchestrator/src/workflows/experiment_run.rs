@@ -47,7 +47,7 @@ use crate::workflows::experiment_errors::{
 use crate::workflows::experiment_trial_run::{
     ExperimentTrialRunClient, ExperimentTrialRunWorkflowRequest, trial_workflow_key,
 };
-use crate::workflows::procedure_execution::{ProcedureExecutionClient, RunProcedureRequest};
+use crate::workflows::procedure_target_wait::{self, ProcedureWaitOutcome};
 
 mod plan_expansion;
 mod status;

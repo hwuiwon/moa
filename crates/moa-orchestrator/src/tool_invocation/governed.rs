@@ -6,16 +6,16 @@ use std::time::{Duration, Instant};
 use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequest};
 use moa_core::wire::turn::TurnPhase;
 use moa_core::{
-    ActionPolicyEffect, Event, ProcedureTool, SessionActorRef, SessionId, SessionMeta,
-    ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput,
-    TrustedSandboxFileManifestRef, UserId, WorkerId, is_delegation_tool_name,
-    is_procedure_tool_name,
+    ActionPolicyEffect, Event, ProcedureTool, SessionId, SessionMeta, ToolCallContent, ToolCallId,
+    ToolCallRequest, ToolInvocation, ToolOutput, TrustedSandboxFileManifestRef, WorkerId,
+    is_delegation_tool_name, is_procedure_tool_name,
 };
 use moa_observability::restate_observability::{event_persist_span, tool_dispatch_span};
 use moa_observability::{record_turn_event_persist_duration, record_turn_tool_dispatch_duration};
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
+use crate::delegation::storage_user_id;
 use crate::services::{
     action_policy::{ActionPolicyClient, PrepareActionReviewRequest, PreparedActionReview},
     action_reviews::{ActionReviewsClient, RequestActionReview},
@@ -65,6 +65,9 @@ pub(crate) struct GovernedInvocationRequest<'a> {
     pub(crate) tool_call: &'a ToolCallContent,
     /// Allowed tool names selected for this turn.
     pub(crate) allowed_tools: &'a BTreeSet<String>,
+    /// Normalized `skill://<name>` references of the procedure-capable skills selected
+    /// for this turn. A `run_procedure` call may only target a skill in this set.
+    pub(crate) selected_procedure_skills: &'a BTreeSet<String>,
     /// Active prompt-injection canary marker, when present.
     pub(crate) active_canary: Option<&'a str>,
     /// Trusted sandbox file manifest selected by the runtime that built this tool call.
@@ -294,16 +297,57 @@ async fn execute_allowed_tool(
 /// Executes a procedure tool on the workflow-owned path and records its events.
 ///
 /// The tool call event is appended here (procedure tools do not reach the
-/// delegation short-circuit that would otherwise own it), the run is started or
-/// polled through [`crate::procedure_tools::execute_procedure_tool`], and the
-/// result event is appended before returning a `Completed` outcome so the caller
-/// turn loops treat it like any other executed tool.
+/// delegation short-circuit that would otherwise own it), the invocation is gated
+/// by [`ActionPolicyClient::prepare_action_review`] exactly like a registered tool,
+/// and only an `Allow` effect starts or polls the run through
+/// [`crate::procedure_tools::execute_procedure_tool`]. The result event is appended
+/// before returning a `Completed` outcome so the caller turn loops treat it like any
+/// other executed tool.
+///
+/// `AdminReview` is turned into a terminal denial rather than a queued review: an
+/// approved review resumes by re-dispatching the tool through the stateless
+/// `ToolExecutor` (see `ActionReviews::decide`), which cannot run a workflow-owned
+/// procedure tool. Deferring these would enqueue a review that could never execute,
+/// so the model is told the action requires review it cannot obtain on this path.
 async fn execute_procedure_tool(
     ctx: &WorkflowContext<'_>,
     request: &GovernedInvocationRequest<'_>,
     invocation: ToolInvocation,
 ) -> Result<GovernedInvocationOutcome, HandlerError> {
     append_tool_call_event(ctx, request).await?;
+
+    let prepared_action = ctx
+        .service_client::<ActionPolicyClient>()
+        .prepare_action_review(Json(prepare_action_review_request(request, &invocation)))
+        .call()
+        .await?
+        .into_inner();
+
+    if matches!(prepared_action.effect, ActionPolicyEffect::Deny) {
+        let output = denied_action_output(&prepared_action, &invocation);
+        append_procedure_tool_result(ctx, request, &invocation, &output).await?;
+        return Ok(GovernedInvocationOutcome::Completed(Box::new(
+            completed_result(
+                request.tool_id,
+                invocation,
+                output,
+                GovernedInvocationDisposition::Denied,
+            ),
+        )));
+    }
+
+    if matches!(prepared_action.effect, ActionPolicyEffect::AdminReview) {
+        let output = procedure_review_unsupported_output(&invocation);
+        append_procedure_tool_result(ctx, request, &invocation, &output).await?;
+        return Ok(GovernedInvocationOutcome::Completed(Box::new(
+            completed_result(
+                request.tool_id,
+                invocation,
+                output,
+                GovernedInvocationDisposition::Denied,
+            ),
+        )));
+    }
 
     let span = tool_dispatch_span(&invocation.name);
     turn_progress::maybe_emit(
@@ -325,6 +369,7 @@ async fn execute_procedure_tool(
                 request.session,
                 request.session_id,
                 tool,
+                request.selected_procedure_skills,
             )
             .instrument(span)
             .await?
@@ -457,6 +502,21 @@ fn pending_review_output(invocation: &ToolInvocation, input_summary: &str) -> To
     )
 }
 
+/// Terminal output for a procedure tool that tenant policy routed to admin review.
+///
+/// Procedure tools run on the workflow-owned path and cannot be resumed through the
+/// `ToolExecutor`-based review approval flow, so a review can never execute them.
+/// The call is denied with a message the model can act on rather than being queued.
+fn procedure_review_unsupported_output(invocation: &ToolInvocation) -> ToolOutput {
+    ToolOutput::error(
+        format!(
+            "Tool {} requires tenant admin review, which is not supported for procedure tools; the action was not started.",
+            invocation.name
+        ),
+        Duration::ZERO,
+    )
+}
+
 async fn append_tool_call_event(
     ctx: &WorkflowContext<'_>,
     request: &GovernedInvocationRequest<'_>,
@@ -548,24 +608,6 @@ async fn append_session_event(
     Ok(sequence_num)
 }
 
-fn storage_user_id(meta: &SessionMeta) -> UserId {
-    let value = meta
-        .contact
-        .as_ref()
-        .map(|contact| contact.contact_id.to_string())
-        .or_else(|| meta.created_by.as_ref().map(session_actor_storage_id))
-        .unwrap_or_else(|| format!("tenant:{}", meta.tenant_id));
-    UserId::new(value)
-}
-
-fn session_actor_storage_id(actor: &SessionActorRef) -> String {
-    match actor {
-        SessionActorRef::Identity { id } => format!("identity:{id}"),
-        SessionActorRef::Contact { id } => id.to_string(),
-        SessionActorRef::Anonymous => "anonymous".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -582,8 +624,9 @@ mod tests {
     use super::{
         GovernedInvocationDisposition, GovernedInvocationEventPlan, GovernedInvocationOrigin,
         GovernedInvocationProgress, GovernedInvocationRequest, completed_result,
-        pending_review_output, prepare_action_review_request, storage_user_id, tool_call_request,
+        pending_review_output, prepare_action_review_request, tool_call_request,
     };
+    use crate::delegation::storage_user_id;
 
     fn test_session_meta() -> SessionMeta {
         SessionMeta {
@@ -610,6 +653,7 @@ mod tests {
         session: &'a SessionMeta,
         tool_call: &'a ToolCallContent,
         allowed_tools: &'a BTreeSet<String>,
+        selected_procedure_skills: &'a BTreeSet<String>,
         origin: GovernedInvocationOrigin<'a>,
     ) -> GovernedInvocationRequest<'a> {
         GovernedInvocationRequest {
@@ -618,6 +662,7 @@ mod tests {
             tool_id: ToolCallId(Uuid::from_u128(30)),
             tool_call,
             allowed_tools,
+            selected_procedure_skills,
             active_canary: Some("canary"),
             trusted_sandbox_manifest: None,
             origin,
@@ -635,10 +680,12 @@ mod tests {
         let session = test_session_meta();
         let tool_call = tool_call();
         let allowed_tools = BTreeSet::from(["file_read".to_string()]);
+        let no_procedures = BTreeSet::new();
         let request = request(
             &session,
             &tool_call,
             &allowed_tools,
+            &no_procedures,
             GovernedInvocationOrigin::RootTurn,
         );
 
@@ -664,10 +711,12 @@ mod tests {
         let session = test_session_meta();
         let tool_call = tool_call();
         let allowed_tools = BTreeSet::from(["file_read".to_string()]);
+        let no_procedures = BTreeSet::new();
         let request = request(
             &session,
             &tool_call,
             &allowed_tools,
+            &no_procedures,
             GovernedInvocationOrigin::Worker {
                 worker_id: "worker-1",
                 turn_id: "child-turn-1",
@@ -693,10 +742,12 @@ mod tests {
         session.contact = Some(contact_ref(session.tenant_id, contact_id));
         let tool_call = tool_call();
         let allowed_tools = BTreeSet::from(["file_read".to_string()]);
+        let no_procedures = BTreeSet::new();
         let request = request(
             &session,
             &tool_call,
             &allowed_tools,
+            &no_procedures,
             GovernedInvocationOrigin::RootTurn,
         );
 
@@ -727,10 +778,12 @@ mod tests {
         let session = test_session_meta();
         let tool_call = tool_call();
         let allowed_tools = BTreeSet::from(["file_read".to_string()]);
+        let no_procedures = BTreeSet::new();
         let request = request(
             &session,
             &tool_call,
             &allowed_tools,
+            &no_procedures,
             GovernedInvocationOrigin::Worker {
                 worker_id: "worker-1",
                 turn_id: "child-turn-1",
@@ -748,10 +801,12 @@ mod tests {
         let session = test_session_meta();
         let tool_call = tool_call();
         let allowed_tools = BTreeSet::from(["file_read".to_string()]);
+        let no_procedures = BTreeSet::new();
         let request = request(
             &session,
             &tool_call,
             &allowed_tools,
+            &no_procedures,
             GovernedInvocationOrigin::RootTurn,
         );
 
@@ -766,6 +821,7 @@ mod tests {
         let session = test_session_meta();
         let tool_call = tool_call();
         let allowed_tools = BTreeSet::from(["file_read".to_string()]);
+        let no_procedures = BTreeSet::new();
         let manifest = TrustedSandboxFileManifestRef {
             blob_id: "blob-1".to_string(),
             size: 128,
@@ -781,6 +837,7 @@ mod tests {
             &session,
             &tool_call,
             &allowed_tools,
+            &no_procedures,
             GovernedInvocationOrigin::RootTurn,
         );
         request.trusted_sandbox_manifest = Some(&manifest);
@@ -805,6 +862,52 @@ mod tests {
                 "file read",
             ),
             GovernedInvocationDisposition::ReviewPending,
+        );
+
+        assert_eq!(
+            result.event_plan,
+            GovernedInvocationEventPlan::WorkflowSyntheticResult { success: false }
+        );
+        assert!(result.should_record_denied_worker_tool());
+        assert!(!result.should_record_segment_tool_use());
+    }
+
+    #[test]
+    fn procedure_admin_review_becomes_terminal_denial() {
+        // Pins: an AdminReview effect on a procedure tool is turned into a terminal
+        // denial the model can read, because a procedure tool cannot be resumed through
+        // the ToolExecutor-based review approval path.
+        let invocation = ToolInvocation {
+            id: None,
+            name: "run_procedure".to_string(),
+            input: json!({}),
+        };
+        let output = super::procedure_review_unsupported_output(&invocation);
+
+        assert!(output.is_error);
+        let text = output.to_text();
+        assert!(text.contains("run_procedure"), "names the tool: {text}");
+        assert!(
+            text.contains("review"),
+            "explains the review limitation: {text}"
+        );
+    }
+
+    #[test]
+    fn denied_procedure_result_is_workflow_owned_and_not_segment_success() {
+        // Pins: a denied procedure invocation is a workflow-synthetic result (the turn
+        // workflow owns appending both the tool-call and result events, not the
+        // ToolExecutor), counts as a denied worker tool, and is never segment success.
+        let invocation = ToolInvocation {
+            id: None,
+            name: "run_procedure".to_string(),
+            input: json!({}),
+        };
+        let result = completed_result(
+            ToolCallId(Uuid::from_u128(2)),
+            invocation.clone(),
+            super::procedure_review_unsupported_output(&invocation),
+            GovernedInvocationDisposition::Denied,
         );
 
         assert_eq!(

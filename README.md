@@ -151,9 +151,9 @@ The binary serves these Restate surfaces: virtual objects `Session`, `Worker`,
 `AdminMaintenance`, `Artifacts`, `ActionReviews`, `ApiKeys`, `Authz`,
 `AuthzChallenges`, `Contacts`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`,
 `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`,
-`Tenants`, `ToolExecutor`, `ActionPolicy`, and `Workflows`; and workflows
+`Tenants`, `ToolExecutor`, and `ActionPolicy`; and workflows
 `Consolidate`, `TurnExecution`, `WorkerTurnExecution`,
-`ArtifactWorkflowExecution`, and `KnowledgeSyncIngestion`. Feature-gated builds
+`ProcedureExecution`, and `KnowledgeSyncIngestion`. Feature-gated builds
 also register experiment and eval-runner surfaces. Deployment registration is
 handled outside the binary.
 
@@ -241,8 +241,7 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-orchestrator`](crates/moa-orchestrator/) | Restate services, virtual objects, workflows, and handler binary |
 | [`moa-agents`](crates/moa-agents/) | Tenant-configurable agent resolution and runtime policy locking |
 | [`moa-contacts`](crates/moa-contacts/) | Contact identity domain and persistence helpers |
-| [`moa-workflows`](crates/moa-workflows/) | Workflow runtime logic for artifact-backed workflow definitions |
-| [`moa-artifacts`](crates/moa-artifacts/) | Canonical artifact definitions for agents, skills, connectors, actions, workflows, and experiment plans |
+| [`moa-artifacts`](crates/moa-artifacts/) | Canonical artifact definitions for agents, skills, connectors, actions, and experiment plans |
 | [`moa-experiments`](crates/moa-experiments/) | Domain types for experiment runs and scorecard configuration |
 | [`moa-scoring`](crates/moa-scoring/) | Shared score-run storage and score summary queries |
 | [`moa-messaging`](crates/moa-messaging/) | Slack adapter, platform rendering, Postmark email connector, and Twilio SMS connector |

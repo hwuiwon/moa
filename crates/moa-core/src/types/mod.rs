@@ -101,8 +101,8 @@ pub use observability::{
 };
 pub use procedure_tools::{
     ProcedureStatusToolInput, ProcedureTool, ProcedureToolKind, RunProcedureToolInput,
-    is_procedure_tool_name, procedure_status_tool_schema, procedure_tool_schemas,
-    run_procedure_tool_schema,
+    is_procedure_tool_name, normalize_procedure_skill_ref, procedure_status_tool_schema,
+    procedure_tool_schemas, run_procedure_tool_schema,
 };
 pub use provider::{ModelTask, ModelTier};
 pub use query_rewrite::{QueryRewriteResult, RewriteReason, RewriteSource};

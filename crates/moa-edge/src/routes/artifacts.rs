@@ -27,6 +27,9 @@ pub(super) fn translate(
             translate_json_object_with_tenant_scope(body, "/Skills/import", tenant_id)
         }
         "/v1/skills/list" => translate_json_object_with_tenant_id(body, "/Skills/list", tenant_id),
+        "/v1/capabilities/list" => {
+            translate_json_object_with_tenant_id(body, "/Skills/list_capabilities", tenant_id)
+        }
         "/v1/skills/run" => translate_json_object_with_tenant_id(body, "/Skills/run", tenant_id),
         "/v1/skills/status" => {
             translate_json_object_with_tenant_id(body, "/Skills/status", tenant_id)
@@ -115,6 +118,11 @@ mod tests {
             (
                 "/v1/skills/list",
                 "/Skills/list",
+                serde_json::json!({ "tenant_id": test_tenant_json() }),
+            ),
+            (
+                "/v1/capabilities/list",
+                "/Skills/list_capabilities",
                 serde_json::json!({ "tenant_id": test_tenant_json() }),
             ),
         ];

@@ -44,7 +44,7 @@ use crate::workflows::errors::{
 use crate::workflows::experiment_errors::{
     non_retryable_handler_error, plan_expansion_error_to_handler_error,
 };
-use crate::workflows::procedure_execution::{ProcedureExecutionClient, RunProcedureRequest};
+use crate::workflows::procedure_target_wait::{self, ProcedureWaitOutcome, TARGET_WAIT_TIMEOUT};
 
 mod status;
 mod target_execution;
@@ -64,7 +64,6 @@ const K_TRIAL_KEY: &str = "trial_key";
 const K_STATUS: &str = "status";
 const K_SESSION_ID: &str = "session_id";
 const K_PROCEDURE_RUN_UID: &str = "procedure_run_uid";
-const TARGET_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
 const SESSION_AUTHZ_PROPAGATION_DELAY: Duration = Duration::from_millis(750);
 
 /// Workflow input for one behavior-lab simulator trial.

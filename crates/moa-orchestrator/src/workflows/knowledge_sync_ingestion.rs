@@ -11,6 +11,7 @@ use moa_knowledge::{
     },
     ingestion::PageIngestionReport,
     observability::classify_failure,
+    providers::{LinkedProviderContentFetcher, RecordContentFetcher},
     repository::{KnowledgeRepository as _, PostgresKnowledgeRepository},
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
@@ -403,9 +404,14 @@ impl KnowledgeSyncIngestionDurableSteps for RestateKnowledgeSyncIngestionSteps<'
         let pool = OrchestratorCtx::current_graph_pool();
         let config = OrchestratorCtx::current_config();
         let run = prepared.run.clone();
+        let provider_label = prepared.provider.clone();
+        let connection = prepared.connection.clone();
         self.ctx
             .run(|| async move {
-                let runner = ProductionKnowledgeIngestionRunner::new(pool, config.as_ref().clone());
+                let content_fetcher =
+                    build_record_content_fetcher(&config, &provider_label, connection);
+                let runner = ProductionKnowledgeIngestionRunner::new(pool, config.as_ref().clone())
+                    .with_content_fetcher(content_fetcher);
                 let report = runner
                     .ingest_record_page(&run, &page.provider, page.page)
                     .await
@@ -568,6 +574,35 @@ impl From<PageIngestionReport> for KnowledgeSyncPageApplication {
             records_deleted: report.records_deleted,
             embeddings_created: report.embeddings_created,
             records_applied,
+        }
+    }
+}
+
+/// Builds a per-page record content fetcher from the configured provider and the
+/// stored connection.
+///
+/// A build failure degrades gracefully to metadata-only ingestion (records that
+/// need content fall back to their title) rather than failing the page: the
+/// provider was already constructed successfully during the listing step, so a
+/// failure here is not expected but must not abort applying the page. The Nango
+/// proxy content path only needs the connection's provider account and
+/// connector, so no vault credential resolution is required.
+fn build_record_content_fetcher(
+    config: &std::sync::Arc<moa_core::MoaConfig>,
+    provider_label: &str,
+    connection: KnowledgeConnection,
+) -> Option<Arc<dyn RecordContentFetcher>> {
+    match ConfigKnowledgeProviders::new(config.knowledge.clone()).provider(provider_label) {
+        Ok(provider) => Some(Arc::new(LinkedProviderContentFetcher::new(
+            provider, connection,
+        ))),
+        Err(error) => {
+            tracing::warn!(
+                provider = provider_label,
+                error = %error,
+                "could not build knowledge content fetcher; records needing content fall back to title-only"
+            );
+            None
         }
     }
 }

@@ -1,14 +1,17 @@
 //! Linked-account provider traits and adapters.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use reqwest::header::HeaderMap;
 
 use crate::{
     domain::{
-        ApplySourceSelectionRequest, CreateLinkTokenRequest, ExchangePublicTokenRequest, LinkToken,
-        LinkedAccount, ListChangedRecordsRequest, RecordPage, TriggerSyncRequest, TriggeredSync,
-        WebhookEvent,
+        ApplySourceSelectionRequest, CreateLinkTokenRequest, ExchangePublicTokenRequest,
+        FetchRecordContentRequest, FetchedRecordContent, KnowledgeConnection, LinkToken,
+        LinkedAccount, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord, RecordPage,
+        TriggerSyncRequest, TriggeredSync, WebhookEvent,
     },
     error::Result,
 };
@@ -19,6 +22,19 @@ pub mod nango;
 /// Tenant knowledge linked-account provider seam.
 #[async_trait]
 pub trait LinkedIntegrationProvider: Send + Sync {
+    /// Lists the integrations this provider can connect for a tenant.
+    ///
+    /// The returned `id`s are the values passed as `connector` in the link flow.
+    /// The default returns an empty list for providers without an integration
+    /// catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider's integration catalog cannot be read.
+    async fn list_integrations(&self) -> Result<Vec<ProviderIntegration>> {
+        Ok(Vec::new())
+    }
+
     /// Creates a short-lived link token or hosted link URL.
     async fn create_link_token(&self, req: CreateLinkTokenRequest) -> Result<LinkToken>;
 
@@ -37,8 +53,85 @@ pub trait LinkedIntegrationProvider: Send + Sync {
     /// Lists changed source records from the provider cache or API.
     async fn list_changed_records(&self, req: ListChangedRecordsRequest) -> Result<RecordPage>;
 
+    /// Fetches the byte content of one provider record when the provider can
+    /// download it directly.
+    ///
+    /// Providers whose record catalog is metadata-only (no inline text and no
+    /// directly fetchable URL) implement this so document bytes reach the
+    /// ingestion pipeline. The default returns `Ok(None)`, meaning the provider
+    /// does not support direct content fetch and the pipeline keeps its
+    /// title-only fallback. Merge filestorage would implement this same hook to
+    /// download file content through its proxy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a supported fetch is attempted but the download
+    /// fails (transport or non-success status). The ingestion pipeline treats
+    /// such errors as a soft, title-only fallback rather than failing the run.
+    async fn fetch_record_content(
+        &self,
+        _req: FetchRecordContentRequest,
+    ) -> Result<Option<FetchedRecordContent>> {
+        Ok(None)
+    }
+
     /// Verifies and normalizes a provider webhook.
     async fn verify_webhook(&self, headers: HeaderMap, body: Bytes) -> Result<WebhookEvent>;
+}
+
+/// Per-run seam the ingestion pipeline uses to download record byte content.
+///
+/// A concrete fetcher binds one [`LinkedIntegrationProvider`] to one
+/// [`KnowledgeConnection`] so the pipeline can request content for a record
+/// without threading connection identity through every call. See
+/// [`LinkedProviderContentFetcher`].
+#[async_trait]
+pub trait RecordContentFetcher: Send + Sync {
+    /// Fetches byte content for one record, or `None` when unsupported.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a supported fetch is attempted but fails.
+    async fn fetch_record_content(
+        &self,
+        record: &ProviderRecord,
+    ) -> Result<Option<FetchedRecordContent>>;
+}
+
+/// Adapts a [`LinkedIntegrationProvider`] and one [`KnowledgeConnection`] into a
+/// per-run [`RecordContentFetcher`] for the ingestion pipeline.
+pub struct LinkedProviderContentFetcher {
+    provider: Arc<dyn LinkedIntegrationProvider>,
+    connection: KnowledgeConnection,
+}
+
+impl LinkedProviderContentFetcher {
+    /// Binds a provider to a connection for record content fetches.
+    #[must_use]
+    pub fn new(
+        provider: Arc<dyn LinkedIntegrationProvider>,
+        connection: KnowledgeConnection,
+    ) -> Self {
+        Self {
+            provider,
+            connection,
+        }
+    }
+}
+
+#[async_trait]
+impl RecordContentFetcher for LinkedProviderContentFetcher {
+    async fn fetch_record_content(
+        &self,
+        record: &ProviderRecord,
+    ) -> Result<Option<FetchedRecordContent>> {
+        self.provider
+            .fetch_record_content(FetchRecordContentRequest {
+                connection: self.connection.clone(),
+                record: record.clone(),
+            })
+            .await
+    }
 }
 
 pub(crate) mod http {
@@ -90,6 +183,41 @@ pub(crate) mod http {
         }
         serde_json::from_slice(&body)
             .map_err(|error| Error::Decode(format!("failed to decode JSON response: {error}")))
+    }
+
+    /// Reads a successful response body as raw bytes, aborting when it exceeds
+    /// `max_bytes`.
+    ///
+    /// The `Content-Length` header, when present, short-circuits oversized
+    /// downloads before any body is read; the streaming loop then enforces the
+    /// same cap for chunked responses that omit a length.
+    pub(crate) async fn bytes_response_capped(
+        response: Response,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>> {
+        let mut response = ensure_success(response).await?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err(Error::Decode(
+                "response body exceeded the content size cap".to_string(),
+            ));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| Error::Transport(format!("failed to read response body: {error}")))?
+        {
+            if body.len().saturating_add(chunk.len()) > max_bytes {
+                return Err(Error::Decode(
+                    "response body exceeded the content size cap".to_string(),
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
     }
 
     /// Returns the response when it has a success status.

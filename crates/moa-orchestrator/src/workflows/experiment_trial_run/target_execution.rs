@@ -1,8 +1,7 @@
 //! Target execution paths for behavior-lab trial workflows.
 
 use super::status::{
-    attach_trial_procedure_run, attach_trial_session, increment_trial_turn,
-    status_response_from_record, stop_trial,
+    attach_trial_procedure_run, attach_trial_session, increment_trial_turn, stop_trial,
 };
 use super::trial_simulator::{SimulatorContext, simulator_done, simulator_next_user_message};
 use super::*;
@@ -29,7 +28,6 @@ struct WorkflowTrialStop {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct StartedWorkflowRun {
     run_uid: Uuid,
-    trial: ExperimentTrialRecord,
     stop: Option<WorkflowTrialStop>,
     error: Option<String>,
 }
@@ -42,8 +40,6 @@ struct WorkflowTrialStart {
     input: Value,
     session_id: Option<SessionId>,
     idempotency_key: Option<String>,
-    tenant_id: TenantId,
-    identity: Identity,
 }
 
 pub(super) async fn run_agent_loop_trial(
@@ -206,6 +202,24 @@ async fn ensure_agent_loop_session(
     Ok((session_id, target_model))
 }
 
+/// Executes one procedure-backed behavior-lab trial and durably waits for the
+/// procedure to reach a terminal state before returning.
+///
+/// The trial starts the durable procedure run row, then invokes the
+/// [`ProcedureExecution`](crate::workflows::procedure_execution::ProcedureExecution)
+/// `run` handler with a durable request-response `.call()` raced against
+/// [`TARGET_WAIT_TIMEOUT`] via `restate_sdk::select!`. This mirrors the agent-loop
+/// turn wait in [`wait_for_target_after_turn`] so the trial only resolves its
+/// parent's completion awakeable once the procedure has actually finished — the
+/// prior fire-and-forget `.send()` let the parent fan-in proceed while the
+/// procedure was still executing.
+///
+/// The procedure `run` handler blocks internally while a run is paused on a
+/// `Review` or `WaitSignal` node, so a procedure awaiting human review never
+/// resolves the call and the trial times out instead. That is intentional for
+/// behavior-lab semantics: an experiment procedure that needs human review times
+/// the trial out (recorded as `Failed`/`Error`, matching an agent-loop turn
+/// timeout) rather than reporting a premature terminal status.
 pub(super) async fn run_procedure_trial(
     ctx: &WorkflowContext<'_>,
     request: ExperimentTrialRunWorkflowRequest,
@@ -234,8 +248,6 @@ pub(super) async fn run_procedure_trial(
             input,
             session_id,
             idempotency_key: idempotency_key.or_else(|| Some(trial.trial_key.clone())),
-            tenant_id: request.tenant_id,
-            identity: request.identity.clone(),
         },
     )
     .await?;
@@ -243,6 +255,9 @@ pub(super) async fn run_procedure_trial(
     tracing::Span::current()
         .set_attribute("moa.experiment.procedure_run_uid", run.run_uid.to_string());
 
+    // Idempotent replay where the procedure was already terminal at start time
+    // (for example a completed run matched by idempotency key): stop immediately
+    // without re-invoking the executor.
     if let Some(stop) = run.stop {
         return stop_trial(
             ctx,
@@ -255,7 +270,79 @@ pub(super) async fn run_procedure_trial(
         .await;
     }
 
-    status_response_from_record(request.tenant_id, run.trial)
+    let (stop, error) = wait_for_procedure_outcome(
+        ctx,
+        request.tenant_id,
+        request.identity.clone(),
+        run.run_uid,
+        session_id,
+    )
+    .await?;
+    stop_trial(
+        ctx,
+        request.tenant_id,
+        trial.trial_uid,
+        stop.status,
+        stop.stop_reason,
+        error,
+    )
+    .await
+}
+
+/// Durably waits for a procedure run to reach a terminal state and maps the
+/// outcome into a trial stop.
+///
+/// Delegates the replay-safe race to
+/// [`procedure_target_wait::wait_for_procedure_outcome`], which bounds the wait
+/// by [`TARGET_WAIT_TIMEOUT`] exactly like the awakeable-vs-timer race in
+/// [`wait_for_target_after_turn`]. A timeout, or an unexpected non-terminal
+/// outcome, records the trial as `Failed`/`Error`, mirroring an agent-loop turn
+/// timeout. On timeout the abandoned call keeps the child procedure invocation
+/// running.
+async fn wait_for_procedure_outcome(
+    ctx: &WorkflowContext<'_>,
+    tenant_id: TenantId,
+    identity: Identity,
+    run_uid: Uuid,
+    session_id: Option<SessionId>,
+) -> Result<(WorkflowTrialStop, Option<String>), HandlerError> {
+    match procedure_target_wait::wait_for_procedure_outcome(
+        ctx, tenant_id, identity, run_uid, session_id,
+    )
+    .await?
+    {
+        ProcedureWaitOutcome::Terminal(status, outcome) => {
+            match trial_stop_for_workflow_status(&status) {
+                Some((status, stop_reason)) => Ok((
+                    WorkflowTrialStop {
+                        status,
+                        stop_reason,
+                    },
+                    outcome.error,
+                )),
+                None => Ok((
+                    procedure_failure_stop(),
+                    Some(format!(
+                        "procedure run {run_uid} returned non-terminal status {}",
+                        outcome.status
+                    )),
+                )),
+            }
+        }
+        ProcedureWaitOutcome::NonTerminal(outcome) => Ok((
+            procedure_failure_stop(),
+            Some(format!(
+                "procedure run {run_uid} returned non-terminal status {}",
+                outcome.status
+            )),
+        )),
+        ProcedureWaitOutcome::TimedOut => Ok((
+            procedure_failure_stop(),
+            Some(format!(
+                "timed out waiting for procedure run {run_uid} to reach a terminal state"
+            )),
+        )),
+    }
 }
 
 async fn create_new_session(
@@ -449,15 +536,17 @@ fn status_for_turn_outcome(outcome: &TurnOutcome) -> SessionStatus {
     }
 }
 
+/// Creates the durable procedure run row and links it to the trial.
+///
+/// This only writes durable state; the executor is invoked later by
+/// [`wait_for_procedure_outcome`] so the trial can durably await the terminal
+/// outcome instead of returning while the procedure runs.
 async fn start_and_attach_workflow_run(
     ctx: &WorkflowContext<'_>,
     start: WorkflowTrialStart,
 ) -> Result<StartedWorkflowRun, HandlerError> {
     let pool = OrchestratorCtx::current_graph_pool();
-    let session_id = start.session_id;
-    let tenant_id = start.tenant_id;
-    let identity = start.identity.clone();
-    let run = ctx
+    Ok(ctx
         .run(|| async move {
             let run = workflow_runtime(pool.clone())
                 .start(
@@ -471,8 +560,7 @@ async fn start_and_attach_workflow_run(
                 )
                 .await
                 .map_err(procedure_handler_error)?;
-            let trial =
-                attach_trial_procedure_run(pool, start.scope, start.trial_uid, run.run_uid).await?;
+            attach_trial_procedure_run(pool, start.scope, start.trial_uid, run.run_uid).await?;
             let stop = trial_stop_for_workflow_status(&run.status).map(|(status, stop_reason)| {
                 WorkflowTrialStop {
                     status,
@@ -481,23 +569,13 @@ async fn start_and_attach_workflow_run(
             });
             Ok::<_, HandlerError>(Json::from(StartedWorkflowRun {
                 run_uid: run.run_uid,
-                trial,
                 stop,
                 error: run.error,
             }))
         })
         .name("experiment_trial_start_workflow_run")
         .await?
-        .into_inner();
-    ctx.workflow_client::<ProcedureExecutionClient>(run.run_uid.to_string())
-        .run(Json::from(RunProcedureRequest {
-            tenant_id,
-            run_uid: run.run_uid,
-            identity,
-            session_id,
-        }))
-        .send();
-    Ok(run)
+        .into_inner())
 }
 
 fn latest_brain_response(events: &[EventRecord]) -> Option<String> {
@@ -546,6 +624,16 @@ fn trial_stop_for_workflow_status(
             ExperimentTrialStatus::Cancelled,
             ExperimentTrialStopReason::Cancelled,
         )),
+    }
+}
+
+/// Trial stop recorded when a procedure trial fails to reach a terminal state in
+/// time (timeout) or reports an unexpected non-terminal status. Mirrors the
+/// agent-loop turn-timeout disposition (`Failed` / `Error`).
+fn procedure_failure_stop() -> WorkflowTrialStop {
+    WorkflowTrialStop {
+        status: ExperimentTrialStatus::Failed,
+        stop_reason: ExperimentTrialStopReason::Error,
     }
 }
 
@@ -633,6 +721,19 @@ mod tests {
                 ExperimentTrialStatus::Cancelled,
                 ExperimentTrialStopReason::Cancelled,
             ))
+        );
+    }
+
+    #[test]
+    fn procedure_timeout_records_failed_error_stop_offline() {
+        // Pins: a procedure trial that times out (for example blocked on human review) records
+        // the same Failed/Error disposition as an agent-loop turn timeout.
+        assert_eq!(
+            procedure_failure_stop(),
+            WorkflowTrialStop {
+                status: ExperimentTrialStatus::Failed,
+                stop_reason: ExperimentTrialStopReason::Error,
+            }
         );
     }
 

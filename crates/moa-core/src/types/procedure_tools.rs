@@ -73,12 +73,23 @@ impl RunProcedureToolInput {
     /// so the model can name a skill exactly as it appears in the manifest.
     #[must_use]
     pub fn procedure_ref(&self) -> String {
-        let trimmed = self.skill.trim();
-        if trimmed.starts_with("skill://") {
-            trimmed.to_string()
-        } else {
-            format!("skill://{trimmed}")
-        }
+        normalize_procedure_skill_ref(&self.skill)
+    }
+}
+
+/// Normalizes a procedure skill identifier into a canonical `skill://<name>` reference.
+///
+/// This is the single normalization used both when a `run_procedure` call names its
+/// target skill and when the turn's selected procedure-capable skill names are turned
+/// into a membership set, so a call and the allowlist compare on identical forms. A
+/// bare name is prefixed and an already-qualified `skill://` reference is preserved.
+#[must_use]
+pub fn normalize_procedure_skill_ref(skill: &str) -> String {
+    let trimmed = skill.trim();
+    if trimmed.starts_with("skill://") {
+        trimmed.to_string()
+    } else {
+        format!("skill://{trimmed}")
     }
 }
 

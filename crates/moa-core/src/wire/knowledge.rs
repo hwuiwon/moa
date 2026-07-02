@@ -21,6 +21,9 @@ pub struct KnowledgeCreateLinkTokenRequest {
     /// Optional end-user email address for providers that require it at link-token creation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_user_email_address: Option<String>,
+    /// Optional URL the provider's hosted link flow redirects to after linking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_url: Option<String>,
     /// Provider-native source selection requested before link creation.
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub source_selection: Value,
@@ -284,6 +287,51 @@ pub struct KnowledgeConnectionListResponse {
     /// Linked connection summaries ordered by recent update time.
     #[serde(default)]
     pub connections: Vec<KnowledgeConnectionSummary>,
+}
+
+/// Request payload for listing the integrations tenants can connect.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeIntegrationListRequest {
+    /// Tenant requesting the connectable integrations.
+    pub tenant_id: TenantId,
+    /// Optional linked-account provider filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+}
+
+/// One integration a tenant can connect through a linked-account provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeIntegrationSummary {
+    /// Linked-account provider identifier, such as `nango` or `merge`.
+    pub provider: String,
+    /// Integration identifier passed as `connector` in the link flow.
+    pub id: String,
+    /// Human-readable integration name for connect UIs.
+    pub display_name: String,
+    /// Optional provider-supplied logo URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo_url: Option<String>,
+}
+
+/// One enabled provider that could not contribute to an integration listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeUnavailableProvider {
+    /// Linked-account provider identifier that failed to list integrations.
+    pub provider: String,
+    /// Human-readable failure reason for operator/connect UIs.
+    pub reason: String,
+}
+
+/// Response payload listing connectable integrations across providers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeIntegrationListResponse {
+    /// Connectable integrations sorted by provider, then integration id.
+    #[serde(default)]
+    pub integrations: Vec<KnowledgeIntegrationSummary>,
+    /// Enabled providers that failed to resolve or list, so connect UIs can
+    /// distinguish "no integrations" from provider misconfiguration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable_providers: Vec<KnowledgeUnavailableProvider>,
 }
 
 /// Request payload for listing tenant knowledge source objects.

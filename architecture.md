@@ -169,8 +169,7 @@ services and virtual objects in `moa-orchestrator` (see sections 5–6 and
 | `moa-orchestrator` | Restate objects, services, workflows, and `moa-orchestrator-bin` |
 | `moa-agents` | Tenant-configurable agent resolution and runtime policy locking |
 | `moa-contacts` | Contact identity domain and persistence helpers |
-| `moa-workflows` | Workflow runtime logic for artifact-backed workflow definitions |
-| `moa-artifacts` | Canonical artifact definitions for agents, skills, connectors, actions, workflows, and experiment plans |
+| `moa-artifacts` | Canonical artifact definitions for agents, skills, connectors, actions, and experiment plans |
 | `moa-experiments` | Domain types for experiment runs and scorecard configuration |
 | `moa-scoring` | Shared score-run storage and score summary queries |
 | `moa-messaging` | Messaging adapters, platform renderers, and notification connectors |

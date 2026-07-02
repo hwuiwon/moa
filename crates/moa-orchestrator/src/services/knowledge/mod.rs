@@ -24,6 +24,7 @@ use moa_core::{
         KnowledgeConnectionListRequest, KnowledgeConnectionListResponse,
         KnowledgeCreateLinkTokenRequest, KnowledgeCreateLinkTokenResponse,
         KnowledgeExchangeTokenRequest, KnowledgeExchangeTokenResponse,
+        KnowledgeIntegrationListRequest, KnowledgeIntegrationListResponse,
         KnowledgeObjectInspectRequest, KnowledgeObjectInspectResponse, KnowledgeObjectListRequest,
         KnowledgeObjectListResponse, KnowledgeProviderWebhookRequest,
         KnowledgeProviderWebhookResponse, KnowledgeQueryTraceRequest, KnowledgeQueryTraceResponse,
@@ -85,6 +86,11 @@ pub trait Knowledge {
     async fn list_connections(
         request: Json<KnowledgeConnectionListRequest>,
     ) -> Result<Json<KnowledgeConnectionListResponse>, HandlerError>;
+
+    /// Lists the integrations tenants can connect through enabled providers.
+    async fn list_integrations(
+        request: Json<KnowledgeIntegrationListRequest>,
+    ) -> Result<Json<KnowledgeIntegrationListResponse>, HandlerError>;
 
     /// Updates provider-native selected sources for one linked connection.
     async fn update_connection_source_selection(
@@ -261,6 +267,28 @@ impl Knowledge for KnowledgeImpl {
                     .map_err(knowledge_handler_error)
             })
             .name("knowledge_list_connections")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn list_integrations(
+        &self,
+        ctx: Context<'_>,
+        request: Json<KnowledgeIntegrationListRequest>,
+    ) -> Result<Json<KnowledgeIntegrationListResponse>, HandlerError> {
+        annotate_restate_handler_span("Knowledge", "list_integrations");
+        let request = request.into_inner();
+        authorize_tenant(&ctx, request.tenant_id).await?;
+        let service = production_service(request.tenant_id);
+        Ok(ctx
+            .run(|| async move {
+                service
+                    .list_integrations(request)
+                    .await
+                    .map(Json::from)
+                    .map_err(knowledge_handler_error)
+            })
+            .name("knowledge_list_integrations")
             .await?)
     }
 
@@ -530,6 +558,9 @@ pub trait KnowledgeProviderResolver: Send + Sync {
         provider: &str,
     ) -> Result<Arc<dyn LinkedIntegrationProvider>, KnowledgeServiceError>;
 
+    /// Returns the resolvable provider identifiers in deterministic order.
+    fn provider_ids(&self) -> Vec<String>;
+
     /// Returns the webhook verifier for a selected provider identifier.
     fn webhook_verifier(
         &self,
@@ -590,6 +621,12 @@ impl KnowledgeProviderResolver for StaticKnowledgeProviders {
             .get(provider)
             .cloned()
             .ok_or_else(|| KnowledgeServiceError::UnknownProvider(provider.to_string()))
+    }
+
+    fn provider_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.providers.keys().cloned().collect();
+        ids.sort();
+        ids
     }
 
     fn webhook_verifier(
@@ -764,6 +801,12 @@ impl KnowledgeProviderResolver for ConfigKnowledgeProviders {
             }
             other => Err(KnowledgeServiceError::UnknownProvider(other.to_string())),
         }
+    }
+
+    fn provider_ids(&self) -> Vec<String> {
+        let mut ids = self.config.providers.enabled.clone();
+        ids.sort();
+        ids
     }
 
     fn webhook_verifier(

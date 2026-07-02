@@ -124,11 +124,40 @@ pub async fn cleanup_test_schema(database_url: &str, _schema_name: &str) -> Resu
         .map_err(|error| MoaError::StorageError(format!("drop test database {db_name}: {error}")))
 }
 
+/// Minimum age before a leftover clone database is considered orphaned.
+///
+/// Clone provisioning has a short window between `CREATE DATABASE` returning
+/// and the owning test opening its first connection; during that window the
+/// database has no active connection and would otherwise look orphaned to a
+/// concurrently starting test process. Clone names embed a UUIDv7 timestamp,
+/// so the sweep only drops clones old enough that no live test can own them.
+const ORPHAN_CLONE_MIN_AGE: Duration = Duration::from_secs(3600);
+
+/// Returns whether `db_name` is a clone database old enough to sweep.
+///
+/// Parses the UUIDv7 embedded in `moa_test_<uuid>` names and requires its
+/// timestamp to be at least [`ORPHAN_CLONE_MIN_AGE`] in the past. Names that do
+/// not carry a parseable UUIDv7 timestamp are never treated as orphaned.
+fn clone_name_is_sweepable(db_name: &str, now_unix_secs: u64) -> bool {
+    let Some(raw) = db_name.strip_prefix("moa_test_") else {
+        return false;
+    };
+    let Ok(uuid) = Uuid::try_parse(raw) else {
+        return false;
+    };
+    let Some(timestamp) = uuid.get_timestamp() else {
+        return false;
+    };
+    let (created_secs, _) = timestamp.to_unix();
+    now_unix_secs.saturating_sub(created_secs) >= ORPHAN_CLONE_MIN_AGE.as_secs()
+}
+
 /// Drops leftover per-test clone databases that have no active connections.
 ///
-/// Intended for manual disk reclamation between test runs. It never drops the
-/// shared template, the maintenance database, or any database that still has a
-/// live connection (which would indicate an in-flight test).
+/// Intended for disk reclamation between test runs. It never drops the shared
+/// template, the maintenance database, any database that still has a live
+/// connection, or any clone younger than [`ORPHAN_CLONE_MIN_AGE`] (which would
+/// race a concurrent test that created its database but has not connected yet).
 pub async fn drop_orphaned_test_databases() -> Result<u64> {
     let maintenance_url = test_database_url();
     let (_, maintenance_db, _) = split_database_url(&maintenance_url)?;
@@ -148,8 +177,15 @@ pub async fn drop_orphaned_test_databases() -> Result<u64> {
     .await
     .map_err(|error| MoaError::StorageError(format!("list orphaned test databases: {error}")))?;
 
+    let now_unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
     let mut dropped = 0_u64;
     for name in candidates {
+        if !clone_name_is_sweepable(&name, now_unix_secs) {
+            continue;
+        }
         let statement = format!(
             "DROP DATABASE IF EXISTS {} WITH (FORCE)",
             quote_identifier(&name)
@@ -461,7 +497,36 @@ fn quote_literal(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{split_database_url, with_database};
+    use super::{ORPHAN_CLONE_MIN_AGE, clone_name_is_sweepable, split_database_url, with_database};
+    use uuid::{NoContext, Timestamp, Uuid};
+
+    #[test]
+    fn orphan_sweep_skips_recent_clone_names() {
+        // Pins: a clone created moments ago must never be swept — dropping it
+        // races the owning test between CREATE DATABASE and its first connect.
+        let name = format!("moa_test_{}", Uuid::now_v7().simple());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_secs();
+        assert!(!clone_name_is_sweepable(&name, now));
+    }
+
+    #[test]
+    fn orphan_sweep_drops_stale_clone_names_and_ignores_unparseable() {
+        // Pins: only clones older than the safety window are reclaimed, and
+        // names without a UUIDv7 timestamp are always preserved.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_secs();
+        let stale_secs = now - ORPHAN_CLONE_MIN_AGE.as_secs() - 60;
+        let stale_uuid = Uuid::new_v7(Timestamp::from_unix(NoContext, stale_secs, 0));
+        let stale_name = format!("moa_test_{}", stale_uuid.simple());
+        assert!(clone_name_is_sweepable(&stale_name, now));
+        assert!(!clone_name_is_sweepable("moa_test_not_a_uuid", now));
+        assert!(!clone_name_is_sweepable("unrelated_db", now));
+    }
 
     #[test]
     fn split_database_url_extracts_database_name() {

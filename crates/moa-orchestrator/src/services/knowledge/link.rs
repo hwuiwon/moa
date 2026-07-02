@@ -29,7 +29,7 @@ impl KnowledgeService {
                 connector: request.connector,
                 external_account_id: request.external_account_id,
                 end_user_email_address: request.end_user_email_address,
-                redirect_url: None,
+                redirect_url: request.redirect_url,
                 source_selection: request.source_selection,
             })
             .await?;

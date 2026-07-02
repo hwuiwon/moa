@@ -9,7 +9,7 @@ use moa_knowledge::{
     Error,
     domain::{
         ConnectionStatus, CreateLinkTokenRequest, ExchangePublicTokenRequest, KnowledgeConnection,
-        ListChangedRecordsRequest,
+        ListChangedRecordsRequest, ProviderIntegration,
     },
     providers::{LinkedIntegrationProvider, merge::MergeProvider},
 };
@@ -48,6 +48,38 @@ fn ts(value: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(value)
         .expect("fixture timestamp should be RFC3339")
         .with_timezone(&Utc)
+}
+
+#[tokio::test]
+async fn list_integrations_returns_static_knowledge_categories() {
+    // Pins: Merge exposes integrations as unified-API product categories (the
+    // `connector` in the link flow), so list_integrations returns humanized
+    // static category entries without an HTTP call.
+    let provider = MergeProvider::with_client(
+        reqwest::Client::new(),
+        "https://api.invalid",
+        "merge-test-key",
+    );
+    let integrations = provider
+        .list_integrations()
+        .await
+        .expect("static integration listing should succeed");
+
+    assert_eq!(
+        integrations,
+        vec![
+            ProviderIntegration {
+                id: "knowledgebase".to_string(),
+                display_name: "Knowledge Base".to_string(),
+                logo_url: None,
+            },
+            ProviderIntegration {
+                id: "filestorage".to_string(),
+                display_name: "File Storage".to_string(),
+                logo_url: None,
+            },
+        ]
+    );
 }
 
 fn signature(body: &[u8], signature_key: &str) -> String {

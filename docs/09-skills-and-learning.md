@@ -53,7 +53,9 @@ use it. A skill may additionally declare an optional `procedure` in its
 `ProcedureDefinition` stores explicit nodes and edges, and `ProcedureExecution`
 advances the graph through persisted node runs, with durable runs, review gates,
 and wait-signals: `review` nodes pause the run until a reviewer decides, and
-`wait_signal` nodes suspend until an external signal arrives.
+`wait_signal` nodes suspend until an external signal arrives. Parallel nodes
+express graph fan-out/join semantics; their side effects currently execute
+sequentially in a deterministic order rather than concurrently.
 
 When a procedure run starts, caller inputs are validated against the skill's
 input schema. A run with missing required inputs is rejected with a structured
@@ -72,6 +74,47 @@ from a live run, and a visual/dashboard edit must round-trip through the same
 artifact document with stable node IDs, edge IDs, and non-semantic `ui`
 metadata. `moa-skills` owns package parsing, learning/review mechanics, and the
 deterministic procedure interpreter.
+
+Step prose has a fixed home so the same document survives the code ↔ canvas
+round-trip. Instruction text that should influence execution belongs in an
+`Agent` node's `input` (the model reads it); presentation-only labels, ordering
+hints, and layout belong in non-semantic `ui` metadata (the interpreter ignores
+it). A visual builder edits and re-serializes the same artifact document,
+preserving node and edge IDs, so a numbered step rendered in the dashboard maps
+back to exactly one node and no meaning is lost on save. This is the concrete
+procedures form of the general code-first, canvas-second rule in
+`docs/01-architecture-overview.md`.
+
+## Capabilities catalog
+
+The tenant-admin procedure builder renders a procedure as numbered steps and
+offers an `@`-mention dropdown of everything a step can attach to. That dropdown
+is fed by a single read-only endpoint, `POST /v1/capabilities/list` (translated
+to `Skills/list_capabilities`), authorized like `Skills/list` with a tenant
+`Operator` check.
+
+The handler merges five sources into one deterministic list, sorted by kind then
+name, where each entry carries the stable `reference` a `ProcedureNode` attaches
+to:
+
+| Kind | Source | Reference form |
+|---|---|---|
+| `tool` | statically declarable built-in tools: default local hand/built-in registry plus delegation and procedure tools | bare tool name |
+| `connector_action` | published `Action` artifacts and the actions of published `Connector` artifacts | `action://<name>` and `action://<connector>.<action>` |
+| `skill_action` | actions declared by published `Skill` artifacts (procedures themselves are excluded — they are what is being edited) | `skill://<skill>#<action_id>` |
+| `memory` | the two graph-memory operations | `memory_read` / `memory_write` |
+| `datasource` | tenant knowledge connections, read through the same repository the `Knowledge` service uses | connection identifier |
+
+Each entry also carries a short `source` provenance string (`builtin`,
+`artifact`, or `knowledge_connection:<provider>`). Datasource entries are
+provider-agnostic: connections come from any enabled linked-account provider
+(nango, merge, and any future provider in `config/knowledge.rs`), so the handler
+enumerates whatever the connections store returns without special-casing a
+provider and tags each entry's `source` with that connection's provider id.
+
+Tool coverage is limited to the statically declarable set. MCP-discovered tools
+and the child-only report tools exposed only inside a worker subset are per-turn
+or configuration-dependent and are intentionally omitted.
 
 ## Storage
 

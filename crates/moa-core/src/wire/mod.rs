@@ -4,6 +4,7 @@ pub mod admin;
 pub mod agents;
 pub mod analytics;
 pub mod artifacts;
+pub mod capabilities;
 pub mod eval;
 pub mod experiments;
 pub mod knowledge;

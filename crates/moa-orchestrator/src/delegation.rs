@@ -6,10 +6,11 @@ use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::{
     AttachWorkerResultWaiterInput, CancelWorkerInput, ConsumeWorkerChildResultInput,
     DelegationTool, Event, ListWorkersInput, ListWorkersOutput, MessageWorkerInput,
-    ProvideWorkerInputInput, RemoveWorkerResultWaiterInput, ReservedWorker, SessionId, SessionMeta,
-    SpawnWorkerInput, SpawnWorkerOutput, ToolOutput, TrustedSandboxFileManifestRef, UserId,
-    WaitWorkerInput, WaitWorkerOutput, WorkerChildRef, WorkerChildRequest, WorkerId, WorkerMessage,
-    WorkerProgressSummary, WorkerState, WorkerTerminalResult,
+    ProvideWorkerInputInput, RemoveWorkerResultWaiterInput, ReservedWorker, SessionActorRef,
+    SessionId, SessionMeta, SpawnWorkerInput, SpawnWorkerOutput, ToolOutput,
+    TrustedSandboxFileManifestRef, UserId, WaitWorkerInput, WaitWorkerOutput, WorkerChildRef,
+    WorkerChildRequest, WorkerId, WorkerMessage, WorkerProgressSummary, WorkerState,
+    WorkerTerminalResult,
 };
 use restate_sdk::prelude::*;
 use serde::Serialize;
@@ -277,13 +278,29 @@ async fn reserve_root_child(
     })
 }
 
-fn storage_user_id(meta: &SessionMeta) -> UserId {
-    let id = meta
+/// Derives the storage-scoped user id for a session, preferring the linked
+/// contact, then the recorded session actor, then the owning tenant.
+///
+/// This matches the governed tool flow's attribution so delegated workers and
+/// procedure tools resolve action policies against the same user id the session
+/// uses for its own turns.
+pub(crate) fn storage_user_id(meta: &SessionMeta) -> UserId {
+    let value = meta
         .contact
         .as_ref()
         .map(|contact| contact.contact_id.to_string())
+        .or_else(|| meta.created_by.as_ref().map(session_actor_storage_id))
         .unwrap_or_else(|| format!("tenant:{}", meta.tenant_id));
-    UserId::new(id)
+    UserId::new(value)
+}
+
+/// Maps a recorded session actor to its storage-scoped identifier.
+fn session_actor_storage_id(actor: &SessionActorRef) -> String {
+    match actor {
+        SessionActorRef::Identity { id } => format!("identity:{id}"),
+        SessionActorRef::Contact { id } => id.to_string(),
+        SessionActorRef::Anonymous => "anonymous".to_string(),
+    }
 }
 
 async fn wait_child(
@@ -687,6 +704,38 @@ mod tests {
         assert_eq!(
             clamp_wait_timeout_ms(MAX_WAIT_TIMEOUT_MS + 1),
             MAX_WAIT_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn storage_user_id_falls_back_to_actor_then_tenant() {
+        // Pins: with no linked contact, delegated attribution uses the recorded
+        // session actor before the tenant, matching the governed tool flow so a
+        // delegated worker resolves action policies against the session's user id.
+        use moa_core::{SessionActorRef, SessionMeta, TenantId, UserId};
+        use uuid::Uuid;
+
+        let tenant_id = TenantId::from(Uuid::from_u128(1));
+        let actor_meta = SessionMeta {
+            tenant_id,
+            created_by: Some(SessionActorRef::Identity {
+                id: Uuid::from_u128(7),
+            }),
+            ..SessionMeta::default()
+        };
+        assert_eq!(
+            super::storage_user_id(&actor_meta),
+            UserId::new(format!("identity:{}", Uuid::from_u128(7)))
+        );
+
+        let tenant_meta = SessionMeta {
+            tenant_id,
+            created_by: None,
+            ..SessionMeta::default()
+        };
+        assert_eq!(
+            super::storage_user_id(&tenant_meta),
+            UserId::new(format!("tenant:{tenant_id}"))
         );
     }
 

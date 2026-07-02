@@ -963,6 +963,7 @@ async fn run_once_inside_workflow(
     }
 
     let tool_calls = response_tool_calls(&visible_response);
+    let selected_procedure_skills = selected_procedure_skill_refs(&request.metadata);
     match dispatch_response_tool_calls(
         ctx,
         RootToolContext {
@@ -971,6 +972,7 @@ async fn run_once_inside_workflow(
             session_id,
             active_canary: active_canary.as_deref(),
             trusted_sandbox_manifest: trusted_sandbox_manifest.as_ref(),
+            selected_procedure_skills: &selected_procedure_skills,
             turn_evidence,
         },
         &allowed_tools,
@@ -1722,6 +1724,7 @@ struct RootToolContext<'a> {
     session_id: SessionId,
     active_canary: Option<&'a str>,
     trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
+    selected_procedure_skills: &'a std::collections::BTreeSet<String>,
     turn_evidence: &'a mut TurnEvidence,
 }
 
@@ -1790,6 +1793,7 @@ async fn handle_tool_call(
             tool_id,
             tool_call,
             allowed_tools,
+            selected_procedure_skills: tool_context.selected_procedure_skills,
             active_canary,
             trusted_sandbox_manifest: tool_context.trusted_sandbox_manifest,
             origin: GovernedInvocationOrigin::RootTurn,
@@ -2521,6 +2525,29 @@ fn turn_has_procedure_capable_skill(
         .any(|name| !name.trim().is_empty())
 }
 
+/// Returns the normalized `skill://<name>` references for the procedure-capable
+/// skills selected on this turn, used to gate which skills `run_procedure` may start.
+///
+/// This reads the same context metadata that decides whether the procedure tools are
+/// offered ([`turn_has_procedure_capable_skill`]) and normalizes each name the way
+/// [`moa_core::RunProcedureToolInput::procedure_ref`] does, so a `run_procedure` call
+/// and the allowlist compare on identical forms. Both the root and worker turn loops
+/// use this so the membership gate shares one source of truth.
+pub(crate) fn selected_procedure_skill_refs(
+    metadata: &std::collections::HashMap<String, serde_json::Value>,
+) -> std::collections::BTreeSet<String> {
+    metadata
+        .get(SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY)
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(moa_core::normalize_procedure_skill_ref)
+        .collect()
+}
+
 fn selected_skill_names(
     metadata: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Vec<String> {
@@ -2671,6 +2698,34 @@ mod tests {
             json!(["", "damaged-food-order"]),
         );
         assert!(turn_has_procedure_capable_skill(&present));
+    }
+
+    #[test]
+    fn selected_procedure_skill_refs_normalizes_and_ignores_blanks() {
+        // Pins: the run_procedure membership set is built from the selected procedure
+        // skill names, normalized to skill:// references, with blank and non-string
+        // metadata entries dropped so the allowlist matches procedure_ref() exactly.
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY.to_string(),
+            json!([
+                "damaged-food-order",
+                " ",
+                "skill://transaction-dispute",
+                7,
+                null
+            ]),
+        );
+
+        assert_eq!(
+            selected_procedure_skill_refs(&metadata),
+            BTreeSet::from([
+                "skill://damaged-food-order".to_string(),
+                "skill://transaction-dispute".to_string(),
+            ])
+        );
+        // No selected procedure skills yields an empty set, so run_procedure is rejected.
+        assert!(selected_procedure_skill_refs(&HashMap::new()).is_empty());
     }
 
     #[test]

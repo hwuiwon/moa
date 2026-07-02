@@ -7,8 +7,9 @@ use moa_core::TenantId;
 use moa_knowledge::{
     Error,
     domain::{
-        ApplySourceSelectionRequest, ConnectionStatus, CreateLinkTokenRequest, KnowledgeConnection,
-        ListChangedRecordsRequest, TriggerSyncRequest,
+        ApplySourceSelectionRequest, ConnectionStatus, CreateLinkTokenRequest,
+        FetchRecordContentRequest, KnowledgeConnection, ListChangedRecordsRequest,
+        ProviderIntegration, ProviderRecord, TriggerSyncRequest,
     },
     providers::{LinkedIntegrationProvider, nango::NangoProvider},
 };
@@ -307,6 +308,45 @@ async fn trigger_and_records_list_include_selected_variant() {
 }
 
 #[tokio::test]
+async fn records_list_fails_fast_when_no_sync_model_selected() {
+    // Pins: Nango's GET /records requires a `model`; with no sync model in the
+    // connection's source_selection, list_changed_records fails fast with an
+    // actionable error and never issues an HTTP request that would return nothing.
+    let provider = NangoProvider::with_client(
+        reqwest::Client::new(),
+        "https://api.invalid",
+        "nango-test-key",
+    );
+    let connection = connection();
+    assert!(
+        connection.source_selection.get("model").is_none(),
+        "fixture connection must have no selected sync model"
+    );
+
+    let error = provider
+        .list_changed_records(ListChangedRecordsRequest {
+            connection,
+            cursor: None,
+            modified_after: None,
+            limit: Some(1),
+            variant: None,
+        })
+        .await
+        .expect_err("missing sync model should be a clear error, not a silent empty page");
+
+    match error {
+        Error::Provider { provider, message } => {
+            assert_eq!(provider, "nango");
+            assert!(
+                message.contains("requires a sync model"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("expected Error::Provider, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn records_list_maps_cursor_deleted_metadata_and_change_tokens() {
     // Pins: Nango record-cache pagination maps cursors and deleted-record metadata without live credentials.
     let server = MockServer::start().await;
@@ -388,6 +428,311 @@ async fn records_list_maps_cursor_deleted_metadata_and_change_tokens() {
         "2026-06-26T12:06:00Z"
     );
     assert_eq!(page.records[1].change_token.as_deref(), Some("DELETED"));
+}
+
+#[tokio::test]
+async fn list_integrations_maps_nango_configs_to_id_display_and_logo() {
+    // Pins: GET /integrations maps each config's unique_key -> id (the connector),
+    // display_name -> display_name (falling back to provider), and logo -> logo_url.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/integrations"))
+        .and(bearer_token("nango-test-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "unique_key": "google-drive",
+                    "provider": "google-drive",
+                    "display_name": "Google Drive",
+                    "logo": "https://logos.example/google-drive.svg"
+                },
+                {
+                    "unique_key": "notion",
+                    "provider": "notion",
+                    "display_name": null,
+                    "logo": null
+                }
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
+    let integrations = provider
+        .list_integrations()
+        .await
+        .expect("integration listing should succeed");
+
+    assert_eq!(
+        integrations,
+        vec![
+            ProviderIntegration {
+                id: "google-drive".to_string(),
+                display_name: "Google Drive".to_string(),
+                logo_url: Some("https://logos.example/google-drive.svg".to_string()),
+            },
+            ProviderIntegration {
+                id: "notion".to_string(),
+                display_name: "notion".to_string(),
+                logo_url: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn list_integrations_surfaces_upstream_errors() {
+    // Pins: a non-success status from /integrations surfaces as an HttpStatus
+    // error rather than an empty catalog.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/integrations"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
+    let error = provider
+        .list_integrations()
+        .await
+        .expect_err("upstream 500 must surface as an error");
+
+    assert!(
+        matches!(error, Error::HttpStatus { status: 500, .. }),
+        "expected an HttpStatus 500 error, got {error:?}"
+    );
+}
+
+fn drive_record(source_id: &str, mime_type: &str) -> ProviderRecord {
+    ProviderRecord {
+        source_id: source_id.to_string(),
+        object_type: "drive_file".to_string(),
+        title: Some(format!("{source_id} title")),
+        // Auth-walled browser viewer link; never a fetchable content URL.
+        source_uri: Some(format!("https://drive.google.com/file/d/{source_id}/view")),
+        change_token: None,
+        deleted: false,
+        source_updated_at: None,
+        metadata: json!({}),
+        payload: json!({ "mimeType": mime_type }),
+    }
+}
+
+#[tokio::test]
+async fn content_fetch_exports_google_apps_files_as_plain_text() {
+    // Pins: a Google Workspace editor file (google-apps MIME) is fetched through
+    // the Nango proxy export endpoint requesting text/plain, with the same auth
+    // headers as /records, and returns the exported text with a text/plain MIME.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/proxy/drive/v3/files/doc-apps/export"))
+        .and(bearer_token("nango-test-key"))
+        .and(header("Connection-Id", "conn_123"))
+        .and(header("Provider-Config-Key", "google-drive"))
+        .and(query_param("mimeType", "text/plain"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/plain; charset=utf-8")
+                .set_body_string("Exported roadmap body."),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
+    let content = provider
+        .fetch_record_content(FetchRecordContentRequest {
+            connection: connection(),
+            record: drive_record("doc-apps", "application/vnd.google-apps.document"),
+        })
+        .await
+        .expect("export fetch should succeed")
+        .expect("google-apps record should yield content");
+
+    assert_eq!(content.bytes, b"Exported roadmap body.");
+    assert_eq!(content.mime_type.as_deref(), Some("text/plain"));
+}
+
+#[tokio::test]
+async fn content_fetch_streams_binary_files_via_alt_media() {
+    // Pins: a non-editor Drive file is fetched verbatim through the proxy with
+    // alt=media, and the response content type is preserved as the MIME.
+    let server = MockServer::start().await;
+    let pdf_bytes = b"%PDF-1.7\n%binary body".to_vec();
+    Mock::given(method("GET"))
+        .and(path("/proxy/drive/v3/files/doc-bin"))
+        .and(bearer_token("nango-test-key"))
+        .and(header("Connection-Id", "conn_123"))
+        .and(header("Provider-Config-Key", "google-drive"))
+        .and(query_param("alt", "media"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/pdf")
+                .set_body_bytes(pdf_bytes.clone()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
+    let content = provider
+        .fetch_record_content(FetchRecordContentRequest {
+            connection: connection(),
+            record: drive_record("doc-bin", "application/pdf"),
+        })
+        .await
+        .expect("binary fetch should succeed")
+        .expect("binary record should yield content");
+
+    assert_eq!(content.bytes, pdf_bytes);
+    assert_eq!(content.mime_type.as_deref(), Some("application/pdf"));
+}
+
+#[tokio::test]
+async fn content_fetch_rejects_bodies_over_the_size_cap() {
+    // Pins: a response larger than the 10 MiB content cap is rejected as a decode
+    // error rather than buffered into memory.
+    let server = MockServer::start().await;
+    // One byte over the crate's 10 MiB record content cap.
+    let oversized = vec![b'a'; 10 * 1024 * 1024 + 1];
+    Mock::given(method("GET"))
+        .and(path("/proxy/drive/v3/files/doc-huge"))
+        .and(query_param("alt", "media"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(oversized))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
+    let error = provider
+        .fetch_record_content(FetchRecordContentRequest {
+            connection: connection(),
+            record: drive_record("doc-huge", "application/octet-stream"),
+        })
+        .await
+        .expect_err("oversized content must be rejected");
+
+    assert!(
+        matches!(&error, Error::Decode(message) if message.contains("size cap")),
+        "expected a size-cap decode error, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn content_fetch_returns_none_for_non_text_exportable_google_apps_types() {
+    // Pins: a google-apps type with no text export (e.g. a Drive folder) yields
+    // None and issues no request, instead of a doomed export that Drive rejects.
+    let provider = NangoProvider::with_client(
+        reqwest::Client::new(),
+        "https://api.invalid",
+        "nango-test-key",
+    );
+
+    let content = provider
+        .fetch_record_content(FetchRecordContentRequest {
+            connection: connection(),
+            record: drive_record("folder-1", "application/vnd.google-apps.folder"),
+        })
+        .await
+        .expect("non-exportable google-apps type should not error");
+
+    assert!(
+        content.is_none(),
+        "a Drive folder has no fetchable content and must return None"
+    );
+}
+
+#[tokio::test]
+async fn content_fetch_exports_spreadsheets_as_csv() {
+    // Pins: Google Sheets export to text/csv (text/plain is rejected by Drive).
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/proxy/drive/v3/files/sheet-1/export"))
+        .and(query_param("mimeType", "text/csv"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/csv")
+                .set_body_string("a,b\n1,2"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
+    let content = provider
+        .fetch_record_content(FetchRecordContentRequest {
+            connection: connection(),
+            record: drive_record("sheet-1", "application/vnd.google-apps.spreadsheet"),
+        })
+        .await
+        .expect("spreadsheet export should succeed")
+        .expect("spreadsheet should yield content");
+
+    assert_eq!(content.bytes, b"a,b\n1,2");
+    assert_eq!(content.mime_type.as_deref(), Some("text/csv"));
+}
+
+#[tokio::test]
+async fn content_fetch_returns_none_for_non_drive_integrations() {
+    // Pins: an integration without a known proxy content path yields None (not an
+    // error) and issues no HTTP request.
+    let provider = NangoProvider::with_client(
+        reqwest::Client::new(),
+        "https://api.invalid",
+        "nango-test-key",
+    );
+    let mut connection = connection();
+    connection.connector = "notion".to_string();
+
+    let content = provider
+        .fetch_record_content(FetchRecordContentRequest {
+            connection,
+            record: drive_record("page-1", "text/markdown"),
+        })
+        .await
+        .expect("unsupported integration should not error");
+
+    assert!(
+        content.is_none(),
+        "unsupported integration should return no content"
+    );
+}
+
+#[tokio::test]
+async fn content_fetch_surfaces_upstream_errors() {
+    // Pins: an upstream non-success status surfaces as an HttpStatus error so the
+    // pipeline can distinguish a failed fetch from an unsupported one.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/proxy/drive/v3/files/doc-error"))
+        .and(query_param("alt", "media"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
+    let error = provider
+        .fetch_record_content(FetchRecordContentRequest {
+            connection: connection(),
+            record: drive_record("doc-error", "application/pdf"),
+        })
+        .await
+        .expect_err("upstream 500 must surface as an error");
+
+    assert!(
+        matches!(error, Error::HttpStatus { status: 500, .. }),
+        "expected an HttpStatus 500 error, got {error:?}"
+    );
 }
 
 #[tokio::test]
