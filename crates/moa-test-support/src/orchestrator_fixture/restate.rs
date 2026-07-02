@@ -8,6 +8,7 @@ pub(super) async fn start_restate_container() -> Result<ContainerAsync<GenericIm
         .with_exposed_port(9070.tcp())
         .with_wait_for(WaitFor::seconds(1))
         .with_env_var("DO_NOT_TRACK", "1")
+        .with_env_var("RESTATE_EXPERIMENTAL_ENABLE_VQUEUES", "true")
         .with_host("host.docker.internal", Host::HostGateway)
         .with_cmd(["--node-name=restate-test"])
         .start()

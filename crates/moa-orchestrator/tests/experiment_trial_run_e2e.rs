@@ -860,7 +860,7 @@ async fn post_json<T: serde::Serialize + ?Sized>(
 ) -> Result<reqwest::Response> {
     let response = client
         .post(format!(
-            "{}/{service_or_object}/{handler}",
+            "{}/restate/call/{service_or_object}/{handler}",
             ingress.trim_end_matches('/')
         ))
         .json(request)
@@ -887,7 +887,7 @@ async fn post_empty(
 ) -> Result<reqwest::Response> {
     let response = client
         .post(format!(
-            "{}/{service_or_object}/{handler}",
+            "{}/restate/call/{service_or_object}/{handler}",
             ingress.trim_end_matches('/')
         ))
         .send()
@@ -915,7 +915,7 @@ async fn post_json_with_identity<T: serde::Serialize + ?Sized>(
 ) -> Result<reqwest::Response> {
     let response = with_identity(
         client.post(format!(
-            "{}/{service_or_object}/{handler}",
+            "{}/restate/call/{service_or_object}/{handler}",
             ingress.trim_end_matches('/')
         )),
         identity,

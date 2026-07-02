@@ -296,7 +296,9 @@ set +a
 
 echo
 echo ">> starting ephemeral restate-server"
-restate-server \
+# Fresh data dir every run, so the v1.7 fresh-cluster vqueues limitation
+# never applies here.
+RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true restate-server \
   --node-name "e2e-${RUN_SHORT_ID}" \
   --base-dir "${RESTATE_DIR}" \
   --bind-ip 127.0.0.1 \

@@ -107,7 +107,7 @@ async fn create_turn_session(
 /// Builds a keyed Restate virtual-object URL.
 fn session_object_url(ingress: &str, session_id: SessionId, handler: &str) -> String {
     format!(
-        "{}/Session/{session_id}/{handler}",
+        "{}/restate/call/Session/{session_id}/{handler}",
         ingress.trim_end_matches('/')
     )
 }

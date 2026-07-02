@@ -351,18 +351,19 @@ On boot, the orchestrator installs two periodic jobs via the `CronJob` virtual o
 To inspect the schedule:
 
 ```bash
-curl http://localhost:10010/CronJob/graph_memory_compact/status
+curl http://localhost:10010/restate/call/CronJob/graph_memory_compact/status
 ```
 
 To pause or resume a job without clearing its config:
 
 ```bash
-curl -X POST http://localhost:10010/CronJob/graph_memory_compact/pause
-curl -X POST http://localhost:10010/CronJob/graph_memory_compact/resume
+curl -X POST http://localhost:10010/restate/call/CronJob/graph_memory_compact/pause
+curl -X POST http://localhost:10010/restate/call/CronJob/graph_memory_compact/resume
 ```
 
-To install a custom schedule, post a new body to `/CronJob/{key}/configure`
-and bump the bootstrap idempotency-key version suffix in code.
+To install a custom schedule, post a new body to
+`/restate/call/CronJob/{key}/configure` and bump the bootstrap
+idempotency-key version suffix in code.
 
 ## Hosted API Runtime
 

@@ -78,6 +78,7 @@ pub(super) async fn initial_stream_sequence(
             contact_token: message.contact_token.clone(),
             event_range: EventRange::recent(1),
         },
+        message.tenant_id,
     )
     .await?;
     Ok(next_sequence_after(&progress.events))
@@ -195,6 +196,7 @@ async fn fetch_stream_progress(
                 limit: Some(100),
             },
         },
+        state.tenant_id,
     )
     .await
 }

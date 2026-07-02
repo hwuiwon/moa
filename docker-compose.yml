@@ -168,12 +168,16 @@ services:
       MOA_SESSION_ATTACHMENT_REGION: ${MOA_SESSION_ATTACHMENT_REGION:-us-east-1}
 
   restate:
-    image: docker.restate.dev/restatedev/restate:1.6.2
+    image: docker.restate.dev/restatedev/restate:1.7.0
     container_name: moa-restate
     restart: unless-stopped
     command: ["--node-name=restate-dev"]
     environment:
       RESTATE_LOG_FILTER: "warn,restate=info"
+      # v1.7 limitation: vqueues can only be enabled on a cluster with no
+      # in-flight invocations; wipe the moa-restate-data volume if the node
+      # refuses to boot after upgrading.
+      RESTATE_EXPERIMENTAL_ENABLE_VQUEUES: "true"
       RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE: "1 GiB"
       RESTATE_ADMIN__QUERY_ENGINE__MEMORY_SIZE: "256 MiB"
       RESTATE_BIFROST__RECORD_CACHE_MEMORY_SIZE: "128 MiB"
@@ -313,6 +317,32 @@ services:
         done
         echo "registration failed"
         exit 1
+
+  # Seeds the cluster-wide Restate flow-control rule book once the node is healthy.
+  # The `*` rule gives every scope key (the edge uses `tenant-{tenant_id}`) its own
+  # concurrency counter capped at 1000, so no tenant can exhaust cluster capacity.
+  # `rules set` is idempotent, so a re-run just overwrites the same default.
+  restate-rules-bootstrap:
+    image: docker.restate.dev/restatedev/restate-cli:1.7.0
+    container_name: moa-restate-rules-bootstrap
+    restart: "no"
+    depends_on:
+      restate:
+        condition: service_healthy
+    environment:
+      RESTATE_ADMIN_URL: http://restate:9070
+    command:
+      - --connect-timeout
+      - "10000"
+      - --request-timeout
+      - "30000"
+      - rules
+      - set
+      - "*"
+      - --concurrency
+      - "1000"
+      - --description
+      - scope default
 
   moa-pii-service:
     build:

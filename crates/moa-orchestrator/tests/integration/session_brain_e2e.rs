@@ -67,7 +67,7 @@ fn live_model() -> Option<&'static str> {
 
 fn object_url(ingress: &str, session_id: SessionId, handler: &str) -> String {
     format!(
-        "{}/Session/{session_id}/{handler}",
+        "{}/restate/call/Session/{session_id}/{handler}",
         ingress.trim_end_matches('/')
     )
 }
@@ -102,7 +102,7 @@ async fn session_brain_round_trip_through_restate() -> Result<()> {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
 
         let create_request = client.post(format!(
-            "{}/SessionStore/create_session",
+            "{}/restate/call/SessionStore/create_session",
             ingress.trim_end_matches('/')
         ));
         let session_id = with_identity(create_request, &identity)
@@ -117,7 +117,7 @@ async fn session_brain_round_trip_through_restate() -> Result<()> {
 
         client
             .post(format!(
-                "{}/SessionStore/init_session_vo",
+                "{}/restate/call/SessionStore/init_session_vo",
                 ingress.trim_end_matches('/')
             ))
             .json(&init_session_vo_request(session_id, meta.clone()))
@@ -213,7 +213,7 @@ async fn wait_for_brain_response(
 ) -> Result<Vec<moa_core::EventRecord>> {
     for _attempt in 0..30 {
         let request = client.post(format!(
-            "{}/SessionStore/get_events",
+            "{}/restate/call/SessionStore/get_events",
             ingress.trim_end_matches('/')
         ));
         let response = with_identity(request, identity)

@@ -176,9 +176,8 @@ parquet = { version = "53", features = ["async", "arrow"] }
 proptest = "1"
 rand = "0.8"
 regex = "1"
-restate-sdk = "0.8"
+restate-sdk = "0.10"
 rust-stemmers = "1"
-restate-sdk-shared-core = "0.8"
 reqwest = { version = "0.13", default-features = false, features = [
     "http2",
     "json",

@@ -1,6 +1,7 @@
 //! HTTP routes exposed by the MOA edge service.
 #![allow(clippy::result_large_err)]
 
+use crate::ingress::{IngressScope, call_path};
 use crate::{headers, proxy::OrchestratorProxy};
 use axum::Router;
 use axum::body::{Body, Bytes};
@@ -233,7 +234,12 @@ async fn handle_proxy(
         .to_string();
     let (method, path, body) =
         match translate_public_route(&method, &uri, &body, identity.tenant_id) {
-            RouteTranslation::Forward { method, path, body } => (method, path, body),
+            // Every catch-all route reaching the proxy is a read, status poll, or
+            // lifecycle write; turn-starting message posts take dedicated handlers, so
+            // these stay unscoped and never consume a tenant's concurrency slot.
+            RouteTranslation::Forward { method, path, body } => {
+                (method, call_path(&IngressScope::Unscoped, &path), body)
+            }
             RouteTranslation::NoChange => (method, original_path, body.to_vec()),
             RouteTranslation::BadRequest(message) => {
                 span.record("http.status_code", 400_i64);
@@ -594,6 +600,7 @@ async fn forward_knowledge_provider_webhook(
     else {
         return (StatusCode::BAD_REQUEST, "bad knowledge webhook body").into_response();
     };
+    let path = call_path(&IngressScope::Unscoped, &path);
 
     match state
         .proxy
@@ -625,6 +632,9 @@ async fn forward_public_contact_route<const N: usize>(
     ) else {
         return (StatusCode::BAD_REQUEST, "bad contact body").into_response();
     };
+    // Contact verification, session init, promote, and channel change set up sessions;
+    // the turn only starts when a message is posted, so these stay unscoped.
+    let path = call_path(&IngressScope::Unscoped, &path);
     match state
         .proxy
         .forward_public(method, &path, body, &headers)
@@ -706,6 +716,7 @@ async fn handle_session_message_stream(
         &state,
         "send_message",
         &input.message,
+        input.message.tenant_id,
     )
     .await
     {
@@ -764,6 +775,7 @@ async fn handle_session_attachment(
             session_id,
             contact_token,
         },
+        tenant_id,
     )
     .await
     {
@@ -836,10 +848,24 @@ impl EdgeJsonError {
     }
 }
 
+/// Flow-control scope for a `Contacts` ingress call.
+///
+/// `send_message` queues a message on the `Session` VO and starts a turn, so it
+/// consumes the tenant's agent-work concurrency and is enrolled in per-tenant
+/// admission control. Verification, authorization, and progress reads are cheap
+/// and stay unscoped so they never wait behind a tenant's turn concurrency.
+fn contacts_scope(handler: &str, tenant_id: TenantId) -> IngressScope {
+    match handler {
+        "send_message" => IngressScope::Tenant(tenant_id),
+        _ => IngressScope::Unscoped,
+    }
+}
+
 async fn call_contacts_handler<I, O>(
     state: &AppState,
     handler: &str,
     input: &I,
+    tenant_id: TenantId,
 ) -> Result<O, EdgeJsonError>
 where
     I: Serialize + ?Sized,
@@ -847,7 +873,10 @@ where
 {
     let body =
         serde_json::to_vec(input).map_err(|error| EdgeJsonError::Serialize(error.to_string()))?;
-    let path = format!("/Contacts/{handler}");
+    let path = call_path(
+        &contacts_scope(handler, tenant_id),
+        &format!("/Contacts/{handler}"),
+    );
     let response = state
         .proxy
         .forward_public(Method::POST, &path, body, &HeaderMap::new())
@@ -1496,5 +1525,28 @@ mod tests {
             credential_for_request(&DisabledAuth, &headers),
             Some(Credential::ApiKey("moa_dev_example".to_string()))
         );
+    }
+
+    #[test]
+    fn only_send_message_takes_the_tenant_flow_control_scope() {
+        // Pins: posting a message starts a turn and is enrolled in per-tenant admission
+        // control, while contact-session reads and lifecycle calls (progress,
+        // authorize_session, init_session) stay unscoped so a status poll or session setup
+        // never consumes a tenant's concurrency slot.
+        let tenant = TenantId::from(
+            Uuid::parse_str("33333333-3333-3333-3333-333333333333").expect("tenant uuid parses"),
+        );
+
+        assert_eq!(
+            contacts_scope("send_message", tenant),
+            IngressScope::Tenant(tenant)
+        );
+        for read_handler in ["progress", "authorize_session", "init_session"] {
+            assert_eq!(
+                contacts_scope(read_handler, tenant),
+                IngressScope::Unscoped,
+                "{read_handler} must not consume tenant concurrency"
+            );
+        }
     }
 }

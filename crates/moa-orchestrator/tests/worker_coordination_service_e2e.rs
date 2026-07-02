@@ -64,15 +64,21 @@ fn ingress_url() -> String {
 }
 
 fn session_url(session_id: &str, handler: &str) -> String {
-    format!("{}/Session/{session_id}/{handler}", ingress_url())
+    format!(
+        "{}/restate/call/Session/{session_id}/{handler}",
+        ingress_url()
+    )
 }
 
 fn session_store_url(handler: &str) -> String {
-    format!("{}/SessionStore/{handler}", ingress_url())
+    format!("{}/restate/call/SessionStore/{handler}", ingress_url())
 }
 
 fn worker_url(worker_id: &str, handler: &str) -> String {
-    format!("{}/Worker/{worker_id}/{handler}", ingress_url())
+    format!(
+        "{}/restate/call/Worker/{worker_id}/{handler}",
+        ingress_url()
+    )
 }
 
 fn live_model() -> &'static str {

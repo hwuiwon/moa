@@ -40,17 +40,17 @@ EOF
 
 echo "Creating smoke session..."
 SESSION_ID="$(
-  curl -sf -X POST http://127.0.0.1:8080/SessionStore/create_session \
+  curl -sf -X POST http://127.0.0.1:8080/restate/call/SessionStore/create_session \
     -H "Content-Type: application/json" \
     -d "${SESSION_META}" | tr -d '"\n'
 )"
 
-curl -sf -X POST http://127.0.0.1:8080/SessionStore/init_session_vo \
+curl -sf -X POST http://127.0.0.1:8080/restate/call/SessionStore/init_session_vo \
   -H "Content-Type: application/json" \
   -d "{\"session_id\":\"${SESSION_ID}\",\"meta\":${SESSION_META}}" >/dev/null
 
 echo "Posting prompt to generate traces, metrics, and logs..."
-curl -sf -X POST "http://127.0.0.1:8080/Session/${SESSION_ID}/post_message" \
+curl -sf -X POST "http://127.0.0.1:8080/restate/call/Session/${SESSION_ID}/post_message" \
   -H "Content-Type: application/json" \
   -d "{\"text\":\"${PROMPT}\",\"attachments\":[]}" >/dev/null
 

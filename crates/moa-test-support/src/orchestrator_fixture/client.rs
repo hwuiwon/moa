@@ -84,6 +84,10 @@ impl TestApiClient {
     }
 
     /// Sends an authenticated JSON POST request and decodes a JSON response.
+    ///
+    /// `path` is a `/{Service}/{handler}` or `/{Service}/{key}/{handler}`
+    /// invocation path, dispatched through the Restate `/restate/call`
+    /// ingress endpoint.
     pub async fn post_call<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
     where
         Req: serde::Serialize + ?Sized,
@@ -91,7 +95,7 @@ impl TestApiClient {
     {
         let response = self.authed(
             self.http
-                .post(format!("{}{path}", self.endpoint))
+                .post(format!("{}/restate/call{path}", self.endpoint))
                 .json(body),
         );
         decode_response(response.send().await.context("send orchestrator request")?).await
@@ -109,7 +113,7 @@ impl TestApiClient {
     {
         let mut request = self.authed(
             self.http
-                .post(format!("{}{path}", self.endpoint))
+                .post(format!("{}/restate/call{path}", self.endpoint))
                 .json(body),
         );
         if let Some(key) = idempotency_key {
@@ -122,7 +126,10 @@ impl TestApiClient {
     where
         Resp: serde::de::DeserializeOwned,
     {
-        let response = self.authed(self.http.post(format!("{}{path}", self.endpoint)));
+        let response = self.authed(
+            self.http
+                .post(format!("{}/restate/call{path}", self.endpoint)),
+        );
         decode_response(response.send().await.context("send orchestrator request")?).await
     }
 
@@ -134,7 +141,7 @@ impl TestApiClient {
         let response = self
             .authed(
                 self.http
-                    .post(format!("{}{path}", self.endpoint))
+                    .post(format!("{}/restate/call{path}", self.endpoint))
                     .json(body),
             )
             .send()

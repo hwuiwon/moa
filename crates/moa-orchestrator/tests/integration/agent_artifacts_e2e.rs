@@ -738,12 +738,15 @@ async fn post_json_with_identity<T: serde::Serialize + ?Sized>(
 }
 
 fn service_url(ingress: &str, service: &str, handler: &str) -> String {
-    format!("{}/{service}/{handler}", ingress.trim_end_matches('/'))
+    format!(
+        "{}/restate/call/{service}/{handler}",
+        ingress.trim_end_matches('/')
+    )
 }
 
 fn object_url(ingress: &str, service: &str, object_id: SessionId, handler: &str) -> String {
     format!(
-        "{}/{service}/{object_id}/{handler}",
+        "{}/restate/call/{service}/{object_id}/{handler}",
         ingress.trim_end_matches('/')
     )
 }

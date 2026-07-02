@@ -205,7 +205,7 @@ async fn post_json_with_identity<T: serde::Serialize + ?Sized>(
 }
 
 fn service_url(ingress: &str, service: &str, handler: &str) -> String {
-    format!("{}/{service}/{handler}", ingress.trim_end_matches('/'))
+    format!("{}/restate/call/{service}/{handler}", ingress.trim_end_matches('/'))
 }
 
 fn node_ids(status: &ProcedureRunStatus) -> Vec<&str> {

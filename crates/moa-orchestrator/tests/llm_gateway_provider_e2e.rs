@@ -91,7 +91,7 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
         grant_tenant_operator(&identity, &storage_partition_id).await?;
 
         let create_request = client.post(format!(
-            "{}/SessionStore/create_session",
+            "{}/restate/call/SessionStore/create_session",
             ingress.trim_end_matches('/')
         ));
         let create_response = with_identity(create_request, &identity)
@@ -129,7 +129,7 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
 
         let response = client
             .post(format!(
-                "{}/LLMGateway/complete",
+                "{}/restate/call/LLMGateway/complete",
                 ingress.trim_end_matches('/')
             ))
             .json(&request)
@@ -180,7 +180,7 @@ async fn wait_for_brain_response(
 ) -> Result<Vec<moa_core::EventRecord>> {
     for _attempt in 0..30 {
         let request = client.post(format!(
-            "{}/SessionStore/get_events",
+            "{}/restate/call/SessionStore/get_events",
             ingress.trim_end_matches('/')
         ));
         let response = with_identity(request, identity)

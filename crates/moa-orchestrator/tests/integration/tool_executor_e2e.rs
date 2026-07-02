@@ -124,7 +124,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
         grant_tenant_operator(&identity, &storage_partition_id).await?;
 
         let create_request = client.post(format!(
-            "{}/SessionStore/create_session",
+            "{}/restate/call/SessionStore/create_session",
             ingress.trim_end_matches('/')
         ));
         let create_response = with_identity(create_request, &identity)
@@ -138,7 +138,11 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             .context("deserialize create_session response")?;
         grant_session_participant(&identity, session_id).await?;
 
-        let write_request = tool_request(
+        // Workers own their sandboxes; the root coordinator may only read
+        // trusted skill package files. Scope the write/read pair to one worker
+        // so the round trip exercises the worker sandbox path.
+        let worker_id = "worker-tool-executor-e2e".to_string();
+        let mut write_request = tool_request(
             ToolCallId::new(),
             "file_write",
             json!({
@@ -148,9 +152,10 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             session_id,
             &meta,
         );
+        write_request.worker_id = Some(worker_id.clone());
         let write_output = client
             .post(format!(
-                "{}/ToolExecutor/execute",
+                "{}/restate/call/ToolExecutor/execute",
                 ingress.trim_end_matches('/')
             ))
             .json(&write_request)
@@ -164,16 +169,17 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             .context("deserialize file_write output")?;
         assert!(write_output.to_text().contains("note.txt"));
 
-        let read_request = tool_request(
+        let mut read_request = tool_request(
             ToolCallId::new(),
             "file_read",
             json!({ "path": "note.txt" }),
             session_id,
             &meta,
         );
+        read_request.worker_id = Some(worker_id.clone());
         let read_output = client
             .post(format!(
-                "{}/ToolExecutor/execute",
+                "{}/restate/call/ToolExecutor/execute",
                 ingress.trim_end_matches('/')
             ))
             .json(&read_request)
@@ -185,7 +191,40 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             .json::<ToolOutput>()
             .await
             .context("deserialize file_read output")?;
-        assert!(read_output.to_text().contains("hello from tool executor"));
+        let read_text = read_output.to_text();
+        assert!(
+            read_text.contains("hello from tool executor"),
+            "file_read output missing written content; got: {read_text}"
+        );
+
+        // Pins: a root-scoped file_read without a trusted sandbox manifest is
+        // denied instead of reaching a sandbox.
+        let root_read_request = tool_request(
+            ToolCallId::new(),
+            "file_read",
+            json!({ "path": "note.txt" }),
+            session_id,
+            &meta,
+        );
+        let root_read_output = client
+            .post(format!(
+                "{}/restate/call/ToolExecutor/execute",
+                ingress.trim_end_matches('/')
+            ))
+            .json(&root_read_request)
+            .send()
+            .await
+            .context("call ToolExecutor/file_read at root scope via restate ingress")?
+            .error_for_status()
+            .context("root file_read call should return a tool output")?
+            .json::<ToolOutput>()
+            .await
+            .context("deserialize root file_read output")?;
+        let root_read_text = root_read_output.to_text();
+        assert!(
+            root_read_text.contains("root coordinator"),
+            "root-scoped file_read should be denied without a trusted manifest; got: {root_read_text}"
+        );
 
         let bash_call_id = ToolCallId::new();
         let bash_request = tool_request(
@@ -197,7 +236,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
         );
         let bash_output = client
             .post(format!(
-                "{}/ToolExecutor/execute",
+                "{}/restate/call/ToolExecutor/execute",
                 ingress.trim_end_matches('/')
             ))
             .json(&bash_request)
@@ -213,7 +252,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
 
         let duplicate_response = client
             .post(format!(
-                "{}/ToolExecutor/execute",
+                "{}/restate/call/ToolExecutor/execute",
                 ingress.trim_end_matches('/')
             ))
             .json(&bash_request)
@@ -230,7 +269,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
 
         let list_response = client
             .post(format!(
-                "{}/ToolExecutor/list_tools",
+                "{}/restate/call/ToolExecutor/list_tools",
                 ingress.trim_end_matches('/')
             ))
             .json(&meta.tenant_id)
@@ -296,7 +335,7 @@ async fn tool_executor_blocks_canary_input_before_backend_execution() -> Result<
         grant_tenant_operator(&identity, &storage_partition_id).await?;
 
         let create_request = client.post(format!(
-            "{}/SessionStore/create_session",
+            "{}/restate/call/SessionStore/create_session",
             ingress.trim_end_matches('/')
         ));
         let create_response = with_identity(create_request, &identity)
@@ -326,7 +365,7 @@ async fn tool_executor_blocks_canary_input_before_backend_execution() -> Result<
 
         let write_output = client
             .post(format!(
-                "{}/ToolExecutor/execute",
+                "{}/restate/call/ToolExecutor/execute",
                 ingress.trim_end_matches('/')
             ))
             .json(&write_request)
@@ -349,7 +388,7 @@ async fn tool_executor_blocks_canary_input_before_backend_execution() -> Result<
         );
 
         let request = client.post(format!(
-            "{}/SessionStore/get_events",
+            "{}/restate/call/SessionStore/get_events",
             ingress.trim_end_matches('/')
         ));
         let events = with_identity(request, &identity)
@@ -437,7 +476,7 @@ async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Resul
         grant_tenant_operator(&identity, &storage_partition_id).await?;
 
         let create_request = client.post(format!(
-            "{}/SessionStore/create_session",
+            "{}/restate/call/SessionStore/create_session",
             ingress.trim_end_matches('/')
         ));
         let create_response = with_identity(create_request, &identity)
@@ -464,7 +503,7 @@ async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Resul
         );
 
         client
-            .post(format!("{}/SessionStore/append_event", ingress.trim_end_matches('/')))
+            .post(format!("{}/restate/call/SessionStore/append_event", ingress.trim_end_matches('/')))
             .json(&append_event_request(
                 session_id,
                 Event::ToolCall {
@@ -483,7 +522,7 @@ async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Resul
             .context("append_event should succeed")?;
 
         let output = client
-            .post(format!("{}/ToolExecutor/execute", ingress.trim_end_matches('/')))
+            .post(format!("{}/restate/call/ToolExecutor/execute", ingress.trim_end_matches('/')))
             .json(&request)
             .send()
             .await
@@ -552,7 +591,7 @@ async fn wait_for_tool_result_events(
 ) -> Result<Vec<moa_core::EventRecord>> {
     for _attempt in 0..30 {
         let request = client.post(format!(
-            "{}/SessionStore/get_events",
+            "{}/restate/call/SessionStore/get_events",
             ingress.trim_end_matches('/')
         ));
         let response = with_identity(request, identity)

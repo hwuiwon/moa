@@ -132,7 +132,7 @@ fn restate_ingress_url() -> String {
 
 fn object_url(ingress: &str, turn: &SessionTurn) -> String {
     format!(
-        "{ingress}/IngestionVO/{}:{}/ingest_turn",
+        "{ingress}/restate/call/IngestionVO/{}:{}/ingest_turn",
         turn.tenant_id, turn.session_id
     )
 }

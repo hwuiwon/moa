@@ -61,13 +61,14 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       restate:
-        image: docker.restate.dev/restatedev/restate:1.6.2
+        image: docker.restate.dev/restatedev/restate:1.7.0
         ports:
           - "8080:8080"
           - "9070:9070"
           - "5122:5122"
         env:
           DO_NOT_TRACK: "1"
+          RESTATE_EXPERIMENTAL_ENABLE_VQUEUES: "true"
         options: >-
           --health-cmd "wget -qO- http://localhost:9070/health >/dev/null 2>&1"
           --health-interval 5s
@@ -105,7 +106,7 @@ jobs:
         run: |
           docker run --rm --network host \
             -e RESTATE_ADMIN_URL=http://localhost:9070 \
-            docker.restate.dev/restatedev/restate-cli:1.6.2 \
+            docker.restate.dev/restatedev/restate-cli:1.7.0 \
               --connect-timeout 10000 \
               --request-timeout 30000 \
               deployments register --force http://localhost:9080 --yes

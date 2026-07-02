@@ -8,7 +8,7 @@ spec:
     autoProvision: true
   compute:
     replicas: 3
-    image: docker.restate.dev/restatedev/restate:1.6.2
+    image: docker.restate.dev/restatedev/restate:1.7.0
     resources:
       requests:
         cpu: "2"
@@ -40,3 +40,7 @@ spec:
     shutdown-timeout = "10m"
     default-num-partitions = 128
     default-replication = 2
+    # v1.7 limitation: vqueues can only be enabled on a fresh cluster (no
+    # in-flight invocations); a cluster with in-flight invocations will
+    # refuse to boot with this flag set.
+    experimental_enable_vqueues = true

@@ -109,7 +109,7 @@ async fn fetch_events(
 
 fn object_url(ingress: &str, service: &str, object_id: SessionId, handler: &str) -> String {
     format!(
-        "{}/{service}/{object_id}/{handler}",
+        "{}/restate/call/{service}/{object_id}/{handler}",
         ingress.trim_end_matches('/')
     )
 }

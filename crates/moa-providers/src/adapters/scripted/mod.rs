@@ -181,12 +181,14 @@ impl ScriptedProvider {
     }
 
     /// Registers a reusable response returned whenever `match_substring` appears in a request's
-    /// system or user message text.
+    /// system, user, or tool-result message text.
     ///
     /// Keyed entries are checked in registration order and the first match wins, so callers should
     /// register specific substrings before general ones. Unlike the FIFO queue, keyed entries are
     /// never consumed, which lets multiple concurrent callers that share a match resolve the same
-    /// completion deterministically.
+    /// completion deterministically. Tool-result text participates so scripts can key an agent
+    /// loop's follow-up iteration on the output of the tool it just ran — the only content that
+    /// distinguishes one iteration from the next.
     pub fn push_keyed(
         mut self,
         match_substring: impl Into<String>,
@@ -196,8 +198,8 @@ impl ScriptedProvider {
         self
     }
 
-    /// Returns the first keyed response whose match substring is contained in the request's system
-    /// or user message text, resolving without mutating the keyed table.
+    /// Returns the first keyed response whose match substring is contained in the request's
+    /// system, user, or tool-result message text, resolving without mutating the keyed table.
     fn match_keyed(&self, request: &CompletionRequest) -> Option<ScriptedResponse> {
         if self.keyed.is_empty() {
             return None;
@@ -205,7 +207,12 @@ impl ScriptedProvider {
         let haystack = request
             .messages
             .iter()
-            .filter(|message| matches!(message.role, MessageRole::System | MessageRole::User))
+            .filter(|message| {
+                matches!(
+                    message.role,
+                    MessageRole::System | MessageRole::User | MessageRole::Tool
+                )
+            })
             .map(|message| message.content.as_str())
             .collect::<Vec<_>>()
             .join("\n");
@@ -429,5 +436,23 @@ mod tests {
             ..CompletionRequest::new("ignored")
         };
         assert_eq!(complete_text(&provider, request).await, "reviewing");
+    }
+
+    #[tokio::test]
+    async fn keyed_match_reads_tool_result_messages() {
+        // Pins: tool-result text participates in keyed matching, so a script can
+        // key an agent loop's next iteration on the output of the tool it just ran.
+        let provider = ScriptedProvider::new(ModelCapabilities::default())
+            .push_keyed("probe-output-ok", ScriptedResponse::text("observed"))
+            .push_keyed("run the probe", ScriptedResponse::text("still-running"));
+
+        let request = CompletionRequest {
+            messages: vec![
+                ContextMessage::user("run the probe"),
+                ContextMessage::tool_result("tool-1", "probe-output-ok", None),
+            ],
+            ..CompletionRequest::new("ignored")
+        };
+        assert_eq!(complete_text(&provider, request).await, "observed");
     }
 }

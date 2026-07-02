@@ -34,11 +34,23 @@ fn ingress_url() -> String {
 }
 
 fn workflow_url(turn_id: &str, handler: &str) -> String {
-    format!("{}/TurnExecution/{turn_id}/{handler}", ingress_url())
+    format!(
+        "{}/restate/call/TurnExecution/{turn_id}/{handler}",
+        ingress_url()
+    )
+}
+
+/// Restate 1.7 fire-and-forget form: `/restate/send/...` replaces the retired
+/// `/{path}/send` suffix.
+fn workflow_send_url(turn_id: &str, handler: &str) -> String {
+    format!(
+        "{}/restate/send/TurnExecution/{turn_id}/{handler}",
+        ingress_url()
+    )
 }
 
 fn session_store_url(handler: &str) -> String {
-    format!("{}/SessionStore/{handler}", ingress_url())
+    format!("{}/restate/call/SessionStore/{handler}", ingress_url())
 }
 
 fn live_model() -> &'static str {
@@ -122,7 +134,7 @@ async fn fire_run(
         "identity": &session.identity,
         "user_message": "smoke test"
     });
-    let request = client.post(format!("{}/send", workflow_url(turn_id, "run")));
+    let request = client.post(workflow_send_url(turn_id, "run"));
     with_identity(request, &session.identity)
         .json(&body)
         .send()

@@ -338,7 +338,7 @@ impl RemoteHttpClient {
     {
         let mut request = self.apply_auth(
             self.http
-                .post(format!("{}{path}", self.endpoint))
+                .post(format!("{}/restate/call{path}", self.endpoint))
                 .json(body),
         );
         if let Some(key) = idempotency_key {
@@ -353,7 +353,10 @@ impl RemoteHttpClient {
         Resp: serde::de::DeserializeOwned,
     {
         let response = self
-            .apply_auth(self.http.post(format!("{}{path}", self.endpoint)))
+            .apply_auth(
+                self.http
+                    .post(format!("{}/restate/call{path}", self.endpoint)),
+            )
             .send()
             .await?;
         decode_response(response).await
@@ -370,7 +373,7 @@ impl RemoteHttpClient {
         let response = self
             .apply_auth(
                 self.http
-                    .post(format!("{}{path}", self.endpoint))
+                    .post(format!("{}/restate/call{path}", self.endpoint))
                     .json(body),
             )
             .send()

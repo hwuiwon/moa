@@ -1155,7 +1155,7 @@ async fn maybe_schedule_auto_delegation(
     }
 
     driver_progress::set_phase(ctx, TurnPhase::Tooling);
-    let tool_subset = auto_worker_tool_subset(allowed_tools);
+    let tool_subset = auto_worker_tool_subset(&OrchestratorCtx::current_tool_schemas());
     let mut worker_ids = Vec::new();
     for (index, node) in ready_nodes.into_iter().take(spawn_count).enumerate() {
         if let Some(reason) = driver_progress::cancel_requested(ctx).await? {
@@ -1515,15 +1515,27 @@ fn auto_delegation_root_turn_cap(user_message: &str) -> Option<u32> {
     )
 }
 
-fn auto_worker_tool_subset(allowed_tools: &std::collections::BTreeSet<String>) -> Vec<String> {
-    allowed_tools
+/// Builds the tool subset granted to auto-delegated workers.
+///
+/// Workers receive the full configured execution surface — derived from the
+/// unfiltered precompiled tool schemas, not the coordinator's sandbox-free
+/// allowlist — so delegated compute keeps hand-routed tools like `bash` that
+/// the root coordinator itself can never call. Coordinator-side delegation
+/// controls, child-report tools, and workflow-owned procedure tools stay
+/// excluded. Once delegation plan nodes carry per-task tool requirements,
+/// derive per-node subsets from the plan instead of granting the full surface.
+fn auto_worker_tool_subset(schemas: &[serde_json::Value]) -> Vec<String> {
+    schemas
         .iter()
+        .filter_map(|schema| schema.get("name").and_then(serde_json::Value::as_str))
         .filter(|name| {
             !is_delegation_tool_name(name)
                 && !is_child_report_tool_name(name)
                 && !is_procedure_tool_name(name)
         })
-        .cloned()
+        .map(str::to_string)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
         .collect()
 }
 
@@ -2798,19 +2810,30 @@ mod tests {
     }
 
     #[test]
-    fn auto_delegation_worker_subset_filters_control_tools() {
-        // Pins: auto-spawned workers inherit execution tools, not coordinator or child-control tools.
-        let allowed_tools = BTreeSet::from([
-            "cancel_worker".to_string(),
-            "file_read".to_string(),
-            "report_to_parent".to_string(),
-            "spawn_worker".to_string(),
-            "web_fetch".to_string(),
-        ]);
+    fn auto_delegation_worker_subset_keeps_hand_tools_and_filters_control_tools() {
+        // Pins: auto-spawned workers inherit the full configured execution
+        // surface — including sandbox tools like bash/file_write that the
+        // sandbox-free coordinator can never call — while delegation controls,
+        // child-report tools, and procedure tools stay excluded.
+        let schemas = vec![
+            serde_json::json!({"name": "bash"}),
+            serde_json::json!({"name": "cancel_worker"}),
+            serde_json::json!({"name": "file_read"}),
+            serde_json::json!({"name": "file_write"}),
+            serde_json::json!({"name": "report_to_parent"}),
+            serde_json::json!({"name": "run_procedure"}),
+            serde_json::json!({"name": "spawn_worker"}),
+            serde_json::json!({"name": "web_fetch"}),
+        ];
 
         assert_eq!(
-            auto_worker_tool_subset(&allowed_tools),
-            vec!["file_read".to_string(), "web_fetch".to_string()]
+            auto_worker_tool_subset(&schemas),
+            vec![
+                "bash".to_string(),
+                "file_read".to_string(),
+                "file_write".to_string(),
+                "web_fetch".to_string()
+            ]
         );
     }
 

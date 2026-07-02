@@ -167,7 +167,7 @@ async fn run_scripted_turn(
 async fn read_turn_progress(ingress_url: &str, turn_id: &str) -> Result<TurnProgress> {
     reqwest::Client::new()
         .post(format!(
-            "{}/TurnExecution/{turn_id}/progress",
+            "{}/restate/call/TurnExecution/{turn_id}/progress",
             ingress_url.trim_end_matches('/')
         ))
         .send()

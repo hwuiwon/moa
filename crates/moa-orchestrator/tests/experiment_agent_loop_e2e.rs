@@ -384,7 +384,10 @@ async fn post_json_with_identity<T: serde::Serialize + ?Sized>(
 }
 
 fn service_url(ingress: &str, service: &str, handler: &str) -> String {
-    format!("{}/{service}/{handler}", ingress.trim_end_matches('/'))
+    format!(
+        "{}/restate/call/{service}/{handler}",
+        ingress.trim_end_matches('/')
+    )
 }
 
 fn saw_successful_skill_file_read(events: &[EventRecord]) -> bool {

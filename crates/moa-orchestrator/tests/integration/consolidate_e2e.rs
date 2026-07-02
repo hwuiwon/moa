@@ -42,14 +42,14 @@ fn spawn_orchestrator(
 
 fn object_url(ingress: &str, tenant_id: TenantId, handler: &str) -> String {
     format!(
-        "{}/Tenant/{tenant_id}/{handler}",
+        "{}/restate/call/Tenant/{tenant_id}/{handler}",
         ingress.trim_end_matches('/')
     )
 }
 
 fn workflow_url(ingress: &str, workflow_id: &str) -> String {
     format!(
-        "{}/Consolidate/{workflow_id}/run",
+        "{}/restate/call/Consolidate/{workflow_id}/run",
         ingress.trim_end_matches('/')
     )
 }

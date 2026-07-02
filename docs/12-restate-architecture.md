@@ -67,6 +67,45 @@ requests, and outcome recording. It starts `TurnExecution` and returns quickly.
 The workflow owns the long LLM/tool loop so read-only status, queueing, and
 cancellation do not wait behind a long turn.
 
+## Admission Control
+
+`moa-edge` forwards every public request to the Restate ingress using the v1.7
+path scheme. Request-response calls use `POST /restate/call/{service}/{handler}`
+(or `.../{service}/{key}/{handler}` for a keyed virtual object such as
+`Session`); the deprecated unversioned `/{Service}/{key}/{handler}` form is gone.
+The edge only issues request-response calls, so it never uses the fire-and-forget
+`/restate/send/...` form.
+
+Restate 1.7 flow control (experimental vqueues,
+`RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true`) caps concurrent invocations per
+**scope**. A scope is a single opaque path segment on the scoped ingress form,
+`POST /restate/scope/{scopeKey}/call/{service}/{key}/{handler}`. MOA's scope-key
+convention is `tenant-{tenant_id}` (the tenant UUID is one segment). The edge
+tags only the invocations that start expensive agent work — posting a message
+(`Contacts/send_message`, which queues on the `Session` VO and starts a turn) —
+with the tenant scope. Cheap reads and status polls (`Session/progress`,
+`Contacts/progress`, `Contacts/authorize_session`), session lifecycle calls
+(`Contacts/init_session`, promote, channel change), and all read/admin routes
+stay unscoped so a poll can never consume a tenant's turn concurrency.
+
+Limits live in a cluster-wide **rule book**, not on individual scopes. A rule
+matches either an exact scope key or the wildcard `*`. The `*` rule is
+per-scope, not shared: it gives **every** distinct scope key its own counter at
+that limit, so `tenant-a` and `tenant-b` each get an independent budget. MOA
+seeds one default rule, `* → concurrency 1000`, via restate-cli
+(`restate rules set "*" --concurrency 1000 --description "scope default"`, backed
+by the admin API); the local compose stack runs it from the one-shot
+`restate-rules-bootstrap` service after Restate is healthy. Tighter per-tenant
+caps are added later as exact-scope rules without code changes.
+
+Enabling vqueues has a fresh-cluster limitation: a node accepts
+`RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true` only when it has no in-flight
+invocations, so the flag must be set before first traffic (wipe the
+`moa-restate-data` volume when flipping it on an existing local node). Admission
+state is observable through the Restate SQL introspection tables: `sys_rules`
+lists the active rule book, and `sys_user_limits` reports per-scope counters and
+current usage.
+
 ## Handler Surfaces
 
 Current orchestrator surfaces are bound by one `moa-orchestrator` production

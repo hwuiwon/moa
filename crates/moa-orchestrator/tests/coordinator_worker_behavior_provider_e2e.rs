@@ -117,7 +117,7 @@ fn live_model() -> Option<&'static str> {
 
 fn session_url(ingress: &str, session_id: SessionId, handler: &str) -> String {
     format!(
-        "{}/Session/{session_id}/{handler}",
+        "{}/restate/call/Session/{session_id}/{handler}",
         ingress.trim_end_matches('/')
     )
 }
@@ -138,7 +138,7 @@ async fn create_initialized_session(
     grant_tenant_operator(&identity, &storage_partition_id).await?;
 
     let create_request = client.post(format!(
-        "{}/SessionStore/create_session",
+        "{}/restate/call/SessionStore/create_session",
         ingress.trim_end_matches('/')
     ));
     let session_id = with_identity(create_request, &identity)
@@ -155,7 +155,7 @@ async fn create_initialized_session(
 
     client
         .post(format!(
-            "{}/SessionStore/init_session_vo",
+            "{}/restate/call/SessionStore/init_session_vo",
             ingress.trim_end_matches('/')
         ))
         .json(&init_session_vo_request(session_id, meta))
@@ -243,7 +243,7 @@ async fn session_events(
     session_id: SessionId,
 ) -> Result<Vec<EventRecord>> {
     let request = client.post(format!(
-        "{}/SessionStore/get_events",
+        "{}/restate/call/SessionStore/get_events",
         ingress.trim_end_matches('/')
     ));
     with_identity(request, identity)

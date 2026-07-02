@@ -53,7 +53,7 @@ async fn session_store_round_trip_through_restate() -> Result<()> {
         grant_tenant_operator(&identity, &storage_partition_id).await?;
 
         let create_request = client.post(format!(
-            "{}/SessionStore/create_session",
+            "{}/restate/call/SessionStore/create_session",
             ingress.trim_end_matches('/')
         ));
         let create_response = with_identity(create_request, &identity)
@@ -70,7 +70,7 @@ async fn session_store_round_trip_through_restate() -> Result<()> {
         for message in ["first", "second", "third"] {
             let append_response = client
                 .post(format!(
-                    "{}/SessionStore/append_event",
+                    "{}/restate/call/SessionStore/append_event",
                     ingress.trim_end_matches('/')
                 ))
                 .json(&append_event_request(
@@ -91,7 +91,7 @@ async fn session_store_round_trip_through_restate() -> Result<()> {
         }
 
         let get_events_request_builder = client.post(format!(
-            "{}/SessionStore/get_events",
+            "{}/restate/call/SessionStore/get_events",
             ingress.trim_end_matches('/')
         ));
         let get_events_response = with_identity(get_events_request_builder, &identity)

@@ -101,7 +101,10 @@ async fn install_default_cron_jobs(ingress_url: &str) -> Result<()> {
 
     for job in default_cron_jobs() {
         let response = client
-            .post(format!("{ingress_url}/CronJob/{}/configure", job.key))
+            .post(format!(
+                "{ingress_url}/restate/call/CronJob/{}/configure",
+                job.key
+            ))
             .header(
                 "idempotency-key",
                 format!("cron-config-{}-{}", job.key, job.version),

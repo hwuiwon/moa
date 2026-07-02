@@ -157,6 +157,25 @@ long-running `moa-orchestrator` service with Restate and Postgres, and tests use
 `moa-test-support` fixtures or raw `reqwest` calls to exercise the same API
 surface.
 
+### Edge-to-ingress forwarding
+
+`moa-edge` terminates the caller credential, resolves identity and tenant, and
+translates each public `/v1/...` path to a Restate ingress call. It uses the
+v1.7 request-response scheme `POST /restate/call/{service}/{handler}` (keyed
+form `.../{service}/{key}/{handler}` for the `Session` virtual object), building
+the path once in `crate::ingress` so route translation never encodes the wire
+contract. The edge issues only request-response calls, never the fire-and-forget
+`/restate/send/...` form.
+
+Turn-starting invocations are tagged for per-tenant flow control. Posting a
+message (`POST /v1/sessions/{session_id}/messages` →
+`Contacts/send_message`) starts a turn, so the edge forwards it on the scoped
+form `POST /restate/scope/tenant-{tenant_id}/call/...`. Every cheap read, status
+poll (`Session/progress`, `Contacts/progress`), authorization check, and
+session-lifecycle call stays unscoped, so a status poll can never wait behind a
+tenant's turn concurrency. `docs/12-restate-architecture.md` describes the
+cluster rule book and per-scope counters that back this admission control.
+
 ## Messaging Adapters
 
 `moa-messaging` owns messaging adapters, renderers, and channel-neutral
