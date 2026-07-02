@@ -35,12 +35,12 @@ Use when the test must:
 
 Examples already in the repo:
 
-- `crates/moa-brain/tests/brain_turn_db.rs` for turn lifecycle and approvals.
-- `crates/moa-orchestrator/tests/session_vo.rs` for Restate virtual-object behavior.
-- `crates/moa-session/tests/postgres_store.rs` for session store behavior.
-- `crates/moa-providers/tests/anthropic_offline.rs` for wiremock-backed provider behavior.
+- `crates/moa-brain/tests/brain_turn_artifacts_db.rs` for turn lifecycle with artifact-backed outputs.
+- `crates/moa-orchestrator/tests/orchestrator_offline/session_vo.rs` for Restate virtual-object behavior.
+- `crates/moa-session/tests/postgres_store_db.rs` for session store behavior.
+- `crates/moa-providers/tests/providers_offline/anthropic_offline.rs` for wiremock-backed provider behavior.
 
-One file per topic. A 2,000-line `tests.rs` is not an integration test file; it is a placeholder for someone to split it up.
+One file per topic. A 2,000-line `tests.rs` is not an integration test file; it is a placeholder for someone to split it up. Offline/`_db`/`_db_memory` behavior files live as modules inside one per-lane harness binary per crate (for example `tests/orchestrator_offline.rs` declaring `#[path = "orchestrator_offline/session_vo.rs"] mod session_vo;`) so each new file does not add a new link target; add the `mod` line to the matching harness when creating a file.
 
 ### Snapshot
 

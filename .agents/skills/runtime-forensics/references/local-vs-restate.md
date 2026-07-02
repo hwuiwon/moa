@@ -10,12 +10,17 @@ Do not start by diffing the Restate workflow line-by-line. Start by proving whet
 
 The brain harness suites live in:
 
-- `crates/moa-brain/tests/brain_turn_db.rs` (buffered turn lifecycle, approvals, cancellation)
+- `crates/moa-brain/tests/brain_turn_artifacts_db.rs` (turn lifecycle with artifact-backed outputs)
 - `crates/moa-brain/tests/brain_turn_cache_replay_db_memory.rs` (cache + replay accounting)
 
 The Restate suites live in:
 
-- `crates/moa-orchestrator/tests/` (multiple files: `session_vo.rs`, `session_store_db.rs`, `tool_executor.rs`, `llm_gateway.rs`, `ingestion_service_e2e.rs`, `workspace.rs`, `integration_service_e2e.rs`, `replay_determinism.rs`, `worker_delegation.rs`, `session_turn_lifecycle_service_e2e.rs`)
+- `crates/moa-orchestrator/tests/` — offline/db behavior files are modules
+  inside the per-lane harness binaries (`orchestrator_offline/` holds
+  `session_vo.rs`, `tool_executor.rs`, `llm_gateway.rs`,
+  `replay_determinism.rs`; `orchestrator_db/` holds `session_store_db.rs`),
+  and e2e binaries such as `ingestion_service_e2e.rs` and
+  `session_turn_lifecycle_service_e2e.rs` stay standalone
 
 ## Classification Flow
 
@@ -49,15 +54,16 @@ The Restate suites live in:
 
 ```bash
 # brain harness (drives the pipeline directly)
-cargo test -p moa-brain --test brain_turn_db -- --test-threads=1
+cargo test -p moa-brain --test brain_turn_artifacts_db -- --test-threads=1
 
-# Restate, scoped to the surface that changed
-cargo test -p moa-orchestrator --test session_vo -- --test-threads=1
-cargo test -p moa-orchestrator --test replay_determinism -- --test-threads=1
-cargo test -p moa-orchestrator --test tool_executor -- --test-threads=1
+# Restate, scoped to the surface that changed (behavior files are modules
+# inside the per-lane harness binaries; the module name is the test filter)
+cargo test -p moa-orchestrator --test orchestrator_offline session_vo -- --test-threads=1
+cargo test -p moa-orchestrator --test orchestrator_offline replay_determinism -- --test-threads=1
+cargo test -p moa-orchestrator --test orchestrator_offline tool_executor -- --test-threads=1
 ```
 
-If a target does not exist, list `crates/moa-brain/tests/` or `crates/moa-orchestrator/tests/` to find the actual current names.
+If a target or module does not exist, list `crates/moa-brain/tests/` or `crates/moa-orchestrator/tests/` (including the harness subdirectories) to find the actual current names.
 
 ## What Good Evidence Looks Like
 

@@ -14,13 +14,13 @@ fn budget_gate_zero_leak_fixture_passes_with_previous_report() -> TestResult {
     write_memory_budget_report(&report_path, &report)?;
     write_memory_budget_report(&previous_path, &report)?;
 
-    let output = run_memory_budget_gate(&report_path, Some(&previous_path))?;
+    let outcome = run_memory_budget_gate(&report_path, Some(&previous_path))?;
     assert!(
-        output.status.success(),
+        outcome.passed(),
         "zero-leak memory budget fixture should pass:\n{}",
-        command_output_text(&output)
+        outcome.rendered
     );
-    let text = command_output_text(&output);
+    let text = &outcome.rendered;
     assert!(
         text.contains("Memory-retrieval budgets passed")
             && text.contains("1 regression baseline(s) compared"),
@@ -40,13 +40,13 @@ fn budget_gate_cross_user_leak_fixture_fails_with_probe_ids() -> TestResult {
         &memory_budget_report(memory_budget_probe_results(true)),
     )?;
 
-    let output = run_memory_budget_gate(&report_path, None)?;
+    let outcome = run_memory_budget_gate(&report_path, None)?;
     assert!(
-        !output.status.success(),
+        !outcome.passed(),
         "cross-user leak fixture should fail:\n{}",
-        command_output_text(&output)
+        outcome.rendered
     );
-    let text = command_output_text(&output);
+    let text = &outcome.rendered;
     for expected in [
         "cross_user_leak_count",
         "expected 0",
@@ -77,13 +77,13 @@ fn budget_gate_previous_report_regression_fails_recall_mrr_ndcg_gate() -> TestRe
         &memory_budget_report(memory_budget_regression_probe_results(true)),
     )?;
 
-    let output = run_memory_budget_gate(&report_path, Some(&previous_path))?;
+    let outcome = run_memory_budget_gate(&report_path, Some(&previous_path))?;
     assert!(
-        !output.status.success(),
+        !outcome.passed(),
         "regressed memory budget fixture should fail:\n{}",
-        command_output_text(&output)
+        outcome.rendered
     );
-    let text = command_output_text(&output);
+    let text = &outcome.rendered;
     for expected in [
         "retrieval.recall_at_4",
         "retrieval.mrr",
@@ -109,13 +109,13 @@ fn budget_gate_reranker_recall_regression_fails() -> TestResult {
         &memory_budget_report_with_reranker(reranker_recall_regression_probe_results(), true),
     )?;
 
-    let output = run_memory_budget_gate(&report_path, None)?;
+    let outcome = run_memory_budget_gate(&report_path, None)?;
     assert!(
-        !output.status.success(),
+        !outcome.passed(),
         "reranker recall regression fixture should fail:\n{}",
-        command_output_text(&output)
+        outcome.rendered
     );
-    let text = command_output_text(&output);
+    let text = &outcome.rendered;
     for expected in [
         "retrieval.reranker_recall_at_4_regression",
         "pre 1.0000",
@@ -140,13 +140,13 @@ fn budget_gate_reranker_latency_without_recall_gain_fails() -> TestResult {
         &memory_budget_report_with_reranker(reranker_latency_without_gain_probe_results(), true),
     )?;
 
-    let output = run_memory_budget_gate(&report_path, None)?;
+    let outcome = run_memory_budget_gate(&report_path, None)?;
     assert!(
-        !output.status.success(),
+        !outcome.passed(),
         "reranker latency fixture should fail:\n{}",
-        command_output_text(&output)
+        outcome.rendered
     );
-    let text = command_output_text(&output);
+    let text = &outcome.rendered;
     for expected in [
         "retrieval.p95_retrieval_latency_ms",
         "expected <= 2000 unless recall@4 gain >= 0.03",

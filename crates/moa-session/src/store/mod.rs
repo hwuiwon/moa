@@ -162,10 +162,16 @@ impl PostgresSessionStore {
     /// for example a per-test database cloned from a pre-migrated template by the
     /// test harness. Use [`Self::new_in_schema`] when migrations must run.
     pub async fn new_in_existing_schema(database_url: &str, schema_name: &str) -> Result<Self> {
+        // Pool is capped well below the compose Postgres server limit
+        // (max_connections = 100): several isolated test stores run
+        // concurrently in the db lanes, and a 100-connection pool lets one
+        // high-concurrency test starve the server's connection slots, which
+        // surfaces as `pool timed out while waiting for an open connection`
+        // in unrelated tests. Concurrent queries queue on the pool instead.
         Self::new_with_options_and_schema(
             database_url,
             1,
-            100,
+            10,
             60,
             Some(schema_name),
             isolated_test_backends()?,

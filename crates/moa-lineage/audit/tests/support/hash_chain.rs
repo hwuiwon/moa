@@ -6,8 +6,9 @@ use moa_lineage_core::chain::{
 };
 use serde_json::Value;
 
-#[path = "fixture_jsonl.rs"]
-mod fixtures;
+// The harness declares the shared fixture_jsonl module once at the binary
+// root; alias it rather than loading the file as a second module.
+use super::super::fixture_jsonl as fixtures;
 
 /// One test audit record with the stored hashes needed by hash-chain tests.
 #[derive(Clone, Debug)]

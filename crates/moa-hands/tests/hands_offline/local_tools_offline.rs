@@ -1,0 +1,994 @@
+include!("../local_tools_support/common.rs");
+include!("../local_tools_support/offline.rs");
+
+#[tokio::test]
+async fn file_read_reads_written_content() {
+    let dir = tempdir().unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
+    let session = session();
+
+    router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({ "path": "notes.txt", "content": "hello" }),
+            },
+        )
+        .await
+        .unwrap();
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_read".to_string(),
+                input: json!({ "path": "notes.txt" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.to_text(), "hello");
+}
+
+#[tokio::test]
+async fn str_replace_updates_only_the_target_region() {
+    let dir = tempdir().unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
+    let session = session();
+
+    router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({
+                    "path": "src/lib.rs",
+                    "content": "fn demo() {\n    alpha();\n    beta();\n}\n",
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, replace_output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "str_replace".to_string(),
+                input: json!({
+                    "path": "src/lib.rs",
+                    "old_str": "    alpha();\n",
+                    "new_str": "    gamma();\n",
+                }),
+            },
+        )
+        .await
+        .unwrap();
+    let rendered = replace_output.to_text();
+    assert!(rendered.starts_with("--- a/src/lib.rs\n+++ b/src/lib.rs\n"));
+    assert!(rendered.contains("-    alpha();"));
+    assert!(rendered.contains("+    gamma();"));
+    assert!(!rendered.contains("replaced 1 lines with 1 lines"));
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_read".to_string(),
+                input: json!({ "path": "src/lib.rs" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        output.to_text(),
+        "fn demo() {\n    gamma();\n    beta();\n}"
+    );
+}
+
+#[tokio::test]
+async fn file_write_overwrite_returns_compact_diff() {
+    let dir = tempdir().unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
+    let session = session();
+
+    router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({
+                    "path": "src/demo.rs",
+                    "content": (1..=500)
+                        .map(|index| format!("{index:03}: {}", "x".repeat(48)))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let updated = (1..=500)
+        .map(|index| match index {
+            120 => "120: changed alpha".to_string(),
+            121 => "121: changed beta".to_string(),
+            122 => "122: changed gamma".to_string(),
+            _ => format!("{index:03}: {}", "x".repeat(48)),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({ "path": "src/demo.rs", "content": updated.clone() }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let rendered = output.to_text();
+    assert!(rendered.starts_with("--- a/src/demo.rs\n+++ b/src/demo.rs\n"));
+    assert!(rendered.contains("@@"));
+    assert!(rendered.contains("-120:"));
+    assert!(rendered.contains("+120: changed alpha"));
+    assert!(approximate_tokens(&rendered) * 10 <= approximate_tokens(&updated) * 3);
+}
+
+#[tokio::test]
+async fn file_search_finds_files_by_glob() {
+    let dir = tempdir().unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
+    let session = session();
+
+    router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({ "path": "src/lib.rs", "content": "pub fn demo() {}" }),
+            },
+        )
+        .await
+        .unwrap();
+    router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({ "path": "notes.txt", "content": "ignore me" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_search".to_string(),
+                input: json!({ "pattern": "**/*.rs" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let rendered = output.to_text();
+    assert!(rendered.contains("src/lib.rs"));
+    assert!(!rendered.contains("notes.txt"));
+}
+
+#[tokio::test]
+async fn file_search_skips_git_directory_contents() {
+    let dir = tempdir().unwrap();
+    let git_dir = dir.path().join(".git").join("logs");
+    tokio::fs::create_dir_all(&git_dir).await.unwrap();
+    tokio::fs::write(git_dir.join("HEAD"), "secret history")
+        .await
+        .unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
+    let session = session();
+
+    router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({ "path": "src/lib.rs", "content": "pub fn demo() {}" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_search".to_string(),
+                input: json!({ "pattern": "**/*" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let rendered = output.to_text();
+    assert!(rendered.contains("src/lib.rs"));
+    assert!(!rendered.contains(".git/logs/HEAD"));
+}
+
+#[tokio::test]
+async fn file_search_skips_python_virtualenvs_in_remembered_workspace() {
+    let dir = tempdir().unwrap();
+    let workspace_root = dir.path().join("workspace-root");
+    tokio::fs::create_dir_all(workspace_root.join(".venv/lib"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(workspace_root.join("server/core"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        workspace_root.join(".venv/lib/ignored.py"),
+        "print('ignore')",
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(workspace_root.join("server/core/views.py"), "print('keep')")
+        .await
+        .unwrap();
+
+    let router = ToolRouter::new_local(dir.path().join("sandboxes"))
+        .await
+        .unwrap();
+    let session = session();
+    router
+        .remember_workspace_root(session.tenant_id, workspace_root)
+        .await;
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_search".to_string(),
+                input: json!({ "pattern": "**/*.py" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let rendered = output.to_text();
+    assert!(rendered.contains("server/core/views.py"));
+    assert!(!rendered.contains(".venv/lib/ignored.py"));
+}
+
+#[tokio::test]
+async fn file_search_respects_moaignore_in_remembered_workspace() {
+    let dir = tempdir().unwrap();
+    let workspace_root = dir.path().join("workspace-root");
+    tokio::fs::create_dir_all(workspace_root.join("data"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(workspace_root.join("src"))
+        .await
+        .unwrap();
+    tokio::fs::write(workspace_root.join(".moaignore"), "data\n")
+        .await
+        .unwrap();
+    tokio::fs::write(workspace_root.join("data/fixtures.json"), "{}")
+        .await
+        .unwrap();
+    tokio::fs::write(workspace_root.join("src/lib.rs"), "pub fn demo() {}")
+        .await
+        .unwrap();
+
+    let router = ToolRouter::new_local(dir.path().join("sandboxes"))
+        .await
+        .unwrap();
+    let session = session();
+    router
+        .remember_workspace_root(session.tenant_id, workspace_root)
+        .await;
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_search".to_string(),
+                input: json!({ "pattern": "**/*" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let rendered = output.to_text();
+    assert!(rendered.contains("src/lib.rs"));
+    assert!(!rendered.contains("data/fixtures.json"));
+}
+
+#[tokio::test]
+async fn file_search_truncates_pathological_match_sets() {
+    let dir = tempdir().unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
+    let session = session();
+
+    for index in 0..1_050 {
+        router
+            .execute_authorized(
+                &session,
+                &ToolInvocation {
+                    id: None,
+                    name: "file_write".to_string(),
+                    input: json!({
+                        "path": format!("src/file-{index:04}.rs"),
+                        "content": "pub fn demo() {}",
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_search".to_string(),
+                input: json!({ "pattern": "**/*.rs" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let rendered = output.to_text();
+    assert!(rendered.contains("[search truncated at 1000 matches"));
+    let structured = output.structured.expect("structured file search payload");
+    let matches = structured
+        .get("matches")
+        .and_then(|value| value.as_array())
+        .expect("matches array");
+    assert_eq!(matches.len(), 1_000);
+    assert_eq!(
+        structured
+            .get("truncated")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn default_router_excludes_provider_native_web_tools() {
+    let dir = tempdir().unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
+
+    assert!(!router.has_tool("web_search"));
+    assert!(!router.has_tool("web_fetch"));
+}
+
+#[tokio::test]
+async fn file_operations_reject_path_traversal() {
+    let dir = tempdir().unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
+    let session = session();
+
+    let error = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_read".to_string(),
+                input: json!({ "path": "../secret.txt" }),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, moa_core::MoaError::PermissionDenied(_)));
+}
+
+#[tokio::test]
+async fn action_review_preview_uses_remembered_workspace_root_for_commands() {
+    let dir = tempdir().unwrap();
+    let workspace_root = dir.path().join("workspace-root");
+    tokio::fs::create_dir_all(&workspace_root).await.unwrap();
+    let router = admin_review_router(dir.path().join("sandboxes")).await;
+    let session = session();
+    router
+        .remember_workspace_root(session.tenant_id, workspace_root.clone())
+        .await;
+
+    let prepared = router
+        .prepare_invocation(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "bash".to_string(),
+                input: json!({ "cmd": "pwd" }),
+            },
+        )
+        .await
+        .unwrap();
+    let preview = prepared.review_preview();
+    let working_dir = preview
+        .fields
+        .iter()
+        .find(|field| field.label == "Working dir")
+        .map(|field| field.value.clone());
+
+    assert_eq!(
+        working_dir.as_deref(),
+        Some(workspace_root.to_str().unwrap())
+    );
+}
+
+#[tokio::test]
+async fn action_review_preview_str_replace_diff_is_surgical() {
+    let dir = tempdir().unwrap();
+    let workspace_root = dir.path().join("workspace-root");
+    tokio::fs::create_dir_all(workspace_root.join("src"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        workspace_root.join("src/lib.rs"),
+        concat!(
+            "line01\n",
+            "line02\n",
+            "line03\n",
+            "line04\n",
+            "line05\n",
+            "target_line();\n",
+            "line07\n",
+            "line08\n",
+            "line09\n",
+            "line10\n",
+            "line11\n",
+            "line12\n",
+        ),
+    )
+    .await
+    .unwrap();
+    let router = admin_review_router(dir.path().join("sandboxes")).await;
+    let session = session();
+    router
+        .remember_workspace_root(session.tenant_id, workspace_root)
+        .await;
+
+    let prepared = router
+        .prepare_invocation(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "str_replace".to_string(),
+                input: json!({
+                    "path": "src/lib.rs",
+                    "old_str": "target_line();\n",
+                    "new_str": "renamed_line();\n",
+                }),
+            },
+        )
+        .await
+        .unwrap();
+    let preview = prepared.review_preview();
+
+    assert_eq!(preview.file_diffs.len(), 1);
+    assert!(preview.file_diffs[0].before.contains("target_line();"));
+    assert!(preview.file_diffs[0].after.contains("renamed_line();"));
+    assert!(!preview.file_diffs[0].before.contains("line01"));
+    assert!(!preview.file_diffs[0].after.contains("line12"));
+}
+
+#[tokio::test]
+async fn bash_captures_stdout_and_stderr() {
+    let dir = tempdir().unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
+    let session = session();
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "bash".to_string(),
+                input: json!({ "cmd": "printf 'out'; printf 'err' 1>&2" }),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.process_stdout(), Some("out"));
+    assert_eq!(output.process_stderr(), Some("err"));
+    assert_eq!(output.process_exit_code(), Some(0));
+}
+
+#[tokio::test]
+async fn bash_success_output_is_truncated_to_router_budget() {
+    let dir = tempdir().unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
+    let session = session();
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "bash".to_string(),
+                input: json!({
+                    "cmd": "python3 -c \"print('x' * 120000)\""
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let text = output.to_text();
+    assert!(output.truncated);
+    assert!(output.original_output_tokens.is_some());
+    assert!(text.contains("[output truncated from ~"));
+    assert!(approximate_tokens(&text) <= 4_000);
+}
+
+#[tokio::test]
+async fn bash_error_output_is_not_truncated() {
+    let dir = tempdir().unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
+    let session = session();
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "bash".to_string(),
+                input: json!({
+                    "cmd": "python3 -c \"import sys; sys.stderr.write('e' * 20000); sys.exit(7)\""
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let text = output.to_text();
+    assert!(output.is_error);
+    assert!(!output.truncated);
+    assert_eq!(output.original_output_tokens, None);
+    assert!(!text.contains("[output truncated from ~"));
+    assert!(approximate_tokens(&text) > 4_000);
+}
+
+#[tokio::test]
+async fn file_read_within_budget_is_not_router_truncated() {
+    let dir = tempdir().unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
+    let session = session();
+    let content = (1..=100)
+        .map(|index| format!("{index:03}: {}", "a".repeat(48)))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({ "path": "notes.txt", "content": content }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_read".to_string(),
+                input: json!({ "path": "notes.txt", "start_line": 1, "end_line": 100 }),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(!output.truncated);
+    assert_eq!(output.original_output_tokens, None);
+    assert!(!output.to_text().contains("[output truncated from ~"));
+}
+
+#[tokio::test]
+async fn file_read_budget_override_truncates_large_results() {
+    let dir = tempdir().unwrap();
+    let router = ToolRouter::new_local(dir.path())
+        .await
+        .unwrap()
+        .with_tool_budgets(ToolBudgetConfig {
+            file_read: 2_000,
+            ..ToolBudgetConfig::default()
+        });
+    let session = session();
+    let content = (1..=200)
+        .map(|index| format!("{index:03}: {}", "b".repeat(96)))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({ "path": "large.txt", "content": content }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, output) = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_read".to_string(),
+                input: json!({ "path": "large.txt", "start_line": 1, "end_line": 200 }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let text = output.to_text();
+    assert!(output.truncated);
+    assert!(output.original_output_tokens.is_some());
+    assert!(text.contains("[output truncated from ~"));
+    assert!(text.contains("to ~2000 tokens]"));
+    assert!(approximate_tokens(&text) <= 2_000);
+}
+
+#[tokio::test]
+async fn bash_respects_timeout() {
+    let dir = tempdir().unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
+    let session = session();
+
+    let error = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "bash".to_string(),
+                input: json!({ "cmd": "sleep 10", "timeout_secs": 1 }),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(error, moa_core::MoaError::ToolError(message) if message.contains("timed out"))
+    );
+}
+
+#[tokio::test]
+async fn local_bash_hard_cancel_kills_running_process() {
+    let dir = tempdir().unwrap();
+    let router = Arc::new(ToolRouter::new_local(dir.path()).await.unwrap());
+    let session = session();
+    let cancel_token = CancellationToken::new();
+    let started = Instant::now();
+    let invocation = ToolInvocation {
+        id: None,
+        name: "bash".to_string(),
+        input: json!({ "cmd": "python3 -c 'import time; time.sleep(60)'" }),
+    };
+
+    let task = {
+        let router = router.clone();
+        let cancel_token = cancel_token.clone();
+        tokio::spawn(async move {
+            router
+                .execute_authorized_with_cancel(&session, &invocation, None, Some(&cancel_token))
+                .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cancel_token.cancel();
+
+    let error = task.await.unwrap().unwrap_err();
+    assert!(matches!(error, moa_core::MoaError::Cancelled));
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+#[tokio::test]
+async fn local_provider_installs_skill_package_files() {
+    let dir = tempdir().unwrap();
+    let provider = LocalHandProvider::new_with_docker_detection(dir.path(), false)
+        .await
+        .unwrap();
+    let handle = provider
+        .provision(HandSpec {
+            sandbox_tier: SandboxTier::Local,
+            image: None,
+            resources: HandResources::default(),
+            env: std::collections::HashMap::new(),
+            workspace_mount: None,
+            idle_timeout: Duration::from_secs(300),
+            max_lifetime: Duration::from_secs(300),
+        })
+        .await
+        .unwrap();
+    let sandbox_dir = match &handle {
+        moa_core::HandHandle::Local { sandbox_dir } => sandbox_dir.clone(),
+        other => panic!("expected local hand, got {other:?}"),
+    };
+
+    provider
+        .install_files(
+            &handle,
+            &[
+                SandboxFile {
+                    path: ".moa/skills/package-skill/SKILL.md".to_string(),
+                    content: b"skill body".to_vec(),
+                    executable: false,
+                },
+                SandboxFile {
+                    path: ".moa/skills/package-skill/scripts/run.sh".to_string(),
+                    content: b"#!/bin/sh\necho ok\n".to_vec(),
+                    executable: true,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let skill_md =
+        tokio::fs::read_to_string(sandbox_dir.join(".moa/skills/package-skill/SKILL.md"))
+            .await
+            .unwrap();
+    assert_eq!(skill_md, "skill body");
+    let script = sandbox_dir.join(".moa/skills/package-skill/scripts/run.sh");
+    assert_eq!(
+        tokio::fs::read_to_string(&script).await.unwrap(),
+        "#!/bin/sh\necho ok\n"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = tokio::fs::metadata(&script)
+            .await
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o111, 0);
+    }
+
+    let error = provider
+        .install_files(
+            &handle,
+            &[SandboxFile {
+                path: "../escape.txt".to_string(),
+                content: b"bad".to_vec(),
+                executable: false,
+            }],
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("invalid segment"));
+
+    provider.destroy(&handle).await.unwrap();
+}
+
+// Pins: ToolRouter::execute is the runtime enforcement gate. A Deny action policy
+// must turn into a PermissionDenied refusal AND the tool body must never run. This
+// drives execute() directly (not execute_authorized, which bypasses the gate) and
+// proves non-execution by reading back the file the denied write would have created.
+#[tokio::test]
+async fn execute_refuses_tool_denied_by_action_policy_and_skips_tool_body() {
+    let dir = tempdir().unwrap();
+    let router = deny_router(dir.path(), &["file_write"]).await;
+    let session = session();
+
+    let error = router
+        .execute(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({ "path": "denied.txt", "content": "must-not-be-written" }),
+            },
+        )
+        .await
+        .unwrap_err();
+    match error {
+        moa_core::MoaError::PermissionDenied(message) => {
+            assert!(
+                message.contains("denied by action policy"),
+                "unexpected refusal message: {message}"
+            );
+        }
+        other => panic!("expected PermissionDenied, got {other:?}"),
+    }
+
+    // The write body must not have executed: reading the would-be target fails
+    // because the file was never created. file_read is allowed by this policy.
+    let read_result = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_read".to_string(),
+                input: json!({ "path": "denied.txt" }),
+            },
+        )
+        .await;
+    assert!(
+        read_result.is_err(),
+        "denied file_write must not have created the file, but it was readable"
+    );
+}
+
+// Pins: execute_with_recovery carries the same Deny enforcement arm as execute and
+// must refuse + skip the tool body identically.
+#[tokio::test]
+async fn execute_with_recovery_refuses_tool_denied_by_action_policy_and_skips_tool_body() {
+    let dir = tempdir().unwrap();
+    let router = deny_router(dir.path(), &["file_write"]).await;
+    let session = session();
+
+    let error = router
+        .execute_with_recovery(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({ "path": "recovery-denied.txt", "content": "must-not-be-written" }),
+            },
+        )
+        .await
+        .unwrap_err();
+    match error {
+        moa_core::MoaError::PermissionDenied(message) => {
+            assert!(
+                message.contains("denied by action policy"),
+                "unexpected refusal message: {message}"
+            );
+        }
+        other => panic!("expected PermissionDenied, got {other:?}"),
+    }
+
+    let read_result = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_read".to_string(),
+                input: json!({ "path": "recovery-denied.txt" }),
+            },
+        )
+        .await;
+    assert!(
+        read_result.is_err(),
+        "denied file_write must not have created the file, but it was readable"
+    );
+}
+
+// Pins: an AdminReview action policy refuses the invocation at execute() time rather
+// than running the tool. Reuses the admin_review_router fixture but drives execute()
+// (the fixture was previously only exercised via prepare_invocation/review_preview).
+#[tokio::test]
+async fn execute_refuses_admin_review_tool_instead_of_running_it() {
+    let dir = tempdir().unwrap();
+    let router = admin_review_router(dir.path()).await;
+    let session = session();
+
+    let error = router
+        .execute(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "bash".to_string(),
+                input: json!({ "cmd": "echo should-not-run" }),
+            },
+        )
+        .await
+        .unwrap_err();
+    match error {
+        moa_core::MoaError::PermissionDenied(message) => {
+            assert!(
+                message.contains("requires tenant admin review"),
+                "unexpected refusal message: {message}"
+            );
+        }
+        other => panic!("expected PermissionDenied, got {other:?}"),
+    }
+}
+
+// Pins: check_policy is the router's public policy-evaluation API. It must report
+// Deny for a configured-denied tool and Allow for any other tool.
+#[tokio::test]
+async fn check_policy_denies_configured_tool_and_allows_others() {
+    let dir = tempdir().unwrap();
+    let router = deny_router(dir.path(), &["bash"]).await;
+    let session = session();
+
+    let denied = router
+        .check_policy(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "bash".to_string(),
+                input: json!({ "cmd": "echo hi" }),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(denied.effect, moa_core::ActionPolicyEffect::Deny),
+        "expected Deny for bash, got {:?}",
+        denied.effect
+    );
+
+    let allowed = router
+        .check_policy(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_read".to_string(),
+                input: json!({ "path": "notes.txt" }),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(allowed.effect, moa_core::ActionPolicyEffect::Allow),
+        "expected Allow for file_read, got {:?}",
+        allowed.effect
+    );
+}
+
+// Pins: dispatch rejects an unregistered tool name with ToolError("unknown tool: ...")
+// rather than silently succeeding or panicking.
+#[tokio::test]
+async fn execute_authorized_rejects_unregistered_tool_name() {
+    let dir = tempdir().unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
+    let session = session();
+
+    let error = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "does_not_exist".to_string(),
+                input: json!({}),
+            },
+        )
+        .await
+        .unwrap_err();
+    match error {
+        moa_core::MoaError::ToolError(message) => {
+            assert!(
+                message.contains("unknown tool"),
+                "unexpected error message: {message}"
+            );
+        }
+        other => panic!("expected ToolError, got {other:?}"),
+    }
+}

@@ -29,21 +29,18 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
 The Restate orchestrator (`crates/moa-orchestrator/`) is the only orchestrator backend; the former `moa-orchestrator-local` crate was removed (PRs #186/#196).
 
-Restate orchestrator deterministic suites (session VO, session store, tool executor, llm gateway, ingestion, workspace, replay):
+Restate orchestrator deterministic suites (session VO, session store, tool executor, llm gateway, ingestion, replay). Offline/db behavior files are consolidated into per-lane harness binaries (`orchestrator_offline`, `orchestrator_db`, `orchestrator_db_memory`); select a behavior file with its module name as the test filter:
 
 ```bash
-cargo test -p moa-orchestrator --test session_vo -- --test-threads=1
-cargo test -p moa-orchestrator --test session_store_db -- --test-threads=1
-cargo test -p moa-orchestrator --test tool_executor -- --test-threads=1
-cargo test -p moa-orchestrator --test llm_gateway -- --test-threads=1
+cargo test -p moa-orchestrator --test orchestrator_offline session_vo -- --test-threads=1
+cargo test -p moa-orchestrator --test orchestrator_db session_store_db -- --test-threads=1
+cargo test -p moa-orchestrator --test orchestrator_offline tool_executor -- --test-threads=1
+cargo test -p moa-orchestrator --test orchestrator_offline llm_gateway -- --test-threads=1
 cargo test -p moa-orchestrator --test ingestion_service_e2e -- --test-threads=1
-cargo test -p moa-orchestrator --test workspace -- --test-threads=1
-cargo test -p moa-orchestrator --test integration_service_e2e -- --test-threads=1
-cargo test -p moa-orchestrator --test replay_determinism -- --test-threads=1
-cargo test -p moa-orchestrator --test worker_delegation -- --test-threads=1
+cargo test -p moa-orchestrator --test orchestrator_offline replay_determinism -- --test-threads=1
 ```
 
-If a target does not exist, list `crates/moa-orchestrator/tests/` and use the actual name.
+If a target or module does not exist, list `crates/moa-orchestrator/tests/` (and the harness subdirectories) and use the actual name.
 
 ## Providers, Models, Pricing, Tool Parsing, Web Search
 
@@ -85,9 +82,9 @@ If the change affects session-derived analytics or event accounting, also rerun 
 Deterministic:
 
 ```bash
-cargo test -p moa-brain --test brain_turn_db -- --test-threads=1
+cargo test -p moa-brain --test brain_turn_artifacts_db -- --test-threads=1
 cargo test -p moa-brain --test stable_prefix_db_memory -- --test-threads=1
-cargo test -p moa-memory --tests
+cargo test -p moa-memory-graph --tests
 ```
 
 Live cache or live harness verification when prompt layout or cache planning changed:

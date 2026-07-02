@@ -237,13 +237,21 @@ ignored = ["workspace-hack"]
 # This is the single biggest space saver.
 debug = 1
 
-# Speed up the linker by keeping debug info in separate files 
+# Speed up the linker by keeping debug info in separate files
 # (Works on macOS and Linux).
 split-debuginfo = "unpacked"
 
-# Optional: If your code is heavy on dependencies, level 1 
-# makes the AI's "test/run" cycles much faster.
-opt-level = 1
+# Workspace code compiles at opt 0 so the edit-test cycle pays no optimizer
+# cost; dependencies (package."*" below) are compiled once at opt 2 and then
+# reused from cache, keeping test runtime fast where it matters.
+opt-level = 0
+
+# Dependencies only ("*" never matches workspace members): optimized once,
+# cached across rebuilds. No debug info — smaller rlibs, faster links;
+# workspace frames keep line tables from profile.dev above.
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
 
 [profile.release]
 # Strip all symbols from the final production binary.

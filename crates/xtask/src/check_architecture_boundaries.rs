@@ -370,8 +370,15 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/services/graph_memory_maint.rs",
         "OrchestratorCtx::current_graph_pool",
+        2,
+        "Graph-memory maintenance is a storage-maintenance exception; sync_vectors drains the vector projection outbox against the graph pool"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/services/graph_memory_maint.rs",
+        "OrchestratorCtx::current_config",
         1,
-        "Graph-memory maintenance is a storage-maintenance exception"
+        "sync_vectors builds the vector store from runtime config to drain the projection outbox"
     ),
     allow!(
         DirectSql,
@@ -741,8 +748,8 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/workflows/turn_execution.rs",
         "OrchestratorCtx::current_tool_schemas",
-        1,
-        "TurnExecution reports available tool count from the runtime tool schema registry"
+        2,
+        "TurnExecution reports available tool count and derives the auto-delegation worker tool subset from the runtime tool schema registry"
     ),
     allow!(
         RuntimeContext,
@@ -796,8 +803,8 @@ const LOC_BUDGETS: &[LocBudget] = &[
         label: "turn execution workflow",
         path: "crates/moa-orchestrator/src/workflows/turn_execution.rs",
         scope: LocScope::File,
-        max_lines: 2_946,
-        reason: "TurnExecution is the central durable workflow pending collaborator extraction",
+        max_lines: 2_969,
+        reason: "TurnExecution is the central durable workflow pending collaborator extraction; ratchet includes the auto-delegation worker tool subset",
     },
 ];
 

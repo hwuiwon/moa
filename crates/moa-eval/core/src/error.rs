@@ -24,6 +24,14 @@ pub enum EvalError {
         /// Underlying TOML parsing error.
         source: toml::de::Error,
     },
+    /// Parsing a JSON document failed.
+    #[error("failed to parse JSON from {path}: {source}")]
+    ParseJson {
+        /// Path that failed to parse.
+        path: PathBuf,
+        /// Underlying JSON parsing error.
+        source: serde_json::Error,
+    },
     /// Serializing a TOML document failed.
     #[error("failed to serialize TOML: {0}")]
     SerializeToml(#[from] toml::ser::Error),

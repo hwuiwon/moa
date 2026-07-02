@@ -26,13 +26,19 @@ all()
   - (package(moa-orchestrator) & test(/::tests::.*_db_/))
 '''
 
+# test() predicates below are scoped to the binaries that actually contain
+# inline DB-named unit tests. An unscoped test() forces nextest to exec-list
+# every workspace test binary (255 binaries, minutes of overhead per run);
+# binary()/package()/kind() scoping lets it skip unmatched binaries without
+# exec. If a new binary gains inline `*_db_`/`*_db_memory` tests, add it here;
+# the ci profile's all() filter remains the safety net.
 [profile.db-session]
 inherits = "default"
 test-threads = 8
 default-filter = '''
 binary(/_db$/)
-  | (package(moa-eval) & test(/::tests::.*_db_/))
-  | (package(moa-orchestrator) & test(/::tests::.*_db_/))
+  | (package(moa-eval) & kind(lib) & test(/::tests::.*_db_/))
+  | (package(moa-orchestrator) & kind(lib) & test(/::tests::.*_db_/))
 '''
 
 [profile.db-memory]
@@ -40,7 +46,9 @@ inherits = "default"
 test-threads = 4
 default-filter = '''
 (
-  binary(/_db_memory$/) | test(/_db_memory$/)
+  binary(/_db_memory$/)
+    | (package(moa-eval) & kind(lib) & test(/_db_memory$/))
+    | (package(moa-orchestrator) & binary(knowledge_service) & test(/_db_memory$/))
 )
   - binary(/^cross_tenant_pentest_db_memory$/)
 '''
@@ -97,7 +105,10 @@ default-filter = 'binary(/^(golden_eval|long_conversation_foundation_eval|long_c
 
 [test-groups]
 db-session = { max-threads = 4 }
-db-memory = { max-threads = 1 }
+# db-memory tests use per-test databases cloned from the migration template
+# and per-test session-store pools capped at 10 connections, so moderate
+# parallelism is safe against the compose Postgres (max_connections = 100).
+db-memory = { max-threads = 4 }
 brain-turn-db = { max-threads = 1 }
 eval-recorded = { max-threads = 1 }
 service-e2e = { max-threads = 1 }
@@ -116,7 +127,7 @@ threads-required = 1
 [[profile.default.overrides]]
 filter = 'binary(/_db_memory$/) | test(/_db_memory$/)'
 test-group = "db-memory"
-threads-required = "num-test-threads"
+threads-required = 1
 
 [[profile.default.overrides]]
 filter = 'binary(/^(golden_eval|long_conversation_foundation_eval|long_conversation_smoke_eval|scripted_user_mode_eval)$/)'

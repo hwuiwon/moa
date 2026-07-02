@@ -17,12 +17,13 @@ Use the smallest exact test target that still reproduces:
 
 ```bash
 # brain harness (drives the pipeline directly)
-cargo test -p moa-brain --test brain_turn_db -- --test-threads=1
+cargo test -p moa-brain --test brain_turn_artifacts_db -- --test-threads=1
 
-# Restate orchestrator (pick the suite that matches the change)
-cargo test -p moa-orchestrator --test session_vo -- --test-threads=1
-cargo test -p moa-orchestrator --test tool_executor -- --test-threads=1
-cargo test -p moa-orchestrator --test replay_determinism -- --test-threads=1
+# Restate orchestrator (behavior files live as modules inside the
+# per-lane harness binaries; the module name is the test filter)
+cargo test -p moa-orchestrator --test orchestrator_offline session_vo -- --test-threads=1
+cargo test -p moa-orchestrator --test orchestrator_offline tool_executor -- --test-threads=1
+cargo test -p moa-orchestrator --test orchestrator_offline replay_determinism -- --test-threads=1
 ```
 
 For live or provider lifecycle failures:

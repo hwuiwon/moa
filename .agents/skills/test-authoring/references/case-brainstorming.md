@@ -71,7 +71,7 @@ Always include:
 - approval persists, pauses, resumes
 - soft cancel stops cleanly without inventing extra turns
 
-These are the core lifecycle assertions; the brain harness suite in `crates/moa-brain/tests/brain_turn_db.rs` and the Restate suite in `crates/moa-orchestrator/tests/session_turn_lifecycle_service_e2e.rs` exercise them.
+These are the core lifecycle assertions; the brain harness suites in `crates/moa-brain/tests/brain_turn_artifacts_db.rs` and `crates/moa-brain/tests/brain_turn_cache_replay_db_memory.rs` and the Restate suite in `crates/moa-orchestrator/tests/session_turn_lifecycle_service_e2e.rs` exercise them.
 
 ### Provider tests
 

@@ -1,9 +1,11 @@
 // Memory budget gate fixture support.
 
 use std::error::Error;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::path::Path;
 
+use moa_eval::memory_eval::budget_gate::{
+    MemoryBudgetGateOptions, MemoryBudgetGateOutcome, run_memory_retrieval_budget_gate,
+};
 use moa_eval::memory_eval::{MemoryRetrievalEvalReport, ProbeResult, ProbeType};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -227,46 +229,22 @@ fn write_memory_budget_report(path: &Path, report: &MemoryRetrievalEvalReport) -
     Ok(())
 }
 
-fn run_memory_budget_gate(report_path: &Path, previous_path: Option<&Path>) -> TestResult<Output> {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let mut command = Command::new(cargo);
-    command
-        .current_dir(workspace_root())
-        .args([
-            "run",
-            "-p",
-            "xtask",
-            "--quiet",
-            "--",
-            "check-eval-budgets",
-            "--suite",
-            "memory_retrieval",
-            "--max-regression-pct",
-            "5",
-            "--memory-eval-report",
-        ])
-        .arg(report_path);
-    if let Some(previous_path) = previous_path {
-        command.env("MOA_EVAL_PREVIOUS_MEMORY_REPORT", previous_path);
-    } else {
-        command.env_remove("MOA_EVAL_PREVIOUS_MEMORY_REPORT");
-    }
-    Ok(command.output()?)
-}
-
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("moa-eval manifest lives under crates/moa-eval")
-        .to_path_buf()
-}
-
-fn command_output_text(output: &Output) -> String {
-    format!(
-        "status: {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    )
+/// Applies the memory-retrieval budget gate in-process, mirroring
+/// `cargo xtask check-eval-budgets --suite memory_retrieval
+/// --max-regression-pct 5`. Runs the library gate directly instead of a
+/// nested `cargo run`, which would serialize on the target-dir lock.
+fn run_memory_budget_gate(
+    report_path: &Path,
+    previous_path: Option<&Path>,
+) -> TestResult<MemoryBudgetGateOutcome> {
+    let options = MemoryBudgetGateOptions {
+        report_path: report_path.to_path_buf(),
+        previous_report_path: previous_path.map(Path::to_path_buf),
+        max_regression_pct: 5.0,
+        min_metric_floors: Vec::new(),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    Ok(runtime.block_on(run_memory_retrieval_budget_gate(&options))?)
 }

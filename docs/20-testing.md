@@ -65,10 +65,17 @@ cargo install cargo-nextest --locked
 make test-fast
 ```
 
-`cargo-nextest` does not run doctests, so `make test-fast` runs
-`cargo test --locked --doc` after the nextest pass. The CI-equivalent local
-target keeps running after failures and writes nextest's JUnit report under
-`target/nextest/ci/`:
+For the inner loop, `make test-affected` narrows the run further: it maps the
+change set (versus the merge base with `main`, plus uncommitted files) to
+workspace crates via `cargo metadata`, expands to reverse dependents, and runs
+only those crates' tests. Workspace-level files such as `Cargo.lock` fall back
+to the full `fast-pr` lane.
+
+`cargo-nextest` does not run doctests. `make test-fast` intentionally skips
+them (the workspace currently has no runnable doc examples and the rustdoc
+pass costs ~90s); `make test-ci` keeps the doc-test pass as the safety net.
+The CI-equivalent local target also keeps running after failures and writes
+nextest's JUnit report under `target/nextest/ci/`:
 
 ```bash
 make test-ci
@@ -84,7 +91,7 @@ suffixes as they are touched.
 | --- | --- | --- |
 | Fast PR | `make test-fast` | none beyond local mock servers and tempdirs |
 | DB session | `make test-db-session` | Postgres only; schema isolation |
-| DB memory | `make test-db-memory` | Postgres with relational graph/vector state; currently serial until physical DB isolation lands |
+| DB memory | `make test-db-memory` | Postgres with relational graph/vector state; per-test template-cloned databases, runs 4-wide |
 | Authz pentest | `make test-authz-pentest` | Postgres with graph/vector state; writes the pentest report |
 | Service E2E | `make test-service-e2e` | clean Postgres/OpenFGA/Restate/PII harness with deterministic providers |
 | Provider E2E | `make test-provider-e2e` | service E2E harness plus live/billed provider credentials |
@@ -94,7 +101,20 @@ new out-of-line test targets on one of these suffixes so the filters stay short:
 `*_unit.rs`, `*_offline.rs`, `*_component.rs`, `*_db.rs`, `*_db_memory.rs`,
 `*_service_e2e.rs`, `*_provider_e2e.rs`, `*_eval.rs`, `*_live.rs`, and
 `*_docker.rs`. When a file starts mixing runtime requirements, split it into
-lane-specific binaries before adding profile selectors. For example, memory
+lane-specific binaries before adding profile selectors.
+
+Offline, `_db`, and `_db_memory` behavior files are consolidated into one
+harness binary per crate per lane (for example
+`crates/moa-orchestrator/tests/orchestrator_db.rs` declaring
+`#[path = "orchestrator_db/session_store_db.rs"] mod session_store_db;`).
+Each file under `tests/` otherwise links as its own binary, and the binary
+count dominates link and nextest-listing time. When adding a behavior file to
+one of these lanes, place it under the harness directory and add a `mod` line
+to the harness; run it with
+`cargo test -p <crate> --test <harness> <module_name>`. Binaries that nextest
+profiles, scripts, or workflows reference by name (the `_service_e2e`,
+`_provider_e2e`, `_live`, `_eval` lanes and pinned names like
+`cross_tenant_pentest_db_memory`) stay standalone. For example, memory
 eval corpus and metric tests belong in `_offline` or `_eval` targets, graph
 gold-resolution and tenant knowledge graph/vector tests belong in
 `_db_memory`, local hand-tool filesystem tests belong in `_offline`,
@@ -113,8 +133,8 @@ DB-backed lineage and auth recovery checks are explicit integration lanes. Run
 them directly when touching those surfaces:
 
 ```bash
-cargo test -p moa-auth-providers-auth0 --test ciba_db --locked -- --test-threads=1
-cargo test -p moa-authz --test authz_poller_db --locked -- --test-threads=1
+cargo test -p moa-auth-providers-auth0 --test auth_providers_auth0_db ciba_db --locked -- --test-threads=1
+cargo test -p moa-authz --test authz_db authz_poller_db --locked -- --test-threads=1
 cargo test -p moa-lineage-audit --test merkle_publisher_db --locked -- --test-threads=1
 ```
 

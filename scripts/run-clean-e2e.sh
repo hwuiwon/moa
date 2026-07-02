@@ -283,10 +283,14 @@ run docker compose exec -T postgres psql -U moa_owner -d postgres \
   -c "CREATE DATABASE ${DB_NAME} OWNER moa_owner"
 DB_CREATED=1
 
+# CARGO_TARGET_DIR=target/tools keeps this single-package `cargo run -p` build
+# out of the main target dir; its feature unification differs from workspace
+# builds and would otherwise force the test steps below to recompile crates.
 run env \
   "MOA_AUTHZ_OPENFGA_URL=${MOA_AUTHZ_OPENFGA_URL:-http://localhost:10030}" \
   "MOA_AUTHZ_OPENFGA_PRESHARED_KEY=${MOA_AUTHZ_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod}" \
   "MOA_FGA_ENV_OUTPUT=${FGA_ENV}" \
+  "CARGO_TARGET_DIR=target/tools" \
   cargo run -q -p moa-fga-bootstrap
 
 set -a

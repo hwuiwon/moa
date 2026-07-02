@@ -1,5 +1,6 @@
 //! Memory evaluation corpus, fixture, and scoring support.
 
+pub mod budget_gate;
 pub mod corpus;
 pub mod embeddings;
 pub mod generator;

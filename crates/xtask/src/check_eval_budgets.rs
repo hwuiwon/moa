@@ -6,9 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use moa_eval::memory_eval::{
-    CorpusProfile, MemoryRetrievalEvalReport, ProbeResult, ProbeType, QueryRewritePolicy,
-    TranscriptStyle,
+use moa_eval::memory_eval::budget_gate::{
+    MemoryBudgetGateOptions, MinMetricFloor, run_memory_retrieval_budget_gate as run_memory_gate,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -18,11 +17,6 @@ const MEMORY_RETRIEVAL_SUITE: &str = "memory_retrieval";
 const DEFAULT_SCENARIO_ROOT: &str = "crates/moa-eval/scenarios/long_conversation";
 const DEFAULT_SCORE_CARD_ROOT: &str = "target/score-cards";
 const DEFAULT_REGRESSION_PCT: f64 = 5.0;
-const MEMORY_PR_ZERO_RECALL_RATE_MAX: f64 = 0.10;
-const MEMORY_RERANKER_RECALL_REGRESSION_MAX: f64 = 0.03;
-const MEMORY_RERANKER_RECALL_GAIN_MIN_FOR_LATENCY: f64 = 0.03;
-const MEMORY_RERANKER_P95_LATENCY_MS_MAX: u64 = 2_000;
-const MEMORY_REWRITE_P95_LATENCY_MS_MAX: u64 = 2_000;
 const PREVIOUS_MEMORY_REPORT_ENV: &str = "MOA_EVAL_PREVIOUS_MEMORY_REPORT";
 
 /// Runs the requested eval budget gate.
@@ -156,9 +150,11 @@ impl Options {
                         Some(PathBuf::from(next_arg(args, "--memory-eval-report")?));
                 }
                 "--min-metric" => {
-                    options
-                        .min_metrics
-                        .push(parse_min_metric(&next_arg(args, "--min-metric")?)?);
+                    let raw = next_arg(args, "--min-metric")?;
+                    options.min_metrics.push(
+                        raw.parse::<MinMetricFloor>()
+                            .with_context(|| format!("parse --min-metric value `{raw}`"))?,
+                    );
                 }
                 "-h" | "--help" => {
                     println!(
@@ -173,30 +169,6 @@ impl Options {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-struct MinMetricFloor {
-    name: String,
-    floor: f64,
-}
-
-fn parse_min_metric(raw: &str) -> Result<MinMetricFloor> {
-    let (name, value) = raw
-        .split_once('=')
-        .with_context(|| format!("--min-metric value `{raw}` must use name=value"))?;
-    let name = name.trim();
-    if name.is_empty() {
-        bail!("--min-metric value `{raw}` has an empty metric name");
-    }
-    let floor = value
-        .trim()
-        .parse::<f64>()
-        .with_context(|| format!("parse --min-metric floor `{value}` for `{name}`"))?;
-    Ok(MinMetricFloor {
-        name: name.to_string(),
-        floor,
-    })
-}
-
 fn next_arg(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
     args.next()
         .with_context(|| format!("{flag} requires a value"))
@@ -205,337 +177,35 @@ fn next_arg(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Strin
 fn run_memory_retrieval_budget_gate(options: Options) -> Result<()> {
     let report_path = options
         .memory_eval_report
-        .as_deref()
         .context("--memory-eval-report is required for --suite memory_retrieval")?;
-    let max_regression_pct = options.max_regression_pct.unwrap_or(DEFAULT_REGRESSION_PCT);
-    let raw_report = load_json_report(report_path)?;
-    let report = load_memory_retrieval_report(report_path)?;
+    let gate_options = MemoryBudgetGateOptions {
+        report_path,
+        previous_report_path: previous_memory_report_path(),
+        max_regression_pct: options.max_regression_pct.unwrap_or(DEFAULT_REGRESSION_PCT),
+        min_metric_floors: options.min_metrics,
+    };
 
-    let mut failure = ScenarioFailure::new(MEMORY_RETRIEVAL_SUITE.to_string());
-    failure
-        .violations
-        .extend(memory_retrieval_gate_violations(&report));
-    failure
-        .violations
-        .extend(min_metric_violations(&raw_report, &options.min_metrics));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("build Tokio runtime for memory budget gate")?;
+    let outcome = runtime.block_on(run_memory_gate(&gate_options))?;
 
-    let mut regression_compared = 0_usize;
-    if let Some(previous_path) = previous_memory_report_path() {
-        let previous = load_memory_retrieval_report(&previous_path).with_context(|| {
-            format!(
-                "load previous memory report from {PREVIOUS_MEMORY_REPORT_ENV}={}",
-                previous_path.display()
-            )
-        })?;
-        regression_compared += 1;
-        failure.violations.extend(compare_memory_regression(
-            &report,
-            &previous,
-            max_regression_pct,
-        ));
-    }
-
-    if failure.violations.is_empty() {
-        let floors = if options.min_metrics.is_empty() {
-            "none".to_string()
-        } else {
-            options
-                .min_metrics
-                .iter()
-                .map(|floor| floor.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        println!(
-            "Memory-retrieval budgets passed: 1 report checked, {regression_compared} regression baseline(s) compared, floors met: {floors}."
-        );
+    if outcome.passed() {
+        print!("{}", outcome.rendered);
         return Ok(());
     }
-
-    let violation_count = failure.violations.len();
-    print_failures(&[failure]);
-    bail!("memory-retrieval budget gate failed: {violation_count} metric violation(s)");
-}
-
-fn load_json_report(path: &Path) -> Result<Value> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("read memory retrieval report {}", path.display()))?;
-    serde_json::from_str(&raw)
-        .with_context(|| format!("parse memory retrieval report {}", path.display()))
-}
-
-fn load_memory_retrieval_report(path: &Path) -> Result<MemoryRetrievalEvalReport> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("read memory retrieval report {}", path.display()))?;
-    serde_json::from_str(&raw)
-        .with_context(|| format!("parse memory retrieval report {}", path.display()))
+    eprint!("{}", outcome.rendered);
+    bail!(
+        "memory-retrieval budget gate failed: {} metric violation(s)",
+        outcome.violations.len()
+    );
 }
 
 fn previous_memory_report_path() -> Option<PathBuf> {
     env::var_os(PREVIOUS_MEMORY_REPORT_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-}
-
-fn memory_retrieval_gate_violations(report: &MemoryRetrievalEvalReport) -> Vec<Violation> {
-    let mut violations = Vec::new();
-    if report.aborted_over_budget {
-        let actual = report
-            .cost
-            .as_ref()
-            .map(|cost| {
-                format!(
-                    "estimated ${:.4} over budget ${:.4}",
-                    cost.est_usd, cost.budget_usd
-                )
-            })
-            .unwrap_or_else(|| "true".to_string());
-        violations.push(Violation::new("aborted_over_budget", "false", actual));
-    }
-
-    let cross_user_leak_probe_ids = cross_user_leak_probe_ids(&report.probe_results);
-    let cross_user_leak_count = cross_user_leak_count(&report.probe_results);
-    if cross_user_leak_count != 0 {
-        violations.push(
-            Violation::new(
-                "cross_user_leak_count",
-                "0",
-                cross_user_leak_count.to_string(),
-            )
-            .with_probe_ids(cross_user_leak_probe_ids),
-        );
-    }
-
-    let pii_unredacted_probe_ids = pii_unredacted_probe_ids(&report.probe_results);
-    if !pii_unredacted_probe_ids.is_empty() {
-        violations.push(
-            Violation::new(
-                "pii_unredacted_count",
-                "0",
-                pii_unredacted_probe_ids.len().to_string(),
-            )
-            .with_probe_ids(pii_unredacted_probe_ids),
-        );
-    }
-
-    if report.manifest.profile == CorpusProfile::Pr
-        && report.manifest.transcript_style == TranscriptStyle::Marked
-    {
-        check_max_f64(
-            &mut violations,
-            "zero_recall_rate",
-            MEMORY_PR_ZERO_RECALL_RATE_MAX,
-            report.metrics.zero_recall_rate.value,
-        );
-    }
-
-    if report.reranker_enabled {
-        let pre_recall_at_4 = report.metrics.pre_rerank_recall_at_4.value;
-        let post_recall_at_4 = report.metrics.post_rerank_recall_at_4.value;
-        let recall_delta = post_recall_at_4 - pre_recall_at_4;
-        let recall_regression = pre_recall_at_4 - post_recall_at_4;
-        if recall_regression > MEMORY_RERANKER_RECALL_REGRESSION_MAX {
-            violations.push(Violation::new(
-                "retrieval.reranker_recall_at_4_regression",
-                format!("<= {MEMORY_RERANKER_RECALL_REGRESSION_MAX:.2}"),
-                format!(
-                    "{recall_regression:.4} (pre {pre_recall_at_4:.4}, post {post_recall_at_4:.4})"
-                ),
-            ));
-        }
-        if report.metrics.p95_retrieval_latency_ms > MEMORY_RERANKER_P95_LATENCY_MS_MAX
-            && recall_delta < MEMORY_RERANKER_RECALL_GAIN_MIN_FOR_LATENCY
-        {
-            violations.push(Violation::new(
-                "retrieval.p95_retrieval_latency_ms",
-                format!(
-                    "<= {MEMORY_RERANKER_P95_LATENCY_MS_MAX} unless recall@4 gain >= {MEMORY_RERANKER_RECALL_GAIN_MIN_FOR_LATENCY:.2}"
-                ),
-                format!(
-                    "{} (recall@4 gain {recall_delta:.4})",
-                    report.metrics.p95_retrieval_latency_ms
-                ),
-            ));
-        }
-    }
-
-    if report.query_rewrite_policy == QueryRewritePolicy::Gated {
-        match report.query_rewrite_by_class.get("exact_identifier") {
-            Some(metrics) if metrics.total_count > 0 && metrics.call_count == 0 => {}
-            Some(metrics) if metrics.total_count > 0 => violations.push(Violation::new(
-                "query_rewrite.exact_identifier_call_count",
-                "0",
-                metrics.call_count.to_string(),
-            )),
-            _ => violations.push(Violation::new(
-                "query_rewrite.exact_identifier_controls",
-                "present with at least 1 probe",
-                "missing".to_string(),
-            )),
-        }
-    }
-
-    violations
-}
-
-fn min_metric_violations(report: &Value, floors: &[MinMetricFloor]) -> Vec<Violation> {
-    floors
-        .iter()
-        .filter_map(|floor| match resolve_metric_number(report, &floor.name) {
-            Ok(actual) if actual < floor.floor => Some(Violation::new(
-                floor.name.clone(),
-                format!(">= {:.4}", floor.floor),
-                format!("{actual:.4}"),
-            )),
-            Ok(_) => None,
-            Err(error) => Some(Violation::new(
-                floor.name.clone(),
-                format!(">= {:.4}", floor.floor),
-                error.to_string(),
-            )),
-        })
-        .collect()
-}
-
-fn resolve_metric_number(report: &Value, name: &str) -> Result<f64> {
-    let mut current = report
-        .get("metrics")
-        .context("report is missing metrics object")?;
-    for part in name.split('.') {
-        if part.is_empty() {
-            bail!("metric path `{name}` contains an empty segment");
-        }
-        current = current
-            .get(part)
-            .with_context(|| format!("metric `{name}` is missing path segment `{part}`"))?;
-    }
-    if let Some(value) = current.as_f64() {
-        return Ok(value);
-    }
-    if let Some(value) = current.get("value").and_then(Value::as_f64) {
-        return Ok(value);
-    }
-    bail!("metric `{name}` did not resolve to a numeric value")
-}
-
-fn compare_memory_regression(
-    current: &MemoryRetrievalEvalReport,
-    previous: &MemoryRetrievalEvalReport,
-    max_regression_pct: f64,
-) -> Vec<Violation> {
-    let mut violations = [
-        (
-            "retrieval.recall_at_4",
-            current.metrics.recall_at_4.value,
-            previous.metrics.recall_at_4.value,
-        ),
-        (
-            "retrieval.recall_at_25",
-            current.metrics.recall_at_25.value,
-            previous.metrics.recall_at_25.value,
-        ),
-        (
-            "retrieval.mrr",
-            current.metrics.mrr.value,
-            previous.metrics.mrr.value,
-        ),
-        (
-            "retrieval.ndcg_at_4",
-            current.metrics.ndcg_at_4.value,
-            previous.metrics.ndcg_at_4.value,
-        ),
-    ]
-    .into_iter()
-    .filter_map(|(metric, current_value, previous_value)| {
-        regression_pct(current_value, previous_value, Direction::HigherIsBetter)
-            .filter(|regression| *regression > max_regression_pct)
-            .map(|regression| {
-                Violation::new(
-                    metric,
-                    format!("regression <= {max_regression_pct:.2}%"),
-                    format!(
-                        "{current_value:.4} (regression: {regression:+.2}% vs baseline {previous_value:.4})"
-                    ),
-                )
-            })
-    })
-    .collect::<Vec<_>>();
-
-    violations.extend(compare_query_rewrite_regression(current, previous));
-    violations
-}
-
-fn compare_query_rewrite_regression(
-    current: &MemoryRetrievalEvalReport,
-    previous: &MemoryRetrievalEvalReport,
-) -> Vec<Violation> {
-    let mut violations = Vec::new();
-    if current.query_rewrite_policy != QueryRewritePolicy::Gated
-        || previous.query_rewrite_policy != QueryRewritePolicy::Always
-    {
-        return violations;
-    }
-
-    if previous.query_rewrite_call_count > 0
-        && current.query_rewrite_call_count.saturating_mul(2) > previous.query_rewrite_call_count
-    {
-        let reduction = 1.0
-            - (current.query_rewrite_call_count as f64 / previous.query_rewrite_call_count as f64);
-        violations.push(Violation::new(
-            "query_rewrite.call_count_reduction",
-            ">= 50.00% fewer calls than always",
-            format!(
-                "{:.2}% fewer ({} gated calls vs {} always calls)",
-                reduction * 100.0,
-                current.query_rewrite_call_count,
-                previous.query_rewrite_call_count
-            ),
-        ));
-    }
-
-    let current_p95 = current.retrieval_plus_rewrite_p95_latency_ms;
-    let previous_p95 = previous.retrieval_plus_rewrite_p95_latency_ms;
-    if current_p95 > MEMORY_REWRITE_P95_LATENCY_MS_MAX
-        && (previous_p95 == 0 || current_p95 > previous_p95)
-    {
-        violations.push(Violation::new(
-            "query_rewrite.retrieval_plus_rewrite_p95_latency_ms",
-            format!("<= {MEMORY_REWRITE_P95_LATENCY_MS_MAX} or <= always baseline {previous_p95}"),
-            current_p95.to_string(),
-        ));
-    }
-
-    violations
-}
-
-fn cross_user_leak_count(probe_results: &[ProbeResult]) -> usize {
-    probe_results
-        .iter()
-        .filter(|probe| probe.probe_type == ProbeType::CrossUserIsolation)
-        .map(|probe| probe.leaked_blocked_fact_ids().len())
-        .sum()
-}
-
-fn cross_user_leak_probe_ids(probe_results: &[ProbeResult]) -> Vec<String> {
-    probe_results
-        .iter()
-        .filter(|probe| probe.probe_type == ProbeType::CrossUserIsolation)
-        .filter(|probe| !probe.leaked_blocked_fact_ids().is_empty())
-        .map(|probe| probe.probe_id.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-fn pii_unredacted_probe_ids(probe_results: &[ProbeResult]) -> Vec<String> {
-    probe_results
-        .iter()
-        .filter(|probe| probe.probe_type == ProbeType::PiiRedaction)
-        .filter(|probe| probe.pii_redacted == Some(false))
-        .map(|probe| probe.probe_id.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1167,11 +837,6 @@ impl Violation {
             affected_probe_ids: Vec::new(),
         }
     }
-
-    fn with_probe_ids(mut self, probe_ids: Vec<String>) -> Self {
-        self.affected_probe_ids = probe_ids;
-        self
-    }
 }
 
 fn scenario_names(scenario_root: &Path) -> Result<Vec<String>> {
@@ -1306,16 +971,6 @@ fn check_max_u64(violations: &mut Vec<Violation>, metric: &str, expected_max: u6
     }
 }
 
-fn check_max_f64(violations: &mut Vec<Violation>, metric: &str, expected_max: f64, actual: f64) {
-    if actual > expected_max {
-        violations.push(Violation::new(
-            metric,
-            format!("<= {expected_max:.4}"),
-            format!("{actual:.4}"),
-        ));
-    }
-}
-
 fn check_min_u64(violations: &mut Vec<Violation>, metric: &str, expected_min: u64, actual: u64) {
     if actual < expected_min {
         violations.push(Violation::new(
@@ -1370,87 +1025,6 @@ fn print_failures(failures: &[ScenarioFailure]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moa_eval::kernel::{PerLexicalBackendRecall, RetrievalCoreMetrics};
-    use moa_eval::memory_eval::GraphExpansionEvalPolicy;
-    use moa_eval::memory_eval::runner::QueryRewriteClassMetrics;
-    use moa_eval::memory_eval::{
-        CorpusManifest, GoldResolutionReport, MetricSummary, PerLegRecall, RetrievalMetrics,
-    };
-
-    #[test]
-    fn check_eval_budgets_min_metric_fails_below_floor() {
-        // Pins: --min-metric compares MetricSummary.value from raw report JSON.
-        let report = serde_json::json!({
-            "metrics": {
-                "ingestion_coverage": {
-                    "numerator": 8.0,
-                    "denominator": 10,
-                    "value": 0.80
-                }
-            }
-        });
-        let floors = vec![parse_min_metric("ingestion_coverage=0.85").expect("parse floor")];
-
-        let violations = min_metric_violations(&report, &floors);
-
-        assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].metric, "ingestion_coverage");
-        assert_eq!(violations[0].expected, ">= 0.8500");
-        assert_eq!(violations[0].actual, "0.8000");
-    }
-
-    #[test]
-    fn check_eval_budgets_min_metric_resolves_nested_per_leg_names() {
-        // Pins: suite-agnostic metric floors walk dotted JSON paths and MetricSummary.value leaves.
-        let report = serde_json::json!({
-            "metrics": {
-                "per_leg_recall": {
-                    "graph": {
-                        "numerator": 9.0,
-                        "denominator": 10,
-                        "value": 0.90
-                    }
-                }
-            }
-        });
-
-        let actual =
-            resolve_metric_number(&report, "per_leg_recall.graph").expect("resolve nested metric");
-
-        assert_eq!(actual, 0.90);
-        assert!(
-            min_metric_violations(
-                &report,
-                &[parse_min_metric("per_leg_recall.graph=0.90").expect("parse floor")]
-            )
-            .is_empty()
-        );
-    }
-
-    #[test]
-    fn check_eval_budgets_min_metric_treats_absent_metric_as_violation() {
-        // Pins: a --min-metric floor on a metric absent from the report fails the gate
-        // (surfacing the resolution error) rather than silently passing.
-        let report = serde_json::json!({
-            "metrics": {
-                "ingestion_coverage": { "value": 0.95 }
-            }
-        });
-        let floors = vec![parse_min_metric("multi_hop_recall=0.80").expect("parse floor")];
-
-        let violations = min_metric_violations(&report, &floors);
-
-        assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].metric, "multi_hop_recall");
-        assert_eq!(violations[0].expected, ">= 0.8000");
-        assert!(
-            violations[0]
-                .actual
-                .contains("missing path segment `multi_hop_recall`"),
-            "absent metric should surface the resolution error, got {:?}",
-            violations[0].actual
-        );
-    }
 
     #[test]
     fn run_memory_retrieval_gate_errors_on_missing_report_file() {
@@ -1471,7 +1045,7 @@ mod tests {
 
         let message = format!("{error:#}");
         assert!(
-            message.contains("read memory retrieval report"),
+            message.contains("failed to read"),
             "expected a read error, got {message:?}"
         );
     }
@@ -1497,164 +1071,8 @@ mod tests {
 
         let message = format!("{error:#}");
         assert!(
-            message.contains("parse memory retrieval report"),
+            message.contains("failed to parse JSON from"),
             "expected a parse error, got {message:?}"
         );
-    }
-
-    #[test]
-    fn memory_regression_checks_recall25_and_rewrite_budget() {
-        // Pins: gated-vs-always comparison enforces recall@25, call reduction, and rewrite p95.
-        let previous = memory_report(QueryRewritePolicy::Always, 147, 0, 2_100, 0, 0, 0.96);
-        let current = memory_report(QueryRewritePolicy::Gated, 84, 63, 2_200, 5, 0, 0.80);
-
-        let violations = compare_memory_regression(&current, &previous, 5.0);
-        let metrics = violations
-            .iter()
-            .map(|violation| violation.metric.as_str())
-            .collect::<BTreeSet<_>>();
-
-        assert!(metrics.contains("retrieval.recall_at_25"));
-        assert!(metrics.contains("query_rewrite.call_count_reduction"));
-        assert!(metrics.contains("query_rewrite.retrieval_plus_rewrite_p95_latency_ms"));
-    }
-
-    #[test]
-    fn memory_gate_requires_gated_exact_identifier_controls() {
-        // Pins: gated reports prove exact-anchor controls exist and do not invoke rewriting.
-        let missing = memory_report(QueryRewritePolicy::Gated, 10, 10, 100, 0, 0, 1.0);
-        let missing_violations = memory_retrieval_gate_violations(&missing);
-        assert!(
-            missing_violations
-                .iter()
-                .any(|violation| violation.metric == "query_rewrite.exact_identifier_controls")
-        );
-
-        let rewritten = memory_report(QueryRewritePolicy::Gated, 10, 10, 100, 3, 1, 1.0);
-        let rewritten_violations = memory_retrieval_gate_violations(&rewritten);
-        assert!(rewritten_violations.iter().any(|violation| {
-            violation.metric == "query_rewrite.exact_identifier_call_count"
-                && violation.actual == "1"
-        }));
-
-        let skipped = memory_report(QueryRewritePolicy::Gated, 10, 10, 100, 3, 0, 1.0);
-        assert!(
-            memory_retrieval_gate_violations(&skipped)
-                .iter()
-                .all(|violation| !violation
-                    .metric
-                    .starts_with("query_rewrite.exact_identifier"))
-        );
-    }
-
-    fn memory_report(
-        policy: QueryRewritePolicy,
-        call_count: usize,
-        skip_count: usize,
-        rewrite_p95_ms: u64,
-        exact_total: usize,
-        exact_calls: usize,
-        recall_at_25: f64,
-    ) -> MemoryRetrievalEvalReport {
-        let mut by_class = BTreeMap::new();
-        if exact_total > 0 {
-            by_class.insert(
-                "exact_identifier".to_string(),
-                QueryRewriteClassMetrics {
-                    total_count: exact_total,
-                    call_count: exact_calls,
-                    skip_count: exact_total.saturating_sub(exact_calls),
-                    call_rate: exact_calls as f64 / exact_total as f64,
-                },
-            );
-        }
-
-        MemoryRetrievalEvalReport {
-            manifest: CorpusManifest {
-                version: 1,
-                corpus_id: "test-corpus".to_string(),
-                profile: CorpusProfile::Pr,
-                description: "test corpus".to_string(),
-                seeds: vec![1, 2, 3],
-                transcript_style: TranscriptStyle::Marked,
-            },
-            candidate_k: 25,
-            final_k: 4,
-            reranker_enabled: false,
-            query_rewrite_policy: policy,
-            graph_expansion_policy: GraphExpansionEvalPolicy::Current,
-            query_rewrite_call_count: call_count,
-            query_rewrite_skip_count: skip_count,
-            query_rewrite_call_rate: if call_count + skip_count == 0 {
-                0.0
-            } else {
-                call_count as f64 / (call_count + skip_count) as f64
-            },
-            query_rewrite_p50_latency_ms: 0,
-            query_rewrite_p95_latency_ms: 0,
-            query_rewrite_input_tokens: 0,
-            query_rewrite_output_tokens: 0,
-            query_rewrite_est_usd: 0.0,
-            retrieval_plus_rewrite_p95_latency_ms: rewrite_p95_ms,
-            query_rewrite_by_class: by_class,
-            aborted_over_budget: false,
-            cost: None,
-            providers: None,
-            metrics: retrieval_metrics(recall_at_25),
-            probe_results: Vec::new(),
-            bootstrap: Vec::new(),
-            cross_user_leak_probe_ids: Vec::new(),
-            gold_resolution: GoldResolutionReport {
-                ingest_reports: Vec::new(),
-                records: Vec::new(),
-            },
-            consolidation: None,
-        }
-    }
-
-    fn retrieval_metrics(recall_at_25: f64) -> RetrievalMetrics {
-        RetrievalMetrics {
-            core: RetrievalCoreMetrics {
-                recall_at_4: metric(0.90),
-                recall_at_25: metric(recall_at_25),
-                mrr: metric(0.90),
-                ndcg_at_4: metric(0.90),
-                zero_recall_rate: MetricSummary::default(),
-                per_leg_recall: PerLegRecall {
-                    graph: MetricSummary::default(),
-                    vector: MetricSummary::default(),
-                    lexical: MetricSummary::default(),
-                },
-                per_lexical_backend_recall: PerLexicalBackendRecall::default(),
-                p50_retrieval_latency_ms: 0,
-                p95_retrieval_latency_ms: 0,
-                cross_user_leak_count: 0,
-                pii_unredacted_count: 0,
-            },
-            ingestion_coverage: MetricSummary::default(),
-            scope_match_rate: MetricSummary::default(),
-            scope_match_rate_contact: MetricSummary::default(),
-            scope_match_rate_tenant: MetricSummary::default(),
-            extraction_precision: MetricSummary::default(),
-            entity_fragmentation: MetricSummary::default(),
-            pre_rerank_recall_at_4: MetricSummary::default(),
-            pre_rerank_recall_at_25: MetricSummary::default(),
-            post_rerank_recall_at_4: MetricSummary::default(),
-            answer_faithfulness: MetricSummary::default(),
-            abstention_correctness: MetricSummary::default(),
-            pii_redaction_rate: MetricSummary::default(),
-            temporal_as_of_accuracy: MetricSummary::default(),
-            temporal_parse_rate: MetricSummary::default(),
-            temporal_parse_mismatch_count: 0,
-            preference_context_rate: MetricSummary::default(),
-        }
-    }
-
-    fn metric(value: f64) -> MetricSummary {
-        MetricSummary {
-            numerator: value,
-            denominator: 1,
-            value,
-        }
     }
 }

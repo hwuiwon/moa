@@ -70,7 +70,12 @@ outbox tuple.
 ## Testing
 
 - Locations: unit tests inline in `#[cfg(test)]`; integration tests under each
-  crate's `tests/` directory.
+  crate's `tests/` directory. Offline/`_db`/`_db_memory` behavior files live as
+  modules inside one per-lane harness binary per crate (e.g.
+  `tests/orchestrator_db.rs` with `#[path = "orchestrator_db/foo_db.rs"] mod
+  foo_db;`) — add new files to the matching harness instead of creating a new
+  root file; e2e/live/eval binaries and names pinned by nextest profiles or
+  scripts stay standalone.
 - Names: test files/functions should say what behavior broke. Use lane suffixes
   like `_offline`, `_db`, `_db_memory`, `_service_e2e`, `_provider_e2e`, `_eval`,
   `_live`, or `_docker` when a runtime requirement matters.

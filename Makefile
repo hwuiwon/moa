@@ -1,4 +1,4 @@
-.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status test-fast test-ci test-db-session test-db-memory test-authz-pentest test-service-e2e test-provider-e2e build-timings e2e-clean e2e-clean-live loadtest-mock loadtest-live graphify
+.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status test-fast test-affected test-ci test-db-session test-db-memory test-authz-pentest test-service-e2e test-provider-e2e build-timings e2e-clean e2e-clean-live loadtest-mock loadtest-live graphify
 
 # Install the repo-pinned graphify CLI (version from
 # .agents/skills/graphify/.graphify_version) via uv, so every contributor runs
@@ -17,12 +17,17 @@ else
 	@set -a; . ./.env.fga; set +a; docker compose up -d --build moa-orchestrator restate-register moa-edge
 endif
 
+# CARGO_TARGET_DIR=target/tools keeps this `cargo run -p` build out of the
+# main target dir: a single-package build unifies features differently than a
+# workspace build, and sharing the dir makes the next `cargo test`/nextest run
+# recompile the flip-flopped crates.
 fga-bootstrap:
 	@echo ">> waiting for OpenFGA"
 	@./scripts/wait-for-fga.sh
 	@echo ">> running moa-fga-bootstrap"
 	@MOA_AUTHZ_OPENFGA_URL=$${MOA_AUTHZ_OPENFGA_URL:-http://localhost:10030} \
 	 MOA_AUTHZ_OPENFGA_PRESHARED_KEY=$${MOA_AUTHZ_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod} \
+	 CARGO_TARGET_DIR=target/tools \
 	 cargo run -q -p moa-fga-bootstrap
 	@echo ">> store/model IDs written to .env.fga"
 
@@ -50,10 +55,18 @@ dev-logs:
 dev-restate-ui:
 	@echo "open http://localhost:10011"
 
+# Doc tests are intentionally not part of test-fast: the workspace currently
+# has zero runnable doc examples and `cargo test --doc` still costs ~90s of
+# rustdoc builds. test-ci keeps the doc-test pass as the safety net.
 test-fast:
 	@command -v cargo-nextest >/dev/null 2>&1 || { echo "cargo-nextest is required; install with: cargo install cargo-nextest --locked"; exit 127; }
 	cargo nextest run --locked --profile fast-pr
-	cargo test --locked --doc
+
+# Runs only tests for crates affected by the current change set (vs. the
+# merge base with main). Fastest inner-loop target; use test-fast before a PR.
+test-affected:
+	@command -v cargo-nextest >/dev/null 2>&1 || { echo "cargo-nextest is required; install with: cargo install cargo-nextest --locked"; exit 127; }
+	./scripts/test-affected.sh
 
 test-ci:
 	@command -v cargo-nextest >/dev/null 2>&1 || { echo "cargo-nextest is required; install with: cargo install cargo-nextest --locked"; exit 127; }
