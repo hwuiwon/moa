@@ -1,7 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://moa.dev/schemas/moa-workflow-v1.schema.json",
-  "title": "MOA Workflow Definition v1",
+  "$id": "https://moa.dev/schemas/moa-procedure-v1.schema.json",
+  "title": "MOA Skill Procedure Definition v1",
+  "description": "Optional deterministic procedure graph carried by a skill definition under `definition.procedure`.",
   "type": "object",
   "required": ["nodes", "edges"],
   "properties": {
@@ -19,7 +20,7 @@
               "start",
               "action",
               "condition",
-              "approval",
+              "review",
               "agent",
               "end",
               "tool",

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use moa_artifacts::agent::{
     ActionPolicy, AgentDefinition, GuardrailPolicy, GuardrailStagePolicy, KnowledgeScopeMode,
-    ModelPolicy, SkillPolicy, SkillPolicyMode, ToolPolicyMode, WorkflowPolicy,
+    ModelPolicy, SkillPolicy, SkillPolicyMode, ToolPolicyMode,
 };
 use moa_artifacts::canonical::canonical_hash;
 use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
@@ -14,7 +14,7 @@ use moa_core::{
     ActionRuleScope, AgentActionPolicy, AgentContext, AgentGuardrailPolicy,
     AgentGuardrailStagePolicy, AgentKnowledgePolicy, AgentKnowledgeScopeMode, AgentModelPolicy,
     AgentPolicySnapshot, AgentRevisionLock, AgentSkillPolicy, AgentSkillPolicyMode,
-    AgentToolPolicy, AgentToolPolicyMode, AgentWorkflowPolicy, LockedToolRef, MoaError, ModelId,
+    AgentToolPolicy, AgentToolPolicyMode, LockedToolRef, MoaError, ModelId,
     ResolvedArtifactRevisionRef, Result,
 };
 use moa_db::ScopedConn;
@@ -86,7 +86,6 @@ impl AgentResolver {
         let model_policy = model_policy_from_definition(&definition.model_policy);
         let knowledge_policy = knowledge_policy_from_definition(definition);
         let skill_policy = skill_policy_from_definition(&definition.skill_policy);
-        let workflow_policy = workflow_policy_from_definition(&definition.workflow_policy);
         let action_policy = action_policy_from_definition(&definition.action_policy);
         let guardrail_policy = guardrail_policy_from_definition(
             &definition.guardrail_policy,
@@ -98,7 +97,6 @@ impl AgentResolver {
             model_policy: &model_policy,
             knowledge_policy: &knowledge_policy,
             skill_policy: &skill_policy,
-            workflow_policy: &workflow_policy,
             action_policy: &action_policy,
             tool_policy: &tool_policy,
             guardrail_policy: &guardrail_policy,
@@ -134,7 +132,6 @@ impl AgentResolver {
             model_policy: model_policy.clone(),
             knowledge_policy: knowledge_policy.clone(),
             skill_policy: skill_policy.clone(),
-            workflow_policy: workflow_policy.clone(),
             action_policy: action_policy.clone(),
             tool_policy: tool_policy.clone(),
             guardrail_policy: guardrail_policy.clone(),
@@ -178,7 +175,6 @@ impl AgentResolver {
             model_policy,
             knowledge_policy,
             skill_policy,
-            workflow_policy,
             action_policy,
             tool_policy,
             guardrail_policy,
@@ -399,12 +395,6 @@ fn skill_policy_from_definition(definition: &SkillPolicy) -> AgentSkillPolicy {
     }
 }
 
-fn workflow_policy_from_definition(definition: &WorkflowPolicy) -> AgentWorkflowPolicy {
-    AgentWorkflowPolicy {
-        allowed: sorted_unique(&definition.allowed),
-    }
-}
-
 fn action_policy_from_definition(definition: &ActionPolicy) -> AgentActionPolicy {
     AgentActionPolicy {
         allowed: sorted_unique(&definition.allowed),
@@ -527,7 +517,6 @@ fn policy_hash_for(
         model_policy: &'a AgentModelPolicy,
         knowledge_policy: &'a AgentKnowledgePolicy,
         skill_policy: &'a AgentSkillPolicy,
-        workflow_policy: &'a AgentWorkflowPolicy,
         action_policy: &'a AgentActionPolicy,
         tool_policy: &'a AgentToolPolicy,
         guardrail_policy: &'a AgentGuardrailPolicy,
@@ -541,7 +530,6 @@ fn policy_hash_for(
         model_policy: policy.model_policy,
         knowledge_policy: policy.knowledge_policy,
         skill_policy: policy.skill_policy,
-        workflow_policy: policy.workflow_policy,
         action_policy: policy.action_policy,
         tool_policy: policy.tool_policy,
         guardrail_policy: policy.guardrail_policy,
@@ -575,7 +563,6 @@ struct ResolvedHashPolicy<'a> {
     model_policy: &'a AgentModelPolicy,
     knowledge_policy: &'a AgentKnowledgePolicy,
     skill_policy: &'a AgentSkillPolicy,
-    workflow_policy: &'a AgentWorkflowPolicy,
     action_policy: &'a AgentActionPolicy,
     tool_policy: &'a AgentToolPolicy,
     guardrail_policy: &'a AgentGuardrailPolicy,
@@ -722,7 +709,6 @@ mod tests {
             instruction_policy: Default::default(),
             knowledge_policy: Default::default(),
             skill_policy: Default::default(),
-            workflow_policy: Default::default(),
             action_policy: Default::default(),
             tool_policy: Default::default(),
             guardrail_policy: Default::default(),

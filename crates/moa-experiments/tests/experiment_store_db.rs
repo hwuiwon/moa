@@ -250,8 +250,8 @@ async fn cross_tenant_artifact_revision_rejects_insert_db() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
-async fn workflow_run_and_session_links_persist_db() -> Result<()> {
-    // Pins: session and workflow artifact-run links persist on experiment records.
+async fn procedure_run_and_session_links_persist_db() -> Result<()> {
+    // Pins: session and procedure artifact-run links persist on experiment records.
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let experiment_store = ExperimentStore::new(test_db.store().pool().clone());
@@ -262,7 +262,8 @@ async fn workflow_run_and_session_links_persist_db() -> Result<()> {
     let session_id =
         insert_session_for_experiment_fk(test_db.store().pool(), &storage_partition_id, &user_id)
             .await?;
-    let workflow_run_uid = insert_workflow_run(test_db.store().pool(), &scope, session_id).await?;
+    let procedure_run_uid =
+        insert_procedure_run(test_db.store().pool(), &scope, session_id).await?;
     let inserted = experiment_store
         .insert_run(&scope, new_experiment("links", None, Vec::new()))
         .await?;
@@ -272,12 +273,12 @@ async fn workflow_run_and_session_links_persist_db() -> Result<()> {
         .await?
         .expect("session link update should return the run");
     let linked = experiment_store
-        .attach_workflow_run(&scope, inserted.run_uid, workflow_run_uid)
+        .attach_procedure_run(&scope, inserted.run_uid, procedure_run_uid)
         .await?
-        .expect("workflow link update should return the run");
+        .expect("procedure link update should return the run");
 
     assert_eq!(linked.session_id, Some(session_id));
-    assert_eq!(linked.workflow_run_uid, Some(workflow_run_uid));
+    assert_eq!(linked.procedure_run_uid, Some(procedure_run_uid));
     assert_score_run_exists(test_db.store().pool(), &scope, linked.score_run_id).await?;
     Ok(())
 }
@@ -511,7 +512,7 @@ async fn trial_rejects_cross_tenant_artifact_revision_db() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
-    // Pins: trial session/workflow/trace links, turn counts, and terminal status persist.
+    // Pins: trial session/procedure/trace links, turn counts, and terminal status persist.
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
@@ -522,7 +523,8 @@ async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
     let session_id =
         insert_session_for_experiment_fk(test_db.store().pool(), &storage_partition_id, &user_id)
             .await?;
-    let workflow_run_uid = insert_workflow_run(test_db.store().pool(), &scope, session_id).await?;
+    let procedure_run_uid =
+        insert_procedure_run(test_db.store().pool(), &scope, session_id).await?;
     let plan_revision_uid = insert_artifact_revision(test_db.store().pool(), &scope).await?;
     let run = store
         .insert_run(
@@ -542,9 +544,9 @@ async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
         .await?
         .expect("session link update should return the trial");
     store
-        .attach_trial_workflow_run(&scope, trial.trial_uid, workflow_run_uid)
+        .attach_trial_procedure_run(&scope, trial.trial_uid, procedure_run_uid)
         .await?
-        .expect("workflow link update should return the trial");
+        .expect("procedure link update should return the trial");
     store
         .attach_trial_trace(&scope, trial.trial_uid, "trace-trial-123".to_string())
         .await?
@@ -571,7 +573,7 @@ async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
 
     assert_eq!(incremented.turn_count, 2);
     assert_eq!(completed.session_id, Some(session_id));
-    assert_eq!(completed.workflow_run_uid, Some(workflow_run_uid));
+    assert_eq!(completed.procedure_run_uid, Some(procedure_run_uid));
     assert_eq!(completed.trace_id.as_deref(), Some("trace-trial-123"));
     assert_eq!(completed.status, ExperimentTrialStatus::Completed);
     assert_eq!(
@@ -772,7 +774,7 @@ fn new_experiment(
             model: Some(ModelId::new("gpt-5.1")),
             artifact_revision_uids: artifact_revision_uids.clone(),
             skill_refs: vec!["skill://experiment-baseline".to_string()],
-            workflow_ref: None,
+            procedure_ref: None,
             metadata: json!({ "cohort": "db" }),
         },
         scorecard: ExperimentScorecard {
@@ -781,7 +783,7 @@ fn new_experiment(
         },
         score_run_id: Uuid::now_v7(),
         session_id: None,
-        workflow_run_uid: None,
+        procedure_run_uid: None,
         artifact_revision_uids,
         idempotency_key: idempotency_key.map(ToOwned::to_owned),
         created_by_identity: json!({
@@ -851,7 +853,7 @@ fn assert_trial_status(
     assert_eq!(trial.stop_reason, stop_reason);
 }
 
-async fn insert_workflow_run(
+async fn insert_procedure_run(
     pool: &sqlx::PgPool,
     scope: &ActionRuleScope,
     session_id: SessionId,
@@ -862,7 +864,7 @@ async fn insert_workflow_run(
     sqlx::query(
         r#"
         INSERT INTO moa.artifact_run (
-            run_uid, storage_partition_id, session_id, workflow_ref, status, input, state
+            run_uid, storage_partition_id, session_id, procedure_ref, status, input, state
         )
         VALUES ($1, $2, $3, $4, 'queued', $5, $6)
         "#,
@@ -870,7 +872,7 @@ async fn insert_workflow_run(
     .bind(run_uid)
     .bind(storage_partition_id)
     .bind(session_id.0)
-    .bind("workflow://experiment-link")
+    .bind("skill://experiment-link")
     .bind(json!({ "case": "link" }))
     .bind(json!({}))
     .execute(conn.as_mut())

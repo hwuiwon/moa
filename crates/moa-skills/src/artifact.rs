@@ -150,6 +150,7 @@ pub(crate) fn skill_definition_from_parts(
                 actions: Vec::new(),
                 connectors: Vec::new(),
                 allowed_tools: document.frontmatter.allowed_tools.clone(),
+                procedure: None,
                 ui: empty_object(),
             }
         };

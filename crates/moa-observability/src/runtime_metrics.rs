@@ -1354,7 +1354,7 @@ mod tests {
             "run_uid",
             "trial_uid",
             "session_id",
-            "workflow_run_uid",
+            "procedure_run_uid",
             "score_run_id",
             "trial_key",
             "artifact_revision",

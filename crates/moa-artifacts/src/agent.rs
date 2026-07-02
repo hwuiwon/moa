@@ -25,9 +25,6 @@ pub struct AgentDefinition {
     /// Skill visibility and pinning policy.
     #[serde(default)]
     pub skill_policy: SkillPolicy,
-    /// Workflow visibility policy.
-    #[serde(default)]
-    pub workflow_policy: WorkflowPolicy,
     /// Action visibility and review policy.
     #[serde(default)]
     pub action_policy: ActionPolicy,
@@ -52,7 +49,6 @@ impl AgentDefinition {
         let mut refs = Vec::new();
         refs.extend(self.instruction_policy.reference_paths());
         refs.extend(self.skill_policy.reference_paths());
-        refs.extend(self.workflow_policy.reference_paths());
         refs.extend(self.action_policy.reference_paths());
         refs.extend(self.tool_policy.reference_paths());
         refs
@@ -186,20 +182,6 @@ pub struct SkillPolicy {
 impl SkillPolicy {
     fn reference_paths(&self) -> Vec<(String, ArtifactRef)> {
         named_ref_paths("skill_policy.refs", &self.refs)
-    }
-}
-
-/// Workflow visibility policy.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorkflowPolicy {
-    /// Workflows the agent may expose.
-    #[serde(default)]
-    pub allowed: Vec<ArtifactRef>,
-}
-
-impl WorkflowPolicy {
-    fn reference_paths(&self) -> Vec<(String, ArtifactRef)> {
-        named_ref_paths("workflow_policy.allowed", &self.allowed)
     }
 }
 

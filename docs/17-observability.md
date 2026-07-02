@@ -112,7 +112,7 @@ attributes for drilldown IDs. Prometheus labels are intentionally bounded:
 `status`, `stop_reason`, `target_kind`, `source`, and `role` are safe labels.
 Do not add prompt text, persona/profile/scenario text, transcript content,
 connector payloads, model output, `run_uid`, `trial_uid`, `session_id`,
-`workflow_run_uid`, `score_run_id`, trial keys, or artifact revision IDs as
+`procedure_run_uid`, `score_run_id`, trial keys, or artifact revision IDs as
 metric labels.
 
 For a slow or failing behavior-lab run:
@@ -120,7 +120,7 @@ For a slow or failing behavior-lab run:
 1. Start with the experiment run UID from the UI/API response. The
    `ExperimentRun` trace records `moa.experiment.run_uid`,
    `moa.experiment.run_score_run_id`, `moa.experiment.session_id` for
-   agent-loop targets, and `moa.experiment.workflow_run_uid` for workflow
+   agent-loop targets, and `moa.experiment.procedure_run_uid` for procedure
    targets.
 2. If the run came from an experiment plan, inspect the child trial row for the
    failing `trial_uid`. `ExperimentTrialRun` attaches the active trace ID to the
@@ -128,10 +128,10 @@ For a slow or failing behavior-lab run:
    The trial trace also records `moa.experiment.run_uid`,
    `moa.experiment.trial_uid`, `moa.experiment.trial_key`,
    `moa.experiment.score_run_id`, `moa.experiment.session_id`, and
-   `moa.experiment.workflow_run_uid` when those links exist.
+   `moa.experiment.procedure_run_uid` when those links exist.
 3. Use the trial `trace_id` to open the trace backend, then pivot by
-   `session_id` to the target session trace or by `workflow_run_uid` to the
-   artifact workflow run. Use the run `score_run_id` and trial `score_run_id`
+   `session_id` to the target session trace or by `procedure_run_uid` to the
+   procedure run. Use the run `score_run_id` and trial `score_run_id`
    to inspect score rows without guessing which analytics run belongs to the
    experiment.
 4. Check lifecycle metrics first:

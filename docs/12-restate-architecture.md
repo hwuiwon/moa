@@ -18,7 +18,7 @@ what must stay out of Restate state.
 |---|---|---|
 | Service | Durable stateless calls such as `ActionReviews`, `AuthzChallenges`, `LearningReview`, `ToolExecutor`, `LLMGateway`, `SessionStore`, `Authz`, `Memory`, `Skills`, `Tenants` | Durable RPC with retries, no keyed state. |
 | Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` | Single-writer-per-key semantics and small hot state. |
-| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ArtifactWorkflowExecution`, `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` | One logical run per ID with explicit progress and completion. |
+| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ProcedureExecution`, `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` | One logical run per ID with explicit progress and completion. |
 
 Use the weakest primitive that gives the needed correctness property. Do not
 use a workflow for conversational actors; do not use virtual-object state as a
@@ -43,8 +43,8 @@ product database.
 
 Sessions and workers are virtual objects because they receive multiple
 messages over time. `TurnExecution` and `WorkerTurnExecution` are workflows
-because one admitted turn should have one observable durable run. Artifact
-workflow execution, tenant knowledge sync ingestion, and consolidation are
+because one admitted turn should have one observable durable run. Procedure
+execution, tenant knowledge sync ingestion, and consolidation are
 workflows for the same reason. Hosted eval status is a Postgres row; it is not
 a workflow unless the eval body gains real durable-step semantics.
 
@@ -78,8 +78,8 @@ Core production bindings:
 | Primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` |
-| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ArtifactWorkflowExecution`, `KnowledgeSyncIngestion`, `Consolidate` |
-| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `ActionPolicy` |
+| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ProcedureExecution`, `KnowledgeSyncIngestion`, `Consolidate` |
+| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
 
 Feature-gated bindings:
 

@@ -57,7 +57,7 @@ they must not be the source of cross-request correctness in Kubernetes.
 `ActionEnvelope` is the durable policy-facing record for one tool invocation.
 It includes the review id, tenant, user, session or worker origin, tool
 call id, tool name, normalized input, input summary, risk level, action class,
-optional workflow/artifact origin metadata, idempotency key, and creation time.
+optional procedure/artifact origin metadata, idempotency key, and creation time.
 The envelope is persisted only when action policy returns
 `ActionPolicyEffect::AdminReview`; normal allowed actions proceed directly.
 

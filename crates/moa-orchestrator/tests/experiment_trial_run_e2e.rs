@@ -820,7 +820,7 @@ fn new_parent_run(identity: &Identity, agent_revision_uid: Uuid) -> NewExperimen
         },
         score_run_id: Uuid::now_v7(),
         session_id: None,
-        workflow_run_uid: None,
+        procedure_run_uid: None,
         artifact_revision_uids: Vec::new(),
         idempotency_key: Some(format!("trial-parent-{}", Uuid::now_v7())),
         created_by_identity: json!({
@@ -979,7 +979,7 @@ fn baseline_variant() -> Value {
         "model": "scripted-loadtest",
         "artifact_revision_uids": [],
         "skill_refs": [],
-        "workflow_ref": null,
+        "procedure_ref": null,
         "metadata": { "lane": "experiment_trial_run_e2e" }
     })
 }

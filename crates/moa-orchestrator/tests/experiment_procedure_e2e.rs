@@ -1,4 +1,4 @@
-//! End-to-end coverage for workflow experiment target execution through Restate.
+//! End-to-end coverage for procedure experiment target execution through Restate.
 
 #![cfg(feature = "integration")]
 
@@ -14,7 +14,7 @@ use moa_core::wire::experiments::{
     ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
     ExperimentRunStatusResponse,
 };
-use moa_core::wire::workflows::{WorkflowRunStatus, WorkflowStatusRequest};
+use moa_core::wire::procedures::{ProcedureRunStatus, ProcedureStatusRequest};
 use moa_core::{ActionRuleScope, StoragePartitionId, TenantId};
 use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::test_database_url;
@@ -57,13 +57,13 @@ fn spawn_orchestrator(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .context("spawn moa-orchestrator binary for workflow experiment e2e")
+        .context("spawn moa-orchestrator binary for procedure experiment e2e")
 }
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, and OpenFGA"]
-async fn workflow_experiment_links_queued_artifact_workflow_run() -> Result<()> {
-    // Pins: workflow experiments start artifact workflow runs and expose executed node projections.
+async fn procedure_experiment_links_queued_procedure_run() -> Result<()> {
+    // Pins: procedure experiments start procedure runs and expose executed node projections.
     let _guard = RESTATE_E2E_LOCK.lock().await;
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
@@ -82,7 +82,7 @@ async fn workflow_experiment_links_queued_artifact_workflow_run() -> Result<()> 
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        let published = import_and_publish_damaged_food_workflow(
+        let published = import_and_publish_damaged_food_procedure(
             &client,
             ingress,
             &identity,
@@ -90,7 +90,7 @@ async fn workflow_experiment_links_queued_artifact_workflow_run() -> Result<()> 
         )
         .await?;
 
-        let run = run_workflow_experiment(
+        let run = run_procedure_experiment(
             &client,
             ingress,
             &identity,
@@ -101,11 +101,11 @@ async fn workflow_experiment_links_queued_artifact_workflow_run() -> Result<()> 
         assert_eq!(run.status, "accepted");
         assert_ne!(run.score_run_id, Uuid::nil());
         assert!(
-            run.workflow_run_uid.is_none(),
-            "workflow run should be linked by ExperimentRun after admission"
+            run.procedure_run_uid.is_none(),
+            "procedure run should be linked by ExperimentRun after admission"
         );
 
-        let experiment_status = wait_for_linked_workflow_experiment(
+        let experiment_status = wait_for_linked_procedure_experiment(
             &client,
             ingress,
             &identity,
@@ -113,41 +113,41 @@ async fn workflow_experiment_links_queued_artifact_workflow_run() -> Result<()> 
             run.run_uid,
         )
         .await?;
-        let workflow_run_uid = experiment_status
-            .workflow_run_uid
-            .context("experiment status should expose linked workflow_run_uid")?;
-        let workflow_status = workflow_status(
+        let procedure_run_uid = experiment_status
+            .procedure_run_uid
+            .context("experiment status should expose linked procedure_run_uid")?;
+        let procedure_status = procedure_status(
             &client,
             ingress,
             &identity,
             &storage_partition_id,
-            workflow_run_uid,
+            procedure_run_uid,
         )
         .await?;
 
-        assert_eq!(experiment_status.target_kind.as_deref(), Some("workflow"));
+        assert_eq!(experiment_status.target_kind.as_deref(), Some("procedure"));
         assert_eq!(experiment_status.score_run_id, Some(run.score_run_id));
         assert_eq!(
-            experiment_status.workflow_run_uid,
-            Some(workflow_status.run_id)
+            experiment_status.procedure_run_uid,
+            Some(procedure_status.run_id)
         );
-        assert_eq!(experiment_status.status, workflow_status.status);
-        assert_eq!(workflow_status.status, "completed");
-        assert_eq!(workflow_status.current_node_id.as_deref(), Some("done"));
+        assert_eq!(experiment_status.status, procedure_status.status);
+        assert_eq!(procedure_status.status, "completed");
+        assert_eq!(procedure_status.current_node_id.as_deref(), Some("done"));
         assert!(
-            !workflow_status.node_runs.is_empty(),
-            "workflow execution should persist node projections"
+            !procedure_status.node_runs.is_empty(),
+            "procedure execution should persist node projections"
         );
         assert_eq!(
-            node_ids(&workflow_status),
+            node_ids(&procedure_status),
             vec!["start", "verify_evidence", "done"]
         );
         assert!(
-            workflow_status
+            procedure_status
                 .node_runs
                 .iter()
                 .all(|node_run| node_run.status == "completed"),
-            "all deterministic workflow nodes should complete: {workflow_status:?}"
+            "all deterministic procedure nodes should complete: {procedure_status:?}"
         );
 
         Ok(())
@@ -225,7 +225,7 @@ async fn experiments_run_denies_caller_without_tenant_operator() -> Result<()> {
     result
 }
 
-async fn import_and_publish_damaged_food_workflow(
+async fn import_and_publish_damaged_food_procedure(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
@@ -240,7 +240,7 @@ async fn import_and_publish_damaged_food_workflow(
     let import_request = ArtifactImportRequest {
         scope,
         source_format: "yaml".to_string(),
-        source_text: damaged_food_workflow_source().to_string(),
+        source_text: damaged_food_procedure_source().to_string(),
         files: Vec::new(),
     };
     let imported = post_json_with_identity(
@@ -278,7 +278,7 @@ async fn import_and_publish_damaged_food_workflow(
     Ok(published)
 }
 
-async fn run_workflow_experiment(
+async fn run_procedure_experiment(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
@@ -288,33 +288,33 @@ async fn run_workflow_experiment(
     let order_id = format!("ORD-{}", Uuid::now_v7());
     let request = ExperimentRunRequest {
         tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
-        name: "damaged-food-workflow-experiment".to_string(),
+        name: "damaged-food-procedure-experiment".to_string(),
         plan_revision_uid: None,
         target: Some(json!({
-            "kind": "workflow",
-            "workflow_ref": "workflow://damaged-food-replacement",
+            "kind": "procedure",
+            "procedure_ref": "skill://damaged-food-replacement",
             "input": {
                 "order_id": order_id,
                 "damage_summary": "clear photo shows sauce leaked through the delivery bag",
                 "customer_requested": "refund_or_replacement"
             },
             "session_id": null,
-            "idempotency_key": format!("workflow-target-{}", Uuid::now_v7())
+            "idempotency_key": format!("procedure-target-{}", Uuid::now_v7())
         })),
         variant: Some(json!({
-            "name": "damaged-food-workflow",
+            "name": "damaged-food-procedure",
             "model": null,
             "artifact_revision_uids": [published.revision_uid],
             "skill_refs": [],
-            "workflow_ref": "workflow://damaged-food-replacement",
-            "metadata": { "lane": "workflow-experiment-e2e" }
+            "procedure_ref": "skill://damaged-food-replacement",
+            "metadata": { "lane": "procedure-experiment-e2e" }
         })),
         scorecard: json!({
-            "score_names": ["workflow_started"],
+            "score_names": ["procedure_started"],
             "evaluator_metadata": { "mode": "manual-or-later" }
         }),
         score_run_id: None,
-        idempotency_key: Some(format!("experiment-workflow-{}", Uuid::now_v7())),
+        idempotency_key: Some(format!("experiment-procedure-{}", Uuid::now_v7())),
         agent_revision_variants: Vec::new(),
     };
     post_json_with_identity(client, ingress, "Experiments", "run", identity, &request)
@@ -324,7 +324,7 @@ async fn run_workflow_experiment(
         .context("deserialize experiment run response")
 }
 
-async fn wait_for_linked_workflow_experiment(
+async fn wait_for_linked_procedure_experiment(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
@@ -344,9 +344,9 @@ async fn wait_for_linked_workflow_experiment(
                 .await
                 .context("deserialize experiment status response")?;
         if status.status == "failed" {
-            bail!("workflow experiment failed before linking a workflow run: {status:?}");
+            bail!("procedure experiment failed before linking a procedure run: {status:?}");
         }
-        if status.workflow_run_uid.is_some() && status.status == "completed" {
+        if status.procedure_run_uid.is_some() && status.status == "completed" {
             return Ok(status);
         }
         last_status = Some(status);
@@ -354,29 +354,29 @@ async fn wait_for_linked_workflow_experiment(
     }
 
     bail!(
-        "timed out waiting for experiment {run_uid} to link a completed workflow run; last status: {last_status:?}"
+        "timed out waiting for experiment {run_uid} to link a completed procedure run; last status: {last_status:?}"
     )
 }
 
-async fn workflow_status(
+async fn procedure_status(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
     storage_partition_id: &StoragePartitionId,
     run_id: Uuid,
-) -> Result<WorkflowRunStatus> {
-    let request = WorkflowStatusRequest {
+) -> Result<ProcedureRunStatus> {
+    let request = ProcedureStatusRequest {
         tenant_id: TenantId::from(
             Uuid::parse_str(storage_partition_id.as_str())
                 .context("workspace id is tenant uuid")?,
         ),
         run_id,
     };
-    post_json_with_identity(client, ingress, "Workflows", "status", identity, &request)
+    post_json_with_identity(client, ingress, "Skills", "status", identity, &request)
         .await?
-        .json::<WorkflowRunStatus>()
+        .json::<ProcedureRunStatus>()
         .await
-        .context("deserialize workflow status response")
+        .context("deserialize procedure status response")
 }
 
 async fn post_json_with_identity<T: serde::Serialize + ?Sized>(
@@ -411,7 +411,7 @@ fn service_url(ingress: &str, service: &str, handler: &str) -> String {
     format!("{}/{service}/{handler}", ingress.trim_end_matches('/'))
 }
 
-fn node_ids(status: &WorkflowRunStatus) -> Vec<&str> {
+fn node_ids(status: &ProcedureRunStatus) -> Vec<&str> {
     status
         .node_runs
         .iter()
@@ -419,10 +419,10 @@ fn node_ids(status: &WorkflowRunStatus) -> Vec<&str> {
         .collect()
 }
 
-fn damaged_food_workflow_source() -> &'static str {
+fn damaged_food_procedure_source() -> &'static str {
     r#"
 api_version: moa.artifact/v1
-kind: workflow
+kind: skill
 metadata:
   name: damaged-food-replacement
   description: Procedure for refund, credit, or replacement when food arrives damaged.
@@ -432,53 +432,56 @@ metadata:
     - refund
 status: draft
 definition:
-  type: workflow
+  type: skill
   spec:
-    input_schema:
-      type: object
-      required:
-        - order_id
-        - damage_summary
-      properties:
-        order_id:
-          type: string
-        damage_summary:
-          type: string
-        customer_requested:
-          type: string
-    state_schema:
-      type: object
-      properties:
-        evidence_sufficient:
-          type: boolean
-    nodes:
-      - id: start
-        kind: start
-        ui:
-          x: 80
-          y: 120
-      - id: verify_evidence
-        kind: condition
-        condition:
-          type: exists
-          path: $.damage_summary
-        ui:
-          x: 280
-          y: 120
-      - id: done
-        kind: end
-        input:
-          status: evidence_verified
-        ui:
-          x: 520
-          y: 120
-    edges:
-      - id: start-to-verify
-        from: start
-        to: verify_evidence
-      - id: verify-to-resolution
-        from: verify_evidence
-        to: done
+    instructions:
+      path: SKILL.md
+    procedure:
+      input_schema:
+        type: object
+        required:
+          - order_id
+          - damage_summary
+        properties:
+          order_id:
+            type: string
+          damage_summary:
+            type: string
+          customer_requested:
+            type: string
+      state_schema:
+        type: object
+        properties:
+          evidence_sufficient:
+            type: boolean
+      nodes:
+        - id: start
+          kind: start
+          ui:
+            x: 80
+            y: 120
+        - id: verify_evidence
+          kind: condition
+          condition:
+            type: exists
+            path: $.damage_summary
+          ui:
+            x: 280
+            y: 120
+        - id: done
+          kind: end
+          input:
+            status: evidence_verified
+          ui:
+            x: 520
+            y: 120
+      edges:
+        - id: start-to-verify
+          from: start
+          to: verify_evidence
+        - id: verify-to-resolution
+          from: verify_evidence
+          to: done
 "#
 }
 
@@ -490,5 +493,5 @@ fn assert_validation_report_has_no_errors(report: &Value) -> Result<()> {
         return Ok(());
     }
 
-    bail!("published workflow had validation errors: {errors:?}")
+    bail!("published procedure had validation errors: {errors:?}")
 }

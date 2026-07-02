@@ -75,6 +75,11 @@ impl Skill {
                 .iter()
                 .map(|action| action.id.clone())
                 .collect(),
+            // The package manifest does not carry the procedure graph; the live
+            // skill-injection path derives `has_procedure` from the parsed skill
+            // definition in the brain registry, so this package-row helper leaves
+            // it unset.
+            has_procedure: false,
             estimated_tokens: self.manifest.skill_md_estimated_tokens.max(1),
         })
     }

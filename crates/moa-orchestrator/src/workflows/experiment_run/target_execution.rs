@@ -11,7 +11,7 @@ struct StartedWorkflowRun {
 struct WorkflowTargetStart {
     scope: ActionRuleScope,
     experiment_run_uid: Uuid,
-    workflow_ref: String,
+    procedure_ref: String,
     input: Value,
     session_id: Option<SessionId>,
     idempotency_key: Option<String>,
@@ -80,7 +80,7 @@ pub(super) async fn run_agent_loop_target(
     .call()
     .await?;
 
-    workflow_status_response(
+    procedure_status_response(
         ctx,
         ExperimentRunStatusRequest {
             tenant_id: request.tenant_id,
@@ -90,10 +90,10 @@ pub(super) async fn run_agent_loop_target(
     .await
 }
 
-pub(super) async fn run_workflow_target(
+pub(super) async fn run_procedure_target(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunWorkflowRequest,
-    workflow_ref: String,
+    procedure_ref: String,
     input: Value,
     session_id: Option<SessionId>,
     idempotency_key: Option<String>,
@@ -114,7 +114,7 @@ pub(super) async fn run_workflow_target(
         WorkflowTargetStart {
             scope,
             experiment_run_uid: request.run_uid,
-            workflow_ref,
+            procedure_ref,
             input,
             session_id,
             idempotency_key,
@@ -123,13 +123,13 @@ pub(super) async fn run_workflow_target(
         },
     )
     .await?;
-    ctx.set(K_WORKFLOW_RUN_UID, Json(workflow_run.run_uid));
+    ctx.set(K_PROCEDURE_RUN_UID, Json(workflow_run.run_uid));
     tracing::Span::current().set_attribute(
-        "moa.experiment.workflow_run_uid",
+        "moa.experiment.procedure_run_uid",
         workflow_run.run_uid.to_string(),
     );
 
-    workflow_status_response(
+    procedure_status_response(
         ctx,
         ExperimentRunStatusRequest {
             tenant_id: request.tenant_id,
@@ -180,16 +180,16 @@ async fn start_and_attach_workflow_run(
             let run = workflow_runtime(pool.clone())
                 .start(
                     &start.scope,
-                    StartWorkflowRun {
-                        workflow_ref: start.workflow_ref,
+                    StartProcedureRun {
+                        procedure_ref: start.procedure_ref,
                         input: start.input,
                         session_id: start.session_id,
                         idempotency_key: start.idempotency_key,
                     },
                 )
                 .await
-                .map_err(workflow_handler_error)?;
-            attach_workflow_run(pool, start.scope, start.experiment_run_uid, run.run_uid).await?;
+                .map_err(procedure_handler_error)?;
+            attach_procedure_run(pool, start.scope, start.experiment_run_uid, run.run_uid).await?;
             Ok::<_, HandlerError>(Json::from(StartedWorkflowRun {
                 run_uid: run.run_uid,
             }))
@@ -197,8 +197,8 @@ async fn start_and_attach_workflow_run(
         .name("experiment_start_workflow_run")
         .await?
         .into_inner();
-    ctx.workflow_client::<ArtifactWorkflowExecutionClient>(run.run_uid.to_string())
-        .run(Json::from(RunArtifactWorkflowRequest {
+    ctx.workflow_client::<ProcedureExecutionClient>(run.run_uid.to_string())
+        .run(Json::from(RunProcedureRequest {
             tenant_id,
             run_uid: run.run_uid,
             identity,

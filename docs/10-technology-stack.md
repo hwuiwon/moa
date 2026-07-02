@@ -9,9 +9,8 @@ The root workspace currently contains:
 | Crate | Purpose |
 |---|---|
 | `moa-core` | Shared traits, DTOs, config, events, telemetry, analytics helpers |
-| `moa-artifacts` | Canonical skill, connector, action, and workflow artifact documents, validation, references, tenant scopes, and Postgres registry |
+| `moa-artifacts` | Canonical skill (including optional procedures), connector, action, and agent artifact documents, validation, references, tenant scopes, and Postgres registry |
 | `moa-brain` | Context pipeline, query rewriting, task segmentation helpers, segment assessment |
-| `moa-workflows` | Artifact-backed workflow run lifecycle and future workflow node interpreter/improvement logic |
 | `moa-session` | Tenant-owned Postgres session store, event log, task segments, learning log, analytics |
 | `moa-runtime-store` | Runtime cache implementations for process-local memory and optional Redis-backed coordination |
 | `moa-migrations` | Central refinery migrations, schema-isolated test replay helpers, and database DDL guardrails |
@@ -36,7 +35,7 @@ The root workspace currently contains:
 | `moa-orchestrator` | One production binary with Restate services, virtual objects, workflows, and in-process application/repository boundaries |
 | `moa-messaging` | Slack adapter, renderer, Postmark email connector, and Twilio SMS connector |
 | `moa-security` | Action policies, MCP credential proxy, prompt-injection controls |
-| `moa-skills` | Skill parser, DB-backed tenant package registry, tenant-local draft proposal generation, and regression suite source generation |
+| `moa-skills` | Skill parser, DB-backed tenant package registry, tenant-local draft proposal generation, regression suite source generation, and the pure deterministic procedure interpreter |
 | `moa-eval` | Evaluation harness used by CI and optional orchestrator-owned internal eval execution |
 | `moa-loadtest` | Direct HTTP load-test harness for hosted orchestrator APIs |
 | `workspace-hack` | Generated `cargo-hakari` feature unification crate |

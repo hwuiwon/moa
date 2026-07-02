@@ -24,7 +24,7 @@ use moa_observability::{
     current_trace_id, record_experiment_trial, record_experiment_trial_duration,
     record_simulation_cost_cents, record_simulation_tokens, record_simulation_turn,
 };
-use moa_workflows::runtime::{StartWorkflowRun, WorkflowRuntime};
+use moa_skills::procedure::runtime::{ProcedureRuntime, StartProcedureRun};
 use restate_sdk::context::Request;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -38,15 +38,13 @@ use crate::services::llm_gateway::{LLMGatewayImpl, compute_cost_cents};
 use crate::services::session_store::inner::{
     apply_agent_model_policy, create_session_for_identity, resolve_agent_context_for_session,
 };
-use crate::workflows::artifact_workflow_execution::{
-    ArtifactWorkflowExecutionClient, RunArtifactWorkflowRequest,
-};
 use crate::workflows::errors::{
-    bad_request, handler_error_message, moa_error_to_handler_error, workflow_handler_error,
+    bad_request, handler_error_message, moa_error_to_handler_error, procedure_handler_error,
 };
 use crate::workflows::experiment_errors::{
     non_retryable_handler_error, plan_expansion_error_to_handler_error,
 };
+use crate::workflows::procedure_execution::{ProcedureExecutionClient, RunProcedureRequest};
 
 mod status;
 mod target_execution;
@@ -57,7 +55,7 @@ use status::{
     persist_trial_status_by_key, status_response_from_record, trial_status_allows_child_start,
     trial_status_response,
 };
-use target_execution::{run_agent_loop_trial, run_workflow_trial};
+use target_execution::{run_agent_loop_trial, run_procedure_trial};
 use trial_simulator::load_simulator_context;
 
 const K_RUN_UID: &str = "run_uid";
@@ -65,7 +63,7 @@ const K_TRIAL_UID: &str = "trial_uid";
 const K_TRIAL_KEY: &str = "trial_key";
 const K_STATUS: &str = "status";
 const K_SESSION_ID: &str = "session_id";
-const K_WORKFLOW_RUN_UID: &str = "workflow_run_uid";
+const K_PROCEDURE_RUN_UID: &str = "procedure_run_uid";
 const TARGET_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
 const SESSION_AUTHZ_PROPAGATION_DELAY: Duration = Duration::from_millis(750);
 
@@ -118,7 +116,7 @@ pub struct ExperimentTrialRunStatusResponse {
     /// Linked target session.
     pub session_id: Option<SessionId>,
     /// Linked artifact workflow run.
-    pub workflow_run_uid: Option<Uuid>,
+    pub procedure_run_uid: Option<Uuid>,
     /// Score run identifier used for trial-level scores.
     pub score_run_id: Uuid,
     /// Terminal error for failed trials.
@@ -258,7 +256,7 @@ async fn run_trial(
         ExperimentTargetKind::AgentLoop => {
             run_agent_loop_trial(ctx, request, trial, simulator_context).await
         }
-        ExperimentTargetKind::Workflow => run_workflow_trial(ctx, request, trial).await,
+        ExperimentTargetKind::Procedure => run_procedure_trial(ctx, request, trial).await,
     }
 }
 
@@ -335,8 +333,8 @@ fn identity_type_header(identity_type: IdentityType) -> &'static str {
     }
 }
 
-fn workflow_runtime(pool: sqlx::PgPool) -> WorkflowRuntime {
-    WorkflowRuntime::new(ArtifactRegistry::new(pool))
+fn workflow_runtime(pool: sqlx::PgPool) -> ProcedureRuntime {
+    ProcedureRuntime::new(ArtifactRegistry::new(pool))
 }
 
 fn annotate_trial_span(trial: &NewExperimentTrial, trial_uid: Option<Uuid>) {

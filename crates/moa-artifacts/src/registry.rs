@@ -196,7 +196,7 @@ pub struct ArtifactFile {
     pub file_size_bytes: i64,
 }
 
-/// Workflow run status persisted for artifacts.
+/// Procedure run status persisted for artifacts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArtifactRunStatus {
     /// Run has been created but not started.
@@ -228,7 +228,7 @@ impl ArtifactRunStatus {
     }
 }
 
-/// Workflow node-run status persisted for artifacts.
+/// Procedure node-run status persisted for artifacts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArtifactNodeRunStatus {
     /// Node run has been created but not started.
@@ -263,24 +263,24 @@ impl ArtifactNodeRunStatus {
     }
 }
 
-/// New workflow run row.
+/// New procedure run row.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewArtifactRun {
     /// Referenced artifact UID, if already resolved.
     pub artifact_uid: Option<Uuid>,
     /// Referenced revision UID, if already resolved.
     pub revision_uid: Option<Uuid>,
-    /// Session associated with this workflow run, when the run was started from a session.
+    /// Session associated with this procedure run, when the run was started from a session.
     pub session_id: Option<SessionId>,
-    /// Workflow reference string.
-    pub workflow_ref: String,
+    /// Procedure reference string, pointing at the skill artifact that carries the procedure.
+    pub procedure_ref: String,
     /// Initial run status.
     pub status: ArtifactRunStatus,
     /// Current node ID.
     pub current_node_id: Option<String>,
     /// Input payload.
     pub input: Value,
-    /// Mutable workflow state.
+    /// Mutable procedure state.
     pub state: Value,
     /// Output payload.
     pub output: Option<Value>,
@@ -290,7 +290,7 @@ pub struct NewArtifactRun {
     pub idempotency_key: Option<String>,
 }
 
-/// Stored workflow run row.
+/// Stored procedure run row.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ArtifactRun {
     /// Run row identifier.
@@ -299,17 +299,17 @@ pub struct ArtifactRun {
     pub artifact_uid: Option<Uuid>,
     /// Referenced revision UID, if the run was started from a resolved artifact revision.
     pub revision_uid: Option<Uuid>,
-    /// Session associated with this workflow run, when present.
+    /// Session associated with this procedure run, when present.
     pub session_id: Option<SessionId>,
-    /// Workflow reference string.
-    pub workflow_ref: String,
+    /// Procedure reference string, pointing at the skill artifact that carries the procedure.
+    pub procedure_ref: String,
     /// Current status.
     pub status: ArtifactRunStatus,
     /// Current node ID.
     pub current_node_id: Option<String>,
     /// Input payload.
     pub input: Value,
-    /// Mutable workflow state.
+    /// Mutable procedure state.
     pub state: Value,
     /// Output payload.
     pub output: Option<Value>,
@@ -321,14 +321,14 @@ pub struct ArtifactRun {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-/// Registry patch payload for mutable workflow run fields.
+/// Registry patch payload for mutable procedure run fields.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ArtifactRunUpdate {
     /// Replacement status when present.
     pub status: Option<ArtifactRunStatus>,
     /// Replacement current node ID when present, including clearing it to `NULL`.
     pub current_node_id: Option<Option<String>>,
-    /// Replacement workflow state when present.
+    /// Replacement procedure state when present.
     pub state: Option<Value>,
     /// Replacement output when present, including clearing it to `NULL`.
     pub output: Option<Option<Value>>,
@@ -343,7 +343,7 @@ pub struct ArtifactRunUpdate {
 pub struct NewArtifactNodeRun {
     /// Parent run identifier.
     pub run_uid: Uuid,
-    /// Workflow node ID.
+    /// Procedure node ID.
     pub node_id: String,
     /// Node status.
     pub status: ArtifactNodeRunStatus,
@@ -357,14 +357,14 @@ pub struct NewArtifactNodeRun {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-/// Stored workflow node-run row.
+/// Stored procedure node-run row.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ArtifactNodeRun {
     /// Node-run row identifier.
     pub node_run_uid: Uuid,
     /// Parent run identifier.
     pub run_uid: Uuid,
-    /// Workflow node ID.
+    /// Procedure node ID.
     pub node_id: String,
     /// Node status.
     pub status: ArtifactNodeRunStatus,
@@ -380,7 +380,7 @@ pub struct ArtifactNodeRun {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-/// Registry patch payload for mutable workflow node-run fields.
+/// Registry patch payload for mutable procedure node-run fields.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ArtifactNodeRunUpdate {
     /// Replacement status when present.
@@ -654,7 +654,7 @@ impl ArtifactRegistry {
         Ok(files)
     }
 
-    /// Appends a workflow run row.
+    /// Appends a procedure run row.
     pub async fn append_run(
         &self,
         scope: &ActionRuleScope,
@@ -667,19 +667,19 @@ impl ArtifactRegistry {
             r#"
             INSERT INTO moa.artifact_run (
                 run_uid, artifact_uid, revision_uid, tenant_id, storage_partition_id, user_id, session_id,
-                workflow_ref, status, current_node_id, input, state, output,
+                procedure_ref, status, current_node_id, input, state, output,
                 error, idempotency_key
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             ON CONFLICT (
                 coalesce(storage_partition_id, ''),
                 coalesce(user_id, ''),
-                workflow_ref,
+                procedure_ref,
                 idempotency_key
             )
             WHERE idempotency_key IS NOT NULL
             DO UPDATE SET updated_at = moa.artifact_run.updated_at
-            RETURNING run_uid, artifact_uid, revision_uid, session_id, workflow_ref, status,
+            RETURNING run_uid, artifact_uid, revision_uid, session_id, procedure_ref, status,
                       current_node_id, input, state, output, error, started_at, completed_at
             "#,
         )
@@ -690,7 +690,7 @@ impl ArtifactRegistry {
         .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(run.session_id.map(|session_id| session_id.0))
-        .bind(&run.workflow_ref)
+        .bind(&run.procedure_ref)
         .bind(run.status.as_str())
         .bind(run.current_node_id.as_deref())
         .bind(run.input)
@@ -705,7 +705,7 @@ impl ArtifactRegistry {
         run_from_row(&row)
     }
 
-    /// Loads a visible workflow run by id.
+    /// Loads a visible procedure run by id.
     pub async fn load_run(
         &self,
         scope: &ActionRuleScope,
@@ -715,7 +715,7 @@ impl ArtifactRegistry {
         let parts = ArtifactScopeParts::from_scope(scope);
         let row = sqlx::query(
             r#"
-            SELECT run_uid, artifact_uid, revision_uid, session_id, workflow_ref, status,
+            SELECT run_uid, artifact_uid, revision_uid, session_id, procedure_ref, status,
                    current_node_id, input, state, output, error, started_at, completed_at
             FROM moa.artifact_run
             WHERE run_uid = $3
@@ -734,7 +734,7 @@ impl ArtifactRegistry {
         row.as_ref().map(run_from_row).transpose()
     }
 
-    /// Updates mutable fields for a visible workflow run and returns the full projection.
+    /// Updates mutable fields for a visible procedure run and returns the full projection.
     pub async fn update_run(
         &self,
         scope: &ActionRuleScope,
@@ -776,7 +776,7 @@ impl ArtifactRegistry {
             WHERE run_uid = $14
               AND storage_partition_id = $1
               AND user_id IS NULL
-            RETURNING run_uid, artifact_uid, revision_uid, session_id, workflow_ref, status,
+            RETURNING run_uid, artifact_uid, revision_uid, session_id, procedure_ref, status,
                       current_node_id, input, state, output, error, started_at, completed_at
             "#,
         )
@@ -801,7 +801,7 @@ impl ArtifactRegistry {
         row.as_ref().map(run_from_row).transpose()
     }
 
-    /// Marks a visible workflow run as cancelled.
+    /// Marks a visible procedure run as cancelled.
     pub async fn cancel_run(
         &self,
         scope: &ActionRuleScope,
@@ -821,7 +821,7 @@ impl ArtifactRegistry {
               AND status NOT IN ('completed', 'failed', 'cancelled')
               AND storage_partition_id = $1
               AND user_id IS NULL
-            RETURNING run_uid, artifact_uid, revision_uid, session_id, workflow_ref, status,
+            RETURNING run_uid, artifact_uid, revision_uid, session_id, procedure_ref, status,
                       current_node_id, input, state, output, error, started_at, completed_at
             "#,
         )
@@ -836,7 +836,7 @@ impl ArtifactRegistry {
         row.as_ref().map(run_from_row).transpose()
     }
 
-    /// Appends a workflow node-run row.
+    /// Appends a procedure node-run row.
     pub async fn append_node_run(
         &self,
         scope: &ActionRuleScope,
@@ -894,7 +894,7 @@ impl ArtifactRegistry {
         Ok(node_run_uid)
     }
 
-    /// Appends missing node-run rows for one workflow run in a single transaction.
+    /// Appends missing node-run rows for one procedure run in a single transaction.
     pub async fn append_node_runs(
         &self,
         scope: &ActionRuleScope,
@@ -905,7 +905,7 @@ impl ArtifactRegistry {
         };
         if node_runs.iter().any(|node_run| node_run.run_uid != run_uid) {
             return Err(MoaError::ValidationError(
-                "append_node_runs requires rows from one workflow run".to_string(),
+                "append_node_runs requires rows from one procedure run".to_string(),
             ));
         }
 
@@ -978,7 +978,7 @@ impl ArtifactRegistry {
         Ok(appended)
     }
 
-    /// Updates mutable fields for a visible workflow node run.
+    /// Updates mutable fields for a visible procedure node run.
     pub async fn update_node_run(
         &self,
         scope: &ActionRuleScope,
@@ -1034,7 +1034,7 @@ impl ArtifactRegistry {
         row.as_ref().map(node_run_from_row).transpose()
     }
 
-    /// Lists visible node runs for a workflow run in start order.
+    /// Lists visible node runs for a procedure run in start order.
     pub async fn list_node_runs(
         &self,
         scope: &ActionRuleScope,
@@ -1437,7 +1437,7 @@ fn run_from_row(row: &sqlx::postgres::PgRow) -> Result<ArtifactRun> {
         artifact_uid: row.try_get("artifact_uid").map_err(map_sqlx_error)?,
         revision_uid: row.try_get("revision_uid").map_err(map_sqlx_error)?,
         session_id,
-        workflow_ref: row.try_get("workflow_ref").map_err(map_sqlx_error)?,
+        procedure_ref: row.try_get("procedure_ref").map_err(map_sqlx_error)?,
         status: run_status_from_str(&status_text)?,
         current_node_id: row.try_get("current_node_id").map_err(map_sqlx_error)?,
         input: row.try_get("input").map_err(map_sqlx_error)?,

@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use moa_artifacts::canonical::canonical_hash;
-use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
+use moa_artifacts::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::reference::{ArtifactRef, ReferenceState};
 use moa_artifacts::validation::validate_for_status;
 
@@ -124,12 +124,6 @@ fn artifact_refs_parse_and_format_supported_schemes() {
             None,
         ),
         (
-            "workflow://damaged-food-order",
-            Some(ArtifactKind::Workflow),
-            "damaged-food-order",
-            None,
-        ),
-        (
             "connector://orders",
             Some(ArtifactKind::Connector),
             "orders",
@@ -188,9 +182,6 @@ definition:
       mode: pinned
       refs:
         - skill://refund-policy
-    workflow_policy:
-      allowed:
-        - workflow://escalation
     action_policy:
       allowed:
         - action://refund-order
@@ -238,7 +229,6 @@ definition:
         agent_refs,
         vec![
             "skill://refund-policy",
-            "workflow://escalation",
             "action://refund-order",
             "action://orders.cancel",
             "tool://file_read",
@@ -323,35 +313,36 @@ fn assert_error(report: &moa_artifacts::validation::ValidationReport, path: &str
 
 #[test]
 fn draft_allows_unresolved_refs_but_published_rejects_them() {
-    // Pins: visual-builder drafts may link capabilities that are created later.
+    // Pins: visual-builder drafts may link procedure capabilities that are created later.
     let yaml = r#"
 api_version: moa.artifact/v1
-kind: workflow
+kind: skill
 metadata:
   name: damaged-food-order
 status: draft
 definition:
-  type: workflow
+  type: skill
   spec:
-    nodes:
-      - id: start
-        kind: start
-      - id: submit_issue
-        kind: action
-        ref: action://orders.submit_issue
-      - id: done
-        kind: end
-    edges:
-      - from: start
-        to: submit_issue
-      - from: submit_issue
-        to: done
+    procedure:
+      nodes:
+        - id: start
+          kind: start
+        - id: submit_issue
+          kind: action
+          ref: action://orders.submit_issue
+        - id: done
+          kind: end
+      edges:
+        - from: start
+          to: submit_issue
+        - from: submit_issue
+          to: done
 reference_resolutions:
-  - path: definition.spec.nodes[1].ref
+  - path: definition.spec.procedure.nodes[1].ref
     ref: action://orders.submit_issue
     state: unresolved
 "#;
-    let document = ArtifactDocument::from_yaml(yaml).expect("parse workflow artifact");
+    let document = ArtifactDocument::from_yaml(yaml).expect("parse skill artifact");
 
     let draft_report = validate_for_status(&document, ArtifactStatus::Draft);
     assert!(
@@ -364,38 +355,39 @@ reference_resolutions:
     assert_eq!(published_report.errors.len(), 1);
     assert_eq!(
         published_report.errors[0].path,
-        "definition.spec.nodes[1].ref"
+        "definition.spec.procedure.nodes[1].ref"
     );
 }
 
 #[test]
-fn workflow_validation_rejects_duplicate_node_ids() {
-    // Pins: workflow graphs must have unambiguous node identities.
+fn procedure_validation_rejects_duplicate_node_ids() {
+    // Pins: skill procedure graphs must have unambiguous node identities.
     let yaml = r#"
 api_version: moa.artifact/v1
-kind: workflow
+kind: skill
 metadata:
-  name: invalid-workflow
+  name: invalid-procedure
 definition:
-  type: workflow
+  type: skill
   spec:
-    nodes:
-      - id: start
-        kind: start
-      - id: start
-        kind: end
-    edges:
-      - from: start
-        to: missing
+    procedure:
+      nodes:
+        - id: start
+          kind: start
+        - id: start
+          kind: end
+      edges:
+        - from: start
+          to: missing
 "#;
-    let document = ArtifactDocument::from_yaml(yaml).expect("parse invalid workflow");
+    let document = ArtifactDocument::from_yaml(yaml).expect("parse invalid skill procedure");
     let report = validate_for_status(&document, ArtifactStatus::Draft);
 
     assert!(
         report
             .errors
             .iter()
-            .any(|error| error.message == "duplicate workflow node id"),
+            .any(|error| error.message == "duplicate procedure node id"),
         "expected duplicate-node error: {report:?}"
     );
     assert!(
@@ -408,90 +400,123 @@ definition:
 }
 
 #[test]
-fn workflow_validation_rejects_executable_nodes_without_invocation_targets() {
-    // Pins: published workflow action/tool nodes fail validation before runtime if no target can be executed.
+fn procedure_validation_rejects_executable_nodes_without_invocation_targets() {
+    // Pins: published procedure action/tool nodes fail validation before runtime if no target can be executed.
     let yaml = r#"
 api_version: moa.artifact/v1
-kind: workflow
+kind: skill
 metadata:
-  name: invalid-executable-workflow
+  name: invalid-executable-procedure
 definition:
-  type: workflow
+  type: skill
   spec:
-    nodes:
-      - id: start
-        kind: start
-      - id: notify_customer
-        kind: action
-        input:
-          template: Tell the customer what happens next.
-      - id: call_tool
-        kind: tool
-      - id: done
-        kind: end
-    edges:
-      - from: start
-        to: notify_customer
-      - from: notify_customer
-        to: call_tool
-      - from: call_tool
-        to: done
+    procedure:
+      nodes:
+        - id: start
+          kind: start
+        - id: notify_customer
+          kind: action
+          input:
+            template: Tell the customer what happens next.
+        - id: call_tool
+          kind: tool
+        - id: done
+          kind: end
+      edges:
+        - from: start
+          to: notify_customer
+        - from: notify_customer
+          to: call_tool
+        - from: call_tool
+          to: done
 "#;
-    let document = ArtifactDocument::from_yaml(yaml).expect("parse invalid workflow");
+    let document = ArtifactDocument::from_yaml(yaml).expect("parse invalid skill procedure");
     let report = validate_for_status(&document, ArtifactStatus::Published);
 
     assert!(
         report.errors.iter().any(|error| {
-            error.path == "definition.spec.nodes[1]"
+            error.path == "definition.spec.procedure.nodes[1]"
                 && error.message
-                    == "workflow action node must specify ref, input.tool_name, or input.tool"
+                    == "procedure action node must specify ref, input.tool_name, or input.tool"
         }),
         "expected missing action invocation target error: {report:?}"
     );
     assert!(
         report.errors.iter().any(|error| {
-            error.path == "definition.spec.nodes[2]"
+            error.path == "definition.spec.procedure.nodes[2]"
                 && error.message
-                    == "workflow tool node must specify exactly one tool_ref, input.tool_name, or input.tool"
+                    == "procedure tool node must specify exactly one tool_ref, input.tool_name, or input.tool"
         }),
         "expected missing tool invocation target error: {report:?}"
     );
 }
 
 #[test]
-fn prompt_examples_parse_as_draft_artifacts() {
-    // Pins: docs examples stay executable by the canonical parser.
-    let skill = include_str!("../../../docs/examples/artifacts/transaction-dispute.skill.yaml");
-    let workflow =
-        include_str!("../../../docs/examples/artifacts/damaged-food-order.workflow.yaml");
-
-    for source in [skill, workflow] {
-        let document = ArtifactDocument::from_yaml(source).expect("parse example artifact");
-        let report = validate_for_status(&document, ArtifactStatus::Draft);
-        assert!(report.is_ok(), "example should be draft-valid: {report:?}");
-    }
-}
-
-#[test]
-fn capability_pattern_workflow_examples_parse_as_draft_artifacts() {
-    // Pins: pattern examples stay round-trippable for future dashboard editing.
-    let examples = [
-        include_str!("../../../docs/examples/artifacts/patterns/sequential.workflow.yaml"),
-        include_str!("../../../docs/examples/artifacts/patterns/parallel-review.workflow.yaml"),
-        include_str!("../../../docs/examples/artifacts/patterns/react-agent.workflow.yaml"),
-        include_str!("../../../docs/examples/artifacts/patterns/human-approval.workflow.yaml"),
-        include_str!("../../../docs/examples/artifacts/patterns/custom-logic.workflow.yaml"),
+fn prompt_examples_parse_as_skill_procedures() {
+    // Pins: docs skill examples stay executable by the canonical parser; the converted
+    // procedure examples each keep a deterministic procedure graph, and the purely
+    // agent-mediated example stays a procedure-less skill.
+    let procedure_examples: [(&str, &str); 6] = [
+        (
+            "damaged-food-order",
+            include_str!("../../../docs/examples/artifacts/damaged-food-order.skill.yaml"),
+        ),
+        (
+            "patterns/custom-logic",
+            include_str!("../../../docs/examples/artifacts/patterns/custom-logic.skill.yaml"),
+        ),
+        (
+            "patterns/human-approval",
+            include_str!("../../../docs/examples/artifacts/patterns/human-approval.skill.yaml"),
+        ),
+        (
+            "patterns/parallel-review",
+            include_str!("../../../docs/examples/artifacts/patterns/parallel-review.skill.yaml"),
+        ),
+        (
+            "patterns/react-agent",
+            include_str!("../../../docs/examples/artifacts/patterns/react-agent.skill.yaml"),
+        ),
+        (
+            "patterns/sequential",
+            include_str!("../../../docs/examples/artifacts/patterns/sequential.skill.yaml"),
+        ),
     ];
 
-    for source in examples {
-        let document = ArtifactDocument::from_yaml(source).expect("parse pattern workflow");
-        let report = validate_for_status(&document, ArtifactStatus::Draft);
+    for (name, yaml) in procedure_examples {
+        let procedure = parse_skill_example(name, yaml);
         assert!(
-            report.is_ok(),
-            "pattern workflow should be draft-valid: {report:?}"
+            procedure.procedure.is_some(),
+            "example {name} should declare a procedure"
         );
-        let yaml = document.to_yaml().expect("serialize pattern workflow");
-        let reparsed = ArtifactDocument::from_yaml(&yaml).expect("parse serialized workflow");
-        assert_eq!(reparsed, document);
     }
+
+    // The transaction-dispute example is a purely agent-mediated skill with no procedure.
+    let agent_mediated = parse_skill_example(
+        "transaction-dispute",
+        include_str!("../../../docs/examples/artifacts/transaction-dispute.skill.yaml"),
+    );
+    assert!(
+        agent_mediated.procedure.is_none(),
+        "transaction-dispute example should stay procedure-less"
+    );
+}
+
+fn parse_skill_example(name: &str, yaml: &str) -> moa_artifacts::skill::SkillDefinition {
+    let document = ArtifactDocument::from_yaml(yaml)
+        .unwrap_or_else(|error| panic!("example {name} should parse: {error}"));
+    assert_eq!(
+        document.kind,
+        ArtifactKind::Skill,
+        "example {name} should be a skill artifact"
+    );
+    let report = validate_for_status(&document, ArtifactStatus::Draft);
+    assert!(
+        report.is_ok(),
+        "example {name} should be draft-valid: {report:?}"
+    );
+    let ArtifactDefinition::Skill(skill) = document.definition else {
+        panic!("example {name} should yield a skill definition");
+    };
+    skill
 }

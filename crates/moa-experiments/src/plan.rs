@@ -37,9 +37,9 @@ pub enum PlanExpansionError {
     /// A simulator temperature value cannot be represented safely.
     #[error("simulator_temperature must be a finite f32-compatible number")]
     InvalidSimulatorTemperature,
-    /// Workflow variants require a workflow reference.
-    #[error("workflow target variants require workflow_ref")]
-    MissingWorkflowRef,
+    /// Procedure variants require a procedure reference.
+    #[error("procedure target variants require procedure_ref")]
+    MissingProcedureRef,
     /// A target variant has an invalid agent selector.
     #[error("target variant agent selector is invalid: {message}")]
     InvalidAgentSelector {
@@ -65,7 +65,7 @@ pub enum PlanExpansionError {
 /// Run-level payloads derived from the first target variant in a plan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanRunProjection {
-    /// Target payload used to admit the run-level workflow.
+    /// Target payload used to admit the run-level experiment run.
     pub target: ExperimentTarget,
     /// Variant payload stored on the experiment run.
     pub variant: ExperimentVariant,
@@ -309,11 +309,12 @@ pub fn target_for_plan_variant(
                 .ok_or(PlanExpansionError::MissingTargetModel)?,
             attachments: Vec::new(),
         }),
-        ExperimentTargetKind::Workflow => Ok(ExperimentTarget::Workflow {
-            workflow_ref: variant
-                .workflow_ref
-                .as_ref()
-                .ok_or(PlanExpansionError::MissingWorkflowRef)?
+        ExperimentTargetKind::Procedure => Ok(ExperimentTarget::Procedure {
+            procedure_ref: variant
+                .config
+                .get("procedure_ref")
+                .and_then(Value::as_str)
+                .ok_or(PlanExpansionError::MissingProcedureRef)?
                 .to_string(),
             input: variant
                 .config
@@ -376,7 +377,11 @@ fn variant_payload_for_plan(
         model: definition.target_model.as_ref().map(ModelId::new),
         artifact_revision_uids: vec![plan_revision_uid],
         skill_refs: Vec::new(),
-        workflow_ref: variant.workflow_ref.as_ref().map(ToString::to_string),
+        procedure_ref: variant
+            .config
+            .get("procedure_ref")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
         metadata: metadata(plan_revision_uid),
     })
 }
@@ -529,7 +534,7 @@ mod tests {
 
     #[test]
     fn expand_plan_trials_rejects_empty_matrix_dimensions_offline() {
-        // Pins: empty plan dimensions fail before the workflow enters the polling loop.
+        // Pins: empty plan dimensions fail before the run enters the polling loop.
         let mut definition = fixture_plan();
         definition.simulation.scenarios.clear();
 
@@ -619,16 +624,16 @@ mod tests {
     }
 
     #[test]
-    fn expand_plan_trials_rejects_workflow_variant_without_workflow_ref_offline() {
-        // Pins: workflow target variants cannot expand without a workflow reference to invoke.
+    fn expand_plan_trials_rejects_procedure_variant_without_procedure_ref_offline() {
+        // Pins: procedure target variants cannot expand without a procedure reference to invoke.
         let mut definition = fixture_plan();
-        definition.target_variants[0].kind = ExperimentTargetKind::Workflow;
-        definition.target_variants[0].workflow_ref = None;
+        definition.target_variants[0].kind = ExperimentTargetKind::Procedure;
+        definition.target_variants[0].config = json!({});
 
         let error = expand_plan_trials(fixture_uuid(2), fixture_uuid(1), &definition)
-            .expect_err("workflow variant without workflow_ref should fail expansion");
+            .expect_err("procedure variant without procedure_ref should fail expansion");
 
-        assert!(matches!(error, PlanExpansionError::MissingWorkflowRef));
+        assert!(matches!(error, PlanExpansionError::MissingProcedureRef));
     }
 
     #[test]
@@ -709,14 +714,12 @@ mod tests {
                 ExperimentTargetVariant {
                     key: "baseline".to_string(),
                     kind: ExperimentTargetKind::AgentLoop,
-                    workflow_ref: None,
                     config: json!({"prompt": "start"}),
                     ui: json!({}),
                 },
                 ExperimentTargetVariant {
                     key: "candidate-v2".to_string(),
                     kind: ExperimentTargetKind::AgentLoop,
-                    workflow_ref: None,
                     config: json!({"prompt": "start"}),
                     ui: json!({}),
                 },

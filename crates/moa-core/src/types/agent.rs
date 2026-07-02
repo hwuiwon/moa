@@ -154,14 +154,6 @@ pub struct AgentSkillPolicy {
     pub max_visible: Option<u32>,
 }
 
-/// Runtime workflow policy copied onto a pinned agent session.
-#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AgentWorkflowPolicy {
-    /// Workflow references the agent may expose.
-    #[serde(default)]
-    pub allowed: Vec<String>,
-}
-
 /// Runtime action policy copied onto a pinned agent session.
 #[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentActionPolicy {
@@ -228,9 +220,6 @@ pub struct AgentPolicySnapshot {
     /// Runtime skill visibility and pinning policy.
     #[serde(default)]
     pub skill_policy: AgentSkillPolicy,
-    /// Runtime workflow affordance policy.
-    #[serde(default)]
-    pub workflow_policy: AgentWorkflowPolicy,
     /// Runtime action visibility and review policy.
     #[serde(default)]
     pub action_policy: AgentActionPolicy,
@@ -292,7 +281,6 @@ impl AgentContext {
             model_policy: AgentModelPolicy::default(),
             knowledge_policy: AgentKnowledgePolicy::default(),
             skill_policy: AgentSkillPolicy::default(),
-            workflow_policy: AgentWorkflowPolicy::default(),
             action_policy: AgentActionPolicy::default(),
             tool_policy: AgentToolPolicy::default(),
             guardrail_policy: AgentGuardrailPolicy::default(),

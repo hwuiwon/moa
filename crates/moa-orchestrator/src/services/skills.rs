@@ -1,8 +1,16 @@
-//! Restate service for cloud-owned skill import, export, listing, and bootstrap requests.
+//! Restate service for cloud-owned skill import, export, listing, and
+//! skill-backed procedure run lifecycle operations.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use moa_artifacts::registry::ArtifactRegistry;
 use moa_authz_schema::Relation;
+use moa_core::wire::procedures::{
+    ProcedureCancelRequest, ProcedureCancelResponse, ProcedureNodeRunSummary,
+    ProcedureReviewDecisionRequest, ProcedureReviewDecisionResponse, ProcedureRunRequest,
+    ProcedureRunResponse, ProcedureRunStatus, ProcedureSignalRequest, ProcedureSignalResponse,
+    ProcedureStatusRequest,
+};
 use moa_core::wire::skills::{
     SkillExportRequest, SkillExportResponse, SkillImportRequest, SkillImportResponse,
     SkillListRequest, SkillListResponse, SkillPackageDocument, SkillPackageDocumentFile,
@@ -11,13 +19,19 @@ use moa_core::wire::skills::{
 use moa_core::{ActionRuleScope, TenantId};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_skills::package::{SkillPackage, SkillPackageFile};
+use moa_skills::procedure::error::ProcedureError;
+use moa_skills::procedure::runtime::{ProcedureRuntime, StartProcedureRun};
 use moa_skills::registry::{NewSkill, Skill, SkillRegistry, StoredSkillPackage};
 use restate_sdk::prelude::*;
 
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::authorize_tenant;
-use crate::workflows::errors::moa_error_to_status_handler_error;
+use crate::workflows::errors::{moa_error_to_status_handler_error, procedure_handler_error};
+use crate::workflows::procedure_execution::{
+    ProcedureExecutionClient, RunProcedureRequest, validate_procedure_review_decision,
+    validate_procedure_signal,
+};
 
 /// Restate service surface for protected skill operations.
 #[restate_sdk::service]
@@ -36,6 +50,31 @@ pub trait Skills {
     /// Lists visible tenant skills after a tenant operator check.
     async fn list(request: Json<SkillListRequest>)
     -> Result<Json<SkillListResponse>, HandlerError>;
+
+    /// Creates a durable procedure run for a published skill that carries a procedure.
+    async fn run(
+        request: Json<ProcedureRunRequest>,
+    ) -> Result<Json<ProcedureRunResponse>, HandlerError>;
+
+    /// Loads procedure run status.
+    async fn status(
+        request: Json<ProcedureStatusRequest>,
+    ) -> Result<Json<ProcedureRunStatus>, HandlerError>;
+
+    /// Requests procedure run cancellation.
+    async fn cancel(
+        request: Json<ProcedureCancelRequest>,
+    ) -> Result<Json<ProcedureCancelResponse>, HandlerError>;
+
+    /// Decides a pending procedure review node.
+    async fn decide_review(
+        request: Json<ProcedureReviewDecisionRequest>,
+    ) -> Result<Json<ProcedureReviewDecisionResponse>, HandlerError>;
+
+    /// Resolves a pending procedure wait-signal node.
+    async fn signal(
+        request: Json<ProcedureSignalRequest>,
+    ) -> Result<Json<ProcedureSignalResponse>, HandlerError>;
 }
 
 /// Concrete skill service implementation.
@@ -91,6 +130,213 @@ impl Skills for SkillsImpl {
             .name("skills_list")
             .await?)
     }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn run(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ProcedureRunRequest>,
+    ) -> Result<Json<ProcedureRunResponse>, HandlerError> {
+        annotate_restate_handler_span("Skills", "run");
+        let request = request.into_inner();
+        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let execution_request_tenant_id = request.tenant_id;
+        let execution_request_session_id = request.session_id;
+
+        let response = ctx
+            .run(|| async move { run_inner(request).await.map(Json::from) })
+            .name("skills_run")
+            .await?
+            .into_inner();
+        ctx.workflow_client::<ProcedureExecutionClient>(response.run_id.to_string())
+            .run(Json::from(RunProcedureRequest {
+                tenant_id: execution_request_tenant_id,
+                run_uid: response.run_id,
+                identity,
+                session_id: execution_request_session_id,
+            }))
+            .send();
+        Ok(Json::from(response))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn status(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ProcedureStatusRequest>,
+    ) -> Result<Json<ProcedureRunStatus>, HandlerError> {
+        annotate_restate_handler_span("Skills", "status");
+        let request = request.into_inner();
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+
+        Ok(ctx
+            .run(|| async move { status_inner(request).await.map(Json::from) })
+            .name("skills_status")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn cancel(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ProcedureCancelRequest>,
+    ) -> Result<Json<ProcedureCancelResponse>, HandlerError> {
+        annotate_restate_handler_span("Skills", "cancel");
+        let request = request.into_inner();
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let run_uid = request.run_id;
+        let reason = request
+            .reason
+            .clone()
+            .unwrap_or_else(|| "procedure cancellation requested".to_string());
+
+        let response = ctx
+            .run(|| async move { cancel_inner(request).await.map(Json::from) })
+            .name("skills_cancel")
+            .await?
+            .into_inner();
+        if response.cancelled {
+            ctx.workflow_client::<ProcedureExecutionClient>(run_uid.to_string())
+                .request_cancel(Json::from(reason))
+                .send();
+        }
+        Ok(Json::from(response))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn decide_review(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ProcedureReviewDecisionRequest>,
+    ) -> Result<Json<ProcedureReviewDecisionResponse>, HandlerError> {
+        annotate_restate_handler_span("Skills", "decide_review");
+        let request = request.into_inner();
+        authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
+        let run_uid = request.run_id;
+
+        let validated = ctx
+            .run(|| async move {
+                validate_procedure_review_decision(request)
+                    .await
+                    .map(Json::from)
+            })
+            .name("skills_decide_review")
+            .await?
+            .into_inner();
+        if let Some(resolution) = validated.resolution {
+            return ctx
+                .workflow_client::<ProcedureExecutionClient>(run_uid.to_string())
+                .decide_review(Json::from(resolution))
+                .call()
+                .await
+                .map_err(HandlerError::from);
+        }
+        Ok(Json::from(validated.response))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn signal(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ProcedureSignalRequest>,
+    ) -> Result<Json<ProcedureSignalResponse>, HandlerError> {
+        annotate_restate_handler_span("Skills", "signal");
+        let request = request.into_inner();
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let run_uid = request.run_id;
+
+        let validated = ctx
+            .run(|| async move { validate_procedure_signal(request).await.map(Json::from) })
+            .name("skills_signal")
+            .await?
+            .into_inner();
+        if let Some(resolution) = validated.resolution {
+            return ctx
+                .workflow_client::<ProcedureExecutionClient>(run_uid.to_string())
+                .signal(Json::from(resolution))
+                .call()
+                .await
+                .map_err(HandlerError::from);
+        }
+        Ok(Json::from(validated.response))
+    }
+}
+
+async fn run_inner(request: ProcedureRunRequest) -> Result<ProcedureRunResponse, HandlerError> {
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: request.tenant_id,
+    };
+    let run = procedure_runtime()
+        .start(
+            &scope,
+            StartProcedureRun {
+                procedure_ref: request.procedure_ref,
+                input: request.input,
+                session_id: request.session_id,
+                idempotency_key: request.idempotency_key,
+            },
+        )
+        .await
+        .map_err(procedure_handler_error)?;
+
+    Ok(ProcedureRunResponse {
+        run_id: run.run_uid,
+        status: run.status.as_str().to_string(),
+    })
+}
+
+async fn status_inner(request: ProcedureStatusRequest) -> Result<ProcedureRunStatus, HandlerError> {
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: request.tenant_id,
+    };
+    let run = procedure_runtime()
+        .status(&scope, request.run_id)
+        .await
+        .map_err(procedure_handler_error)?
+        .ok_or_else(|| TerminalError::new_with_code(404, "procedure run not found"))?;
+    let node_runs = ArtifactRegistry::new(OrchestratorCtx::current_graph_pool())
+        .list_node_runs(&scope, request.run_id)
+        .await
+        .map_err(|error| procedure_handler_error(ProcedureError::Artifact(error)))?
+        .into_iter()
+        .map(|node_run| ProcedureNodeRunSummary {
+            node_id: node_run.node_id,
+            status: node_run.status.as_str().to_string(),
+            started_at: node_run.started_at,
+            completed_at: node_run.completed_at,
+        })
+        .collect();
+    Ok(ProcedureRunStatus {
+        run_id: run.run_uid,
+        session_id: run.session_id,
+        current_node_id: run.current_node_id,
+        status: run.status.as_str().to_string(),
+        node_runs,
+        output: run.output,
+        error: run.error,
+    })
+}
+
+async fn cancel_inner(
+    request: ProcedureCancelRequest,
+) -> Result<ProcedureCancelResponse, HandlerError> {
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: request.tenant_id,
+    };
+    let run = procedure_runtime()
+        .cancel(&scope, request.run_id, request.reason)
+        .await
+        .map_err(procedure_handler_error)?;
+    Ok(ProcedureCancelResponse {
+        cancelled: run.is_some(),
+        reason: run
+            .map(|_| "cancelled".to_string())
+            .unwrap_or_else(|| "procedure run was not cancellable".to_string()),
+    })
+}
+
+fn procedure_runtime() -> ProcedureRuntime {
+    ProcedureRuntime::new(ArtifactRegistry::new(OrchestratorCtx::current_graph_pool()))
 }
 
 /// Converts a registry skill row into a public API summary.

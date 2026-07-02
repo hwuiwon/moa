@@ -1,13 +1,13 @@
 #[path = "support/mod.rs"]
 mod support;
 
-include!("workflow_execution_support/common.rs");
-include!("workflow_execution_support/execution.rs");
+include!("procedure_execution_support/common.rs");
+include!("procedure_execution_support/execution.rs");
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, and OpenFGA"]
-async fn workflow_execution_runs_deterministic_nodes_service_e2e() -> Result<()> {
-    // Pins: `Workflows::run` starts `ArtifactWorkflowExecution` and persists node projections.
+async fn procedure_execution_runs_deterministic_nodes_service_e2e() -> Result<()> {
+    // Pins: `Skills::run` starts `ProcedureExecution` and persists node projections.
     let _guard = RESTATE_E2E_LOCK.lock().await;
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
@@ -25,28 +25,29 @@ async fn workflow_execution_runs_deterministic_nodes_service_e2e() -> Result<()>
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_and_publish_workflow(
+        import_and_publish_skill(
             &client,
             ingress,
             &identity,
             tenant_id,
-            deterministic_workflow_source(),
+            deterministic_procedure_source(),
         )
         .await?;
 
-        let run = start_workflow(
+        let run = start_procedure(
             &client,
             ingress,
             &identity,
             tenant_id,
-            "workflow://deterministic-routing",
+            "skill://deterministic-routing",
             json!({ "decision": "approved" }),
         )
         .await?;
         assert_eq!(run.status, "queued");
 
         let status =
-            wait_for_completed_workflow(&client, ingress, &identity, tenant_id, run.run_id).await?;
+            wait_for_completed_procedure(&client, ingress, &identity, tenant_id, run.run_id)
+                .await?;
         assert_eq!(status.run_id, run.run_id);
         assert_eq!(status.status, "completed");
         assert_eq!(status.current_node_id.as_deref(), Some("approved"));
@@ -72,8 +73,8 @@ async fn workflow_execution_runs_deterministic_nodes_service_e2e() -> Result<()>
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, and OpenFGA"]
-async fn workflow_parallel_join_executes_independent_tool_nodes_service_e2e() -> Result<()> {
-    // Pins: workflow Parallel/Join topology persists visible branch node runs.
+async fn procedure_parallel_join_executes_independent_tool_nodes_service_e2e() -> Result<()> {
+    // Pins: procedure Parallel/Join topology persists visible branch node runs.
     let _guard = RESTATE_E2E_LOCK.lock().await;
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
@@ -91,26 +92,27 @@ async fn workflow_parallel_join_executes_independent_tool_nodes_service_e2e() ->
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_and_publish_workflow(
+        import_and_publish_skill(
             &client,
             ingress,
             &identity,
             tenant_id,
-            parallel_join_workflow_source(),
+            parallel_join_procedure_source(),
         )
         .await?;
 
-        let run = start_workflow(
+        let run = start_procedure(
             &client,
             ingress,
             &identity,
             tenant_id,
-            "workflow://parallel-join-workflow",
+            "skill://parallel-join-procedure",
             json!({}),
         )
         .await?;
         let status =
-            wait_for_completed_workflow(&client, ingress, &identity, tenant_id, run.run_id).await?;
+            wait_for_completed_procedure(&client, ingress, &identity, tenant_id, run.run_id)
+                .await?;
 
         assert_eq!(status.current_node_id.as_deref(), Some("done"));
         assert_eq!(
@@ -122,7 +124,7 @@ async fn workflow_parallel_join_executes_independent_tool_nodes_service_e2e() ->
                 .node_runs
                 .iter()
                 .all(|node_run| node_run.status == "completed"),
-            "parallel workflow should complete every visible node: {status:?}"
+            "parallel procedure should complete every visible node: {status:?}"
         );
         assert_eq!(
             status
@@ -151,8 +153,8 @@ async fn workflow_parallel_join_executes_independent_tool_nodes_service_e2e() ->
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, and OpenFGA"]
-async fn workflow_loop_guard_stops_infinite_refinement_service_e2e() -> Result<()> {
-    // Pins: workflow loop guards fail explicit back-edges instead of spinning indefinitely.
+async fn procedure_loop_guard_stops_infinite_refinement_service_e2e() -> Result<()> {
+    // Pins: procedure loop guards fail explicit back-edges instead of spinning indefinitely.
     let _guard = RESTATE_E2E_LOCK.lock().await;
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
@@ -170,26 +172,26 @@ async fn workflow_loop_guard_stops_infinite_refinement_service_e2e() -> Result<(
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_and_publish_workflow(
+        import_and_publish_skill(
             &client,
             ingress,
             &identity,
             tenant_id,
-            loop_guard_workflow_source(),
+            loop_guard_procedure_source(),
         )
         .await?;
 
-        let run = start_workflow(
+        let run = start_procedure(
             &client,
             ingress,
             &identity,
             tenant_id,
-            "workflow://loop-guard-workflow",
+            "skill://loop-guard-procedure",
             json!({ "retry": true }),
         )
         .await?;
         let status =
-            wait_for_workflow_status(&client, ingress, &identity, tenant_id, run.run_id, "failed")
+            wait_for_procedure_status(&client, ingress, &identity, tenant_id, run.run_id, "failed")
                 .await?;
 
         assert!(
@@ -197,7 +199,7 @@ async fn workflow_loop_guard_stops_infinite_refinement_service_e2e() -> Result<(
                 .error
                 .as_deref()
                 .is_some_and(|error| error.contains("exceeded max iterations")),
-            "loop guard should fail the workflow with a typed error: {status:?}"
+            "loop guard should fail the procedure with a typed error: {status:?}"
         );
 
         Ok(())

@@ -12,7 +12,7 @@ _Restate orchestration, hosted API runtime mode, turn execution, and workers._
 - Session VO: `crates/moa-orchestrator/src/objects/session/`
 - Worker VO: `crates/moa-orchestrator/src/objects/worker/`
 - Turn workflows: `crates/moa-orchestrator/src/workflows/turn_execution.rs` and `crates/moa-orchestrator/src/workflows/worker_turn_execution.rs`
-- Artifact workflow execution: `crates/moa-orchestrator/src/workflows/artifact_workflow_execution.rs`
+- Procedure execution: `crates/moa-orchestrator/src/workflows/procedure_execution.rs`
 - CronJob VO: `crates/moa-orchestrator/src/objects/cron_job.rs`
 - Pipeline assembly: `crates/moa-brain/src/pipeline/mod.rs`
 
@@ -34,8 +34,8 @@ Core production Restate bindings:
 | Restate primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` |
-| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `ActionPolicy` |
-| Workflow | `ArtifactWorkflowExecution`, `KnowledgeSyncIngestion`, `Consolidate`, `TurnExecution`, `WorkerTurnExecution` |
+| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
+| Workflow | `ProcedureExecution`, `KnowledgeSyncIngestion`, `Consolidate`, `TurnExecution`, `WorkerTurnExecution` |
 
 Feature-gated Restate bindings:
 
@@ -61,16 +61,16 @@ Postgres, Restate, or an explicitly configured Redis runtime cache; process
 memory is only a local cache.
 
 `Artifacts` owns import, export, listing, validation, and publish for canonical
-skills, connectors, and workflows. `Workflows` exposes artifact-backed workflow
-run lifecycle over Restate, while `ArtifactWorkflowExecution` executes the
-deterministic workflow graph using the pure interpreter in `moa-workflows`.
+skills, connectors, actions, and agents. The `Skills` service exposes the skill
+procedure run lifecycle over Restate, while `ProcedureExecution` executes the
+deterministic procedure graph using the pure interpreter in `moa-skills`.
 The open-ended agent loop still lives in `Session` and `TurnExecution`.
 
-Workflow runs can carry an optional `session_id` so the product can show a
-procedure/workflow attached to the same support conversation. This is an
-association boundary, not autonomous routing: skill selection still happens
-inside the context pipeline, and workflow node execution remains explicit
-workflow runtime behavior.
+Procedure runs can carry an optional `session_id` so the product can show a
+procedure attached to the same support conversation. This is an association
+boundary, not autonomous routing: skill selection still happens inside the
+context pipeline, and procedure node execution remains explicit procedure
+runtime behavior.
 
 ## Session Flow
 
@@ -289,9 +289,9 @@ generation-guarded `check_child_liveness` watchdog per active child; on a stale
 heartbeat it appends `WorkerHeartbeatStale` and raises a `HeartbeatStale` signal,
 exempting children parked on a `needs_input` request (`awaiting_input`).
 
-## Workflows
+## Workflows and Procedures
 
-MOA has two workflow-shaped execution surfaces. Restate workflows run internal durable jobs:
+Restate workflows run internal durable jobs:
 
 - `Consolidate`: one tenant/date memory consolidation pass.
 - `KnowledgeSyncIngestion`: one tenant knowledge sync ingestion pass.
@@ -300,38 +300,40 @@ MOA has two workflow-shaped execution surfaces. Restate workflows run internal d
 
 These are workflow-shaped because rerunning the same logical job should be explicit and observable.
 
-Artifact-backed workflows are user-authored deterministic skills. A
-`WorkflowDefinition` stores an explicit node/edge graph for branch conditions,
+Skill procedures are user-authored deterministic execution plans. A skill may
+declare an optional `procedure` in its `skill.moa.yaml` definition: a
+`ProcedureDefinition` stores an explicit node/edge graph for branch conditions,
 parallel fan-out, joins, bounded loops, connector actions, approval gates,
 memory reads/writes, checkpoints, and product-visible run history.
-`moa-artifacts` stores and validates the workflow document shape;
-`moa-workflows` owns the pure graph interpreter and graph-renderable execution
-state; the `Workflows` Restate service handles authorization and run creation;
-`ArtifactWorkflowExecution` owns durable execution and node-run persistence.
+`moa-artifacts` stores and validates the skill document shape including its
+optional procedure; `moa-skills` owns the pure graph interpreter and
+graph-renderable execution state; the `Skills` Restate service handles
+authorization and run creation; `ProcedureExecution` owns durable execution and
+node-run persistence.
 
-Workflow nodes stay decomposable for future dashboard editing:
+Procedure nodes stay decomposable for future dashboard editing:
 
 - deterministic nodes such as `start`, `condition`, `parallel`, `join`, and
-  `end` are interpreted directly by `moa-workflows`;
+  `end` are interpreted directly by `moa-skills`;
 - governed tool/action/skill-action nodes call existing action policy,
   review, and `ToolExecutor` services;
-- `review` nodes pause the run until `Workflows/decide_review` resumes or
+- `review` nodes pause the run until `Skills/decide_review` resumes or
   fails the node;
 - `agent` nodes enqueue one bounded `Session` turn and wait for the existing
-  `TurnExecution` result; `max_turns` caps that turn loop, not the workflow
+  `TurnExecution` result; `max_turns` caps that turn loop, not the procedure
   graph itself;
 - `worker` nodes call the existing delegation path, including depth,
   fan-out, repeated-task, and budget validation;
 - `memory_read` and `memory_write` nodes call the existing `Memory` service so
   tenant/contact scope, privacy, ingestion, and retrieval behavior do not fork
-  inside the workflow runtime.
+  inside the procedure runtime.
 
 Adapter nodes link to inner service records such as session turns, worker
 outputs, review IDs, memory hit IDs, or ingestion reports through node output.
-The workflow graph remains the product-visible control plane; detailed inner
-events remain in their owning service logs. Workflow improvement should operate
-on artifact revisions and proposed patches, not by rewriting the live run state
-directly.
+The procedure graph remains the product-visible control plane; detailed inner
+events remain in their owning service logs. Procedure improvement should operate
+on skill artifact revisions and proposed patches, not by rewriting the live run
+state directly.
 
 Reusable scheduled work is anchored by the `CronJob` virtual object. Each job
 key stores its cron expression, timezone, target service handler, and a version

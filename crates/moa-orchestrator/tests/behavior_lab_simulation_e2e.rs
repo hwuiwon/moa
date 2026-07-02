@@ -22,11 +22,11 @@ use moa_core::wire::experiments::{
     ExperimentTrialStatusRequest, ExperimentTrialStatusResponse, ExperimentTrialSummary,
     ExperimentTrialsRequest, ExperimentTrialsResponse,
 };
+use moa_core::wire::procedures::{
+    ProcedureRunRequest, ProcedureRunResponse, ProcedureRunStatus, ProcedureStatusRequest,
+};
 use moa_core::wire::skills::{
     SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
-};
-use moa_core::wire::workflows::{
-    WorkflowRunRequest, WorkflowRunResponse, WorkflowRunStatus, WorkflowStatusRequest,
 };
 use moa_core::{
     ActionRuleScope, Event, EventRange, EventRecord, SessionId, StoragePartitionId, TenantId,
@@ -91,8 +91,8 @@ fn spawn_orchestrator(
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
-async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -> Result<()> {
-    // Pins: a behavior-lab plan drives a damaged-food simulator trial through skills and same-session workflow association.
+async fn damaged_food_plan_links_trial_session_procedure_skill_and_score_runs() -> Result<()> {
+    // Pins: a behavior-lab plan drives a damaged-food simulator trial through skills and same-session procedure association.
     let _guard = RESTATE_E2E_LOCK.lock().await;
     if !cfg!(feature = "provider-overrides") {
         return Ok(());
@@ -130,12 +130,12 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
         )
         .await?;
 
-        let workflow = import_and_publish_artifact(
+        let procedure = import_and_publish_artifact(
             &client,
             ingress,
             &identity,
             &storage_partition_id,
-            damaged_food_workflow_source(),
+            damaged_food_procedure_source(),
         )
         .await?;
         let plan_source = damaged_food_plan_source(agent.revision_uid);
@@ -160,7 +160,7 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
         assert_eq!(run.status, "accepted");
         assert_ne!(run.score_run_id, Uuid::nil());
         assert!(run.session_id.is_none());
-        assert!(run.workflow_run_uid.is_none());
+        assert!(run.procedure_run_uid.is_none());
 
         let status =
             wait_for_run_status(&client, ingress, &identity, &storage_partition_id, run.run_uid, |status| {
@@ -184,7 +184,7 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
         assert_eq!(trial.turn_count, 2);
         assert_eq!(trial.stop_reason.as_deref(), Some("max_turns"));
         assert_ne!(trial.score_run_id, Uuid::nil());
-        assert!(trial.workflow_run_uid.is_none());
+        assert!(trial.procedure_run_uid.is_none());
         let session_id = trial
             .session_id
             .context("damaged-food trial should link the target session")?;
@@ -221,23 +221,23 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
             summarize_events(&events)
         );
 
-        let workflow_run =
-            run_workflow_for_session(&client, ingress, &identity, &storage_partition_id, session_id).await?;
-        assert_eq!(workflow_run.status, "queued");
-        let workflow_status =
-            wait_for_workflow_status(&client, ingress, &identity, &storage_partition_id, workflow_run.run_id, "completed")
+        let procedure_run =
+            run_procedure_for_session(&client, ingress, &identity, &storage_partition_id, session_id).await?;
+        assert_eq!(procedure_run.status, "queued");
+        let procedure_status =
+            wait_for_procedure_status(&client, ingress, &identity, &storage_partition_id, procedure_run.run_id, "completed")
                 .await?;
-        assert_eq!(workflow_status.run_id, workflow_run.run_id);
-        assert_eq!(workflow_status.session_id, Some(session_id));
-        assert_eq!(workflow_status.status, "completed");
-        assert_eq!(workflow_status.current_node_id.as_deref(), Some("done"));
-        assert_eq!(node_ids(&workflow_status), vec!["start", "verify_evidence", "done"]);
+        assert_eq!(procedure_status.run_id, procedure_run.run_id);
+        assert_eq!(procedure_status.session_id, Some(session_id));
+        assert_eq!(procedure_status.status, "completed");
+        assert_eq!(procedure_status.current_node_id.as_deref(), Some("done"));
+        assert_eq!(node_ids(&procedure_status), vec!["start", "verify_evidence", "done"]);
         assert!(
-            workflow_status
+            procedure_status
                 .node_runs
                 .iter()
                 .all(|node_run| node_run.status == "completed"),
-            "associated deterministic workflow should complete visible nodes: {workflow_status:?}"
+            "associated deterministic procedure should complete visible nodes: {procedure_status:?}"
         );
 
         let pool = PgPool::connect(&test_database_url())
@@ -259,7 +259,7 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
             "no scorer has emitted analytics.scores rows yet"
         );
 
-        assert_ne!(workflow.revision_uid, Uuid::nil());
+        assert_ne!(procedure.revision_uid, Uuid::nil());
 
         pool.close().await;
         Ok(())
@@ -354,7 +354,7 @@ async fn transaction_dispute_plan_clarifies_then_handles_required_review() -> Re
         );
         assert_eq!(trial.turn_count, 2);
         assert_eq!(trial.stop_reason.as_deref(), Some("max_turns"));
-        assert!(trial.workflow_run_uid.is_none());
+        assert!(trial.procedure_run_uid.is_none());
         let session_id = trial
             .session_id
             .context("transaction-dispute trial should link target session")?;
@@ -677,83 +677,83 @@ async fn experiment_scores(
         .context("deserialize experiment scores response")
 }
 
-async fn run_workflow_for_session(
+async fn run_procedure_for_session(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
     storage_partition_id: &StoragePartitionId,
     session_id: SessionId,
-) -> Result<WorkflowRunResponse> {
-    let request = WorkflowRunRequest {
+) -> Result<ProcedureRunResponse> {
+    let request = ProcedureRunRequest {
         tenant_id: TenantId::from(
             Uuid::parse_str(storage_partition_id.as_str())
                 .context("storage partition id is tenant uuid")?,
         ),
-        workflow_ref: "workflow://damaged-food-replacement".to_string(),
+        procedure_ref: "skill://damaged-food-replacement".to_string(),
         input: json!({
             "order_id": "FOOD-42",
             "damage_summary": "soup pooled under the container and sauce on every item",
             "customer_requested": "replacement"
         }),
         session_id: Some(session_id),
-        idempotency_key: Some(format!("damaged-food-workflow-{}", Uuid::now_v7())),
+        idempotency_key: Some(format!("damaged-food-procedure-{}", Uuid::now_v7())),
     };
-    post_json_with_identity(client, ingress, "Workflows", "run", identity, &request)
+    post_json_with_identity(client, ingress, "Skills", "run", identity, &request)
         .await?
-        .json::<WorkflowRunResponse>()
+        .json::<ProcedureRunResponse>()
         .await
-        .context("deserialize workflow run response")
+        .context("deserialize procedure run response")
 }
 
-async fn workflow_status(
+async fn procedure_status(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
     storage_partition_id: &StoragePartitionId,
     run_id: Uuid,
-) -> Result<WorkflowRunStatus> {
-    let request = WorkflowStatusRequest {
+) -> Result<ProcedureRunStatus> {
+    let request = ProcedureStatusRequest {
         tenant_id: TenantId::from(
             Uuid::parse_str(storage_partition_id.as_str())
                 .context("storage partition id is tenant uuid")?,
         ),
         run_id,
     };
-    post_json_with_identity(client, ingress, "Workflows", "status", identity, &request)
+    post_json_with_identity(client, ingress, "Skills", "status", identity, &request)
         .await?
-        .json::<WorkflowRunStatus>()
+        .json::<ProcedureRunStatus>()
         .await
-        .context("deserialize workflow status response")
+        .context("deserialize procedure status response")
 }
 
-async fn wait_for_workflow_status(
+async fn wait_for_procedure_status(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
     storage_partition_id: &StoragePartitionId,
     run_id: Uuid,
     expected: &str,
-) -> Result<WorkflowRunStatus> {
+) -> Result<ProcedureRunStatus> {
     let mut last_status = None;
     for _attempt in 0..60 {
         let status =
-            workflow_status(client, ingress, identity, storage_partition_id, run_id).await?;
+            procedure_status(client, ingress, identity, storage_partition_id, run_id).await?;
         if status.status == expected {
             return Ok(status);
         }
         if status.status == "failed" {
-            bail!("workflow run failed before reaching {expected}: {status:?}");
+            bail!("procedure run failed before reaching {expected}: {status:?}");
         }
         last_status = Some(status);
         sleep(Duration::from_secs(1)).await;
     }
 
     bail!(
-        "timed out waiting for workflow run {run_id} to reach {expected}; last status: {last_status:?}"
+        "timed out waiting for procedure run {run_id} to reach {expected}; last status: {last_status:?}"
     )
 }
 
-fn node_ids(status: &WorkflowRunStatus) -> Vec<&str> {
+fn node_ids(status: &ProcedureRunStatus) -> Vec<&str> {
     status
         .node_runs
         .iter()
@@ -978,7 +978,7 @@ fn assert_trial_status_matches_summary(
     assert_eq!(status.scenario_id, summary.scenario_id);
     assert_eq!(status.score_run_id, summary.score_run_id);
     assert_eq!(status.session_id, summary.session_id);
-    assert_eq!(status.workflow_run_uid, summary.workflow_run_uid);
+    assert_eq!(status.procedure_run_uid, summary.procedure_run_uid);
     assert_eq!(status.stop_reason, summary.stop_reason);
     assert_eq!(status.turn_count, summary.turn_count);
 }
@@ -1282,7 +1282,6 @@ definition:
     target_variants:
       - key: support-agent
         kind: agent_loop
-        workflow_ref: workflow://damaged-food-replacement
         config:
           prompt: Start the damaged-food support trial. Use the delivery support skill before recommending a refund or replacement, and associate the damaged-food workflow once details are clear.
           agent_revision_uid: "{agent_revision_uid}"
@@ -1304,10 +1303,10 @@ definition:
     )
 }
 
-fn damaged_food_workflow_source() -> &'static str {
+fn damaged_food_procedure_source() -> &'static str {
     r#"
 api_version: moa.artifact/v1
-kind: workflow
+kind: skill
 metadata:
   name: damaged-food-replacement
   description: Procedure for replacement review when food arrives damaged.
@@ -1317,44 +1316,47 @@ metadata:
     - replacement
 status: draft
 definition:
-  type: workflow
+  type: skill
   spec:
-    input_schema:
-      type: object
-      required:
-        - order_id
-        - damage_summary
-      properties:
-        order_id:
-          type: string
-        damage_summary:
-          type: string
-        customer_requested:
-          type: string
-    state_schema:
-      type: object
-      properties:
-        evidence_sufficient:
-          type: boolean
-    nodes:
-      - id: start
-        kind: start
-      - id: verify_evidence
-        kind: condition
-        condition:
-          type: exists
-          path: $.damage_summary
-      - id: done
-        kind: end
-        input:
-          status: evidence_verified
-    edges:
-      - id: start-to-verify
-        from: start
-        to: verify_evidence
-      - id: verify-to-resolution
-        from: verify_evidence
-        to: done
+    instructions:
+      path: SKILL.md
+    procedure:
+      input_schema:
+        type: object
+        required:
+          - order_id
+          - damage_summary
+        properties:
+          order_id:
+            type: string
+          damage_summary:
+            type: string
+          customer_requested:
+            type: string
+      state_schema:
+        type: object
+        properties:
+          evidence_sufficient:
+            type: boolean
+      nodes:
+        - id: start
+          kind: start
+        - id: verify_evidence
+          kind: condition
+          condition:
+            type: exists
+            path: $.damage_summary
+        - id: done
+          kind: end
+          input:
+            status: evidence_verified
+      edges:
+        - id: start-to-verify
+          from: start
+          to: verify_evidence
+        - id: verify-to-resolution
+          from: verify_evidence
+          to: done
 "#
 }
 

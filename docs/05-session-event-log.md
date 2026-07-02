@@ -257,7 +257,7 @@ Learning log rows are append-only records with tenant ID, learning type, target,
 ## Live Behavior Experiment Tables
 
 Live behavior experiment runs are stored in a dedicated ledger instead of being
-encoded as session events, `analytics.scores`, or artifact workflow runs.
+encoded as session events, `analytics.scores`, or procedure runs.
 
 `analytics.score_run` is the FK-able parent for a scored run. It stores the
 score run UUID, tenant attribution for runtime scoring, source label, and
@@ -269,16 +269,16 @@ timestamps. Eval, experiment, and future scored run types can attach many
 - `run_uid` is the public experiment run identifier.
 - `tenant_id` is the runtime isolation key; creator actor fields record the
   admin/operator principal that admitted the run.
-- `target_kind` is `agent_loop` or `workflow`.
+- `target_kind` is `agent_loop` or `procedure`.
 - `status` is `accepted`, `dispatched`, `running`,
   `completed`, `failed`, or `cancelled`.
 - `target`, `variant`, and `scorecard` are the accepted experiment payloads.
 - `score_run_id` references `analytics.score_run(run_id)` and is the join key
   for `analytics.scores`.
-- `session_id` references `sessions(id)` for agent-loop runs or workflow runs
+- `session_id` references `sessions(id)` for agent-loop runs or procedure runs
   associated with a session.
-- `workflow_run_uid` references `moa.artifact_run(run_uid)` for
-  artifact-backed workflow experiments.
+- `procedure_run_uid` references `moa.artifact_run(run_uid)` for
+  procedure experiments.
 - `artifact_revision_uids` is the fast-read list of pinned artifact revisions.
 - `idempotency_key`, `created_by_identity`, `error`, and timestamps describe
   admission, ownership, and terminal state.
@@ -292,9 +292,9 @@ does not replace the FK table.
 run, carries the tenant and optional contact attribution, trial key, status,
 target kind, variant key, pinned plan revision, selected
 persona/profile/scenario/data-bundle IDs, simulator settings, session or
-workflow run link, score run ID, turn count, stop reason, error, trace ID, and
+procedure run link, score run ID, turn count, stop reason, error, trace ID, and
 timestamps. `ExperimentTrialRun` updates this row as simulator turns dispatch
-target sessions or workflow runs.
+target sessions or procedure runs.
 
 The `Experiments` service exposes `generate_plan`, `run`, `status`, `list`,
 `trials`, `trial_status`, `cancel`, `propose_improvements`, `scores`, and

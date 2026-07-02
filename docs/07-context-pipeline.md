@@ -20,7 +20,7 @@ The code reports fixed stage numbers through each `ContextProcessor`. With query
 | Stage | Processor | Cache role | Purpose |
 |---|---|---|---|
 | 1 | `IdentityProcessor` | Stable prefix | MOA identity and high-level behavior |
-| 2 | `AgentInstructionProcessor` | Stable prefix | session-pinned configured-agent instructions and workflow affordances |
+| 2 | `AgentInstructionProcessor` | Stable prefix | session-pinned configured-agent instructions and procedure affordances |
 | 2 | `InstructionProcessor` | Stable prefix | tenant and contact/session instructions |
 | 3 | `ToolDefinitionProcessor` | Stable prefix | deterministic tool schema list, capped at 30 and filtered by pinned agent tool policy |
 | 4 | `QueryRewriter` | Dynamic metadata | retrieval query preparation and task transition signal |
@@ -75,7 +75,7 @@ snapshot can:
 - filter prompt-visible tool schemas
 - constrain skill selection by `auto`, `allowlist`, `pinned`, or `denylist`
 - constrain graph-memory retrieval mode, filters, budget, and PII floor
-- expose allowed workflow affordances without starting workflows implicitly
+- expose allowed procedure affordances without starting procedures implicitly
 - configure input and output LLM-judge text guardrails
 
 Durable execution still enforces policy again in the orchestrator tool/action
@@ -136,7 +136,7 @@ dynamic hint when the request has high-confidence independent workstreams, such
 as explicit reports from several inputs, readiness checks across named areas,
 reconciliations, incident investigations, audits, or option comparisons.
 
-The processor itself does not route workflows and does not add strict
+The processor itself does not route procedures and does not add strict
 `selected_skill` or `selected_action` fields to the worker contract. Root
 `TurnExecution` consumes the metadata once per admitted user message: when
 `spawn_worker` is available, it auto-spawns dependency-free ready nodes as

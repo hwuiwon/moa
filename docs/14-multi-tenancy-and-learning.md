@@ -81,7 +81,7 @@ not by a fixed intent taxonomy.
 
 ## Learning Candidates
 
-`learning_candidates` stores proposal state for skill, workflow, memory, policy,
+`learning_candidates` stores proposal state for skill, memory, policy,
 prompt, and eval updates. Candidates carry source experience IDs, task fingerprints,
 payloads, evaluation payloads, risk class, promotion requirements, and status.
 The initial status is `proposed`; promotion requires explicit transitions such

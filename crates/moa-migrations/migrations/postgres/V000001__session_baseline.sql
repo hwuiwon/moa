@@ -2260,7 +2260,7 @@ CREATE TABLE IF NOT EXISTS moa.artifact (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (scope IS NOT NULL),
-    CHECK (kind IN ('agent', 'skill', 'connector', 'workflow', 'action', 'experiment_plan')),
+    CHECK (kind IN ('agent', 'skill', 'connector', 'action', 'experiment_plan')),
     CHECK (name <> '')
 );
 
@@ -2359,7 +2359,7 @@ CREATE TABLE IF NOT EXISTS moa.artifact_run (
     user_id TEXT,
     session_id UUID,
     scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
-    workflow_ref TEXT NOT NULL,
+    procedure_ref TEXT NOT NULL,
     status TEXT NOT NULL,
     current_node_id TEXT,
     input JSONB NOT NULL DEFAULT '{}'::JSONB,
@@ -2386,7 +2386,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS artifact_run_idempotency_uniq
     ON moa.artifact_run (
         coalesce(storage_partition_id, ''),
         coalesce(user_id, ''),
-        workflow_ref,
+        procedure_ref,
         idempotency_key
     )
     WHERE idempotency_key IS NOT NULL;
@@ -2465,14 +2465,14 @@ CREATE TABLE IF NOT EXISTS moa.experiment_run (
     user_id TEXT,
     scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     name TEXT NOT NULL,
-    target_kind TEXT NOT NULL CHECK (target_kind IN ('agent_loop', 'workflow')),
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('agent_loop', 'procedure')),
     status TEXT NOT NULL CHECK (status IN ('accepted', 'running', 'completed', 'failed', 'cancelled')),
     target JSONB NOT NULL,
     variant JSONB NOT NULL,
     scorecard JSONB NOT NULL DEFAULT '{}'::jsonb,
     score_run_id UUID NOT NULL REFERENCES analytics.score_run(run_id) ON DELETE RESTRICT,
     session_id UUID REFERENCES sessions(id) ON DELETE SET NULL,
-    workflow_run_uid UUID REFERENCES moa.artifact_run(run_uid) ON DELETE SET NULL,
+    procedure_run_uid UUID REFERENCES moa.artifact_run(run_uid) ON DELETE SET NULL,
     artifact_revision_uids UUID[] NOT NULL DEFAULT '{}',
     idempotency_key TEXT,
     created_by_identity JSONB NOT NULL,
@@ -2507,9 +2507,9 @@ CREATE INDEX IF NOT EXISTS experiment_run_session_idx
     ON moa.experiment_run (session_id)
     WHERE session_id IS NOT NULL;
 
-CREATE INDEX IF NOT EXISTS experiment_run_workflow_run_idx
-    ON moa.experiment_run (workflow_run_uid)
-    WHERE workflow_run_uid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS experiment_run_procedure_run_idx
+    ON moa.experiment_run (procedure_run_uid)
+    WHERE procedure_run_uid IS NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS experiment_run_idempotency_uniq
     ON moa.experiment_run (
@@ -2558,7 +2558,6 @@ ALTER TABLE moa.artifact
         kind IN (
             'skill',
             'connector',
-            'workflow',
             'action',
             'agent',
             'experiment_plan'
@@ -2575,7 +2574,7 @@ CREATE TABLE IF NOT EXISTS moa.experiment_trial (
     scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     trial_key TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('accepted', 'running', 'completed', 'failed', 'cancelled')),
-    target_kind TEXT NOT NULL CHECK (target_kind IN ('agent_loop', 'workflow')),
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('agent_loop', 'procedure')),
     variant_key TEXT NOT NULL,
     plan_revision_uid UUID NOT NULL,
     persona_id TEXT,
@@ -2588,7 +2587,7 @@ CREATE TABLE IF NOT EXISTS moa.experiment_trial (
     target_model TEXT,
     seed TEXT,
     session_id UUID REFERENCES sessions(id) ON DELETE SET NULL,
-    workflow_run_uid UUID REFERENCES moa.artifact_run(run_uid) ON DELETE SET NULL,
+    procedure_run_uid UUID REFERENCES moa.artifact_run(run_uid) ON DELETE SET NULL,
     score_run_id UUID NOT NULL REFERENCES analytics.score_run(run_id) ON DELETE RESTRICT,
     turn_count INT NOT NULL DEFAULT 0,
     stop_reason TEXT CHECK (
@@ -2625,9 +2624,9 @@ CREATE INDEX IF NOT EXISTS experiment_trial_session_idx
     ON moa.experiment_trial (session_id)
     WHERE session_id IS NOT NULL;
 
-CREATE INDEX IF NOT EXISTS experiment_trial_workflow_run_idx
-    ON moa.experiment_trial (workflow_run_uid)
-    WHERE workflow_run_uid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS experiment_trial_procedure_run_idx
+    ON moa.experiment_trial (procedure_run_uid)
+    WHERE procedure_run_uid IS NOT NULL;
 
 SELECT moa.apply_three_tier_rls('moa.experiment_trial'::REGCLASS);
 

@@ -7,7 +7,7 @@ use moa_brain::segment_assessment::verification_signal::{self, VerificationKind}
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, Result, SessionId,
     StopReason, ToolCallContent, ToolCallId, ToolInvocation, ToolOutput, TurnOutcome,
-    delegation_tool_schemas,
+    delegation_tool_schemas, procedure_tool_schemas,
 };
 use moa_security::{ToolInputCanaryScreening, screen_tool_input_for_canary};
 use uuid::Uuid;
@@ -182,6 +182,16 @@ pub(crate) fn summarize_response_text(response: &CompletionResponse) -> Option<S
 /// Ensures the v2 delegation tool schemas are available on the request.
 pub(crate) fn ensure_delegation_tool_schemas(request: &mut CompletionRequest) {
     for schema in delegation_tool_schemas() {
+        ensure_tool_schema(request, schema);
+    }
+}
+
+/// Ensures the procedure execution tool schemas are available on the request.
+///
+/// Injected only when a selected skill carries a procedure so the tools appear
+/// on the turn exactly when deterministic execution is available.
+pub(crate) fn ensure_procedure_tool_schemas(request: &mut CompletionRequest) {
+    for schema in procedure_tool_schemas() {
         ensure_tool_schema(request, schema);
     }
 }

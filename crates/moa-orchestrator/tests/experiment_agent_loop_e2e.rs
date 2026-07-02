@@ -210,7 +210,7 @@ async fn run_agent_loop_experiment(
             "model": "scripted-loadtest",
             "artifact_revision_uids": [],
             "skill_refs": ["skill://delivery-support"],
-            "workflow_ref": null,
+            "procedure_ref": null,
             "metadata": { "lane": "deterministic-e2e" }
         })),
         scorecard: json!({

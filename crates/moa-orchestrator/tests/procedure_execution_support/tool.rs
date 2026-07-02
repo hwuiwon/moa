@@ -1,4 +1,4 @@
-// Tool, agent, and worker workflow-node support.
+// Tool, agent, and worker procedure-node support.
 
 use std::fs;
 
@@ -9,27 +9,27 @@ use crate::support::session_store_service::{
     get_events_request, init_session_vo_request, test_session_meta,
 };
 
-async fn start_workflow_with_session(
+async fn start_procedure_with_session(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
     tenant_id: TenantId,
-    workflow_ref: &str,
+    procedure_ref: &str,
     input: Value,
     session_id: Option<SessionId>,
-) -> Result<WorkflowRunResponse> {
-    let request = WorkflowRunRequest {
+) -> Result<ProcedureRunResponse> {
+    let request = ProcedureRunRequest {
         tenant_id,
-        workflow_ref: workflow_ref.to_string(),
+        procedure_ref: procedure_ref.to_string(),
         input,
         session_id,
-        idempotency_key: Some(format!("workflow-{}", Uuid::now_v7())),
+        idempotency_key: Some(format!("procedure-{}", Uuid::now_v7())),
     };
-    post_json_with_identity(client, ingress, "Workflows", "run", identity, &request)
+    post_json_with_identity(client, ingress, "Skills", "run", identity, &request)
         .await?
-        .json::<WorkflowRunResponse>()
+        .json::<ProcedureRunResponse>()
         .await
-        .context("deserialize workflow run response")
+        .context("deserialize procedure run response")
 }
 
 async fn create_session(
@@ -114,141 +114,150 @@ fn object_url(ingress: &str, service: &str, object_id: SessionId, handler: &str)
     )
 }
 
-fn tool_workflow_source() -> &'static str {
+fn tool_search_procedure_source() -> &'static str {
     r#"
 api_version: moa.artifact/v1
-kind: workflow
+kind: skill
 metadata:
-  name: tool-search-workflow
-  description: Workflow that executes one idempotent tool node.
+  name: tool-search-procedure
+  description: Procedure that executes one idempotent tool node.
   tags:
     - test
 status: draft
 definition:
-  type: workflow
+  type: skill
   spec:
-    nodes:
-      - id: start
-        kind: start
-        ui:
-          x: 80
-          y: 120
-      - id: search
-        kind: tool
-        tool_refs:
-          - tool://file_search
-        input:
-          pattern: "*"
-        ui:
-          x: 280
-          y: 120
-      - id: done
-        kind: end
-        ui:
-          x: 520
-          y: 120
-    edges:
-      - id: start-search
-        from: start
-        to: search
-      - id: search-done
-        from: search
-        to: done
-    ui:
-      layout: dagre
+    instructions:
+      path: SKILL.md
+    procedure:
+      nodes:
+        - id: start
+          kind: start
+          ui:
+            x: 80
+            y: 120
+        - id: search
+          kind: tool
+          tool_refs:
+            - tool://file_search
+          input:
+            pattern: "*"
+          ui:
+            x: 280
+            y: 120
+        - id: done
+          kind: end
+          ui:
+            x: 520
+            y: 120
+      edges:
+        - id: start-search
+          from: start
+          to: search
+        - id: search-done
+          from: search
+          to: done
+      ui:
+        layout: dagre
 "#
 }
 
-fn agent_workflow_source() -> &'static str {
+fn agent_adapter_procedure_source() -> &'static str {
     r#"
 api_version: moa.artifact/v1
-kind: workflow
+kind: skill
 metadata:
-  name: agent-adapter-workflow
-  description: Workflow that adapts one deterministic graph node into a session turn.
+  name: agent-adapter-procedure
+  description: Procedure that adapts one deterministic graph node into a session turn.
   tags:
     - test
 status: draft
 definition:
-  type: workflow
+  type: skill
   spec:
-    nodes:
-      - id: start
-        kind: start
-        ui:
-          x: 80
-          y: 120
-      - id: agent
-        kind: agent
-        max_turns: 1
-        input:
-          prompt: Summarize the deterministic skill adapter status.
-          model: scripted-loadtest
-        ui:
-          x: 280
-          y: 120
-      - id: done
-        kind: end
-        ui:
-          x: 520
-          y: 120
-    edges:
-      - id: start-agent
-        from: start
-        to: agent
-      - id: agent-done
-        from: agent
-        to: done
-    ui:
-      layout: dagre
+    instructions:
+      path: SKILL.md
+    procedure:
+      nodes:
+        - id: start
+          kind: start
+          ui:
+            x: 80
+            y: 120
+        - id: agent
+          kind: agent
+          max_turns: 1
+          input:
+            prompt: Summarize the deterministic skill adapter status.
+            model: scripted-loadtest
+          ui:
+            x: 280
+            y: 120
+        - id: done
+          kind: end
+          ui:
+            x: 520
+            y: 120
+      edges:
+        - id: start-agent
+          from: start
+          to: agent
+        - id: agent-done
+          from: agent
+          to: done
+      ui:
+        layout: dagre
 "#
 }
 
-fn worker_workflow_source() -> &'static str {
+fn worker_fanout_procedure_source() -> &'static str {
     r#"
 api_version: moa.artifact/v1
-kind: workflow
+kind: skill
 metadata:
-  name: worker-fanout-workflow
-  description: Workflow that adapts one deterministic graph node into worker delegation.
+  name: worker-fanout-procedure
+  description: Procedure that adapts one deterministic graph node into worker delegation.
   tags:
     - test
 status: draft
 definition:
-  type: workflow
+  type: skill
   spec:
-    nodes:
-      - id: start
-        kind: start
-        ui:
-          x: 80
-          y: 120
-      - id: delegate
-        kind: worker
-        max_turns: 1
-        input:
-          task: Inspect whether this workflow node respects existing delegation fan-out limits.
-          task_name: fanout-check
-          tool_subset: []
-          budget_tokens: 256
-          timeout_ms: 0
-        ui:
-          x: 280
-          y: 120
-      - id: done
-        kind: end
-        ui:
-          x: 520
-          y: 120
-    edges:
-      - id: start-delegate
-        from: start
-        to: delegate
-      - id: delegate-done
-        from: delegate
-        to: done
-    ui:
-      layout: dagre
+    instructions:
+      path: SKILL.md
+    procedure:
+      nodes:
+        - id: start
+          kind: start
+          ui:
+            x: 80
+            y: 120
+        - id: delegate
+          kind: worker
+          max_turns: 1
+          input:
+            task: Inspect whether this procedure node respects existing delegation fan-out limits.
+            task_name: fanout-check
+            tool_subset: []
+            budget_tokens: 256
+            timeout_ms: 0
+          ui:
+            x: 280
+            y: 120
+        - id: done
+          kind: end
+          ui:
+            x: 520
+            y: 120
+      edges:
+        - id: start-delegate
+          from: start
+          to: delegate
+        - id: delegate-done
+          from: delegate
+          to: done
+      ui:
+        layout: dagre
 "#
 }
 

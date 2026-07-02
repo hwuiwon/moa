@@ -1,37 +1,42 @@
-//! Workflow graph artifact definitions.
+//! Procedure graph definitions.
+//!
+//! A procedure is the optional deterministic graph carried by a skill
+//! definition. The graph is authored here and interpreted by the pure procedure
+//! interpreter in `moa-skills`; skills without a procedure are purely
+//! agent-mediated.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{document::empty_object, reference::ArtifactRef};
 
-/// Declarative workflow graph.
+/// Declarative procedure graph.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct WorkflowDefinition {
-    /// JSON schema for workflow inputs.
+pub struct ProcedureDefinition {
+    /// JSON schema for procedure inputs.
     #[serde(default = "empty_object")]
     pub input_schema: Value,
-    /// JSON schema for persisted workflow state.
+    /// JSON schema for persisted procedure state.
     #[serde(default = "empty_object")]
     pub state_schema: Value,
     /// Graph nodes in builder order.
     #[serde(default)]
-    pub nodes: Vec<WorkflowNode>,
+    pub nodes: Vec<ProcedureNode>,
     /// Directed graph edges.
     #[serde(default)]
-    pub edges: Vec<WorkflowEdge>,
+    pub edges: Vec<ProcedureEdge>,
     /// Builder-owned UI metadata.
     #[serde(default = "empty_object")]
     pub ui: Value,
 }
 
-/// Node in a workflow graph.
+/// Node in a procedure graph.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct WorkflowNode {
+pub struct ProcedureNode {
     /// Stable node identifier.
     pub id: String,
     /// Runtime node kind.
-    pub kind: WorkflowNodeKind,
+    pub kind: ProcedureNodeKind,
     /// Optional artifact/tool reference for action or agent nodes.
     #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
     pub artifact_ref: Option<ArtifactRef>,
@@ -43,7 +48,7 @@ pub struct WorkflowNode {
     pub tool_refs: Vec<ArtifactRef>,
     /// Optional condition evaluated by this node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub condition: Option<WorkflowCondition>,
+    pub condition: Option<ProcedureCondition>,
     /// Static node input or template metadata.
     #[serde(default = "empty_object")]
     pub input: Value,
@@ -55,9 +60,9 @@ pub struct WorkflowNode {
     pub ui: Value,
 }
 
-/// Directed transition between two workflow nodes.
+/// Directed transition between two procedure nodes.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct WorkflowEdge {
+pub struct ProcedureEdge {
     /// Optional stable edge identifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -67,18 +72,18 @@ pub struct WorkflowEdge {
     pub to: String,
     /// Optional edge condition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub when: Option<WorkflowCondition>,
+    pub when: Option<ProcedureCondition>,
 }
 
-/// Supported workflow node kinds.
+/// Supported procedure node kinds.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WorkflowNodeKind {
-    /// Initialize the workflow run state.
+pub enum ProcedureNodeKind {
+    /// Initialize the procedure run state.
     Start,
     /// Dispatch a connector action or tool-backed action.
     Action,
-    /// Evaluate a condition against workflow state.
+    /// Evaluate a condition against procedure state.
     Condition,
     /// Wait for a tenant-admin review decision.
     Review,
@@ -107,7 +112,7 @@ pub enum WorkflowNodeKind {
 /// Typed condition expression for nodes and edges.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum WorkflowCondition {
+pub enum ProcedureCondition {
     /// Compare a state/input path to an expected value.
     Equals {
         /// JSON-path-like left-hand side.

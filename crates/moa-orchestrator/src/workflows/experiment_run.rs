@@ -24,7 +24,7 @@ use moa_experiments::plan::{ExpandedPlanTrial, expand_plan_trials};
 use moa_experiments::store::ExperimentStore;
 use moa_observability::record_experiment_run;
 use moa_observability::restate_observability::annotate_restate_handler_span;
-use moa_workflows::runtime::{StartWorkflowRun, WorkflowRuntime};
+use moa_skills::procedure::runtime::{ProcedureRuntime, StartProcedureRun};
 use restate_sdk::context::Request;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -37,12 +37,9 @@ use crate::objects::session::SessionClient;
 use crate::services::session_store::inner::{
     apply_agent_model_policy, create_session_for_identity, resolve_agent_context_for_session,
 };
-use crate::workflows::artifact_workflow_execution::{
-    ArtifactWorkflowExecutionClient, RunArtifactWorkflowRequest,
-};
 use crate::workflows::durable_utc_now;
 use crate::workflows::errors::{
-    bad_request, handler_error_message, moa_error_to_handler_error, workflow_handler_error,
+    bad_request, handler_error_message, moa_error_to_handler_error, procedure_handler_error,
 };
 use crate::workflows::experiment_errors::{
     non_retryable_handler_error, plan_expansion_error_to_handler_error,
@@ -50,20 +47,21 @@ use crate::workflows::experiment_errors::{
 use crate::workflows::experiment_trial_run::{
     ExperimentTrialRunClient, ExperimentTrialRunWorkflowRequest, trial_workflow_key,
 };
+use crate::workflows::procedure_execution::{ProcedureExecutionClient, RunProcedureRequest};
 
 mod plan_expansion;
 mod status;
 mod target_execution;
 
 use plan_expansion::run_experiment_plan;
-use status::{status_response, workflow_status_response};
-use target_execution::{run_agent_loop_target, run_workflow_target};
+use status::{procedure_status_response, status_response};
+use target_execution::{run_agent_loop_target, run_procedure_target};
 
 const K_RUN_UID: &str = "run_uid";
 const K_SCORE_RUN_ID: &str = "score_run_id";
 const K_STATUS: &str = "status";
 const K_SESSION_ID: &str = "session_id";
-const K_WORKFLOW_RUN_UID: &str = "workflow_run_uid";
+const K_PROCEDURE_RUN_UID: &str = "procedure_run_uid";
 const PLAN_CHILD_COMPLETION_WAIT_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Workflow input for one live behavior experiment run.
@@ -192,17 +190,17 @@ async fn run_experiment_target(
             annotate_run_span(&request, Some(ExperimentTargetKind::AgentLoop));
             run_agent_loop_target(ctx, request, prompt, session_id, agent, model, attachments).await
         }
-        ExperimentTarget::Workflow {
-            workflow_ref,
+        ExperimentTarget::Procedure {
+            procedure_ref,
             input,
             session_id,
             idempotency_key,
         } => {
-            annotate_run_span(&request, Some(ExperimentTargetKind::Workflow));
-            run_workflow_target(
+            annotate_run_span(&request, Some(ExperimentTargetKind::Procedure));
+            run_procedure_target(
                 ctx,
                 request,
-                workflow_ref,
+                procedure_ref,
                 input,
                 session_id,
                 idempotency_key,
@@ -277,14 +275,14 @@ async fn attach_session(
         .ok_or_else(|| run_not_found(run_uid))
 }
 
-async fn attach_workflow_run(
+async fn attach_procedure_run(
     pool: sqlx::PgPool,
     scope: ActionRuleScope,
     run_uid: Uuid,
-    workflow_run_uid: Uuid,
+    procedure_run_uid: Uuid,
 ) -> Result<ExperimentRunRecord, HandlerError> {
     ExperimentStore::new(pool)
-        .attach_workflow_run(&scope, run_uid, workflow_run_uid)
+        .attach_procedure_run(&scope, run_uid, procedure_run_uid)
         .await
         .map_err(moa_error_to_handler_error)?
         .ok_or_else(|| run_not_found(run_uid))
@@ -363,8 +361,8 @@ fn identity_type_header(identity_type: IdentityType) -> &'static str {
     }
 }
 
-fn workflow_runtime(pool: sqlx::PgPool) -> WorkflowRuntime {
-    WorkflowRuntime::new(ArtifactRegistry::new(pool))
+fn workflow_runtime(pool: sqlx::PgPool) -> ProcedureRuntime {
+    ProcedureRuntime::new(ArtifactRegistry::new(pool))
 }
 
 fn annotate_run_span(
@@ -523,7 +521,7 @@ mod tests {
             target_model: Some(ModelId::new("gpt-5.1")),
             seed: None,
             session_id: None,
-            workflow_run_uid: None,
+            procedure_run_uid: None,
             score_run_id: Uuid::now_v7(),
             turn_count: 0,
             stop_reason: None,

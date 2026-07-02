@@ -1,16 +1,16 @@
 # Graph Report - moa  (2026-07-01)
 
 ## Corpus Check
-- 1161 files · ~864,590 words
+- 1162 files · ~868,776 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 25821 nodes · 61869 edges · 1175 communities (1037 shown, 138 thin omitted)
-- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 2746 edges (avg confidence: 0.8)
+- 25882 nodes · 62012 edges · 1191 communities (1053 shown, 138 thin omitted)
+- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 2740 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `c5b89535`
+- Built from commit: `523dabe9`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -908,6 +908,7 @@
 - [[_COMMUNITY_providers tests|providers: tests]]
 - [[_COMMUNITY_session queries|session: queries]]
 - [[_COMMUNITY_auth auth0|auth: auth0]]
+- [[_COMMUNITY_providers adapters|providers: adapters]]
 - [[_COMMUNITY_skills tests|skills: tests]]
 - [[_COMMUNITY_eval scenarios|eval: scenarios]]
 - [[_COMMUNITY_eval scenarios|eval: scenarios]]
@@ -1008,6 +1009,7 @@
 - [[_COMMUNITY_memory ingest|memory: ingest]]
 - [[_COMMUNITY_eval scenarios|eval: scenarios]]
 - [[_COMMUNITY_brain segment_assessment|brain: segment_assessment]]
+- [[_COMMUNITY_workflows|workflows]]
 - [[_COMMUNITY_ocsf|ocsf]]
 - [[_COMMUNITY_ocsf|ocsf]]
 - [[_COMMUNITY_ocsf|ocsf]]
@@ -1109,6 +1111,21 @@
 - [[_COMMUNITY_Community 1170|Community 1170]]
 - [[_COMMUNITY_Community 1171|Community 1171]]
 - [[_COMMUNITY_Community 1172|Community 1172]]
+- [[_COMMUNITY_Community 1175|Community 1175]]
+- [[_COMMUNITY_Community 1176|Community 1176]]
+- [[_COMMUNITY_Community 1177|Community 1177]]
+- [[_COMMUNITY_Community 1178|Community 1178]]
+- [[_COMMUNITY_Community 1179|Community 1179]]
+- [[_COMMUNITY_Community 1180|Community 1180]]
+- [[_COMMUNITY_Community 1181|Community 1181]]
+- [[_COMMUNITY_Community 1182|Community 1182]]
+- [[_COMMUNITY_Community 1183|Community 1183]]
+- [[_COMMUNITY_Community 1184|Community 1184]]
+- [[_COMMUNITY_Community 1185|Community 1185]]
+- [[_COMMUNITY_Community 1186|Community 1186]]
+- [[_COMMUNITY_Community 1187|Community 1187]]
+- [[_COMMUNITY_Community 1188|Community 1188]]
+- [[_COMMUNITY_Community 1189|Community 1189]]
 
 ## God Nodes (most connected - your core abstractions)
 1. `annotate_restate_handler_span()` - 207 edges
@@ -1116,22 +1133,22 @@
 3. `SessionVoState` - 62 edges
 4. `Arc` - 60 edges
 5. `Result` - 56 edges
-6. `ValidationReport` - 50 edges
-7. `Result` - 50 edges
-8. `HandlerError` - 50 edges
+6. `Result` - 50 edges
+7. `HandlerError` - 50 edges
+8. `ValidationReport` - 49 edges
 9. `OrchestratorCtx` - 49 edges
 10. `PostgresSessionStore` - 49 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `incremental_history_falls_back_when_delta_grows_too_large()` --calls--> `compiler_with_recent_turns()`  [INFERRED]
-  crates/moa-brain/src/pipeline/history/checkpoint.rs → crates/moa-brain/src/pipeline/history/test_support.rs
+- `validate_for_status()` --calls--> `behavior_lab_plan_round_trips_json_yaml_and_exposes_external_refs()`  [INFERRED]
+  crates/moa-artifacts/src/validation.rs → crates/moa-artifacts/tests/behavior_lab_offline.rs
 - `run_brain_turn_recovers_old_artifact_via_session_search()` --calls--> `count_lines()`  [INFERRED]
   crates/moa-brain/tests/brain_turn_session_search_db.rs → crates/moa-brain/tests/brain_turn_support/session_search.rs
+- `parse_and_match_command()` --calls--> `has_action_policy_unsafe_shell_syntax()`  [INFERRED]
+  crates/moa-security/src/policies.rs → crates/moa-core/src/shell.rs
 - `auto_spawn_input()` --calls--> `default_worker_budget_tokens()`  [INFERRED]
   crates/moa-orchestrator/src/workflows/turn_execution.rs → crates/moa-core/src/types/worker.rs
 - `load_suite()` --calls--> `parse_example_suite()`  [INFERRED]
-  crates/moa-eval/core/src/loader.rs → crates/moa-eval/tests/loader.rs
-- `load_agent_config()` --calls--> `parse_example_configs()`  [INFERRED]
   crates/moa-eval/core/src/loader.rs → crates/moa-eval/tests/loader.rs
 
 ## Import Cycles
@@ -1146,6 +1163,7 @@
 - 1-file cycle: `crates/moa-artifacts/src/connector.rs -> crates/moa-artifacts/src/connector.rs`
 - 1-file cycle: `crates/moa-artifacts/src/document.rs -> crates/moa-artifacts/src/document.rs`
 - 1-file cycle: `crates/moa-artifacts/src/validation.rs -> crates/moa-artifacts/src/validation.rs`
+- 1-file cycle: `crates/moa-artifacts/src/procedure.rs -> crates/moa-artifacts/src/procedure.rs`
 - 1-file cycle: `crates/moa-providers/src/adapters/anthropic/mod.rs -> crates/moa-providers/src/adapters/anthropic/mod.rs`
 - 1-file cycle: `crates/moa-core/src/config/env_overlay.rs -> crates/moa-core/src/config/env_overlay.rs`
 - 1-file cycle: `crates/moa-auth/auth0/src/vault.rs -> crates/moa-auth/auth0/src/vault.rs`
@@ -1154,7 +1172,6 @@
 - 1-file cycle: `crates/moa-orchestrator/src/services/scim/groups.rs -> crates/moa-orchestrator/src/services/scim/groups.rs`
 - 1-file cycle: `crates/moa-orchestrator/src/services/scim/users.rs -> crates/moa-orchestrator/src/services/scim/users.rs`
 - 1-file cycle: `crates/moa-auth/auth0/src/auth0_provider.rs -> crates/moa-auth/auth0/src/auth0_provider.rs`
-- 1-file cycle: `crates/moa-auth/fga-bootstrap/src/http.rs -> crates/moa-auth/fga-bootstrap/src/http.rs`
 
 ## Hyperedges (group relationships)
 - **Tenant Knowledge Ingestion Pipeline** — postgres_v000311_knowledge_connections, postgres_v000311_knowledge_sync_runs, postgres_v000311_knowledge_objects, postgres_v000311_knowledge_document_versions, postgres_v000311_knowledge_blocks, postgres_v000311_knowledge_chunks [EXTRACTED 1.00]
@@ -1170,19 +1187,19 @@
 - **moa-memory Subsystem Composition** — moa_memory_readme_subsystem, moa_memory_readme_graph_store, moa_memory_readme_vector_store, moa_memory_readme_pii, moa_memory_readme_ingest, moa_memory_readme_lifecycle, moa_memory_readme_types [INFERRED 0.85]
 - **Centralized Migration Governance** — moa_migrations_readme_migrations, moa_migrations_readme_centralization, moa_migrations_readme_table_ownership, moa_migrations_readme_forward_migration [INFERRED 0.75]
 
-## Communities (1175 total, 138 thin omitted)
+## Communities (1191 total, 138 thin omitted)
 
 ### Community 0 - "orchestrator: identity_admin"
 Cohesion: 0.18
 Nodes (40): ActorInput, AuthzError, DateTime, EmitError, Error, Option, PgPool, Postgres (+32 more)
 
 ### Community 1 - "memory: lifecycle"
-Cohesion: 0.05
-Nodes (106): Arc, BTreeMap, BTreeSet, DateTime, Default, DigestStats, EmbeddingProvider, Map (+98 more)
+Cohesion: 0.13
+Nodes (37): DateTime, MemoryDigestConfig, Option, PgPool, PgRow, Result, StoragePartitionId, String (+29 more)
 
 ### Community 2 - "experiments"
 Cohesion: 0.05
-Nodes (111): ActionRuleScope, AgentRevisionSimulationVariant, ArtifactDocument, ArtifactRegistry, DateTime, Display, ExperimentCancelRequest, ExperimentCancelResponse (+103 more)
+Nodes (111): ActionRuleScope, AgentRevisionSimulationVariant, ArtifactDocument, ArtifactRegistry, CompletionRequest, DateTime, Display, ExperimentCancelRequest (+103 more)
 
 ### Community 3 - "orchestrator: services"
 Cohesion: 0.05
@@ -1190,11 +1207,11 @@ Nodes (74): Arc, Context, CredentialVault, HandlerError, HashMap, Into, Json, Kn
 
 ### Community 4 - "orchestrator: workflows"
 Cohesion: 0.05
-Nodes (136): ActiveSegment, AssessmentOverride, AssessmentPhase, BTreeSet, ChunkRef, CompletionRequest, CompletionResponse, CoordinationSnapshot (+128 more)
+Nodes (137): ActiveSegment, AssessmentOverride, AssessmentPhase, BTreeSet, ChunkRef, CompletionRequest, CompletionResponse, CoordinationSnapshot (+129 more)
 
 ### Community 5 - "eval: memory_eval"
 Cohesion: 0.06
-Nodes (96): BTreeMap, CorpusManifest, CorpusProfile, DateTime, EmbeddingInput, EvalError, LedgerFact, Option (+88 more)
+Nodes (91): BTreeMap, CorpusManifest, CorpusProfile, DateTime, EmbeddingInput, EvalError, LedgerFact, Option (+83 more)
 
 ### Community 6 - "orchestrator"
 Cohesion: 0.06
@@ -1202,19 +1219,19 @@ Nodes (92): CancelWorkerInput, Event, HandlerError, Into, Option, Result, Serial
 
 ### Community 7 - "brain: pipeline"
 Cohesion: 0.05
-Nodes (82): AgentContext, AgentSkillPolicy, Arc, ContextProcessor, ExcludedItem, Option, PgPool, ProcessorOutput (+74 more)
+Nodes (85): AgentContext, AgentSkillPolicy, Arc, ContextProcessor, ExcludedItem, Option, PgPool, ProcessorOutput (+77 more)
 
 ### Community 8 - "orchestrator: services"
 Cohesion: 0.10
 Nodes (46): AdmittedExperimentRun, AgentRevisionSimulationCompareRequest, AgentRevisionSimulationCompareResponse, AgentRevisionSimulationRunRequest, Arc, Context, ExperimentCancelRequest, ExperimentCancelResponse (+38 more)
 
 ### Community 9 - "security"
-Cohesion: 0.16
-Nodes (25): ActionPolicyEffect, ActionPolicyRule, Default, GlobMatcher, Option, Result, String, ToolPolicyInput (+17 more)
+Cohesion: 0.12
+Nodes (41): ActionPolicyEffect, ActionPolicyRule, Default, GlobMatcher, MoaConfig, Option, Result, Self (+33 more)
 
 ### Community 10 - "knowledge"
-Cohesion: 0.13
-Nodes (20): ContactGroupMembership, ContactGroupTarget, DateTime, DocumentVersion, KnowledgeBlock, KnowledgeChunk, KnowledgeIngestionStep, KnowledgeObject (+12 more)
+Cohesion: 0.06
+Nodes (67): ConnectionStatus, ContactGroup, ContactGroupMembership, ContactGroupTarget, ContactGroupTargetMember, DateTime, DocumentVersion, Error (+59 more)
 
 ### Community 11 - "orchestrator: objects"
 Cohesion: 0.05
@@ -1237,8 +1254,8 @@ Cohesion: 0.09
 Nodes (57): Arc, CheckpointHandle, CheckpointInfo, Client, DateTime, Duration, HashMap, HeaderMap (+49 more)
 
 ### Community 16 - "orchestrator: objects"
-Cohesion: 0.07
-Nodes (55): AttachWorkerResultWaiterInput, AttachWorkerResultWaiterOutput, CleanupRequest, DateTime, HandlerError, Json, ObjectContext, Option (+47 more)
+Cohesion: 0.08
+Nodes (46): AttachWorkerResultWaiterInput, AttachWorkerResultWaiterOutput, CleanupRequest, DateTime, HandlerError, Json, ObjectContext, Option (+38 more)
 
 ### Community 17 - "eval: pentest"
 Cohesion: 0.06
@@ -1250,7 +1267,7 @@ Nodes (79): Option, PgConnection, Result, String, Uuid, Value, ChangelogRecord, 
 
 ### Community 19 - "memory: ingest"
 Cohesion: 0.08
-Nodes (88): ApplyOutcome, ClassifiedFact, Arc, Conflict, ContextMessage, ContradictionDetector, EdgeLabel, EdgeWriteIntent (+80 more)
+Nodes (90): ApplyOutcome, ClassifiedFact, Arc, Conflict, ContextMessage, ContradictionDetector, EdgeLabel, EdgeWriteIntent (+82 more)
 
 ### Community 20 - "hands: adapters"
 Cohesion: 0.13
@@ -1269,12 +1286,12 @@ Cohesion: 0.08
 Nodes (69): ChildReportTool, CoreTurnOutcome, AgentSignalId, BTreeSet, CompletionRequest, DateTime, HandlerError, InputAudience (+61 more)
 
 ### Community 24 - "orchestrator: objects"
-Cohesion: 0.07
-Nodes (24): ActiveSegment, AgentSignalId, CancelScope, DateTime, Option, SessionStatus, String, TurnOutcome (+16 more)
+Cohesion: 0.10
+Nodes (12): ActiveSegment, AgentSignalId, CancelScope, String, Vec, VoState, WorkerId, AutoDelegationRun (+4 more)
 
 ### Community 25 - "memory: ingest"
-Cohesion: 0.11
-Nodes (30): Arc, ContradictionDetector, Debug, EmbeddingProvider, EntityMergeVerifier, EntityResolver, FactExtractor, GraphStore (+22 more)
+Cohesion: 0.16
+Nodes (13): Arc, ContradictionDetector, EmbeddingProvider, EntityMergeVerifier, EntityResolver, FactExtractor, GraphStore, Option (+5 more)
 
 ### Community 26 - "brain: retrieval"
 Cohesion: 0.15
@@ -1290,11 +1307,11 @@ Nodes (69): BackendIntrospection, Citation, ContextChunk, ContextSourceRef, Date
 
 ### Community 29 - "edge"
 Cohesion: 0.08
-Nodes (83): Arc, AuthzCheckError, Bytes, Error, FgaClient, HashMap, HeaderMap, I (+75 more)
+Nodes (81): Arc, AuthzCheckError, Bytes, Error, FgaClient, HashMap, HeaderMap, I (+73 more)
 
 ### Community 30 - "eval: memory_eval"
-Cohesion: 0.20
-Nodes (23): BTreeMap, EntityMergeFixtureRecord, EntityMergeVerifier, ExtractionFixtureRecord, Mutex, NodeIndexRow, Path, Result (+15 more)
+Cohesion: 0.07
+Nodes (52): BTreeMap, EntityMergeFixtureRecord, EntityMergeVerifier, ExtractionFixtureRecord, Into, MemoryExtractionConfig, Mutex, NodeIndexRow (+44 more)
 
 ### Community 31 - "orchestrator: tests"
 Cohesion: 0.09
@@ -1302,19 +1319,19 @@ Nodes (74): ActionRuleScope, ArtifactPublishResponse, Child, Client, EventRecord
 
 ### Community 32 - "agents"
 Cohesion: 0.07
-Nodes (65): AgentInstallationPointer, ActionPolicy, ActionRuleScope, AgentActionPolicy, AgentDefinition, AgentGuardrailPolicy, AgentGuardrailStagePolicy, AgentKnowledgePolicy (+57 more)
+Nodes (62): AgentInstallationPointer, ActionPolicy, ActionRuleScope, AgentActionPolicy, AgentDefinition, AgentGuardrailPolicy, AgentGuardrailStagePolicy, AgentKnowledgePolicy (+54 more)
 
 ### Community 33 - "observability"
 Cohesion: 0.06
 Nodes (65): ActionClass, ActionPolicyEffect, ActionReviewStatus, Duration, MetricsConfig, ModelId, ModelTier, Option (+57 more)
 
 ### Community 34 - "orchestrator: objects"
-Cohesion: 0.06
-Nodes (45): ContextMessage, DateTime, HandlerError, ModelId, Option, R, Result, Self (+37 more)
+Cohesion: 0.08
+Nodes (25): ContextMessage, DateTime, ModelId, Option, SessionId, String, TenantId, TrustedSandboxFileManifestRef (+17 more)
 
 ### Community 35 - "orchestrator: tests"
-Cohesion: 0.10
-Nodes (27): ContactGroupTarget, DateTime, DocumentVersion, FnOnce, KnowledgeBlock, KnowledgeChunk, KnowledgeConnection, KnowledgeConnectionProjection (+19 more)
+Cohesion: 0.09
+Nodes (33): ContactGroup, ContactGroupMembership, ContactGroupTarget, DateTime, DocumentVersion, FnOnce, KnowledgeBlock, KnowledgeChunk (+25 more)
 
 ### Community 36 - "edge: routes"
 Cohesion: 0.07
@@ -1325,8 +1342,8 @@ Cohesion: 0.06
 Nodes (76): DateTime, Default, EdgeLabel, EdgeWriteIntent, GraphError, GraphExpansionHit, HashMap, HashSet (+68 more)
 
 ### Community 38 - "brain: retrieval"
-Cohesion: 0.09
-Nodes (50): AtomicI64, Arc, AtomicUsize, Cache, ContactId, DateTime, Default, Duration (+42 more)
+Cohesion: 0.23
+Nodes (22): ContactId, MemoryScope, PlannedQuery, String, TenantId, cache_eviction_at_capacity_forces_backend_re_miss(), cache_hit_reuses_successful_tenant_retrieval(), cache_invalidation_on_write_version_bump_misses() (+14 more)
 
 ### Community 39 - "knowledge"
 Cohesion: 0.08
@@ -1337,12 +1354,12 @@ Cohesion: 0.10
 Nodes (26): Arc, AtomicU64, Duration, F, Mutex, Option, Self, Span (+18 more)
 
 ### Community 41 - "core: types"
-Cohesion: 0.07
+Cohesion: 0.08
 Nodes (37): AgentContext, AgentPolicySnapshot, CompletionRequest, ContactRef, Duration, EventRecord, HashMap, I (+29 more)
 
 ### Community 42 - "hands: tools"
-Cohesion: 0.06
-Nodes (48): BuiltInTool, ClaimCheck, DateTime, Event, EventFilter, EventRange, EventRecord, HashMap (+40 more)
+Cohesion: 0.13
+Nodes (20): ClaimCheck, DateTime, Event, EventFilter, EventRange, EventRecord, HashMap, Result (+12 more)
 
 ### Community 43 - "skills"
 Cohesion: 0.05
@@ -1366,15 +1383,15 @@ Nodes (45): Arc, Client, Duration, Event, EventRange, EventRecord, FgaClient, Id
 
 ### Community 48 - "workflows"
 Cohesion: 0.09
-Nodes (51): ArtifactRef, BTreeMap, BTreeSet, I, Option, Result, Self, String (+43 more)
+Nodes (51): ArtifactRef, BTreeMap, BTreeSet, I, Option, ProcedureCondition, ProcedureDefinition, ProcedureEdge (+43 more)
 
 ### Community 49 - "auth: providers"
 Cohesion: 0.08
 Nodes (57): create, validate, Cache, DateTime, Err, Executor, FromStr, KeyOwner (+49 more)
 
 ### Community 50 - "hands: tools"
-Cohesion: 0.06
-Nodes (59): ContextLine, CancellationToken, Duration, Error, GlobMatcher, Option, Path, Result (+51 more)
+Cohesion: 0.12
+Nodes (34): ContextLine, Duration, Option, Path, PathBuf, Regex, Result, String (+26 more)
 
 ### Community 51 - "test-support: orchestrator_fixture"
 Cohesion: 0.17
@@ -1389,16 +1406,16 @@ Cohesion: 0.07
 Nodes (72): AgentDefinitionListRequest, AgentDefinitionListResponse, AgentDeploymentListRequest, AgentDeploymentListResponse, AgentDeployRequest, AgentDeployResponse, AgentInstallationListRequest, AgentInstallationListResponse (+64 more)
 
 ### Community 54 - "hands: adapters"
-Cohesion: 0.11
-Nodes (32): Arc, AsRef, Duration, HandHandle, HandProvider, HandSpec, HandStatus, HashMap (+24 more)
+Cohesion: 0.14
+Nodes (20): Arc, Duration, HandProvider, HashMap, LeaseHandle, Path, PathBuf, RwLock (+12 more)
 
 ### Community 55 - "orchestrator: turn"
 Cohesion: 0.06
-Nodes (59): BTreeMap, BTreeSet, CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, Hash, Hasher (+51 more)
+Nodes (60): BTreeMap, BTreeSet, CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, Hash, Hasher (+52 more)
 
 ### Community 56 - "orchestrator: tool_invocation"
-Cohesion: 0.09
-Nodes (58): BTreeSet, ContactId, ContactRef, Event, HandlerError, Option, Result, SessionActorRef (+50 more)
+Cohesion: 0.10
+Nodes (60): BTreeSet, ContactId, ContactRef, Event, HandlerError, Option, Result, SessionActorRef (+52 more)
 
 ### Community 57 - "core: types"
 Cohesion: 0.09
@@ -1421,12 +1438,12 @@ Cohesion: 0.36
 Nodes (11): Bytes, Method, Option, RouteTranslation, TenantId, Uri, agent_public_routes_translate_to_restate_handlers(), authenticated_agent_session_route_translates_to_session_store() (+3 more)
 
 ### Community 62 - "eval: memory_eval"
-Cohesion: 0.08
-Nodes (34): CachedEmbeddingProvider, BTreeMap, CachedEmbeddingFixture, CorpusManifest, CorpusProfile, EmbeddingInput, EmbeddingProvider, EntityMergeVerifier (+26 more)
+Cohesion: 0.11
+Nodes (17): CorpusManifest, CorpusProfile, CostLedger, EmbeddingProvider, EntityMergeVerifier, FactExtractor, ProviderProvenance, SharedCostLedger (+9 more)
 
 ### Community 63 - "core: types"
-Cohesion: 0.08
-Nodes (36): ActionClass, ActionPolicyEffect, ClaimCheck, Duration, Into, Option, RiskLevel, SandboxFile (+28 more)
+Cohesion: 0.12
+Nodes (19): ClaimCheck, Duration, Into, Option, SandboxFile, Self, SessionId, String (+11 more)
 
 ### Community 64 - "orchestrator: workflows"
 Cohesion: 0.09
@@ -1470,7 +1487,7 @@ Nodes (48): CachedHybridRetriever, ContactId, EmbeddingProvider, LineageHandle, 
 
 ### Community 74 - "eval: memory_eval"
 Cohesion: 0.11
-Nodes (49): CorpusProfile, DateTime, Item, Iterator, Option, Path, PiiClass, ProbeType (+41 more)
+Nodes (48): CorpusProfile, DateTime, Item, Iterator, Option, Path, PiiClass, ProbeType (+40 more)
 
 ### Community 75 - "experiments"
 Cohesion: 0.11
@@ -1481,12 +1498,12 @@ Cohesion: 0.07
 Nodes (45): DateTime, ExecutionTurnOutcome, Option, SessionTurnWaiter, String, Utc, Vec, VecDeque (+37 more)
 
 ### Community 77 - "artifacts"
-Cohesion: 0.06
-Nodes (88): ActionDefinition, ConnectorDefinition, ActionPolicy, AgentDefinition, ArtifactKind, ArtifactRef, ExperimentBudget, ExperimentPlanDefinition (+80 more)
+Cohesion: 0.07
+Nodes (79): ActionDefinition, ConnectorDefinition, ActionPolicy, ArtifactKind, ArtifactRef, ExperimentBudget, ExperimentPlanDefinition, ExperimentSimulationDefinition (+71 more)
 
 ### Community 78 - "brain: retrieval"
-Cohesion: 0.12
-Nodes (43): BTreeSet, DateTime, Default, From, MemoryRankingConfig, MemoryRankingWeights, MemoryScope, NodeIndexRow (+35 more)
+Cohesion: 0.17
+Nodes (33): BTreeSet, DateTime, MemoryScope, NodeIndexRow, Option, String, Utc, Value (+25 more)
 
 ### Community 79 - "experiments: tests"
 Cohesion: 0.15
@@ -1513,16 +1530,16 @@ Cohesion: 0.09
 Nodes (39): ApplySourceSelectionRequest, Bytes, Client, CreateLinkTokenRequest, DateTime, ExchangePublicTokenRequest, HeaderMap, Into (+31 more)
 
 ### Community 85 - "memory: ingest"
-Cohesion: 0.09
-Nodes (60): Arc, AtomicUsize, ContactId, DateTime, EmbeddingProvider, IngestCtx, Into, NodeIndexRow (+52 more)
+Cohesion: 0.08
+Nodes (61): Arc, AtomicUsize, ContactId, DateTime, EmbeddingProvider, IngestCtx, Into, NodeIndexRow (+53 more)
 
 ### Community 86 - "orchestrator: tests"
-Cohesion: 0.15
-Nodes (41): Display, KnowledgeProviderWebhookRequest, KnowledgeRepository, KnowledgeService, exchange_stores_only_credential_reference_on_connection(), fake_ingestion_runner(), fake_prepared_sync_run(), fixture_connection() (+33 more)
+Cohesion: 0.13
+Nodes (44): Display, KnowledgeConnection, KnowledgeProviderWebhookRequest, KnowledgeRepository, KnowledgeSyncStatusResponse, KnowledgeService, assert_sync_status_counters(), exchange_stores_only_credential_reference_on_connection() (+36 more)
 
 ### Community 87 - "orchestrator: tests"
-Cohesion: 0.06
-Nodes (71): Child, Option, OrchestratorPorts, Result, String, Identity, RequestBuilder, Result (+63 more)
+Cohesion: 0.08
+Nodes (59): Result, ArtifactPublishResponse, Child, Client, Identity, Option, OrchestratorPorts, Path (+51 more)
 
 ### Community 88 - "auth: auth0"
 Cohesion: 0.12
@@ -1533,8 +1550,8 @@ Cohesion: 0.27
 Nodes (23): Into, Value, Vec, CacheScores, CostScores, float_number(), LatencyScores, MemoryScores (+15 more)
 
 ### Community 90 - "eval: memory_eval"
-Cohesion: 0.10
-Nodes (34): Arc, CompletionRequest, Into, JsonResponseFormat, LLMProvider, Option, ProbeType, Result (+26 more)
+Cohesion: 0.09
+Nodes (38): EvalError, Into, String, Arc, CompletionRequest, Into, JsonResponseFormat, LLMProvider (+30 more)
 
 ### Community 91 - "orchestrator: services"
 Cohesion: 0.11
@@ -1546,7 +1563,7 @@ Nodes (33): Arc, Credential, CredentialVault, DateTime, Duration, HashMap, Into,
 
 ### Community 93 - "session: store"
 Cohesion: 0.05
-Nodes (47): AgentContext, ClaimCheck, ContactId, ContactRef, ContextSnapshot, DateTime, Event, EventFilter (+39 more)
+Nodes (49): AgentContext, ClaimCheck, ContactId, ContactRef, ContextSnapshot, DateTime, Event, EventFilter (+41 more)
 
 ### Community 94 - "memory: graph"
 Cohesion: 0.09
@@ -1573,12 +1590,12 @@ Cohesion: 0.10
 Nodes (50): ContactSessionAuthorizationRequest, ContactSessionAuthorizationResponse, ContactSessionChannelChangeRequest, ContactSessionChannelChangeResponse, ContactSessionInitRequest, ContactSessionInitResponse, ContactSessionProgressRequest, ContactSessionPromotionRequest (+42 more)
 
 ### Community 100 - "hands: adapters"
-Cohesion: 0.09
-Nodes (38): build_url(), expect_success(), expect_success_json(), http_error(), parse_retry_after(), required_string_field(), Client, Duration (+30 more)
+Cohesion: 0.11
+Nodes (27): Client, Duration, HandHandle, HandProvider, HandSpec, HandStatus, HeaderMap, Into (+19 more)
 
 ### Community 101 - "lineage: sink"
-Cohesion: 0.12
-Nodes (37): DateTime, Error, Option, Path, PgPool, String, Utc, Uuid (+29 more)
+Cohesion: 0.14
+Nodes (33): DateTime, Option, Path, PgPool, String, Utc, Uuid, Value (+25 more)
 
 ### Community 102 - "contacts"
 Cohesion: 0.12
@@ -1589,16 +1606,16 @@ Cohesion: 0.16
 Nodes (47): AgentRevisionSimulationVariant, BTreeMap, Option, SessionId, String, TenantId, Uuid, Value (+39 more)
 
 ### Community 104 - "orchestrator: runtime"
-Cohesion: 0.11
-Nodes (46): Arc, Endpoint, PgPool, PostgresSessionStore, ProviderRegistry, ToolRouter, EndpointBuilder, bind_action_policy() (+38 more)
+Cohesion: 0.09
+Nodes (55): Arc, Endpoint, PgPool, PostgresSessionStore, ProviderRegistry, ToolRouter, EndpointBuilder, bind_action_policy() (+47 more)
 
 ### Community 105 - "skills"
 Cohesion: 0.12
 Nodes (31): ActionRuleScope, ArtifactFile, DateTime, MemoryScope, Option, PgConnection, PgPool, Result (+23 more)
 
 ### Community 106 - "brain: pipeline"
-Cohesion: 0.07
-Nodes (44): apply_tier3(), Tier3Summary, Cow, CompactionConfig, CompletionRequest, Event, EventRecord, LLMProvider (+36 more)
+Cohesion: 0.14
+Nodes (29): Cow, CompactionConfig, CompletionRequest, Event, EventRecord, LLMProvider, ModelTier, Option (+21 more)
 
 ### Community 107 - "hands: adapters"
 Cohesion: 0.12
@@ -1645,16 +1662,16 @@ Cohesion: 0.10
 Nodes (44): CacheDailyMetricRow, ContactId, DateTime, EventType, ExperimentRunTrendPoint, ExperimentScoreRunRef, ExperimentStatusCount, ExperimentTrialTrendPoint (+36 more)
 
 ### Community 118 - "brain: pipeline"
-Cohesion: 0.13
-Nodes (19): Arc, ContextProcessor, EmbeddingProvider, GraphStore, HashMap, LineageHandle, MemoryScope, MoaConfig (+11 more)
+Cohesion: 0.10
+Nodes (28): Arc, AtomicUsize, ContextProcessor, EmbeddingProvider, GraphStore, HashMap, LineageHandle, MemoryScope (+20 more)
 
 ### Community 119 - "orchestrator: workflows"
 Cohesion: 0.12
 Nodes (36): Error, FailureClassification, From, HandlerError, HashSet, Json, KnowledgeConnection, KnowledgeServiceError (+28 more)
 
 ### Community 120 - "orchestrator: tests"
-Cohesion: 0.14
-Nodes (39): ActionPolicyEffect, ActionReviewDecisionKind, ActionReviewSummary, Error, EventRecord, Identity, IsolatedTest, Option (+31 more)
+Cohesion: 0.12
+Nodes (44): ActionPolicyEffect, ActionReviewDecisionKind, ActionReviewSummary, Error, EventRecord, Identity, IsolatedTest, Option (+36 more)
 
 ### Community 121 - "runtime-store"
 Cohesion: 0.18
@@ -1682,11 +1699,11 @@ Nodes (63): AppState, ContactSessionMessageRequest, ContactSessionMessageRespons
 
 ### Community 127 - "memory: ingest"
 Cohesion: 0.08
-Nodes (59): ContactId, DateTime, Option, PiiClass, PiiSpan, Result, SessionId, String (+51 more)
+Nodes (58): ContactId, DateTime, Option, PiiClass, PiiSpan, Result, SessionId, String (+50 more)
 
 ### Community 128 - "orchestrator: runtime"
-Cohesion: 0.11
-Nodes (36): Arc, AwakeableResolver, Channel, ChannelAdapter, EmbeddingProvider, FgaClient, GraphMemoryRetriever, HashMap (+28 more)
+Cohesion: 0.10
+Nodes (38): Arc, AwakeableResolver, Channel, ChannelAdapter, EmbeddingProvider, FgaClient, GraphMemoryRetriever, HashMap (+30 more)
 
 ### Community 129 - "orchestrator: services"
 Cohesion: 0.10
@@ -1697,8 +1714,8 @@ Cohesion: 0.20
 Nodes (18): BackfillStats, DecayStats, DigestStats, Error, HandlerError, Json, MergeStats, Result (+10 more)
 
 ### Community 131 - "orchestrator: tests"
-Cohesion: 0.11
-Nodes (26): Arc, HandlerError, HashSet, Into, PostgresKnowledgeRepository, Self, String, SyncRunStatus (+18 more)
+Cohesion: 0.10
+Nodes (28): Arc, HandlerError, HashSet, Into, KnowledgeServiceError, PageIngestionReport, PostgresKnowledgeRepository, Self (+20 more)
 
 ### Community 132 - "orchestrator: tests"
 Cohesion: 0.14
@@ -1709,24 +1726,24 @@ Cohesion: 0.10
 Nodes (28): Client, Duration, Event, EventRange, EventRecord, Identity, Into, Option (+20 more)
 
 ### Community 134 - "brain: tests"
-Cohesion: 0.10
-Nodes (34): Attributes, Arc, CompletionRequest, ContactId, ContactRef, Context, EventRecord, Mutex (+26 more)
+Cohesion: 0.16
+Nodes (19): Attributes, Arc, Context, EventRecord, Mutex, S, String, ToolOutput (+11 more)
 
 ### Community 135 - "hands: core"
 Cohesion: 0.09
-Nodes (27): default_budget_for_tool(), default_local_prompt_schemas_keep_structured_hand_tool_guidance(), default_local_uses_sandbox_descriptors_as_source_of_truth(), RegisteredTool, tool_requires_sandbox_flags_hand_tools_only(), ToolExecution, ToolRegistry, Arc (+19 more)
+Nodes (23): default_budget_for_tool(), default_local_prompt_schemas_keep_structured_hand_tool_guidance(), RegisteredTool, ToolExecution, ToolRegistry, Arc, BuiltInTool, Default (+15 more)
 
 ### Community 136 - "brain: pipeline"
-Cohesion: 0.10
-Nodes (27): Box, ContextProcessor, ContextSnapshotConfig, MoaError, ModelCapabilities, Option, ProcessorOutput, Result (+19 more)
+Cohesion: 0.09
+Nodes (28): Box, ContextProcessor, ContextSnapshotConfig, MoaError, ModelCapabilities, Option, ProcessorOutput, Result (+20 more)
 
 ### Community 137 - "core: types"
 Cohesion: 0.10
 Nodes (31): CancellationToken, ContextMessage, Debug, Error, Formatter, HashMap, Into, JoinHandle (+23 more)
 
 ### Community 138 - "eval: tests"
-Cohesion: 0.09
-Nodes (32): TestResult, DateTime, EmbeddingProvider, GoldNodeRecord, IngestCtx, LedgerFact, PgPool, RlsContext (+24 more)
+Cohesion: 0.11
+Nodes (29): DateTime, EmbeddingProvider, GoldNodeRecord, IngestCtx, LedgerFact, PgPool, RlsContext, ScopeTier (+21 more)
 
 ### Community 139 - "orchestrator: services"
 Cohesion: 0.10
@@ -1737,12 +1754,12 @@ Cohesion: 0.14
 Nodes (42): ApprovalClaims, BTreeMap, Display, Error, HandlerError, Option, Path, PathBuf (+34 more)
 
 ### Community 141 - "orchestrator: tests"
-Cohesion: 0.10
-Nodes (14): ApplySourceSelectionRequest, CreateLinkTokenRequest, Default, LinkedIntegrationProvider, LinkToken, ListChangedRecordsRequest, Mutex, RecordPage (+6 more)
+Cohesion: 0.08
+Nodes (22): ApplySourceSelectionRequest, CreateLinkTokenRequest, Default, EmbeddingProvider, KnowledgeIngestionRunner, LinkedIntegrationProvider, LinkToken, Mutex (+14 more)
 
 ### Community 142 - "eval: memory_eval"
-Cohesion: 0.16
-Nodes (25): MetricSummary, Option, ProbeType, ScopeMatchBreakdown, aggregate_metrics(), discount(), observation_mrr(), observation_ndcg_at_4() (+17 more)
+Cohesion: 0.15
+Nodes (27): ClusterObservation, MetricSummary, Option, ProbeType, ScopeMatchBreakdown, aggregate_metrics(), discount(), observation_mrr() (+19 more)
 
 ### Community 143 - "hands: core"
 Cohesion: 0.15
@@ -1761,8 +1778,8 @@ Cohesion: 0.12
 Nodes (30): Arc, HandHandle, HandProvider, HandSpec, HandStatus, IdempotencyClass, MoaError, Mutex (+22 more)
 
 ### Community 147 - "messaging"
-Cohesion: 0.11
-Nodes (31): DateTime, HashMap, InboundMessage, MoaError, RwLock, Sender, Utc, SlackAppMentionEvent (+23 more)
+Cohesion: 0.10
+Nodes (42): ChannelRef, DateTime, From, InboundMessage, MoaError, Option, String, Utc (+34 more)
 
 ### Community 148 - "observability"
 Cohesion: 0.10
@@ -1777,8 +1794,8 @@ Cohesion: 0.14
 Nodes (34): Arc, EmbeddingProvider, GraphStore, HandlerError, MemoryRetrieveDebugRequest, MemoryRetrieveDebugResponse, MemoryScope, MemorySearchRequest (+26 more)
 
 ### Community 151 - "orchestrator: workflows"
-Cohesion: 0.17
-Nodes (40): HandlerError, Identity, Result, SessionId, TenantId, Uuid, Vec, WorkflowContext (+32 more)
+Cohesion: 0.14
+Nodes (59): ActionRuleScope, ArtifactRegistry, ArtifactRun, HandlerError, Identity, Option, ProcedureDefinition, ProcedureNodeRequest (+51 more)
 
 ### Community 152 - "orchestrator: workflows"
 Cohesion: 0.16
@@ -1789,24 +1806,24 @@ Cohesion: 0.14
 Nodes (36): Child, Client, Drop, IngestApplyReport, OrchestratorPorts, PgPool, Result, Self (+28 more)
 
 ### Community 154 - "scoring"
-Cohesion: 0.17
-Nodes (40): ActionRuleScope, Option, PgConnection, PgPool, PgRow, Result, Self, String (+32 more)
+Cohesion: 0.13
+Nodes (47): ExperimentCompareRequest, ExperimentCompareResponse, ExperimentScoresRequest, ExperimentScoresResponse, ActionRuleScope, Option, PgConnection, PgPool (+39 more)
 
 ### Community 155 - "artifacts"
-Cohesion: 0.11
-Nodes (34): ArtifactDocument, ArtifactRef, Default, ExperimentBudget, ExperimentSimulationDefinition, ExperimentTargetKind, ExperimentTargetVariant, Option (+26 more)
+Cohesion: 0.10
+Nodes (36): ArtifactDocument, ArtifactRef, Default, ExperimentBudget, ExperimentSimulationDefinition, ExperimentTargetKind, ExperimentTargetVariant, Option (+28 more)
 
 ### Community 156 - "brain: pipeline"
-Cohesion: 0.13
-Nodes (32): AgentContext, AgentKnowledgePolicy, AtomicUsize, ContactVerificationState, ModelCapabilities, Send, SessionMeta, Sync (+24 more)
+Cohesion: 0.11
+Nodes (37): AgentContext, AgentKnowledgePolicy, ContactVerificationState, ContextMessage, ModelCapabilities, PiiClass, ProcessorOutput, RetrievalScopePlan (+29 more)
 
 ### Community 157 - "core: types"
 Cohesion: 0.07
 Nodes (32): ActionReviewField, ActionReviewFileDiff, DateTime, Option, SessionActorRef, SessionId, String, TenantId (+24 more)
 
 ### Community 158 - "knowledge: parser"
-Cohesion: 0.14
-Nodes (39): String, DocumentElement, DocumentElementKind, DocumentParser, Option, ParsedDocument, ParseInput, Result (+31 more)
+Cohesion: 0.15
+Nodes (38): String, DocumentElement, DocumentElementKind, DocumentParser, Option, ParsedDocument, ParseInput, Result (+30 more)
 
 ### Community 159 - "memory: pii"
 Cohesion: 0.10
@@ -1821,28 +1838,28 @@ Cohesion: 0.09
 Nodes (31): Arc, ChunkingConfig, EmbeddingProvider, HashSet, KnowledgeChunkingConfig, KnowledgeServiceError, KnowledgeSyncRun, MoaConfig (+23 more)
 
 ### Community 162 - "orchestrator: services"
-Cohesion: 0.09
-Nodes (23): AppendEventRequest, AppendExperienceAttributionsRequest, AppendExperienceRecordRequest, AppendLearningCandidateRequest, CompleteSegmentRequest, CreateSegmentRequest, ExperienceRecord, GetLearningCandidateRequest (+15 more)
+Cohesion: 0.06
+Nodes (44): AppendEventRequest, AppendExperienceAttributionsRequest, AppendExperienceRecordRequest, AppendLearningCandidateRequest, CompleteSegmentRequest, CreateSegmentRequest, EventRecord, ExperienceAttribution (+36 more)
 
 ### Community 163 - "orchestrator: workflows"
-Cohesion: 0.08
-Nodes (44): ActionRuleScope, ExperimentTrialRecord, HandlerError, Identity, IdentityType, Json, ModelId, NewExperimentTrial (+36 more)
+Cohesion: 0.09
+Nodes (41): ActionRuleScope, ExperimentTrialRecord, HandlerError, Identity, IdentityType, Json, ModelId, NewExperimentTrial (+33 more)
 
 ### Community 164 - "orchestrator: tests"
 Cohesion: 0.08
-Nodes (34): Arc, BuiltInTool, EventRecord, IdempotencyClass, Option, Result, SandboxFile, Self (+26 more)
+Nodes (33): Arc, BuiltInTool, EventRecord, IdempotencyClass, Option, Result, SandboxFile, Self (+25 more)
 
 ### Community 165 - "providers: tests"
 Cohesion: 0.08
 Nodes (35): Option, String, MockServer, String, Value, Vec, Option, String (+27 more)
 
 ### Community 166 - "eval: long_conversation"
-Cohesion: 0.16
-Nodes (39): AgentConfig, AgentEnvironment, EngineOptions, EvalResult, LongSessionInterleaving, LongTestCase, Map, MoaConfig (+31 more)
+Cohesion: 0.14
+Nodes (43): AgentConfig, AgentEnvironment, EngineOptions, EvalResult, EvalScore, EvalScoreValue, LongSessionInterleaving, LongTestCase (+35 more)
 
 ### Community 167 - "brain: pipeline"
-Cohesion: 0.05
-Nodes (71): Arc, ContextMessage, ContextProcessor, DateTime, Default, ModelCapabilities, Option, Path (+63 more)
+Cohesion: 0.11
+Nodes (30): Arc, ContextMessage, ContextProcessor, DateTime, Default, ModelCapabilities, Option, Path (+22 more)
 
 ### Community 168 - "core: wire"
 Cohesion: 0.18
@@ -1850,7 +1867,7 @@ Nodes (39): DateTime, KnowledgeObjectChunkInspectView, KnowledgeQueryTraceStage,
 
 ### Community 169 - "eval: memory_eval"
 Cohesion: 0.08
-Nodes (23): BootstrapConfig, CostError, CostLedger, EvalLane, Fn, GraphExpansionEvalPolicy, Into, MemoryEvalExtractorMode (+15 more)
+Nodes (14): BootstrapConfig, EvalLane, Fn, GraphExpansionEvalPolicy, Into, MemoryEvalExtractorMode, Path, PathBuf (+6 more)
 
 ### Community 170 - "eval: tests"
 Cohesion: 0.16
@@ -1858,11 +1875,11 @@ Nodes (15): CompletionRequest, CompletionStream, LLMProvider, ModelCapabilities,
 
 ### Community 171 - "knowledge"
 Cohesion: 0.09
-Nodes (36): Arc, ChunkingConfig, E, EdgeLabel, EdgeWriteIntent, Error, G, GraphEdgeUpsert (+28 more)
+Nodes (35): Arc, ChunkingConfig, E, EdgeLabel, EdgeWriteIntent, Error, G, GraphEdgeUpsert (+27 more)
 
 ### Community 172 - "knowledge"
 Cohesion: 0.17
-Nodes (23): DocumentVersion, FailureClassification, HashSet, KnowledgeChunk, KnowledgeObject, KnowledgeSyncCounters, Option, ParsedDocument (+15 more)
+Nodes (24): DocumentVersion, FailureClassification, HashSet, KnowledgeChunk, KnowledgeGraphDelta, KnowledgeObject, KnowledgeSyncCounters, Option (+16 more)
 
 ### Community 173 - "lineage: audit"
 Cohesion: 0.15
@@ -1889,8 +1906,8 @@ Cohesion: 0.19
 Nodes (39): ActorInput, AuthzError, DateTime, EmitError, Error, Option, PgPool, Postgres (+31 more)
 
 ### Community 179 - "orchestrator: services"
-Cohesion: 0.11
-Nodes (36): ActionRuleScope, Context, HandlerError, Json, Option, RequestHeaders, Result, Skill (+28 more)
+Cohesion: 0.08
+Nodes (51): ActionRuleScope, Context, HandlerError, Json, Option, ProcedureCancelResponse, ProcedureReviewDecisionRequest, ProcedureReviewDecisionResponse (+43 more)
 
 ### Community 180 - "orchestrator: workflows"
 Cohesion: 0.10
@@ -1925,8 +1942,8 @@ Cohesion: 0.15
 Nodes (28): DateTime, E, EdgeLabel, EdgeWriteIntent, GraphError, GraphExpansionHit, GraphStore, NodeIndexRow (+20 more)
 
 ### Community 188 - "memory: ingest"
-Cohesion: 0.09
-Nodes (42): AtomicUsize, Cache, ConfiguredReranker, Duration, LlmChatClient, MoaConfig, NodeIndexRow, Option (+34 more)
+Cohesion: 0.11
+Nodes (24): AtomicUsize, ConfiguredReranker, LlmChatClient, MoaConfig, Reranker, Self, Send, Sync (+16 more)
 
 ### Community 189 - "memory: vector"
 Cohesion: 0.16
@@ -1945,12 +1962,12 @@ Cohesion: 0.13
 Nodes (29): CheckpointCleanupResponse, CheckpointCreateRequest, CheckpointCreateResponse, CheckpointListResponse, CheckpointRollbackRequest, CheckpointRollbackResponse, Context, HandlerError (+21 more)
 
 ### Community 193 - "eval: memory_eval"
-Cohesion: 0.20
-Nodes (27): ConsolidationOutcome, EntityFragmentationCounts, ExtractionPrecisionCounts, GoldResolutionReport, HashMap, LedgerFact, PgPool, ScopeTier (+19 more)
+Cohesion: 0.15
+Nodes (41): ConsolidationOutcome, CostError, DateTime, EntityFragmentationCounts, ExtractionPrecisionCounts, GoldResolutionReport, HashMap, LedgerFact (+33 more)
 
 ### Community 194 - "brain: pipeline"
-Cohesion: 0.16
-Nodes (32): ChildSignalKind, CompiledRecordMessage, EventRecord, HashMap, HashSet, InputAudience, Option, Result (+24 more)
+Cohesion: 0.08
+Nodes (40): ChildSignalKind, CompiledRecordMessage, ContextMessage, EventRecord, HashMap, HashSet, InputAudience, Option (+32 more)
 
 ### Community 195 - "eval: long_conversation"
 Cohesion: 0.09
@@ -1958,11 +1975,11 @@ Nodes (27): Arc, DateTime, EventFilter, EventRange, EventRecord, I, Mutex, Optio
 
 ### Community 196 - "hands: tools"
 Cohesion: 0.10
-Nodes (32): IdempotencyClass, MoaError, Option, Self, ToolDefinition, ToolDiffStrategy, ToolInputShape, ToolPolicySpec (+24 more)
+Nodes (34): default_local_uses_sandbox_descriptors_as_source_of_truth(), tool_requires_sandbox_flags_hand_tools_only(), IdempotencyClass, Option, Self, ToolDefinition, ToolDiffStrategy, ToolInputShape (+26 more)
 
 ### Community 197 - "knowledge: providers"
-Cohesion: 0.09
-Nodes (28): Bytes, Client, CreateLinkTokenRequest, ExchangePublicTokenRequest, HeaderMap, Into, LinkedAccount, LinkedIntegrationProvider (+20 more)
+Cohesion: 0.10
+Nodes (27): Bytes, Client, CreateLinkTokenRequest, ExchangePublicTokenRequest, HeaderMap, Into, LinkedAccount, LinkedIntegrationProvider (+19 more)
 
 ### Community 198 - "messaging"
 Cohesion: 0.19
@@ -2005,8 +2022,8 @@ Cohesion: 0.14
 Nodes (21): PgConnection, PgPool, Result, RlsContext, ScopedConn, Self, String, Uuid (+13 more)
 
 ### Community 208 - "orchestrator: services"
-Cohesion: 0.11
-Nodes (34): AgentContext, Arc, EventRecord, IdempotencyClass, Option, RunRetryPolicy, Self, Send (+26 more)
+Cohesion: 0.13
+Nodes (30): AgentContext, Arc, EventRecord, Option, Self, Send, Sync, ToolCallId (+22 more)
 
 ### Community 209 - "orchestrator: tests"
 Cohesion: 0.13
@@ -2081,8 +2098,8 @@ Cohesion: 0.14
 Nodes (18): ArtifactKind, D, Display, Error, Formatter, FromStr, Into, Ok (+10 more)
 
 ### Community 227 - "brain: pipeline"
-Cohesion: 0.12
-Nodes (24): ContactId, DateTime, EdgeLabel, EdgeWriteIntent, GraphExpansionHit, NodeIndexRow, NodeLabel, NodeWriteIntent (+16 more)
+Cohesion: 0.13
+Nodes (22): ContactId, DateTime, EdgeLabel, EdgeWriteIntent, GraphExpansionHit, NodeIndexRow, NodeLabel, NodeWriteIntent (+14 more)
 
 ### Community 228 - "core: types"
 Cohesion: 0.12
@@ -2105,8 +2122,8 @@ Cohesion: 0.10
 Nodes (28): Arc, Duration, EventRecord, Instant, JoinHandle, LoadTestOptions, LoadTestReport, Option (+20 more)
 
 ### Community 233 - "memory: ingest"
-Cohesion: 0.18
-Nodes (34): DateTime, Option, PgPool, ScopedConn, Self, String, Utc, Uuid (+26 more)
+Cohesion: 0.17
+Nodes (25): Arc, DateTime, EmbeddingProvider, Mutex, Option, PgPool, ScopedConn, String (+17 more)
 
 ### Community 234 - "messaging"
 Cohesion: 0.13
@@ -2121,8 +2138,8 @@ Cohesion: 0.15
 Nodes (32): Arc, EventRecord, ExperienceRecord, HandlerError, Into, Json, MoaConfig, MoaResult (+24 more)
 
 ### Community 237 - "session"
-Cohesion: 0.05
-Nodes (66): AttachmentObjectStore, Arc, BlobStore, ClaimCheck, Error, Event, MoaConfig, MoaError (+58 more)
+Cohesion: 0.12
+Nodes (25): AttachmentObjectStore, Arc, BlobStore, CacheDailyMetric, LearningCandidateStatus, LearningCandidateSummary, MoaConfig, Option (+17 more)
 
 ### Community 238 - "providers: adapters"
 Cohesion: 0.14
@@ -2145,16 +2162,16 @@ Cohesion: 0.13
 Nodes (20): Arc, AuthzError, Client, Option, Response, Result, Self, String (+12 more)
 
 ### Community 243 - "brain: pipeline"
-Cohesion: 0.10
-Nodes (31): CompiledRecordMessage, Vec, CompiledHistory, ContextSnapshot, Option, Result, CompiledRecordMessage, ContextMessage (+23 more)
+Cohesion: 0.09
+Nodes (33): CompiledRecordMessage, Vec, CompiledHistory, ContextSnapshot, Option, Result, CompiledHistory, CompiledRecordMessage (+25 more)
 
 ### Community 244 - "brain: planning"
 Cohesion: 0.19
 Nodes (27): Default, IntoIterator, Item, NerSpan, Self, String, Vec, NerLabel (+19 more)
 
 ### Community 245 - "eval: memory_eval"
-Cohesion: 0.14
-Nodes (31): BTreeSet, ContactId, FactExtractor, PiiClass, ScopeTier, UserId, candidate_match_tokens(), contact_id_from_user_id() (+23 more)
+Cohesion: 0.13
+Nodes (36): BTreeSet, ContactId, FactExtractor, Option, ScopeTier, UserId, Value, candidate_match_tokens() (+28 more)
 
 ### Community 246 - "hands: tests"
 Cohesion: 0.08
@@ -2186,18 +2203,18 @@ Nodes (32): ActionRuleScope, DateTime, ExperimentTrialRecord, ExperimentTrialRun
 
 ### Community 253 - "orchestrator: tests"
 Cohesion: 0.06
-Nodes (51): Child, Client, EventRecord, Identity, Option, OrchestratorPorts, Result, SessionId (+43 more)
+Nodes (56): Child, OrchestratorPorts, Result, Child, Client, EventRecord, Identity, Option (+48 more)
 
 ### Community 254 - "xtask"
 Cohesion: 0.21
 Nodes (26): Path, PathBuf, Result, Vec, Finding, LocBudgetReport, ReverseDependencyReport, ArchitectureReport (+18 more)
 
 ### Community 255 - "core: types"
-Cohesion: 0.09
-Nodes (40): AgentPath, CompletionResponse, String, ToolCallId, ToolOutput, TurnOutcome, WorkerId, WorkerTerminalResult (+32 more)
+Cohesion: 0.08
+Nodes (42): AgentPath, CompletionResponse, String, ToolCallId, ToolOutput, TurnOutcome, WorkerId, WorkerState (+34 more)
 
 ### Community 256 - "providers: adapters"
-Cohesion: 0.11
+Cohesion: 0.09
 Nodes (30): ApiError, CompletionContent, CompletionResponse, CreateResponse, Instant, LLMSpanRecorder, MoaError, ModelId (+22 more)
 
 ### Community 257 - "db"
@@ -2217,8 +2234,8 @@ Cohesion: 0.12
 Nodes (29): Auth0AuthProvider, Option, String, Uuid, RsaPrivateKey, String, Uuid, MockServer (+21 more)
 
 ### Community 261 - "knowledge: tests"
-Cohesion: 0.14
-Nodes (31): ChildSignalKind, Identity, MarkWorkerChildTerminalInput, UnreadChildSignal, WorkerChildRef, WorkerState, ParentResumePolicy, auto_delegation_bundle_completes_with_real_failed_and_cancelled_terminals() (+23 more)
+Cohesion: 0.17
+Nodes (16): ChildSignalKind, Identity, UnreadChildSignal, ParentResumePolicy, clear_resume_on_outcome_drains_only_dispatch_snapshot(), resume_budget_window_resets_after_elapsed_window(), resume_gate_arms_only_when_idle_eligible_and_under_budget(), resume_gate_does_not_rearm_once_a_resume_turn_is_active() (+8 more)
 
 ### Community 262 - "core: config"
 Cohesion: 0.12
@@ -2226,7 +2243,7 @@ Nodes (20): BudgetConfig, CompactionConfig, ContextSnapshotConfig, progress_narr
 
 ### Community 263 - "brain: pipeline"
 Cohesion: 0.11
-Nodes (21): Arc, CompactionConfig, CompiledHistory, ContextMessage, ContextProcessor, ContextSnapshotConfig, DeduplicationStats, EventRecord (+13 more)
+Nodes (20): Arc, CompactionConfig, ContextMessage, ContextProcessor, ContextSnapshotConfig, DeduplicationStats, EventRecord, LLMProvider (+12 more)
 
 ### Community 264 - "core: types"
 Cohesion: 0.12
@@ -2261,8 +2278,8 @@ Cohesion: 0.10
 Nodes (38): ActionRuleScope, Arc, LearningCandidate, LearningCandidateReviewAction, LearningCandidateReviewRequest, LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateType (+30 more)
 
 ### Community 272 - "providers: embedding"
-Cohesion: 0.16
-Nodes (27): Arc, EmbeddingProvider, MoaConfig, Option, Result, Self, String, EmbedderConstructionRole (+19 more)
+Cohesion: 0.15
+Nodes (28): Arc, EmbeddingProvider, MoaConfig, Option, Result, Self, String, String (+20 more)
 
 ### Community 273 - "session: tests"
 Cohesion: 0.16
@@ -2285,24 +2302,24 @@ Cohesion: 0.11
 Nodes (24): CohereAssistantMessage, CohereChatContent, CohereChatMessage, Client, Error, Into, LlmChatError, Result (+16 more)
 
 ### Community 278 - "providers: core"
-Cohesion: 0.13
-Nodes (21): cached_cost_calculation_uses_cache_write_rate(), calculate_cost(), calculate_cost_with_cached(), cost_calculation_correct(), has_meaningful_output(), llm_span_name(), LLMSpanAttributes, LLMSpanRecorder (+13 more)
+Cohesion: 0.12
+Nodes (23): cached_cost_calculation_uses_cache_write_rate(), calculate_cost(), calculate_cost_with_cached(), cost_calculation_correct(), has_meaningful_output(), llm_span_name(), LLMSpanAttributes, LLMSpanRecorder (+15 more)
 
 ### Community 279 - "hands: core"
-Cohesion: 0.17
-Nodes (20): append_footer(), artifact_storage_footer(), count_lines(), estimate_tokens(), format_artifact_summary(), inline_artifact_preview_budget(), ToolRouter, truncate_text_for_budget() (+12 more)
+Cohesion: 0.13
+Nodes (23): append_footer(), artifact_storage_footer(), count_lines(), estimate_tokens(), format_artifact_summary(), inline_artifact_preview_budget(), ToolRouter, truncate_text_for_budget() (+15 more)
 
 ### Community 280 - "brain: harness"
-Cohesion: 0.09
-Nodes (55): Arc, CancellationToken, EventRecord, Option, Result, RuntimeEvent, Sender, SessionId (+47 more)
+Cohesion: 0.19
+Nodes (30): Arc, CancellationToken, EventRecord, Option, Result, RuntimeEvent, Sender, SessionId (+22 more)
 
 ### Community 281 - "brain: pipeline"
 Cohesion: 0.11
 Nodes (25): ContextMessage, ContextProcessor, DateTime, MemoryDigestConfig, ModelCapabilities, Option, PgPool, PgRow (+17 more)
 
 ### Community 282 - "core: types"
-Cohesion: 0.17
-Nodes (24): AgentGuardrailPolicy, Default, Option, Result, Self, String, Uuid, Value (+16 more)
+Cohesion: 0.18
+Nodes (23): AgentGuardrailPolicy, Default, Option, Result, Self, String, Uuid, Value (+15 more)
 
 ### Community 283 - "eval: kernel"
 Cohesion: 0.14
@@ -2325,8 +2342,8 @@ Cohesion: 0.11
 Nodes (23): ApprovalDecision, Arc, AuthzChallengeReaperHandle, AwakeableResolveError, AwakeableResolver, Client, Duration, Into (+15 more)
 
 ### Community 288 - "orchestrator: services"
-Cohesion: 0.22
-Nodes (26): Context, HandlerError, Json, Result, SessionMeta, StoragePartitionId, String, ToolCallRequest (+18 more)
+Cohesion: 0.29
+Nodes (21): Context, HandlerError, Json, Result, SessionMeta, StoragePartitionId, ToolCallRequest, ToolOutput (+13 more)
 
 ### Community 289 - "orchestrator: tests"
 Cohesion: 0.09
@@ -2334,15 +2351,15 @@ Nodes (26): ActionRuleScope, Arc, CompletionRequest, CompletionStream, Into, Int
 
 ### Community 290 - "providers: embedding"
 Cohesion: 0.10
-Nodes (22): Client, EmbeddingProvider, GeminiContent, Into, Option, Result, Self, String (+14 more)
+Nodes (23): Client, EmbeddingProvider, GeminiContent, Into, Option, Result, Self, String (+15 more)
 
 ### Community 291 - "providers"
 Cohesion: 0.16
 Nodes (19): AtomicUsize, ModelRouter, ProviderDescriptor, Self, String, Value, ProviderFactory, ScriptedCompletion (+11 more)
 
 ### Community 292 - "session: tests"
-Cohesion: 0.15
-Nodes (28): String, Option, PgPool, Postgres, String, TenantId, TestDb, Transaction (+20 more)
+Cohesion: 0.24
+Nodes (22): Option, PgPool, Postgres, String, TenantId, TestDb, Transaction, Uuid (+14 more)
 
 ### Community 293 - "skills"
 Cohesion: 0.17
@@ -2369,8 +2386,8 @@ Cohesion: 0.11
 Nodes (24): Arc, CompletionRequest, CompletionStream, LLMProvider, MoaResult, ModelCapabilities, Mutex, Option (+16 more)
 
 ### Community 299 - "eval: tests"
-Cohesion: 0.07
-Nodes (40): TestResult, StoragePartitionId, BTreeMap, BTreeSet, CachedEmbeddingFixture, CorpusManifest, DateTime, LedgerFact (+32 more)
+Cohesion: 0.09
+Nodes (30): StoragePartitionId, BTreeMap, BTreeSet, CachedEmbeddingFixture, CorpusManifest, DateTime, LedgerFact, Option (+22 more)
 
 ### Community 300 - "hands: tools"
 Cohesion: 0.15
@@ -2393,8 +2410,8 @@ Cohesion: 0.10
 Nodes (20): BTreeSet, Credential, CredentialVault, HashMap, MockServer, Option, Request, Result (+12 more)
 
 ### Community 305 - "orchestrator: tests"
-Cohesion: 0.16
-Nodes (28): ArtifactPublishResponse, Child, Client, ExperimentRunResponse, ExperimentRunStatusResponse, Identity, OrchestratorPorts, Response (+20 more)
+Cohesion: 0.13
+Nodes (32): Arc, BlobStore, ClaimCheck, Event, MoaConfig, Option, Path, PathBuf (+24 more)
 
 ### Community 306 - "orchestrator: tests"
 Cohesion: 0.11
@@ -2409,8 +2426,8 @@ Cohesion: 0.14
 Nodes (27): LearningCandidate, Option, PgConnection, PostgresSessionStore, Result, Self, SessionMeta, SkillMetadata (+19 more)
 
 ### Community 309 - "orchestrator: workflows"
-Cohesion: 0.36
-Nodes (16): ActionRuleScope, ArtifactRegistry, ArtifactRun, Value, WorkflowDefinition, WorkflowExecutionState, advance_and_persist(), append_completed_node_runs() (+8 more)
+Cohesion: 0.12
+Nodes (29): Map, Option, PiiClass, RlsContext, String, Uuid, Value, BackfillStats (+21 more)
 
 ### Community 310 - "brain: tests"
 Cohesion: 0.12
@@ -2422,11 +2439,11 @@ Nodes (14): CohereEmbeddings, Client, EmbeddingProvider, Into, MoaConfig, Result
 
 ### Community 312 - "artifacts"
 Cohesion: 0.19
-Nodes (22): ArtifactRef, Default, GuardrailMode, GuardrailStagePolicy, Option, String, Value, Vec (+14 more)
+Nodes (21): ArtifactRef, Default, GuardrailMode, GuardrailStagePolicy, Option, String, Value, Vec (+13 more)
 
 ### Community 313 - "artifacts: tests"
-Cohesion: 0.10
-Nodes (23): ArtifactDocument, ArtifactStatus, String, ValidationReport, Value, Vec, ValidationReport, validate_envelope() (+15 more)
+Cohesion: 0.21
+Nodes (11): String, ValidationReport, Value, Vec, assert_error(), behavior_lab_plan_round_trips_json_yaml_and_exposes_external_refs(), behavior_lab_schema_has_only_experiment_plan_as_simulation_artifact_kind(), enum_labels() (+3 more)
 
 ### Community 314 - "brain: pipeline"
 Cohesion: 0.16
@@ -2437,8 +2454,8 @@ Cohesion: 0.20
 Nodes (20): HashSet, Option, QueryRewriteResult, Result, RewriteInput, RewriteReason, String, TaskFacetSet (+12 more)
 
 ### Community 316 - "eval: memory_eval"
-Cohesion: 0.15
-Nodes (20): Arc, Duration, Mutex, ProbeType, StoragePartitionId, T, JudgeOutcome, candidate_answer_for_deterministic_judge() (+12 more)
+Cohesion: 0.19
+Nodes (17): Arc, Duration, ExtractedFact, Mutex, Self, StoragePartitionId, T, TurnChunk (+9 more)
 
 ### Community 317 - "eval: memory_eval"
 Cohesion: 0.11
@@ -2505,44 +2522,44 @@ Cohesion: 0.15
 Nodes (26): DateTime, LineageRecordView, Option, SessionId, String, TenantId, UserId, Utc (+18 more)
 
 ### Community 333 - "eval: memory_eval"
-Cohesion: 0.21
-Nodes (20): EmbeddingInput, EmbeddingProvider, HashMap, Path, Result, Self, String, Vec (+12 more)
+Cohesion: 0.15
+Nodes (25): EmbeddingInput, EmbeddingProvider, HashMap, Path, Result, Self, String, Vec (+17 more)
 
 ### Community 334 - "hands: tools"
 Cohesion: 0.10
 Nodes (20): BuiltInTool, EventRecord, EventType, IdempotencyClass, Option, Result, String, ToolContext (+12 more)
 
 ### Community 335 - "knowledge"
-Cohesion: 0.15
-Nodes (12): KnowledgeObject, ProviderRecord, TenantId, Uuid, Value, KnowledgeConnection, Value, is_secret_key() (+4 more)
+Cohesion: 0.10
+Nodes (20): KnowledgeObject, ProviderRecord, TenantId, Uuid, Value, KnowledgeCreateLinkTokenRequest, KnowledgeCreateLinkTokenResponse, KnowledgeExchangeTokenRequest (+12 more)
 
 ### Community 336 - "lineage: sink"
 Cohesion: 0.30
 Nodes (10): DurableJournal, lossy_telemetry_drops_scores_when_channel_is_full(), lossy_telemetry_never_drops_turn_lineage_events(), null_sink_never_records_drops(), NullSink, record_durable_event_returns_after_journal_acceptance(), sample_event(), sample_score_event() (+2 more)
 
 ### Community 337 - "lineage: sink"
-Cohesion: 0.17
-Nodes (13): LineageEvent, Result, ScoreRecord, ScoreSource, Self, StdMutex, Journal, DurableJournal (+5 more)
+Cohesion: 0.21
+Nodes (18): Arc, AtomicU64, LineageEvent, Result, StdMutex, Vec, Journal, DurableJournal (+10 more)
 
 ### Community 338 - "memory: ingest"
-Cohesion: 0.15
-Nodes (26): IngestCtx, ExpectedFact, NodeIndexRow, PgPool, String, Uuid, Vec, ingest_turn_direct_with_ctx() (+18 more)
+Cohesion: 0.14
+Nodes (23): ExpectedFact, NodeIndexRow, PgPool, String, Uuid, Vec, active_user_fact_rows(), count_graph_create_rows() (+15 more)
 
 ### Community 339 - "memory: vector"
 Cohesion: 0.23
 Nodes (27): AsRef, Option, PgPool, PgvectorStore, RlsContext, ScopedConn, TestDb, Uuid (+19 more)
 
 ### Community 340 - "orchestrator: services"
-Cohesion: 0.21
-Nodes (22): Arc, EvalResult, MpscSink, ScoreRecord, ScoreValue, assert_boolean_score(), assert_dataset_run_item_target(), assert_numeric_score() (+14 more)
+Cohesion: 0.20
+Nodes (23): Arc, EvalResult, MpscSink, ScoreRecord, ScoreValue, Vec, assert_boolean_score(), assert_dataset_run_item_target() (+15 more)
 
 ### Community 341 - "orchestrator: tests"
-Cohesion: 0.14
-Nodes (27): Child, Client, EventRecord, Identity, Option, OrchestratorPorts, Path, Result (+19 more)
+Cohesion: 0.12
+Nodes (24): Option, Result, Self, String, T, ToolInvocation, Value, Vec (+16 more)
 
 ### Community 342 - "providers: rerank"
-Cohesion: 0.16
-Nodes (23): String, Arc, MoaConfig, Option, Reranker, Result, Self, String (+15 more)
+Cohesion: 0.17
+Nodes (21): Arc, MoaConfig, Option, Reranker, Result, Self, String, build_provider() (+13 more)
 
 ### Community 343 - "skills: tests"
 Cohesion: 0.27
@@ -2553,12 +2570,12 @@ Cohesion: 0.15
 Nodes (22): EvalLane, GraphExpansionEvalPolicy, Item, Iterator, MemoryEvalExtractorMode, Option, PathBuf, QueryRewritePolicy (+14 more)
 
 ### Community 345 - "orchestrator: runtime"
-Cohesion: 0.10
-Nodes (25): BindEndpointFn, Option, RegisteredDeployment, RegisteredService, Self, String, Vec, compiled_bindings_are_the_expected_name_source_of_truth() (+17 more)
+Cohesion: 0.15
+Nodes (15): BindEndpointFn, Option, RegisteredDeployment, RegisteredService, Self, String, Vec, deployment_with_services() (+7 more)
 
 ### Community 346 - "messaging"
-Cohesion: 0.13
-Nodes (18): Channel, ChannelAdapter, ChannelCapabilities, Instant, OutboundMessage, Span, SlackApiToken, SlackClient (+10 more)
+Cohesion: 0.18
+Nodes (9): Channel, ChannelCapabilities, OutboundMessage, Span, SlackMessageContent, SlackRenderChunk, SlackTarget, slack_api_span() (+1 more)
 
 ### Community 347 - "artifacts"
 Cohesion: 0.20
@@ -2569,8 +2586,8 @@ Cohesion: 0.21
 Nodes (16): BTreeMap, Client, Map, Option, Response, Result, Self, String (+8 more)
 
 ### Community 349 - "brain: pipeline"
-Cohesion: 0.12
-Nodes (25): CompiledRecordMessage, ContextMessage, EventRecord, FileReadDedupState, SequenceNum, SessionMeta, SnapshotHistory, Strategy (+17 more)
+Cohesion: 0.13
+Nodes (24): CompiledRecordMessage, ContextMessage, EventRecord, FileReadDedupState, SequenceNum, SessionMeta, SnapshotHistory, Strategy (+16 more)
 
 ### Community 350 - "brain: segment_assessment"
 Cohesion: 0.15
@@ -2597,8 +2614,8 @@ Cohesion: 0.19
 Nodes (26): AsRef, DateTime, NodeLabel, NodeWriteIntent, PgConnection, PgPool, PostgresGraphStore, RlsContext (+18 more)
 
 ### Community 356 - "memory: ingest"
-Cohesion: 0.22
-Nodes (17): Arc, Default, EmbeddedFact, NodeLabel, PgPool, PiiClass, Result, RlsContext (+9 more)
+Cohesion: 0.14
+Nodes (29): Arc, Cache, Default, Duration, EmbeddedFact, NodeLabel, PgPool, PiiClass (+21 more)
 
 ### Community 357 - "messaging: tests"
 Cohesion: 0.16
@@ -2617,8 +2634,8 @@ Cohesion: 0.15
 Nodes (23): ConsolidateRequest, Context, HandlerError, Json, NaiveDate, Option, PgPool, Result (+15 more)
 
 ### Community 361 - "orchestrator: services"
-Cohesion: 0.19
-Nodes (21): Context, HandlerError, Json, Result, WorkflowCancelResponse, WorkflowReviewDecisionRequest, WorkflowReviewDecisionResponse, WorkflowRunResponse (+13 more)
+Cohesion: 0.12
+Nodes (25): CancellationToken, Duration, Error, GlobMatcher, Option, Path, Result, String (+17 more)
 
 ### Community 362 - "orchestrator: tests"
 Cohesion: 0.14
@@ -2629,12 +2646,12 @@ Cohesion: 0.15
 Nodes (18): enabled_native_tools(), Arc, Client, CompletionRequest, CompletionStream, Into, LLMProvider, MoaConfig (+10 more)
 
 ### Community 364 - "providers: adapters"
-Cohesion: 0.06
-Nodes (60): ModelCapabilities, Result, String, CompletionRequest, ContextMessage, HashMap, JsonResponseFormat, Option (+52 more)
+Cohesion: 0.17
+Nodes (26): ContextMessage, ContextMessage, Option, ProviderNativeTool, Result, ToolContent, ToolInvocation, Value (+18 more)
 
 ### Community 365 - "providers: adapters"
-Cohesion: 0.11
-Nodes (26): CompletionContent, ContextMessage, HashMap, Option, Response, Result, StopReason, String (+18 more)
+Cohesion: 0.10
+Nodes (27): CompletionContent, ContextMessage, HashMap, Option, Response, Result, StopReason, String (+19 more)
 
 ### Community 366 - "providers"
 Cohesion: 0.26
@@ -2645,8 +2662,8 @@ Cohesion: 0.16
 Nodes (25): EventRecord, MoaConfig, Option, PathBuf, Result, SessionMeta, SkillDocument, String (+17 more)
 
 ### Community 368 - "test-support"
-Cohesion: 0.10
-Nodes (26): ActionRuleScope, Error, MemoryScope, MoaError, PgConnection, PgPool, PostgresGraphStore, Result (+18 more)
+Cohesion: 0.13
+Nodes (19): String, ContactId, ContactRef, ContactVerificationState, SessionMeta, StoragePartitionId, String, TenantId (+11 more)
 
 ### Community 369 - "xtask"
 Cohesion: 0.22
@@ -2689,8 +2706,8 @@ Cohesion: 0.21
 Nodes (25): Arc, AtomicBool, Error, JoinHandle, PgPool, Result, ScopedConn, Stack (+17 more)
 
 ### Community 379 - "memory: ingest"
-Cohesion: 0.25
-Nodes (10): Reranker, Self, Value, candidate(), contradiction_judge_cache_hit_is_sub_5ms(), contradiction_judge_empty_candidates_returns_insert(), contradiction_judge_parsing_unchanged_on_shared_client(), contradiction_judge_provider_change_returns_supersede() (+2 more)
+Cohesion: 0.19
+Nodes (32): Arc, BTreeMap, BTreeSet, DateTime, DigestStats, EmbeddingProvider, NodeLabel, PgPool (+24 more)
 
 ### Community 380 - "messaging: tests"
 Cohesion: 0.14
@@ -2705,8 +2722,8 @@ Cohesion: 0.16
 Nodes (26): CheckChildLivenessRequest, DateTime, HandlerError, ObjectContext, Option, Result, SessionId, SessionVoState (+18 more)
 
 ### Community 383 - "orchestrator: objects"
-Cohesion: 0.11
-Nodes (36): ConsolidateReport, DateTime, Duration, HandlerError, Json, NaiveDate, ObjectContext, Option (+28 more)
+Cohesion: 0.15
+Nodes (25): ConsolidateReport, Duration, HandlerError, Json, NaiveDate, ObjectContext, R, Result (+17 more)
 
 ### Community 384 - "orchestrator: services"
 Cohesion: 0.12
@@ -2714,7 +2731,7 @@ Nodes (20): Context, EvalDatasetListRequest, EvalDatasetListResponse, EvalDatase
 
 ### Community 385 - "providers: adapters"
 Cohesion: 0.10
-Nodes (26): CompletionRequest, CreateResponse, JsonResponseFormat, Option, ProviderNativeTool, Result, String, MoaError (+18 more)
+Nodes (25): CompletionRequest, CreateResponse, JsonResponseFormat, Option, ProviderNativeTool, Result, String, MoaError (+17 more)
 
 ### Community 386 - "security"
 Cohesion: 0.18
@@ -2745,8 +2762,8 @@ Cohesion: 0.10
 Nodes (24): ToolRouter, ActionPolicies, ActionPolicyRuleStore, Arc, HandHandle, HandLeaseStore, HandProvider, HashMap (+16 more)
 
 ### Community 393 - "brain: pipeline"
-Cohesion: 0.15
-Nodes (20): AgentContext, AgentWorkflowPolicy, BTreeMap, ContextProcessor, ModelCapabilities, Option, ProcessorOutput, Result (+12 more)
+Cohesion: 0.16
+Nodes (14): AgentContext, ContextProcessor, ModelCapabilities, ProcessorOutput, Result, Self, String, Vec (+6 more)
 
 ### Community 394 - "brain: pipeline"
 Cohesion: 0.15
@@ -2793,8 +2810,8 @@ Cohesion: 0.16
 Nodes (23): Path, SigningKey, Value, Vec, PathBuf, String, Value, Vec (+15 more)
 
 ### Community 405 - "loadtest"
-Cohesion: 0.15
-Nodes (22): MoaConfig, Result, LoadTestOptions, LoadTestReport, Result, Option, Path, Result (+14 more)
+Cohesion: 0.29
+Nodes (15): Option, Path, Result, SessionProfileKind, String, Vec, build_session_plans(), first_existing_relative_path() (+7 more)
 
 ### Community 406 - "memory: ingest"
 Cohesion: 0.17
@@ -2829,8 +2846,8 @@ Cohesion: 0.18
 Nodes (16): Child, OrchestratorPorts, Result, String, TempDir, TenantId, Result, String (+8 more)
 
 ### Community 414 - "session: store"
-Cohesion: 0.11
-Nodes (20): Event, Option, SegmentAssessment, String, Option, Result, SegmentAssessment, SegmentBaseline (+12 more)
+Cohesion: 0.16
+Nodes (13): SegmentAssessment, Option, Result, SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId, SessionId (+5 more)
 
 ### Community 415 - "skills: tests"
 Cohesion: 0.13
@@ -2857,8 +2874,8 @@ Cohesion: 0.13
 Nodes (19): BudgetResult, Default, Display, Formatter, Option, Result, ScoreCard, Self (+11 more)
 
 ### Community 421 - "session: store"
-Cohesion: 0.15
-Nodes (29): ActionEnvelope, ActionPolicyEffect, ActionPolicyRule, ActionReviewPreview, AgentPolicySnapshot, MoaError, Option, SessionMeta (+21 more)
+Cohesion: 0.10
+Nodes (42): ActionEnvelope, ActionPolicyEffect, ActionPolicyRule, ActionPolicyRuleStore, ActionReviewPreview, AgentPolicySnapshot, Arc, Context (+34 more)
 
 ### Community 422 - "artifacts"
 Cohesion: 0.17
@@ -2881,20 +2898,20 @@ Cohesion: 0.11
 Nodes (22): Arc, CancellationToken, CompletionRequest, CompletionResponse, CompletionStream, F, G, LLMProvider (+14 more)
 
 ### Community 427 - "eval: memory_eval"
-Cohesion: 0.10
-Nodes (39): BTreeSet, ContactId, DateTime, GoldNodeRecord, Item, Iterator, MemoryDigestConfig, Option (+31 more)
+Cohesion: 0.11
+Nodes (35): BTreeSet, GoldNodeRecord, Item, Iterator, Option, Probe, ProbeResult, ProbeType (+27 more)
 
 ### Community 428 - "eval: reporters"
 Cohesion: 0.11
 Nodes (22): ActionPolicyOverride, AgentConfig, EvalRun, HashMap, InstructionOverride, MemoryOverride, Option, PathBuf (+14 more)
 
 ### Community 429 - "lineage: audit"
-Cohesion: 0.20
-Nodes (16): Into, Option, PgPool, Result, Self, String, Vec, RedactionEvent (+8 more)
+Cohesion: 0.18
+Nodes (17): Into, Option, PgPool, Result, Self, String, Vec, RedactionEvent (+9 more)
 
 ### Community 430 - "loadtest"
-Cohesion: 0.13
-Nodes (22): LoadMode, Option, Result, SessionProfileKind, Args, main(), String, LoadMode (+14 more)
+Cohesion: 0.20
+Nodes (16): Result, main(), LoadMode, Option, Result, SessionId, SessionProfileKind, SessionStatus (+8 more)
 
 ### Community 431 - "messaging"
 Cohesion: 0.22
@@ -2905,12 +2922,12 @@ Cohesion: 0.17
 Nodes (15): Arc, Bytes, HeaderMap, Into, LinkedIntegrationProvider, Option, Result, Self (+7 more)
 
 ### Community 433 - "orchestrator: services"
-Cohesion: 0.22
-Nodes (18): ActionRuleScope, ArtifactFile, LearningCandidate, MoaConfig, Option, ProviderRegistry, Self, SkillRegistry (+10 more)
+Cohesion: 0.26
+Nodes (18): ActionRuleScope, Arc, ArtifactFile, EvalResult, EvalRun, LearningCandidate, ProviderRegistry, Self (+10 more)
 
 ### Community 434 - "orchestrator: tests"
-Cohesion: 0.09
-Nodes (58): ActionRuleScope, CancellationToken, Child, Client, EventRecord, ExperimentTrialRecord, ExperimentTrialRunStatusResponse, ExperimentTrialRunWorkflowRequest (+50 more)
+Cohesion: 0.08
+Nodes (65): ActionRuleScope, CancellationToken, Child, Client, EventRecord, ExperimentTrialRecord, ExperimentTrialRunStatusResponse, ExperimentTrialRunWorkflowRequest (+57 more)
 
 ### Community 435 - "core: wire"
 Cohesion: 0.21
@@ -2933,16 +2950,16 @@ Cohesion: 0.12
 Nodes (27): by_provider(), by_provider_partitions_correctly(), canonical_model_id(), capabilities_for_provider_model(), chat_price_rank(), cheapest_chat_model(), cheapest_chat_model_picks_min_combined_price(), claude_opus_has_million_token_context() (+19 more)
 
 ### Community 440 - "orchestrator: services"
-Cohesion: 0.17
-Nodes (22): CoreEvalRun, AgentConfig, Option, Result, String, TestSuite, Value, Vec (+14 more)
+Cohesion: 0.23
+Nodes (17): CoreEvalRun, AgentConfig, Option, Result, String, TestSuite, Value, attach_summary_field() (+9 more)
 
 ### Community 441 - "auth: auth0"
 Cohesion: 0.17
 Nodes (18): Arc, AuthError, AuthProvider, Credential, Error, Identity, IdentityType, JwksCache (+10 more)
 
 ### Community 442 - "brain: harness"
-Cohesion: 0.08
-Nodes (33): Span, Arc, CancellationToken, ContextPipeline, EventRecord, LineageHandle, LLMProvider, Option (+25 more)
+Cohesion: 0.09
+Nodes (31): Span, Arc, CancellationToken, ContextPipeline, EventRecord, LineageHandle, LLMProvider, Option (+23 more)
 
 ### Community 443 - "brain: pipeline"
 Cohesion: 0.22
@@ -2973,8 +2990,8 @@ Cohesion: 0.18
 Nodes (14): Event, EventFilter, EventRange, EventRecord, Result, SequenceNum, SessionFilter, SessionId (+6 more)
 
 ### Community 450 - "core: wire"
-Cohesion: 0.22
-Nodes (22): DateTime, Option, SessionId, String, TenantId, Utc, Uuid, Value (+14 more)
+Cohesion: 0.16
+Nodes (29): ArtifactPublishResponse, Child, Client, ExperimentRunResponse, ExperimentRunStatusResponse, Identity, OrchestratorPorts, ProcedureRunStatus (+21 more)
 
 ### Community 451 - "eval: reporters"
 Cohesion: 0.21
@@ -2993,8 +3010,8 @@ Cohesion: 0.15
 Nodes (28): ContactId, PgPool, PostgresGraphStore, Result, RlsContext, ScopedConn, String, TenantId (+20 more)
 
 ### Community 455 - "messaging"
-Cohesion: 0.19
-Nodes (16): ChannelRef, From, Option, String, SlackPushEventCallback, SlackTarget, push_event_origin(), slack_channel_ref() (+8 more)
+Cohesion: 0.16
+Nodes (25): ActionRuleScope, HandlerError, Identity, Option, ProcedureRunStatus, ProcedureRuntime, Result, SessionId (+17 more)
 
 ### Community 456 - "orchestrator"
 Cohesion: 0.17
@@ -3013,8 +3030,8 @@ Cohesion: 0.17
 Nodes (22): EventRecord, Identity, Result, SessionId, String, TestApiClient, TurnOutcome, TurnProgress (+14 more)
 
 ### Community 460 - "orchestrator: tests"
-Cohesion: 0.14
-Nodes (22): Client, EventRecord, Identity, Option, Path, Result, SessionId, SessionMeta (+14 more)
+Cohesion: 0.10
+Nodes (12): BuiltInTool, IdempotencyClass, ToolCallId, ToolContext, ToolOutput, ToolPolicySpec, Value, parse_tool_id() (+4 more)
 
 ### Community 461 - "providers: adapters"
 Cohesion: 0.19
@@ -3061,8 +3078,8 @@ Cohesion: 0.16
 Nodes (15): MockProvider, ModelRouter, provider(), provider_for_falls_back_to_main_when_auxiliary_is_missing(), provider_for_routes_auxiliary_tasks_to_auxiliary_provider(), Arc, CompletionRequest, CompletionStream (+7 more)
 
 ### Community 472 - "auth: authz"
-Cohesion: 0.10
-Nodes (47): Display, FgaClient, Identity, ObjectType, PgPool, Relation, Result, String (+39 more)
+Cohesion: 0.14
+Nodes (36): Display, FgaClient, Identity, ObjectType, PgPool, Relation, Result, String (+28 more)
 
 ### Community 473 - "auth: providers"
 Cohesion: 0.13
@@ -3082,7 +3099,7 @@ Nodes (21): ActionRuleScope, DateTime, Option, SkillPackageDocument, SkillPackag
 
 ### Community 477 - "eval: memory_eval"
 Cohesion: 0.26
-Nodes (22): HashMap, IngestCtx, LedgerFact, Result, SessionTurn, SyntheticSession, SyntheticTurn, FactSource (+14 more)
+Nodes (19): HashMap, LedgerFact, PiiClass, Result, SessionTurn, SyntheticSession, SyntheticTurn, FactSource (+11 more)
 
 ### Community 478 - "eval: memory_eval"
 Cohesion: 0.19
@@ -3093,8 +3110,8 @@ Cohesion: 0.11
 Nodes (26): DateTime, LegSources, MemoryRetrievalEvalReport, NodeIndexRow, Option, ProbeResult, RetrievedCandidate, SessionId (+18 more)
 
 ### Community 480 - "lineage: sink"
-Cohesion: 0.22
-Nodes (11): PgPool, Result, Receiver, MpscSinkConfig, ensure_schema(), spawn_writer(), spawn_writer_for_sink(), spawn_writer_task() (+3 more)
+Cohesion: 0.20
+Nodes (13): PgPool, Result, CancellationToken, JoinHandle, Mutex, Receiver, MpscSinkConfig, ensure_schema() (+5 more)
 
 ### Community 481 - "memory: graph"
 Cohesion: 0.15
@@ -3105,8 +3122,8 @@ Cohesion: 0.13
 Nodes (21): Arc, AuthzChallengeReaperHandle, AwakeableResolver, F, FgaClient, JoinHandle, MoaConfig, Option (+13 more)
 
 ### Community 483 - "orchestrator: services"
-Cohesion: 0.17
-Nodes (21): ActionRuleScope, AgentContext, AgentModelPolicy, AgentSessionSelection, CreateAgentSessionRequest, CreateAgentSessionResponse, Identity, PgPool (+13 more)
+Cohesion: 0.21
+Nodes (16): ActionRuleScope, AgentContext, AgentModelPolicy, AgentSessionSelection, CreateAgentSessionRequest, CreateAgentSessionResponse, PgPool, PostgresSessionStore (+8 more)
 
 ### Community 484 - "orchestrator: workflows"
 Cohesion: 0.22
@@ -3209,8 +3226,8 @@ Cohesion: 0.21
 Nodes (17): ComplianceConfig, HandlerError, Option, Result, Self, String, TenantId, Vec (+9 more)
 
 ### Community 509 - "orchestrator: services"
-Cohesion: 0.14
-Nodes (10): EventRecord, ExperienceAttribution, GetEventsRequest, ListExperienceAttributionsRequest, ListSkillResolutionRatesRequest, ListTaskStrategySuccessRatesRequest, SearchEventsRequest, SkillResolutionRate (+2 more)
+Cohesion: 0.16
+Nodes (25): Option, String, Vec, WorkingContext, canary_detection_works(), canary_system_message(), canary_system_message_contains_token(), check_canary() (+17 more)
 
 ### Community 510 - "orchestrator: services"
 Cohesion: 0.24
@@ -3229,8 +3246,8 @@ Cohesion: 0.17
 Nodes (10): AsRef, ModelCapabilities, Path, StopReason, ScriptedResponse, parse_scripted_stop_reason(), scripted_capabilities(), scripted_registry_from_file() (+2 more)
 
 ### Community 514 - "providers: tests"
-Cohesion: 0.11
-Nodes (32): AnthropicProvider, MockServer, Value, MockServer, CompletionRequest, Into, MockServer, ResponseTemplate (+24 more)
+Cohesion: 0.21
+Nodes (18): AnthropicProvider, MockServer, Value, MockServer, mount_anthropic_sse(), anthropic_offline_429_response_triggers_retry_with_backoff(), anthropic_offline_500_response_triggers_retry_then_surfaces_typed_error(), anthropic_offline_completion_returns_text_for_minimal_request() (+10 more)
 
 ### Community 515 - "session: tests"
 Cohesion: 0.22
@@ -3245,8 +3262,8 @@ Cohesion: 0.29
 Nodes (17): assert_config_error_contains(), empty_default_provider_env_is_rejected_not_clobbered(), empty_models_main_env_is_rejected_not_clobbered(), env_pairs(), from_iter_applies_flat_single_underscore_env(), invalid_bool_reports_env_name(), invalid_enum_reports_offending_value(), invalid_integer_reports_env_name() (+9 more)
 
 ### Community 518 - "brain: tests"
-Cohesion: 0.25
-Nodes (8): Into, MemoryExtractionConfig, Option, PathBuf, Self, String, MemoryExtractionRecordingOptions, MemoryMergeRecordingOptions
+Cohesion: 0.17
+Nodes (20): ArtifactDefinition, ActionRuleScope, ArtifactRef, ArtifactRegistry, ArtifactRun, Option, ProcedureDefinition, Result (+12 more)
 
 ### Community 519 - "core"
 Cohesion: 0.22
@@ -3261,8 +3278,8 @@ Cohesion: 0.23
 Nodes (19): BTreeMap, LedgerFact, Option, String, TranscriptStyle, FactCategory, apply_frame(), distractor() (+11 more)
 
 ### Community 522 - "eval: memory_eval"
-Cohesion: 0.22
-Nodes (19): BTreeMap, IngestApplyReport, NodeIndexRow, Option, String, Value, Vec, GoldIngestTurnReport (+11 more)
+Cohesion: 0.24
+Nodes (19): BTreeMap, IngestApplyReport, IngestCtx, NodeIndexRow, String, Vec, fetch_source_candidates(), fetch_tenant_fact_candidates() (+11 more)
 
 ### Community 523 - "eval: tests"
 Cohesion: 0.14
@@ -3285,8 +3302,8 @@ Cohesion: 0.20
 Nodes (15): Duration, Option, Result, String, assert_validation_error(), LoadMode, LoadTestOptions, OutputFormat (+7 more)
 
 ### Community 528 - "messaging"
-Cohesion: 0.18
-Nodes (14): AsRef, BTreeMap, Channel, ContactId, DateTime, Into, Span, Utc (+6 more)
+Cohesion: 0.07
+Nodes (48): Arc, AsRef, BTreeMap, Channel, ContactId, Credential, CredentialVault, DateTime (+40 more)
 
 ### Community 529 - "messaging"
 Cohesion: 0.16
@@ -3306,31 +3323,31 @@ Nodes (17): CompletionRequest, HandlerError, ModelCapabilities, ModelId, Result,
 
 ### Community 533 - "orchestrator: services"
 Cohesion: 0.10
-Nodes (32): Context, CreateApiKeyRequest, CreateApiKeyResponse, HandlerError, Identity, Json, KeyListItem, Result (+24 more)
+Nodes (27): BranchManager, Context, HandlerError, Json, Result, String, Value, Context (+19 more)
 
 ### Community 534 - "orchestrator: services"
 Cohesion: 0.16
 Nodes (17): BuiltinApprovalRow, Context, DateTime, HandlerError, Json, Option, Result, String (+9 more)
 
 ### Community 535 - "orchestrator: services"
-Cohesion: 0.22
-Nodes (13): TenantId, eval_run_status_from_str(), eval_run_status_strings_match_persisted_values(), load_eval_run_status_response(), status_response_from_run_response(), verify_run_status_tenant(), EvalRunStatusResponse, accepted_run_response_is_non_terminal() (+5 more)
+Cohesion: 0.24
+Nodes (11): TenantId, suite_summaries_from_documents(), EvalSuiteListDocument, EvalSuiteSummary, accepted_run_response_is_non_terminal(), dataset_jsonl_items_are_constrained_to_authorized_tenant(), hosted_eval_reports_return_terminal_and_json_artifacts(), run_status_rejects_stored_tenant_mismatch() (+3 more)
 
 ### Community 536 - "orchestrator: services"
 Cohesion: 0.13
 Nodes (32): HeaderMap, KnowledgeConnection, KnowledgeProviderWebhookRequest, KnowledgeProviderWebhookResponse, KnowledgeRepository, KnowledgeServiceError, KnowledgeSyncRun, Option (+24 more)
 
 ### Community 537 - "orchestrator: tests"
-Cohesion: 0.11
-Nodes (4): ToolContent, WorkerState, tool_content_char_len(), worker_state_attr()
+Cohesion: 0.13
+Nodes (18): Json, ProcedureReviewDecisionResponse, ProcedureSignalResponse, SharedWorkflowContext, String, ProcedureReviewDecisionKind, ProcedureReviewResolution, ProcedureSignalResolution (+10 more)
 
 ### Community 538 - "orchestrator: tests"
-Cohesion: 0.12
-Nodes (25): Child, Client, EventRecord, Identity, Option, OrchestratorPorts, Result, SessionId (+17 more)
+Cohesion: 0.18
+Nodes (19): Child, Client, EventRecord, Identity, Option, OrchestratorPorts, Result, SessionId (+11 more)
 
 ### Community 539 - "orchestrator: tests"
-Cohesion: 0.16
-Nodes (13): DocumentElement, DocumentElementKind, DocumentParser, ElementLayout, ParsedDocument, ParseInput, Value, element() (+5 more)
+Cohesion: 0.13
+Nodes (16): DocumentElement, DocumentElementKind, DocumentParser, ElementLayout, ListChangedRecordsRequest, ParsedDocument, ParseInput, RecordPage (+8 more)
 
 ### Community 540 - "orchestrator: tests"
 Cohesion: 0.27
@@ -3349,8 +3366,8 @@ Cohesion: 0.19
 Nodes (18): String, Value, Vec, openai_provider_does_not_retry_after_partial_stream_output(), openai_provider_drops_oversized_metadata_values(), openai_provider_includes_native_web_search_when_enabled(), openai_provider_omits_native_web_search_when_disabled(), openai_provider_retries_after_rate_limit() (+10 more)
 
 ### Community 544 - "workflows"
-Cohesion: 0.20
-Nodes (15): ActionRuleScope, ArtifactRef, ArtifactRegistry, ArtifactRun, Option, Result, Self, SessionId (+7 more)
+Cohesion: 0.22
+Nodes (16): Arc, Cache, Default, Duration, PgPool, Self, Send, Sync (+8 more)
 
 ### Community 545 - "agents: tests"
 Cohesion: 0.23
@@ -3417,8 +3434,8 @@ Cohesion: 0.20
 Nodes (18): DateTime, Option, ScimGroupMember, String, T, Utc, Vec, Meta (+10 more)
 
 ### Community 561 - "orchestrator: tests"
-Cohesion: 0.07
-Nodes (33): ContactGroup, ContactGroupMembership, ExchangePublicTokenRequest, HashMap, KnowledgeCredentialStore, KnowledgeIngestionRunner, KnowledgeObjectProjection, KnowledgeServiceError (+25 more)
+Cohesion: 0.15
+Nodes (13): ExchangePublicTokenRequest, HashMap, KnowledgeCredentialStore, LineageEvent, LinkedAccount, PgPool, TenantId, chunk_vector_row_count() (+5 more)
 
 ### Community 562 - "orchestrator: tests"
 Cohesion: 0.28
@@ -3429,8 +3446,8 @@ Cohesion: 0.23
 Nodes (18): CompletionContent, CompletionRequest, ProviderEvent, String, Value, Vec, base_request(), file_read_tool() (+10 more)
 
 ### Community 564 - "session"
-Cohesion: 0.24
-Nodes (15): Arc, AtomicU64, CancellationToken, JoinHandle, Mutex, Vec, flush_events(), handle_writer_command() (+7 more)
+Cohesion: 0.21
+Nodes (18): Debug, MoaConfig, PgPool, Result, String, current_runtime(), entity_blocking_enabled_from_config(), entity_resolver_from_config() (+10 more)
 
 ### Community 565 - "session: store"
 Cohesion: 0.25
@@ -3457,8 +3474,8 @@ Cohesion: 0.13
 Nodes (15): Auth0AuthConfig, Auth0AuthConfig, AuthConfig, AuthProviderKind, ContactTokenConfig, LocalAuthConfig, OidcAuthConfig, ContactTokenConfig (+7 more)
 
 ### Community 571 - "brain: pipeline"
-Cohesion: 0.21
-Nodes (16): MoaConfig, Self, SessionMeta, TenantId, configured_tool_policy_cannot_be_weakened_by_persisted_allow_rule(), configured_tool_policy_uses_valid_glob_patterns(), default_policy_uses_the_stricter_config_or_tool_effect(), malformed_deny_config_glob_is_rejected_at_policy_construction() (+8 more)
+Cohesion: 0.22
+Nodes (22): DateTime, Option, SessionId, String, TenantId, Utc, Uuid, Value (+14 more)
 
 ### Community 572 - "core: config"
 Cohesion: 0.32
@@ -3477,12 +3494,12 @@ Cohesion: 0.29
 Nodes (17): Hash, Result, Vec, blake3_inclusion_proof(), blake3_merkle_root(), ct_merkle_root_is_available_for_rfc6962_shape(), ct_sha256_root(), hash_from_vec() (+9 more)
 
 ### Community 576 - "eval: long_conversation"
-Cohesion: 0.16
-Nodes (16): CompletionRequest, CompletionStream, ModelCapabilities, Mutex, Option, RecordedScriptedProvider, ScoreRecord, String (+8 more)
+Cohesion: 0.15
+Nodes (17): CompletionRequest, CompletionStream, ModelCapabilities, Mutex, Option, RecordedScriptedProvider, ScoreRecord, String (+9 more)
 
 ### Community 577 - "eval: memory_eval"
-Cohesion: 0.30
-Nodes (14): Error, EvalError, Into, Path, Result, String, T, Vec (+6 more)
+Cohesion: 0.44
+Nodes (9): Error, Path, Result, T, Vec, ensure_parent_dir(), io_error(), read_jsonl() (+1 more)
 
 ### Community 578 - "eval: tests"
 Cohesion: 0.18
@@ -3525,20 +3542,20 @@ Cohesion: 0.31
 Nodes (17): Option, Result, String, Value, Vec, Operation, email_from_json(), email_from_value() (+9 more)
 
 ### Community 588 - "orchestrator: services"
-Cohesion: 0.28
-Nodes (17): AgentConfig, Arc, LLMProvider, Path, PathBuf, Result, String, T (+9 more)
+Cohesion: 0.23
+Nodes (20): AgentConfig, LLMProvider, MoaConfig, Path, PathBuf, Result, String, T (+12 more)
 
 ### Community 589 - "orchestrator: workflows"
-Cohesion: 0.18
-Nodes (16): MoaError, HandlerError, Into, MoaError, String, HandlerError, PlanExpansionError, WorkflowError (+8 more)
+Cohesion: 0.17
+Nodes (20): HandlerError, Into, MoaError, String, HandlerError, MoaError, PlanExpansionError, ProcedureError (+12 more)
 
 ### Community 590 - "orchestrator: workflows"
 Cohesion: 0.23
 Nodes (12): Self, ToolInvocation, Value, ToolBudgetDecision, canonical_json(), canonical_tool_input_ordering_is_stable_for_repeat_detection(), invocation(), repeated_tool_fingerprint_stops_at_loop_threshold() (+4 more)
 
 ### Community 591 - "orchestrator: tests"
-Cohesion: 0.23
-Nodes (16): Client, Identity, Result, TenantId, Uuid, WorkflowCancelResponse, WorkflowReviewDecisionResponse, WorkflowRunStatus (+8 more)
+Cohesion: 0.21
+Nodes (12): AsRef, HandHandle, HandSpec, HandStatus, Result, SandboxTier, Self, detect_docker() (+4 more)
 
 ### Community 592 - "providers: adapters"
 Cohesion: 0.28
@@ -3589,8 +3606,8 @@ Cohesion: 0.24
 Nodes (14): ContextMessage, EventRecord, Option, Result, Self, String, Vec, WorkingContext (+6 more)
 
 ### Community 604 - "core"
-Cohesion: 0.21
-Nodes (13): Path, ProviderEvent, Result, Self, String, Vec, MetadataLine, ProviderEvent (+5 more)
+Cohesion: 0.14
+Nodes (16): Path, ProviderEvent, Result, Self, String, Vec, Result, MetadataLine (+8 more)
 
 ### Community 605 - "core: types"
 Cohesion: 0.18
@@ -3613,8 +3630,8 @@ Cohesion: 0.15
 Nodes (16): Box, EvalRun, EvalScore, Evaluator, Option, Result, String, TestSuite (+8 more)
 
 ### Community 610 - "eval: memory_eval"
-Cohesion: 0.09
-Nodes (23): CachedHybridRetriever, ExtractedFact, PlannedQuery, PlannedRetriever, PlanningCtx, QueryPlanner, Reranker, RerankHit (+15 more)
+Cohesion: 0.08
+Nodes (23): CachedHybridRetriever, NodeIndexRow, PlannedQuery, PlannedRetriever, PlanningCtx, QueryPlanner, Reranker, RerankHit (+15 more)
 
 ### Community 611 - "eval: tests"
 Cohesion: 0.40
@@ -3645,20 +3662,20 @@ Cohesion: 0.23
 Nodes (10): AgentContext, Identity, Result, SessionId, TempDir, TenantId, TupleOp, default_test_identity() (+2 more)
 
 ### Community 618 - "messaging: tests"
-Cohesion: 0.18
-Nodes (14): BTreeSet, Channel, MockServer, Request, Self, String, DeliveryMessage, delivery_message() (+6 more)
+Cohesion: 0.14
+Nodes (22): Client, EventRecord, Identity, Option, Path, ProcedureRunResponse, Result, SessionId (+14 more)
 
 ### Community 619 - "orchestrator: services"
 Cohesion: 0.30
 Nodes (14): CohereV4Embedder, PgPool, RetrievalHit, RlsContext, String, TestResult, assert_contains_artemis_core_stage(), cohere_api_key() (+6 more)
 
 ### Community 620 - "orchestrator: services"
-Cohesion: 0.14
-Nodes (17): HandHandle, HandProvider, HandSpec, HandStatus, Mutex, SandboxFile, SessionId, SessionRepository (+9 more)
+Cohesion: 0.13
+Nodes (18): HandHandle, HandProvider, HandSpec, HandStatus, Mutex, SandboxFile, SessionId, SessionRepository (+10 more)
 
 ### Community 621 - "orchestrator: workflows"
 Cohesion: 0.12
-Nodes (21): Json, Option, Self, SharedWorkflowContext, String, WorkflowReviewDecisionResponse, WorkflowSignalResponse, WorkflowReviewDecisionKind (+13 more)
+Nodes (17): ModelCapabilities, Result, String, String, Value, canonical_model_id(), capabilities_for_model(), gemini_3_1_flash_lite_preview_uses_documented_price_envelope() (+9 more)
 
 ### Community 622 - "orchestrator: tests"
 Cohesion: 0.22
@@ -3673,8 +3690,8 @@ Cohesion: 0.24
 Nodes (16): Error, PgPool, Postgres, Result, String, TestDb, Transaction, Uuid (+8 more)
 
 ### Community 625 - "skills: tests"
-Cohesion: 0.19
-Nodes (15): NewArtifactFile, PostgresSessionStore, Result, SkillPackage, ValidatedSkillPackage, Vec, PostgresSessionStore, purge_test_skill_name() (+7 more)
+Cohesion: 0.10
+Nodes (28): NewArtifactFile, PostgresSessionStore, Result, SkillPackage, ValidatedSkillPackage, Vec, ActionRuleScope, Error (+20 more)
 
 ### Community 626 - "test-support: orchestrator_fixture"
 Cohesion: 0.16
@@ -3713,8 +3730,8 @@ Cohesion: 0.27
 Nodes (12): EventRecord, HashMap, Result, SkillResolutionRate, String, TaskStrategySuccessRate, Vec, WorkingContext (+4 more)
 
 ### Community 635 - "brain: planning"
-Cohesion: 0.23
-Nodes (12): ActionPolicyRuleStore, Arc, Context, HandlerError, Identity, Json, Result, Self (+4 more)
+Cohesion: 0.14
+Nodes (12): AtomicI64, AtomicUsize, DateTime, Result, RetrievalHit, RetrievalRequest, Utc, Vec (+4 more)
 
 ### Community 636 - "brain: retrieval"
 Cohesion: 0.09
@@ -3773,24 +3790,24 @@ Cohesion: 0.20
 Nodes (14): DateTime, NodeIndexRow, Option, Utc, Value, candidate(), candidate_with(), contradiction_detector_does_not_flag_self_referential_fact_repetition() (+6 more)
 
 ### Community 650 - "messaging"
-Cohesion: 0.31
-Nodes (10): Arc, CredentialVault, MessagingConfig, Option, Self, TwilioSmsClient, PostmarkEmailClient, optional_postmark_client() (+2 more)
+Cohesion: 0.15
+Nodes (18): ActionClass, ActionPolicyEffect, RiskLevel, Value, IdempotencyClass, read_tool_policy(), tool_output_error_sets_error_flag(), tool_output_from_process_failure_includes_exit_code_and_stderr() (+10 more)
 
 ### Community 651 - "messaging"
 Cohesion: 0.20
 Nodes (13): Channel, Into, MessageId, Option, Result, Self, String, EditFn (+5 more)
 
 ### Community 652 - "orchestrator: services"
-Cohesion: 0.10
-Nodes (21): KnowledgeConnectionListRequest, KnowledgeConnectionListResponse, KnowledgeIngestionStep, KnowledgeServiceError, KnowledgeSyncEventsRequest, KnowledgeSyncEventsResponse, KnowledgeSyncRequest, KnowledgeSyncResponse (+13 more)
+Cohesion: 0.11
+Nodes (20): KnowledgeConnectionListRequest, KnowledgeConnectionListResponse, KnowledgeIngestionStep, KnowledgeServiceError, KnowledgeSyncEventsRequest, KnowledgeSyncEventsResponse, KnowledgeSyncRequest, KnowledgeSyncResponse (+12 more)
 
 ### Community 653 - "orchestrator: services"
 Cohesion: 0.18
 Nodes (12): Context, Display, HandlerError, Json, PrivacyEraseRequest, PrivacyEraseResponse, PrivacyExportRequest, PrivacyExportResponse (+4 more)
 
 ### Community 654 - "providers: tests"
-Cohesion: 0.22
-Nodes (16): MockServer, MockServer, GeminiProvider, mount_gemini_sse(), gemini_offline_429_response_triggers_retry_with_backoff(), gemini_offline_500_response_triggers_retry_then_surfaces_typed_error(), gemini_offline_completion_returns_text_for_minimal_request(), gemini_offline_empty_candidate_yields_empty_text_with_usage() (+8 more)
+Cohesion: 0.12
+Nodes (30): MockServer, MockServer, CompletionRequest, Into, MockServer, ResponseTemplate, String, Value (+22 more)
 
 ### Community 655 - "session: store"
 Cohesion: 0.19
@@ -3817,12 +3834,12 @@ Cohesion: 0.34
 Nodes (11): ComparableCandidate, Option, Value, all_expected_found_at_k(), ComparableProbeResult, ComparedMetric, metrics_for(), ndcg_at() (+3 more)
 
 ### Community 661 - "artifacts"
-Cohesion: 0.22
-Nodes (13): ArtifactRef, Default, Option, Self, SkillActionDefinition, String, Value, Vec (+5 more)
+Cohesion: 0.21
+Nodes (14): ArtifactRef, Default, Option, ProcedureDefinition, Self, SkillActionDefinition, String, Value (+6 more)
 
 ### Community 662 - "artifacts"
-Cohesion: 0.19
-Nodes (14): ArtifactRef, Option, String, Value, Vec, WorkflowCondition, WorkflowEdge, WorkflowNode (+6 more)
+Cohesion: 0.21
+Nodes (16): WorkerMessage, accepted_message_bumps_cleanup_generation_invalidating_pending_cleanup(), build_result_uses_terminal_state(), bump_cleanup_generation_resets_release_attempts(), cleaned_state_rejects_follow_up_but_terminal_child_is_revivable(), exhausted_budget_completion_preserves_visible_result(), follow_up_queues_message(), initial_task() (+8 more)
 
 ### Community 663 - "auth: providers"
 Cohesion: 0.28
@@ -3845,8 +3862,8 @@ Cohesion: 0.17
 Nodes (10): Default, From, Self, TenantId, Uuid, ModelId, storage_partition_id_for_tenant_uses_tenant_uuid_text(), StoragePartitionId (+2 more)
 
 ### Community 668 - "core: types"
-Cohesion: 0.29
-Nodes (10): Value, cancel_worker_tool_schema(), list_workers_tool_schema(), message_worker_tool_schema(), provide_worker_input_tool_schema(), report_to_parent_tool_schema(), request_input_tool_schema(), spawn_worker_schema_describes_dag_decomposition_without_extra_fields() (+2 more)
+Cohesion: 0.19
+Nodes (14): Value, cancel_worker_tool_schema(), child_report_tool_schemas(), child_report_tools_are_separate_from_delegation_tools(), delegation_schema_names_are_stable(), delegation_tool_schemas(), list_workers_tool_schema(), message_worker_tool_schema() (+6 more)
 
 ### Community 669 - "edge: routes"
 Cohesion: 0.25
@@ -3861,16 +3878,16 @@ Cohesion: 0.25
 Nodes (8): Default, Self, from_counts_with_zero_denominator_is_zero_not_nan(), from_total_with_zero_denominator_is_zero_not_nan(), MetricSummary, PerLegRecall, PerLexicalBackendRecall, RetrievalCoreMetrics
 
 ### Community 672 - "eval: memory_eval"
-Cohesion: 0.35
-Nodes (14): BootstrapConfig, ClusterBootstrapReport, ClusterObservation, GoldResolutionReport, Vec, aggregate_retrieval_eval_from_diagnostic_counts(), aggregate_retrieval_eval_from_scope_counts(), aggregate_retrieval_eval_with_diagnostics() (+6 more)
+Cohesion: 0.44
+Nodes (12): BootstrapConfig, ClusterBootstrapReport, GoldResolutionReport, Vec, aggregate_retrieval_eval_from_diagnostic_counts(), aggregate_retrieval_eval_from_scope_counts(), aggregate_retrieval_eval_with_diagnostics(), aggregate_retrieval_eval_with_extraction_precision() (+4 more)
 
 ### Community 673 - "eval: memory_eval"
 Cohesion: 0.16
 Nodes (18): BTreeSet, Fn, From, HashMap, Item, Iterator, LegSources, LexicalBackend (+10 more)
 
 ### Community 674 - "eval: memory_eval"
-Cohesion: 0.29
-Nodes (7): PiiClassifier, PiiError, PiiResult, deterministic_pii_result(), entity_embedding_texts_include_redacted_mentions(), insert_entity_embedding_texts(), MemoryEvalPiiClassifier
+Cohesion: 0.13
+Nodes (20): CachedEmbeddingProvider, BTreeMap, CachedEmbeddingFixture, ContactId, EmbeddingInput, PiiClassifier, PiiError, PiiResult (+12 more)
 
 ### Community 675 - "knowledge: tests"
 Cohesion: 0.22
@@ -3885,8 +3902,8 @@ Cohesion: 0.26
 Nodes (13): MessageId, MockServer, Result, String, Value, MessageId, MessagingEditResponse, message_id() (+5 more)
 
 ### Community 678 - "orchestrator"
-Cohesion: 0.36
-Nodes (3): MoaConfig, RuntimeCacheStore, OrchestratorCtx
+Cohesion: 0.27
+Nodes (5): MoaConfig, RuntimeCacheStore, Self, OrchestratorCtx, OrchestratorDeps
 
 ### Community 679 - "orchestrator: services"
 Cohesion: 0.22
@@ -3897,16 +3914,16 @@ Cohesion: 0.18
 Nodes (14): DateTime, EventRecord, LearningEntry, MoaError, Result, SegmentAssessment, SegmentId, TenantId (+6 more)
 
 ### Community 681 - "orchestrator: tests"
-Cohesion: 0.20
-Nodes (12): ContextMessage, PiiClass, ProcessorOutput, RetrievalScopePlan, String, Value, WorkingContext, extract_search_query() (+4 more)
+Cohesion: 0.12
+Nodes (20): Child, Client, EventRecord, Identity, Option, OrchestratorPorts, Result, SessionId (+12 more)
 
 ### Community 682 - "security: tests"
 Cohesion: 0.30
 Nodes (13): ActionPolicyContext, ActionPolicies, ActionPolicyRule, TenantId, ToolPolicyInput, bash_allow_rule(), bash_input(), check_allows_clean_bash_command_matching_rule() (+5 more)
 
 ### Community 683 - "hands: adapters"
-Cohesion: 0.26
-Nodes (11): Item, Iterator, Option, PathBuf, Result, Self, String, Options (+3 more)
+Cohesion: 0.20
+Nodes (21): CompletionRequest, String, Value, Vec, anthropic_body(), anthropic_large_request_uses_top_level_and_stable_prefix_cache_control(), anthropic_request_byte_layout_changes_only_in_messages_segment_when_only_messages_change(), anthropic_request_byte_layout_is_identical_before_dynamic_user_turn() (+13 more)
 
 ### Community 684 - "core: config"
 Cohesion: 0.26
@@ -3917,8 +3934,8 @@ Cohesion: 0.22
 Nodes (13): decode_failure_surfaces_provider_quirk(), event(), finalize_streamed_completion(), parse_sse_json(), send_with_transport_phase(), CompletionResponse, F, LLMSpanRecorder (+5 more)
 
 ### Community 686 - "artifacts: tests"
-Cohesion: 0.29
-Nodes (13): ArtifactDocument, ArtifactFile, Result, experiment_plan_doc(), file_by_path(), registry_missing_id_lookups_return_none_db_memory(), registry_persists_behavior_lab_artifact_kinds(), registry_preserves_tenant_published_revision_history() (+5 more)
+Cohesion: 0.12
+Nodes (24): ArtifactStatus, SkillDefinition, ValidationReport, ArtifactDocument, ArtifactFile, Result, validate_for_status(), agent_validation_rejects_empty_required_policy_fields() (+16 more)
 
 ### Community 687 - "auth: authz"
 Cohesion: 0.32
@@ -4005,12 +4022,12 @@ Cohesion: 0.27
 Nodes (9): MoaResult, SessionMeta, UserMessage, session_vo_destroy_clears_projection(), session_vo_idle_turn_maps_to_paused_status(), session_vo_queues_messages_and_transitions_to_running(), session_vo_requires_meta_before_enqueue(), test_message() (+1 more)
 
 ### Community 709 - "session: store"
-Cohesion: 0.27
-Nodes (10): Item, Iterator, Option, PathBuf, Result, Self, String, Options (+2 more)
+Cohesion: 0.22
+Nodes (20): Error, MoaError, PgPool, PgRow, ResolvedArtifactRevisionRef, Result, SandboxFile, SkillMetadata (+12 more)
 
 ### Community 710 - "session: store"
-Cohesion: 0.16
-Nodes (15): ChannelRef, SessionActorRef, SessionChannelBindingId, SessionFilter, SessionSummary, String, SessionChannelBindingReplacement, SessionChannelBindingUpdate (+7 more)
+Cohesion: 0.17
+Nodes (13): ChannelRef, SessionActorRef, SessionChannelBindingId, SessionFilter, SessionSummary, SessionChannelBindingReplacement, SessionChannelBindingUpdate, channel_route_keys() (+5 more)
 
 ### Community 711 - "xtask"
 Cohesion: 0.22
@@ -4021,12 +4038,12 @@ Cohesion: 0.14
 Nodes (3): moa-eval, parse_example_configs(), parse_example_suite()
 
 ### Community 713 - "orchestrator: services"
-Cohesion: 0.07
-Nodes (48): AgentArtifactDependencyDelta, AgentDependencyChange, AgentRevisionCompareRequest, AgentRevisionCompareResponse, AgentRevisionSimulationRunResponse, AgentToolDependencyDelta, ActionRuleScope, AgentRevisionLock (+40 more)
+Cohesion: 0.06
+Nodes (49): AgentArtifactDependencyDelta, AgentDependencyChange, AgentRevisionCompareRequest, AgentRevisionCompareResponse, AgentRevisionSimulationRunResponse, AgentToolDependencyDelta, ActionRuleScope, AgentRevisionLock (+41 more)
 
 ### Community 714 - "edge"
-Cohesion: 0.23
-Nodes (8): AuthError, AuthProvider, Credential, Identity, credential_for_request(), DisabledAuth, extract_credential(), StrictAuth
+Cohesion: 0.20
+Nodes (11): AuthError, AuthProvider, Credential, Identity, Span, authenticate_edge_request(), credential_for_request(), DisabledAuth (+3 more)
 
 ### Community 715 - "loadtest: bin"
 Cohesion: 0.23
@@ -4041,12 +4058,12 @@ Cohesion: 0.24
 Nodes (9): MetricsConfig, ObservabilityConfig, OtlpProtocol, Default, HashMap, LineageConfig, Option, Self (+1 more)
 
 ### Community 718 - "agents"
-Cohesion: 0.15
-Nodes (12): AgentActionPolicy, AgentContext, AgentGuardrailPolicy, AgentKnowledgePolicy, AgentModelPolicy, AgentRevisionLock, AgentSkillPolicy, AgentToolPolicy (+4 more)
+Cohesion: 0.17
+Nodes (11): AgentActionPolicy, AgentContext, AgentGuardrailPolicy, AgentKnowledgePolicy, AgentModelPolicy, AgentRevisionLock, AgentSkillPolicy, AgentToolPolicy (+3 more)
 
 ### Community 719 - "core: types"
-Cohesion: 0.36
-Nodes (9): ModelId, Option, SessionId, TenantId, TrustedSandboxFileManifestRef, UserId, ReserveWorkerInput, WorkerChildRequest (+1 more)
+Cohesion: 0.27
+Nodes (12): ModelId, Option, SessionId, TenantId, TrustedSandboxFileManifestRef, UserId, Vec, ListWorkersOutput (+4 more)
 
 ### Community 720 - "core"
 Cohesion: 0.32
@@ -4057,8 +4074,8 @@ Cohesion: 0.36
 Nodes (12): Arc, CancellationToken, LLMProvider, RuntimeEvent, Self, Sender, SessionId, Transcript (+4 more)
 
 ### Community 722 - "eval: memory_eval"
-Cohesion: 0.19
-Nodes (13): DateTime, Path, Utc, Uuid, GoldNodeSnapshot, GoldPiiStatus, GoldResolutionStatus, gold_record() (+5 more)
+Cohesion: 0.24
+Nodes (11): DateTime, Path, Utc, Uuid, GoldNodeSnapshot, GoldPiiStatus, GoldResolutionStatus, GoldNodeRecord (+3 more)
 
 ### Community 723 - "eval: memory_eval"
 Cohesion: 0.21
@@ -4081,8 +4098,8 @@ Cohesion: 0.22
 Nodes (10): InboundMessage, PathBuf, Result, String, assert_serde_json_error(), assert_validation_error(), fixture_path(), fixture_text() (+2 more)
 
 ### Community 728 - "providers: adapters"
-Cohesion: 0.20
-Nodes (10): BranchManager, Context, HandlerError, Json, Result, String, Value, NeonMaint (+2 more)
+Cohesion: 0.25
+Nodes (15): Context, CreateApiKeyRequest, CreateApiKeyResponse, HandlerError, Identity, Json, KeyListItem, Result (+7 more)
 
 ### Community 729 - "providers: rerank"
 Cohesion: 0.23
@@ -4109,24 +4126,24 @@ Cohesion: 0.28
 Nodes (14): test_action_policy_rules(), tenant_id_for_label(), test_create_and_get_session(), test_emit_and_get_events(), test_event_search(), test_list_sessions_with_filter(), test_session_meta(), test_session_status_update() (+6 more)
 
 ### Community 735 - "auth: authz"
-Cohesion: 0.26
-Nodes (11): Bytes, Method, Option, RouteTranslation, TenantId, Uri, action_review_public_routes_translate_to_restate_handlers(), authz_challenge_public_routes_translate_to_restate_handlers() (+3 more)
+Cohesion: 0.29
+Nodes (10): Bytes, Method, Option, RouteTranslation, TenantId, Uri, action_review_public_routes_translate_to_restate_handlers(), authz_challenge_public_routes_translate_to_restate_handlers() (+2 more)
 
 ### Community 736 - "auth: providers"
 Cohesion: 0.23
 Nodes (8): Result, String, TokenVaultError, TokenVaultProvider, Uuid, VaultToken, Vec, NullTokenVaultProvider
 
 ### Community 737 - "brain: pipeline"
-Cohesion: 0.32
-Nodes (7): Arc, Into, MoaConfig, RuntimeCacheStore, Self, slack_multi_chunk_refs_survive_adapter_instance_boundaries_with_runtime_cache(), slack_ref_storage_failure_after_side_effect_keeps_local_refs()
+Cohesion: 0.13
+Nodes (21): Arc, ChannelAdapter, HashMap, Instant, Into, MoaConfig, RuntimeCacheStore, RwLock (+13 more)
 
 ### Community 738 - "brain: pipeline"
 Cohesion: 0.35
 Nodes (11): ContextMessage, RewriteInput, String, Vec, WorkingContext, available_skill_lines(), available_tool_names(), build_rewriter_user_prompt() (+3 more)
 
 ### Community 739 - "brain: tests"
-Cohesion: 0.23
-Nodes (9): KnowledgeCreateLinkTokenRequest, KnowledgeCreateLinkTokenResponse, KnowledgeExchangeTokenRequest, KnowledgeExchangeTokenResponse, KnowledgeServiceError, KnowledgeUpdateConnectionSourceSelectionRequest, KnowledgeUpdateConnectionSourceSelectionResponse, Result (+1 more)
+Cohesion: 0.18
+Nodes (19): Child, Client, EventRecord, Identity, Option, OrchestratorPorts, Result, SessionId (+11 more)
 
 ### Community 740 - "eval: core"
 Cohesion: 0.20
@@ -4141,8 +4158,8 @@ Cohesion: 0.21
 Nodes (13): Event, LongRunReport, ScoreCard, ToolCallId, assert_canary_leak_blocked(), assert_compaction_invariants(), assert_experience_learning_value(), assert_multi_observer_parity() (+5 more)
 
 ### Community 743 - "eval: tests"
-Cohesion: 0.29
-Nodes (10): Bytes, Method, Option, RouteTranslation, TenantId, Uri, artifact_public_routes_translate_to_restate_handlers(), learning_candidate_public_routes_translate_to_restate_handlers() (+2 more)
+Cohesion: 0.27
+Nodes (11): Bytes, Method, Option, RouteTranslation, TenantId, Uri, artifact_public_routes_translate_to_restate_handlers(), learning_candidate_public_routes_translate_to_restate_handlers() (+3 more)
 
 ### Community 744 - "lineage: sink"
 Cohesion: 0.29
@@ -4153,8 +4170,8 @@ Cohesion: 0.21
 Nodes (9): FromStr, Option, Result, Self, String, Uuid, Value, EdgeLabel (+1 more)
 
 ### Community 746 - "memory: ingest"
-Cohesion: 0.24
-Nodes (6): Arc, EmbeddingProvider, Mutex, Vec, deterministic_vector(), RecordingEmbedder
+Cohesion: 0.29
+Nodes (17): CompletionRequest, HashMap, JsonResponseFormat, Option, ProviderNativeTool, Result, String, Value (+9 more)
 
 ### Community 747 - "memory: vector"
 Cohesion: 0.27
@@ -4185,8 +4202,8 @@ Cohesion: 0.29
 Nodes (7): Bytes, HeaderMap, KnowledgeWebhookVerifier, WebhookEvent, FixedWebhookVerifier, PayloadWebhookVerifier, required_string()
 
 ### Community 754 - "orchestrator: tests"
-Cohesion: 0.38
-Nodes (6): CancellationToken, MoaError, Option, ToolFailureClass, ToolOutput, classify_error()
+Cohesion: 0.71
+Nodes (3): CancellationToken, Option, ToolOutput
 
 ### Community 755 - "providers: tests"
 Cohesion: 0.41
@@ -4197,8 +4214,8 @@ Cohesion: 0.24
 Nodes (8): LearningEntry, Option, PgConnection, Result, SessionLearningLogStore, Uuid, Vec, PostgresSessionStore
 
 ### Community 757 - "xtask"
-Cohesion: 0.22
-Nodes (6): GetSegmentBaselineRequest, Option, SegmentBaseline, SessionId, SessionMeta, TaskSegment
+Cohesion: 0.13
+Nodes (15): apply_tier3(), Tier3Summary, CompactionConfig, ContextMessage, LLMProvider, Option, Result, SessionStore (+7 more)
 
 ### Community 758 - "xtask"
 Cohesion: 0.26
@@ -4209,8 +4226,8 @@ Cohesion: 0.25
 Nodes (11): NER Gazetteer Asset, Infrastructure and Provider Entities, Memory and Storage Entities, moa-memory-graph GraphStore, moa-memory-ingest Ingestion, moa-memory-lifecycle Consolidation, moa-memory-pii Classification, Retriever in moa-brain (+3 more)
 
 ### Community 760 - "orchestrator: services"
-Cohesion: 0.15
-Nodes (17): BoxFuture, EvalError, From, MoaConfig, MoaError, ScoringError, Self, T (+9 more)
+Cohesion: 0.31
+Nodes (9): BoxFuture, MoaConfig, T, block_on_current_thread(), replay_dataset_for_tenant(), run_replay_request_isolated(), EvalReplayRequest, EvalReplayResponse (+1 more)
 
 ### Community 761 - "providers: core"
 Cohesion: 0.31
@@ -4229,8 +4246,8 @@ Cohesion: 0.22
 Nodes (9): Box, Default, Reporter, Result, Self, String, Vec, build_reporters() (+1 more)
 
 ### Community 765 - "messaging"
-Cohesion: 0.33
-Nodes (7): Credential, Result, String, Vec, EnvironmentDeliveryCredentialVault, optional_env(), required_env()
+Cohesion: 0.17
+Nodes (15): TestResult, FactSchedule, generate_memory_eval_corpus(), generate_memory_eval_corpus_with_style(), generator_prior_assignment_is_deterministic_and_disjoint(), probes_never_target_restating_fact_ids(), validate_seeds(), corpus_id_encodes_transcript_style() (+7 more)
 
 ### Community 766 - "orchestrator: tests"
 Cohesion: 0.39
@@ -4245,8 +4262,8 @@ Cohesion: 0.25
 Nodes (7): LlmChatClient, LlmChatError, Result, Self, LlmEntityMergeClient, merge_client_sends_mention_and_candidate_context(), parse_merge_answer()
 
 ### Community 770 - "artifacts"
-Cohesion: 0.20
-Nodes (10): AgentPurpose, ActionPolicy, GuardrailPolicy, InstructionPolicy, ModelPolicy, SkillPolicy, ToolPolicy, WorkflowPolicy (+2 more)
+Cohesion: 0.22
+Nodes (9): AgentPurpose, ActionPolicy, GuardrailPolicy, InstructionPolicy, ModelPolicy, SkillPolicy, ToolPolicy, KnowledgePolicy (+1 more)
 
 ### Community 771 - "artifacts: tests"
 Cohesion: 0.47
@@ -4277,8 +4294,8 @@ Cohesion: 0.24
 Nodes (6): Error, Into, Option, Self, String, ContactError
 
 ### Community 778 - "core"
-Cohesion: 0.25
-Nodes (6): String, Vec, parse_and_match_command(), has_action_policy_unsafe_shell_syntax(), push_sub_command(), split_shell_chain()
+Cohesion: 0.27
+Nodes (5): String, Vec, has_action_policy_unsafe_shell_syntax(), push_sub_command(), split_shell_chain()
 
 ### Community 779 - "core: traits"
 Cohesion: 0.22
@@ -4385,8 +4402,8 @@ Cohesion: 0.28
 Nodes (8): ConnectorActionDefinition, ConnectorActionDefinition, Option, String, Value, Vec, ConnectorActionDefinition, ConnectorDefinition
 
 ### Community 805 - "providers: core"
-Cohesion: 0.22
-Nodes (9): Vec, WorkerState, child_report_tool_schemas(), child_report_tools_are_separate_from_delegation_tools(), delegation_schema_names_are_stable(), delegation_tool_schemas(), ListWorkersOutput, SpawnWorkerInput (+1 more)
+Cohesion: 0.24
+Nodes (16): Option, Regex, String, SearchContextLine, SearchMatch, ToolArtifactStream, collect_context(), render_search_match() (+8 more)
 
 ### Community 806 - "auth: authz"
 Cohesion: 0.22
@@ -4405,8 +4422,8 @@ Cohesion: 0.25
 Nodes (8): ActionClass, IdempotencyClass, RiskLevel, String, ToolDefinition, Value, tool_descriptor(), ToolDescriptor
 
 ### Community 810 - "edge: routes"
-Cohesion: 0.33
-Nodes (8): Bytes, Method, Option, RouteTranslation, TenantId, Uri, translate(), workflow_public_routes_translate_to_restate_handlers()
+Cohesion: 0.24
+Nodes (16): NodeIndexRow, Option, String, FactParts, build_judge_prompt(), candidate_text(), contradictory_deployment_provider(), deployment_provider() (+8 more)
 
 ### Community 811 - "edge: tests"
 Cohesion: 0.25
@@ -4429,8 +4446,8 @@ Cohesion: 0.44
 Nodes (8): Channel, ChannelCapabilities, OutboundMessage, capabilities(), prepare_outbound_message(), prepare_outbound_message_degrades_review_card_to_text(), prepare_outbound_message_keeps_review_card_when_buttons_are_available(), review_message()
 
 ### Community 816 - "orchestrator"
-Cohesion: 0.29
-Nodes (6): Channel, ChannelAdapter, HashMap, Self, MessagingDeps, OrchestratorDeps
+Cohesion: 0.47
+Nodes (4): Channel, ChannelAdapter, HashMap, MessagingDeps
 
 ### Community 817 - "orchestrator: identity_admin"
 Cohesion: 0.47
@@ -4517,8 +4534,8 @@ Cohesion: 0.46
 Nodes (6): Arc, PgPool, PostgresSessionStore, Self, RestateSessionStore, SessionStoreImpl
 
 ### Community 838 - "orchestrator: tests"
-Cohesion: 0.28
-Nodes (7): Json, SharedWorkflowContext, TurnOutcome, WorkflowContext, HandlerResult, SessionTurnWaiterProbe, SessionTurnWaiterProbeImpl
+Cohesion: 0.25
+Nodes (8): DateTime, Option, SessionStatus, TurnOutcome, Utc, WorkerSignal, ResumeBudget, signal_kind_is_resume_eligible()
 
 ### Community 839 - "providers: tests"
 Cohesion: 0.39
@@ -4577,8 +4594,8 @@ Cohesion: 0.29
 Nodes (7): Item, Iterator, Option, fact_index(), golden_vector(), stable_index(), tokens()
 
 ### Community 853 - "experiments"
-Cohesion: 0.33
-Nodes (7): CompletionRequest, ExperimentGeneratePlanRequest, JsonResponseFormat, experiment_plan_response_format(), plan_generation_request(), plan_generation_request_keeps_description_out_of_system_prompt(), plan_generation_user_prompt()
+Cohesion: 0.23
+Nodes (16): Client, Identity, ProcedureCancelResponse, ProcedureReviewDecisionResponse, ProcedureRunStatus, ProcedureSignalResponse, Result, TenantId (+8 more)
 
 ### Community 854 - "knowledge"
 Cohesion: 0.43
@@ -4689,12 +4706,12 @@ Cohesion: 0.40
 Nodes (4): SessionMeta, session(), session_search_filters_error_events(), session_search_finds_prior_events()
 
 ### Community 883 - "knowledge"
-Cohesion: 0.08
-Nodes (39): ConnectionStatus, ContactGroup, ContactGroupTargetMember, Error, IngestionStepStatus, KnowledgeConnectionProjection, KnowledgeObjectProjection, KnowledgeProviderEventRecord (+31 more)
+Cohesion: 0.15
+Nodes (15): CompletionRequest, ContactId, ContactRef, Option, Result, TenantId, TurnReplaySnapshot, SpanRecorder (+7 more)
 
 ### Community 884 - "knowledge"
-Cohesion: 0.53
-Nodes (3): PgPool, RlsContext, Self
+Cohesion: 0.28
+Nodes (15): Self, FastRememberRequest, fast_remember(), contact_remember_request(), fast_forget_idempotent_by_name(), fast_forget_soft_all_respects_contact_scope(), fast_remember_batch_writes_all_facts_with_local_dependencies(), fast_remember_db_memory() (+7 more)
 
 ### Community 885 - "lineage: core"
 Cohesion: 0.40
@@ -4740,6 +4757,10 @@ Nodes (3): E, Result, from_db()
 Cohesion: 0.33
 Nodes (5): moa-auth-providers-auth0 lib, moa-auth-providers lib, moa-auth, Public Surface, Subcrates
 
+### Community 896 - "providers: adapters"
+Cohesion: 0.39
+Nodes (13): MarkWorkerChildTerminalInput, WorkerChildRef, auto_delegation_bundle_completes_with_real_failed_and_cancelled_terminals(), auto_delegation_bundle_survives_worker_self_cleanup(), auto_delegation_bundle_waits_for_all_workers_and_preserves_schedule_order(), auto_delegation_consume_child_terminal_snapshots_into_run(), auto_delegation_emit_and_synthesis_dispatch_guards_are_idempotent(), auto_delegation_run_backfills_terminal_reported_before_registration() (+5 more)
+
 ### Community 897 - "skills: tests"
 Cohesion: 0.40
 Nodes (4): SkillRegressionSummary, generated_suite_source_is_reviewable_without_writing_files(), regression_run_with_score_within_noise_band_commits_new_version_only_if_above_threshold(), summary()
@@ -4761,8 +4782,8 @@ Cohesion: 0.40
 Nodes (4): Context Compaction Under Sustained Token Pressure, How To Re-record, Key Invariants, What It Tests
 
 ### Community 902 - "test-support: tests"
-Cohesion: 0.40
-Nodes (3): Result, fixture_round_trips_session_turn_through_restate(), Turn
+Cohesion: 0.19
+Nodes (14): ArtifactRef, Option, ProcedureCondition, ProcedureEdge, ProcedureNode, ProcedureNodeKind, String, Value (+6 more)
 
 ### Community 903 - "brain: tests"
 Cohesion: 0.50
@@ -4913,32 +4934,32 @@ Cohesion: 0.33
 Nodes (3): CompletionRequest, CompletionStream, CacheTestProvider
 
 ### Community 945 - "test-support: postgres"
-Cohesion: 0.40
-Nodes (3): Self, ToolBudgetConfig, ToolOutputConfig
+Cohesion: 0.18
+Nodes (14): EvalError, From, MoaError, ScoringError, Self, eval_run_status_from_str(), eval_run_status_strings_match_persisted_values(), EvalServiceError (+6 more)
 
 ### Community 946 - "experiments"
 Cohesion: 0.67
 Nodes (3): ExperimentVariantScoreDeltaRow, experiment_variant_score_delta_row(), VariantScoreDeltaRow
 
 ### Community 947 - "messaging"
-Cohesion: 0.67
-Nodes (3): Send, Sync, DeliverySink
+Cohesion: 0.24
+Nodes (12): String, Value, Vec, InputSchemaViolations, missing_required_fields_are_reported_exactly(), non_object_schema_is_a_no_op(), required_fields_with_non_object_input_are_all_missing(), valid_input_passes_including_whole_number_integers() (+4 more)
 
 ### Community 948 - "orchestrator: services"
 Cohesion: 0.67
 Nodes (3): Option, String, ListQuery
 
 ### Community 949 - "orchestrator: services"
-Cohesion: 0.17
-Nodes (15): EvalError, EvalResult, EvalRun, MoaError, Skill, SkillRegressionSummary, estimate_suite_cost(), estimate_tokens() (+7 more)
+Cohesion: 0.24
+Nodes (9): Option, Skill, SkillRegressionSummary, Value, generated_suite_payload(), generated_suite_summary(), GeneratedSuitePayload, previous_skill_payload() (+1 more)
 
 ### Community 950 - "orchestrator: workflows"
-Cohesion: 0.50
-Nodes (4): ContextMessage, Self, ToolResultReplayMeta, CompiledRecordMessage
+Cohesion: 0.25
+Nodes (13): build_url(), expect_success(), expect_success_json(), http_error(), parse_retry_after(), required_string_field(), Duration, MoaError (+5 more)
 
 ### Community 951 - "providers: embedding"
-Cohesion: 0.40
-Nodes (5): EvalScore, EvalScoreValue, ScoreCard, eval_score_value(), score_card_scores()
+Cohesion: 0.23
+Nodes (10): Default, From, MemoryRankingConfig, MemoryRankingWeights, Self, is_first_person_query(), ranking_fingerprint(), ranking_fingerprint_for_version() (+2 more)
 
 ### Community 953 - "experiments"
 Cohesion: 0.67
@@ -4956,9 +4977,21 @@ Nodes (3): moa.agent_deployment table, moa.agent_installation table, session_age
 Cohesion: 0.40
 Nodes (4): HandlerError, R, Result, Self
 
+### Community 980 - "workflows"
+Cohesion: 0.22
+Nodes (11): DateTime, Option, Utc, compute_next_consolidation_utc(), consolidation_completed_uninitialized_tenant_skips_vo_reschedule(), fixed_time(), tenant_state_projection_contains_only_consolidation_state(), TenantStatus (+3 more)
+
 ### Community 1002 - "hands: adapters"
-Cohesion: 0.50
-Nodes (5): Value, action_policy_script(), bash_tool_response(), repeated_tool_loop_script(), text_response()
+Cohesion: 0.24
+Nodes (11): FgaClient, MockServer, PgPool, String, Value, check_body(), denied_require_authz_persists_ocsf_security_event_db(), fga_client() (+3 more)
+
+### Community 1032 - "workflows"
+Cohesion: 0.20
+Nodes (9): Error, ScoreRecord, ScoreSource, Self, decode_pending_row(), is_retryable_write_error(), pending_row_routes_eval_events_to_scores(), PendingRow (+1 more)
+
+### Community 1155 - "Community 1155"
+Cohesion: 0.31
+Nodes (6): IngestCtx, PostgresSessionStore, eval_seed_sets_pr_embedder_state_before_ingestion_db_memory(), IsolatedEvalStore, run_memory_retrieval_eval(), test_database_url()
 
 ### Community 1158 - "Community 1158"
 Cohesion: 0.50
@@ -4969,8 +5002,8 @@ Cohesion: 0.83
 Nodes (3): MoaError, ToolFailureClass, classify_error()
 
 ### Community 1161 - "Community 1161"
-Cohesion: 0.50
-Nodes (4): SessionStatus, TenantId, record_session_created(), session_status_label()
+Cohesion: 0.20
+Nodes (9): Event, HandlerError, ObjectContext, Result, SessionId, String, UserMessage, persist_parent_session_event() (+1 more)
 
 ### Community 1162 - "Community 1162"
 Cohesion: 0.50
@@ -4985,8 +5018,12 @@ Cohesion: 0.67
 Nodes (3): hand_lease_expires_at(), DateTime, Utc
 
 ### Community 1165 - "Community 1165"
-Cohesion: 0.67
-Nodes (3): Send, Sync, KnowledgeRepository
+Cohesion: 0.39
+Nodes (9): AgentDefinition, ArtifactDocument, agent_document(), agent_guardrail_policy_rejects_empty_model_guardrail(), agent_guardrail_policy_requires_model_and_block_message_for_enabled_enforce_guardrail(), agent_guardrail_policy_requires_prompt_guardrail(), assert_error(), valid_agent_definition() (+1 more)
+
+### Community 1166 - "Community 1166"
+Cohesion: 0.22
+Nodes (7): MoaConfig, Result, LoadTestOptions, LoadTestReport, Result, load_config(), run_loadtest()
 
 ### Community 1167 - "Community 1167"
 Cohesion: 0.67
@@ -4996,25 +5033,73 @@ Nodes (3): Send, Sync, ActionPolicyRuleStore
 Cohesion: 0.67
 Nodes (3): BudgetExpectations, FunctionalExpectations, Expectations
 
+### Community 1175 - "Community 1175"
+Cohesion: 0.31
+Nodes (9): IdempotencyClass, RunRetryPolicy, String, ToolDefinition, build_tool_run_plan(), retry_max_attempts_for(), tool_run_name(), tool_run_retry_policy() (+1 more)
+
+### Community 1176 - "Community 1176"
+Cohesion: 0.31
+Nodes (7): Event, Option, String, event_hand_id(), normalize_event_search_query(), quote_identifier(), redact_password()
+
+### Community 1177 - "Community 1177"
+Cohesion: 0.32
+Nodes (7): Default, MemoryDigestConfig, Self, ConsolidationOptions, decay_anchors_to_base_confidence_and_is_idempotent_at_same_instant(), decay_respects_floor_and_counts_at_floor(), decay_target()
+
+### Community 1178 - "Community 1178"
+Cohesion: 0.29
+Nodes (4): WorkerState, WorkerTerminalResult, failed_worker_terminal(), terminal_in_state()
+
+### Community 1179 - "Community 1179"
+Cohesion: 0.33
+Nodes (4): HandlerError, R, Result, Self
+
+### Community 1180 - "Community 1180"
+Cohesion: 0.33
+Nodes (6): LoadMode, Option, SessionProfileKind, Args, String, OutputFormat
+
+### Community 1181 - "Community 1181"
+Cohesion: 0.33
+Nodes (6): ChannelAccountId, ChannelRef, ContactId, ContactPointId, StoragePartitionId, SessionChannelBindingReplacement
+
+### Community 1183 - "Community 1183"
+Cohesion: 0.50
+Nodes (3): WriterCommand, WriterReceiver, TryRecvError
+
+### Community 1184 - "Community 1184"
+Cohesion: 0.83
+Nodes (3): MoaError, ToolFailureClass, classify_error()
+
+### Community 1185 - "Community 1185"
+Cohesion: 0.67
+Nodes (3): EvalError, MoaError, map_eval_error()
+
+### Community 1186 - "Community 1186"
+Cohesion: 0.67
+Nodes (3): PgPool, ProcedureRuntime, workflow_runtime()
+
+### Community 1187 - "Community 1187"
+Cohesion: 0.67
+Nodes (3): Error, MoaError, map_sqlx_error()
+
 ## Knowledge Gaps
-- **4868 isolated node(s):** `Option`, `String`, `AgentContext`, `AgentRevisionLock`, `Vec` (+4863 more)
+- **4872 isolated node(s):** `Option`, `String`, `AgentContext`, `AgentRevisionLock`, `Vec` (+4867 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **138 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Deserialize` connect `providers: adapters` to `providers: memory_llm`, `core: config`, `hands: tools`, `eval: tests`, `session: tests`, `hands: adapters`, `orchestrator: tests`, `edge`, `providers`, `auth: auth0`, `hands: tools`, `hands: tools`, `hands: tools`, `memory: pii`, `hands: tools`, `auth: auth0`, `brain: pipeline`, `knowledge: providers`, `orchestrator: tests`, `orchestrator: services`, `hands: tools`, `xtask`, `memory: ingest`, `auth: auth0`, `lineage: audit`, `auth: auth0`, `hands: tools`, `hands: tools`, `auth: fga-bootstrap`, `orchestrator: services`, `artifacts`, `eval: tests`, `orchestrator: runtime`, `memory: ingest`, `messaging`, `orchestrator: services`, `skills: tests`, `orchestrator: tests`, `lineage: audit`, `memory: vector`, `orchestrator: services`, `memory: ingest`?**
-  _High betweenness centrality (0.221) - this node is a cross-community bridge._
-- **Why does `annotate_restate_handler_span()` connect `orchestrator: services` to `orchestrator: services`, `orchestrator: workflows`, `orchestrator: services`, `orchestrator: workflows`, `orchestrator: services`, `orchestrator: services`, `orchestrator: objects`, `orchestrator: services`, `orchestrator: objects`, `observability`, `orchestrator: objects`, `orchestrator: services`, `orchestrator: services`, `orchestrator: workflows`, `orchestrator: workflows`, `orchestrator: services`, `orchestrator: workflows`, `skills`, `orchestrator: services`, `orchestrator: services`, `session: store`, `orchestrator: services`, `orchestrator: services`, `orchestrator: services`, `orchestrator: workflows`, `orchestrator: services`, `orchestrator: services`, `orchestrator: services`, `providers: adapters`, `orchestrator: services`, `orchestrator: services`, `orchestrator: services`, `orchestrator: services`, `orchestrator: workflows`, `orchestrator: workflows`, `orchestrator: services`, `orchestrator: services`, `orchestrator: workflows`, `orchestrator: services`, `brain: planning`, `orchestrator: objects`?**
-  _High betweenness centrality (0.118) - this node is a cross-community bridge._
-- **Why does `Turn` connect `test-support: tests` to `orchestrator: services`, `orchestrator: workflows`, `orchestrator: services`, `orchestrator: objects`, `orchestrator: workflows`, `orchestrator: workflows`, `orchestrator: workflows`, `loadtest`, `brain: harness`, `orchestrator: turn_driver`, `orchestrator: tests`, `orchestrator: objects`, `core`, `orchestrator: tests`, `orchestrator: services`, `memory: ingest`, `providers: tests`, `orchestrator: tests`, `edge: routes`?**
-  _High betweenness centrality (0.113) - this node is a cross-community bridge._
+- **Why does `Deserialize` connect `providers: adapters` to `providers: memory_llm`, `core: config`, `hands: tools`, `eval: tests`, `session: tests`, `hands: adapters`, `orchestrator: tests`, `edge`, `providers`, `auth: auth0`, `providers: core`, `hands: tools`, `hands: tools`, `memory: pii`, `hands: tools`, `auth: auth0`, `brain: pipeline`, `knowledge: providers`, `orchestrator: tests`, `orchestrator: services`, `hands: tools`, `xtask`, `memory: ingest`, `auth: auth0`, `lineage: audit`, `auth: auth0`, `hands: tools`, `hands: tools`, `auth: fga-bootstrap`, `orchestrator: services`, `artifacts`, `eval: tests`, `orchestrator: runtime`, `memory: ingest`, `messaging`, `orchestrator: services`, `orchestrator: services`, `skills: tests`, `orchestrator: tests`, `lineage: audit`, `memory: vector`, `orchestrator: services`, `memory: ingest`?**
+  _High betweenness centrality (0.201) - this node is a cross-community bridge._
+- **Why does `annotate_restate_handler_span()` connect `orchestrator: services` to `orchestrator: services`, `orchestrator: workflows`, `orchestrator: services`, `orchestrator: workflows`, `orchestrator: services`, `orchestrator: services`, `orchestrator: objects`, `orchestrator: services`, `orchestrator: objects`, `observability`, `orchestrator: objects`, `orchestrator: services`, `orchestrator: services`, `orchestrator: workflows`, `orchestrator: tests`, `orchestrator: workflows`, `orchestrator: services`, `orchestrator: workflows`, `session: store`, `skills`, `orchestrator: services`, `orchestrator: services`, `session: store`, `orchestrator: services`, `orchestrator: services`, `orchestrator: services`, `orchestrator: workflows`, `orchestrator: services`, `orchestrator: services`, `providers: adapters`, `orchestrator: services`, `orchestrator: services`, `orchestrator: services`, `orchestrator: workflows`, `orchestrator: services`, `orchestrator: services`, `orchestrator: workflows`, `orchestrator: services`, `orchestrator: objects`?**
+  _High betweenness centrality (0.150) - this node is a cross-community bridge._
+- **Why does `Turn` connect `core` to `orchestrator: services`, `orchestrator: turn_driver`, `orchestrator: services`, `orchestrator: workflows`, `orchestrator: workflows`, `memory: ingest`, `orchestrator: tests`, `providers: tests`, `orchestrator: objects`, `orchestrator: services`, `loadtest`, `orchestrator: objects`, `orchestrator: workflows`, `orchestrator: tests`, `brain: harness`, `orchestrator: workflows`, `orchestrator: tests`, `edge: routes`?**
+  _High betweenness centrality (0.086) - this node is a cross-community bridge._
 - **Are the 206 inferred relationships involving `annotate_restate_handler_span()` (e.g. with `.compare()` and `.datasets_list()`) actually correct?**
   _`annotate_restate_handler_span()` has 206 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `Option`, `String`, `AgentContext` to the rest of the system?**
-  _4871 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _4875 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `memory: lifecycle` be split into smaller, more focused modules?**
-  _Cohesion score 0.05037481259370315 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.13076923076923078 - nodes in this community are weakly interconnected._
 - **Should `experiments` be split into smaller, more focused modules?**
   _Cohesion score 0.048745173745173745 - nodes in this community are weakly interconnected._

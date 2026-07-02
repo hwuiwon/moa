@@ -27,6 +27,19 @@ pub(super) fn translate(
             translate_json_object_with_tenant_scope(body, "/Skills/import", tenant_id)
         }
         "/v1/skills/list" => translate_json_object_with_tenant_id(body, "/Skills/list", tenant_id),
+        "/v1/skills/run" => translate_json_object_with_tenant_id(body, "/Skills/run", tenant_id),
+        "/v1/skills/status" => {
+            translate_json_object_with_tenant_id(body, "/Skills/status", tenant_id)
+        }
+        "/v1/skills/cancel" => {
+            translate_json_object_with_tenant_id(body, "/Skills/cancel", tenant_id)
+        }
+        "/v1/skills/signal" => {
+            translate_json_object_with_tenant_id(body, "/Skills/signal", tenant_id)
+        }
+        "/v1/skills/decide-review" => {
+            translate_json_object_with_tenant_id(body, "/Skills/decide_review", tenant_id)
+        }
         "/v1/artifacts/import" => {
             translate_json_object_with_tenant_scope(body, "/Artifacts/import", tenant_id)
         }
@@ -129,6 +142,46 @@ mod tests {
                     let forwarded: serde_json::Value =
                         serde_json::from_slice(&forwarded_body).expect("forwarded body is JSON");
                     assert_eq!(forwarded, expected_body, "{public_path} body changed");
+                }
+                RouteTranslation::NoChange => {
+                    panic!("{public_path} should translate to {internal_path}")
+                }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn skill_execution_public_routes_translate_to_restate_handlers() {
+        // Pins: hosted skill procedure edge routes forward to the internal Skills service handlers
+        // that absorbed the former standalone workflow run/status/cancel/signal/review surface.
+        let cases = [
+            ("/v1/skills/run", "/Skills/run"),
+            ("/v1/skills/status", "/Skills/status"),
+            ("/v1/skills/cancel", "/Skills/cancel"),
+            ("/v1/skills/signal", "/Skills/signal"),
+            ("/v1/skills/decide-review", "/Skills/decide_review"),
+        ];
+
+        for (public_path, internal_path) in cases {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+            let body = Bytes::from_static(br#"{}"#);
+
+            let translation = translate(&Method::POST, &uri, &body);
+
+            match translation {
+                RouteTranslation::Forward {
+                    method,
+                    path,
+                    body: forwarded_body,
+                } => {
+                    assert_eq!(method, Method::POST, "{public_path} must remain POST");
+                    assert_eq!(path, internal_path, "{public_path} target changed");
+                    let forwarded: serde_json::Value =
+                        serde_json::from_slice(&forwarded_body).expect("forwarded body is JSON");
+                    assert_eq!(forwarded.get("tenant_id"), Some(&test_tenant_json()));
                 }
                 RouteTranslation::NoChange => {
                     panic!("{public_path} should translate to {internal_path}")

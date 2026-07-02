@@ -1,7 +1,7 @@
 //! Target execution paths for behavior-lab trial workflows.
 
 use super::status::{
-    attach_trial_session, attach_trial_workflow_run, increment_trial_turn,
+    attach_trial_procedure_run, attach_trial_session, increment_trial_turn,
     status_response_from_record, stop_trial,
 };
 use super::trial_simulator::{SimulatorContext, simulator_done, simulator_next_user_message};
@@ -38,7 +38,7 @@ struct StartedWorkflowRun {
 struct WorkflowTrialStart {
     scope: ActionRuleScope,
     trial_uid: Uuid,
-    workflow_ref: String,
+    procedure_ref: String,
     input: Value,
     session_id: Option<SessionId>,
     idempotency_key: Option<String>,
@@ -167,7 +167,7 @@ async fn ensure_agent_loop_session(
             trial.target_model.clone().or(variant.model).or(Some(model)),
             attachments.is_empty(),
         ),
-        ExperimentTarget::Workflow { .. } => {
+        ExperimentTarget::Procedure { .. } => {
             return Err(bad_request(
                 "agent-loop trial received a workflow experiment target",
             ));
@@ -206,14 +206,14 @@ async fn ensure_agent_loop_session(
     Ok((session_id, target_model))
 }
 
-pub(super) async fn run_workflow_trial(
+pub(super) async fn run_procedure_trial(
     ctx: &WorkflowContext<'_>,
     request: ExperimentTrialRunWorkflowRequest,
     trial: ExperimentTrialRecord,
 ) -> Result<ExperimentTrialRunStatusResponse, HandlerError> {
     let target = parse_payload::<ExperimentTarget>("target", request.target)?;
-    let ExperimentTarget::Workflow {
-        workflow_ref,
+    let ExperimentTarget::Procedure {
+        procedure_ref,
         input,
         session_id,
         idempotency_key,
@@ -230,7 +230,7 @@ pub(super) async fn run_workflow_trial(
         WorkflowTrialStart {
             scope,
             trial_uid: trial.trial_uid,
-            workflow_ref,
+            procedure_ref,
             input,
             session_id,
             idempotency_key: idempotency_key.or_else(|| Some(trial.trial_key.clone())),
@@ -239,9 +239,9 @@ pub(super) async fn run_workflow_trial(
         },
     )
     .await?;
-    ctx.set(K_WORKFLOW_RUN_UID, Json(run.run_uid));
+    ctx.set(K_PROCEDURE_RUN_UID, Json(run.run_uid));
     tracing::Span::current()
-        .set_attribute("moa.experiment.workflow_run_uid", run.run_uid.to_string());
+        .set_attribute("moa.experiment.procedure_run_uid", run.run_uid.to_string());
 
     if let Some(stop) = run.stop {
         return stop_trial(
@@ -462,17 +462,17 @@ async fn start_and_attach_workflow_run(
             let run = workflow_runtime(pool.clone())
                 .start(
                     &start.scope,
-                    StartWorkflowRun {
-                        workflow_ref: start.workflow_ref,
+                    StartProcedureRun {
+                        procedure_ref: start.procedure_ref,
                         input: start.input,
                         session_id: start.session_id,
                         idempotency_key: start.idempotency_key,
                     },
                 )
                 .await
-                .map_err(workflow_handler_error)?;
+                .map_err(procedure_handler_error)?;
             let trial =
-                attach_trial_workflow_run(pool, start.scope, start.trial_uid, run.run_uid).await?;
+                attach_trial_procedure_run(pool, start.scope, start.trial_uid, run.run_uid).await?;
             let stop = trial_stop_for_workflow_status(&run.status).map(|(status, stop_reason)| {
                 WorkflowTrialStop {
                     status,
@@ -489,8 +489,8 @@ async fn start_and_attach_workflow_run(
         .name("experiment_trial_start_workflow_run")
         .await?
         .into_inner();
-    ctx.workflow_client::<ArtifactWorkflowExecutionClient>(run.run_uid.to_string())
-        .run(Json::from(RunArtifactWorkflowRequest {
+    ctx.workflow_client::<ProcedureExecutionClient>(run.run_uid.to_string())
+        .run(Json::from(RunProcedureRequest {
             tenant_id,
             run_uid: run.run_uid,
             identity,

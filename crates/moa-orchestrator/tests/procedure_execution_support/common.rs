@@ -1,4 +1,4 @@
-// Common end-to-end workflow execution support.
+// Common end-to-end procedure execution support.
 
 use std::process::{Child, Command, Stdio};
 use std::path::Path;
@@ -9,7 +9,9 @@ use moa_core::traits::Identity;
 use moa_core::wire::artifacts::{
     ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest, ArtifactPublishResponse,
 };
-use moa_core::wire::workflows::{WorkflowRunRequest, WorkflowRunResponse, WorkflowRunStatus, WorkflowStatusRequest};
+use moa_core::wire::procedures::{
+    ProcedureRunRequest, ProcedureRunResponse, ProcedureRunStatus, ProcedureStatusRequest,
+};
 use moa_core::{ActionRuleScope, TenantId};
 use moa_test_support::postgres::test_database_url;
 use serde_json::{Value, json};
@@ -57,21 +59,10 @@ fn spawn_orchestrator(
     }
     command
         .spawn()
-        .context("spawn moa-orchestrator binary for workflow execution e2e")
+        .context("spawn moa-orchestrator binary for procedure execution e2e")
 }
 
-
-
-
-
-
-
-
-
-
-
-
-async fn import_and_publish_workflow(
+async fn import_and_publish_skill(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
@@ -120,67 +111,67 @@ async fn import_and_publish_workflow(
     Ok(published)
 }
 
-async fn start_workflow(
+async fn start_procedure(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
     tenant_id: TenantId,
-    workflow_ref: &str,
+    procedure_ref: &str,
     input: Value,
-) -> Result<WorkflowRunResponse> {
-    let request = WorkflowRunRequest {
+) -> Result<ProcedureRunResponse> {
+    let request = ProcedureRunRequest {
         tenant_id,
-        workflow_ref: workflow_ref.to_string(),
+        procedure_ref: procedure_ref.to_string(),
         input,
         session_id: None,
-        idempotency_key: Some(format!("workflow-{}", Uuid::now_v7())),
+        idempotency_key: Some(format!("procedure-{}", Uuid::now_v7())),
     };
-    post_json_with_identity(client, ingress, "Workflows", "run", identity, &request)
+    post_json_with_identity(client, ingress, "Skills", "run", identity, &request)
         .await?
-        .json::<WorkflowRunResponse>()
+        .json::<ProcedureRunResponse>()
         .await
-        .context("deserialize workflow run response")
+        .context("deserialize procedure run response")
 }
 
-async fn wait_for_completed_workflow(
+async fn wait_for_completed_procedure(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
     tenant_id: TenantId,
     run_id: Uuid,
-) -> Result<WorkflowRunStatus> {
-    wait_for_workflow_status(client, ingress, identity, tenant_id, run_id, "completed").await
+) -> Result<ProcedureRunStatus> {
+    wait_for_procedure_status(client, ingress, identity, tenant_id, run_id, "completed").await
 }
 
-async fn wait_for_workflow_status(
+async fn wait_for_procedure_status(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
     tenant_id: TenantId,
     run_id: Uuid,
     expected: &str,
-) -> Result<WorkflowRunStatus> {
-    let request = WorkflowStatusRequest { tenant_id, run_id };
+) -> Result<ProcedureRunStatus> {
+    let request = ProcedureStatusRequest { tenant_id, run_id };
     let mut last_status = None;
     for _attempt in 0..60 {
         let status =
-            post_json_with_identity(client, ingress, "Workflows", "status", identity, &request)
+            post_json_with_identity(client, ingress, "Skills", "status", identity, &request)
                 .await?
-                .json::<WorkflowRunStatus>()
+                .json::<ProcedureRunStatus>()
                 .await
-                .context("deserialize workflow status response")?;
+                .context("deserialize procedure status response")?;
         if status.status == expected {
             return Ok(status);
         }
         if status.status == "failed" {
-            bail!("workflow run failed before reaching {expected}: {status:?}");
+            bail!("procedure run failed before reaching {expected}: {status:?}");
         }
         last_status = Some(status);
         sleep(Duration::from_secs(1)).await;
     }
 
     bail!(
-        "timed out waiting for workflow run {run_id} to reach {expected}; last status: {last_status:?}"
+        "timed out waiting for procedure run {run_id} to reach {expected}; last status: {last_status:?}"
     )
 }
 
@@ -217,7 +208,7 @@ fn service_url(ingress: &str, service: &str, handler: &str) -> String {
     format!("{}/{service}/{handler}", ingress.trim_end_matches('/'))
 }
 
-fn node_ids(status: &WorkflowRunStatus) -> Vec<&str> {
+fn node_ids(status: &ProcedureRunStatus) -> Vec<&str> {
     status
         .node_runs
         .iter()
@@ -233,5 +224,5 @@ fn assert_validation_report_has_no_errors(report: &Value) -> Result<()> {
         return Ok(());
     }
 
-    bail!("published workflow had validation errors: {errors:?}")
+    bail!("published skill had validation errors: {errors:?}")
 }

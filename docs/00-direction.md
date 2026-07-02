@@ -30,7 +30,7 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 - **Learning log:** every learned pattern, segment assessment, memory update, and skill change can be audited and invalidated by version or batch.
 - **Lineage and audit:** retrieval, context, generation, scores, DSAR exports, and optional compliance audit records are first-class operational artifacts.
 - **Tenant knowledge:** relational graph memory stores facts, decisions, lessons, sources, and provenance as Postgres nodes and edges, while sidecar indexes and the configured vector backend provide retrieval. Contact memory is contact-local and does not inherit tenant memory or another contact's memory.
-- **Skills:** successful workflows can become reusable Agent Skills; ranking improves as segment outcomes accumulate.
+- **Skills:** recurring successful executions can be distilled into reusable Agent Skills, optionally carrying a deterministic procedure; ranking improves as segment outcomes accumulate.
 - **Tenant ownership:** skills and policies are tenant-owned runtime data.
 - **Pluggable execution:** local hands, Docker, Daytona, E2B, and MCP servers are routed through one tool abstraction.
 - **Multiple interfaces:** REST/gateway, API automation, and messaging adapters all talk to the same session model.

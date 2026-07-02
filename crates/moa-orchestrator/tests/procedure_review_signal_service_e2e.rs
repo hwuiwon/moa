@@ -1,13 +1,13 @@
 #[path = "support/mod.rs"]
 mod support;
 
-include!("workflow_execution_support/common.rs");
-include!("workflow_execution_support/review_signal.rs");
+include!("procedure_execution_support/common.rs");
+include!("procedure_execution_support/review_signal.rs");
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, and OpenFGA"]
-async fn workflow_review_node_pauses_and_resumes_service_e2e() -> Result<()> {
-    // Pins: review nodes pause as pending_review and resume through Workflows/decide_review.
+async fn procedure_review_node_pauses_and_resumes_service_e2e() -> Result<()> {
+    // Pins: review nodes pause as pending_review and resume through Skills/decide_review.
     let _guard = RESTATE_E2E_LOCK.lock().await;
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
@@ -25,25 +25,25 @@ async fn workflow_review_node_pauses_and_resumes_service_e2e() -> Result<()> {
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_and_publish_workflow(
+        import_and_publish_skill(
             &client,
             ingress,
             &identity,
             tenant_id,
-            review_workflow_source(),
+            review_procedure_source(),
         )
         .await?;
 
-        let run = start_workflow(
+        let run = start_procedure(
             &client,
             ingress,
             &identity,
             tenant_id,
-            "workflow://review-gated-workflow",
+            "skill://review-gated-procedure",
             json!({}),
         )
         .await?;
-        let pending = wait_for_workflow_status(
+        let pending = wait_for_procedure_status(
             &client,
             ingress,
             &identity,
@@ -57,12 +57,13 @@ async fn workflow_review_node_pauses_and_resumes_service_e2e() -> Result<()> {
         assert_eq!(pending.node_runs[1].status, "pending_review");
 
         let decision =
-            decide_workflow_review(&client, ingress, &identity, tenant_id, run.run_id).await?;
+            decide_procedure_review(&client, ingress, &identity, tenant_id, run.run_id).await?;
         assert!(decision.accepted);
         assert_eq!(decision.status, "pending_review");
 
         let completed =
-            wait_for_completed_workflow(&client, ingress, &identity, tenant_id, run.run_id).await?;
+            wait_for_completed_procedure(&client, ingress, &identity, tenant_id, run.run_id)
+                .await?;
         assert_eq!(completed.status, "completed");
         assert_eq!(completed.current_node_id.as_deref(), Some("done"));
         assert_eq!(node_ids(&completed), vec!["start", "gate", "done"]);
@@ -79,8 +80,8 @@ async fn workflow_review_node_pauses_and_resumes_service_e2e() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, and OpenFGA"]
-async fn workflow_wait_signal_node_pauses_and_resumes_service_e2e() -> Result<()> {
-    // Pins: wait_signal nodes keep the workflow body alive until Workflows/signal resolves it.
+async fn procedure_wait_signal_node_pauses_and_resumes_service_e2e() -> Result<()> {
+    // Pins: wait_signal nodes keep the procedure body alive until Skills/signal resolves it.
     let _guard = RESTATE_E2E_LOCK.lock().await;
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
@@ -99,37 +100,38 @@ async fn workflow_wait_signal_node_pauses_and_resumes_service_e2e() -> Result<()
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_and_publish_workflow(
+        import_and_publish_skill(
             &client,
             ingress,
             &identity,
             tenant_id,
-            wait_signal_workflow_source(),
+            wait_signal_procedure_source(),
         )
         .await?;
 
-        let run = start_workflow(
+        let run = start_procedure(
             &client,
             ingress,
             &identity,
             tenant_id,
-            "workflow://signal-gated-workflow",
+            "skill://signal-gated-procedure",
             json!({}),
         )
         .await?;
-        let waiting = wait_for_workflow_status(
+        let waiting = wait_for_procedure_status(
             &client, ingress, &identity, tenant_id, run.run_id, "running",
         )
         .await?;
         assert_eq!(waiting.current_node_id.as_deref(), Some("signal"));
         assert_eq!(node_ids(&waiting), vec!["start", "signal"]);
 
-        let signal = signal_workflow(&client, ingress, &identity, tenant_id, run.run_id).await?;
+        let signal = signal_procedure(&client, ingress, &identity, tenant_id, run.run_id).await?;
         assert!(signal.accepted);
         assert_eq!(signal.status, "running");
 
         let completed =
-            wait_for_completed_workflow(&client, ingress, &identity, tenant_id, run.run_id).await?;
+            wait_for_completed_procedure(&client, ingress, &identity, tenant_id, run.run_id)
+                .await?;
         assert_eq!(completed.current_node_id.as_deref(), Some("done"));
         assert_eq!(node_ids(&completed), vec!["start", "signal", "done"]);
         assert_eq!(
@@ -152,8 +154,8 @@ async fn workflow_wait_signal_node_pauses_and_resumes_service_e2e() -> Result<()
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, and OpenFGA"]
-async fn workflow_cancel_resolves_paused_review_service_e2e() -> Result<()> {
-    // Pins: Workflows/cancel resolves the artifact workflow cancel promise while blocked.
+async fn procedure_cancel_resolves_paused_review_service_e2e() -> Result<()> {
+    // Pins: Skills/cancel resolves the procedure execution cancel promise while blocked.
     let _guard = RESTATE_E2E_LOCK.lock().await;
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
@@ -171,25 +173,25 @@ async fn workflow_cancel_resolves_paused_review_service_e2e() -> Result<()> {
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_and_publish_workflow(
+        import_and_publish_skill(
             &client,
             ingress,
             &identity,
             tenant_id,
-            review_workflow_source(),
+            review_procedure_source(),
         )
         .await?;
 
-        let run = start_workflow(
+        let run = start_procedure(
             &client,
             ingress,
             &identity,
             tenant_id,
-            "workflow://review-gated-workflow",
+            "skill://review-gated-procedure",
             json!({}),
         )
         .await?;
-        let pending = wait_for_workflow_status(
+        let pending = wait_for_procedure_status(
             &client,
             ingress,
             &identity,
@@ -200,16 +202,17 @@ async fn workflow_cancel_resolves_paused_review_service_e2e() -> Result<()> {
         .await?;
         assert_eq!(pending.current_node_id.as_deref(), Some("gate"));
 
-        let cancelled = cancel_workflow(&client, ingress, &identity, tenant_id, run.run_id).await?;
+        let cancelled =
+            cancel_procedure(&client, ingress, &identity, tenant_id, run.run_id).await?;
         assert!(cancelled.cancelled);
 
-        let status = wait_for_workflow_node_status(
+        let status = wait_for_procedure_node_status(
             &client,
             ingress,
             &identity,
             tenant_id,
             run.run_id,
-            WorkflowNodeStatusExpectation {
+            ProcedureNodeStatusExpectation {
                 expected_run_status: "cancelled",
                 node_id: "gate",
                 expected_node_status: "cancelled",

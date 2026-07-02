@@ -2,7 +2,7 @@
 
 use moa_core::{
     AgentActionPolicy, AgentContext, AgentGuardrailPolicy, AgentKnowledgePolicy, AgentModelPolicy,
-    AgentRevisionLock, AgentSkillPolicy, AgentToolPolicy, AgentWorkflowPolicy,
+    AgentRevisionLock, AgentSkillPolicy, AgentToolPolicy,
 };
 
 /// Compact deterministic runtime policy for a pinned configured-agent revision.
@@ -20,8 +20,6 @@ pub struct AgentRuntimePolicy {
     pub knowledge_policy: AgentKnowledgePolicy,
     /// Runtime skill visibility and pinning policy.
     pub skill_policy: AgentSkillPolicy,
-    /// Runtime workflow affordance policy.
-    pub workflow_policy: AgentWorkflowPolicy,
     /// Runtime action visibility and review policy.
     pub action_policy: AgentActionPolicy,
     /// Runtime tool filter.

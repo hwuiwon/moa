@@ -25,7 +25,7 @@ pub(super) async fn status_response(
         return status_response_from_record(tenant_id, run);
     }
 
-    if run.target_kind == ExperimentTargetKind::Workflow {
+    if run.target_kind == ExperimentTargetKind::Procedure {
         return linked_workflow_status_response(pool, scope, tenant_id, run).await;
     }
 
@@ -44,14 +44,14 @@ async fn linked_workflow_status_response(
     tenant_id: TenantId,
     mut run: ExperimentRunRecord,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
-    let Some(workflow_run_uid) = run.workflow_run_uid else {
+    let Some(procedure_run_uid) = run.procedure_run_uid else {
         return status_response_from_record(tenant_id, run);
     };
 
     let workflow_run = workflow_runtime(pool.clone())
-        .status(&scope, workflow_run_uid)
+        .status(&scope, procedure_run_uid)
         .await
-        .map_err(workflow_handler_error)?
+        .map_err(procedure_handler_error)?
         .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
 
     if let Some(status) = experiment_status_from_artifact_status(&workflow_run.status)
@@ -74,7 +74,7 @@ async fn linked_workflow_status_response(
     Ok(response)
 }
 
-pub(super) async fn workflow_status_response(
+pub(super) async fn procedure_status_response(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunStatusRequest,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
@@ -151,7 +151,7 @@ fn status_response_from_record_with_status(
         target_kind: Some(run.target_kind.as_str().to_string()),
         score_run_id: Some(run.score_run_id),
         session_id: run.session_id,
-        workflow_run_uid: run.workflow_run_uid,
+        procedure_run_uid: run.procedure_run_uid,
         error: run.error,
         run: run_value,
     })

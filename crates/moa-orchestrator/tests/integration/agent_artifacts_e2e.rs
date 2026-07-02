@@ -1,4 +1,4 @@
-//! End-to-end coverage for artifact-backed skills and workflows through Restate.
+//! End-to-end coverage for artifact-backed skills and procedures through Restate.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -17,11 +17,11 @@ use moa_core::traits::Identity;
 use moa_core::wire::artifacts::{
     ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest, ArtifactPublishResponse,
 };
+use moa_core::wire::procedures::{
+    ProcedureRunRequest, ProcedureRunResponse, ProcedureRunStatus, ProcedureStatusRequest,
+};
 use moa_core::wire::skills::{
     SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
-};
-use moa_core::wire::workflows::{
-    WorkflowRunRequest, WorkflowRunResponse, WorkflowRunStatus, WorkflowStatusRequest,
 };
 use moa_core::{
     ActionRuleScope, Event, EventRange, EventRecord, ModelId, SessionId, SessionStatus,
@@ -49,15 +49,15 @@ const REFUND_SKILL_PATH: &str = ".moa/skills/refund-triage/SKILL.md";
 const REFUND_SKILL_PROVIDER_ID: &str = "read_refund_triage_skill";
 
 #[test]
-fn damaged_food_workflow_fixture_is_publishable() -> Result<()> {
-    // Pins: the e2e workflow fixture remains a valid publishable workflow artifact.
-    let document = ArtifactDocument::from_yaml(damaged_food_workflow_source())
-        .context("parse damaged food workflow fixture")?;
+fn damaged_food_procedure_fixture_is_publishable() -> Result<()> {
+    // Pins: the e2e procedure fixture remains a valid publishable procedure artifact.
+    let document = ArtifactDocument::from_yaml(damaged_food_procedure_source())
+        .context("parse damaged food procedure fixture")?;
     let report = validate_for_status(&document, ArtifactStatus::Published);
 
     assert!(
         report.is_ok(),
-        "workflow fixture should publish cleanly: {report:?}"
+        "procedure fixture should publish cleanly: {report:?}"
     );
     assert_eq!(document.metadata.name, "damaged-food-replacement");
     Ok(())
@@ -187,8 +187,8 @@ async fn support_agent_selects_refund_skill_from_customer_message() -> Result<()
             detailed_event_summary(&events)
         );
         assert!(
-            !saw_workflow_tool_call(&events),
-            "skill-only support conversation should not invoke a workflow tool"
+            !saw_procedure_tool_call(&events),
+            "skill-only support conversation should not invoke a procedure tool"
         );
 
         Ok(())
@@ -203,12 +203,12 @@ async fn support_agent_selects_refund_skill_from_customer_message() -> Result<()
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, and OpenFGA"]
-async fn damaged_food_workflow_run_starts_from_published_artifact() -> Result<()> {
+async fn damaged_food_procedure_run_starts_from_published_artifact() -> Result<()> {
     let _guard = RESTATE_E2E_LOCK.lock().await;
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
-    let fixture_path = memory_dir.path().join("damaged-food-workflow-script.json");
+    let fixture_path = memory_dir.path().join("damaged-food-procedure-script.json");
     write_scripted_text_fixture(
         &fixture_path,
         "I checked the damaged food report and queued it for approval.",
@@ -220,7 +220,7 @@ async fn damaged_food_workflow_run_starts_from_published_artifact() -> Result<()
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
     let mut identity = test_user_identity();
-    let mut meta = test_session_meta(&format!("agent-artifacts-workflow-{}", Uuid::now_v7()));
+    let mut meta = test_session_meta(&format!("agent-artifacts-procedure-{}", Uuid::now_v7()));
     meta.model = ModelId::new("scripted-loadtest");
     let storage_partition_id = storage_partition_id_from_meta(&meta);
     identity.tenant_id = meta.tenant_id;
@@ -238,7 +238,7 @@ async fn damaged_food_workflow_run_starts_from_published_artifact() -> Result<()
         wait_for_orchestrator_live(&client, ports.health, &mut orchestrator, &orchestrator_log)
             .await?;
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_and_publish_damaged_food_workflow(
+        import_and_publish_damaged_food_procedure(
             &client,
             ingress,
             &identity,
@@ -247,7 +247,7 @@ async fn damaged_food_workflow_run_starts_from_published_artifact() -> Result<()
         .await?;
         let session_id = create_session(&client, ingress, &identity, &meta).await?;
 
-        let response = start_damaged_food_workflow(
+        let response = start_damaged_food_procedure(
             &client,
             ingress,
             &identity,
@@ -258,7 +258,7 @@ async fn damaged_food_workflow_run_starts_from_published_artifact() -> Result<()
         .await?;
         assert_eq!(response.status, "queued");
 
-        let status = wait_for_workflow_status(
+        let status = wait_for_procedure_status(
             &client,
             ingress,
             &identity,
@@ -281,7 +281,7 @@ async fn damaged_food_workflow_run_starts_from_published_artifact() -> Result<()
         assert_eq!(status.node_runs[3].status, "pending_review");
         assert!(
             status.error.is_none(),
-            "workflow should pause cleanly: {status:?}"
+            "procedure should pause cleanly: {status:?}"
         );
 
         Ok(())
@@ -296,7 +296,7 @@ async fn damaged_food_workflow_run_starts_from_published_artifact() -> Result<()
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
-async fn workflow_association_and_skill_selection_share_one_support_session() -> Result<()> {
+async fn procedure_association_and_skill_selection_share_one_support_session() -> Result<()> {
     let _guard = RESTATE_E2E_LOCK.lock().await;
     if !cfg!(feature = "provider-overrides") {
         return Ok(());
@@ -304,8 +304,8 @@ async fn workflow_association_and_skill_selection_share_one_support_session() ->
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
-    let fixture_path = memory_dir.path().join("mixed-workflow-skill-script.json");
-    let final_text = "I used the refund triage runbook and kept the damaged-food workflow attached to this session for tracking.";
+    let fixture_path = memory_dir.path().join("mixed-procedure-skill-script.json");
+    let final_text = "I used the refund triage runbook and kept the damaged-food procedure attached to this session for tracking.";
     write_skill_file_read_fixture(&fixture_path, final_text)?;
 
     let ports = reserve_orchestrator_ports()?;
@@ -333,11 +333,11 @@ async fn workflow_association_and_skill_selection_share_one_support_session() ->
             .await?;
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
         import_refund_skill(&client, ingress, &identity, &storage_partition_id).await?;
-        import_and_publish_damaged_food_workflow(&client, ingress, &identity, &storage_partition_id)
+        import_and_publish_damaged_food_procedure(&client, ingress, &identity, &storage_partition_id)
             .await?;
         let session_id = create_session(&client, ingress, &identity, &meta).await?;
 
-        let prompt = "Use our refund triage guidance while tracking the damaged-food workflow \
+        let prompt = "Use our refund triage guidance while tracking the damaged-food procedure \
             for order ORD-7002. The customer says sauce leaked through the bag and wants a credit.";
         post_user_message(&client, ingress, &identity, session_id, prompt).await?;
 
@@ -351,11 +351,11 @@ async fn workflow_association_and_skill_selection_share_one_support_session() ->
             detailed_event_summary(&events)
         );
         assert!(
-            !saw_workflow_tool_call(&events),
-            "workflow association should not make the agent loop invent workflow tool calls"
+            !saw_procedure_tool_call(&events),
+            "procedure association should not make the agent loop invent procedure tool calls"
         );
 
-        let workflow_run = start_damaged_food_workflow(
+        let procedure_run = start_damaged_food_procedure(
             &client,
             ingress,
             &identity,
@@ -364,14 +364,14 @@ async fn workflow_association_and_skill_selection_share_one_support_session() ->
             "ORD-7002",
         )
         .await?;
-        assert_eq!(workflow_run.status, "queued");
+        assert_eq!(procedure_run.status, "queued");
 
-        let status = wait_for_workflow_status(
+        let status = wait_for_procedure_status(
             &client,
             ingress,
             &identity,
             &storage_partition_id,
-            workflow_run.run_id,
+            procedure_run.run_id,
             "pending_review",
         )
         .await?;
@@ -387,7 +387,7 @@ async fn workflow_association_and_skill_selection_share_one_support_session() ->
             ]
         );
         assert_eq!(status.node_runs[3].status, "pending_review");
-        assert!(status.error.is_none(), "workflow should pause cleanly: {status:?}");
+        assert!(status.error.is_none(), "procedure should pause cleanly: {status:?}");
 
         Ok(())
     }
@@ -418,7 +418,7 @@ async fn import_refund_skill(
     Ok(())
 }
 
-async fn import_and_publish_damaged_food_workflow(
+async fn import_and_publish_damaged_food_procedure(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
@@ -428,7 +428,7 @@ async fn import_and_publish_damaged_food_workflow(
     let import_request = ArtifactImportRequest {
         scope,
         source_format: "yaml".to_string(),
-        source_text: damaged_food_workflow_source().to_string(),
+        source_text: damaged_food_procedure_source().to_string(),
         files: Vec::new(),
     };
     let imported = post_json_with_identity(
@@ -471,64 +471,64 @@ fn tenant_scope(storage_partition_id: &StoragePartitionId) -> Result<ActionRuleS
     Ok(ActionRuleScope::Tenant { tenant_id })
 }
 
-async fn start_damaged_food_workflow(
+async fn start_damaged_food_procedure(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
     storage_partition_id: &StoragePartitionId,
     session_id: Option<SessionId>,
     order_id: &str,
-) -> Result<WorkflowRunResponse> {
-    let request = WorkflowRunRequest {
+) -> Result<ProcedureRunResponse> {
+    let request = ProcedureRunRequest {
         tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
-        workflow_ref: "workflow://damaged-food-replacement".to_string(),
+        procedure_ref: "skill://damaged-food-replacement".to_string(),
         input: json!({
             "order_id": order_id,
             "damage_summary": "clear photo shows sauce leaked through the delivery bag",
             "customer_requested": "refund_or_replacement"
         }),
         session_id,
-        idempotency_key: Some(format!("workflow-{order_id}")),
+        idempotency_key: Some(format!("procedure-{order_id}")),
     };
-    post_json_with_identity(client, ingress, "Workflows", "run", identity, &request)
+    post_json_with_identity(client, ingress, "Skills", "run", identity, &request)
         .await?
-        .json::<WorkflowRunResponse>()
+        .json::<ProcedureRunResponse>()
         .await
-        .context("deserialize workflow run response")
+        .context("deserialize procedure run response")
 }
 
-async fn wait_for_workflow_status(
+async fn wait_for_procedure_status(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
     storage_partition_id: &StoragePartitionId,
     run_id: Uuid,
     expected: &str,
-) -> Result<WorkflowRunStatus> {
-    let request = WorkflowStatusRequest {
+) -> Result<ProcedureRunStatus> {
+    let request = ProcedureStatusRequest {
         tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
         run_id,
     };
     let mut last_status = None;
     for _attempt in 0..60 {
         let status =
-            post_json_with_identity(client, ingress, "Workflows", "status", identity, &request)
+            post_json_with_identity(client, ingress, "Skills", "status", identity, &request)
                 .await?
-                .json::<WorkflowRunStatus>()
+                .json::<ProcedureRunStatus>()
                 .await
-                .context("deserialize workflow status response")?;
+                .context("deserialize procedure status response")?;
         if status.status == expected {
             return Ok(status);
         }
         if status.status == "failed" {
-            bail!("workflow run failed before reaching {expected}: {status:?}");
+            bail!("procedure run failed before reaching {expected}: {status:?}");
         }
         last_status = Some(status);
         sleep(Duration::from_secs(1)).await;
     }
 
     bail!(
-        "timed out waiting for workflow run {run_id} to reach {expected}; last status: {last_status:?}"
+        "timed out waiting for procedure run {run_id} to reach {expected}; last status: {last_status:?}"
     )
 }
 
@@ -779,11 +779,11 @@ fn saw_successful_skill_file_read(events: &[EventRecord]) -> bool {
     })
 }
 
-fn saw_workflow_tool_call(events: &[EventRecord]) -> bool {
+fn saw_procedure_tool_call(events: &[EventRecord]) -> bool {
     events.iter().any(|record| {
         matches!(
             &record.event,
-            Event::ToolCall { tool_name, .. } if tool_name.contains("workflow")
+            Event::ToolCall { tool_name, .. } if tool_name.contains("procedure")
         )
     })
 }
@@ -850,7 +850,7 @@ fn detailed_event_summary(events: &[EventRecord]) -> String {
         .join("; ")
 }
 
-fn node_ids(status: &WorkflowRunStatus) -> Vec<&str> {
+fn node_ids(status: &ProcedureRunStatus) -> Vec<&str> {
     status
         .node_runs
         .iter()
@@ -975,10 +975,10 @@ fn skill_file(
     }
 }
 
-fn damaged_food_workflow_source() -> &'static str {
+fn damaged_food_procedure_source() -> &'static str {
     r#"
 api_version: moa.artifact/v1
-kind: workflow
+kind: skill
 metadata:
   name: damaged-food-replacement
   description: Procedure for refund, credit, or replacement when food arrives damaged.
@@ -988,72 +988,75 @@ metadata:
     - refund
 status: draft
 definition:
-  type: workflow
+  type: skill
   spec:
-    input_schema:
-      type: object
-      required:
-        - order_id
-        - damage_summary
-      properties:
-        order_id:
-          type: string
-        damage_summary:
-          type: string
-        customer_requested:
-          type: string
-    state_schema:
-      type: object
-      properties:
-        evidence_sufficient:
-          type: boolean
-    nodes:
-      - id: start
-        kind: start
-        ui:
-          x: 80
-          y: 120
-      - id: verify_evidence
-        kind: condition
-        condition:
-          type: exists
-          path: $.damage_summary
-        ui:
-          x: 280
-          y: 120
-      - id: choose_resolution
-        kind: agent
-        max_turns: 2
-        input:
-          instruction: Decide refund, credit, replacement, or escalation after evidence review.
-        ui:
-          x: 520
-          y: 120
-      - id: review_resolution
-        kind: review
-        input:
-          prompt: Review the proposed refund, credit, replacement, or escalation before notifying the customer.
-        ui:
-          x: 760
-          y: 120
-      - id: done
-        kind: end
-        ui:
-          x: 1000
-          y: 120
-    edges:
-      - id: start-to-verify
-        from: start
-        to: verify_evidence
-      - id: verify-to-resolution
-        from: verify_evidence
-        to: choose_resolution
-      - id: resolution-to-review
-        from: choose_resolution
-        to: review_resolution
-      - id: review-to-done
-        from: review_resolution
-        to: done
+    instructions:
+      path: SKILL.md
+    procedure:
+      input_schema:
+        type: object
+        required:
+          - order_id
+          - damage_summary
+        properties:
+          order_id:
+            type: string
+          damage_summary:
+            type: string
+          customer_requested:
+            type: string
+      state_schema:
+        type: object
+        properties:
+          evidence_sufficient:
+            type: boolean
+      nodes:
+        - id: start
+          kind: start
+          ui:
+            x: 80
+            y: 120
+        - id: verify_evidence
+          kind: condition
+          condition:
+            type: exists
+            path: $.damage_summary
+          ui:
+            x: 280
+            y: 120
+        - id: choose_resolution
+          kind: agent
+          max_turns: 2
+          input:
+            instruction: Decide refund, credit, replacement, or escalation after evidence review.
+          ui:
+            x: 520
+            y: 120
+        - id: review_resolution
+          kind: review
+          input:
+            prompt: Review the proposed refund, credit, replacement, or escalation before notifying the customer.
+          ui:
+            x: 760
+            y: 120
+        - id: done
+          kind: end
+          ui:
+            x: 1000
+            y: 120
+      edges:
+        - id: start-to-verify
+          from: start
+          to: verify_evidence
+        - id: verify-to-resolution
+          from: verify_evidence
+          to: choose_resolution
+        - id: resolution-to-review
+          from: choose_resolution
+          to: review_resolution
+        - id: review-to-done
+          from: review_resolution
+          to: done
 "#
 }
 
@@ -1065,5 +1068,5 @@ fn assert_validation_report_has_no_errors(report: &Value) -> Result<()> {
         return Ok(());
     }
 
-    bail!("published workflow had validation errors: {errors:?}")
+    bail!("published procedure had validation errors: {errors:?}")
 }

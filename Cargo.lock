@@ -3981,7 +3981,6 @@ dependencies = [
  "moa-session",
  "moa-skills",
  "moa-test-support",
- "moa-workflows",
  "rand 0.8.5",
  "regex",
  "reqwest 0.13.4",
@@ -4157,20 +4156,6 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "uuid",
- "workspace-hack",
-]
-
-[[package]]
-name = "moa-workflows"
-version = "0.1.0"
-dependencies = [
- "moa-artifacts",
- "moa-core",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
  "uuid",
  "workspace-hack",
 ]

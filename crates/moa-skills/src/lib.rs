@@ -12,6 +12,8 @@ pub mod format;
 pub mod improver;
 pub mod lessons;
 pub mod package;
+/// Deterministic procedure graph execution for skill-backed procedures.
+pub mod procedure;
 #[cfg(feature = "skill-learning")]
 pub mod proposals;
 pub mod registry;

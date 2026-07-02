@@ -18,7 +18,9 @@ use moa_brain::pipeline::delegation_planning::{
     DELEGATION_PLAN_METADATA_KEY, DelegationPlan, DelegationPlanNode, plan_delegation_for_request,
 };
 use moa_brain::pipeline::segments::{SegmentCompleted, SegmentTracker};
-use moa_brain::pipeline::skills::SELECTED_SKILL_NAMES_METADATA_KEY;
+use moa_brain::pipeline::skills::{
+    SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY, SELECTED_SKILL_NAMES_METADATA_KEY,
+};
 use moa_brain::segment_assessment::AssessmentOverride;
 use moa_brain::turn_learning::build_segment_learning_bundle;
 use moa_brain::turn_segments::{
@@ -45,7 +47,8 @@ use moa_core::{
     ToolOutput, TrustedSandboxFileEntry, TrustedSandboxFileManifestPayload,
     TrustedSandboxFileManifestRef, TurnOutcome as CoreTurnOutcome, TurnReplayCounters,
     WorkerChildRef, WorkerTerminalResult, default_worker_budget_tokens, is_child_report_tool_name,
-    is_delegation_tool_name, scope_coordination_counters, scope_turn_replay_counters,
+    is_delegation_tool_name, is_procedure_tool_name, scope_coordination_counters,
+    scope_turn_replay_counters,
 };
 use moa_lineage_citation::ChunkRef;
 use moa_lineage_core::TurnId;
@@ -78,8 +81,8 @@ use crate::tool_invocation::governed::{
 };
 use crate::turn::util::{
     TurnEvidence, allowed_tool_names, annotate_unresolved_verification,
-    ensure_delegation_tool_schemas, response_tool_calls, stable_tool_call_id,
-    summarize_response_text, turn_outcome_for_response,
+    ensure_delegation_tool_schemas, ensure_procedure_tool_schemas, response_tool_calls,
+    stable_tool_call_id, summarize_response_text, turn_outcome_for_response,
 };
 use crate::turn_driver::{
     guardrails as driver_guardrails, learning as driver_learning, model_loop as driver_model_loop,
@@ -818,6 +821,9 @@ async fn run_once_inside_workflow(
         record_selected_segment_skills(ctx, session_id, &request.metadata).await?;
     }
     ensure_delegation_tool_schemas(&mut request);
+    if turn_has_procedure_capable_skill(&request.metadata) {
+        ensure_procedure_tool_schemas(&mut request);
+    }
     request.metadata.insert(
         DEFER_BRAIN_RESPONSE_METADATA_KEY.to_string(),
         serde_json::json!(true),
@@ -1510,7 +1516,11 @@ fn auto_delegation_root_turn_cap(user_message: &str) -> Option<u32> {
 fn auto_worker_tool_subset(allowed_tools: &std::collections::BTreeSet<String>) -> Vec<String> {
     allowed_tools
         .iter()
-        .filter(|name| !is_delegation_tool_name(name) && !is_child_report_tool_name(name))
+        .filter(|name| {
+            !is_delegation_tool_name(name)
+                && !is_child_report_tool_name(name)
+                && !is_procedure_tool_name(name)
+        })
         .cloned()
         .collect()
 }
@@ -2497,6 +2507,20 @@ async fn record_selected_segment_skills(
     Ok(())
 }
 
+/// Returns whether the turn selected at least one skill carrying a procedure, so
+/// the deterministic procedure execution tools should be offered on this turn.
+fn turn_has_procedure_capable_skill(
+    metadata: &std::collections::HashMap<String, serde_json::Value>,
+) -> bool {
+    metadata
+        .get(SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY)
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .any(|name| !name.trim().is_empty())
+}
+
 fn selected_skill_names(
     metadata: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Vec<String> {
@@ -2626,6 +2650,27 @@ mod tests {
             selected_skill_names(&metadata),
             vec!["incident-triage".to_string(), "rust".to_string()]
         );
+    }
+
+    #[test]
+    fn procedure_tools_offered_only_when_a_procedure_skill_is_selected() {
+        // Pins: run_procedure/procedure_status are injected only when the turn
+        // selected at least one skill that carries a procedure.
+        let mut none = HashMap::new();
+        none.insert(
+            SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY.to_string(),
+            json!([]),
+        );
+        assert!(!turn_has_procedure_capable_skill(&none));
+        // Missing key entirely also means no procedure tools.
+        assert!(!turn_has_procedure_capable_skill(&HashMap::new()));
+
+        let mut present = HashMap::new();
+        present.insert(
+            SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY.to_string(),
+            json!(["", "damaged-food-order"]),
+        );
+        assert!(turn_has_procedure_capable_skill(&present));
     }
 
     #[test]

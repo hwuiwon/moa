@@ -55,7 +55,15 @@ pub(super) fn test_skill(name: &str, description: &str) -> SkillMetadata {
         tags: vec!["ops".to_string(), "debug".to_string()],
         allowed_tools: vec!["bash".to_string()],
         actions: Vec::new(),
+        has_procedure: false,
         estimated_tokens: 1_200,
+    }
+}
+
+pub(super) fn test_skill_with_procedure(name: &str, description: &str) -> SkillMetadata {
+    SkillMetadata {
+        has_procedure: true,
+        ..test_skill(name, description)
     }
 }
 

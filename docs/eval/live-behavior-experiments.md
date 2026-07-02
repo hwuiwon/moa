@@ -16,8 +16,8 @@ Use a live behavior experiment when the question is "what happens when this
 variant uses real MOA execution paths?" Live experiments live in
 `moa-experiments` and the hosted `Experiments` service. They store run metadata
 in `moa.experiment_run`, then admit the target through existing production
-paths: `Session`/`TurnExecution` for agent loops and `WorkflowRuntime` for
-artifact-backed workflow runs.
+paths: `Session`/`TurnExecution` for agent loops and the procedure runtime for
+skill procedure runs.
 
 Do not use live experiments as a shortcut for regression coverage. If a live
 experiment reveals a repeatable failure, turn the finding into a regression
@@ -34,18 +34,20 @@ object, and queues the prompt through `Session/queue_message`. Tool routing,
 skills, memory, approvals, event logging, and learning emission are the same
 production path used by user sessions.
 
-`workflow` targets contain a `workflow_ref`, input JSON, optional session ID,
-and optional idempotency key. The experiment starts a published workflow through
-`WorkflowRuntime` and stores the linked `moa.artifact_run.run_uid`. Workflow
-experiments do not interpret workflow nodes themselves. Current workflow runs
-may remain queued until the `moa-workflows` node interpreter supports execution.
+`procedure` targets reference a published skill's procedure through a
+`procedure_ref`, plus input JSON, an optional session ID, and an optional
+idempotency key. Starting a procedure run first validates the input JSON against
+the skill's input schema; a run with missing required inputs is rejected with a
+structured missing-inputs error instead of being created. The experiment then
+starts the procedure through the procedure runtime and stores the linked
+`moa.artifact_run.run_uid`.
 
 ## Artifact Revisions
 
 Experiment variants can pin `artifact_revision_uids`. The run stores those
 revision IDs on `moa.experiment_run` for fast API reads and also records
 enforceable links in `moa.experiment_run_artifact_revision`. Pin revisions when
-testing a skill or workflow variant so later score comparisons can identify the
+testing a skill variant so later score comparisons can identify the
 exact artifact bytes under test.
 
 ## Scores
@@ -88,15 +90,15 @@ Do not document `/v1/experiments/run` as public; the public admission route is
 
 Live behavior experiments use the normal action-policy engine. Agent-loop
 experiments do not enter a blocking review status; an admin-review decision
-records a tenant action review and the target session continues. Workflow
-experiment status mirrors the linked artifact workflow run when a workflow run
+records a tenant action review and the target session continues. Procedure
+experiment status mirrors the linked procedure run when a procedure run
 has been attached.
 
 ## Learning Boundary
 
 Experiment-derived improvements must go through `learning_candidates`; they
-must never auto-promote skills or workflows. Experiment execution records run
-metadata and links to sessions, workflow runs, artifact revisions, and score
+must never auto-promote skills. Experiment execution records run
+metadata and links to sessions, procedure runs, artifact revisions, and score
 runs. The explicit `Experiments/propose_improvements` operation may create a
 candidate from completed experiment evidence, but review, evaluation, and
 promotion remain separate explicit steps.
@@ -166,8 +168,8 @@ lane.
 | direct edge `lineage/explain`, `query`, `verify` | `Tenant:Member` |
 
 Future MCP support is a thin adapter over product/default typed services such
-as `Experiments`, direct edge analytics/lineage reads, and `Workflows`. If it exposes
+as `Experiments`, direct edge analytics/lineage reads, and `Skills`. If it exposes
 internal eval at all, that surface must remain qualified as
 `internal-eval-runner` gated. MCP must forward through the same DTOs and
 authorization boundaries instead of owning eval, experiment, analytics,
-lineage, learning, or workflow domain logic.
+lineage, or learning domain logic.

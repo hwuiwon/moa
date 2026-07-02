@@ -47,12 +47,11 @@ use crate::{
         skills::{Skills, SkillsImpl},
         tenants::{Tenants, TenantsImpl},
         tool_executor::{ToolExecutor, ToolExecutorImpl},
-        workflows::{Workflows, WorkflowsImpl},
     },
     workflows::{
-        artifact_workflow_execution::{ArtifactWorkflowExecution, ArtifactWorkflowExecutionImpl},
         consolidate::{Consolidate, ConsolidateImpl},
         knowledge_sync_ingestion::{KnowledgeSyncIngestion, KnowledgeSyncIngestionImpl},
+        procedure_execution::{ProcedureExecution, ProcedureExecutionImpl},
         turn_execution::{TurnExecution, TurnExecutionImpl},
         worker_turn_execution::{WorkerTurnExecution, WorkerTurnExecutionImpl},
     },
@@ -121,11 +120,7 @@ const CORE_BODY_BINDINGS: &[RestateBinding] = &[
     RestateBinding::enabled("Worker", bind_worker),
     RestateBinding::enabled("Tenants", bind_tenants),
     RestateBinding::enabled("Tenant", bind_tenant),
-    RestateBinding::enabled("Workflows", bind_workflows),
-    RestateBinding::enabled(
-        "ArtifactWorkflowExecution",
-        bind_artifact_workflow_execution,
-    ),
+    RestateBinding::enabled("ProcedureExecution", bind_procedure_execution),
     RestateBinding::enabled("KnowledgeSyncIngestion", bind_knowledge_sync_ingestion),
     RestateBinding::enabled("Consolidate", bind_consolidate),
 ];
@@ -425,15 +420,11 @@ fn bind_tenant(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> Endp
     builder.bind(TenantImpl.serve())
 }
 
-fn bind_workflows(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(WorkflowsImpl.serve())
-}
-
-fn bind_artifact_workflow_execution(
+fn bind_procedure_execution(
     builder: EndpointBuilder,
     _: &EndpointBindingContext<'_>,
 ) -> EndpointBuilder {
-    builder.bind(ArtifactWorkflowExecutionImpl.serve())
+    builder.bind(ProcedureExecutionImpl.serve())
 }
 
 fn bind_knowledge_sync_ingestion(
@@ -589,8 +580,8 @@ mod tests {
             "default product readiness should match the experiments feature"
         );
         assert!(
-            names.contains(&"ArtifactWorkflowExecution"),
-            "default product readiness should include ArtifactWorkflowExecution"
+            names.contains(&"ProcedureExecution"),
+            "default product readiness should include ProcedureExecution"
         );
     }
 

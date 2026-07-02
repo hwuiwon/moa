@@ -32,7 +32,6 @@ ALTER TABLE moa.artifact
             'agent',
             'skill',
             'connector',
-            'workflow',
             'action',
             'experiment_plan'
         )

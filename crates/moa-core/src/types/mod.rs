@@ -18,6 +18,7 @@ mod learning;
 mod memory;
 mod model;
 mod observability;
+mod procedure_tools;
 mod provider;
 mod query_rewrite;
 mod runtime_events;
@@ -37,10 +38,9 @@ pub use action_policy::{
 pub use agent::{
     AgentActionPolicy, AgentContext, AgentKnowledgePolicy, AgentKnowledgeScopeMode,
     AgentModelPolicy, AgentPolicySnapshot, AgentRevisionLock, AgentSessionSelection,
-    AgentSkillPolicy, AgentSkillPolicyMode, AgentToolPolicy, AgentToolPolicyMode,
-    AgentWorkflowPolicy, LockedToolRef, ResolvedArtifactRevisionRef,
-    SYSTEM_DEFAULT_AGENT_ARTIFACT_UID, SYSTEM_DEFAULT_AGENT_POLICY_HASH, SYSTEM_DEFAULT_AGENT_REF,
-    SYSTEM_DEFAULT_AGENT_REVISION_UID,
+    AgentSkillPolicy, AgentSkillPolicyMode, AgentToolPolicy, AgentToolPolicyMode, LockedToolRef,
+    ResolvedArtifactRevisionRef, SYSTEM_DEFAULT_AGENT_ARTIFACT_UID,
+    SYSTEM_DEFAULT_AGENT_POLICY_HASH, SYSTEM_DEFAULT_AGENT_REF, SYSTEM_DEFAULT_AGENT_REVISION_UID,
 };
 pub use channel::{
     ActionButton, Attachment, ButtonStyle, Channel, ChannelAccountId, ChannelAccountRef,
@@ -98,6 +98,11 @@ pub use observability::{
     CacheReport, TraceContext, full_request_fingerprint, genai_operation_name, genai_provider_name,
     normalize_environment, stable_prefix_fingerprint, trace_name_from_message,
     truncate_with_ellipsis,
+};
+pub use procedure_tools::{
+    ProcedureStatusToolInput, ProcedureTool, ProcedureToolKind, RunProcedureToolInput,
+    is_procedure_tool_name, procedure_status_tool_schema, procedure_tool_schemas,
+    run_procedure_tool_schema,
 };
 pub use provider::{ModelTask, ModelTier};
 pub use query_rewrite::{QueryRewriteResult, RewriteReason, RewriteSource};

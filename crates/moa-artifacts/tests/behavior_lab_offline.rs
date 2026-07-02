@@ -50,9 +50,6 @@ definition:
     target_variants:
       - key: agent-loop
         kind: agent_loop
-      - key: workflow
-        kind: workflow
-        workflow_ref: workflow://checkout-support
     simulator_model: gpt-4.1-mini
     target_model: gpt-4.1-mini
     parallelism: 2
@@ -104,16 +101,10 @@ ui:
         .collect::<Vec<_>>();
     assert_eq!(
         paths,
-        vec![
-            (
-                "definition.spec.simulation.data_bundles[0].sources[0].connector_ref".to_string(),
-                "connector://orders".to_string()
-            ),
-            (
-                "definition.spec.target_variants[1].workflow_ref".to_string(),
-                "workflow://checkout-support".to_string()
-            )
-        ]
+        vec![(
+            "definition.spec.simulation.data_bundles[0].sources[0].connector_ref".to_string(),
+            "connector://orders".to_string()
+        )]
     );
 }
 
@@ -162,11 +153,6 @@ fn artifact_refs_parse_and_format_generic_artifact_schemes() {
             "connector://orders",
             Some(ArtifactKind::Connector),
             "orders",
-        ),
-        (
-            "workflow://checkout-support",
-            Some(ArtifactKind::Workflow),
-            "checkout-support",
         ),
         (
             "experiment_plan://checkout-behavior",
@@ -225,9 +211,8 @@ fn plan_validation_rejects_invalid_embedded_simulation_and_wrong_refs() {
                     },
                     "target_variants": [
                         {
-                            "key": "workflow",
-                            "kind": "workflow",
-                            "workflow_ref": "skill://not-a-workflow"
+                            "key": "agent-loop",
+                            "kind": "agent_loop"
                         }
                     ],
                     "simulator_model": "",
@@ -275,11 +260,6 @@ fn plan_validation_rejects_invalid_embedded_simulation_and_wrong_refs() {
     );
     assert_error(
         &report,
-        "definition.spec.target_variants[0].workflow_ref",
-        "reference must use workflow://",
-    );
-    assert_error(
-        &report,
         "definition.spec.parallelism",
         "experiment plan parallelism must be between 1 and 64",
     );
@@ -291,16 +271,16 @@ fn published_behavior_lab_docs_reject_unresolved_external_refs_from_resolver() {
     let mut document =
         ArtifactDocument::from_json(&minimal_valid_plan()).expect("parse valid plan");
     document.reference_resolutions = vec![ReferenceResolution::unresolved(
-        "definition.spec.target_variants[0].workflow_ref",
-        ArtifactRef::workflow("missing-workflow"),
+        "definition.spec.simulation.data_bundles[0].sources[0].connector_ref",
+        ArtifactRef::connector("missing-orders"),
     )];
 
     let report = validate_for_status(&document, ArtifactStatus::Published);
 
     assert_error(
         &report,
-        "definition.spec.target_variants[0].workflow_ref",
-        "unresolved reference workflow://missing-workflow",
+        "definition.spec.simulation.data_bundles[0].sources[0].connector_ref",
+        "unresolved reference connector://missing-orders",
     );
 }
 

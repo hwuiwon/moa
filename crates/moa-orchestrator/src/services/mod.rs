@@ -29,4 +29,3 @@ pub mod skill_regression;
 pub mod skills;
 pub mod tenants;
 pub mod tool_executor;
-pub mod workflows;

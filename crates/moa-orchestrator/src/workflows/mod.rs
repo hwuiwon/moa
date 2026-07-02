@@ -3,7 +3,6 @@
 use chrono::{DateTime, Utc};
 use restate_sdk::prelude::*;
 
-pub mod artifact_workflow_execution;
 pub mod consolidate;
 pub(crate) mod errors;
 #[cfg(feature = "experiments")]
@@ -13,6 +12,8 @@ pub mod experiment_run;
 #[cfg(feature = "experiments")]
 pub mod experiment_trial_run;
 pub mod knowledge_sync_ingestion;
+pub mod procedure_execution;
+pub mod procedure_node_actions;
 pub(crate) mod progress_delivery;
 #[cfg(feature = "skill-learning")]
 pub mod skill_learning;
@@ -21,7 +22,6 @@ pub mod turn_execution;
 pub(crate) mod turn_progress;
 pub(crate) mod turn_responsiveness;
 pub mod worker_turn_execution;
-pub mod workflow_node_actions;
 
 /// Durably samples the current UTC time inside a workflow as a named replayable step.
 ///

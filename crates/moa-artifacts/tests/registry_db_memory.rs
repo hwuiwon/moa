@@ -330,8 +330,8 @@ async fn registry_persists_behavior_lab_artifact_kinds() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
-async fn workflow_run_node_projection_db_memory() -> Result<()> {
-    // Pins: workflow runs and node-run projections round-trip through the registry schema.
+async fn procedure_run_node_projection_db_memory() -> Result<()> {
+    // Pins: procedure runs and node-run projections round-trip through the registry schema.
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
     let registry = ArtifactRegistry::new(store.pool().clone());
@@ -339,12 +339,12 @@ async fn workflow_run_node_projection_db_memory() -> Result<()> {
         tenant_id: TenantId::from(Uuid::now_v7()),
     };
     let name = format!("support-flow-{}", Uuid::now_v7());
-    let document = workflow_doc(&name);
-    let source = document.to_json().expect("serialize workflow doc");
+    let document = procedure_skill_doc(&name);
+    let source = document.to_json().expect("serialize procedure skill doc");
     let input = json!({ "ticket_id": "T-100", "priority": "high" });
     let initial_state = json!({ "steps": [] });
     let session_id = SessionId::new();
-    let idempotency_key = Some(format!("workflow-run-{}", Uuid::now_v7()));
+    let idempotency_key = Some(format!("procedure-run-{}", Uuid::now_v7()));
 
     let draft = registry
         .create_draft(
@@ -372,7 +372,7 @@ async fn workflow_run_node_projection_db_memory() -> Result<()> {
                 artifact_uid: Some(published.artifact_uid),
                 revision_uid: Some(published.revision_uid),
                 session_id: Some(session_id),
-                workflow_ref: format!("workflow://{name}"),
+                procedure_ref: format!("skill://{name}"),
                 status: ArtifactRunStatus::Queued,
                 current_node_id: None,
                 input: input.clone(),
@@ -390,7 +390,7 @@ async fn workflow_run_node_projection_db_memory() -> Result<()> {
                 artifact_uid: Some(published.artifact_uid),
                 revision_uid: Some(published.revision_uid),
                 session_id: Some(session_id),
-                workflow_ref: format!("workflow://{name}"),
+                procedure_ref: format!("skill://{name}"),
                 status: ArtifactRunStatus::Queued,
                 current_node_id: None,
                 input: json!({ "ticket_id": "T-999" }),
@@ -404,7 +404,7 @@ async fn workflow_run_node_projection_db_memory() -> Result<()> {
 
     assert_eq!(appended.artifact_uid, Some(published.artifact_uid));
     assert_eq!(appended.revision_uid, Some(published.revision_uid));
-    assert_eq!(appended.workflow_ref, format!("workflow://{name}"));
+    assert_eq!(appended.procedure_ref, format!("skill://{name}"));
     assert_eq!(appended.input, input);
     assert_eq!(appended.state, json!({ "steps": [] }));
     assert_eq!(duplicate.run_uid, appended.run_uid);
@@ -414,11 +414,11 @@ async fn workflow_run_node_projection_db_memory() -> Result<()> {
     let loaded = registry
         .load_run(&workspace_scope, appended.run_uid)
         .await?
-        .expect("workflow run should be visible after append");
+        .expect("procedure run should be visible after append");
     assert_eq!(loaded.artifact_uid, Some(published.artifact_uid));
     assert_eq!(loaded.revision_uid, Some(published.revision_uid));
     assert_eq!(loaded.session_id, Some(session_id));
-    assert_eq!(loaded.workflow_ref, format!("workflow://{name}"));
+    assert_eq!(loaded.procedure_ref, format!("skill://{name}"));
     assert_eq!(loaded.status, ArtifactRunStatus::Queued);
     assert_eq!(loaded.input, input);
     assert_eq!(loaded.state, json!({ "steps": [] }));
@@ -439,7 +439,7 @@ async fn workflow_run_node_projection_db_memory() -> Result<()> {
             },
         )
         .await?
-        .expect("running workflow run should update");
+        .expect("running procedure run should update");
     assert_eq!(running.status, ArtifactRunStatus::Running);
     assert_eq!(running.current_node_id.as_deref(), Some("start"));
     assert_eq!(running.state, running_state);
@@ -552,7 +552,7 @@ async fn workflow_run_node_projection_db_memory() -> Result<()> {
             },
         )
         .await?
-        .expect("completed workflow run should update");
+        .expect("completed procedure run should update");
     assert_eq!(completed.status, ArtifactRunStatus::Completed);
     assert_eq!(completed.current_node_id.as_deref(), Some("done"));
     assert_eq!(completed.output, Some(completed_output.clone()));
@@ -562,10 +562,10 @@ async fn workflow_run_node_projection_db_memory() -> Result<()> {
     let reloaded = registry
         .load_run(&workspace_scope, appended.run_uid)
         .await?
-        .expect("completed workflow run should remain visible");
+        .expect("completed procedure run should remain visible");
     assert_eq!(reloaded.artifact_uid, Some(published.artifact_uid));
     assert_eq!(reloaded.revision_uid, Some(published.revision_uid));
-    assert_eq!(reloaded.workflow_ref, format!("workflow://{name}"));
+    assert_eq!(reloaded.procedure_ref, format!("skill://{name}"));
     assert_eq!(reloaded.input, input);
     assert_eq!(
         reloaded.state,
@@ -600,44 +600,47 @@ fn skill_doc(name: &str, description: &str) -> ArtifactDocument {
     serde_json::from_value(source).expect("test skill artifact is valid")
 }
 
-fn workflow_doc(name: &str) -> ArtifactDocument {
+fn procedure_skill_doc(name: &str) -> ArtifactDocument {
     let source = json!({
         "api_version": "moa.artifact/v1",
-        "kind": "workflow",
+        "kind": "skill",
         "metadata": {
             "name": name,
-            "description": "Support workflow projection test",
-            "tags": ["workflow"]
+            "description": "Support procedure projection test",
+            "tags": ["procedure"]
         },
         "definition": {
-            "type": "workflow",
+            "type": "skill",
             "spec": {
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "ticket_id": { "type": "string" }
-                    }
-                },
-                "state_schema": {
-                    "type": "object",
-                    "properties": {
-                        "steps": {
-                            "type": "array",
-                            "items": { "type": "string" }
+                "instructions": { "path": "SKILL.md" },
+                "procedure": {
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "ticket_id": { "type": "string" }
                         }
-                    }
-                },
-                "nodes": [
-                    { "id": "start", "kind": "start" },
-                    { "id": "done", "kind": "end" }
-                ],
-                "edges": [
-                    { "from": "start", "to": "done" }
-                ]
+                    },
+                    "state_schema": {
+                        "type": "object",
+                        "properties": {
+                            "steps": {
+                                "type": "array",
+                                "items": { "type": "string" }
+                            }
+                        }
+                    },
+                    "nodes": [
+                        { "id": "start", "kind": "start" },
+                        { "id": "done", "kind": "end" }
+                    ],
+                    "edges": [
+                        { "from": "start", "to": "done" }
+                    ]
+                }
             }
         }
     });
-    serde_json::from_value(source).expect("test workflow artifact is valid")
+    serde_json::from_value(source).expect("test procedure skill artifact is valid")
 }
 
 fn experiment_plan_doc(name: &str) -> ArtifactDocument {

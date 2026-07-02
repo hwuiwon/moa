@@ -1,13 +1,13 @@
 #[path = "support/mod.rs"]
 mod support;
 
-include!("workflow_execution_support/common.rs");
-include!("workflow_execution_support/memory.rs");
+include!("procedure_execution_support/common.rs");
+include!("procedure_execution_support/memory.rs");
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, OpenFGA, and pgvector"]
-async fn workflow_memory_read_respects_contact_scope_service_e2e() -> Result<()> {
-    // Pins: workflow MemoryRead nodes execute through the scoped Memory service adapter.
+async fn procedure_memory_read_respects_contact_scope_service_e2e() -> Result<()> {
+    // Pins: procedure MemoryRead nodes execute through the scoped Memory service adapter.
     let _guard = RESTATE_E2E_LOCK.lock().await;
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
@@ -26,26 +26,27 @@ async fn workflow_memory_read_respects_contact_scope_service_e2e() -> Result<()>
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_and_publish_workflow(
+        import_and_publish_skill(
             &client,
             ingress,
             &identity,
             tenant_id,
-            memory_read_workflow_source(),
+            memory_read_procedure_source(),
         )
         .await?;
 
-        let run = start_workflow(
+        let run = start_procedure(
             &client,
             ingress,
             &identity,
             tenant_id,
-            "workflow://memory-read-workflow",
+            "skill://memory-read-procedure",
             json!({}),
         )
         .await?;
         let status =
-            wait_for_completed_workflow(&client, ingress, &identity, tenant_id, run.run_id).await?;
+            wait_for_completed_procedure(&client, ingress, &identity, tenant_id, run.run_id)
+                .await?;
 
         assert_eq!(status.current_node_id.as_deref(), Some("done"));
         assert_eq!(node_ids(&status), vec!["start", "recall", "done"]);
@@ -69,8 +70,8 @@ async fn workflow_memory_read_respects_contact_scope_service_e2e() -> Result<()>
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, OpenFGA, and pgvector"]
-async fn workflow_memory_write_records_scoped_fact_service_e2e() -> Result<()> {
-    // Pins: workflow MemoryWrite nodes execute through graph-memory ingestion with provenance.
+async fn procedure_memory_write_records_scoped_fact_service_e2e() -> Result<()> {
+    // Pins: procedure MemoryWrite nodes execute through graph-memory ingestion with provenance.
     let _guard = RESTATE_E2E_LOCK.lock().await;
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
@@ -89,26 +90,27 @@ async fn workflow_memory_write_records_scoped_fact_service_e2e() -> Result<()> {
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_and_publish_workflow(
+        import_and_publish_skill(
             &client,
             ingress,
             &identity,
             tenant_id,
-            memory_write_workflow_source(),
+            memory_write_procedure_source(),
         )
         .await?;
 
-        let run = start_workflow(
+        let run = start_procedure(
             &client,
             ingress,
             &identity,
             tenant_id,
-            "workflow://memory-write-workflow",
+            "skill://memory-write-procedure",
             json!({}),
         )
         .await?;
         let status =
-            wait_for_completed_workflow(&client, ingress, &identity, tenant_id, run.run_id).await?;
+            wait_for_completed_procedure(&client, ingress, &identity, tenant_id, run.run_id)
+                .await?;
 
         assert_eq!(status.current_node_id.as_deref(), Some("done"));
         assert_eq!(node_ids(&status), vec!["start", "remember", "done"]);

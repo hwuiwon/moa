@@ -58,8 +58,8 @@ path = "tests/experiment_trial_run_e2e.rs"
 required-features = ["experiments"]
 
 [[test]]
-name = "experiment_workflow_e2e"
-path = "tests/experiment_workflow_e2e.rs"
+name = "experiment_procedure_e2e"
+path = "tests/experiment_procedure_e2e.rs"
 required-features = ["experiments"]
 
 [dependencies]
@@ -110,7 +110,6 @@ moa-providers = { workspace = true }
 moa-runtime-store = { workspace = true }
 moa-session = { workspace = true }
 moa-skills = { workspace = true }
-moa-workflows.workspace = true
 rand.workspace = true
 restate-sdk.workspace = true
 reqwest.workspace = true

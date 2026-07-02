@@ -58,8 +58,8 @@ session metadata and a required initial `ChannelRef` route. The
 client cannot set trusted caller identity or override the session contact per
 message. `Contacts/change_session_channel` can later switch the active route,
 closing the previous active binding, inserting the new binding, updating
-session metadata, and appending `SessionChannelChanged`. If a workflow or skill
-needs higher assurance, it starts contact-point verification, completes the
+session metadata, and appending `SessionChannelChanged`. If a skill or its
+procedure needs higher assurance, it starts contact-point verification, completes the
 OTP-style challenge through the contact service, receives a verified contact
 token, and calls `Contacts/promote_session`. Verification can deliver OTP codes
 only to email and phone contact points today. Email points use the

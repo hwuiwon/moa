@@ -194,7 +194,7 @@ pub async fn admit_run(
             NewExperimentRun {
                 name: request.name,
                 session_id: session_id_from_target(&run_inputs.target),
-                workflow_run_uid: None,
+                procedure_run_uid: None,
                 artifact_revision_uids: run_inputs.artifact_revision_uids.clone(),
                 score_run_id,
                 target: run_inputs.target,
@@ -583,7 +583,7 @@ pub fn build_experiment_learning_candidate(
         id: candidate_id,
         tenant_id: evidence.tenant_id,
         user_id: None,
-        candidate_type: LearningCandidateType::Workflow,
+        candidate_type: LearningCandidateType::Skill,
         status: LearningCandidateStatus::Proposed,
         target_id: Some(format!("experiment_run:{}", evidence.run.run_uid)),
         target_label: Some(format!("Experiment proposal for {}", evidence.run.name)),
@@ -833,7 +833,7 @@ fn experiment_learning_candidate_payload(
 ) -> Value {
     let run = evidence.run;
     serde_json::json!({
-        "kind": "workflow_learning_proposal",
+        "kind": "experiment_learning_proposal",
         "source": "Experiments/propose_improvements",
         "tenant_id": evidence.tenant_id,
         "experiment": {
@@ -843,13 +843,13 @@ fn experiment_learning_candidate_payload(
             "target_kind": run.target_kind.as_str(),
             "run_score_run_id": run.score_run_id,
             "session_id": run.session_id,
-            "workflow_run_uid": run.workflow_run_uid,
+            "procedure_run_uid": run.procedure_run_uid,
             "artifact_revision_uids": run.artifact_revision_uids,
             "variant": {
                 "name": run.variant.name,
                 "artifact_revision_uids": run.variant.artifact_revision_uids,
                 "skill_refs": run.variant.skill_refs,
-                "workflow_ref": run.variant.workflow_ref,
+                "procedure_ref": run.variant.procedure_ref,
                 "metadata": run.variant.metadata,
             },
         },
@@ -860,7 +860,7 @@ fn experiment_learning_candidate_payload(
             "trial_uids": evidence.completed_trials.iter().map(|trial| trial.trial_uid).collect::<Vec<_>>(),
             "trial_score_run_ids": evidence.completed_trials.iter().map(|trial| trial.score_run_id).collect::<Vec<_>>(),
             "session_ids": evidence.completed_trials.iter().filter_map(|trial| trial.session_id).collect::<Vec<_>>(),
-            "workflow_run_uids": evidence.completed_trials.iter().filter_map(|trial| trial.workflow_run_uid).collect::<Vec<_>>(),
+            "procedure_run_uids": evidence.completed_trials.iter().filter_map(|trial| trial.procedure_run_uid).collect::<Vec<_>>(),
             "artifact_revision_refs": artifact_revision_refs(run, evidence.completed_trials, evidence.plan_revision_uid, evidence.draft_artifact_revision_uids),
         },
         "trials": evidence.completed_trials.iter().map(trial_evidence_payload).collect::<Vec<_>>(),
@@ -909,7 +909,7 @@ fn trial_evidence_payload(trial: &ExperimentTrialRecord) -> Value {
         "data_bundle_ids": trial.data_bundle_ids.clone(),
         "artifact_revision_uids": trial.artifact_revision_uids.clone(),
         "session_id": trial.session_id,
-        "workflow_run_uid": trial.workflow_run_uid,
+        "procedure_run_uid": trial.procedure_run_uid,
         "score_run_id": trial.score_run_id,
         "turn_count": trial.turn_count,
         "stop_reason": trial.stop_reason.map(|reason| reason.as_str()),
@@ -946,7 +946,7 @@ fn scenario_score_payload(scenario: &ScenarioScoreSummary) -> Value {
 
 fn deterministic_candidate_id(tenant_id: TenantId, run_uid: Uuid, idempotency_key: &str) -> Uuid {
     let digest = blake3::hash(
-        format!("workflow_learning_proposal:{tenant_id}:{run_uid}:{idempotency_key}").as_bytes(),
+        format!("experiment_learning_proposal:{tenant_id}:{run_uid}:{idempotency_key}").as_bytes(),
     );
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest.as_bytes()[..16]);
@@ -1046,7 +1046,7 @@ fn parse_trial_status(status: &str) -> Result<ExperimentTrialStatus> {
 fn session_id_from_target(target: &ExperimentTarget) -> Option<moa_core::SessionId> {
     match target {
         ExperimentTarget::AgentLoop { session_id, .. }
-        | ExperimentTarget::Workflow { session_id, .. } => *session_id,
+        | ExperimentTarget::Procedure { session_id, .. } => *session_id,
     }
 }
 
@@ -1065,7 +1065,7 @@ fn run_response_from_record(
         status: run.status.as_str().to_string(),
         score_run_id: run.score_run_id,
         session_id: run.session_id,
-        workflow_run_uid: run.workflow_run_uid,
+        procedure_run_uid: run.procedure_run_uid,
     }
 }
 
@@ -1083,7 +1083,7 @@ fn trial_status_response_from_summary(
         scenario_id: summary.scenario_id,
         score_run_id: summary.score_run_id,
         session_id: summary.session_id,
-        workflow_run_uid: summary.workflow_run_uid,
+        procedure_run_uid: summary.procedure_run_uid,
         trace_id: summary.trace_id,
         stop_reason: summary.stop_reason,
         error: summary.error,
@@ -1106,7 +1106,7 @@ fn trial_summary_from_record(
         scenario_id: trial.scenario_id.clone(),
         score_run_id: trial.score_run_id,
         session_id: trial.session_id,
-        workflow_run_uid: trial.workflow_run_uid,
+        procedure_run_uid: trial.procedure_run_uid,
         trace_id: trial.trace_id.clone(),
         stop_reason: trial.stop_reason.map(|reason| reason.as_str().to_string()),
         error: trial.error.clone(),
@@ -1292,8 +1292,8 @@ mod tests {
         });
 
         assert_eq!(candidate.status, LearningCandidateStatus::Proposed);
-        assert_eq!(candidate.candidate_type, LearningCandidateType::Workflow);
-        assert_eq!(candidate.payload["kind"], "workflow_learning_proposal");
+        assert_eq!(candidate.candidate_type, LearningCandidateType::Skill);
+        assert_eq!(candidate.payload["kind"], "experiment_learning_proposal");
         assert_eq!(
             candidate.promotion_requirements,
             vec![
@@ -1335,7 +1335,7 @@ mod tests {
                 model: Some(ModelId::new("gpt-fixture")),
                 artifact_revision_uids: vec![fixture_uuid(3)],
                 skill_refs: vec!["skill://support".to_string()],
-                workflow_ref: Some("workflow://support".to_string()),
+                procedure_ref: Some("skill://support".to_string()),
                 metadata: json!({"plan_revision_uid": fixture_uuid(20)}),
             },
             scorecard: ExperimentScorecard {
@@ -1344,7 +1344,7 @@ mod tests {
             },
             score_run_id: fixture_uuid(4),
             session_id: Some(SessionId(fixture_uuid(2))),
-            workflow_run_uid: Some(fixture_uuid(5)),
+            procedure_run_uid: Some(fixture_uuid(5)),
             artifact_revision_uids: vec![fixture_uuid(20)],
             idempotency_key: Some("run-key".to_string()),
             created_by_identity: json!({"subject": "user:creator"}),
@@ -1383,7 +1383,7 @@ mod tests {
             target_model: Some(ModelId::new("gpt-fixture")),
             seed: Some("seed-a".to_string()),
             session_id: Some(SessionId(fixture_uuid(31))),
-            workflow_run_uid: Some(fixture_uuid(32)),
+            procedure_run_uid: Some(fixture_uuid(32)),
             score_run_id: fixture_uuid(33),
             turn_count: 3,
             stop_reason: Some(ExperimentTrialStopReason::Success),

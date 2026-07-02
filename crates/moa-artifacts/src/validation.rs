@@ -9,20 +9,20 @@ use serde_json::Value;
 use crate::action::ActionDefinition;
 use crate::agent::{
     ActionPolicy, AgentDefinition, GuardrailPolicy, GuardrailStagePolicy, InstructionPolicy,
-    ModelPolicy, SkillPolicy, SkillPolicyMode, ToolPolicy, ToolPolicyMode, WorkflowPolicy,
+    ModelPolicy, SkillPolicy, SkillPolicyMode, ToolPolicy, ToolPolicyMode,
 };
 use crate::connector::ConnectorDefinition;
 use crate::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind, ArtifactStatus};
+use crate::procedure::{ProcedureDefinition, ProcedureNode, ProcedureNodeKind};
 use crate::reference::{ArtifactRef, ReferenceResolution, ReferenceState};
 use crate::simulation::{
     ExperimentBudget, ExperimentPlanDefinition, ExperimentSimulationDefinition,
-    ExperimentTargetKind, MAX_PLAN_PARALLELISM, MAX_PLAN_TOTAL_COST_CENTS, MAX_PLAN_TOTAL_TOKENS,
+    MAX_PLAN_PARALLELISM, MAX_PLAN_TOTAL_COST_CENTS, MAX_PLAN_TOTAL_TOKENS,
     MAX_PLAN_TRIAL_COST_CENTS, MAX_PLAN_TRIAL_TOKENS, MAX_PLAN_TRIALS_PER_COMBINATION,
     MAX_SCENARIO_TURNS, SimulationDataBundleDefinition, SimulationDataSourceKind,
     SimulationPersonaDefinition, SimulationProfileDefinition, SimulationScenarioDefinition,
 };
 use crate::skill::SkillDefinition;
-use crate::workflow::{WorkflowDefinition, WorkflowNode, WorkflowNodeKind};
 
 /// A single semantic validation error.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -76,7 +76,6 @@ pub fn validate_for_status(
         ArtifactDefinition::Agent(definition) => validate_agent(definition, &mut report),
         ArtifactDefinition::Skill(definition) => validate_skill(definition, &mut report),
         ArtifactDefinition::Connector(definition) => validate_connector(definition, &mut report),
-        ArtifactDefinition::Workflow(definition) => validate_workflow(definition, &mut report),
         ArtifactDefinition::Action(definition) => validate_action(definition, &mut report),
         ArtifactDefinition::ExperimentPlan(definition) => {
             validate_experiment_plan(definition, &mut report);
@@ -137,7 +136,6 @@ fn validate_agent(definition: &AgentDefinition, report: &mut ValidationReport) {
     validate_model_policy(&definition.model_policy, report);
     validate_instruction_policy(&definition.instruction_policy, report);
     validate_skill_policy(&definition.skill_policy, report);
-    validate_workflow_policy(&definition.workflow_policy, report);
     validate_action_policy(&definition.action_policy, report);
     validate_tool_policy(&definition.tool_policy, report);
     validate_guardrail_policy(&definition.guardrail_policy, report);
@@ -180,15 +178,6 @@ fn validate_skill_policy(definition: &SkillPolicy, report: &mut ValidationReport
         &definition.mode,
         &definition.refs,
         ArtifactKind::Skill,
-        report,
-    );
-}
-
-fn validate_workflow_policy(definition: &WorkflowPolicy, report: &mut ValidationReport) {
-    validate_non_empty_unique_refs(
-        "definition.spec.workflow_policy.allowed",
-        &definition.allowed,
-        Some(ArtifactKind::Workflow),
         report,
     );
 }
@@ -575,25 +564,6 @@ fn validate_target_variants(definition: &ExperimentPlanDefinition, report: &mut 
         } else if !variant_keys.insert(variant.key.as_str()) {
             report.push_error(key_path, "duplicate target variant key");
         }
-
-        match variant.kind {
-            ExperimentTargetKind::AgentLoop => {}
-            ExperimentTargetKind::Workflow => {
-                if let Some(workflow_ref) = &variant.workflow_ref {
-                    validate_ref_kind(
-                        &format!("definition.spec.target_variants[{index}].workflow_ref"),
-                        workflow_ref,
-                        ArtifactKind::Workflow,
-                        report,
-                    );
-                } else {
-                    report.push_error(
-                        format!("definition.spec.target_variants[{index}].workflow_ref"),
-                        "workflow target variant must reference a workflow artifact",
-                    );
-                }
-            }
-        }
     }
 }
 
@@ -660,6 +630,9 @@ fn validate_skill(definition: &SkillDefinition, report: &mut ValidationReport) {
         "duplicate skill action id",
         report,
     );
+    if let Some(procedure) = &definition.procedure {
+        validate_procedure(procedure, report);
+    }
 }
 
 fn validate_connector(definition: &ConnectorDefinition, report: &mut ValidationReport) {
@@ -690,88 +663,92 @@ fn validate_action_id_uniqueness<'a>(
     }
 }
 
-fn validate_workflow(definition: &WorkflowDefinition, report: &mut ValidationReport) {
+/// Validates a skill's optional deterministic procedure graph.
+fn validate_procedure(definition: &ProcedureDefinition, report: &mut ValidationReport) {
     let mut node_ids = HashSet::new();
     let mut saw_start = false;
     let mut saw_end = false;
 
     for (index, node) in definition.nodes.iter().enumerate() {
-        let id_path = format!("definition.spec.nodes[{index}].id");
+        let id_path = format!("definition.spec.procedure.nodes[{index}].id");
         if node.id.trim().is_empty() {
-            report.push_error(id_path.clone(), "workflow node id must not be empty");
+            report.push_error(id_path.clone(), "procedure node id must not be empty");
         } else if !node_ids.insert(node.id.as_str()) {
-            report.push_error(id_path, "duplicate workflow node id");
+            report.push_error(id_path, "duplicate procedure node id");
         }
-        validate_workflow_node(index, node, report);
+        validate_procedure_node(index, node, report);
 
-        saw_start |= node.kind == WorkflowNodeKind::Start;
-        saw_end |= node.kind == WorkflowNodeKind::End;
+        saw_start |= node.kind == ProcedureNodeKind::Start;
+        saw_end |= node.kind == ProcedureNodeKind::End;
     }
 
     if !saw_start {
         report.push_error(
-            "definition.spec.nodes",
-            "workflow must include a start node",
+            "definition.spec.procedure.nodes",
+            "procedure must include a start node",
         );
     }
     if !saw_end {
-        report.push_error("definition.spec.nodes", "workflow must include an end node");
+        report.push_error(
+            "definition.spec.procedure.nodes",
+            "procedure must include an end node",
+        );
     }
 
     for (index, edge) in definition.edges.iter().enumerate() {
         if !node_ids.contains(edge.from.as_str()) {
             report.push_error(
-                format!("definition.spec.edges[{index}].from"),
+                format!("definition.spec.procedure.edges[{index}].from"),
                 "edge source node does not exist",
             );
         }
         if !node_ids.contains(edge.to.as_str()) {
             report.push_error(
-                format!("definition.spec.edges[{index}].to"),
+                format!("definition.spec.procedure.edges[{index}].to"),
                 "edge destination node does not exist",
             );
         }
     }
 }
 
-fn validate_workflow_node(index: usize, node: &WorkflowNode, report: &mut ValidationReport) {
-    let path = format!("definition.spec.nodes[{index}]");
+fn validate_procedure_node(index: usize, node: &ProcedureNode, report: &mut ValidationReport) {
+    let path = format!("definition.spec.procedure.nodes[{index}]");
     match node.kind {
-        WorkflowNodeKind::Action | WorkflowNodeKind::SkillAction => {
-            validate_workflow_action_node(&path, node, report);
+        ProcedureNodeKind::Action | ProcedureNodeKind::SkillAction => {
+            validate_procedure_action_node(&path, node, report);
         }
-        WorkflowNodeKind::Tool => validate_workflow_tool_node(&path, node, report),
+        ProcedureNodeKind::Tool => validate_procedure_tool_node(&path, node, report),
         _ => {}
     }
 }
 
-fn validate_workflow_action_node(path: &str, node: &WorkflowNode, report: &mut ValidationReport) {
+fn validate_procedure_action_node(path: &str, node: &ProcedureNode, report: &mut ValidationReport) {
     if let Some(artifact_ref) = &node.artifact_ref {
         validate_single_action_ref(&format!("{path}.ref"), artifact_ref, report);
         return;
     }
-    if !workflow_input_tool_target_present(&node.input) {
+    if !procedure_input_tool_target_present(&node.input) {
         report.push_error(
             path,
-            "workflow action node must specify ref, input.tool_name, or input.tool",
+            "procedure action node must specify ref, input.tool_name, or input.tool",
         );
     }
 }
 
-fn validate_workflow_tool_node(path: &str, node: &WorkflowNode, report: &mut ValidationReport) {
+fn validate_procedure_tool_node(path: &str, node: &ProcedureNode, report: &mut ValidationReport) {
     validate_tool_refs(&format!("{path}.tool_refs"), &node.tool_refs, report);
-    if workflow_input_tool_target_present(&node.input) {
+    if procedure_input_tool_target_present(&node.input) {
         return;
     }
     if node.tool_refs.len() != 1 {
         report.push_error(
             path,
-            "workflow tool node must specify exactly one tool_ref, input.tool_name, or input.tool",
+            "procedure tool node must specify exactly one tool_ref, input.tool_name, or input.tool",
         );
     }
 }
 
-fn workflow_input_tool_target_present(input: &Value) -> bool {
+fn procedure_input_tool_target_present(input: &Value) -> bool {
     input
         .get("tool_name")
         .or_else(|| input.get("tool"))
@@ -1157,7 +1134,6 @@ mod tests {
             instruction_policy: Default::default(),
             knowledge_policy: Default::default(),
             skill_policy: Default::default(),
-            workflow_policy: Default::default(),
             action_policy: Default::default(),
             tool_policy: Default::default(),
             guardrail_policy: Default::default(),

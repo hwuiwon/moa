@@ -1,4 +1,4 @@
-//! Restate workflow that executes one artifact-backed workflow run.
+//! Restate workflow that executes one skill-backed procedure run.
 
 use std::collections::BTreeSet;
 
@@ -9,15 +9,15 @@ use moa_artifacts::registry::{
     ArtifactRunUpdate, NewArtifactNodeRun,
 };
 use moa_core::traits::Identity;
-use moa_core::wire::workflows::{
-    WorkflowReviewDecisionKind, WorkflowReviewDecisionRequest, WorkflowReviewDecisionResponse,
-    WorkflowSignalRequest, WorkflowSignalResponse,
+use moa_core::wire::procedures::{
+    ProcedureReviewDecisionKind, ProcedureReviewDecisionRequest, ProcedureReviewDecisionResponse,
+    ProcedureSignalRequest, ProcedureSignalResponse,
 };
 use moa_core::{ActionRuleScope, TenantId};
 use moa_observability::restate_observability::annotate_restate_handler_span;
-use moa_workflows::error::WorkflowError;
-use moa_workflows::interpreter::{
-    WorkflowAdvance, WorkflowExecutionState, WorkflowInterpreter, WorkflowNodeRequest,
+use moa_skills::procedure::error::ProcedureError;
+use moa_skills::procedure::interpreter::{
+    ProcedureAdvance, ProcedureExecutionState, ProcedureInterpreter, ProcedureNodeRequest,
 };
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -25,9 +25,9 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::OrchestratorCtx;
-use crate::workflows::errors::workflow_handler_error;
-use crate::workflows::workflow_node_actions::{
-    WorkflowNodeActionContext, WorkflowNodeActionOutcome, execute_workflow_node_action,
+use crate::workflows::errors::procedure_handler_error;
+use crate::workflows::procedure_node_actions::{
+    ProcedureNodeActionContext, ProcedureNodeActionOutcome, execute_procedure_node_action,
 };
 
 const K_STATUS: &str = "status";
@@ -36,24 +36,24 @@ const K_CANCEL_REASON_PROMISE: &str = "cancel_reason";
 const REVIEW_PROMISE_PREFIX: &str = "review";
 const SIGNAL_PROMISE_PREFIX: &str = "signal";
 
-/// Request payload for executing one artifact workflow run.
+/// Request payload for executing one procedure run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RunArtifactWorkflowRequest {
-    /// Tenant that owns the workflow run.
+pub struct RunProcedureRequest {
+    /// Tenant that owns the procedure run.
     pub tenant_id: TenantId,
     /// Durable artifact run row identifier.
     pub run_uid: Uuid,
     /// Identity snapshot from the authorized caller.
     pub identity: Identity,
-    /// Optional session associated with this workflow run.
+    /// Optional session associated with this procedure run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<moa_core::SessionId>,
 }
 
-/// Terminal or current outcome for one artifact workflow execution.
+/// Terminal or current outcome for one procedure execution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ArtifactWorkflowOutcome {
-    /// Workflow run row identifier.
+pub struct ProcedureOutcome {
+    /// Procedure run row identifier.
     pub run_uid: Uuid,
     /// Current run status.
     pub status: String,
@@ -67,45 +67,45 @@ pub struct ArtifactWorkflowOutcome {
     pub error: Option<String>,
 }
 
-/// Shared progress projection for an artifact workflow invocation.
+/// Shared progress projection for an procedure invocation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArtifactWorkflowProgress {
-    /// Workflow run row identifier.
+pub struct ProcedureProgress {
+    /// Procedure run row identifier.
     pub run_uid: Uuid,
     /// Current run status.
     pub status: String,
-    /// Whether cancellation was requested through the workflow shared handler.
+    /// Whether cancellation was requested through the procedure shared handler.
     pub cancel_requested: bool,
     /// Optional cancellation reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_reason: Option<String>,
 }
 
-/// Result of validating a workflow review decision before it is resolved into the live workflow.
+/// Result of validating a procedure review decision before it is resolved into the live procedure.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ValidatedWorkflowReviewDecision {
-    /// Public workflow review decision response.
-    pub response: WorkflowReviewDecisionResponse,
-    /// Decision payload to resolve into the running workflow.
-    pub resolution: Option<WorkflowReviewResolution>,
+pub struct ValidatedProcedureReviewDecision {
+    /// Public procedure review decision response.
+    pub response: ProcedureReviewDecisionResponse,
+    /// Decision payload to resolve into the running procedure.
+    pub resolution: Option<ProcedureReviewResolution>,
 }
 
-/// Result of validating a workflow signal before it is resolved into the live workflow.
+/// Result of validating a procedure signal before it is resolved into the live procedure.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ValidatedWorkflowSignal {
-    /// Public workflow signal response.
-    pub response: WorkflowSignalResponse,
-    /// Signal payload to resolve into the running workflow.
-    pub resolution: Option<WorkflowSignalResolution>,
+pub struct ValidatedProcedureSignal {
+    /// Public procedure signal response.
+    pub response: ProcedureSignalResponse,
+    /// Signal payload to resolve into the running procedure.
+    pub resolution: Option<ProcedureSignalResolution>,
 }
 
-/// Typed review decision consumed by the running workflow body.
+/// Typed review decision consumed by the running procedure body.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WorkflowReviewResolution {
+pub struct ProcedureReviewResolution {
     /// Review node being decided.
     pub node_id: String,
     /// Decision to apply.
-    pub decision: WorkflowReviewDecisionKind,
+    pub decision: ProcedureReviewDecisionKind,
     /// Optional human-readable reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -114,9 +114,9 @@ pub struct WorkflowReviewResolution {
     pub output: Option<Value>,
 }
 
-/// Typed external signal consumed by the running workflow body.
+/// Typed external signal consumed by the running procedure body.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WorkflowSignalResolution {
+pub struct ProcedureSignalResolution {
     /// Wait-signal node being resolved.
     pub node_id: String,
     /// Optional logical signal name.
@@ -126,60 +126,60 @@ pub struct WorkflowSignalResolution {
     pub payload: Value,
 }
 
-/// Internal result of one durable artifact workflow advancement.
+/// Internal result of one durable procedure advancement.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum ArtifactWorkflowStep {
+enum ProcedureStep {
     /// Execution has reached a stable run outcome.
     Outcome {
         /// Current run projection.
-        outcome: ArtifactWorkflowOutcome,
+        outcome: ProcedureOutcome,
     },
     /// Execution must run one governed side-effect node before continuing.
     ExecuteNode {
         /// Current run projection before the side effect completes.
-        outcome: ArtifactWorkflowOutcome,
+        outcome: ProcedureOutcome,
         /// Node-run row to update with the side-effect result.
         node_run_uid: Uuid,
         /// Side-effect request emitted by the pure interpreter.
-        request: WorkflowNodeRequest,
+        request: ProcedureNodeRequest,
     },
     /// Execution must run multiple branch side-effect nodes before continuing.
     ExecuteNodes {
         /// Current run projection before the side effects complete.
-        outcome: ArtifactWorkflowOutcome,
+        outcome: ProcedureOutcome,
         /// Branch side-effect requests emitted by the pure interpreter.
-        executions: Vec<ArtifactWorkflowNodeExecution>,
+        executions: Vec<ProcedureNodeExecution>,
     },
-    /// Execution is durably waiting on a workflow review or signal.
+    /// Execution is durably waiting on a procedure review or signal.
     AwaitNode {
         /// Current run projection while blocked.
-        outcome: ArtifactWorkflowOutcome,
+        outcome: ProcedureOutcome,
         /// Node-run row to update after the unblock event arrives.
         node_run_uid: Uuid,
         /// Blocked request emitted by the pure interpreter.
-        request: WorkflowNodeRequest,
+        request: ProcedureNodeRequest,
     },
 }
 
-/// One branch node execution selected by a workflow parallel node.
+/// One branch node execution selected by a procedure parallel node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct ArtifactWorkflowNodeExecution {
+struct ProcedureNodeExecution {
     /// Node-run row to update with the side-effect result.
     node_run_uid: Uuid,
     /// Side-effect request emitted by the pure interpreter.
-    request: WorkflowNodeRequest,
+    request: ProcedureNodeRequest,
 }
 
 /// Completed side-effect output for one branch node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct ArtifactWorkflowNodeActionResult {
+struct ProcedureNodeActionResult {
     /// Node-run row to update.
     node_run_uid: Uuid,
     /// Side-effect request that was executed.
-    request: WorkflowNodeRequest,
+    request: ProcedureNodeRequest,
     /// Adapter outcome to persist.
-    outcome: WorkflowNodeActionOutcome,
+    outcome: ProcedureNodeActionOutcome,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,10 +201,10 @@ enum BlockedNodeKind {
 }
 
 impl BlockedNodeKind {
-    fn from_request(request: &WorkflowNodeRequest) -> Option<Self> {
+    fn from_request(request: &ProcedureNodeRequest) -> Option<Self> {
         match request {
-            WorkflowNodeRequest::Review { .. } => Some(Self::Review),
-            WorkflowNodeRequest::WaitSignal { .. } => Some(Self::Signal),
+            ProcedureNodeRequest::Review { .. } => Some(Self::Review),
+            ProcedureNodeRequest::WaitSignal { .. } => Some(Self::Signal),
             _ => None,
         }
     }
@@ -218,67 +218,67 @@ impl BlockedNodeKind {
 
     fn cancel_step_name(self, step_index: usize) -> String {
         match self {
-            Self::Review => format!("artifact_workflow_cancel_while_review_{step_index}"),
-            Self::Signal => format!("artifact_workflow_cancel_while_signal_{step_index}"),
+            Self::Review => format!("procedure_cancel_while_review_{step_index}"),
+            Self::Signal => format!("procedure_cancel_while_signal_{step_index}"),
         }
     }
 
     fn resolution_step_name(self, step_index: usize) -> String {
         match self {
-            Self::Review => format!("artifact_workflow_review_resolution_{step_index}"),
-            Self::Signal => format!("artifact_workflow_signal_resolution_{step_index}"),
+            Self::Review => format!("procedure_review_resolution_{step_index}"),
+            Self::Signal => format!("procedure_signal_resolution_{step_index}"),
         }
     }
 }
 
-enum WorkflowBlockedNodeResolution {
-    Review(WorkflowReviewResolution),
-    Signal(WorkflowSignalResolution),
+enum ProcedureBlockedNodeResolution {
+    Review(ProcedureReviewResolution),
+    Signal(ProcedureSignalResolution),
 }
 
-/// Restate workflow surface for artifact-backed workflow execution.
+/// Restate procedure execution surface for skill-backed procedure execution.
 #[restate_sdk::workflow]
-pub trait ArtifactWorkflowExecution {
-    /// Runs one artifact-backed workflow execution.
+pub trait ProcedureExecution {
+    /// Runs one skill-backed procedure execution.
     async fn run(
-        request: Json<RunArtifactWorkflowRequest>,
-    ) -> Result<Json<ArtifactWorkflowOutcome>, HandlerError>;
+        request: Json<RunProcedureRequest>,
+    ) -> Result<Json<ProcedureOutcome>, HandlerError>;
 
-    /// Requests cancellation for the in-flight artifact workflow run.
+    /// Requests cancellation for the in-flight procedure run.
     #[shared]
     async fn request_cancel(reason: Json<String>) -> Result<(), HandlerError>;
 
-    /// Resolves a pending workflow review node.
+    /// Resolves a pending procedure review node.
     #[shared]
     async fn decide_review(
-        resolution: Json<WorkflowReviewResolution>,
-    ) -> Result<Json<WorkflowReviewDecisionResponse>, HandlerError>;
+        resolution: Json<ProcedureReviewResolution>,
+    ) -> Result<Json<ProcedureReviewDecisionResponse>, HandlerError>;
 
-    /// Resolves a pending workflow wait-signal node.
+    /// Resolves a pending procedure wait-signal node.
     #[shared]
     async fn signal(
-        resolution: Json<WorkflowSignalResolution>,
-    ) -> Result<Json<WorkflowSignalResponse>, HandlerError>;
+        resolution: Json<ProcedureSignalResolution>,
+    ) -> Result<Json<ProcedureSignalResponse>, HandlerError>;
 
-    /// Reads lightweight workflow progress from Restate state.
+    /// Reads lightweight procedure progress from Restate state.
     #[shared]
-    async fn progress() -> Result<Json<ArtifactWorkflowProgress>, HandlerError>;
+    async fn progress() -> Result<Json<ProcedureProgress>, HandlerError>;
 }
 
-/// Concrete artifact workflow execution implementation.
-pub struct ArtifactWorkflowExecutionImpl;
+/// Concrete procedure execution implementation.
+pub struct ProcedureExecutionImpl;
 
-impl ArtifactWorkflowExecution for ArtifactWorkflowExecutionImpl {
+impl ProcedureExecution for ProcedureExecutionImpl {
     #[tracing::instrument(skip(self, ctx, request))]
     async fn run(
         &self,
         ctx: WorkflowContext<'_>,
-        request: Json<RunArtifactWorkflowRequest>,
-    ) -> Result<Json<ArtifactWorkflowOutcome>, HandlerError> {
-        annotate_restate_handler_span("ArtifactWorkflowExecution", "run");
+        request: Json<RunProcedureRequest>,
+    ) -> Result<Json<ProcedureOutcome>, HandlerError> {
+        annotate_restate_handler_span("ProcedureExecution", "run");
         let request = request.into_inner();
         if request.run_uid.to_string() != ctx.key() {
-            return Err(TerminalError::new_with_code(404, "workflow run id mismatch").into());
+            return Err(TerminalError::new_with_code(404, "procedure run id mismatch").into());
         }
 
         ctx.set(K_RUN_UID, Json(request.run_uid));
@@ -288,21 +288,17 @@ impl ArtifactWorkflowExecution for ArtifactWorkflowExecutionImpl {
         );
         let initial_request = request.clone();
         let mut step = ctx
-            .run(|| async move {
-                advance_artifact_workflow(initial_request)
-                    .await
-                    .map(Json::from)
-            })
-            .name("artifact_workflow_execute")
+            .run(|| async move { advance_procedure(initial_request).await.map(Json::from) })
+            .name("procedure_execute")
             .await?
             .into_inner();
         for step_index in 0..32 {
             match step {
-                ArtifactWorkflowStep::Outcome { outcome } => {
+                ProcedureStep::Outcome { outcome } => {
                     ctx.set(K_STATUS, Json(outcome.status.clone()));
                     return Ok(Json::from(outcome));
                 }
-                ArtifactWorkflowStep::ExecuteNode {
+                ProcedureStep::ExecuteNode {
                     node_run_uid,
                     request: node_request,
                     ..
@@ -310,7 +306,7 @@ impl ArtifactWorkflowExecution for ArtifactWorkflowExecutionImpl {
                     if let Some(cancel_step) = cancel_step_if_requested(
                         &ctx,
                         &request,
-                        format!("artifact_workflow_cancel_before_node_{step_index}"),
+                        format!("procedure_cancel_before_node_{step_index}"),
                     )
                     .await?
                     {
@@ -320,7 +316,7 @@ impl ArtifactWorkflowExecution for ArtifactWorkflowExecutionImpl {
                     let action_outcomes = execute_node_actions(
                         &ctx,
                         &request,
-                        vec![ArtifactWorkflowNodeExecution {
+                        vec![ProcedureNodeExecution {
                             node_run_uid,
                             request: node_request,
                         }],
@@ -329,7 +325,7 @@ impl ArtifactWorkflowExecution for ArtifactWorkflowExecutionImpl {
                     let persist_request = request.clone();
                     step = ctx
                         .run(|| async move {
-                            persist_workflow_node_action_outcomes(
+                            persist_procedure_node_action_outcomes(
                                 persist_request,
                                 action_outcomes,
                                 ActionResultMode::Single,
@@ -337,15 +333,15 @@ impl ArtifactWorkflowExecution for ArtifactWorkflowExecutionImpl {
                             .await
                             .map(Json::from)
                         })
-                        .name(format!("artifact_workflow_node_action_{step_index}"))
+                        .name(format!("procedure_node_action_{step_index}"))
                         .await?
                         .into_inner();
                 }
-                ArtifactWorkflowStep::ExecuteNodes { executions, .. } => {
+                ProcedureStep::ExecuteNodes { executions, .. } => {
                     if let Some(cancel_step) = cancel_step_if_requested(
                         &ctx,
                         &request,
-                        format!("artifact_workflow_cancel_before_parallel_nodes_{step_index}"),
+                        format!("procedure_cancel_before_parallel_nodes_{step_index}"),
                     )
                     .await?
                     {
@@ -356,7 +352,7 @@ impl ArtifactWorkflowExecution for ArtifactWorkflowExecutionImpl {
                     let persist_request = request.clone();
                     step = ctx
                         .run(|| async move {
-                            persist_workflow_node_action_outcomes(
+                            persist_procedure_node_action_outcomes(
                                 persist_request,
                                 action_outcomes,
                                 ActionResultMode::Parallel,
@@ -364,13 +360,11 @@ impl ArtifactWorkflowExecution for ArtifactWorkflowExecutionImpl {
                             .await
                             .map(Json::from)
                         })
-                        .name(format!(
-                            "artifact_workflow_parallel_node_actions_{step_index}"
-                        ))
+                        .name(format!("procedure_parallel_node_actions_{step_index}"))
                         .await?
                         .into_inner();
                 }
-                ArtifactWorkflowStep::AwaitNode {
+                ProcedureStep::AwaitNode {
                     outcome,
                     node_run_uid,
                     request: node_request,
@@ -389,7 +383,7 @@ impl ArtifactWorkflowExecution for ArtifactWorkflowExecutionImpl {
         }
         Err(TerminalError::new_with_code(
             400,
-            "artifact workflow exceeded maximum effectful node steps",
+            "artifact procedure exceeded maximum effectful node steps",
         )
         .into())
     }
@@ -400,26 +394,26 @@ impl ArtifactWorkflowExecution for ArtifactWorkflowExecutionImpl {
         ctx: SharedWorkflowContext<'_>,
         reason: Json<String>,
     ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("ArtifactWorkflowExecution", "request_cancel");
+        annotate_restate_handler_span("ProcedureExecution", "request_cancel");
         ctx.resolve_promise(K_CANCEL_REASON_PROMISE, reason.into_inner());
         Ok(())
     }
 
     #[tracing::instrument(skip(self, ctx, resolution))]
-    // SAFETY: called by the authorized Workflows/decide_review service after tenant-admin authz.
+    // SAFETY: called by the authorized Skills/decide_review service after tenant-admin authz.
     async fn decide_review(
         &self,
         ctx: SharedWorkflowContext<'_>,
-        resolution: Json<WorkflowReviewResolution>,
-    ) -> Result<Json<WorkflowReviewDecisionResponse>, HandlerError> {
-        annotate_restate_handler_span("ArtifactWorkflowExecution", "decide_review");
+        resolution: Json<ProcedureReviewResolution>,
+    ) -> Result<Json<ProcedureReviewDecisionResponse>, HandlerError> {
+        annotate_restate_handler_span("ProcedureExecution", "decide_review");
         let resolution = resolution.into_inner();
         ctx.resolve_promise(
             &review_promise_key(&resolution.node_id),
             Json::from(resolution.clone()),
         );
-        Ok(Json::from(WorkflowReviewDecisionResponse {
-            run_id: workflow_run_uid_from_key(ctx.key())?,
+        Ok(Json::from(ProcedureReviewDecisionResponse {
+            run_id: procedure_run_uid_from_key(ctx.key())?,
             accepted: true,
             status: ArtifactRunStatus::PendingReview.as_str().to_string(),
             current_node_id: Some(resolution.node_id),
@@ -427,20 +421,20 @@ impl ArtifactWorkflowExecution for ArtifactWorkflowExecutionImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, resolution))]
-    // SAFETY: called by the authorized Workflows/signal service after tenant-operator authz.
+    // SAFETY: called by the authorized Skills/signal service after tenant-operator authz.
     async fn signal(
         &self,
         ctx: SharedWorkflowContext<'_>,
-        resolution: Json<WorkflowSignalResolution>,
-    ) -> Result<Json<WorkflowSignalResponse>, HandlerError> {
-        annotate_restate_handler_span("ArtifactWorkflowExecution", "signal");
+        resolution: Json<ProcedureSignalResolution>,
+    ) -> Result<Json<ProcedureSignalResponse>, HandlerError> {
+        annotate_restate_handler_span("ProcedureExecution", "signal");
         let resolution = resolution.into_inner();
         ctx.resolve_promise(
             &signal_promise_key(&resolution.node_id),
             Json::from(resolution.clone()),
         );
-        Ok(Json::from(WorkflowSignalResponse {
-            run_id: workflow_run_uid_from_key(ctx.key())?,
+        Ok(Json::from(ProcedureSignalResponse {
+            run_id: procedure_run_uid_from_key(ctx.key())?,
             accepted: true,
             status: ArtifactRunStatus::Running.as_str().to_string(),
             current_node_id: Some(resolution.node_id),
@@ -451,8 +445,8 @@ impl ArtifactWorkflowExecution for ArtifactWorkflowExecutionImpl {
     async fn progress(
         &self,
         ctx: SharedWorkflowContext<'_>,
-    ) -> Result<Json<ArtifactWorkflowProgress>, HandlerError> {
-        annotate_restate_handler_span("ArtifactWorkflowExecution", "progress");
+    ) -> Result<Json<ProcedureProgress>, HandlerError> {
+        annotate_restate_handler_span("ProcedureExecution", "progress");
         let run_uid = ctx
             .get::<Json<Uuid>>(K_RUN_UID)
             .await?
@@ -467,7 +461,7 @@ impl ArtifactWorkflowExecution for ArtifactWorkflowExecutionImpl {
             .peek_promise::<String>(K_CANCEL_REASON_PROMISE)
             .await
             .map_err(HandlerError::from)?;
-        Ok(Json::from(ArtifactWorkflowProgress {
+        Ok(Json::from(ProcedureProgress {
             run_uid,
             status,
             cancel_requested: cancel_reason.is_some(),
@@ -478,9 +472,9 @@ impl ArtifactWorkflowExecution for ArtifactWorkflowExecutionImpl {
 
 async fn cancel_step_if_requested(
     ctx: &WorkflowContext<'_>,
-    request: &RunArtifactWorkflowRequest,
+    request: &RunProcedureRequest,
     run_step_name: String,
-) -> Result<Option<ArtifactWorkflowStep>, HandlerError> {
+) -> Result<Option<ProcedureStep>, HandlerError> {
     let Some(reason) = cancel_requested(ctx).await? else {
         return Ok(None);
     };
@@ -491,13 +485,13 @@ async fn cancel_step_if_requested(
 
 async fn persist_cancel_step(
     ctx: &WorkflowContext<'_>,
-    request: RunArtifactWorkflowRequest,
+    request: RunProcedureRequest,
     reason: String,
     run_step_name: String,
-) -> Result<ArtifactWorkflowStep, HandlerError> {
+) -> Result<ProcedureStep, HandlerError> {
     Ok(ctx
         .run(|| async move {
-            persist_workflow_cancel(request, reason)
+            persist_procedure_cancel(request, reason)
                 .await
                 .map(Json::from)
         })
@@ -508,14 +502,14 @@ async fn persist_cancel_step(
 
 async fn execute_node_actions(
     ctx: &WorkflowContext<'_>,
-    request: &RunArtifactWorkflowRequest,
-    executions: Vec<ArtifactWorkflowNodeExecution>,
-) -> Result<Vec<ArtifactWorkflowNodeActionResult>, HandlerError> {
+    request: &RunProcedureRequest,
+    executions: Vec<ProcedureNodeExecution>,
+) -> Result<Vec<ProcedureNodeActionResult>, HandlerError> {
     let mut action_results = Vec::with_capacity(executions.len());
     for execution in executions {
-        let action_outcome = execute_workflow_node_action(
+        let action_outcome = execute_procedure_node_action(
             ctx,
-            WorkflowNodeActionContext {
+            ProcedureNodeActionContext {
                 tenant_id: request.tenant_id,
                 run_uid: request.run_uid,
                 node_id: blocked_node_id(&execution.request),
@@ -526,7 +520,7 @@ async fn execute_node_actions(
             execution.request.clone(),
         )
         .await?;
-        action_results.push(ArtifactWorkflowNodeActionResult {
+        action_results.push(ProcedureNodeActionResult {
             node_run_uid: execution.node_run_uid,
             request: execution.request,
             outcome: action_outcome,
@@ -537,16 +531,16 @@ async fn execute_node_actions(
 
 async fn await_blocked_node_resolution(
     ctx: &WorkflowContext<'_>,
-    request: RunArtifactWorkflowRequest,
+    request: RunProcedureRequest,
     node_run_uid: Uuid,
-    node_request: WorkflowNodeRequest,
+    node_request: ProcedureNodeRequest,
     step_index: usize,
-) -> Result<ArtifactWorkflowStep, HandlerError> {
+) -> Result<ProcedureStep, HandlerError> {
     let node_id = blocked_node_id(&node_request);
     let kind = BlockedNodeKind::from_request(&node_request).ok_or_else(|| {
         TerminalError::new_with_code(
             400,
-            format!("workflow node `{node_id}` is not a resumable blocked node"),
+            format!("procedure node `{node_id}` is not a resumable blocked node"),
         )
     })?;
     let cancel_step_name = kind.cancel_step_name(step_index);
@@ -559,12 +553,12 @@ async fn await_blocked_node_resolution(
                 reason = ctx.promise::<String>(K_CANCEL_REASON_PROMISE) => {
                     persist_cancel_step(ctx, request.clone(), reason?, cancel_step_name).await?
                 },
-                resolution = ctx.promise::<Json<WorkflowReviewResolution>>(review_key.as_str()) => {
+                resolution = ctx.promise::<Json<ProcedureReviewResolution>>(review_key.as_str()) => {
                     persist_blocked_node_resolution_step(
                         ctx,
                         request.clone(),
                         node_run_uid,
-                        WorkflowBlockedNodeResolution::Review(resolution?.into_inner()),
+                        ProcedureBlockedNodeResolution::Review(resolution?.into_inner()),
                         resolution_step_name,
                     )
                     .await?
@@ -578,12 +572,12 @@ async fn await_blocked_node_resolution(
                 reason = ctx.promise::<String>(K_CANCEL_REASON_PROMISE) => {
                     persist_cancel_step(ctx, request.clone(), reason?, cancel_step_name).await?
                 },
-                resolution = ctx.promise::<Json<WorkflowSignalResolution>>(signal_key.as_str()) => {
+                resolution = ctx.promise::<Json<ProcedureSignalResolution>>(signal_key.as_str()) => {
                     persist_blocked_node_resolution_step(
                         ctx,
                         request.clone(),
                         node_run_uid,
-                        WorkflowBlockedNodeResolution::Signal(resolution?.into_inner()),
+                        ProcedureBlockedNodeResolution::Signal(resolution?.into_inner()),
                         resolution_step_name,
                     )
                     .await?
@@ -596,19 +590,19 @@ async fn await_blocked_node_resolution(
 
 async fn persist_blocked_node_resolution_step(
     ctx: &WorkflowContext<'_>,
-    request: RunArtifactWorkflowRequest,
+    request: RunProcedureRequest,
     node_run_uid: Uuid,
-    resolution: WorkflowBlockedNodeResolution,
+    resolution: ProcedureBlockedNodeResolution,
     run_step_name: String,
-) -> Result<ArtifactWorkflowStep, HandlerError> {
+) -> Result<ProcedureStep, HandlerError> {
     Ok(ctx
         .run(|| async move {
             match resolution {
-                WorkflowBlockedNodeResolution::Review(resolution) => {
-                    persist_workflow_review_resolution(request, node_run_uid, resolution).await
+                ProcedureBlockedNodeResolution::Review(resolution) => {
+                    persist_procedure_review_resolution(request, node_run_uid, resolution).await
                 }
-                WorkflowBlockedNodeResolution::Signal(resolution) => {
-                    persist_workflow_signal_resolution(request, node_run_uid, resolution).await
+                ProcedureBlockedNodeResolution::Signal(resolution) => {
+                    persist_procedure_signal_resolution(request, node_run_uid, resolution).await
                 }
             }
             .map(Json::from)
@@ -624,10 +618,10 @@ async fn cancel_requested(ctx: &WorkflowContext<'_>) -> Result<Option<String>, H
         .map_err(HandlerError::from)
 }
 
-async fn persist_workflow_cancel(
-    request: RunArtifactWorkflowRequest,
+async fn persist_procedure_cancel(
+    request: RunProcedureRequest,
     reason: String,
-) -> Result<ArtifactWorkflowStep, HandlerError> {
+) -> Result<ProcedureStep, HandlerError> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
@@ -636,12 +630,12 @@ async fn persist_workflow_cancel(
         .load_run(&scope, request.run_uid)
         .await
         .map_err(artifact_handler_error)?
-        .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
+        .ok_or_else(|| TerminalError::new_with_code(404, "procedure run not found"))?;
     if matches!(
         run.status,
         ArtifactRunStatus::Completed | ArtifactRunStatus::Failed
     ) {
-        return Ok(ArtifactWorkflowStep::Outcome {
+        return Ok(ProcedureStep::Outcome {
             outcome: outcome_from_run(&run),
         });
     }
@@ -665,7 +659,7 @@ async fn persist_workflow_cancel(
     }
 
     if run.status == ArtifactRunStatus::Cancelled {
-        return Ok(ArtifactWorkflowStep::Outcome {
+        return Ok(ProcedureStep::Outcome {
             outcome: outcome_from_run(&run),
         });
     }
@@ -674,15 +668,13 @@ async fn persist_workflow_cancel(
         .cancel_run(&scope, request.run_uid, Some(reason))
         .await
         .map_err(artifact_handler_error)?
-        .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
-    Ok(ArtifactWorkflowStep::Outcome {
+        .ok_or_else(|| TerminalError::new_with_code(404, "procedure run not found"))?;
+    Ok(ProcedureStep::Outcome {
         outcome: outcome_from_run(&updated),
     })
 }
 
-async fn advance_artifact_workflow(
-    request: RunArtifactWorkflowRequest,
-) -> Result<ArtifactWorkflowStep, HandlerError> {
+async fn advance_procedure(request: RunProcedureRequest) -> Result<ProcedureStep, HandlerError> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
@@ -691,7 +683,7 @@ async fn advance_artifact_workflow(
         .load_run(&scope, request.run_uid)
         .await
         .map_err(artifact_handler_error)?
-        .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
+        .ok_or_else(|| TerminalError::new_with_code(404, "procedure run not found"))?;
 
     if matches!(
         run.status,
@@ -700,13 +692,13 @@ async fn advance_artifact_workflow(
             | ArtifactRunStatus::Cancelled
             | ArtifactRunStatus::PendingReview
     ) {
-        return Ok(ArtifactWorkflowStep::Outcome {
+        return Ok(ProcedureStep::Outcome {
             outcome: outcome_from_run(&run),
         });
     }
 
-    let definition = load_workflow_definition(&registry, &scope, &run).await?;
-    let execution_state = workflow_state_from_run(&run)?;
+    let definition = load_procedure_definition(&registry, &scope, &run).await?;
+    let execution_state = procedure_state_from_run(&run)?;
 
     registry
         .update_run(
@@ -727,11 +719,11 @@ async fn advance_artifact_workflow(
     advance_and_persist(&registry, &scope, &run, &definition, execution_state).await
 }
 
-async fn persist_workflow_node_action_outcomes(
-    request: RunArtifactWorkflowRequest,
-    action_results: Vec<ArtifactWorkflowNodeActionResult>,
+async fn persist_procedure_node_action_outcomes(
+    request: RunProcedureRequest,
+    action_results: Vec<ProcedureNodeActionResult>,
     mode: ActionResultMode,
-) -> Result<ArtifactWorkflowStep, HandlerError> {
+) -> Result<ProcedureStep, HandlerError> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
@@ -740,23 +732,23 @@ async fn persist_workflow_node_action_outcomes(
         .load_run(&scope, request.run_uid)
         .await
         .map_err(artifact_handler_error)?
-        .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
+        .ok_or_else(|| TerminalError::new_with_code(404, "procedure run not found"))?;
     if matches!(
         run.status,
         ArtifactRunStatus::Completed | ArtifactRunStatus::Failed | ArtifactRunStatus::Cancelled
     ) {
-        return Ok(ArtifactWorkflowStep::Outcome {
+        return Ok(ProcedureStep::Outcome {
             outcome: outcome_from_run(&run),
         });
     }
-    let definition = load_workflow_definition(&registry, &scope, &run).await?;
-    let interpreter = WorkflowInterpreter::new(&definition);
-    let mut state = workflow_state_from_run(&run)?;
+    let definition = load_procedure_definition(&registry, &scope, &run).await?;
+    let interpreter = ProcedureInterpreter::new(&definition);
+    let mut state = procedure_state_from_run(&run)?;
 
     for action_result in action_results {
         let node_id = blocked_node_id(&action_result.request);
         match action_result.outcome {
-            WorkflowNodeActionOutcome::Completed { output } => {
+            ProcedureNodeActionOutcome::Completed { output } => {
                 complete_node_run(
                     &registry,
                     &scope,
@@ -766,16 +758,16 @@ async fn persist_workflow_node_action_outcomes(
                 .await?;
                 state = interpreter
                     .complete_blocked_node(state, &node_id, output)
-                    .map_err(workflow_handler_error)?;
+                    .map_err(procedure_handler_error)?;
             }
-            WorkflowNodeActionOutcome::Failed { error } => {
+            ProcedureNodeActionOutcome::Failed { error } => {
                 fail_node_run(&registry, &scope, action_result.node_run_uid, error.clone()).await?;
                 if mode.records_failed_node() {
                     state.failed_nodes.insert(node_id.clone());
                 }
-                return fail_workflow_run(&registry, &scope, &run, node_id, &state, error).await;
+                return fail_procedure_run(&registry, &scope, &run, node_id, &state, error).await;
             }
-            WorkflowNodeActionOutcome::Cancelled { reason } => {
+            ProcedureNodeActionOutcome::Cancelled { reason } => {
                 cancel_node_run(
                     &registry,
                     &scope,
@@ -783,7 +775,7 @@ async fn persist_workflow_node_action_outcomes(
                     reason.clone(),
                 )
                 .await?;
-                return persist_workflow_cancel(request, reason).await;
+                return persist_procedure_cancel(request, reason).await;
             }
         }
     }
@@ -857,14 +849,14 @@ async fn cancel_node_run(
     Ok(())
 }
 
-async fn fail_workflow_run(
+async fn fail_procedure_run(
     registry: &ArtifactRegistry,
     scope: &ActionRuleScope,
     run: &ArtifactRun,
     node_id: String,
-    state: &WorkflowExecutionState,
+    state: &ProcedureExecutionState,
     error: String,
-) -> Result<ArtifactWorkflowStep, HandlerError> {
+) -> Result<ProcedureStep, HandlerError> {
     let updated = registry
         .update_run(
             scope,
@@ -872,7 +864,7 @@ async fn fail_workflow_run(
             ArtifactRunUpdate {
                 status: Some(ArtifactRunStatus::Failed),
                 current_node_id: Some(Some(node_id)),
-                state: Some(workflow_state_json(state)),
+                state: Some(procedure_state_json(state)),
                 output: None,
                 error: Some(Some(error)),
                 completed_at: Some(Some(Utc::now())),
@@ -880,16 +872,16 @@ async fn fail_workflow_run(
         )
         .await
         .map_err(artifact_handler_error)?
-        .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
-    Ok(ArtifactWorkflowStep::Outcome {
+        .ok_or_else(|| TerminalError::new_with_code(404, "procedure run not found"))?;
+    Ok(ProcedureStep::Outcome {
         outcome: outcome_from_run(&updated),
     })
 }
 
-/// Validates an explicit workflow review-node decision before resolving the workflow promise.
-pub(crate) async fn validate_workflow_review_decision(
-    request: WorkflowReviewDecisionRequest,
-) -> Result<ValidatedWorkflowReviewDecision, HandlerError> {
+/// Validates an explicit procedure review-node decision before resolving the workflow promise.
+pub(crate) async fn validate_procedure_review_decision(
+    request: ProcedureReviewDecisionRequest,
+) -> Result<ValidatedProcedureReviewDecision, HandlerError> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
@@ -898,10 +890,10 @@ pub(crate) async fn validate_workflow_review_decision(
         .load_run(&scope, request.run_id)
         .await
         .map_err(artifact_handler_error)?
-        .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
+        .ok_or_else(|| TerminalError::new_with_code(404, "procedure run not found"))?;
     if run.status != ArtifactRunStatus::PendingReview {
-        return Ok(ValidatedWorkflowReviewDecision {
-            response: WorkflowReviewDecisionResponse {
+        return Ok(ValidatedProcedureReviewDecision {
+            response: ProcedureReviewDecisionResponse {
                 run_id: run.run_uid,
                 accepted: false,
                 status: run.status.as_str().to_string(),
@@ -915,14 +907,14 @@ pub(crate) async fn validate_workflow_review_decision(
         .node_id
         .clone()
         .or_else(|| run.current_node_id.clone())
-        .ok_or_else(|| TerminalError::new_with_code(400, "workflow run has no review node"))?;
-    let state = workflow_state_from_run(&run)?;
+        .ok_or_else(|| TerminalError::new_with_code(400, "procedure run has no review node"))?;
+    let state = procedure_state_from_run(&run)?;
     if !matches!(
         state.blocked_nodes.get(&node_id),
-        Some(WorkflowNodeRequest::Review { .. })
+        Some(ProcedureNodeRequest::Review { .. })
     ) {
-        return Ok(ValidatedWorkflowReviewDecision {
-            response: WorkflowReviewDecisionResponse {
+        return Ok(ValidatedProcedureReviewDecision {
+            response: ProcedureReviewDecisionResponse {
                 run_id: run.run_uid,
                 accepted: false,
                 status: run.status.as_str().to_string(),
@@ -932,14 +924,14 @@ pub(crate) async fn validate_workflow_review_decision(
         });
     }
 
-    Ok(ValidatedWorkflowReviewDecision {
-        response: WorkflowReviewDecisionResponse {
+    Ok(ValidatedProcedureReviewDecision {
+        response: ProcedureReviewDecisionResponse {
             run_id: run.run_uid,
             accepted: true,
             status: run.status.as_str().to_string(),
             current_node_id: Some(node_id.clone()),
         },
-        resolution: Some(WorkflowReviewResolution {
+        resolution: Some(ProcedureReviewResolution {
             node_id,
             decision: request.decision,
             reason: request.reason,
@@ -948,10 +940,10 @@ pub(crate) async fn validate_workflow_review_decision(
     })
 }
 
-/// Validates an external workflow signal before resolving the workflow promise.
-pub(crate) async fn validate_workflow_signal(
-    request: WorkflowSignalRequest,
-) -> Result<ValidatedWorkflowSignal, HandlerError> {
+/// Validates an external procedure signal before resolving the workflow promise.
+pub(crate) async fn validate_procedure_signal(
+    request: ProcedureSignalRequest,
+) -> Result<ValidatedProcedureSignal, HandlerError> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
@@ -960,13 +952,13 @@ pub(crate) async fn validate_workflow_signal(
         .load_run(&scope, request.run_id)
         .await
         .map_err(artifact_handler_error)?
-        .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
+        .ok_or_else(|| TerminalError::new_with_code(404, "procedure run not found"))?;
     if matches!(
         run.status,
         ArtifactRunStatus::Completed | ArtifactRunStatus::Failed | ArtifactRunStatus::Cancelled
     ) {
-        return Ok(ValidatedWorkflowSignal {
-            response: WorkflowSignalResponse {
+        return Ok(ValidatedProcedureSignal {
+            response: ProcedureSignalResponse {
                 run_id: run.run_uid,
                 accepted: false,
                 status: run.status.as_str().to_string(),
@@ -980,14 +972,14 @@ pub(crate) async fn validate_workflow_signal(
         .node_id
         .clone()
         .or_else(|| run.current_node_id.clone())
-        .ok_or_else(|| TerminalError::new_with_code(400, "workflow run has no signal node"))?;
-    let state = workflow_state_from_run(&run)?;
+        .ok_or_else(|| TerminalError::new_with_code(400, "procedure run has no signal node"))?;
+    let state = procedure_state_from_run(&run)?;
     if !matches!(
         state.blocked_nodes.get(&node_id),
-        Some(WorkflowNodeRequest::WaitSignal { .. })
+        Some(ProcedureNodeRequest::WaitSignal { .. })
     ) {
-        return Ok(ValidatedWorkflowSignal {
-            response: WorkflowSignalResponse {
+        return Ok(ValidatedProcedureSignal {
+            response: ProcedureSignalResponse {
                 run_id: run.run_uid,
                 accepted: false,
                 status: run.status.as_str().to_string(),
@@ -997,14 +989,14 @@ pub(crate) async fn validate_workflow_signal(
         });
     }
 
-    Ok(ValidatedWorkflowSignal {
-        response: WorkflowSignalResponse {
+    Ok(ValidatedProcedureSignal {
+        response: ProcedureSignalResponse {
             run_id: run.run_uid,
             accepted: true,
             status: run.status.as_str().to_string(),
             current_node_id: Some(node_id.clone()),
         },
-        resolution: Some(WorkflowSignalResolution {
+        resolution: Some(ProcedureSignalResolution {
             node_id,
             signal_name: request.signal_name,
             payload: request.payload,
@@ -1012,11 +1004,11 @@ pub(crate) async fn validate_workflow_signal(
     })
 }
 
-async fn persist_workflow_review_resolution(
-    request: RunArtifactWorkflowRequest,
+async fn persist_procedure_review_resolution(
+    request: RunProcedureRequest,
     node_run_uid: Uuid,
-    resolution: WorkflowReviewResolution,
-) -> Result<ArtifactWorkflowStep, HandlerError> {
+    resolution: ProcedureReviewResolution,
+) -> Result<ProcedureStep, HandlerError> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
@@ -1025,25 +1017,25 @@ async fn persist_workflow_review_resolution(
         .load_run(&scope, request.run_uid)
         .await
         .map_err(artifact_handler_error)?
-        .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
+        .ok_or_else(|| TerminalError::new_with_code(404, "procedure run not found"))?;
     if matches!(
         run.status,
         ArtifactRunStatus::Completed | ArtifactRunStatus::Failed | ArtifactRunStatus::Cancelled
     ) {
-        return Ok(ArtifactWorkflowStep::Outcome {
+        return Ok(ProcedureStep::Outcome {
             outcome: outcome_from_run(&run),
         });
     }
-    let definition = load_workflow_definition(&registry, &scope, &run).await?;
-    let state = workflow_state_from_run(&run)?;
+    let definition = load_procedure_definition(&registry, &scope, &run).await?;
+    let state = procedure_state_from_run(&run)?;
     if !matches!(
         state.blocked_nodes.get(&resolution.node_id),
-        Some(WorkflowNodeRequest::Review { .. })
+        Some(ProcedureNodeRequest::Review { .. })
     ) {
         return Err(TerminalError::new_with_code(
             400,
             format!(
-                "workflow node `{}` is not waiting for review",
+                "procedure node `{}` is not waiting for review",
                 resolution.node_id
             ),
         )
@@ -1051,7 +1043,7 @@ async fn persist_workflow_review_resolution(
     }
 
     match resolution.decision {
-        WorkflowReviewDecisionKind::Approved => {
+        ProcedureReviewDecisionKind::Approved => {
             let output = resolution.output.unwrap_or_else(|| {
                 json!({
                     "decision": "approved",
@@ -1059,26 +1051,26 @@ async fn persist_workflow_review_resolution(
                 })
             });
             complete_node_run(&registry, &scope, node_run_uid, output.clone()).await?;
-            let resumed_state = WorkflowInterpreter::new(&definition)
+            let resumed_state = ProcedureInterpreter::new(&definition)
                 .complete_blocked_node(state, &resolution.node_id, output)
-                .map_err(workflow_handler_error)?;
+                .map_err(procedure_handler_error)?;
             advance_and_persist(&registry, &scope, &run, &definition, resumed_state).await
         }
-        WorkflowReviewDecisionKind::Rejected => {
+        ProcedureReviewDecisionKind::Rejected => {
             let reason = resolution
                 .reason
-                .unwrap_or_else(|| "workflow review rejected".to_string());
+                .unwrap_or_else(|| "procedure review rejected".to_string());
             fail_node_run(&registry, &scope, node_run_uid, reason.clone()).await?;
-            fail_workflow_run(&registry, &scope, &run, resolution.node_id, &state, reason).await
+            fail_procedure_run(&registry, &scope, &run, resolution.node_id, &state, reason).await
         }
     }
 }
 
-async fn persist_workflow_signal_resolution(
-    request: RunArtifactWorkflowRequest,
+async fn persist_procedure_signal_resolution(
+    request: RunProcedureRequest,
     node_run_uid: Uuid,
-    resolution: WorkflowSignalResolution,
-) -> Result<ArtifactWorkflowStep, HandlerError> {
+    resolution: ProcedureSignalResolution,
+) -> Result<ProcedureStep, HandlerError> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
@@ -1087,25 +1079,25 @@ async fn persist_workflow_signal_resolution(
         .load_run(&scope, request.run_uid)
         .await
         .map_err(artifact_handler_error)?
-        .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
+        .ok_or_else(|| TerminalError::new_with_code(404, "procedure run not found"))?;
     if matches!(
         run.status,
         ArtifactRunStatus::Completed | ArtifactRunStatus::Failed | ArtifactRunStatus::Cancelled
     ) {
-        return Ok(ArtifactWorkflowStep::Outcome {
+        return Ok(ProcedureStep::Outcome {
             outcome: outcome_from_run(&run),
         });
     }
-    let definition = load_workflow_definition(&registry, &scope, &run).await?;
-    let state = workflow_state_from_run(&run)?;
+    let definition = load_procedure_definition(&registry, &scope, &run).await?;
+    let state = procedure_state_from_run(&run)?;
     if !matches!(
         state.blocked_nodes.get(&resolution.node_id),
-        Some(WorkflowNodeRequest::WaitSignal { .. })
+        Some(ProcedureNodeRequest::WaitSignal { .. })
     ) {
         return Err(TerminalError::new_with_code(
             400,
             format!(
-                "workflow node `{}` is not waiting for a signal",
+                "procedure node `{}` is not waiting for a signal",
                 resolution.node_id
             ),
         )
@@ -1117,9 +1109,9 @@ async fn persist_workflow_signal_resolution(
         "payload": resolution.payload,
     });
     complete_node_run(&registry, &scope, node_run_uid, output.clone()).await?;
-    let resumed_state = WorkflowInterpreter::new(&definition)
+    let resumed_state = ProcedureInterpreter::new(&definition)
         .complete_blocked_node(state, &resolution.node_id, output)
-        .map_err(workflow_handler_error)?;
+        .map_err(procedure_handler_error)?;
     advance_and_persist(&registry, &scope, &run, &definition, resumed_state).await
 }
 
@@ -1127,11 +1119,11 @@ async fn advance_and_persist(
     registry: &ArtifactRegistry,
     scope: &ActionRuleScope,
     run: &ArtifactRun,
-    definition: &moa_artifacts::workflow::WorkflowDefinition,
-    execution_state: WorkflowExecutionState,
-) -> Result<ArtifactWorkflowStep, HandlerError> {
-    match WorkflowInterpreter::new(definition).advance(execution_state) {
-        Ok(WorkflowAdvance::Completed { state, output }) => {
+    definition: &moa_artifacts::procedure::ProcedureDefinition,
+    execution_state: ProcedureExecutionState,
+) -> Result<ProcedureStep, HandlerError> {
+    match ProcedureInterpreter::new(definition).advance(execution_state) {
+        Ok(ProcedureAdvance::Completed { state, output }) => {
             append_completed_node_runs(registry, scope, definition, &state, Some(&output)).await?;
             let updated = registry
                 .update_run(
@@ -1140,7 +1132,7 @@ async fn advance_and_persist(
                     ArtifactRunUpdate {
                         status: Some(ArtifactRunStatus::Completed),
                         current_node_id: Some(state.current_node_id.clone()),
-                        state: Some(workflow_state_json(&state)),
+                        state: Some(procedure_state_json(&state)),
                         output: Some(Some(output.clone())),
                         error: Some(None),
                         completed_at: Some(Some(Utc::now())),
@@ -1148,15 +1140,15 @@ async fn advance_and_persist(
                 )
                 .await
                 .map_err(artifact_handler_error)?
-                .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
-            Ok(ArtifactWorkflowStep::Outcome {
+                .ok_or_else(|| TerminalError::new_with_code(404, "procedure run not found"))?;
+            Ok(ProcedureStep::Outcome {
                 outcome: outcome_from_run(&updated),
             })
         }
-        Ok(WorkflowAdvance::Blocked { state, request }) => {
+        Ok(ProcedureAdvance::Blocked { state, request }) => {
             persist_blocked_request(registry, scope, run, definition, state, request).await
         }
-        Ok(WorkflowAdvance::Ready { state, requests }) => {
+        Ok(ProcedureAdvance::Ready { state, requests }) => {
             append_completed_node_runs(registry, scope, definition, &state, None).await?;
             let should_execute =
                 !requests.is_empty() && requests.iter().all(is_executable_adapter_request);
@@ -1176,7 +1168,7 @@ async fn advance_and_persist(
                         ArtifactRunUpdate {
                             status: Some(ArtifactRunStatus::Failed),
                             current_node_id: Some(state.current_node_id.clone()),
-                            state: Some(workflow_state_json(&state)),
+                            state: Some(procedure_state_json(&state)),
                             output: None,
                             error: Some(Some(message)),
                             completed_at: Some(Some(Utc::now())),
@@ -1184,8 +1176,8 @@ async fn advance_and_persist(
                     )
                     .await
                     .map_err(artifact_handler_error)?
-                    .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
-                return Ok(ArtifactWorkflowStep::Outcome {
+                    .ok_or_else(|| TerminalError::new_with_code(404, "procedure run not found"))?;
+                return Ok(ProcedureStep::Outcome {
                     outcome: outcome_from_run(&updated),
                 });
             }
@@ -1207,7 +1199,7 @@ async fn advance_and_persist(
                     .await
                     .map_err(artifact_handler_error)?;
                 if should_execute {
-                    executions.push(ArtifactWorkflowNodeExecution {
+                    executions.push(ProcedureNodeExecution {
                         node_run_uid,
                         request,
                     });
@@ -1220,7 +1212,7 @@ async fn advance_and_persist(
                     ArtifactRunUpdate {
                         status: Some(ArtifactRunStatus::Running),
                         current_node_id: Some(state.current_node_id.clone()),
-                        state: Some(workflow_state_json(&state)),
+                        state: Some(procedure_state_json(&state)),
                         output: None,
                         error: Some(None),
                         completed_at: None,
@@ -1228,15 +1220,15 @@ async fn advance_and_persist(
                 )
                 .await
                 .map_err(artifact_handler_error)?
-                .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
+                .ok_or_else(|| TerminalError::new_with_code(404, "procedure run not found"))?;
             let outcome = outcome_from_run(&updated);
             if should_execute {
-                return Ok(ArtifactWorkflowStep::ExecuteNodes {
+                return Ok(ProcedureStep::ExecuteNodes {
                     outcome,
                     executions,
                 });
             }
-            Ok(ArtifactWorkflowStep::Outcome { outcome })
+            Ok(ProcedureStep::Outcome { outcome })
         }
         Err(error) => {
             let message = error.to_string();
@@ -1255,30 +1247,32 @@ async fn advance_and_persist(
                 )
                 .await
                 .map_err(artifact_handler_error)?
-                .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
-            Ok(ArtifactWorkflowStep::Outcome {
+                .ok_or_else(|| TerminalError::new_with_code(404, "procedure run not found"))?;
+            Ok(ProcedureStep::Outcome {
                 outcome: outcome_from_run(&updated),
             })
         }
     }
 }
 
-async fn load_workflow_definition(
+async fn load_procedure_definition(
     registry: &ArtifactRegistry,
     scope: &ActionRuleScope,
     run: &ArtifactRun,
-) -> Result<moa_artifacts::workflow::WorkflowDefinition, HandlerError> {
-    let revision_uid = run
-        .revision_uid
-        .ok_or_else(|| TerminalError::new_with_code(400, "workflow run is missing revision_uid"))?;
+) -> Result<moa_artifacts::procedure::ProcedureDefinition, HandlerError> {
+    let revision_uid = run.revision_uid.ok_or_else(|| {
+        TerminalError::new_with_code(400, "procedure run is missing revision_uid")
+    })?;
     let revision = registry
         .load_revision(scope, revision_uid)
         .await
         .map_err(artifact_handler_error)?
-        .ok_or_else(|| TerminalError::new_with_code(404, "workflow revision not found"))?;
+        .ok_or_else(|| TerminalError::new_with_code(404, "procedure revision not found"))?;
     match revision.document.definition {
-        ArtifactDefinition::Workflow(definition) => Ok(definition),
-        _ => Err(TerminalError::new_with_code(400, "artifact revision is not a workflow").into()),
+        ArtifactDefinition::Skill(skill) => skill.procedure.ok_or_else(|| {
+            TerminalError::new_with_code(400, "skill artifact does not define a procedure").into()
+        }),
+        _ => Err(TerminalError::new_with_code(400, "artifact revision is not a skill").into()),
     }
 }
 
@@ -1286,10 +1280,10 @@ async fn persist_blocked_request(
     registry: &ArtifactRegistry,
     scope: &ActionRuleScope,
     run: &ArtifactRun,
-    definition: &moa_artifacts::workflow::WorkflowDefinition,
-    state: WorkflowExecutionState,
-    request: WorkflowNodeRequest,
-) -> Result<ArtifactWorkflowStep, HandlerError> {
+    definition: &moa_artifacts::procedure::ProcedureDefinition,
+    state: ProcedureExecutionState,
+    request: ProcedureNodeRequest,
+) -> Result<ProcedureStep, HandlerError> {
     append_completed_node_runs(registry, scope, definition, &state, None).await?;
     let status = if is_review_request(&request) {
         ArtifactNodeRunStatus::PendingReview
@@ -1323,7 +1317,7 @@ async fn persist_blocked_request(
             ArtifactRunUpdate {
                 status: Some(run_status),
                 current_node_id: Some(state.current_node_id.clone()),
-                state: Some(workflow_state_json(&state)),
+                state: Some(procedure_state_json(&state)),
                 output: None,
                 error: Some(None),
                 completed_at: None,
@@ -1331,30 +1325,30 @@ async fn persist_blocked_request(
         )
         .await
         .map_err(artifact_handler_error)?
-        .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
+        .ok_or_else(|| TerminalError::new_with_code(404, "procedure run not found"))?;
     let outcome = outcome_from_run(&updated);
     if is_executable_adapter_request(&request) {
-        return Ok(ArtifactWorkflowStep::ExecuteNode {
+        return Ok(ProcedureStep::ExecuteNode {
             outcome,
             node_run_uid,
             request,
         });
     }
     if is_review_request(&request) || is_signal_request(&request) {
-        return Ok(ArtifactWorkflowStep::AwaitNode {
+        return Ok(ProcedureStep::AwaitNode {
             outcome,
             node_run_uid,
             request,
         });
     }
-    Ok(ArtifactWorkflowStep::Outcome { outcome })
+    Ok(ProcedureStep::Outcome { outcome })
 }
 
 async fn append_completed_node_runs(
     registry: &ArtifactRegistry,
     scope: &ActionRuleScope,
-    definition: &moa_artifacts::workflow::WorkflowDefinition,
-    state: &WorkflowExecutionState,
+    definition: &moa_artifacts::procedure::ProcedureDefinition,
+    state: &ProcedureExecutionState,
     terminal_output: Option<&Value>,
 ) -> Result<(), HandlerError> {
     let mut existing_node_ids = registry
@@ -1417,14 +1411,14 @@ async fn latest_node_run_uid(
 }
 
 fn traversed_node_ids(
-    definition: &moa_artifacts::workflow::WorkflowDefinition,
-    state: &WorkflowExecutionState,
+    definition: &moa_artifacts::procedure::ProcedureDefinition,
+    state: &ProcedureExecutionState,
 ) -> Result<Vec<String>, HandlerError> {
     let start = definition
         .nodes
         .iter()
-        .find(|node| node.kind == moa_artifacts::workflow::WorkflowNodeKind::Start)
-        .ok_or_else(|| workflow_handler_error(WorkflowError::MissingStartNode))?;
+        .find(|node| node.kind == moa_artifacts::procedure::ProcedureNodeKind::Start)
+        .ok_or_else(|| procedure_handler_error(ProcedureError::MissingStartNode))?;
     let mut node_ids = vec![start.id.clone()];
     for edge_id in &state.traversed_edge_ids {
         let edge = definition
@@ -1437,7 +1431,7 @@ fn traversed_node_ids(
                     .unwrap_or_else(|| format!("{}->{}", edge.from, edge.to) == *edge_id)
             })
             .ok_or_else(|| {
-                workflow_handler_error(WorkflowError::EdgeNotFound {
+                procedure_handler_error(ProcedureError::EdgeNotFound {
                     edge_id: edge_id.clone(),
                 })
             })?;
@@ -1449,7 +1443,7 @@ fn traversed_node_ids(
         .collect())
 }
 
-fn workflow_state_json(state: &WorkflowExecutionState) -> Value {
+fn procedure_state_json(state: &ProcedureExecutionState) -> Value {
     let mut value = serde_json::to_value(state).unwrap_or_else(|_| json!({}));
     if let Value::Object(map) = &mut value {
         map.insert(
@@ -1460,39 +1454,39 @@ fn workflow_state_json(state: &WorkflowExecutionState) -> Value {
     value
 }
 
-fn workflow_state_from_run(run: &ArtifactRun) -> Result<WorkflowExecutionState, HandlerError> {
+fn procedure_state_from_run(run: &ArtifactRun) -> Result<ProcedureExecutionState, HandlerError> {
     if run.state.get("run_uid").is_some() {
-        return serde_json::from_value::<WorkflowExecutionState>(run.state.clone()).map_err(
+        return serde_json::from_value::<ProcedureExecutionState>(run.state.clone()).map_err(
             |error| {
                 TerminalError::new_with_code(400, format!("invalid workflow state: {error}")).into()
             },
         );
     }
-    let mut state = WorkflowExecutionState::new(run.run_uid, run.input.clone());
+    let mut state = ProcedureExecutionState::new(run.run_uid, run.input.clone());
     state.state = run.state.clone();
     state.current_node_id = run.current_node_id.clone();
     Ok(state)
 }
 
-fn is_executable_adapter_request(request: &WorkflowNodeRequest) -> bool {
+fn is_executable_adapter_request(request: &ProcedureNodeRequest) -> bool {
     matches!(
         request,
-        WorkflowNodeRequest::Action { .. }
-            | WorkflowNodeRequest::Tool { .. }
-            | WorkflowNodeRequest::SkillAction { .. }
-            | WorkflowNodeRequest::Agent { .. }
-            | WorkflowNodeRequest::Worker { .. }
-            | WorkflowNodeRequest::MemoryRead { .. }
-            | WorkflowNodeRequest::MemoryWrite { .. }
+        ProcedureNodeRequest::Action { .. }
+            | ProcedureNodeRequest::Tool { .. }
+            | ProcedureNodeRequest::SkillAction { .. }
+            | ProcedureNodeRequest::Agent { .. }
+            | ProcedureNodeRequest::Worker { .. }
+            | ProcedureNodeRequest::MemoryRead { .. }
+            | ProcedureNodeRequest::MemoryWrite { .. }
     )
 }
 
-fn is_review_request(request: &WorkflowNodeRequest) -> bool {
-    matches!(request, WorkflowNodeRequest::Review { .. })
+fn is_review_request(request: &ProcedureNodeRequest) -> bool {
+    matches!(request, ProcedureNodeRequest::Review { .. })
 }
 
-fn is_signal_request(request: &WorkflowNodeRequest) -> bool {
-    matches!(request, WorkflowNodeRequest::WaitSignal { .. })
+fn is_signal_request(request: &ProcedureNodeRequest) -> bool {
+    matches!(request, ProcedureNodeRequest::WaitSignal { .. })
 }
 
 fn review_promise_key(node_id: &str) -> String {
@@ -1503,42 +1497,42 @@ fn signal_promise_key(node_id: &str) -> String {
     format!("{SIGNAL_PROMISE_PREFIX}:{node_id}")
 }
 
-fn workflow_run_uid_from_key(key: &str) -> Result<Uuid, HandlerError> {
+fn procedure_run_uid_from_key(key: &str) -> Result<Uuid, HandlerError> {
     Uuid::parse_str(key).map_err(|error| {
         TerminalError::new_with_code(400, format!("invalid workflow run id: {error}")).into()
     })
 }
 
-fn blocked_node_id(request: &WorkflowNodeRequest) -> String {
+fn blocked_node_id(request: &ProcedureNodeRequest) -> String {
     match request {
-        WorkflowNodeRequest::Action { node_id, .. }
-        | WorkflowNodeRequest::Tool { node_id, .. }
-        | WorkflowNodeRequest::SkillAction { node_id, .. }
-        | WorkflowNodeRequest::Agent { node_id, .. }
-        | WorkflowNodeRequest::Worker { node_id, .. }
-        | WorkflowNodeRequest::Review { node_id, .. }
-        | WorkflowNodeRequest::WaitSignal { node_id, .. }
-        | WorkflowNodeRequest::MemoryRead { node_id, .. }
-        | WorkflowNodeRequest::MemoryWrite { node_id, .. } => node_id.clone(),
+        ProcedureNodeRequest::Action { node_id, .. }
+        | ProcedureNodeRequest::Tool { node_id, .. }
+        | ProcedureNodeRequest::SkillAction { node_id, .. }
+        | ProcedureNodeRequest::Agent { node_id, .. }
+        | ProcedureNodeRequest::Worker { node_id, .. }
+        | ProcedureNodeRequest::Review { node_id, .. }
+        | ProcedureNodeRequest::WaitSignal { node_id, .. }
+        | ProcedureNodeRequest::MemoryRead { node_id, .. }
+        | ProcedureNodeRequest::MemoryWrite { node_id, .. } => node_id.clone(),
     }
 }
 
-fn blocked_input(request: &WorkflowNodeRequest) -> Value {
+fn blocked_input(request: &ProcedureNodeRequest) -> Value {
     match request {
-        WorkflowNodeRequest::Action { input, .. }
-        | WorkflowNodeRequest::Tool { input, .. }
-        | WorkflowNodeRequest::SkillAction { input, .. }
-        | WorkflowNodeRequest::Agent { input, .. }
-        | WorkflowNodeRequest::Worker { input, .. }
-        | WorkflowNodeRequest::Review { input, .. }
-        | WorkflowNodeRequest::WaitSignal { input, .. }
-        | WorkflowNodeRequest::MemoryRead { input, .. }
-        | WorkflowNodeRequest::MemoryWrite { input, .. } => input.clone(),
+        ProcedureNodeRequest::Action { input, .. }
+        | ProcedureNodeRequest::Tool { input, .. }
+        | ProcedureNodeRequest::SkillAction { input, .. }
+        | ProcedureNodeRequest::Agent { input, .. }
+        | ProcedureNodeRequest::Worker { input, .. }
+        | ProcedureNodeRequest::Review { input, .. }
+        | ProcedureNodeRequest::WaitSignal { input, .. }
+        | ProcedureNodeRequest::MemoryRead { input, .. }
+        | ProcedureNodeRequest::MemoryWrite { input, .. } => input.clone(),
     }
 }
 
-fn outcome_from_run(run: &ArtifactRun) -> ArtifactWorkflowOutcome {
-    ArtifactWorkflowOutcome {
+fn outcome_from_run(run: &ArtifactRun) -> ProcedureOutcome {
+    ProcedureOutcome {
         run_uid: run.run_uid,
         status: run.status.as_str().to_string(),
         current_node_id: run.current_node_id.clone(),
@@ -1548,5 +1542,5 @@ fn outcome_from_run(run: &ArtifactRun) -> ArtifactWorkflowOutcome {
 }
 
 fn artifact_handler_error(error: moa_core::MoaError) -> HandlerError {
-    workflow_handler_error(WorkflowError::Artifact(error))
+    procedure_handler_error(ProcedureError::Artifact(error))
 }

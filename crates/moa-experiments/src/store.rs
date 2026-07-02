@@ -78,7 +78,7 @@ impl ExperimentStore {
             INSERT INTO moa.experiment_run (
                 run_uid, storage_partition_id, user_id, name, target_kind, status,
                 target, variant, scorecard, score_run_id, session_id,
-                workflow_run_uid, artifact_revision_uids, idempotency_key,
+                procedure_run_uid, artifact_revision_uids, idempotency_key,
                 created_by_identity
             )
             VALUES ($1, $2, $3, $4, $5, 'accepted', $6, $7, $8, $9, $10, $11, $12, $13, $14)
@@ -95,7 +95,7 @@ impl ExperimentStore {
         .bind(scorecard)
         .bind(score_run_id)
         .bind(run.session_id.map(|session_id| session_id.0))
-        .bind(run.workflow_run_uid)
+        .bind(run.procedure_run_uid)
         .bind(&artifact_revision_uids)
         .bind(run.idempotency_key)
         .bind(run.created_by_identity)
@@ -232,14 +232,14 @@ impl ExperimentStore {
             .await
     }
 
-    /// Attaches a workflow artifact run to a scoped experiment run.
-    pub async fn attach_workflow_run(
+    /// Attaches a skill-backed procedure run to a scoped experiment run.
+    pub async fn attach_procedure_run(
         &self,
         scope: &ActionRuleScope,
         run_uid: Uuid,
-        workflow_run_uid: Uuid,
+        procedure_run_uid: Uuid,
     ) -> MoaResult<Option<ExperimentRunRecord>> {
-        self.update_link(scope, run_uid, None, Some(workflow_run_uid))
+        self.update_link(scope, run_uid, None, Some(procedure_run_uid))
             .await
     }
 
@@ -554,17 +554,17 @@ impl ExperimentStore {
             .await
     }
 
-    /// Attaches a workflow artifact run to a scoped experiment trial.
-    pub async fn attach_trial_workflow_run(
+    /// Attaches a skill-backed procedure run to a scoped experiment trial.
+    pub async fn attach_trial_procedure_run(
         &self,
         scope: &ActionRuleScope,
         trial_uid: Uuid,
-        workflow_run_uid: Uuid,
+        procedure_run_uid: Uuid,
     ) -> MoaResult<Option<ExperimentTrialRecord>> {
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
-        ensure_workflow_run_visible(conn.as_mut(), scope, workflow_run_uid).await?;
+        ensure_procedure_run_visible(conn.as_mut(), scope, procedure_run_uid).await?;
         conn.commit().await?;
-        self.update_trial_links(scope, trial_uid, None, Some(workflow_run_uid), None)
+        self.update_trial_links(scope, trial_uid, None, Some(procedure_run_uid), None)
             .await
     }
 
@@ -615,7 +615,7 @@ impl ExperimentStore {
         scope: &ActionRuleScope,
         trial_uid: Uuid,
         session_id: Option<Uuid>,
-        workflow_run_uid: Option<Uuid>,
+        procedure_run_uid: Option<Uuid>,
         trace_id: Option<String>,
     ) -> MoaResult<Option<ExperimentTrialRecord>> {
         let parts = ScopeParts::from_scope(scope);
@@ -624,7 +624,7 @@ impl ExperimentStore {
             r#"
             UPDATE moa.experiment_trial
             SET session_id = COALESCE($5, session_id),
-                workflow_run_uid = COALESCE($6, workflow_run_uid),
+                procedure_run_uid = COALESCE($6, procedure_run_uid),
                 trace_id = COALESCE($7, trace_id),
                 updated_at = now()
             WHERE trial_uid = $4
@@ -639,7 +639,7 @@ impl ExperimentStore {
         .bind(parts.user_id.as_deref())
         .bind(trial_uid)
         .bind(session_id)
-        .bind(workflow_run_uid)
+        .bind(procedure_run_uid)
         .bind(trace_id)
         .fetch_optional(conn.as_mut())
         .await
@@ -653,7 +653,7 @@ impl ExperimentStore {
         scope: &ActionRuleScope,
         run_uid: Uuid,
         session_id: Option<Uuid>,
-        workflow_run_uid: Option<Uuid>,
+        procedure_run_uid: Option<Uuid>,
     ) -> MoaResult<Option<ExperimentRunRecord>> {
         let parts = ScopeParts::from_scope(scope);
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
@@ -661,7 +661,7 @@ impl ExperimentStore {
             r#"
             UPDATE moa.experiment_run
             SET session_id = COALESCE($5, session_id),
-                workflow_run_uid = COALESCE($6, workflow_run_uid),
+                procedure_run_uid = COALESCE($6, procedure_run_uid),
                 updated_at = now()
             WHERE run_uid = $4
               AND scope = $1
@@ -675,7 +675,7 @@ impl ExperimentStore {
         .bind(parts.user_id.as_deref())
         .bind(run_uid)
         .bind(session_id)
-        .bind(workflow_run_uid)
+        .bind(procedure_run_uid)
         .fetch_optional(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
@@ -823,10 +823,10 @@ async fn load_scoped_trial_by_key(
     .map_err(map_sqlx_error)
 }
 
-async fn ensure_workflow_run_visible(
+async fn ensure_procedure_run_visible(
     conn: &mut PgConnection,
     scope: &ActionRuleScope,
-    workflow_run_uid: Uuid,
+    procedure_run_uid: Uuid,
 ) -> MoaResult<()> {
     let parts = ScopeParts::from_scope(scope);
     let exists = sqlx::query_scalar::<_, bool>(
@@ -844,7 +844,7 @@ async fn ensure_workflow_run_visible(
     .bind(parts.scope)
     .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
-    .bind(workflow_run_uid)
+    .bind(procedure_run_uid)
     .fetch_one(conn)
     .await
     .map_err(map_sqlx_error)?;
@@ -854,7 +854,7 @@ async fn ensure_workflow_run_visible(
     }
 
     Err(MoaError::StorageError(format!(
-        "workflow run `{workflow_run_uid}` is not visible in the requested experiment scope"
+        "procedure run `{procedure_run_uid}` is not visible in the requested experiment scope"
     )))
 }
 
@@ -925,7 +925,7 @@ impl RowExt for sqlx::postgres::PgRow {
 /// The order here must stay in lockstep with [`run_from_row`], which reads each
 /// column by name; keep both in sync when columns are added or removed.
 const RUN_COLUMNS: &str = "run_uid, storage_partition_id, user_id, scope, name, target_kind, status, \
-     target, variant, scorecard, score_run_id, session_id, workflow_run_uid, \
+     target, variant, scorecard, score_run_id, session_id, procedure_run_uid, \
      artifact_revision_uids, idempotency_key, created_by_identity, error, \
      started_at, completed_at, created_at, updated_at";
 
@@ -936,7 +936,7 @@ const RUN_COLUMNS: &str = "run_uid, storage_partition_id, user_id, scope, name, 
 const TRIAL_COLUMNS: &str = "trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status, \
      target_kind, variant_key, plan_revision_uid, persona_id, profile_id, \
      scenario_id, data_bundle_ids, artifact_revision_uids, \
-     simulator, target_model, seed, session_id, workflow_run_uid, \
+     simulator, target_model, seed, session_id, procedure_run_uid, \
      score_run_id, turn_count, stop_reason, error, trace_id, \
      started_at, completed_at, created_at, updated_at";
 
@@ -970,7 +970,7 @@ fn run_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentRunRecord> {
             .map_err(|error| MoaError::SerializationError(error.to_string()))?,
         score_run_id: row.col("score_run_id")?,
         session_id: row.col::<Option<Uuid>>("session_id")?.map(SessionId),
-        workflow_run_uid: row.col("workflow_run_uid")?,
+        procedure_run_uid: row.col("procedure_run_uid")?,
         artifact_revision_uids: row
             .col::<Option<Vec<Uuid>>>("artifact_revision_uids")?
             .unwrap_or_default(),
@@ -1029,7 +1029,7 @@ fn trial_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentTrialRecor
         target_model: target_model.map(ModelId::new),
         seed: row.col("seed")?,
         session_id: row.col::<Option<Uuid>>("session_id")?.map(SessionId),
-        workflow_run_uid: row.col("workflow_run_uid")?,
+        procedure_run_uid: row.col("procedure_run_uid")?,
         score_run_id: row.col("score_run_id")?,
         turn_count: row.col("turn_count")?,
         stop_reason: stop_reason_text

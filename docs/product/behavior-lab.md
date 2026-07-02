@@ -2,8 +2,9 @@
 
 _Product boundary for behavior-lab artifacts, experiments, analytics, and live simulation._
 
-Behavior Lab is the product surface for testing how target agents or workflows
-behave under simulated users, profiles, data bundles, and scenarios. It is not
+Behavior Lab is the product surface for testing how target agents or skill
+procedures behave under simulated users, profiles, data bundles, and scenarios.
+It is not
 the regression-eval system. Regression evals remain in `moa-eval`; the `Eval`
 service is internal-only and compiled behind `internal-eval-runner`, with
 hosted run status persisted in Postgres.
@@ -40,7 +41,7 @@ There is no default public `/v1/evals/*` product route and no public
 ## Artifact Model
 
 Behavior Lab uses the same `ArtifactDocument` envelope as skills, connectors,
-and workflows, but exposes one artifact kind:
+and agents, but exposes one artifact kind:
 
 | Kind | Purpose |
 |---|---|
@@ -82,7 +83,7 @@ An experiment plan expands into trials. `moa.experiment_run` stores the
 run-level ledger, links pinned artifact revisions, and points at the run
 `analytics.score_run`. `moa.experiment_trial` stores trial keys, variant,
 the pinned plan revision, selected persona/profile/scenario/data-bundle IDs,
-simulator settings, target session or workflow run links, trial score run ID,
+simulator settings, target session or procedure run links, trial score run ID,
 stop reason, and trace ID.
 
 Score rows land in `analytics.scores`. `Experiments/scores` returns run score
@@ -94,7 +95,7 @@ UI.
 Experiment-derived improvements cross one explicit review boundary:
 `Experiments/propose_improvements` creates proposed `learning_candidates` and
 may attach draft artifact revision IDs when it has a concrete reviewed patch to
-preserve. Behavior Lab does not auto-promote skills, workflows, artifacts, or
+preserve. Behavior Lab does not auto-promote skills, artifacts, or
 learning entries. Promotion must happen through the relevant review surface, so
 experiment evidence can inform a change without publishing or materializing it
 as live behavior.
@@ -102,7 +103,7 @@ as live behavior.
 ## Future MCP Adapter
 
 Product/default MCP should be a thin adapter over `Artifacts`, `Experiments`,
-direct edge analytics reads, `Workflows`, and other typed services. It must not
+direct edge analytics reads, `Skills`, and other typed services. It must not
 own Behavior Lab domain logic, bypass service authorization, or publish public
 `/v1/evals/*` semantics. If internal eval is exposed at all, it remains
 `internal-eval-runner` gated.

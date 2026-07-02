@@ -1,4 +1,4 @@
-//! Canonical artifact definitions for MOA agents, skills, connectors, actions, workflows, and experiment plans.
+//! Canonical artifact definitions for MOA agents, skills, connectors, actions, and experiment plans.
 //!
 //! The crate owns the code-addressable document model used by API imports,
 //! Postgres storage, and future visual builders. Runtime crates should depend
@@ -14,6 +14,8 @@ pub mod canonical;
 pub mod connector;
 /// Artifact document wrappers and metadata.
 pub mod document;
+/// Procedure graph definitions embedded in skills.
+pub mod procedure;
 /// Stable artifact reference parsing and formatting.
 pub mod reference;
 /// Postgres-backed artifact registry.
@@ -26,8 +28,6 @@ pub mod simulation;
 pub mod skill;
 /// Semantic validation for artifact documents.
 pub mod validation;
-/// Workflow artifact definitions.
-pub mod workflow;
 
 /// Result type returned by artifact helpers.
 pub type Result<T> = std::result::Result<T, Error>;

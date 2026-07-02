@@ -31,6 +31,9 @@ const MANIFEST_BUDGET_METADATA_KEY: &str = "manifest_budget_chars";
 const MANIFEST_CHARS_USED_METADATA_KEY: &str = "manifest_chars_used";
 /// Context metadata key containing selected skill names.
 pub const SELECTED_SKILL_NAMES_METADATA_KEY: &str = "selected_skill_names";
+/// Context metadata key containing the names of selected skills that carry a
+/// deterministic procedure the agent can run via `run_procedure`.
+pub const SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY: &str = "selected_procedure_skill_names";
 /// Context metadata key containing the selected skill sandbox file count.
 pub const SELECTED_SKILL_FILE_COUNT_METADATA_KEY: &str = "selected_skill_sandbox_file_count";
 
@@ -202,6 +205,12 @@ impl ContextProcessor for SkillInjector {
             .iter()
             .map(|skill| skill.metadata.name.clone())
             .collect::<Vec<_>>();
+        let procedure_skill_names = selection
+            .selected
+            .iter()
+            .filter(|skill| skill.metadata.has_procedure)
+            .map(|skill| skill.metadata.name.clone())
+            .collect::<Vec<_>>();
         let mut excluded_items = policy_filtered.excluded;
         excluded_items.extend(selection.excluded.clone());
         let items_excluded = excluded_items
@@ -211,6 +220,10 @@ impl ContextProcessor for SkillInjector {
         ctx.insert_metadata(
             SELECTED_SKILL_NAMES_METADATA_KEY,
             json!(items_included.clone()),
+        );
+        ctx.insert_metadata(
+            SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY,
+            json!(procedure_skill_names.clone()),
         );
         ctx.insert_metadata(
             SELECTED_SKILL_FILE_COUNT_METADATA_KEY,
@@ -241,6 +254,10 @@ impl ContextProcessor for SkillInjector {
             (
                 SELECTED_SKILL_NAMES_METADATA_KEY.to_string(),
                 json!(items_included.clone()),
+            ),
+            (
+                SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY.to_string(),
+                json!(procedure_skill_names),
             ),
             (
                 SELECTED_SKILL_FILE_COUNT_METADATA_KEY.to_string(),
@@ -356,9 +373,11 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::test_support::{capabilities, session, skills};
+    use super::test_support::{
+        capabilities, session, skills, test_skill, test_skill_with_procedure,
+    };
     use super::tier1_metadata::{MANIFEST_FOOTER, MANIFEST_PREAMBLE};
-    use super::{SharedSkillInjector, SkillInjector};
+    use super::{SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY, SharedSkillInjector, SkillInjector};
 
     #[tokio::test]
     async fn skill_injector_formats_dynamic_metadata() {
@@ -385,6 +404,40 @@ mod tests {
         assert!(!ctx.messages[0].content.contains("allowed-tools"));
         assert!(output.tokens_added > 0);
         assert_eq!(output.items_included, vec!["debug-oauth"]);
+    }
+
+    #[tokio::test]
+    async fn procedure_skills_are_recorded_and_tagged_in_the_manifest() {
+        // Pins: a selected skill carrying a procedure is tagged [procedure] in the
+        // manifest and listed in the procedure-skill metadata that gates the
+        // run_procedure tool, while an agent-mediated skill is neither.
+        let mut ctx = moa_core::WorkingContext::new(&session(), capabilities(200_000));
+        let selection = vec![
+            test_skill_with_procedure("damaged-food-order", "Handle a damaged food order"),
+            test_skill("free-form-helper", "General assistance"),
+        ];
+
+        let output = SkillInjector::from_skills(selection)
+            .process(&mut ctx)
+            .await
+            .expect("skill injection should succeed");
+
+        assert!(ctx.messages[0].content.contains("damaged-food-order"));
+        assert!(ctx.messages[0].content.contains("[procedure]"));
+        // Only the procedure-carrying skill is tagged.
+        let procedure_line = ctx.messages[0]
+            .content
+            .lines()
+            .find(|line| line.contains("free-form-helper"))
+            .expect("free-form skill line present");
+        assert!(!procedure_line.contains("[procedure]"));
+
+        assert_eq!(
+            output
+                .metadata
+                .get(SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY),
+            Some(&json!(["damaged-food-order"]))
+        );
     }
 
     #[tokio::test]

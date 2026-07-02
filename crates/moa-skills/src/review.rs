@@ -844,7 +844,7 @@ mod tests {
             target_label: None,
             task_fingerprint: None,
             task_facets: None,
-            payload: json!({"operation": "workflow_improved"}),
+            payload: json!({"operation": "unknown_operation"}),
             evaluation_payload: None,
             source_experience_ids: Vec::new(),
             confidence: None,

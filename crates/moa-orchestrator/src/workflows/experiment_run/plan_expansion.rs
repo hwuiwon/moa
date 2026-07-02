@@ -72,7 +72,7 @@ async fn dispatch_plan_trials(
                     .unwrap_or_else(|| "parent run cancelled".to_string()),
             )
             .await?;
-            return workflow_status_response(
+            return procedure_status_response(
                 ctx,
                 ExperimentRunStatusRequest {
                     tenant_id: request.tenant_id,
@@ -92,7 +92,7 @@ async fn dispatch_plan_trials(
                 Some(durable_utc_now(ctx, "experiment_utc_now").await?),
             )
             .await?;
-            return workflow_status_response(
+            return procedure_status_response(
                 ctx,
                 ExperimentRunStatusRequest {
                     tenant_id: request.tenant_id,
@@ -171,7 +171,7 @@ async fn dispatch_plan_trials(
                 Some(durable_utc_now(ctx, "experiment_utc_now").await?),
             )
             .await?;
-            return workflow_status_response(
+            return procedure_status_response(
                 ctx,
                 ExperimentRunStatusRequest {
                     tenant_id: request.tenant_id,
@@ -302,7 +302,6 @@ fn definition_with_agent_revision_variants(
             Ok(moa_artifacts::simulation::ExperimentTargetVariant {
                 key: variant.variant_key.clone(),
                 kind: moa_artifacts::simulation::ExperimentTargetKind::AgentLoop,
-                workflow_ref: None,
                 config,
                 ui: template.ui.clone(),
             })

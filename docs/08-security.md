@@ -40,7 +40,7 @@ admin/operator or authorized integration operation protected by normal caller
 authz; presenting a contact JWT cannot call admin/operator APIs or become an
 admin/operator user principal.
 
-Identity verification can be initiated by workflows or skills, but the platform
+Identity verification can be initiated by skills or their procedures, but the platform
 contact service enforces challenge creation, OTP-style completion, token
 upgrade, and session promotion. Low-assurance contact scopes can perform only
 the operations explicitly granted before verification.

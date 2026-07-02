@@ -213,6 +213,10 @@ fn format_manifest_entry(metadata: &SkillMetadata, budget: &ResolvedSkillBudget)
     if !actions.is_empty() {
         entry.push_str(&format!(" [actions: {}]", actions.join(", ")));
     }
+    if metadata.has_procedure {
+        // Marks skills the agent can execute deterministically via `run_procedure`.
+        entry.push_str(" [procedure]");
+    }
     if budget.show_token_estimates {
         entry.push_str(&format!(" (est. {} tok)", metadata.estimated_tokens));
     }
@@ -304,7 +308,9 @@ mod tests {
         DEFAULT_MIN_MANIFEST_CHARS, MANIFEST_FOOTER, MANIFEST_PREAMBLE, ResolvedSkillBudget,
         format_manifest_entry, format_skill_manifest, rank_skills, select_skills_within_budget,
     };
-    use crate::pipeline::skills::test_support::{resolved_budget, test_skill};
+    use crate::pipeline::skills::test_support::{
+        resolved_budget, test_skill, test_skill_with_procedure,
+    };
 
     #[test]
     fn selects_top_ranked_skills_then_resorts_emission_alphabetically() {
@@ -375,6 +381,28 @@ mod tests {
 
         assert!(!without_actions.contains("[actions:"));
         assert!(with_actions.contains("[actions: issue_refund, lookup_order]"));
+    }
+
+    #[test]
+    fn manifest_entry_marks_procedure_skills_deterministically() {
+        // Pins: a skill carrying a procedure is tagged [procedure] so the model
+        // knows deterministic execution via run_procedure is available; a skill
+        // without one is not tagged.
+        let budget = ResolvedSkillBudget {
+            max_manifest_chars: DEFAULT_MIN_MANIFEST_CHARS,
+            max_per_skill_chars: 512,
+            show_token_estimates: false,
+        };
+
+        let without =
+            format_manifest_entry(&test_skill("agentic", "Agent-mediated skill"), &budget);
+        let with = format_manifest_entry(
+            &test_skill_with_procedure("refund", "Refund procedure"),
+            &budget,
+        );
+
+        assert!(!without.contains("[procedure]"));
+        assert!(with.contains("[procedure]"));
     }
 
     #[test]

@@ -149,14 +149,14 @@ pub(super) async fn attach_current_trial_trace(
     Ok(())
 }
 
-pub(super) async fn attach_trial_workflow_run(
+pub(super) async fn attach_trial_procedure_run(
     pool: sqlx::PgPool,
     scope: ActionRuleScope,
     trial_uid: Uuid,
-    workflow_run_uid: Uuid,
+    procedure_run_uid: Uuid,
 ) -> Result<ExperimentTrialRecord, HandlerError> {
     ExperimentStore::new(pool)
-        .attach_trial_workflow_run(&scope, trial_uid, workflow_run_uid)
+        .attach_trial_procedure_run(&scope, trial_uid, procedure_run_uid)
         .await
         .map_err(moa_error_to_handler_error)?
         .ok_or_else(|| trial_not_found(trial_uid))
@@ -210,7 +210,7 @@ pub(super) fn status_response_from_record(
         stop_reason: trial.stop_reason.map(|reason| reason.as_str().to_string()),
         turn_count: trial.turn_count,
         session_id: trial.session_id,
-        workflow_run_uid: trial.workflow_run_uid,
+        procedure_run_uid: trial.procedure_run_uid,
         score_run_id: trial.score_run_id,
         error: trial.error,
         trial: trial_value,

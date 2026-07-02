@@ -265,6 +265,7 @@ fn skill_metadata_from_row(row: sqlx::postgres::PgRow) -> Result<SkillMetadata> 
     } else {
         skill.instructions.path.as_str()
     };
+    let has_procedure = skill.procedure.is_some();
     let actions = skill
         .actions
         .into_iter()
@@ -282,6 +283,7 @@ fn skill_metadata_from_row(row: sqlx::postgres::PgRow) -> Result<SkillMetadata> 
         tags,
         allowed_tools: skill.allowed_tools,
         actions,
+        has_procedure,
         estimated_tokens: estimate_text_tokens(&source_text).max(1),
     })
 }

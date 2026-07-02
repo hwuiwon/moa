@@ -1,38 +1,38 @@
-//! Pure workflow graph interpreter for artifact-backed workflow definitions.
+//! Pure procedure graph interpreter for skill-backed procedure definitions.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use moa_artifacts::{
-    reference::ArtifactRef,
-    workflow::{
-        WorkflowCondition, WorkflowDefinition, WorkflowEdge, WorkflowNode, WorkflowNodeKind,
+    procedure::{
+        ProcedureCondition, ProcedureDefinition, ProcedureEdge, ProcedureNode, ProcedureNodeKind,
     },
+    reference::ArtifactRef,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use crate::error::{Result, WorkflowError};
+use crate::procedure::error::{ProcedureError, Result};
 
-/// Graph-renderable execution state for a workflow run.
+/// Graph-renderable execution state for a procedure run.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct WorkflowExecutionState {
-    /// Durable workflow run identifier.
+pub struct ProcedureExecutionState {
+    /// Durable procedure run identifier.
     pub run_uid: Uuid,
     /// Node currently being interpreted or blocked.
     pub current_node_id: Option<String>,
     /// Nodes that are ready or running.
     pub active_node_ids: BTreeSet<String>,
-    /// Initial workflow input payload.
+    /// Initial procedure input payload.
     pub input: Value,
-    /// Persisted workflow state payload.
+    /// Persisted procedure state payload.
     pub state: Value,
     /// Nodes that completed successfully.
     pub completed_nodes: BTreeSet<String>,
     /// Nodes that failed during execution.
     pub failed_nodes: BTreeSet<String>,
     /// Nodes blocked on side effects.
-    pub blocked_nodes: BTreeMap<String, WorkflowNodeRequest>,
+    pub blocked_nodes: BTreeMap<String, ProcedureNodeRequest>,
     /// Parallel branch group state keyed by stable branch group ID.
     pub branch_groups: BTreeMap<String, BTreeSet<String>>,
     /// Loop traversal counts keyed by stable edge ID.
@@ -47,8 +47,8 @@ pub struct WorkflowExecutionState {
     pub traversed_edge_ids: Vec<String>,
 }
 
-impl WorkflowExecutionState {
-    /// Creates an execution state for a newly started workflow run.
+impl ProcedureExecutionState {
+    /// Creates an execution state for a newly started procedure run.
     #[must_use]
     pub fn new(run_uid: Uuid, input: Value) -> Self {
         Self {
@@ -70,21 +70,21 @@ impl WorkflowExecutionState {
     }
 }
 
-/// Pure interpreter over one workflow definition.
-pub struct WorkflowInterpreter<'a> {
-    /// Workflow graph to interpret.
-    pub definition: &'a WorkflowDefinition,
+/// Pure interpreter over one procedure definition.
+pub struct ProcedureInterpreter<'a> {
+    /// Procedure graph to interpret.
+    pub definition: &'a ProcedureDefinition,
 }
 
-impl<'a> WorkflowInterpreter<'a> {
-    /// Creates an interpreter for a workflow definition.
+impl<'a> ProcedureInterpreter<'a> {
+    /// Creates an interpreter for a procedure definition.
     #[must_use]
-    pub fn new(definition: &'a WorkflowDefinition) -> Self {
+    pub fn new(definition: &'a ProcedureDefinition) -> Self {
         Self { definition }
     }
 
-    /// Advances the workflow until it completes or blocks on a side-effect node.
-    pub fn advance(&self, mut state: WorkflowExecutionState) -> Result<WorkflowAdvance> {
+    /// Advances the procedure until it completes or blocks on a side-effect node.
+    pub fn advance(&self, mut state: ProcedureExecutionState) -> Result<ProcedureAdvance> {
         if let Some(advance) = advance_existing_blocked_state(&state) {
             return Ok(advance);
         }
@@ -98,7 +98,7 @@ impl<'a> WorkflowInterpreter<'a> {
 
             let node = self.node(&node_id)?;
             match &node.kind {
-                WorkflowNodeKind::Start => {
+                ProcedureNodeKind::Start => {
                     state.completed_nodes.insert(node.id.clone());
                     let edge = self.select_edge(node, &state)?;
                     let next_node_id = edge.to.clone();
@@ -106,11 +106,11 @@ impl<'a> WorkflowInterpreter<'a> {
                     record_transition(&mut state, edge)?;
                     node_id = next_node_id;
                 }
-                WorkflowNodeKind::Condition => {
+                ProcedureNodeKind::Condition => {
                     if let Some(condition) = &node.condition
                         && !evaluate_condition(condition, &state)?
                     {
-                        return Err(WorkflowError::NoMatchingOutgoingEdge {
+                        return Err(ProcedureError::NoMatchingOutgoingEdge {
                             node_id: node.id.clone(),
                         });
                     }
@@ -121,7 +121,7 @@ impl<'a> WorkflowInterpreter<'a> {
                     record_transition(&mut state, edge)?;
                     node_id = next_node_id;
                 }
-                WorkflowNodeKind::End => {
+                ProcedureNodeKind::End => {
                     state.completed_nodes.insert(node.id.clone());
                     state.active_node_ids.clear();
                     let output = if is_empty_object(&node.input) {
@@ -129,26 +129,26 @@ impl<'a> WorkflowInterpreter<'a> {
                     } else {
                         node.input.clone()
                     };
-                    return Ok(WorkflowAdvance::Completed { state, output });
+                    return Ok(ProcedureAdvance::Completed { state, output });
                 }
-                WorkflowNodeKind::Action
-                | WorkflowNodeKind::Tool
-                | WorkflowNodeKind::SkillAction
-                | WorkflowNodeKind::Agent
-                | WorkflowNodeKind::Worker
-                | WorkflowNodeKind::Review
-                | WorkflowNodeKind::WaitSignal
-                | WorkflowNodeKind::MemoryRead
-                | WorkflowNodeKind::MemoryWrite => {
-                    let request = WorkflowNodeRequest::from_node(node)?;
+                ProcedureNodeKind::Action
+                | ProcedureNodeKind::Tool
+                | ProcedureNodeKind::SkillAction
+                | ProcedureNodeKind::Agent
+                | ProcedureNodeKind::Worker
+                | ProcedureNodeKind::Review
+                | ProcedureNodeKind::WaitSignal
+                | ProcedureNodeKind::MemoryRead
+                | ProcedureNodeKind::MemoryWrite => {
+                    let request = ProcedureNodeRequest::from_node(node)?;
                     state.blocked_nodes.insert(node.id.clone(), request.clone());
-                    return Ok(WorkflowAdvance::Blocked { state, request });
+                    return Ok(ProcedureAdvance::Blocked { state, request });
                 }
-                WorkflowNodeKind::Parallel => {
+                ProcedureNodeKind::Parallel => {
                     state.completed_nodes.insert(node.id.clone());
                     let edges = self.select_parallel_edges(node, &state)?;
                     if edges.len() > state.max_parallel_branches as usize {
-                        return Err(WorkflowError::ParallelFanOutExceeded {
+                        return Err(ProcedureError::ParallelFanOutExceeded {
                             node_id: node.id.clone(),
                             branch_count: edges.len(),
                             max_branches: state.max_parallel_branches,
@@ -166,7 +166,7 @@ impl<'a> WorkflowInterpreter<'a> {
                     let mut requests = Vec::with_capacity(edges.len());
                     for edge in &edges {
                         let branch = self.node(&edge.to)?;
-                        let request = WorkflowNodeRequest::from_node(branch)?;
+                        let request = ProcedureNodeRequest::from_node(branch)?;
                         record_transition(&mut state, edge)?;
                         state
                             .blocked_nodes
@@ -176,17 +176,17 @@ impl<'a> WorkflowInterpreter<'a> {
                     state.current_node_id = Some(node.id.clone());
                     state.active_node_ids = branch_node_ids.clone();
                     state.branch_groups.insert(join_id, branch_node_ids);
-                    return Ok(WorkflowAdvance::Ready { state, requests });
+                    return Ok(ProcedureAdvance::Ready { state, requests });
                 }
-                WorkflowNodeKind::Join => {
+                ProcedureNodeKind::Join => {
                     if let Some(failed_node_ids) = self.failed_join_branch_ids(node, &state) {
-                        return Err(WorkflowError::ParallelBranchFailed {
+                        return Err(ProcedureError::ParallelBranchFailed {
                             join_node_id: node.id.clone(),
                             failed_node_ids,
                         });
                     }
                     if !self.join_requirements_satisfied(node, &state) {
-                        return Ok(WorkflowAdvance::Ready {
+                        return Ok(ProcedureAdvance::Ready {
                             state,
                             requests: Vec::new(),
                         });
@@ -202,15 +202,15 @@ impl<'a> WorkflowInterpreter<'a> {
         }
     }
 
-    fn next_node_id(&self, state: &mut WorkflowExecutionState) -> Result<String> {
+    fn next_node_id(&self, state: &mut ProcedureExecutionState) -> Result<String> {
         if let Some(node_id) = state.current_node_id.clone() {
             if state.active_node_ids.is_empty() {
                 state.active_node_ids.insert(node_id.clone());
             } else if !state.active_node_ids.contains(&node_id) {
-                return Err(WorkflowError::CurrentNodeNotActive { node_id });
+                return Err(ProcedureError::CurrentNodeNotActive { node_id });
             }
             if state.active_node_ids.len() > 1 {
-                return Err(WorkflowError::MultipleActiveNodesUnsupported {
+                return Err(ProcedureError::MultipleActiveNodesUnsupported {
                     count: state.active_node_ids.len(),
                 });
             }
@@ -220,8 +220,8 @@ impl<'a> WorkflowInterpreter<'a> {
 
         match state.active_node_ids.len() {
             0 => self.start_node_id(),
-            1 => Err(WorkflowError::MissingCurrentNodeForActiveState),
-            count => Err(WorkflowError::MultipleActiveNodesUnsupported { count }),
+            1 => Err(ProcedureError::MissingCurrentNodeForActiveState),
+            count => Err(ProcedureError::MultipleActiveNodesUnsupported { count }),
         }
     }
 
@@ -230,29 +230,29 @@ impl<'a> WorkflowInterpreter<'a> {
             .definition
             .nodes
             .iter()
-            .filter(|node| node.kind == WorkflowNodeKind::Start);
-        let start = starts.next().ok_or(WorkflowError::MissingStartNode)?;
+            .filter(|node| node.kind == ProcedureNodeKind::Start);
+        let start = starts.next().ok_or(ProcedureError::MissingStartNode)?;
         if starts.next().is_some() {
-            return Err(WorkflowError::MultipleStartNodes);
+            return Err(ProcedureError::MultipleStartNodes);
         }
         Ok(start.id.clone())
     }
 
-    fn node(&self, node_id: &str) -> Result<&WorkflowNode> {
+    fn node(&self, node_id: &str) -> Result<&ProcedureNode> {
         self.definition
             .nodes
             .iter()
             .find(|node| node.id == node_id)
-            .ok_or_else(|| WorkflowError::NodeNotFound {
+            .ok_or_else(|| ProcedureError::NodeNotFound {
                 node_id: node_id.to_string(),
             })
     }
 
     fn select_edge(
         &self,
-        node: &WorkflowNode,
-        state: &WorkflowExecutionState,
-    ) -> Result<&WorkflowEdge> {
+        node: &ProcedureNode,
+        state: &ProcedureExecutionState,
+    ) -> Result<&ProcedureEdge> {
         let mut conditional_matches = Vec::new();
         let mut default_edges = Vec::new();
         for edge in self
@@ -273,13 +273,13 @@ impl<'a> WorkflowInterpreter<'a> {
         let selected = if conditional_matches.is_empty() {
             match default_edges.as_slice() {
                 [] => {
-                    return Err(WorkflowError::NoMatchingOutgoingEdge {
+                    return Err(ProcedureError::NoMatchingOutgoingEdge {
                         node_id: node.id.clone(),
                     });
                 }
                 [selected] => *selected,
                 defaults => {
-                    return Err(WorkflowError::AmbiguousOutgoingEdges {
+                    return Err(ProcedureError::AmbiguousOutgoingEdges {
                         node_id: node.id.clone(),
                         matched_count: defaults.len(),
                     });
@@ -289,7 +289,7 @@ impl<'a> WorkflowInterpreter<'a> {
             match conditional_matches.as_slice() {
                 [selected] => *selected,
                 matches => {
-                    return Err(WorkflowError::AmbiguousOutgoingEdges {
+                    return Err(ProcedureError::AmbiguousOutgoingEdges {
                         node_id: node.id.clone(),
                         matched_count: matches.len(),
                     });
@@ -301,9 +301,9 @@ impl<'a> WorkflowInterpreter<'a> {
 
     fn select_parallel_edges(
         &self,
-        node: &WorkflowNode,
-        state: &WorkflowExecutionState,
-    ) -> Result<Vec<WorkflowEdge>> {
+        node: &ProcedureNode,
+        state: &ProcedureExecutionState,
+    ) -> Result<Vec<ProcedureEdge>> {
         let mut edges = Vec::new();
         for edge in self
             .definition
@@ -319,7 +319,7 @@ impl<'a> WorkflowInterpreter<'a> {
             edges.push(edge.clone());
         }
         if edges.is_empty() {
-            return Err(WorkflowError::NoMatchingOutgoingEdge {
+            return Err(ProcedureError::NoMatchingOutgoingEdge {
                 node_id: node.id.clone(),
             });
         }
@@ -328,8 +328,8 @@ impl<'a> WorkflowInterpreter<'a> {
 
     fn join_requirements_satisfied(
         &self,
-        node: &WorkflowNode,
-        state: &WorkflowExecutionState,
+        node: &ProcedureNode,
+        state: &ProcedureExecutionState,
     ) -> bool {
         self.required_join_branches(node, state)
             .is_some_and(|required| {
@@ -341,8 +341,8 @@ impl<'a> WorkflowInterpreter<'a> {
 
     fn failed_join_branch_ids(
         &self,
-        node: &WorkflowNode,
-        state: &WorkflowExecutionState,
+        node: &ProcedureNode,
+        state: &ProcedureExecutionState,
     ) -> Option<Vec<String>> {
         let failed = self
             .required_join_branches(node, state)?
@@ -355,22 +355,22 @@ impl<'a> WorkflowInterpreter<'a> {
 
     fn required_join_branches<'state>(
         &self,
-        node: &WorkflowNode,
-        state: &'state WorkflowExecutionState,
+        node: &ProcedureNode,
+        state: &'state ProcedureExecutionState,
     ) -> Option<&'state BTreeSet<String>> {
         state.branch_groups.get(&node.id)
     }
 
     fn join_id_for_parallel_branches(
         &self,
-        node: &WorkflowNode,
+        node: &ProcedureNode,
         branch_node_ids: &BTreeSet<String>,
     ) -> Result<String> {
         let candidates = self
             .definition
             .nodes
             .iter()
-            .filter(|candidate| candidate.kind == WorkflowNodeKind::Join)
+            .filter(|candidate| candidate.kind == ProcedureNodeKind::Join)
             .filter(|candidate| {
                 let incoming_sources = self
                     .definition
@@ -386,10 +386,10 @@ impl<'a> WorkflowInterpreter<'a> {
             .collect::<Vec<_>>();
         match candidates.as_slice() {
             [candidate] => Ok(candidate.id.clone()),
-            [] => Err(WorkflowError::NoMatchingOutgoingEdge {
+            [] => Err(ProcedureError::NoMatchingOutgoingEdge {
                 node_id: node.id.clone(),
             }),
-            candidates => Err(WorkflowError::AmbiguousOutgoingEdges {
+            candidates => Err(ProcedureError::AmbiguousOutgoingEdges {
                 node_id: node.id.clone(),
                 matched_count: candidates.len(),
             }),
@@ -399,14 +399,14 @@ impl<'a> WorkflowInterpreter<'a> {
     /// Completes one blocked side-effect node, records its output into state, and advances to the next graph node.
     pub fn complete_blocked_node(
         &self,
-        mut state: WorkflowExecutionState,
+        mut state: ProcedureExecutionState,
         node_id: &str,
         output: Value,
-    ) -> Result<WorkflowExecutionState> {
+    ) -> Result<ProcedureExecutionState> {
         state
             .blocked_nodes
             .remove(node_id)
-            .ok_or_else(|| WorkflowError::BlockedNodeNotFound {
+            .ok_or_else(|| ProcedureError::BlockedNodeNotFound {
                 node_id: node_id.to_string(),
             })?;
         let node = self.node(node_id)?;
@@ -433,38 +433,38 @@ impl<'a> WorkflowInterpreter<'a> {
     }
 }
 
-/// Result of one workflow interpreter advance.
+/// Result of one procedure interpreter advance.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum WorkflowAdvance {
-    /// The workflow reached an end node.
+pub enum ProcedureAdvance {
+    /// The procedure reached an end node.
     Completed {
         /// Updated execution state.
-        state: WorkflowExecutionState,
-        /// Terminal workflow output.
+        state: ProcedureExecutionState,
+        /// Terminal procedure output.
         output: Value,
     },
-    /// The workflow blocked on one side-effect node.
+    /// The procedure blocked on one side-effect node.
     Blocked {
         /// Updated execution state.
-        state: WorkflowExecutionState,
+        state: ProcedureExecutionState,
         /// Request that must be satisfied by the orchestrator.
-        request: WorkflowNodeRequest,
+        request: ProcedureNodeRequest,
     },
-    /// The workflow produced ready side-effect requests.
+    /// The procedure produced ready side-effect requests.
     Ready {
         /// Updated execution state.
-        state: WorkflowExecutionState,
+        state: ProcedureExecutionState,
         /// Requests that can be run by the orchestrator.
-        requests: Vec<WorkflowNodeRequest>,
+        requests: Vec<ProcedureNodeRequest>,
     },
 }
 
 /// Side-effect request emitted by the pure interpreter.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum WorkflowNodeRequest {
+pub enum ProcedureNodeRequest {
     /// Connector action or artifact action invocation.
     Action {
-        /// Source workflow node ID.
+        /// Source procedure node ID.
         node_id: String,
         /// Optional action artifact reference.
         artifact_ref: Option<ArtifactRef>,
@@ -473,7 +473,7 @@ pub enum WorkflowNodeRequest {
     },
     /// Direct tool invocation.
     Tool {
-        /// Source workflow node ID.
+        /// Source procedure node ID.
         node_id: String,
         /// Tool references allowed for this node.
         tool_refs: Vec<ArtifactRef>,
@@ -482,7 +482,7 @@ pub enum WorkflowNodeRequest {
     },
     /// Skill-declared action invocation.
     SkillAction {
-        /// Source workflow node ID.
+        /// Source procedure node ID.
         node_id: String,
         /// Optional skill action reference.
         artifact_ref: Option<ArtifactRef>,
@@ -491,7 +491,7 @@ pub enum WorkflowNodeRequest {
     },
     /// Existing top-level agent loop invocation.
     Agent {
-        /// Source workflow node ID.
+        /// Source procedure node ID.
         node_id: String,
         /// Skill references pinned for the agent.
         skill_refs: Vec<ArtifactRef>,
@@ -504,7 +504,7 @@ pub enum WorkflowNodeRequest {
     },
     /// Existing bounded worker invocation.
     Worker {
-        /// Source workflow node ID.
+        /// Source procedure node ID.
         node_id: String,
         /// Skill references pinned for the worker.
         skill_refs: Vec<ArtifactRef>,
@@ -517,88 +517,88 @@ pub enum WorkflowNodeRequest {
     },
     /// Human or policy review pause.
     Review {
-        /// Source workflow node ID.
+        /// Source procedure node ID.
         node_id: String,
         /// Node input payload.
         input: Value,
     },
     /// External signal wait.
     WaitSignal {
-        /// Source workflow node ID.
+        /// Source procedure node ID.
         node_id: String,
         /// Node input payload.
         input: Value,
     },
     /// Graph memory retrieval request.
     MemoryRead {
-        /// Source workflow node ID.
+        /// Source procedure node ID.
         node_id: String,
         /// Node input payload.
         input: Value,
     },
     /// Graph memory write request.
     MemoryWrite {
-        /// Source workflow node ID.
+        /// Source procedure node ID.
         node_id: String,
         /// Node input payload.
         input: Value,
     },
 }
 
-impl WorkflowNodeRequest {
-    fn from_node(node: &WorkflowNode) -> Result<Self> {
+impl ProcedureNodeRequest {
+    fn from_node(node: &ProcedureNode) -> Result<Self> {
         Ok(match &node.kind {
-            WorkflowNodeKind::Action => Self::Action {
+            ProcedureNodeKind::Action => Self::Action {
                 node_id: node.id.clone(),
                 artifact_ref: node.artifact_ref.clone(),
                 input: node.input.clone(),
             },
-            WorkflowNodeKind::Tool => Self::Tool {
+            ProcedureNodeKind::Tool => Self::Tool {
                 node_id: node.id.clone(),
                 tool_refs: node.tool_refs.clone(),
                 input: node.input.clone(),
             },
-            WorkflowNodeKind::SkillAction => Self::SkillAction {
+            ProcedureNodeKind::SkillAction => Self::SkillAction {
                 node_id: node.id.clone(),
                 artifact_ref: node.artifact_ref.clone(),
                 input: node.input.clone(),
             },
-            WorkflowNodeKind::Agent => Self::Agent {
+            ProcedureNodeKind::Agent => Self::Agent {
                 node_id: node.id.clone(),
                 skill_refs: node.skill_refs.clone(),
                 tool_refs: node.tool_refs.clone(),
                 input: node.input.clone(),
                 max_turns: node.max_turns,
             },
-            WorkflowNodeKind::Worker => Self::Worker {
+            ProcedureNodeKind::Worker => Self::Worker {
                 node_id: node.id.clone(),
                 skill_refs: node.skill_refs.clone(),
                 tool_refs: node.tool_refs.clone(),
                 input: node.input.clone(),
                 max_turns: node.max_turns,
             },
-            WorkflowNodeKind::Review => Self::Review {
+            ProcedureNodeKind::Review => Self::Review {
                 node_id: node.id.clone(),
                 input: node.input.clone(),
             },
-            WorkflowNodeKind::WaitSignal => Self::WaitSignal {
+            ProcedureNodeKind::WaitSignal => Self::WaitSignal {
                 node_id: node.id.clone(),
                 input: node.input.clone(),
             },
-            WorkflowNodeKind::MemoryRead => Self::MemoryRead {
+            ProcedureNodeKind::MemoryRead => Self::MemoryRead {
                 node_id: node.id.clone(),
                 input: node.input.clone(),
             },
-            WorkflowNodeKind::MemoryWrite => Self::MemoryWrite {
+            ProcedureNodeKind::MemoryWrite => Self::MemoryWrite {
                 node_id: node.id.clone(),
                 input: node.input.clone(),
             },
-            WorkflowNodeKind::Start
-            | WorkflowNodeKind::Condition
-            | WorkflowNodeKind::End
-            | WorkflowNodeKind::Parallel
-            | WorkflowNodeKind::Join => {
-                return Err(WorkflowError::UnsupportedNodeKind {
+            ProcedureNodeKind::Start
+            | ProcedureNodeKind::Condition
+            | ProcedureNodeKind::End
+            | ProcedureNodeKind::Parallel
+            | ProcedureNodeKind::Join => {
+                return Err(ProcedureError::UnsupportedNodeKind {
                     node_id: node.id.clone(),
                     kind: node_kind_label(&node.kind).to_string(),
                 });
@@ -607,19 +607,19 @@ impl WorkflowNodeRequest {
     }
 }
 
-fn advance_existing_blocked_state(state: &WorkflowExecutionState) -> Option<WorkflowAdvance> {
+fn advance_existing_blocked_state(state: &ProcedureExecutionState) -> Option<ProcedureAdvance> {
     let requests = state
         .blocked_nodes
         .values()
         .cloned()
-        .collect::<Vec<WorkflowNodeRequest>>();
+        .collect::<Vec<ProcedureNodeRequest>>();
     match requests.as_slice() {
         [] => None,
-        [request] => Some(WorkflowAdvance::Blocked {
+        [request] => Some(ProcedureAdvance::Blocked {
             state: state.clone(),
             request: request.clone(),
         }),
-        _ => Some(WorkflowAdvance::Ready {
+        _ => Some(ProcedureAdvance::Ready {
             state: state.clone(),
             requests,
         }),
@@ -627,7 +627,7 @@ fn advance_existing_blocked_state(state: &WorkflowExecutionState) -> Option<Work
 }
 
 fn reset_parallel_branch_state(
-    state: &mut WorkflowExecutionState,
+    state: &mut ProcedureExecutionState,
     join_id: &str,
     branch_node_ids: &BTreeSet<String>,
 ) {
@@ -648,13 +648,13 @@ fn reset_parallel_branch_state(
     state.blocked_nodes.remove(join_id);
 }
 
-fn record_transition(state: &mut WorkflowExecutionState, edge: &WorkflowEdge) -> Result<()> {
+fn record_transition(state: &mut ProcedureExecutionState, edge: &ProcedureEdge) -> Result<()> {
     let edge_id = edge_id(edge);
     if state.completed_nodes.contains(&edge.to) {
         let count = state.loop_counts.entry(edge_id.clone()).or_insert(0);
         *count = count.saturating_add(1);
         if *count >= state.max_loop_iterations {
-            return Err(WorkflowError::LoopIterationLimitExceeded {
+            return Err(ProcedureError::LoopIterationLimitExceeded {
                 edge_id,
                 attempted_iterations: *count,
                 max_iterations: state.max_loop_iterations,
@@ -666,21 +666,21 @@ fn record_transition(state: &mut WorkflowExecutionState, edge: &WorkflowEdge) ->
     Ok(())
 }
 
-fn edge_id(edge: &WorkflowEdge) -> String {
+fn edge_id(edge: &ProcedureEdge) -> String {
     edge.id
         .clone()
         .unwrap_or_else(|| format!("{}->{}", edge.from, edge.to))
 }
 
 fn evaluate_condition(
-    condition: &WorkflowCondition,
-    state: &WorkflowExecutionState,
+    condition: &ProcedureCondition,
+    state: &ProcedureExecutionState,
 ) -> Result<bool> {
     match condition {
-        WorkflowCondition::Equals { left, right } => Ok(resolve_path(left, state) == Some(right)),
-        WorkflowCondition::Exists { path } => Ok(resolve_path(path, state).is_some()),
-        WorkflowCondition::Expression { language, source } => {
-            Err(WorkflowError::UnsupportedConditionExpression {
+        ProcedureCondition::Equals { left, right } => Ok(resolve_path(left, state) == Some(right)),
+        ProcedureCondition::Exists { path } => Ok(resolve_path(path, state).is_some()),
+        ProcedureCondition::Expression { language, source } => {
+            Err(ProcedureError::UnsupportedConditionExpression {
                 language: language.clone(),
                 expression: source.clone(),
             })
@@ -688,7 +688,7 @@ fn evaluate_condition(
     }
 }
 
-fn resolve_path<'a>(path: &str, state: &'a WorkflowExecutionState) -> Option<&'a Value> {
+fn resolve_path<'a>(path: &str, state: &'a ProcedureExecutionState) -> Option<&'a Value> {
     let normalized = path
         .strip_prefix("$.")
         .or_else(|| path.strip_prefix('$'))
@@ -721,53 +721,53 @@ fn is_empty_object(value: &Value) -> bool {
     matches!(value, Value::Object(map) if map.is_empty())
 }
 
-fn node_kind_label(kind: &WorkflowNodeKind) -> &'static str {
+fn node_kind_label(kind: &ProcedureNodeKind) -> &'static str {
     match kind {
-        WorkflowNodeKind::Start => "start",
-        WorkflowNodeKind::Action => "action",
-        WorkflowNodeKind::Condition => "condition",
-        WorkflowNodeKind::Review => "review",
-        WorkflowNodeKind::Agent => "agent",
-        WorkflowNodeKind::End => "end",
-        WorkflowNodeKind::Tool => "tool",
-        WorkflowNodeKind::SkillAction => "skill_action",
-        WorkflowNodeKind::Worker => "worker",
-        WorkflowNodeKind::Parallel => "parallel",
-        WorkflowNodeKind::Join => "join",
-        WorkflowNodeKind::WaitSignal => "wait_signal",
-        WorkflowNodeKind::MemoryRead => "memory_read",
-        WorkflowNodeKind::MemoryWrite => "memory_write",
+        ProcedureNodeKind::Start => "start",
+        ProcedureNodeKind::Action => "action",
+        ProcedureNodeKind::Condition => "condition",
+        ProcedureNodeKind::Review => "review",
+        ProcedureNodeKind::Agent => "agent",
+        ProcedureNodeKind::End => "end",
+        ProcedureNodeKind::Tool => "tool",
+        ProcedureNodeKind::SkillAction => "skill_action",
+        ProcedureNodeKind::Worker => "worker",
+        ProcedureNodeKind::Parallel => "parallel",
+        ProcedureNodeKind::Join => "join",
+        ProcedureNodeKind::WaitSignal => "wait_signal",
+        ProcedureNodeKind::MemoryRead => "memory_read",
+        ProcedureNodeKind::MemoryWrite => "memory_write",
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use moa_artifacts::procedure::{ProcedureEdge, ProcedureNode};
     use moa_artifacts::reference::ArtifactRef;
-    use moa_artifacts::workflow::{WorkflowEdge, WorkflowNode};
     use serde_json::json;
 
     use super::*;
 
     #[test]
     fn sequential_start_to_end_completes() {
-        // Pins: deterministic sequential workflows execute entirely inside the pure interpreter.
-        let definition = workflow(
+        // Pins: deterministic sequential procedures execute entirely inside the pure interpreter.
+        let definition = procedure(
             vec![
-                node("start", WorkflowNodeKind::Start),
-                node("end", WorkflowNodeKind::End).with_input(json!({ "done": true })),
+                node("start", ProcedureNodeKind::Start),
+                node("end", ProcedureNodeKind::End).with_input(json!({ "done": true })),
             ],
             vec![edge("start-end", "start", "end")],
         );
         let run_uid = Uuid::now_v7();
-        let result = WorkflowInterpreter::new(&definition)
-            .advance(WorkflowExecutionState::new(
+        let result = ProcedureInterpreter::new(&definition)
+            .advance(ProcedureExecutionState::new(
                 run_uid,
                 json!({ "ticket": "T-1" }),
             ))
-            .expect("workflow should advance");
+            .expect("procedure should advance");
 
-        let WorkflowAdvance::Completed { state, output } = result else {
-            panic!("expected completed workflow");
+        let ProcedureAdvance::Completed { state, output } = result else {
+            panic!("expected completed procedure");
         };
         assert_eq!(output, json!({ "done": true }));
         assert_eq!(state.current_node_id.as_deref(), Some("end"));
@@ -782,16 +782,16 @@ mod tests {
     #[test]
     fn condition_edge_selects_matching_branch() {
         // Pins: branch choice is encoded by explicit graph edges and persisted edge IDs.
-        let definition = workflow(
+        let definition = procedure(
             vec![
-                node("start", WorkflowNodeKind::Start),
-                node("route", WorkflowNodeKind::Condition),
-                node("vip", WorkflowNodeKind::End).with_input(json!({ "lane": "vip" })),
-                node("standard", WorkflowNodeKind::End).with_input(json!({ "lane": "standard" })),
+                node("start", ProcedureNodeKind::Start),
+                node("route", ProcedureNodeKind::Condition),
+                node("vip", ProcedureNodeKind::End).with_input(json!({ "lane": "vip" })),
+                node("standard", ProcedureNodeKind::End).with_input(json!({ "lane": "standard" })),
             ],
             vec![
                 edge("start-route", "start", "route"),
-                edge("route-vip", "route", "vip").when(WorkflowCondition::Equals {
+                edge("route-vip", "route", "vip").when(ProcedureCondition::Equals {
                     left: "input.priority".to_string(),
                     right: json!("vip"),
                 }),
@@ -799,15 +799,15 @@ mod tests {
             ],
         );
 
-        let result = WorkflowInterpreter::new(&definition)
-            .advance(WorkflowExecutionState::new(
+        let result = ProcedureInterpreter::new(&definition)
+            .advance(ProcedureExecutionState::new(
                 Uuid::now_v7(),
                 json!({ "priority": "vip" }),
             ))
-            .expect("workflow should advance");
+            .expect("procedure should advance");
 
-        let WorkflowAdvance::Completed { state, output } = result else {
-            panic!("expected completed workflow");
+        let ProcedureAdvance::Completed { state, output } = result else {
+            panic!("expected completed procedure");
         };
         assert_eq!(output, json!({ "lane": "vip" }));
         assert_eq!(state.current_node_id.as_deref(), Some("vip"));
@@ -818,13 +818,13 @@ mod tests {
     fn effectful_tool_node_blocks_with_request() {
         // Pins: side-effect nodes return a typed request without hidden execution.
         let tool_ref = ArtifactRef::tool("orders.lookup");
-        let definition = workflow(
+        let definition = procedure(
             vec![
-                node("start", WorkflowNodeKind::Start),
-                node("lookup", WorkflowNodeKind::Tool)
+                node("start", ProcedureNodeKind::Start),
+                node("lookup", ProcedureNodeKind::Tool)
                     .with_tool_refs(vec![tool_ref.clone()])
                     .with_input(json!({ "order_id": "O-1" })),
-                node("end", WorkflowNodeKind::End),
+                node("end", ProcedureNodeKind::End),
             ],
             vec![
                 edge("start-lookup", "start", "lookup"),
@@ -832,16 +832,16 @@ mod tests {
             ],
         );
 
-        let result = WorkflowInterpreter::new(&definition)
-            .advance(WorkflowExecutionState::new(Uuid::now_v7(), json!({})))
-            .expect("workflow should advance");
+        let result = ProcedureInterpreter::new(&definition)
+            .advance(ProcedureExecutionState::new(Uuid::now_v7(), json!({})))
+            .expect("procedure should advance");
 
-        let WorkflowAdvance::Blocked { state, request } = result else {
-            panic!("expected blocked workflow");
+        let ProcedureAdvance::Blocked { state, request } = result else {
+            panic!("expected blocked procedure");
         };
         assert_eq!(
             request,
-            WorkflowNodeRequest::Tool {
+            ProcedureNodeRequest::Tool {
                 node_id: "lookup".to_string(),
                 tool_refs: vec![tool_ref],
                 input: json!({ "order_id": "O-1" }),
@@ -859,29 +859,29 @@ mod tests {
     #[test]
     fn completing_blocked_node_records_output_and_continues() {
         // Pins: side-effect completion resumes through declared graph edges.
-        let definition = workflow(
+        let definition = procedure(
             vec![
-                node("start", WorkflowNodeKind::Start),
-                node("lookup", WorkflowNodeKind::Tool)
+                node("start", ProcedureNodeKind::Start),
+                node("lookup", ProcedureNodeKind::Tool)
                     .with_tool_refs(vec![ArtifactRef::tool("orders.lookup")]),
-                node("end", WorkflowNodeKind::End).with_input(json!({ "done": true })),
+                node("end", ProcedureNodeKind::End).with_input(json!({ "done": true })),
             ],
             vec![
                 edge("start-lookup", "start", "lookup"),
                 edge("lookup-end", "lookup", "end"),
             ],
         );
-        let blocked = WorkflowInterpreter::new(&definition)
-            .advance(WorkflowExecutionState::new(
+        let blocked = ProcedureInterpreter::new(&definition)
+            .advance(ProcedureExecutionState::new(
                 Uuid::now_v7(),
                 json!({ "order_id": "O-1" }),
             ))
-            .expect("workflow should block on tool");
-        let WorkflowAdvance::Blocked { state, .. } = blocked else {
-            panic!("expected blocked workflow");
+            .expect("procedure should block on tool");
+        let ProcedureAdvance::Blocked { state, .. } = blocked else {
+            panic!("expected blocked procedure");
         };
 
-        let resumed = WorkflowInterpreter::new(&definition)
+        let resumed = ProcedureInterpreter::new(&definition)
             .complete_blocked_node(state, "lookup", json!({ "status": "ok" }))
             .expect("blocked node should complete");
         assert_eq!(resumed.current_node_id.as_deref(), Some("end"));
@@ -891,11 +891,11 @@ mod tests {
             BTreeSet::from(["lookup".to_string(), "start".to_string()])
         );
 
-        let result = WorkflowInterpreter::new(&definition)
+        let result = ProcedureInterpreter::new(&definition)
             .advance(resumed)
-            .expect("workflow should finish after tool");
-        let WorkflowAdvance::Completed { output, state } = result else {
-            panic!("expected completed workflow");
+            .expect("procedure should finish after tool");
+        let ProcedureAdvance::Completed { output, state } = result else {
+            panic!("expected completed procedure");
         };
         assert_eq!(output, json!({ "done": true }));
         assert_eq!(state.current_node_id.as_deref(), Some("end"));
@@ -905,29 +905,29 @@ mod tests {
     #[test]
     fn loop_back_edge_stops_at_iteration_limit() {
         // Pins: explicit graph back-edges are bounded by persisted loop counters.
-        let definition = workflow(
+        let definition = procedure(
             vec![
-                node("start", WorkflowNodeKind::Start),
-                node("retry", WorkflowNodeKind::Condition),
-                node("end", WorkflowNodeKind::End),
+                node("start", ProcedureNodeKind::Start),
+                node("retry", ProcedureNodeKind::Condition),
+                node("end", ProcedureNodeKind::End),
             ],
             vec![
                 edge("start-retry", "start", "retry"),
-                edge("retry-loop", "retry", "retry").when(WorkflowCondition::Exists {
+                edge("retry-loop", "retry", "retry").when(ProcedureCondition::Exists {
                     path: "input.retry".to_string(),
                 }),
                 edge("retry-end", "retry", "end"),
             ],
         );
-        let mut state = WorkflowExecutionState::new(Uuid::now_v7(), json!({ "retry": true }));
+        let mut state = ProcedureExecutionState::new(Uuid::now_v7(), json!({ "retry": true }));
         state.max_loop_iterations = 1;
 
-        let error = WorkflowInterpreter::new(&definition)
+        let error = ProcedureInterpreter::new(&definition)
             .advance(state)
             .expect_err("loop should stop at limit");
         assert!(matches!(
             error,
-            WorkflowError::LoopIterationLimitExceeded {
+            ProcedureError::LoopIterationLimitExceeded {
                 edge_id,
                 attempted_iterations: 1,
                 max_iterations: 1
@@ -938,13 +938,13 @@ mod tests {
     #[test]
     fn parallel_node_returns_branch_requests() {
         // Pins: parallel fan-out is explicit graph topology plus branch-group state.
-        let definition = parallel_workflow();
+        let definition = parallel_procedure();
 
-        let result = WorkflowInterpreter::new(&definition)
-            .advance(WorkflowExecutionState::new(Uuid::now_v7(), json!({})))
-            .expect("parallel workflow should advance");
+        let result = ProcedureInterpreter::new(&definition)
+            .advance(ProcedureExecutionState::new(Uuid::now_v7(), json!({})))
+            .expect("parallel procedure should advance");
 
-        let WorkflowAdvance::Ready { state, requests } = result else {
+        let ProcedureAdvance::Ready { state, requests } = result else {
             panic!("expected ready branch requests");
         };
         assert_eq!(
@@ -968,8 +968,8 @@ mod tests {
     #[test]
     fn join_waits_for_all_required_branches() {
         // Pins: join nodes do not transition until every required branch is terminal.
-        let definition = parallel_workflow();
-        let mut state = WorkflowExecutionState::new(Uuid::now_v7(), json!({}));
+        let definition = parallel_procedure();
+        let mut state = ProcedureExecutionState::new(Uuid::now_v7(), json!({}));
         state.current_node_id = Some("join".to_string());
         state.active_node_ids = BTreeSet::from(["join".to_string()]);
         state.completed_nodes = BTreeSet::from(["fanout".to_string(), "left".to_string()]);
@@ -978,11 +978,11 @@ mod tests {
             BTreeSet::from(["left".to_string(), "right".to_string()]),
         );
 
-        let result = WorkflowInterpreter::new(&definition)
+        let result = ProcedureInterpreter::new(&definition)
             .advance(state)
             .expect("join should wait instead of failing");
 
-        let WorkflowAdvance::Ready { state, requests } = result else {
+        let ProcedureAdvance::Ready { state, requests } = result else {
             panic!("expected waiting join");
         };
         assert!(requests.is_empty());
@@ -993,8 +993,8 @@ mod tests {
     #[test]
     fn join_ignores_branch_group_keyed_to_another_join() {
         // Pins: a join only consumes the branch group keyed by its own node id.
-        let definition = parallel_workflow();
-        let mut state = WorkflowExecutionState::new(Uuid::now_v7(), json!({}));
+        let definition = parallel_procedure();
+        let mut state = ProcedureExecutionState::new(Uuid::now_v7(), json!({}));
         state.current_node_id = Some("join".to_string());
         state.active_node_ids = BTreeSet::from(["join".to_string()]);
         state.completed_nodes = BTreeSet::from([
@@ -1007,11 +1007,11 @@ mod tests {
             BTreeSet::from(["left".to_string(), "right".to_string()]),
         );
 
-        let result = WorkflowInterpreter::new(&definition)
+        let result = ProcedureInterpreter::new(&definition)
             .advance(state)
             .expect("join should wait without its own branch group");
 
-        let WorkflowAdvance::Ready { state, requests } = result else {
+        let ProcedureAdvance::Ready { state, requests } = result else {
             panic!("expected waiting join");
         };
         assert!(requests.is_empty());
@@ -1022,8 +1022,8 @@ mod tests {
     #[test]
     fn reentering_parallel_clears_stale_branch_completion() {
         // Pins: looped parallel sections require fresh branch completions before the join passes.
-        let definition = parallel_workflow();
-        let mut state = WorkflowExecutionState::new(Uuid::now_v7(), json!({}));
+        let definition = parallel_procedure();
+        let mut state = ProcedureExecutionState::new(Uuid::now_v7(), json!({}));
         state.current_node_id = Some("fanout".to_string());
         state.active_node_ids = BTreeSet::from(["fanout".to_string()]);
         state.completed_nodes = BTreeSet::from([
@@ -1038,11 +1038,11 @@ mod tests {
             BTreeSet::from(["left".to_string(), "right".to_string()]),
         );
 
-        let result = WorkflowInterpreter::new(&definition)
+        let result = ProcedureInterpreter::new(&definition)
             .advance(state)
             .expect("parallel re-entry should create fresh branch requests");
 
-        let WorkflowAdvance::Ready { state, requests } = result else {
+        let ProcedureAdvance::Ready { state, requests } = result else {
             panic!("expected fresh parallel branch requests");
         };
         assert_eq!(
@@ -1061,8 +1061,8 @@ mod tests {
     #[test]
     fn failed_branch_fails_join() {
         // Pins: failed required branches fail the join deterministically.
-        let definition = parallel_workflow();
-        let mut state = WorkflowExecutionState::new(Uuid::now_v7(), json!({}));
+        let definition = parallel_procedure();
+        let mut state = ProcedureExecutionState::new(Uuid::now_v7(), json!({}));
         state.current_node_id = Some("join".to_string());
         state.active_node_ids = BTreeSet::from(["join".to_string()]);
         state.completed_nodes = BTreeSet::from(["fanout".to_string(), "left".to_string()]);
@@ -1072,20 +1072,20 @@ mod tests {
             BTreeSet::from(["left".to_string(), "right".to_string()]),
         );
 
-        let error = WorkflowInterpreter::new(&definition)
+        let error = ProcedureInterpreter::new(&definition)
             .advance(state)
             .expect_err("failed branch should fail the join");
         assert!(matches!(
             error,
-            WorkflowError::ParallelBranchFailed {
+            ProcedureError::ParallelBranchFailed {
                 join_node_id,
                 failed_node_ids
             } if join_node_id == "join" && failed_node_ids == vec!["right".to_string()]
         ));
     }
 
-    fn workflow(nodes: Vec<WorkflowNode>, edges: Vec<WorkflowEdge>) -> WorkflowDefinition {
-        WorkflowDefinition {
+    fn procedure(nodes: Vec<ProcedureNode>, edges: Vec<ProcedureEdge>) -> ProcedureDefinition {
+        ProcedureDefinition {
             input_schema: json!({}),
             state_schema: json!({}),
             nodes,
@@ -1094,17 +1094,17 @@ mod tests {
         }
     }
 
-    fn parallel_workflow() -> WorkflowDefinition {
-        workflow(
+    fn parallel_procedure() -> ProcedureDefinition {
+        procedure(
             vec![
-                node("start", WorkflowNodeKind::Start),
-                node("fanout", WorkflowNodeKind::Parallel),
-                node("left", WorkflowNodeKind::Tool)
+                node("start", ProcedureNodeKind::Start),
+                node("fanout", ProcedureNodeKind::Parallel),
+                node("left", ProcedureNodeKind::Tool)
                     .with_tool_refs(vec![ArtifactRef::tool("left.tool")]),
-                node("right", WorkflowNodeKind::Tool)
+                node("right", ProcedureNodeKind::Tool)
                     .with_tool_refs(vec![ArtifactRef::tool("right.tool")]),
-                node("join", WorkflowNodeKind::Join),
-                node("end", WorkflowNodeKind::End).with_input(json!({ "joined": true })),
+                node("join", ProcedureNodeKind::Join),
+                node("end", ProcedureNodeKind::End).with_input(json!({ "joined": true })),
             ],
             vec![
                 edge("start-fanout", "start", "fanout"),
@@ -1117,22 +1117,22 @@ mod tests {
         )
     }
 
-    fn request_node_id(request: &WorkflowNodeRequest) -> &str {
+    fn request_node_id(request: &ProcedureNodeRequest) -> &str {
         match request {
-            WorkflowNodeRequest::Action { node_id, .. }
-            | WorkflowNodeRequest::Tool { node_id, .. }
-            | WorkflowNodeRequest::SkillAction { node_id, .. }
-            | WorkflowNodeRequest::Agent { node_id, .. }
-            | WorkflowNodeRequest::Worker { node_id, .. }
-            | WorkflowNodeRequest::Review { node_id, .. }
-            | WorkflowNodeRequest::WaitSignal { node_id, .. }
-            | WorkflowNodeRequest::MemoryRead { node_id, .. }
-            | WorkflowNodeRequest::MemoryWrite { node_id, .. } => node_id,
+            ProcedureNodeRequest::Action { node_id, .. }
+            | ProcedureNodeRequest::Tool { node_id, .. }
+            | ProcedureNodeRequest::SkillAction { node_id, .. }
+            | ProcedureNodeRequest::Agent { node_id, .. }
+            | ProcedureNodeRequest::Worker { node_id, .. }
+            | ProcedureNodeRequest::Review { node_id, .. }
+            | ProcedureNodeRequest::WaitSignal { node_id, .. }
+            | ProcedureNodeRequest::MemoryRead { node_id, .. }
+            | ProcedureNodeRequest::MemoryWrite { node_id, .. } => node_id,
         }
     }
 
-    fn node(id: &str, kind: WorkflowNodeKind) -> WorkflowNode {
-        WorkflowNode {
+    fn node(id: &str, kind: ProcedureNodeKind) -> ProcedureNode {
+        ProcedureNode {
             id: id.to_string(),
             kind,
             artifact_ref: None,
@@ -1150,7 +1150,7 @@ mod tests {
         fn with_tool_refs(self, tool_refs: Vec<ArtifactRef>) -> Self;
     }
 
-    impl NodeBuilder for WorkflowNode {
+    impl NodeBuilder for ProcedureNode {
         fn with_input(mut self, input: Value) -> Self {
             self.input = input;
             self
@@ -1162,8 +1162,8 @@ mod tests {
         }
     }
 
-    fn edge(id: &str, from: &str, to: &str) -> WorkflowEdge {
-        WorkflowEdge {
+    fn edge(id: &str, from: &str, to: &str) -> ProcedureEdge {
+        ProcedureEdge {
             id: Some(id.to_string()),
             from: from.to_string(),
             to: to.to_string(),
@@ -1172,11 +1172,11 @@ mod tests {
     }
 
     trait EdgeBuilder {
-        fn when(self, condition: WorkflowCondition) -> Self;
+        fn when(self, condition: ProcedureCondition) -> Self;
     }
 
-    impl EdgeBuilder for WorkflowEdge {
-        fn when(mut self, condition: WorkflowCondition) -> Self {
+    impl EdgeBuilder for ProcedureEdge {
+        fn when(mut self, condition: ProcedureCondition) -> Self {
             self.when = Some(condition);
             self
         }

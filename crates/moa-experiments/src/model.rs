@@ -123,7 +123,7 @@ pub enum ExperimentTrialStopReason {
     BudgetCap,
     /// The simulator indicated it had no more user-visible messages.
     SimulatorDone,
-    /// The target session or workflow reached a terminal state.
+    /// The target session or procedure reached a terminal state.
     TargetTerminal,
     /// The trial stopped because execution failed.
     Error,
@@ -182,15 +182,15 @@ pub enum ExperimentTarget {
         /// Input attachments supplied with the prompt.
         attachments: Vec<Attachment>,
     },
-    /// Run an artifact-backed workflow.
-    Workflow {
-        /// Stable workflow artifact reference such as `workflow://name`.
-        workflow_ref: String,
-        /// Workflow input payload.
+    /// Run a deterministic skill-backed procedure.
+    Procedure {
+        /// Skill artifact reference carrying the procedure such as `skill://name`.
+        procedure_ref: String,
+        /// Procedure input payload.
         input: Value,
-        /// Optional session linked to workflow history.
+        /// Optional session linked to procedure history.
         session_id: Option<SessionId>,
-        /// Optional idempotency key for live workflow admission.
+        /// Optional idempotency key for live procedure admission.
         idempotency_key: Option<String>,
     },
 }
@@ -201,7 +201,7 @@ impl ExperimentTarget {
     pub const fn kind(&self) -> ExperimentTargetKind {
         match self {
             Self::AgentLoop { .. } => ExperimentTargetKind::AgentLoop,
-            Self::Workflow { .. } => ExperimentTargetKind::Workflow,
+            Self::Procedure { .. } => ExperimentTargetKind::Procedure,
         }
     }
 }
@@ -217,8 +217,8 @@ pub struct ExperimentVariant {
     pub artifact_revision_uids: Vec<Uuid>,
     /// Skill artifact references included in this variant.
     pub skill_refs: Vec<String>,
-    /// Workflow artifact reference included in this variant.
-    pub workflow_ref: Option<String>,
+    /// Skill procedure reference included in this variant.
+    pub procedure_ref: Option<String>,
     /// Variant-specific metadata.
     pub metadata: Value,
 }
@@ -283,8 +283,8 @@ pub struct NewExperimentRun {
     pub score_run_id: Uuid,
     /// Session linked to the experiment run, when one exists.
     pub session_id: Option<SessionId>,
-    /// Workflow run linked to the experiment run, when one exists.
-    pub workflow_run_uid: Option<Uuid>,
+    /// Procedure run linked to the experiment run, when one exists.
+    pub procedure_run_uid: Option<Uuid>,
     /// Artifact revisions associated with this experiment run.
     pub artifact_revision_uids: Vec<Uuid>,
     /// Optional idempotency key for scoped create deduplication.
@@ -349,8 +349,8 @@ pub struct ExperimentRunRecord {
     pub score_run_id: Uuid,
     /// Session linked to the experiment run, when one exists.
     pub session_id: Option<SessionId>,
-    /// Workflow run linked to the experiment run, when one exists.
-    pub workflow_run_uid: Option<Uuid>,
+    /// Procedure run linked to the experiment run, when one exists.
+    pub procedure_run_uid: Option<Uuid>,
     /// Artifact revisions associated with this experiment run.
     pub artifact_revision_uids: Vec<Uuid>,
     /// Optional idempotency key for scoped create deduplication.
@@ -406,8 +406,8 @@ pub struct ExperimentTrialRecord {
     pub seed: Option<String>,
     /// Session linked to the trial, when one exists.
     pub session_id: Option<SessionId>,
-    /// Workflow run linked to the trial, when one exists.
-    pub workflow_run_uid: Option<Uuid>,
+    /// Procedure run linked to the trial, when one exists.
+    pub procedure_run_uid: Option<Uuid>,
     /// Score run identifier used for trial-level scores.
     pub score_run_id: Uuid,
     /// Number of simulator-target turns persisted for this trial.

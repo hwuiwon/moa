@@ -234,18 +234,7 @@ impl ExperimentPlanDefinition {
     /// Returns every artifact reference declared by this plan with its document path.
     #[must_use]
     pub(crate) fn reference_paths(&self) -> Vec<(String, ArtifactRef)> {
-        let mut refs = self.simulation.reference_paths();
-        refs.extend(self.target_variants.iter().enumerate().filter_map(
-            |(variant_index, variant)| {
-                variant.workflow_ref.as_ref().map(|artifact_ref| {
-                    (
-                        format!("definition.spec.target_variants[{variant_index}].workflow_ref"),
-                        artifact_ref.clone(),
-                    )
-                })
-            },
-        ));
-        refs
+        self.simulation.reference_paths()
     }
 }
 
@@ -301,9 +290,6 @@ pub struct ExperimentTargetVariant {
     pub key: String,
     /// Target runtime kind.
     pub kind: ExperimentTargetKind,
-    /// Workflow artifact for workflow targets.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow_ref: Option<ArtifactRef>,
     /// Runtime configuration for this variant.
     #[serde(default = "empty_object")]
     pub config: Value,
@@ -318,8 +304,8 @@ pub struct ExperimentTargetVariant {
 pub enum ExperimentTargetKind {
     /// Existing open-ended agent-loop session path.
     AgentLoop,
-    /// Artifact-backed workflow runtime path.
-    Workflow,
+    /// Deterministic skill-backed procedure run path.
+    Procedure,
 }
 
 impl ExperimentTargetKind {
@@ -328,7 +314,7 @@ impl ExperimentTargetKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::AgentLoop => "agent_loop",
-            Self::Workflow => "workflow",
+            Self::Procedure => "procedure",
         }
     }
 
@@ -337,7 +323,7 @@ impl ExperimentTargetKind {
     pub fn from_db(value: &str) -> Option<Self> {
         match value {
             "agent_loop" => Some(Self::AgentLoop),
-            "workflow" => Some(Self::Workflow),
+            "procedure" => Some(Self::Procedure),
             _ => None,
         }
     }
@@ -471,11 +457,7 @@ pub fn experiment_plan_response_schema() -> Value {
                                     "required": ["key", "kind"],
                                     "properties": {
                                         "key": { "type": "string", "minLength": 1 },
-                                        "kind": { "enum": ["agent_loop", "workflow"] },
-                                        "workflow_ref": {
-                                            "type": "string",
-                                            "pattern": "^workflow://.+"
-                                        },
+                                        "kind": { "enum": ["agent_loop"] },
                                         "config": { "type": "object" },
                                         "ui": { "type": "object" }
                                     }
@@ -598,14 +580,12 @@ mod tests {
             )]
         );
 
-        // The plan level merges embedded-simulation refs with target-variant workflow refs in order.
-        let workflow_ref = ArtifactRef::workflow("escalation");
+        // The plan level surfaces embedded-simulation refs prefixed under `definition.spec`.
         let plan = ExperimentPlanDefinition {
             simulation,
             target_variants: vec![ExperimentTargetVariant {
-                key: "workflow".to_string(),
-                kind: ExperimentTargetKind::Workflow,
-                workflow_ref: Some(workflow_ref.clone()),
+                key: "baseline".to_string(),
+                kind: ExperimentTargetKind::AgentLoop,
                 config: json!({}),
                 ui: json!({}),
             }],
@@ -613,17 +593,10 @@ mod tests {
         };
         assert_eq!(
             plan.reference_paths(),
-            vec![
-                (
-                    "definition.spec.simulation.data_bundles[0].sources[1].connector_ref"
-                        .to_string(),
-                    connector_ref,
-                ),
-                (
-                    "definition.spec.target_variants[0].workflow_ref".to_string(),
-                    workflow_ref,
-                ),
-            ]
+            vec![(
+                "definition.spec.simulation.data_bundles[0].sources[1].connector_ref".to_string(),
+                connector_ref,
+            )]
         );
     }
 

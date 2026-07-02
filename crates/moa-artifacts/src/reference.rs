@@ -55,12 +55,6 @@ impl ArtifactRef {
         }
     }
 
-    /// Builds a workflow reference.
-    #[must_use]
-    pub fn workflow(name: impl Into<String>) -> Self {
-        Self::artifact(ArtifactKind::Workflow, name)
-    }
-
     /// Builds a connector reference.
     #[must_use]
     pub fn connector(name: impl Into<String>) -> Self {

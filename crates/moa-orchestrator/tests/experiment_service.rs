@@ -68,7 +68,7 @@ fn experiment_wire_dtos_use_experiment_names_and_include_tenant_id() {
         tenant_id,
         description: "Simulate damaged-food-order support behavior.".to_string(),
         model: Some("gpt-5.4".to_string()),
-        artifact_refs: vec!["workflow://damaged-food-order".to_string()],
+        artifact_refs: vec!["skill://damaged-food-order".to_string()],
     });
     assert_has_tenant_id(ExperimentGeneratePlanResponse {
         tenant_id,
@@ -86,7 +86,7 @@ fn experiment_wire_dtos_use_experiment_names_and_include_tenant_id() {
         status: "accepted".to_string(),
         score_run_id: fixture_uuid(2),
         session_id: None,
-        workflow_run_uid: None,
+        procedure_run_uid: None,
     });
     assert_has_tenant_id(ExperimentRunStatusRequest {
         tenant_id,
@@ -99,7 +99,7 @@ fn experiment_wire_dtos_use_experiment_names_and_include_tenant_id() {
         target_kind: Some("agent_loop".to_string()),
         score_run_id: Some(fixture_uuid(2)),
         session_id: None,
-        workflow_run_uid: None,
+        procedure_run_uid: None,
         error: None,
         run: json!({}),
     });
@@ -123,7 +123,7 @@ fn experiment_wire_dtos_use_experiment_names_and_include_tenant_id() {
         scenario_id: Some(fixture_uuid(3).to_string()),
         score_run_id: fixture_uuid(4),
         session_id: Some(SessionId(fixture_uuid(5))),
-        workflow_run_uid: Some(fixture_uuid(6)),
+        procedure_run_uid: Some(fixture_uuid(6)),
         trace_id: Some("trace-fixture".to_string()),
         stop_reason: Some("success".to_string()),
         error: None,
@@ -155,7 +155,7 @@ fn experiment_wire_dtos_use_experiment_names_and_include_tenant_id() {
         scenario_id: trial_summary.scenario_id,
         score_run_id: trial_summary.score_run_id,
         session_id: trial_summary.session_id,
-        workflow_run_uid: trial_summary.workflow_run_uid,
+        procedure_run_uid: trial_summary.procedure_run_uid,
         trace_id: trial_summary.trace_id,
         stop_reason: trial_summary.stop_reason,
         error: trial_summary.error,
@@ -287,7 +287,7 @@ fn experiment_trial_responses_serialize_typed_ui_drilldown_fields() {
     let scenario_id = fixture_uuid(3);
     let score_run_id = fixture_uuid(4);
     let session_id = SessionId(fixture_uuid(5));
-    let workflow_run_uid = fixture_uuid(6);
+    let procedure_run_uid = fixture_uuid(6);
 
     let response = ExperimentTrialsResponse {
         tenant_id,
@@ -303,7 +303,7 @@ fn experiment_trial_responses_serialize_typed_ui_drilldown_fields() {
             scenario_id: Some(scenario_id.to_string()),
             score_run_id,
             session_id: Some(session_id),
-            workflow_run_uid: Some(workflow_run_uid),
+            procedure_run_uid: Some(procedure_run_uid),
             trace_id: Some("trace-fixture".to_string()),
             stop_reason: Some("success".to_string()),
             error: None,
@@ -325,8 +325,8 @@ fn experiment_trial_responses_serialize_typed_ui_drilldown_fields() {
     );
     assert_eq!(encoded["trials"][0]["session_id"], session_id.0.to_string());
     assert_eq!(
-        encoded["trials"][0]["workflow_run_uid"],
-        workflow_run_uid.to_string()
+        encoded["trials"][0]["procedure_run_uid"],
+        procedure_run_uid.to_string()
     );
     assert_eq!(encoded["trials"][0]["trace_id"], "trace-fixture");
     assert_eq!(encoded["trials"][0]["stop_reason"], "success");
@@ -379,7 +379,7 @@ fn experiment_compare_response_serializes_scenario_and_variant_deltas() {
 }
 
 // Authorization for the Experiments service is exercised behaviorally, not by source-grep:
-// `experiment_workflow_e2e::experiments_run_denies_caller_without_tenant_operator` calls
+// `experiment_procedure_e2e::experiments_run_denies_caller_without_tenant_operator` calls
 // `Experiments/run` over the real Restate + OpenFGA stack as a caller with no Tenant:Operator
 // grant and asserts a 403 denial. Every Experiments handler authorizes Tenant:Operator as its
 // first statement, so that e2e is the template for the remaining read/mutate handlers.
@@ -431,7 +431,7 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
     assert_eq!(candidate.status.as_str(), "proposed");
     assert_eq!(candidate.tenant_id, tenant_id);
     assert_eq!(candidate.candidate_type.as_str(), "workflow");
-    assert_eq!(candidate.payload["kind"], "workflow_learning_proposal");
+    assert_eq!(candidate.payload["kind"], "experiment_learning_proposal");
     assert_eq!(
         candidate.promotion_requirements,
         vec![
@@ -469,10 +469,10 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
             .to_string()
     );
     assert_eq!(
-        candidate.payload["evidence_refs"]["workflow_run_uids"][0],
+        candidate.payload["evidence_refs"]["procedure_run_uids"][0],
         trials[0]
-            .workflow_run_uid
-            .expect("fixture should include workflow run")
+            .procedure_run_uid
+            .expect("fixture should include procedure run")
             .to_string()
     );
     assert_eq!(
@@ -574,7 +574,7 @@ fn completed_run_record(storage_partition_id: StoragePartitionId) -> ExperimentR
             model: Some(ModelId::new("gpt-5.4")),
             artifact_revision_uids: vec![fixture_uuid(20), fixture_uuid(21)],
             skill_refs: vec!["skill://support-style".to_string()],
-            workflow_ref: Some("workflow://support-flow".to_string()),
+            procedure_ref: Some("skill://support-flow".to_string()),
             metadata: json!({"plan_revision_uid": fixture_uuid(20)}),
         },
         scorecard: ExperimentScorecard {
@@ -583,7 +583,7 @@ fn completed_run_record(storage_partition_id: StoragePartitionId) -> ExperimentR
         },
         score_run_id: fixture_uuid(3),
         session_id: Some(SessionId(fixture_uuid(4))),
-        workflow_run_uid: Some(fixture_uuid(5)),
+        procedure_run_uid: Some(fixture_uuid(5)),
         artifact_revision_uids: vec![fixture_uuid(20), fixture_uuid(21)],
         idempotency_key: Some("run-key".to_string()),
         created_by_identity: json!({"type": "user"}),
@@ -622,7 +622,7 @@ fn completed_trial_record(run_uid: Uuid) -> ExperimentTrialRecord {
         target_model: Some(ModelId::new("gpt-5.4")),
         seed: Some("seed".to_string()),
         session_id: Some(SessionId(fixture_uuid(11))),
-        workflow_run_uid: Some(fixture_uuid(12)),
+        procedure_run_uid: Some(fixture_uuid(12)),
         score_run_id: fixture_uuid(13),
         turn_count: 2,
         stop_reason: None,

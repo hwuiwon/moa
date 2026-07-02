@@ -50,31 +50,31 @@ without turning connector sync into session memory ingestion.
 
 ## Agent Building Blocks
 
-MOA supports two user-facing capability artifact shapes:
+MOA has one user-facing capability artifact kind: the skill. A skill is an
+open-ended, agent-mediated capability selected by the context pipeline and
+executed through the existing `Session` and `TurnExecution` path. Skills give an
+agent instructions, tools, memory, approvals, and workers so it can handle a
+task autonomously.
 
-- Skill: an open-ended, agent-mediated capability selected by the context
-  pipeline and executed through the existing `Session` and `TurnExecution`
-  path. Skills give an agent instructions, tools, memory, approvals, and
-  workers so it can handle a task autonomously.
-- Workflow: a deterministic, graph-shaped skill stored as an artifact-backed
-  `WorkflowDefinition`. Workflows are used when conditions, approval gates,
-  connector actions, checkpoints, memory operations, bounded agent/worker
-  adapter nodes, and run history must be explicit and reviewable.
+A skill may additionally declare an optional deterministic `procedure` in its
+`skill.moa.yaml` definition. A procedure is a graph-shaped execution plan
+(`ProcedureDefinition`) used when conditions, approval gates, connector actions,
+checkpoints, memory operations, bounded agent/worker adapter nodes, and run
+history must be explicit and reviewable. It is the deterministic execution mode
+of the same skill artifact, not a separate artifact shape; skills without a
+procedure keep the open-ended agent-mediated behavior.
 
-Agents, skills, connectors, actions, workflows, and behavior-lab experiment
-plans are canonical artifacts. `moa-artifacts` owns the persisted document
-model, validation, stable references, revision history, and Postgres registry;
-`moa-skills` owns skill package parsing, draft proposal generation, and
-artifact-backed package helpers; `moa-workflows` owns the pure deterministic
-workflow interpreter and graph-renderable execution state; `moa-orchestrator`
-owns Restate execution through `ArtifactWorkflowExecution` and adapter calls
-into existing services. JSON is the canonical persisted shape in Postgres,
-while YAML is a human authoring/import/export format. Visual builders must
-round-trip through the same artifact structs instead of owning a separate
+Agents, skills, connectors, actions, and behavior-lab experiment plans are
+canonical artifacts. `moa-artifacts` owns the persisted document model,
+validation, stable references, revision history, and Postgres registry;
+`moa-skills` owns skill package parsing, draft proposal generation,
+artifact-backed package helpers, and the pure deterministic procedure
+interpreter (`ProcedureInterpreter`) with its graph-renderable execution state;
+`moa-orchestrator` owns Restate execution through `ProcedureExecution` and
+adapter calls into existing services. JSON is the canonical persisted shape in
+Postgres, while YAML is a human authoring/import/export format. Visual builders
+must round-trip through the same artifact structs instead of owning a separate
 canvas-only model; optional `ui` metadata is non-semantic layout/canvas data.
-This shared capability-artifact model does not imply a shared implementation
-crate: package learning/review and deterministic graph interpretation stay
-separate until there is concrete duplicated code to extract.
 
 Behavior Lab uses a single `experiment_plan` artifact. Personas, profiles, data bundles, and scenarios are typed embedded blocks under `definition.spec.simulation`, each with stable IDs for UI round trips, trial fanout, scoring, and analytics. Their product boundary, UI expectations, and verification lanes are documented in [`docs/product/behavior-lab.md`](product/behavior-lab.md).
 
@@ -89,13 +89,18 @@ artifact JSON and pinned into this `session_agent_context` snapshot as
 artifact revisions and materializes selected artifact files for the tool
 router, but that selection now runs inside the configured agent policy for the
 session.
-Artifact-backed workflows are explicit product operations through the
-`Workflows` API; a run may be associated with a session for UI/history. The
-workflow runtime interprets explicit graph nodes; the open-ended agent loop does
-not implicitly choose workflow graphs unless a caller starts a workflow or a
-future reviewed artifact policy allows that routing.
+Skill procedures are explicit product operations run through the Skills surface
+(`/v1/skills/run`, `/v1/skills/status`, `/v1/skills/cancel`,
+`/v1/skills/signal`, `/v1/skills/decide-review`); a run may be associated with a
+session for UI/history. Starting a procedure validates caller inputs against the
+skill's input schema and returns a structured missing-inputs error instead of
+creating a run when required inputs are absent. The procedure runtime interprets
+explicit graph nodes; the open-ended agent loop does not implicitly choose
+procedure graphs. An agent can invoke a selected skill's procedure through a
+policy-gated hands tool, which enforces the same input-schema check before a run
+starts.
 
-Current artifact tables are `moa.artifact`, `moa.artifact_revision`, `moa.artifact_file`, `moa.artifact_run`, and `moa.artifact_node_run`. `moa.artifact` / `moa.artifact_revision` are the source of truth for skill packages. Automatic skill learning follows `skill proposal -> draft skill artifact + learning_candidate -> LearningReview accept -> published artifact`; generation never rewrites published skill revisions directly.
+Current artifact tables are `moa.artifact`, `moa.artifact_revision`, `moa.artifact_file`, `moa.artifact_run`, and `moa.artifact_node_run`. `moa.artifact` / `moa.artifact_revision` are the source of truth for skill packages, and `moa.artifact_run` / `moa.artifact_node_run` persist procedure runs and their per-node execution state. Automatic skill learning follows `skill proposal -> draft skill artifact + learning_candidate -> LearningReview accept -> published artifact`; generation never rewrites published skill revisions directly.
 
 Tenant knowledge-base rows are `moa.knowledge_connections`,
 `moa.knowledge_sync_runs`, `moa.knowledge_ingestion_steps`,
@@ -184,8 +189,8 @@ Core production bindings:
   `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`,
   `Contacts`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`,
   `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`,
-  `Tenants`, `ToolExecutor`, `Workflows`, `ActionPolicy`
-- Workflows: `ArtifactWorkflowExecution`, `KnowledgeSyncIngestion`,
+  `Tenants`, `ToolExecutor`, `ActionPolicy`
+- Workflows: `ProcedureExecution`, `KnowledgeSyncIngestion`,
   `Consolidate`, `TurnExecution`, `WorkerTurnExecution`
 
 Feature-gated bindings:
@@ -254,7 +259,7 @@ User message
   -> Segment counters are updated
   -> SegmentAssessor assesses completed or idle segments
   -> Assessed segments emit experience records and attributions
-  -> Learning candidates propose skill, workflow, memory, policy, prompt, or eval updates
+  -> Learning candidates propose skill, memory, policy, prompt, or eval updates
   -> LearningEntry rows record promoted segment, skill, or memory learning
 ```
 
@@ -376,11 +381,11 @@ separate surfaces:
   storage repository; the `Experiments` service accepts and tracks runs against
   production execution paths. Agent-loop targets create or reuse `Session`
   state and queue messages through the normal `Session` and `TurnExecution`
-  path. Workflow targets start existing artifact-backed runs through
-  `WorkflowRuntime`, link `moa.artifact_run.run_uid`, and execute supported
-  deterministic workflow nodes through `ArtifactWorkflowExecution`. The
-  `moa.experiment_run` row is the experiment ledger and links to the session,
-  workflow run, pinned artifact revisions, and `analytics.score_run`.
+  path. Procedure targets start skill procedure runs through the procedure
+  runtime, link `moa.artifact_run.run_uid`, and execute supported deterministic
+  procedure nodes through `ProcedureExecution`. The `moa.experiment_run` row is
+  the experiment ledger and links to the session, procedure run, pinned artifact
+  revisions, and `analytics.score_run`.
   `ExperimentTrialRun` owns per-trial simulator execution. The public edge
   routes are `POST /v1/experiments/generate-plan`,
   `/v1/experiments/run-plan`, `/v1/experiments/status`,
@@ -407,9 +412,9 @@ separate surfaces:
   durable product workflow owns those side effects.
 
 Live behavior experiment-derived improvements have one review boundary: they
-must become `learning_candidates` before any skill or workflow change is
+must become `learning_candidates` before any skill change is
 accepted. Experiment runs do not auto-create those proposals, and no experiment
-path may auto-promote skills or workflows. The explicit
+path may auto-promote skills. The explicit
 `Experiments/propose_improvements` operation attaches experiment run IDs, score
 run IDs, and artifact revision references to the candidate payload so reviewers
 can reproduce the evidence.
@@ -423,10 +428,10 @@ is the only runtime path that publishes those drafts inside the tenant, records
 `skill_created`/`skill_improved`, and marks the candidate promoted.
 
 Future MCP support is a transport adapter over product/default services such as
-`Experiments`, direct edge analytics/lineage reads, `Workflows`, and other typed
+`Experiments`, direct edge analytics/lineage reads, `Skills`, and other typed
 surfaces. If internal eval is exposed through MCP, it must remain qualified as
 `internal-eval-runner` gated. MCP must not publish public `/v1/evals/*`
-semantics, own experiment, eval, analytics, learning, workflow, or lineage
+semantics, own experiment, eval, analytics, learning, or lineage
 domain models, or bypass service-level authorization.
 
 Grafana dashboards live in `dashboards/grafana/` and Prometheus alert rules live

@@ -42,7 +42,6 @@ mod session_stream;
 mod tools;
 mod webhook_verification;
 mod whoami;
-mod workflows;
 
 use self::contact_messages::{
     attachment_response, authorization_bearer_token, cleanup_session_attachments,
@@ -1051,7 +1050,6 @@ fn translate_public_route(
         memory::translate,
         knowledge::translate,
         artifacts::translate,
-        workflows::translate,
         tools::translate,
     ] {
         if let Some(translation) = translate(method, uri, body, tenant_id) {

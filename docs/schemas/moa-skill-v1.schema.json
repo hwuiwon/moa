@@ -38,6 +38,7 @@
         }
       }
     },
+    "procedure": { "$ref": "https://moa.dev/schemas/moa-procedure-v1.schema.json" },
     "ui": { "type": "object" }
   }
 }

@@ -79,6 +79,10 @@ pub struct SkillMetadata {
     /// Callable action names exposed by the skill artifact, if any.
     #[serde(default)]
     pub actions: Vec<String>,
+    /// Whether the skill carries a deterministic procedure graph that the agent
+    /// can execute via the `run_procedure` tool.
+    #[serde(default)]
+    pub has_procedure: bool,
     /// Estimated token cost for the full skill body.
     pub estimated_tokens: usize,
 }

@@ -11,7 +11,6 @@ use crate::connector::ConnectorDefinition;
 use crate::reference::{ArtifactRef, ReferenceResolution};
 use crate::simulation::ExperimentPlanDefinition;
 use crate::skill::SkillDefinition;
-use crate::workflow::WorkflowDefinition;
 use crate::{Error, Result};
 
 /// Artifact family stored in the canonical artifact registry.
@@ -24,8 +23,6 @@ pub enum ArtifactKind {
     Skill,
     /// Connector and action declaration.
     Connector,
-    /// Declarative workflow graph.
-    Workflow,
     /// Standalone action declaration.
     Action,
     /// Experiment matrix and budget plan for behavior-lab runs.
@@ -40,7 +37,6 @@ impl ArtifactKind {
             Self::Agent => "agent",
             Self::Skill => "skill",
             Self::Connector => "connector",
-            Self::Workflow => "workflow",
             Self::Action => "action",
             Self::ExperimentPlan => "experiment_plan",
         }
@@ -61,7 +57,6 @@ impl FromStr for ArtifactKind {
             "agent" => Ok(Self::Agent),
             "skill" => Ok(Self::Skill),
             "connector" => Ok(Self::Connector),
-            "workflow" => Ok(Self::Workflow),
             "action" => Ok(Self::Action),
             "experiment_plan" => Ok(Self::ExperimentPlan),
             _ => Err(Error::InvalidReference {
@@ -169,8 +164,6 @@ pub enum ArtifactDefinition {
     Skill(SkillDefinition),
     /// Connector artifact body.
     Connector(ConnectorDefinition),
-    /// Workflow artifact body.
-    Workflow(WorkflowDefinition),
     /// Standalone action artifact body.
     Action(ActionDefinition),
     /// Behavior-lab experiment plan body.
@@ -185,7 +178,6 @@ impl ArtifactDefinition {
             Self::Agent(_) => ArtifactKind::Agent,
             Self::Skill(_) => ArtifactKind::Skill,
             Self::Connector(_) => ArtifactKind::Connector,
-            Self::Workflow(_) => ArtifactKind::Workflow,
             Self::Action(_) => ArtifactKind::Action,
             Self::ExperimentPlan(_) => ArtifactKind::ExperimentPlan,
         }
@@ -243,43 +235,41 @@ impl ArtifactDefinition {
                             })
                         }),
                 );
+                if let Some(procedure) = &definition.procedure {
+                    for (node_index, node) in procedure.nodes.iter().enumerate() {
+                        if let Some(artifact_ref) = &node.artifact_ref {
+                            refs.push((
+                                format!("definition.spec.procedure.nodes[{node_index}].ref"),
+                                artifact_ref.clone(),
+                            ));
+                        }
+                        refs.extend(node.skill_refs.iter().enumerate().map(
+                            |(ref_index, artifact_ref)| {
+                                (
+                                    format!(
+                                        "definition.spec.procedure.nodes[{node_index}].skill_refs[{ref_index}]"
+                                    ),
+                                    artifact_ref.clone(),
+                                )
+                            },
+                        ));
+                        refs.extend(node.tool_refs.iter().enumerate().map(
+                            |(ref_index, artifact_ref)| {
+                                (
+                                    format!(
+                                        "definition.spec.procedure.nodes[{node_index}].tool_refs[{ref_index}]"
+                                    ),
+                                    artifact_ref.clone(),
+                                )
+                            },
+                        ));
+                    }
+                }
                 refs
             }
             Self::Connector(_) => Vec::new(),
             Self::Action(definition) => definition.reference_paths(),
             Self::ExperimentPlan(definition) => definition.reference_paths(),
-            Self::Workflow(definition) => {
-                let mut refs = Vec::new();
-                for (node_index, node) in definition.nodes.iter().enumerate() {
-                    if let Some(artifact_ref) = &node.artifact_ref {
-                        refs.push((
-                            format!("definition.spec.nodes[{node_index}].ref"),
-                            artifact_ref.clone(),
-                        ));
-                    }
-                    refs.extend(node.skill_refs.iter().enumerate().map(
-                        |(ref_index, artifact_ref)| {
-                            (
-                                format!(
-                                    "definition.spec.nodes[{node_index}].skill_refs[{ref_index}]"
-                                ),
-                                artifact_ref.clone(),
-                            )
-                        },
-                    ));
-                    refs.extend(node.tool_refs.iter().enumerate().map(
-                        |(ref_index, artifact_ref)| {
-                            (
-                                format!(
-                                    "definition.spec.nodes[{node_index}].tool_refs[{ref_index}]"
-                                ),
-                                artifact_ref.clone(),
-                            )
-                        },
-                    ));
-                }
-                refs
-            }
         }
     }
 }

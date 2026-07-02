@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{document::empty_object, reference::ArtifactRef};
+use crate::{document::empty_object, procedure::ProcedureDefinition, reference::ArtifactRef};
 
 /// Location of the instruction body used for a skill.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -42,6 +42,14 @@ pub struct SkillDefinition {
     /// Built-in or MCP tools the skill may use.
     #[serde(default)]
     pub allowed_tools: Vec<String>,
+    /// Optional deterministic graph execution plan for this skill.
+    ///
+    /// A procedure is the skill's optional deterministic graph: when present it
+    /// describes an ordered node/edge plan the procedure interpreter runs
+    /// step by step. Skills without a procedure are purely agent-mediated and
+    /// rely on the autonomous agent loop instead of a fixed graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub procedure: Option<ProcedureDefinition>,
     /// Builder-owned UI metadata.
     #[serde(default = "empty_object")]
     pub ui: Value,

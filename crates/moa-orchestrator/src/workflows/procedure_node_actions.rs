@@ -1,4 +1,4 @@
-//! Adapters for executing effectful artifact workflow nodes through existing services.
+//! Adapters for executing effectful procedure nodes through existing services.
 
 use std::time::Duration;
 
@@ -11,7 +11,7 @@ use moa_core::{
     SessionStatus, SpawnWorkerInput, TenantId, ToolCallId, ToolCallRequest, ToolInvocation,
     ToolOutput, UserId, WaitWorkerInput,
 };
-use moa_workflows::interpreter::WorkflowNodeRequest;
+use moa_skills::procedure::interpreter::ProcedureNodeRequest;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -30,32 +30,32 @@ use crate::services::tool_executor::ToolExecutorClient;
 const AGENT_NODE_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
 const WORKER_WAIT_TIMEOUT_MS: u64 = 30_000;
 
-/// Runtime context needed to execute one workflow side-effect node.
+/// Runtime context needed to execute one procedure side-effect node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkflowNodeActionContext {
-    /// Tenant that owns the workflow run.
+pub struct ProcedureNodeActionContext {
+    /// Tenant that owns the procedure run.
     pub tenant_id: TenantId,
-    /// Durable workflow run identifier.
+    /// Durable procedure run identifier.
     pub run_uid: Uuid,
-    /// Stable workflow node identifier.
+    /// Stable procedure node identifier.
     pub node_id: String,
     /// Optional owning session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,
-    /// Identity that authorized the workflow run.
+    /// Identity that authorized the procedure run.
     pub identity: Identity,
-    /// Restate promise key that resolves when the workflow run is cancelled.
+    /// Restate promise key that resolves when the procedure run is cancelled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_promise_key: Option<String>,
 }
 
-/// Result of attempting one governed workflow side effect.
+/// Result of attempting one governed procedure side effect.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub enum WorkflowNodeActionOutcome {
-    /// The node executed and produced workflow-state output.
+pub enum ProcedureNodeActionOutcome {
+    /// The node executed and produced procedure-state output.
     Completed {
-        /// Output to store under the workflow node id.
+        /// Output to store under the procedure node id.
         output: Value,
     },
     /// The node failed without a pending review.
@@ -63,7 +63,7 @@ pub enum WorkflowNodeActionOutcome {
         /// Failure reason.
         error: String,
     },
-    /// The workflow run was cancelled before the node produced an output.
+    /// The procedure run was cancelled before the node produced an output.
     Cancelled {
         /// Cancellation reason.
         reason: String,
@@ -76,9 +76,9 @@ enum AgentNodeTurnWait {
     Cancelled(String),
 }
 
-async fn workflow_cancel_requested(
+async fn procedure_cancel_requested(
     ctx: &WorkflowContext<'_>,
-    action_context: &WorkflowNodeActionContext,
+    action_context: &ProcedureNodeActionContext,
 ) -> Result<Option<String>, HandlerError> {
     let Some(promise_key) = &action_context.cancel_promise_key else {
         return Ok(None);
@@ -88,31 +88,31 @@ async fn workflow_cancel_requested(
         .map_err(HandlerError::from)
 }
 
-/// Executes a workflow action/tool node through the same policy and tool services as agent turns.
-pub async fn execute_workflow_node_action(
+/// Executes a procedure action/tool node through the same policy and tool services as agent turns.
+pub async fn execute_procedure_node_action(
     ctx: &WorkflowContext<'_>,
-    action_context: WorkflowNodeActionContext,
-    request: WorkflowNodeRequest,
-) -> Result<WorkflowNodeActionOutcome, HandlerError> {
-    if let Some(reason) = workflow_cancel_requested(ctx, &action_context).await? {
-        return Ok(WorkflowNodeActionOutcome::Cancelled { reason });
+    action_context: ProcedureNodeActionContext,
+    request: ProcedureNodeRequest,
+) -> Result<ProcedureNodeActionOutcome, HandlerError> {
+    if let Some(reason) = procedure_cancel_requested(ctx, &action_context).await? {
+        return Ok(ProcedureNodeActionOutcome::Cancelled { reason });
     }
 
     match &request {
-        WorkflowNodeRequest::Agent {
+        ProcedureNodeRequest::Agent {
             input, max_turns, ..
         } => {
             return execute_agent_node(ctx, action_context, input, *max_turns).await;
         }
-        WorkflowNodeRequest::Worker {
+        ProcedureNodeRequest::Worker {
             input, max_turns, ..
         } => {
             return execute_worker_node(ctx, action_context, input, *max_turns).await;
         }
-        WorkflowNodeRequest::MemoryRead { input, .. } => {
+        ProcedureNodeRequest::MemoryRead { input, .. } => {
             return execute_memory_read_node(ctx, action_context, input).await;
         }
-        WorkflowNodeRequest::MemoryWrite { input, .. } => {
+        ProcedureNodeRequest::MemoryWrite { input, .. } => {
             return execute_memory_write_node(ctx, action_context, input).await;
         }
         _ => {}
@@ -120,14 +120,14 @@ pub async fn execute_workflow_node_action(
 
     let invocation = match invocation_from_request(&request) {
         Ok(invocation) => invocation,
-        Err(error) => return Ok(WorkflowNodeActionOutcome::Failed { error }),
+        Err(error) => return Ok(ProcedureNodeActionOutcome::Failed { error }),
     };
     let tool_call_id = stable_tool_call_id(action_context.run_uid, &action_context.node_id);
     let idempotency_key = Some(format!(
-        "workflow:{}:{}",
+        "procedure:{}:{}",
         action_context.run_uid, action_context.node_id
     ));
-    let session = workflow_session_meta(&action_context);
+    let session = procedure_session_meta(&action_context);
     let prepared_action = ctx
         .service_client::<ActionPolicyClient>()
         .prepare_action_review(Json(PrepareActionReviewRequest {
@@ -136,7 +136,7 @@ pub async fn execute_workflow_node_action(
             review_id: stable_review_id(action_context.run_uid, &action_context.node_id),
             tool_call_id,
             worker_id: None,
-            origin_kind: Some("workflow".to_string()),
+            origin_kind: Some("procedure".to_string()),
             origin_id: Some(action_context.run_uid.to_string()),
             origin_step_id: Some(action_context.node_id.clone()),
             idempotency_key: idempotency_key.clone(),
@@ -149,7 +149,7 @@ pub async fn execute_workflow_node_action(
         let reason = prepared_action
             .reason
             .unwrap_or_else(|| "denied by action policy".to_string());
-        return Ok(WorkflowNodeActionOutcome::Failed {
+        return Ok(ProcedureNodeActionOutcome::Failed {
             error: format!("Tool {} denied by action policy: {reason}", invocation.name),
         });
     }
@@ -162,23 +162,23 @@ pub async fn execute_workflow_node_action(
         active_canary: None,
         session_id: action_context.session_id,
         tenant_id: action_context.tenant_id,
-        user_id: workflow_user_id(&action_context.identity),
+        user_id: procedure_user_id(&action_context.identity),
         idempotency_key,
         trusted_sandbox_manifest: None,
         worker_id: None,
     };
 
     if matches!(prepared_action.effect, ActionPolicyEffect::AdminReview) {
-        return Ok(WorkflowNodeActionOutcome::Failed {
+        return Ok(ProcedureNodeActionOutcome::Failed {
             error: format!(
-                "workflow action `{}` requires tenant admin review; add an explicit workflow review node before this action or update the action policy",
+                "procedure action `{}` requires tenant admin review; add an explicit procedure review node before this action or update the action policy",
                 invocation.name
             ),
         });
     }
 
-    if let Some(reason) = workflow_cancel_requested(ctx, &action_context).await? {
-        return Ok(WorkflowNodeActionOutcome::Cancelled { reason });
+    if let Some(reason) = procedure_cancel_requested(ctx, &action_context).await? {
+        return Ok(ProcedureNodeActionOutcome::Cancelled { reason });
     }
 
     let output = ctx
@@ -188,41 +188,41 @@ pub async fn execute_workflow_node_action(
         .await?
         .into_inner();
     if output.is_error {
-        return Ok(WorkflowNodeActionOutcome::Failed {
+        return Ok(ProcedureNodeActionOutcome::Failed {
             error: output.to_text(),
         });
     }
 
-    Ok(WorkflowNodeActionOutcome::Completed {
+    Ok(ProcedureNodeActionOutcome::Completed {
         output: tool_output_value(output),
     })
 }
 
 async fn execute_agent_node(
     ctx: &WorkflowContext<'_>,
-    action_context: WorkflowNodeActionContext,
+    action_context: ProcedureNodeActionContext,
     input: &Value,
     max_turns: Option<u32>,
-) -> Result<WorkflowNodeActionOutcome, HandlerError> {
+) -> Result<ProcedureNodeActionOutcome, HandlerError> {
     let Some(session_id) = action_context.session_id else {
-        return Ok(WorkflowNodeActionOutcome::Failed {
-            error: "workflow agent node requires an associated session_id".to_string(),
+        return Ok(ProcedureNodeActionOutcome::Failed {
+            error: "procedure agent node requires an associated session_id".to_string(),
         });
     };
-    if let Some(reason) = workflow_cancel_requested(ctx, &action_context).await? {
-        return Ok(WorkflowNodeActionOutcome::Cancelled { reason });
+    if let Some(reason) = procedure_cancel_requested(ctx, &action_context).await? {
+        return Ok(ProcedureNodeActionOutcome::Cancelled { reason });
     }
     if matches!(max_turns, Some(0)) {
-        return Ok(WorkflowNodeActionOutcome::Failed {
-            error: "workflow agent node max_turns must be at least 1".to_string(),
+        return Ok(ProcedureNodeActionOutcome::Failed {
+            error: "procedure agent node max_turns must be at least 1".to_string(),
         });
     }
     let user_message = match prompt_from_input(input) {
         Some(prompt) => prompt,
         None => {
-            return Ok(WorkflowNodeActionOutcome::Failed {
+            return Ok(ProcedureNodeActionOutcome::Failed {
                 error:
-                    "workflow agent node requires input.instruction, input.prompt, or input.message"
+                    "procedure agent node requires input.instruction, input.prompt, or input.message"
                         .to_string(),
             });
         }
@@ -245,8 +245,8 @@ async fn execute_agent_node(
     .await?
     .into_inner();
     let Some(turn_id) = response.started_turn_id else {
-        return Ok(WorkflowNodeActionOutcome::Failed {
-            error: "workflow agent node was queued behind an active session turn".to_string(),
+        return Ok(ProcedureNodeActionOutcome::Failed {
+            error: "procedure agent node was queued behind an active session turn".to_string(),
         });
     };
 
@@ -254,11 +254,11 @@ async fn execute_agent_node(
         match wait_for_agent_node_turn(ctx, &action_context, session_id, turn_id.clone()).await? {
             AgentNodeTurnWait::Outcome(outcome) => outcome,
             AgentNodeTurnWait::Cancelled(reason) => {
-                return Ok(WorkflowNodeActionOutcome::Cancelled { reason });
+                return Ok(ProcedureNodeActionOutcome::Cancelled { reason });
             }
         };
     if outcome.kind == TurnOutcomeKind::Completed {
-        Ok(WorkflowNodeActionOutcome::Completed {
+        Ok(ProcedureNodeActionOutcome::Completed {
             output: json!({
                 "turn_id": outcome.turn_id,
                 "message": outcome.message,
@@ -266,7 +266,7 @@ async fn execute_agent_node(
             }),
         })
     } else {
-        Ok(WorkflowNodeActionOutcome::Failed {
+        Ok(ProcedureNodeActionOutcome::Failed {
             error: outcome.message,
         })
     }
@@ -274,7 +274,7 @@ async fn execute_agent_node(
 
 async fn wait_for_agent_node_turn(
     ctx: &WorkflowContext<'_>,
-    action_context: &WorkflowNodeActionContext,
+    action_context: &ProcedureNodeActionContext,
     session_id: SessionId,
     turn_id: String,
 ) -> Result<AgentNodeTurnWait, HandlerError> {
@@ -304,7 +304,7 @@ async fn wait_for_agent_node_turn(
             _ = ctx.sleep(AGENT_NODE_WAIT_TIMEOUT) => {
                 remove_agent_node_turn_waiter(ctx, session_id, turn_id.clone(), awakeable_id).await?;
                 Err(TerminalError::new(format!(
-                    "workflow agent node timed out waiting for turn {turn_id}"
+                    "procedure agent node timed out waiting for turn {turn_id}"
                 )).into())
             }
         };
@@ -315,7 +315,7 @@ async fn wait_for_agent_node_turn(
         _ = ctx.sleep(AGENT_NODE_WAIT_TIMEOUT) => {
             remove_agent_node_turn_waiter(ctx, session_id, turn_id.clone(), awakeable_id).await?;
             Err(TerminalError::new(format!(
-                "workflow agent node timed out waiting for turn {turn_id}"
+                "procedure agent node timed out waiting for turn {turn_id}"
             )).into())
         }
     }
@@ -341,7 +341,7 @@ async fn remove_agent_node_turn_waiter(
 fn parse_turn_outcome(raw: &str) -> Result<TurnOutcome, HandlerError> {
     serde_json::from_str(raw).map_err(|error| {
         TerminalError::new(format!(
-            "failed to deserialize workflow agent turn outcome: {error}"
+            "failed to deserialize procedure agent turn outcome: {error}"
         ))
         .into()
     })
@@ -349,26 +349,26 @@ fn parse_turn_outcome(raw: &str) -> Result<TurnOutcome, HandlerError> {
 
 async fn execute_worker_node(
     ctx: &WorkflowContext<'_>,
-    action_context: WorkflowNodeActionContext,
+    action_context: ProcedureNodeActionContext,
     input: &Value,
     max_turns: Option<u32>,
-) -> Result<WorkflowNodeActionOutcome, HandlerError> {
+) -> Result<ProcedureNodeActionOutcome, HandlerError> {
     let Some(session_id) = action_context.session_id else {
-        return Ok(WorkflowNodeActionOutcome::Failed {
-            error: "workflow worker node requires an associated session_id".to_string(),
+        return Ok(ProcedureNodeActionOutcome::Failed {
+            error: "procedure worker node requires an associated session_id".to_string(),
         });
     };
-    if let Some(reason) = workflow_cancel_requested(ctx, &action_context).await? {
-        return Ok(WorkflowNodeActionOutcome::Cancelled { reason });
+    if let Some(reason) = procedure_cancel_requested(ctx, &action_context).await? {
+        return Ok(ProcedureNodeActionOutcome::Cancelled { reason });
     }
     if matches!(max_turns, Some(0)) {
-        return Ok(WorkflowNodeActionOutcome::Failed {
-            error: "workflow worker node max_turns must be at least 1".to_string(),
+        return Ok(ProcedureNodeActionOutcome::Failed {
+            error: "procedure worker node max_turns must be at least 1".to_string(),
         });
     }
     let mut spawn_input = match spawn_input_from_node(input) {
         Ok(input) => input,
-        Err(error) => return Ok(WorkflowNodeActionOutcome::Failed { error }),
+        Err(error) => return Ok(ProcedureNodeActionOutcome::Failed { error }),
     };
     spawn_input.max_turns = max_turns;
     let meta = with_identity_headers(
@@ -393,18 +393,18 @@ async fn execute_worker_node(
     {
         Ok(output) => output,
         Err(error) => {
-            return Ok(WorkflowNodeActionOutcome::Failed {
+            return Ok(ProcedureNodeActionOutcome::Failed {
                 error: format!("{error:?}"),
             });
         }
     };
     let Some(spawn) = structured_output::<moa_core::SpawnWorkerOutput>(&spawn_output) else {
-        return Ok(WorkflowNodeActionOutcome::Failed {
-            error: "workflow worker node spawn returned no structured output".to_string(),
+        return Ok(ProcedureNodeActionOutcome::Failed {
+            error: "procedure worker node spawn returned no structured output".to_string(),
         });
     };
-    if let Some(reason) = workflow_cancel_requested(ctx, &action_context).await? {
-        return Ok(WorkflowNodeActionOutcome::Cancelled { reason });
+    if let Some(reason) = procedure_cancel_requested(ctx, &action_context).await? {
+        return Ok(ProcedureNodeActionOutcome::Cancelled { reason });
     }
     let wait_timeout_ms = input
         .get("timeout_ms")
@@ -423,25 +423,25 @@ async fn execute_worker_node(
     {
         Ok(output) => output,
         Err(error) => {
-            return Ok(WorkflowNodeActionOutcome::Failed {
+            return Ok(ProcedureNodeActionOutcome::Failed {
                 error: format!("{error:?}"),
             });
         }
     };
     let Some(wait) = structured_output::<moa_core::WaitWorkerOutput>(&wait_output) else {
-        return Ok(WorkflowNodeActionOutcome::Failed {
-            error: "workflow worker node wait returned no structured output".to_string(),
+        return Ok(ProcedureNodeActionOutcome::Failed {
+            error: "procedure worker node wait returned no structured output".to_string(),
         });
     };
     if wait.timed_out {
-        return Ok(WorkflowNodeActionOutcome::Failed {
+        return Ok(ProcedureNodeActionOutcome::Failed {
             error: format!(
-                "workflow worker node timed out waiting for {}",
+                "procedure worker node timed out waiting for {}",
                 wait.worker_id
             ),
         });
     }
-    Ok(WorkflowNodeActionOutcome::Completed {
+    Ok(ProcedureNodeActionOutcome::Completed {
         output: json!({
             "spawn": spawn,
             "wait": wait,
@@ -452,15 +452,15 @@ async fn execute_worker_node(
 
 async fn execute_memory_read_node(
     ctx: &WorkflowContext<'_>,
-    action_context: WorkflowNodeActionContext,
+    action_context: ProcedureNodeActionContext,
     input: &Value,
-) -> Result<WorkflowNodeActionOutcome, HandlerError> {
+) -> Result<ProcedureNodeActionOutcome, HandlerError> {
     let request = match memory_search_request_from_node(&action_context, input) {
         Ok(request) => request,
-        Err(error) => return Ok(WorkflowNodeActionOutcome::Failed { error }),
+        Err(error) => return Ok(ProcedureNodeActionOutcome::Failed { error }),
     };
-    if let Some(reason) = workflow_cancel_requested(ctx, &action_context).await? {
-        return Ok(WorkflowNodeActionOutcome::Cancelled { reason });
+    if let Some(reason) = procedure_cancel_requested(ctx, &action_context).await? {
+        return Ok(ProcedureNodeActionOutcome::Cancelled { reason });
     }
     let contact_id = request.contact_id;
     let response = with_identity_headers(
@@ -472,7 +472,7 @@ async fn execute_memory_read_node(
     .await?
     .into_inner();
 
-    Ok(WorkflowNodeActionOutcome::Completed {
+    Ok(ProcedureNodeActionOutcome::Completed {
         output: json!({
             "query": response.query,
             "contact_id": contact_id,
@@ -483,15 +483,15 @@ async fn execute_memory_read_node(
 
 async fn execute_memory_write_node(
     ctx: &WorkflowContext<'_>,
-    action_context: WorkflowNodeActionContext,
+    action_context: ProcedureNodeActionContext,
     input: &Value,
-) -> Result<WorkflowNodeActionOutcome, HandlerError> {
+) -> Result<ProcedureNodeActionOutcome, HandlerError> {
     let request = match memory_ingest_request_from_node(&action_context, input) {
         Ok(request) => request,
-        Err(error) => return Ok(WorkflowNodeActionOutcome::Failed { error }),
+        Err(error) => return Ok(ProcedureNodeActionOutcome::Failed { error }),
     };
-    if let Some(reason) = workflow_cancel_requested(ctx, &action_context).await? {
-        return Ok(WorkflowNodeActionOutcome::Cancelled { reason });
+    if let Some(reason) = procedure_cancel_requested(ctx, &action_context).await? {
+        return Ok(ProcedureNodeActionOutcome::Cancelled { reason });
     }
     let contact_id = request.contact_id;
     let response = with_identity_headers(
@@ -503,7 +503,7 @@ async fn execute_memory_write_node(
     .await?
     .into_inner();
 
-    Ok(WorkflowNodeActionOutcome::Completed {
+    Ok(ProcedureNodeActionOutcome::Completed {
         output: json!({
             "tenant_id": response.tenant_id,
             "contact_id": contact_id,
@@ -513,13 +513,13 @@ async fn execute_memory_write_node(
 }
 
 fn memory_search_request_from_node(
-    context: &WorkflowNodeActionContext,
+    context: &ProcedureNodeActionContext,
     input: &Value,
 ) -> Result<MemorySearchRequest, String> {
     let query = required_string(
         input,
         &["query", "prompt", "question"],
-        "workflow memory_read node requires input.query, input.prompt, or input.question",
+        "procedure memory_read node requires input.query, input.prompt, or input.question",
     )?;
     Ok(MemorySearchRequest {
         tenant_id: context.tenant_id,
@@ -536,7 +536,7 @@ fn memory_search_request_from_node(
 }
 
 fn memory_ingest_request_from_node(
-    context: &WorkflowNodeActionContext,
+    context: &ProcedureNodeActionContext,
     input: &Value,
 ) -> Result<MemoryIngestRequest, String> {
     Ok(MemoryIngestRequest {
@@ -547,20 +547,20 @@ fn memory_ingest_request_from_node(
 }
 
 fn memory_documents_from_node(
-    context: &WorkflowNodeActionContext,
+    context: &ProcedureNodeActionContext,
     input: &Value,
 ) -> Result<Vec<MemoryIngestDocument>, String> {
     if let Some(documents) = input.get("documents") {
         let mut documents = serde_json::from_value::<Vec<MemoryIngestDocument>>(documents.clone())
             .map_err(|error| {
-                format!("workflow memory_write input.documents is invalid: {error}")
+                format!("procedure memory_write input.documents is invalid: {error}")
             })?;
         if documents.is_empty() {
-            return Err("workflow memory_write node requires at least one document".to_string());
+            return Err("procedure memory_write node requires at least one document".to_string());
         }
         for (index, document) in documents.iter_mut().enumerate() {
             document.metadata =
-                workflow_memory_metadata(document.metadata.clone(), context, index)?;
+                procedure_memory_metadata(document.metadata.clone(), context, index)?;
         }
         return Ok(documents);
     }
@@ -568,10 +568,10 @@ fn memory_documents_from_node(
     let content = required_string(
         input,
         &["content", "text", "fact"],
-        "workflow memory_write node requires input.content, input.text, input.fact, or input.documents",
+        "procedure memory_write node requires input.content, input.text, input.fact, or input.documents",
     )?;
     let source_name = optional_string_field(input, "source_name")?
-        .unwrap_or_else(|| format!("workflow:{}:{}", context.run_uid, context.node_id));
+        .unwrap_or_else(|| format!("procedure:{}:{}", context.run_uid, context.node_id));
     let source_uri = optional_string_field(input, "source_uri")?;
     let metadata = input.get("metadata").cloned().unwrap_or_else(|| json!({}));
 
@@ -579,23 +579,23 @@ fn memory_documents_from_node(
         source_name,
         content,
         source_uri,
-        metadata: workflow_memory_metadata(metadata, context, 0)?,
+        metadata: procedure_memory_metadata(metadata, context, 0)?,
     }])
 }
 
-fn workflow_memory_metadata(
+fn procedure_memory_metadata(
     metadata: Value,
-    context: &WorkflowNodeActionContext,
+    context: &ProcedureNodeActionContext,
     index: usize,
 ) -> Result<Value, String> {
     let mut map = match metadata {
         Value::Object(map) => map,
         Value::Null => Map::new(),
-        _ => return Err("workflow memory_write metadata must be an object".to_string()),
+        _ => return Err("procedure memory_write metadata must be an object".to_string()),
     };
-    map.insert("workflow_run_uid".to_string(), json!(context.run_uid));
-    map.insert("workflow_node_id".to_string(), json!(context.node_id));
-    map.insert("workflow_document_index".to_string(), json!(index));
+    map.insert("procedure_run_uid".to_string(), json!(context.run_uid));
+    map.insert("procedure_node_id".to_string(), json!(context.node_id));
+    map.insert("procedure_document_index".to_string(), json!(index));
     Ok(Value::Object(map))
 }
 
@@ -620,11 +620,11 @@ fn parse_contact_id(value: &Value) -> Result<ContactId, String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
-        return Err("workflow memory node input.contact_id must be a UUID string".to_string());
+        return Err("procedure memory node input.contact_id must be a UUID string".to_string());
     };
     Uuid::parse_str(value)
         .map(ContactId)
-        .map_err(|error| format!("workflow memory node input.contact_id is invalid: {error}"))
+        .map_err(|error| format!("procedure memory node input.contact_id is invalid: {error}"))
 }
 
 fn memory_limit(input: &Value) -> u32 {
@@ -641,14 +641,14 @@ fn string_array_field(input: &Value, field: &str) -> Result<Vec<String>, String>
     };
     let Some(values) = value.as_array() else {
         return Err(format!(
-            "workflow memory node input.{field} must be an array"
+            "procedure memory node input.{field} must be an array"
         ));
     };
     values
         .iter()
         .map(|value| {
             value.as_str().map(ToOwned::to_owned).ok_or_else(|| {
-                format!("workflow memory node input.{field} entries must be strings")
+                format!("procedure memory node input.{field} entries must be strings")
             })
         })
         .collect()
@@ -666,7 +666,7 @@ fn optional_string_field(input: &Value, field: &str) -> Result<Option<String>, S
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| Some(value.to_string()))
-        .ok_or_else(|| format!("workflow memory node input.{field} must be a string"))
+        .ok_or_else(|| format!("procedure memory node input.{field} must be a string"))
 }
 
 fn required_string(input: &Value, fields: &[&str], message: &str) -> Result<String, String> {
@@ -679,9 +679,9 @@ fn required_string(input: &Value, fields: &[&str], message: &str) -> Result<Stri
         .ok_or_else(|| message.to_string())
 }
 
-fn invocation_from_request(request: &WorkflowNodeRequest) -> Result<ToolInvocation, String> {
+fn invocation_from_request(request: &ProcedureNodeRequest) -> Result<ToolInvocation, String> {
     let (node_id, artifact_ref, tool_refs, input) = match request {
-        WorkflowNodeRequest::Action {
+        ProcedureNodeRequest::Action {
             node_id,
             artifact_ref,
             input,
@@ -691,12 +691,12 @@ fn invocation_from_request(request: &WorkflowNodeRequest) -> Result<ToolInvocati
             Vec::<ArtifactRef>::new(),
             input,
         ),
-        WorkflowNodeRequest::Tool {
+        ProcedureNodeRequest::Tool {
             node_id,
             tool_refs,
             input,
         } => (node_id, None, tool_refs.clone(), input),
-        WorkflowNodeRequest::SkillAction {
+        ProcedureNodeRequest::SkillAction {
             node_id,
             artifact_ref,
             input,
@@ -707,15 +707,15 @@ fn invocation_from_request(request: &WorkflowNodeRequest) -> Result<ToolInvocati
             input,
         ),
         _ => {
-            return Err("workflow node request is not an executable action node".to_string());
+            return Err("procedure node request is not an executable action node".to_string());
         }
     };
     let tool_name = tool_name_from_input(input)
         .or_else(|| tool_name_from_refs(&tool_refs))
         .or_else(|| artifact_ref.and_then(tool_name_from_artifact_ref))
-        .ok_or_else(|| format!("workflow node `{node_id}` did not specify a tool name"))?;
+        .ok_or_else(|| format!("procedure node `{node_id}` did not specify a tool name"))?;
     Ok(ToolInvocation {
-        id: Some(format!("workflow:{node_id}")),
+        id: Some(format!("procedure:{node_id}")),
         name: tool_name,
         input: tool_input(input),
     })
@@ -741,7 +741,7 @@ fn spawn_input_from_node(input: &Value) -> Result<SpawnWorkerInput, String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
-            "workflow worker node requires input.task, input.instruction, or input.prompt"
+            "procedure worker node requires input.task, input.instruction, or input.prompt"
                 .to_string()
         })?
         .to_string();
@@ -828,7 +828,7 @@ fn tool_input(input: &Value) -> Value {
     Value::Object(payload)
 }
 
-fn workflow_session_meta(context: &WorkflowNodeActionContext) -> SessionMeta {
+fn procedure_session_meta(context: &ProcedureNodeActionContext) -> SessionMeta {
     SessionMeta {
         id: context.session_id.unwrap_or_default(),
         tenant_id: context.tenant_id,
@@ -841,7 +841,7 @@ fn workflow_session_meta(context: &WorkflowNodeActionContext) -> SessionMeta {
     }
 }
 
-fn workflow_user_id(identity: &Identity) -> UserId {
+fn procedure_user_id(identity: &Identity) -> UserId {
     UserId::new(format!("identity:{}", identity.id))
 }
 
@@ -856,11 +856,11 @@ fn tool_output_value(output: ToolOutput) -> Value {
 }
 
 fn stable_tool_call_id(run_uid: Uuid, node_id: &str) -> ToolCallId {
-    ToolCallId(stable_uuid(b"moa.workflow.tool_call.v1", run_uid, node_id))
+    ToolCallId(stable_uuid(b"moa.procedure.tool_call.v1", run_uid, node_id))
 }
 
 fn stable_review_id(run_uid: Uuid, node_id: &str) -> Uuid {
-    stable_uuid(b"moa.workflow.review.v1", run_uid, node_id)
+    stable_uuid(b"moa.procedure.review.v1", run_uid, node_id)
 }
 
 fn stable_uuid(domain: &[u8], run_uid: Uuid, node_id: &str) -> Uuid {
@@ -883,7 +883,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use moa_artifacts::reference::ArtifactRef;
-    use moa_workflows::interpreter::WorkflowNodeRequest;
+    use moa_skills::procedure::interpreter::ProcedureNodeRequest;
     use serde_json::json;
 
     use crate::objects::session::AttachSessionTurnWaiterOutput;
@@ -926,7 +926,7 @@ mod tests {
     #[test]
     fn tool_node_uses_single_tool_ref_and_node_input() {
         // Pins: UI-authored tool nodes keep tool identity in graph refs and payload in node input.
-        let invocation = invocation_from_request(&WorkflowNodeRequest::Tool {
+        let invocation = invocation_from_request(&ProcedureNodeRequest::Tool {
             node_id: "read".to_string(),
             tool_refs: vec![ArtifactRef::tool("file_read")],
             input: json!({ "path": "README.md" }),
@@ -939,8 +939,8 @@ mod tests {
 
     #[test]
     fn tool_node_can_use_explicit_input_tool_name() {
-        // Pins: imported workflow fixtures can encode tool identity directly in node input.
-        let invocation = invocation_from_request(&WorkflowNodeRequest::Tool {
+        // Pins: imported procedure fixtures can encode tool identity directly in node input.
+        let invocation = invocation_from_request(&ProcedureNodeRequest::Tool {
             node_id: "shell".to_string(),
             tool_refs: Vec::new(),
             input: json!({
@@ -956,7 +956,7 @@ mod tests {
 
     #[test]
     fn stable_ids_are_deterministic_per_run_and_node() {
-        // Pins: workflow side effects use stable ids across Restate replays.
+        // Pins: procedure side effects use stable ids across Restate replays.
         let run_uid = Uuid::now_v7();
 
         assert_eq!(
@@ -985,9 +985,9 @@ mod tests {
 
     #[tokio::test]
     async fn agent_node_turn_completion_awakeable_resolves_before_legacy_poll_interval_offline() {
-        // Pins: workflow agent nodes wait on the session turn signal, not a 1s snapshot poll.
+        // Pins: procedure agent nodes wait on the session turn signal, not a 1s snapshot poll.
         let outcome = TurnOutcome {
-            turn_id: "turn-workflow-node".to_string(),
+            turn_id: "turn-procedure-node".to_string(),
             kind: TurnOutcomeKind::Completed,
             message: "agent node completed".to_string(),
         };
@@ -1015,7 +1015,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_node_turn_wait_observes_cancellation_before_timeout_offline() {
-        // Pins: workflow agent nodes race cancellation instead of waiting for the 180s timeout.
+        // Pins: procedure agent nodes race cancellation instead of waiting for the 180s timeout.
         let started = Instant::now();
 
         let wait = tokio::time::timeout(
@@ -1023,7 +1023,7 @@ mod tests {
             await_agent_turn_or_cancel_after_session_waiter(
                 AttachSessionTurnWaiterOutput { outcome: None },
                 std::future::pending(),
-                async { Ok::<_, TerminalError>("operator cancelled workflow".to_string()) },
+                async { Ok::<_, TerminalError>("operator cancelled procedure".to_string()) },
             ),
         )
         .await
@@ -1032,7 +1032,7 @@ mod tests {
 
         assert_eq!(
             wait,
-            AgentNodeTurnWait::Cancelled("operator cancelled workflow".to_string())
+            AgentNodeTurnWait::Cancelled("operator cancelled procedure".to_string())
         );
         assert!(
             started.elapsed() < Duration::from_secs(1),
@@ -1042,7 +1042,7 @@ mod tests {
 
     #[test]
     fn worker_input_preserves_task_budget_and_tools() {
-        // Pins: worker workflow nodes feed the existing delegation validator shape.
+        // Pins: worker procedure nodes feed the existing delegation validator shape.
         let input = spawn_input_from_node(&json!({
             "task": "Investigate refunds",
             "task_name": "refunds",
@@ -1059,10 +1059,10 @@ mod tests {
 
     #[test]
     fn memory_read_defaults_contact_identity_to_contact_scope() {
-        // Pins: contact-triggered workflow memory reads never silently inherit tenant memory.
+        // Pins: contact-triggered procedure memory reads never silently inherit tenant memory.
         let contact_uuid =
             Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("contact id");
-        let context = workflow_action_context(Identity {
+        let context = procedure_action_context(Identity {
             identity_type: IdentityType::Contact,
             id: contact_uuid,
             tenant_id: TenantId::new(),
@@ -1091,9 +1091,9 @@ mod tests {
     }
 
     #[test]
-    fn memory_write_stamps_workflow_provenance_metadata() {
-        // Pins: workflow memory writes preserve reviewable node/run provenance in graph ingestion metadata.
-        let context = workflow_action_context(Identity {
+    fn memory_write_stamps_procedure_provenance_metadata() {
+        // Pins: procedure memory writes preserve reviewable node/run provenance in graph ingestion metadata.
+        let context = procedure_action_context(Identity {
             identity_type: IdentityType::User,
             id: Uuid::now_v7(),
             tenant_id: TenantId::new(),
@@ -1108,7 +1108,7 @@ mod tests {
                 "content": "The customer prefers email updates.",
                 "source_name": "handoff note",
                 "metadata": {
-                    "source": "workflow-test"
+                    "source": "procedure-test"
                 }
             }),
         )
@@ -1124,18 +1124,18 @@ mod tests {
         assert_eq!(request.documents[0].source_name, "handoff note");
         assert_eq!(
             request.documents[0].metadata["source"],
-            json!("workflow-test")
+            json!("procedure-test")
         );
         assert_eq!(
-            request.documents[0].metadata["workflow_run_uid"],
+            request.documents[0].metadata["procedure_run_uid"],
             json!(context.run_uid)
         );
         assert_eq!(
-            request.documents[0].metadata["workflow_node_id"],
+            request.documents[0].metadata["procedure_node_id"],
             json!("memory")
         );
         assert_eq!(
-            request.documents[0].metadata["workflow_document_index"],
+            request.documents[0].metadata["procedure_document_index"],
             json!(0)
         );
     }
@@ -1143,7 +1143,7 @@ mod tests {
     #[test]
     fn memory_write_requires_content_or_documents() {
         // Pins: memory_write nodes fail closed rather than writing empty graph-memory records.
-        let context = workflow_action_context(Identity {
+        let context = procedure_action_context(Identity {
             identity_type: IdentityType::User,
             id: Uuid::now_v7(),
             tenant_id: TenantId::new(),
@@ -1157,11 +1157,11 @@ mod tests {
         assert!(error.contains("requires input.content"));
     }
 
-    fn workflow_action_context(identity: Identity) -> WorkflowNodeActionContext {
-        WorkflowNodeActionContext {
+    fn procedure_action_context(identity: Identity) -> ProcedureNodeActionContext {
+        ProcedureNodeActionContext {
             tenant_id: identity.tenant_id,
             run_uid: Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-                .expect("workflow run id"),
+                .expect("procedure run id"),
             node_id: "memory".to_string(),
             session_id: None,
             identity,

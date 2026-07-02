@@ -44,26 +44,34 @@ skill artifact metadata: input and output schemas, connector references, named
 actions, allowed tools, and UI metadata. When it is absent, MOA converts the
 package to a minimal skill artifact that points at `SKILL.md`.
 
-## Workflow Artifacts As Deterministic Skills
+## Procedures
 
-Skills and workflows are both reviewable capability artifacts. A skill is
-open-ended and agent-mediated: the context pipeline selects it, materializes its
-package, and the `Session`/`TurnExecution` loop decides how to use it. A
-workflow is deterministic and graph-mediated: `WorkflowDefinition` stores
-explicit nodes and edges, and `ArtifactWorkflowExecution` advances the graph
-through persisted node runs.
+A skill is open-ended and agent-mediated: the context pipeline selects it,
+materializes its package, and the `Session`/`TurnExecution` loop decides how to
+use it. A skill may additionally declare an optional `procedure` in its
+`skill.moa.yaml` definition — a deterministic, graph-mediated execution plan.
+`ProcedureDefinition` stores explicit nodes and edges, and `ProcedureExecution`
+advances the graph through persisted node runs, with durable runs, review gates,
+and wait-signals: `review` nodes pause the run until a reviewer decides, and
+`wait_signal` nodes suspend until an external signal arrives.
 
-This distinction is about execution shape, not governance. Both artifact types
-are imported, validated, revised, reviewed, published, and rolled back through
-the artifact and learning-review boundary. Workflow improvements are therefore
-deterministic-skill candidates: generated or experiment-derived workflow changes
-must first become draft workflow artifact revisions plus
-`LearningCandidateType::Workflow` rows. They are not auto-promoted from a live
-run, and a visual/dashboard edit must round-trip through the same artifact
-document with stable node IDs, edge IDs, and non-semantic `ui` metadata.
-The implementation remains split on purpose: `moa-skills` owns package and
-learning/review mechanics, while `moa-workflows` owns the deterministic graph
-interpreter.
+When a procedure run starts, caller inputs are validated against the skill's
+input schema. A run with missing required inputs is rejected with a structured
+missing-inputs error so the agent can collect them first, rather than creating a
+run that fails midway. Skills without a procedure keep the open-ended
+agent-mediated behavior, and skill ranking and context injection are identical
+whether or not a skill carries a procedure.
+
+A procedure is part of the skill artifact, not a separate artifact type. Both
+the package and its optional procedure are imported, validated, revised,
+reviewed, published, and rolled back through the artifact and learning-review
+boundary. Procedure improvements are skill revisions: generated or
+experiment-derived procedure changes must first become draft skill artifact
+revisions plus `LearningCandidateType::Skill` rows. They are not auto-promoted
+from a live run, and a visual/dashboard edit must round-trip through the same
+artifact document with stable node IDs, edge IDs, and non-semantic `ui`
+metadata. `moa-skills` owns package parsing, learning/review mechanics, and the
+deterministic procedure interpreter.
 
 ## Storage
 
@@ -83,7 +91,7 @@ Skill packages use tenant scope, not runtime memory scope:
 
 | Scope | Stored as | Visibility | Typical use |
 |---|---|---|---|
-| Tenant | `tenant_id` set | One tenant | Tenant conventions, approved learned skills, and tenant-specific workflows |
+| Tenant | `tenant_id` set | One tenant | Tenant conventions, approved learned skills, and tenant-specific procedures |
 
 Visible skill resolution is name-based within a tenant. Tenant imports go
 through `/v1/skills/import` after tenant authorization. There is no
@@ -113,7 +121,7 @@ The context pipeline also emits a conservative `delegation_plan` metadata object
 when the current request clearly names independent workstreams. That object can
 reference the selected skill context. Root `TurnExecution` may consume it to
 auto-spawn dependency-free ready nodes, but skill selection alone does not imply
-workflow routing and worker task payloads stay generic text envelopes.
+procedure routing and worker task payloads stay generic text envelopes.
 
 ## Skill Ranking
 
@@ -184,14 +192,13 @@ active skill package mutation, moves the candidate through `proposed ->
 promoted` or `rejected`, and records the candidate ID plus source experience IDs
 in the learning log when promotion succeeds.
 
-Live behavior experiments use the same review boundary for any derived workflow
-or skill improvement. Experiment-derived workflow proposals capture recurring
-escalations, shared failure modes, and workflow-shape changes as
-`LearningCandidateType::Workflow`; skill proposals capture reusable handling
-instructions and optimized execution patterns as `LearningCandidateType::Skill`.
-An experiment run may provide evidence through its linked session, workflow run,
+Live behavior experiments use the same review boundary for any derived skill
+improvement. Experiment-derived skill proposals capture reusable handling
+instructions, optimized execution patterns, and procedure-shape changes as
+`LearningCandidateType::Skill`.
+An experiment run may provide evidence through its linked session, procedure run,
 artifact revisions, and `analytics.score_run`, but the experiment path itself
-does not auto-promote skills or workflows. Any experiment-derived improvement
+does not auto-promote skills. Any experiment-derived improvement
 writer must first append a `learning_candidates` proposal with the experiment
 evidence attached, then rely on explicit evaluation and human or operator review
 before promotion.
@@ -237,16 +244,14 @@ Current learning types include:
 
 - `skill_created`
 - `skill_improved`
-- `workflow_improved`
 - `memory_updated`
 - `segment_assessed`
 
 `learning_candidates` is not a replacement for `learning_log`. Candidates are
 mutable proposal state with evaluation payloads and explicit status transitions.
-They are also the required boundary for experiment-derived skill or workflow
-improvements; experiment outcomes must not mutate skill packages or workflow
-artifacts directly. `learning_log` remains the append-only audit stream for
-promoted learning.
+They are also the required boundary for experiment-derived skill improvements;
+experiment outcomes must not mutate skill packages or procedures directly.
+`learning_log` remains the append-only audit stream for promoted learning.
 
 ## Memory Learning
 

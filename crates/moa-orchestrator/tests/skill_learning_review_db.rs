@@ -328,20 +328,20 @@ mod skill_learning_review {
     }
 
     #[tokio::test]
-    async fn accept_refuses_non_skill_and_reject_handles_workflow_candidate() {
-        // Pins: accept stays skill-specific, while reject can disposition workflow proposals.
+    async fn accept_refuses_non_skill_and_reject_handles_non_skill_candidate() {
+        // Pins: accept stays skill-specific, while reject can disposition non-skill proposals.
         let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
         let storage_partition_id = unique_workspace("review-guard");
         let scope = tenant_scope(&storage_partition_id);
         let skill_name = unique_skill_name("review-guard");
         let package = skill_package(&skill_name, "Review guard draft skills");
         let draft = create_draft_skill_artifact(&test_db, &scope, &package).await;
-        let workflow_candidate = append_candidate(
+        let policy_candidate = append_candidate(
             &test_db,
             &storage_partition_id,
-            LearningCandidateType::Workflow,
+            LearningCandidateType::Policy,
             LearningCandidateStatus::Proposed,
-            "workflow_improved",
+            "policy_updated",
             &skill_name,
             &draft,
         )
@@ -369,7 +369,7 @@ mod skill_learning_review {
                 review_providers(),
                 review_request(
                     &storage_partition_id,
-                    workflow_candidate.id,
+                    policy_candidate.id,
                     LearningCandidateReviewAction::Accept,
                 ),
             )
@@ -377,17 +377,17 @@ mod skill_learning_review {
             .is_err(),
             "accept_skill must reject non-skill candidates"
         );
-        let rejected_workflow = reject_learning_candidate_after_authz(
+        let rejected_policy = reject_learning_candidate_after_authz(
             store.clone(),
             review_request(
                 &storage_partition_id,
-                workflow_candidate.id,
+                policy_candidate.id,
                 LearningCandidateReviewAction::Reject,
             ),
         )
         .await
-        .expect("reject workflow candidate");
-        assert_eq!(rejected_workflow.status, LearningCandidateStatus::Rejected);
+        .expect("reject policy candidate");
+        assert_eq!(rejected_policy.status, LearningCandidateStatus::Rejected);
         assert!(
             accept_skill_candidate_after_authz(
                 store.clone(),
@@ -525,7 +525,7 @@ mod skill_learning_review {
            moa-estimated-tokens: \"300\"\n\
          ---\n\n\
          # {skill_name}\n\n\
-         Use this reviewed workflow when the task pattern recurs.\n"
+         Use this reviewed procedure when the task pattern recurs.\n"
         );
         SkillPackage::from_skill_markdown(markdown)
             .validate()

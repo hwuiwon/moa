@@ -9,7 +9,6 @@ members = [
     "crates/moa-brain",
     "crates/moa-contacts",
     "crates/moa-observability",
-    "crates/moa-workflows",
     "crates/moa-session",
     "crates/moa-migrations",
     "crates/moa-memory/graph",
@@ -55,7 +54,6 @@ default-members = [
     "crates/moa-brain",
     "crates/moa-contacts",
     "crates/moa-observability",
-    "crates/moa-workflows",
     "crates/moa-session",
     "crates/moa-migrations",
     "crates/moa-memory/graph",
@@ -137,7 +135,6 @@ moa-security = { path = "crates/moa-security" }
 moa-session = { path = "crates/moa-session" }
 moa-skills = { path = "crates/moa-skills" }
 moa-test-support = { path = "crates/moa-test-support" }
-moa-workflows = { path = "crates/moa-workflows" }
 workspace-hack = { path = "crates/workspace-hack" }
 xtask = { path = "crates/xtask" }
 anyhow = "1"

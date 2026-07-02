@@ -1000,7 +1000,7 @@ mod tests {
             agent_revision_uid: Uuid::now_v7(),
             artifact_dependencies: vec![
                 artifact_dependency("skill://support", new_skill),
-                artifact_dependency("workflow://refund", Uuid::now_v7()),
+                artifact_dependency("skill://refund", Uuid::now_v7()),
             ],
             tool_dependencies: vec![tool_dependency("file_read", "hash-b")],
             canonical_policy_hash: "new-hash".to_string(),
@@ -1012,7 +1012,7 @@ mod tests {
         assert_eq!(artifact_deltas[0].base_revision_uid, Some(base_skill));
         assert_eq!(artifact_deltas[0].new_revision_uid, Some(new_skill));
         assert_eq!(artifact_deltas[0].change, AgentDependencyChange::Changed);
-        assert_eq!(artifact_deltas[1].reference, "workflow://refund");
+        assert_eq!(artifact_deltas[1].reference, "skill://refund");
         assert_eq!(artifact_deltas[1].change, AgentDependencyChange::Added);
 
         let tool_deltas = compare_tool_dependencies(&base, &new);

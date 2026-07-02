@@ -1,7 +1,5 @@
 //! Stage 2: injects configured-agent instructions pinned to the session.
 
-use std::collections::BTreeMap;
-
 use async_trait::async_trait;
 use moa_core::{
     ContextMessage, ContextProcessor, ContextSourceRef, ProcessorOutput, Result, WorkingContext,
@@ -46,8 +44,6 @@ impl ContextProcessor for AgentInstructionProcessor {
             .map(|instruction| instruction.trim())
             .filter(|instruction| !instruction.is_empty())
             .collect::<Vec<_>>();
-        let workflow_section =
-            workflow_affordance_section(&snapshot.workflow_policy, agent_context);
         ctx.insert_metadata(
             AGENT_CONTEXT_METADATA_KEY,
             serde_json::json!({
@@ -56,23 +52,14 @@ impl ContextProcessor for AgentInstructionProcessor {
                 "policy_hash": policy_hash.clone(),
             }),
         );
-        if instructions.is_empty() && workflow_section.is_none() {
+        if instructions.is_empty() {
             return Ok(ProcessorOutput {
                 items_included: vec![definition_ref],
                 ..ProcessorOutput::default()
             });
         }
 
-        let mut body = String::new();
-        if !instructions.is_empty() {
-            body.push_str(&instructions.join("\n\n"));
-        }
-        if let Some(workflows) = workflow_section {
-            if !body.is_empty() {
-                body.push_str("\n\n");
-            }
-            body.push_str(&workflows);
-        }
+        let body = instructions.join("\n\n");
         let content = format!(
             "<agent_instructions ref=\"{}\" revision_uid=\"{}\" policy_hash=\"{}\">\n{}\n</agent_instructions>",
             definition_ref, revision_uid, policy_hash, body
@@ -88,48 +75,6 @@ impl ContextProcessor for AgentInstructionProcessor {
             ..ProcessorOutput::default()
         })
     }
-}
-
-fn workflow_affordance_section(
-    policy: &moa_core::AgentWorkflowPolicy,
-    agent_context: &moa_core::AgentContext,
-) -> Option<String> {
-    let resolved = resolved_workflow_dependencies(agent_context);
-    let allowed = resolved_policy_refs(&policy.allowed, &resolved);
-    if allowed.is_empty() {
-        return None;
-    }
-
-    Some(format!(
-        "<agent_workflows>\nAllowed workflows: {}\n</agent_workflows>",
-        allowed.join(", ")
-    ))
-}
-
-fn resolved_workflow_dependencies(
-    agent_context: &moa_core::AgentContext,
-) -> BTreeMap<String, String> {
-    agent_context
-        .artifact_dependencies
-        .iter()
-        .filter(|dependency| dependency.kind == "workflow")
-        .map(|dependency| {
-            (
-                dependency.reference.clone(),
-                format!(
-                    "{} revision_uid={} version={}",
-                    dependency.reference, dependency.revision_uid, dependency.version
-                ),
-            )
-        })
-        .collect()
-}
-
-fn resolved_policy_refs(references: &[String], resolved: &BTreeMap<String, String>) -> Vec<String> {
-    references
-        .iter()
-        .filter_map(|reference| resolved.get(reference).cloned())
-        .collect()
 }
 
 #[cfg(test)]
@@ -193,9 +138,6 @@ mod tests {
     fn agent_context(instructions: Vec<String>) -> AgentContext {
         let snapshot = AgentPolicySnapshot {
             instructions,
-            workflow_policy: moa_core::AgentWorkflowPolicy {
-                allowed: Vec::new(),
-            },
             tool_policy: AgentToolPolicy::default(),
             revision_lock: None,
             ..AgentPolicySnapshot::default()

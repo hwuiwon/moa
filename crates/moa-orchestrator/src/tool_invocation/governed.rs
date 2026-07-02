@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequest};
 use moa_core::wire::turn::TurnPhase;
 use moa_core::{
-    ActionPolicyEffect, Event, SessionActorRef, SessionId, SessionMeta, ToolCallContent,
-    ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput, TrustedSandboxFileManifestRef, UserId,
-    WorkerId, is_delegation_tool_name,
+    ActionPolicyEffect, Event, ProcedureTool, SessionActorRef, SessionId, SessionMeta,
+    ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput,
+    TrustedSandboxFileManifestRef, UserId, WorkerId, is_delegation_tool_name,
+    is_procedure_tool_name,
 };
 use moa_observability::restate_observability::{event_persist_span, tool_dispatch_span};
 use moa_observability::{record_turn_event_persist_duration, record_turn_tool_dispatch_duration};
@@ -173,6 +174,15 @@ pub(crate) async fn invoke_governed_tool(
         });
     }
 
+    // Procedure tools start/poll durable runs and, like delegation tools, must run
+    // on the workflow-owned path with the Restate context rather than through the
+    // stateless ToolExecutor. They are executed inline here so both the root and
+    // worker turn loops keep their existing `Completed` handling; the run's own
+    // node actions remain action-policy governed inside ProcedureExecution.
+    if is_procedure_tool_name(&invocation.name) {
+        return execute_procedure_tool(ctx, &request, invocation).await;
+    }
+
     append_tool_call_event(ctx, &request).await?;
 
     let prepared_action = ctx
@@ -277,6 +287,69 @@ async fn execute_allowed_tool(
             output,
             disposition: GovernedInvocationDisposition::Executed,
             event_plan: GovernedInvocationEventPlan::ToolExecutorResult,
+        },
+    )))
+}
+
+/// Executes a procedure tool on the workflow-owned path and records its events.
+///
+/// The tool call event is appended here (procedure tools do not reach the
+/// delegation short-circuit that would otherwise own it), the run is started or
+/// polled through [`crate::procedure_tools::execute_procedure_tool`], and the
+/// result event is appended before returning a `Completed` outcome so the caller
+/// turn loops treat it like any other executed tool.
+async fn execute_procedure_tool(
+    ctx: &WorkflowContext<'_>,
+    request: &GovernedInvocationRequest<'_>,
+    invocation: ToolInvocation,
+) -> Result<GovernedInvocationOutcome, HandlerError> {
+    append_tool_call_event(ctx, request).await?;
+
+    let span = tool_dispatch_span(&invocation.name);
+    turn_progress::maybe_emit(
+        ctx,
+        request.session_id,
+        request.progress.turn_id,
+        TurnPhase::Tooling,
+        turn_progress::running_tool_summary(&invocation.name),
+        request.progress.first_delay_ms,
+        request.progress.interval_ms,
+    )
+    .await?;
+
+    let dispatch_started = Instant::now();
+    let output = match ProcedureTool::from_invocation(&invocation) {
+        Ok(Some(tool)) => {
+            crate::procedure_tools::execute_procedure_tool(
+                ctx,
+                request.session,
+                request.session_id,
+                tool,
+            )
+            .instrument(span)
+            .await?
+        }
+        Ok(None) => ToolOutput::error(
+            format!("unsupported procedure tool {}", invocation.name),
+            Duration::ZERO,
+        ),
+        Err(error) => ToolOutput::error(
+            format!("invalid {} arguments: {error}", invocation.name),
+            Duration::ZERO,
+        ),
+    };
+    record_turn_tool_dispatch_duration(dispatch_started.elapsed(), 1);
+
+    append_procedure_tool_result(ctx, request, &invocation, &output).await?;
+
+    let success = !output.is_error;
+    Ok(GovernedInvocationOutcome::Completed(Box::new(
+        GovernedInvocationResult {
+            tool_id: request.tool_id,
+            invocation,
+            output,
+            disposition: GovernedInvocationDisposition::Executed,
+            event_plan: GovernedInvocationEventPlan::WorkflowSyntheticResult { success },
         },
     )))
 }
@@ -425,6 +498,28 @@ async fn append_synthetic_tool_result(
             output: output.clone(),
             original_output_tokens: output.original_output_tokens,
             success: false,
+            duration_ms: 0,
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
+async fn append_procedure_tool_result(
+    ctx: &WorkflowContext<'_>,
+    request: &GovernedInvocationRequest<'_>,
+    invocation: &ToolInvocation,
+    output: &ToolOutput,
+) -> Result<(), HandlerError> {
+    append_session_event(
+        ctx,
+        request.session_id,
+        Event::ToolResult {
+            tool_id: request.tool_id,
+            provider_tool_use_id: invocation.id.clone(),
+            output: output.clone(),
+            original_output_tokens: output.original_output_tokens,
+            success: !output.is_error,
             duration_ms: 0,
         },
     )
