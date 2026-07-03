@@ -341,48 +341,6 @@ impl CredentialVault for EnvironmentDeliveryCredentialVault {
             "environment delivery credential vault is read-only".to_string(),
         ))
     }
-
-    async fn delete(&self, _service: &str, _scope: &str) -> Result<()> {
-        Err(MoaError::StorageError(
-            "environment delivery credential vault is read-only".to_string(),
-        ))
-    }
-
-    async fn list(&self, _scope: &str) -> Result<Vec<String>> {
-        #[cfg(not(any(feature = "postmark", feature = "twilio")))]
-        {
-            Ok(Vec::new())
-        }
-        #[cfg(any(feature = "postmark", feature = "twilio"))]
-        {
-            let mut services = Vec::new();
-            #[cfg(feature = "postmark")]
-            if optional_env(POSTMARK_SERVER_API_TOKEN_ENV).is_some() {
-                services.push(POSTMARK_SERVER_TOKEN_SERVICE.to_string());
-            }
-            #[cfg(feature = "twilio")]
-            {
-                if optional_env(TWILIO_ACCOUNT_SID_ENV).is_some() {
-                    services.push(TWILIO_ACCOUNT_SID_SERVICE.to_string());
-                }
-                for (service, env_name) in [
-                    (TWILIO_AUTH_TOKEN_SERVICE, TWILIO_AUTH_TOKEN_ENV),
-                    (TWILIO_API_KEY_SID_SERVICE, TWILIO_API_KEY_SID_ENV),
-                    (TWILIO_API_KEY_SECRET_SERVICE, TWILIO_API_KEY_SECRET_ENV),
-                    (TWILIO_FROM_NUMBER_SERVICE, TWILIO_FROM_NUMBER_ENV),
-                    (
-                        TWILIO_MESSAGING_SERVICE_SID_SERVICE,
-                        TWILIO_MESSAGING_SERVICE_SID_ENV,
-                    ),
-                ] {
-                    if optional_env(env_name).is_some() {
-                        services.push(service.to_string());
-                    }
-                }
-            }
-            Ok(services)
-        }
-    }
 }
 
 #[cfg(feature = "postmark")]

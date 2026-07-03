@@ -21,7 +21,7 @@ use moa_db::ScopedConn;
 use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, NodeLabel, NodeWriteIntent, PostgresGraphStore,
 };
-use moa_memory_pii::{PiiClassifier, PiiResult, PiiSpan, redact_text};
+use moa_memory_pii::{PiiClassifier, PiiResult, PiiSpan, redact_text, redaction_replacement};
 use moa_memory_vector::{VectorStore, VectorStoreFactory};
 use restate_sdk::prelude::*;
 use serde_json::json;
@@ -463,30 +463,17 @@ fn redact_fact_part(part: &str, summary: &str, spans: &[PiiSpan]) -> String {
         if source_text.is_empty() {
             continue;
         }
-        let replacement = redaction_replacement(source_text, span);
-        redacted = redacted.replace(source_text, &replacement);
+        let replacement = redaction_replacement(span.category);
+        redacted = redacted.replace(source_text, replacement);
         let trimmed_source = source_text.trim_matches(|character: char| {
             character.is_ascii_punctuation() && !matches!(character, '[' | ']')
         });
         if !trimmed_source.is_empty() && trimmed_source != source_text {
-            let trimmed_replacement = redaction_replacement(trimmed_source, span);
-            redacted = redacted.replace(trimmed_source, &trimmed_replacement);
+            let trimmed_replacement = redaction_replacement(span.category);
+            redacted = redacted.replace(trimmed_source, trimmed_replacement);
         }
     }
     redacted
-}
-
-fn redaction_replacement(source_text: &str, span: &PiiSpan) -> String {
-    redact_text(
-        source_text,
-        &[PiiSpan::with_replacement(
-            0,
-            source_text.len(),
-            span.category,
-            span.confidence,
-            span.redaction_replacement(),
-        )],
-    )
 }
 
 async fn embed_batch_shared(
@@ -524,7 +511,7 @@ async fn embed_batch_with(
         .map(|(classified, embedding)| EmbeddedFact {
             classified,
             embedding: Some(embedding),
-            embedding_model: Some(embedder.model_name().to_string()),
+            embedding_model: Some(embedder.model_id().to_string()),
             embedding_model_version: Some(embedder.model_version()),
         })
         .collect())

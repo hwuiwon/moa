@@ -56,12 +56,12 @@ Do these after the small deletes or when already touching the owning crate.
 - #14 hands normalization fallback duplication. **done:** descriptor-less fallbacks are generic, and constant command preview metadata is collapsed.
 - #15 dead session constructors/blob enum surface. **done:** removed unused constructors and the unimplemented `object_store` blob backend.
 - #38 duplicate analytics read paths.
-- #42 `ProcedureCondition::Expression`.
-- #45 unused `CredentialVault` methods except live `set`.
+- #42 `ProcedureCondition::Expression`. **done:** removed the unsupported expression condition and schema branch; kept live `EdgeNotFound`.
+- #45 unused `CredentialVault` methods except live `set`. **done:** removed dead `delete`/`list` from the vault trait and impls.
 - #58 `MemoryScope::ancestors()` identity chain. **done:** deleted the identity helper, `PlannedQuery::scope_ancestors`, and duplicate cache-key `layers=`.
-- #59 `PiiSpan.replacement` compatibility field. **next.**
-- #65 embedding provider alias methods.
-- #73 eval reporter subsystem.
+- #59 `PiiSpan.replacement` compatibility field. **done:** removed the per-span replacement override and slow-path identity helper.
+- #65 embedding provider alias methods. **done:** kept only `model_id()` and `dimensions()` on `EmbeddingProvider`.
+- #73 eval reporter subsystem. **done:** deleted the unused reporter trait/module/reexports and self-test.
 - #74 unwired pairwise LLM judge.
 
 ### Group C: Medium Refactors
@@ -144,10 +144,10 @@ Keep these out of opportunistic small-delete batches. They need one explicit pro
 | 39 | 🟡 | lineage / ocsf / observability | moa-lineage-sink ships four dead or test-only parallel surfaces, including a backwards-compat decode shim |
 | 40 | 🟡 | skills / artifacts | Three-tier artifact visibility machinery for a scope enum with exactly one variant |
 | 41 | 🟡 | skills / artifacts | Lesson-graph subsystem (learn_lesson + render addenda + SkillRegistry::load_full) has zero production callers |
-| 42 | 🟡 | skills / artifacts | ProcedureCondition::Expression escape-hatch variant that can only ever fail at runtime |
+| 42 | ✅ | skills / artifacts | ProcedureCondition::Expression escape-hatch variant that can only ever fail at runtime |
 | 43 | 🟡 | edge / messaging / security | MCP credential proxy mints an opaque grant token that is consumed two lines later in the same function |
 | 44 | 🟡 | edge / messaging / security | rate_limit.rs ships a full send-retry framework and metrics registry that no production connector uses |
-| 45 | 🟡 | edge / messaging / security | CredentialVault trait carries set/delete/list methods with zero production callers |
+| 45 | ✅ | edge / messaging / security | CredentialVault trait carried dead delete/list methods around a live set path |
 | 46 | 🟡 | edge / messaging / security | Slack outbound-ref store hand-rolls a distributed lock plus a two-tier cache for edits that are already serialized upstream |
 | 47 | 🟡 | Orchestrator — services/rest | OrchestratorCtx dependency-group pyramid: 10-way trait-object fan-out of one store plus three parallel accessor surfaces, mostly dead |
 | 48 | ✅ | Orchestrator — services/rest | runtime/endpoint.rs builds a function-pointer service registry to express a static bind list |
@@ -167,7 +167,7 @@ Keep these out of opportunistic small-delete batches. They need one explicit pro
 | 62 | 🟡 | moa-core (traits/types/config/wire) | 119 of 245 env config knobs are never set or referenced anywhere in the repo |
 | 63 | ✅ | moa-core (traits/types/config/wire) | Session persistence split into 7 single-impl 'focused contract' traits plus a blanket SessionRepository aggregate |
 | 64 | ✅ | moa-core (traits/types/config/wire) | Four near-identical turn-message DTOs in wire/turn.rs, two of them field-for-field identical |
-| 65 | 🟡 | moa-core (traits/types/config/wire) | EmbeddingProvider carries synonym method pairs (dimensions/dimension, model_id/model_name) |
+| 65 | ✅ | moa-core (traits/types/config/wire) | EmbeddingProvider carries synonym method pairs (dimensions/dimension, model_id/model_name) |
 | 66 | 🟡 | lineage / ocsf / observability | LineageHandle JSON bridge forces serialize -> deserialize -> clone -> deserialize on every lineage event |
 | 67 | 🟡 | auth / agents / contacts / scoring / experiments | Single-variant ActionRuleScope enum threaded through scoring, experiments, and agents |
 | 68 | 🟡 | auth / agents / contacts / scoring / experiments | fga-bootstrap ships a second hand-rolled OpenFGA HTTP client that its own doc comment calls a stopgap |
@@ -957,17 +957,19 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~40**
 - `crates/moa-memory/pii/src/lib.rs:102-148,175-205`
 - `crates/moa-memory/ingest/src/slow_path.rs:479-490`
 
-**What it is.** PiiSpan carries replacement: Option<String> with a serde default documented as 'older serialized spans may omit this field', a with_replacement constructor, and a redaction_replacement() accessor that falls back to the category constant. Every construction site in the workspace (PiiSpan::new, the openai_filter client, the heuristic classifier) sets the canonical category replacement; the sole with_replacement caller in slow_path passes span.redaction_replacement() — i.e., the default again — inside a redaction_replacement() helper that wraps the whole source text in a synthetic full-length span and calls redact_text on it, which reduces to returning the replacement string unchanged.
+**What it was.** PiiSpan carried replacement: Option<String> with a serde default documented as 'older serialized spans may omit this field', a with_replacement constructor, and a redaction_replacement() accessor that fell back to the category constant. Every construction site in the workspace (PiiSpan::new, the openai_filter client, the heuristic classifier) set the canonical category replacement; the sole with_replacement caller in slow_path passed span.redaction_replacement() — i.e., the default again — inside a redaction_replacement() helper that wrapped the whole source text in a synthetic full-length span and called redact_text on it, which reduced to returning the replacement string unchanged.
 
-**Why it may be over-engineered.** The Option, the fallback accessor, and the serde default exist purely for wire compatibility with 'older serialized spans' — MOA is pre-production and has no such spans to honor. The replacement text is a pure function of category, so storing it per-span adds a field that can only ever disagree with the category by bug. The slow_path helper is an identity wrapper.
+**Why it was over-engineered.** The Option, the fallback accessor, and the serde default existed purely for wire compatibility with 'older serialized spans' — MOA is pre-production and has no such spans to honor. The replacement text is a pure function of category, so storing it per-span added a field that could only ever disagree with the category by bug. The slow_path helper was an identity wrapper.
 
-**Simpler alternative.** Delete the replacement field, with_replacement, and the accessor; have redact_text push redaction_replacement(span.category) directly. In slow_path, replace the redaction_replacement(source_text, span) helper with redaction_replacement(span.category).to_string().
+**Implemented simplification.** Deleted the replacement field, with_replacement, and the accessor; redact_text now pushes redaction_replacement(span.category) directly. In slow_path, the redaction helper is gone and fact-part replacement uses redaction_replacement(span.category) directly.
 
 **Side effects / what to watch.** Any journaled PiiResult values in in-flight Restate invocations change shape (transient, pre-prod); pii offline tests constructing spans drop one field.
 
 **Value of simplifying.** Removes a compatibility knob with zero producers of non-default values and an identity-function indirection on the ingestion redaction path.
 
-**Adversarial verifier: ✅ CONFIRMED.** `PiiSpan.replacement` exists for older serialized spans, but constructors always derive the category replacement and the only production `with_replacement` caller passes that same replacement back into an identity wrapper (`slow_path.rs:479`). Delete the field/constructor/accessor and use `redaction_replacement(category)` directly, accounting for transient Restate journal shape changes.
+**Adversarial verifier: ✅ CONFIRMED.** `PiiSpan.replacement` existed for older serialized spans, but constructors always derived the category replacement and the only production `with_replacement` caller passed that same replacement back into an identity wrapper (`slow_path.rs:479`). The implemented cut deletes the field/constructor/accessor and uses `redaction_replacement(category)` directly, accounting for transient Restate journal shape changes.
+
+**Implementation status: ✅ DONE.** Current code has no `with_replacement`, `span.redaction_replacement()`, or `PiiSpan { replacement: ... }` call sites. Focused verification passed with `cargo test -p moa-memory-pii --locked --lib`, `cargo test -p moa-memory-pii --locked --test memory_pii_offline`, and `cargo check -p moa-memory-ingest --locked`. The full `cargo test -p moa-memory-pii --locked` command is deferred because the DB-memory erasure lane timed out waiting for a maintenance database pool connection, tracked in `docs/simplification-deferred-regressions.md`.
 
 ---
 
@@ -1114,17 +1116,19 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~560**
 - `crates/moa-eval/src/lib.rs:17-19`
 - `crates/moa-eval/tests/eval_offline/reporters.rs`
 
-**What it is.** moa-eval ships a full pluggable reporting layer: an async `Reporter` trait, a `TerminalReporter` (327 lines with ANSI color handling, verbose per-case rendering, a status matrix, truncation helpers), a `JsonReporter`, a `ReporterOptions` struct with an `is_terminal()` default, and a `build_reporters()` factory that parses CLI-style spec strings ("terminal", "json:<path>") into `Vec<Box<dyn Reporter>>` with a terminal fallback.
+**What it was.** moa-eval shipped a full pluggable reporting layer: an async `Reporter` trait, a `TerminalReporter` (327 lines with ANSI color handling, verbose per-case rendering, a status matrix, truncation helpers), a `JsonReporter`, a `ReporterOptions` struct with an `is_terminal()` default, and a `build_reporters()` factory that parsed CLI-style spec strings ("terminal", "json:<path>") into `Vec<Box<dyn Reporter>>` with a terminal fallback.
 
-**Why it may be over-engineered.** There is no CLI binary in moa-eval and no caller anywhere in the workspace: grepping the whole repo, `build_reporters`, `TerminalReporter`, and `ReporterOptions` are referenced only by moa-eval's own lib.rs re-exports; `JsonReporter` is used once, in tests/eval_offline/reporters.rs, a test that only tests the reporter itself. The two real consumers of eval runs (the orchestrator `Eval` service and `skill_regression`) serialize `EvalRun` themselves and never touch this layer. docs/16-evaluation.md never mentions it. This is speculative machinery for a CLI that does not exist — dynamic dispatch, a spec-string mini-language, and terminal rendering with zero users.
+**Why it was over-engineered.** There is no CLI binary in moa-eval and no caller anywhere in the workspace: grepping the whole repo, `build_reporters`, `TerminalReporter`, and `ReporterOptions` were referenced only by moa-eval's own lib.rs re-exports; `JsonReporter` was used once, in tests/eval_offline/reporters.rs, a test that only tested the reporter itself. The two real consumers of eval runs (the orchestrator `Eval` service and `skill_regression`) serialize `EvalRun` themselves and never touch this layer. docs/16-evaluation.md never mentions it. This was speculative machinery for a CLI that does not exist — dynamic dispatch, a spec-string mini-language, and terminal rendering with zero users.
 
-**Simpler alternative.** Delete src/reporter.rs, src/reporters/ (all three files), the lib.rs re-exports, and tests/eval_offline/reporters.rs. If a JSON dump of an EvalRun is ever needed, `serde_json::to_writer_pretty(file, &run)` at the call site is the whole feature (EvalRun already derives Serialize).
+**Implemented simplification.** Deleted src/reporter.rs, src/reporters/ (all three files), the lib.rs re-exports, and tests/eval_offline/reporters.rs. If a JSON dump of an EvalRun is ever needed, `serde_json::to_writer_pretty(file, &run)` at the call site is the whole feature (EvalRun already derives Serialize).
 
 **Side effects / what to watch.** None at runtime — nothing calls it. One tautological offline test is deleted with it. If a human-readable eval CLI is built later, the terminal rendering would need to be rewritten, but by then the desired output format will be known.
 
 **Value of simplifying.** ~560 lines deleted, one trait and one factory/spec-string mini-language removed from the public API, smaller compile surface for every crate that depends on moa-eval (orchestrator under internal-eval-runner).
 
 **Adversarial verifier: ✅ CONFIRMED.** `Reporter`, `TerminalReporter`, `JsonReporter`, `ReporterOptions`, and `build_reporters` are defined/re-exported in `moa-eval`, and targeted search found no workspace caller beyond reporter modules and their self-test. Deletion proposal holds.
+
+**Implementation status: ✅ DONE.** Current code has no reporter module, reporter reexports, or reporter offline test. Verification passed with `cargo check -p moa-eval --all-targets --locked` and `cargo test -p moa-eval --test eval_offline --locked`.
 
 ---
 
@@ -2067,11 +2071,11 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~35**
 - `crates/moa-skills/src/procedure/interpreter.rs:682-688`
 - `crates/moa-skills/src/procedure/error.rs:99-106 (UnsupportedConditionExpression); error.rs:59-63 (EdgeNotFound, never constructed)`
 
-**What it is.** ProcedureCondition has a third variant, Expression { language, source }, documented as an 'escape hatch for future expression languages'. The interpreter's evaluate_condition unconditionally returns ProcedureError::UnsupportedConditionExpression for it, and artifact validation (validate_procedure in moa-artifacts/src/validation.rs) performs no condition checks — so a procedure using it validates, publishes, and then deterministically fails mid-run at the first evaluation. error.rs also carries an EdgeNotFound variant that no code path constructs.
+**What it was.** ProcedureCondition had a third variant, Expression { language, source }, documented as an 'escape hatch for future expression languages'. The interpreter's evaluate_condition unconditionally returned ProcedureError::UnsupportedConditionExpression for it, and artifact validation (validate_procedure in moa-artifacts/src/validation.rs) performed no condition checks — so a procedure using it validated, published, and then deterministically failed mid-run at the first evaluation. The original finding also claimed EdgeNotFound was dead; the verifier proved it is constructed by the orchestrator and must stay.
 
-**Why it may be over-engineered.** Speculative extensibility for a feature with no implementation, no plan in docs/09, and no way to succeed: the variant's only effect is moving a parse-time rejection to a worse failure point (a published procedure dying mid-run). Serde's tagged-enum parsing would already reject unknown condition types at import time with a clear error, which is strictly better behavior.
+**Why it was over-engineered.** Speculative extensibility for a feature with no implementation, no plan in docs/09, and no way to succeed: the variant's only effect was moving a parse-time rejection to a worse failure point (a published procedure dying mid-run). Serde's tagged-enum parsing rejects unknown condition types at import time with a clear error, which is better behavior.
 
-**Simpler alternative.** Delete the Expression variant, the UnsupportedConditionExpression error variant, and the dead EdgeNotFound variant. When a real expression language lands, add the variant together with its evaluator and a publish-time validation rule in the same change.
+**Implemented simplification.** Deleted the Expression variant, the UnsupportedConditionExpression error variant, the interpreter match arm, the orchestrator error mapping arm, and the published JSON-schema expression branch. Kept EdgeNotFound because it is a live error path. When a real expression language lands, add the variant together with its evaluator and a publish-time validation rule in the same change.
 
 **Side effects / what to watch.** Documents containing expression conditions stop parsing (import-time error instead of run-time error) — a clean break the pre-prod policy explicitly permits; no stored procedures can rely on it since it never worked.
 
@@ -2082,6 +2086,8 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~35**
 > **Revised simpler alternative:** Delete the Expression variant (crates/moa-artifacts/src/procedure.rs:128-134), the interpreter match arm (crates/moa-skills/src/procedure/interpreter.rs:682-688), the UnsupportedConditionExpression error variant (crates/moa-skills/src/procedure/error.rs:99-106), its match arm in crates/moa-orchestrator/src/workflows/errors.rs:67, AND the "expression" oneOf branch in docs/schemas/moa-procedure-v1.schema.json. Do NOT delete EdgeNotFound — it is constructed at crates/moa-orchestrator/src/workflows/procedure_execution.rs:1435 and is a real runtime error path.
 
 > **Revised side effects:** As claimed for Expression: documents with expression conditions fail serde deserialization at import time instead of at runtime (clean pre-prod break; nothing in the workspace uses them). Additional: docs/schemas/moa-procedure-v1.schema.json must drop the expression branch or the published schema will advertise a condition type the parser rejects; errors.rs in moa-orchestrator needs its match arm updated (compile error otherwise). Removing EdgeNotFound would be a genuine breakage, not a cleanup — keep it.
+
+**Implementation status: ✅ DONE.** Current code has no `ProcedureCondition::Expression` or `UnsupportedConditionExpression` references, and `docs/schemas/moa-procedure-v1.schema.json` no longer advertises `"type": "expression"`. Verification passed with `python3 -m json.tool docs/schemas/moa-procedure-v1.schema.json >/dev/null`, `cargo check -p moa-artifacts -p moa-skills -p moa-orchestrator --all-targets --locked`, and `cargo test -p moa-skills --lib procedure --locked`.
 
 ---
 
@@ -2140,7 +2146,7 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~350**
 
 ---
 
-### 45. CredentialVault trait carries set/delete/list methods with zero production callers
+### 45. CredentialVault trait carried dead delete/list methods
 
 **Area:** edge / messaging / security
 effort: **small** · finder confidence: **high** · ~LOC removable: **~130**
@@ -2151,21 +2157,23 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~130**
 - `crates/moa-messaging/src/delivery.rs (L349-395)`
 - `crates/moa-security/src/mcp_proxy.rs (L163-188)`
 
-**What it is.** The CredentialVault trait requires get, set, delete, and list. Both production implementations are env-backed and effectively read-only: EnvironmentDeliveryCredentialVault stubs set/delete with 'read-only' errors and implements list by probing seven env vars; EnvironmentCredentialVault (MCP) implements RwLock-guarded set/delete/list that nothing in production ever invokes. Four test mocks across moa-messaging and moa-security must also stub all three methods.
+**What it was.** The CredentialVault trait required get, set, delete, and list. Both production implementations carried dead deletion/listing surface: EnvironmentDeliveryCredentialVault stubbed delete with a 'read-only' error and implemented list by probing seven env vars; EnvironmentCredentialVault implemented RwLock-guarded delete/list methods that nothing in production invoked. Four test mocks across moa-messaging and moa-security also had to stub both methods.
 
-**Why it may be over-engineered.** Grep-verified: no production code calls vault.set, vault.delete, or vault.list anywhere in the workspace. The write surface is a leftover from the removed local encrypted vault (docs/08-security.md: 'Local encrypted vault storage is no longer part of the active runtime'). The trait itself is justified as a test seam (live Twilio/Postmark e2e tests inject credentials via custom vaults), but only the get method is exercised for that.
+**Why it was over-engineered.** The delete/list surface was leftover from the removed local encrypted vault (docs/08-security.md: 'Local encrypted vault storage is no longer part of the active runtime'). No production or test code called credential-vault delete/list. The original claim that set was dead was wrong: tenant knowledge account linking uses `CredentialVault::set` to persist exchanged credential material, and later sync/ingestion resolves it through `get`.
 
-**Simpler alternative.** Shrink the trait to `async fn get(&self, service, scope) -> Result<Credential>`. Delete the set/delete/list bodies from both production impls (the RwLock in EnvironmentCredentialVault becomes a plain HashMap) and from all test mocks. EnvironmentDeliveryCredentialVault's list-by-env-probing goes away entirely.
+**Implemented simplification.** Shrunk the trait to `get` + `set`: deleted `delete` and `list` from CredentialVault, EnvironmentDeliveryCredentialVault, EnvironmentCredentialVault, the security proxy mock, and the messaging offline/live test vaults. Kept `set` and EnvironmentCredentialVault's RwLock because `VaultKnowledgeCredentialStore::store_linked_account` is a production write path.
 
-**Side effects / what to watch.** A future writable vault (e.g. Token Vault-backed) would re-add methods to the trait — a clean break that is explicitly allowed pre-prod. Test mocks get 3 methods shorter each.
+**Side effects / what to watch.** A future vault deletion/listing UI would re-add those methods together with concrete callers. Test mocks are shorter. The knowledge linked-account path still has write capability through `set`.
 
-**Value of simplifying.** Shrinks a core trait to its actual contract, deletes ~130 lines of stubs and unreachable code, and removes an RwLock whose only writers were dead methods.
+**Value of simplifying.** Shrinks a core trait to its actual contract and deletes dead stubs/unreachable list-by-env probing without breaking tenant knowledge credential storage.
 
 **Adversarial verifier: 🟡 ADJUSTED.** The claim's central "grep-verified" fact is wrong for `set`, but right for `delete` and `list`. Evidence: (1) crates/moa-orchestrator/src/services/knowledge/mod.rs L678-694 — production `VaultKnowledgeCredentialStore::store_linked_account` calls `self.vault.set(&service, &scope, Credential::Bearer(...))` (L689-690); the claimant's grep missed it because rustfmt puts `.set(` on its own line, so `vault\.set` never matches. (2) This is reachable from a real production handler: crates/moa-orchestrator/src/services/knowledge/link.rs L60 calls `store_linked_account` when a tenant links a knowledge account (docs/21-tenant-knowledge-base.md flow). (3) The vault wired in is exactly the impl the claim wants gutted: `knowledge_credential_vault()` at mod.rs L924-934 builds a process-global `OnceLock<Arc<dyn CredentialVault>>` holding `moa_security::EnvironmentCredentialVault::from_mcp_servers(&[])`, i.e. an initially-empty vault that only works because runtime `set` populates it; `resolve_linked_account` (mod.rs L696-714) and the ingestion workflow (crates/moa-orchestrator/src/workflows/knowledge_sync_ingestion.rs L610-624) later `get` from it. Because the OnceLock singleton is shared across concurrent async handlers with runtime writes, the RwLock in EnvironmentCredentialVault (crates/moa-security/src/mcp_proxy.rs L127-177) is load-bearing and cannot become a plain HashMap. So "shrink the trait to get-only" would not compile (VaultKnowledgeCredentialStore) and would functionally break knowledge linked-account credential storage — a side effect the claimant missed entirely. However, the claim survives for `delete` and `list`: exhaustive greps across all six impls (crates/moa-messaging/src/delivery.rs, crates/moa-security/src/mcp_proxy.rs, four test mocks in crates/moa-messaging/tests/) and all consumers (moa-hands MCPCredentialProxy only calls `get` at mcp_proxy.rs L102; twilio.rs/postmark.rs from_vault only `get`) found zero callers of `vault.delete` or `vault.list` in production or tests — the slack.rs `.delete(` hits are a different cache object, and the pgvector `.delete(` hits are a vector store. The seven-env-var probing `list` in EnvironmentDeliveryCredentialVault (delivery.rs L361-395) is pure dead weight. Minor accuracy note: the trait (crates/moa-core/src/traits/mod.rs L829-841) uses `StoredCredential`, which is just `Credential as StoredCredential` (L26) — same type.
 
 > **Revised simpler alternative:** Shrink the trait to `get` + `set` only: delete `delete` and `list` from CredentialVault (crates/moa-core/src/traits/mod.rs L836-840), from EnvironmentDeliveryCredentialVault (crates/moa-messaging/src/delivery.rs L355-395, including the seven-env-var probing list), from EnvironmentCredentialVault (crates/moa-security/src/mcp_proxy.rs L171-188), and from the four test mocks in crates/moa-messaging/tests/. Keep `set` and the RwLock in EnvironmentCredentialVault (production write path via VaultKnowledgeCredentialStore); keep EnvironmentDeliveryCredentialVault's read-only `set` error stub.
 
 > **Revised side effects:** The original proposal would break production: crates/moa-orchestrator/src/services/knowledge/link.rs L60 -> store_linked_account -> vault.set is the only way linked-account credential material reaches the vault that sync/ingestion later reads via vault.get; removing `set` (or downgrading EnvironmentCredentialVault's RwLock to a plain HashMap) breaks tenant knowledge-base account linking and fails compilation in moa-orchestrator. The corrected simplification (drop only delete/list) has the side effects the claimant listed, scaled down: each of the four test mocks and both production impls lose 2 methods, not 3; EnvironmentDeliveryCredentialVault's env-probing list still goes away.
+
+**Implementation status: ✅ DONE.** Current `CredentialVault` exposes only `get` and `set`; all credential-vault `delete`/`list` impls are gone. Verification passed with `cargo check -p moa-core -p moa-security -p moa-messaging -p moa-orchestrator --all-targets --locked`, `cargo check -p moa-core -p moa-security -p moa-messaging -p moa-orchestrator --all-targets --all-features --locked`, `cargo test -p moa-security --lib mcp_proxy --locked`, and `cargo test -p moa-messaging --test messaging_offline --locked from_vault_uses`. A mistaken two-filter cargo invocation was rejected before running tests and then rerun with the shared filter.
 
 ---
 
@@ -2489,17 +2497,19 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~15**
 
 - `crates/moa-core/src/traits/embedding.rs:9-33`
 
-**What it is.** The trait defines required `model_id()` and `dimensions()`, then adds defaulted `model_name()` (returns model_id) and `dimension()` (returns dimensions) — pure aliases. Both names of each pair are actively called across moa-memory, moa-knowledge, moa-eval, and moa-loadtest, so the codebase is split between the synonyms.
+**What it was.** The trait defined required `model_id()` and `dimensions()`, then added defaulted `model_name()` (returns model_id) and `dimension()` (returns dimensions) — pure aliases. Both names of each pair were actively called across moa-memory, moa-knowledge, moa-eval, and moa-loadtest, so the codebase was split between the synonyms.
 
-**Why it may be over-engineered.** The aliases exist only to preserve old call-site spellings, which AGENTS.md rule 7 explicitly forbids (no wrapper functions to preserve old paths) and pre-prod status makes unnecessary. Two names for one concept invites divergence: an implementor overriding one alias but not its twin would silently desynchronize them.
+**Why it was over-engineered.** The aliases existed only to preserve old call-site spellings, which AGENTS.md rule 7 explicitly forbids (no wrapper functions to preserve old paths) and pre-prod status makes unnecessary. Two names for one concept invited divergence: an implementor overriding one alias but not its twin would silently desynchronize them.
 
-**Simpler alternative.** Keep exactly `model_id()`, `dimensions()`, and `model_version()`; delete `model_name()` and `dimension()` and mechanically update the ~20 call sites to the canonical names.
+**Implemented simplification.** Kept exactly `model_id()`, `dimensions()`, and `model_version()`; deleted `model_name()` and `dimension()` and mechanically updated embedding-provider call sites to the canonical names. Unrelated `VectorStore::dimension()` and citation `model_name()` helpers were left alone.
 
 **Side effects / what to watch.** One-pass rename across ~10 files; no behavior change unless some impl overrides an alias inconsistently (none found).
 
 **Value of simplifying.** Removes a latent inconsistency trap in a trait with 12+ implementations and makes grep/graph navigation unambiguous for embedding dimensions and model identity.
 
-**Adversarial verifier: 🟡 ADJUSTED.** The embedding-provider alias pairs exist, but most `.dimension()` hits are `VectorStore::dimension`; only one real embedding-provider `dimension()` use was found. Remove aliases carefully, rename `model_name()` users in memory/knowledge/eval/loadtest, and avoid touching unrelated vector-store APIs.
+**Adversarial verifier: ✅ CONFIRMED.** The embedding-provider alias pairs existed, but most `.dimension()` hits were `VectorStore::dimension`; only one real embedding-provider `dimension()` use was found. The implemented cut removed the aliases, renamed `model_name()` users in memory/knowledge/eval/loadtest/brain, and avoided unrelated vector-store APIs.
+
+**Implementation status: ✅ DONE.** Current `EmbeddingProvider` only exposes `model_id()`, `dimensions()`, `model_version()`, and `embed()`. The remaining `dimension()` search hits are vector-store APIs or local vector-store stand-ins, and the remaining `model_name()` helper is lineage citation code unrelated to embedding providers. Verification passed with `cargo check -p moa-core -p moa-memory-ingest -p moa-memory-lifecycle -p moa-knowledge -p moa-eval -p moa-loadtest -p moa-orchestrator --locked` and `cargo check -p moa-core -p moa-providers -p moa-memory-ingest -p moa-memory-lifecycle -p moa-knowledge -p moa-eval -p moa-loadtest -p moa-orchestrator -p moa-brain --all-targets --locked`.
 
 ---
 

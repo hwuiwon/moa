@@ -934,7 +934,7 @@ where
             .upsert_delta(
                 &delta,
                 &embeddings,
-                self.embedder.model_name(),
+                self.embedder.model_id(),
                 self.embedder.model_version(),
             )
             .instrument(graph_span.clone())

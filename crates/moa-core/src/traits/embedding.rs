@@ -18,16 +18,6 @@ pub trait EmbeddingProvider: Send + Sync {
         1
     }
 
-    /// Returns the model name stored beside embeddings.
-    fn model_name(&self) -> &str {
-        self.model_id()
-    }
-
-    /// Returns the fixed output dimensionality.
-    fn dimension(&self) -> usize {
-        self.dimensions()
-    }
-
     /// Computes embeddings for one or more UTF-8 inputs.
     async fn embed(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>>;
 }

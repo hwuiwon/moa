@@ -428,7 +428,7 @@ pub async fn backfill_entities(
                     .upsert_node_embedding(NodeEmbeddingIntent {
                         uid: entity.uid,
                         embedding: vector,
-                        embedding_model: embedder.model_name().to_string(),
+                        embedding_model: embedder.model_id().to_string(),
                         embedding_model_version: embedder.model_version(),
                         actor_id: CONSOLIDATION_ACTOR.to_string(),
                         actor_kind: CONSOLIDATION_ACTOR_KIND.to_string(),

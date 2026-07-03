@@ -410,19 +410,4 @@ impl CredentialVault for MockVault {
             "mock vault is read-only".to_string(),
         ))
     }
-
-    async fn delete(&self, _service: &str, _scope: &str) -> moa_core::Result<()> {
-        Err(MoaError::StorageError(
-            "mock vault is read-only".to_string(),
-        ))
-    }
-
-    async fn list(&self, scope: &str) -> moa_core::Result<Vec<String>> {
-        Ok(self
-            .credentials
-            .keys()
-            .filter(|(_, candidate_scope)| candidate_scope == scope)
-            .map(|(service, _)| service.clone())
-            .collect())
-    }
 }

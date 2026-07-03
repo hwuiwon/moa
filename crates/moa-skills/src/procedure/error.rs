@@ -96,14 +96,6 @@ pub enum ProcedureError {
         /// Number of matching outgoing edges.
         matched_count: usize,
     },
-    /// Expression conditions are intentionally unsupported in the pure interpreter.
-    #[error("unsupported procedure condition expression `{language}`: {expression}")]
-    UnsupportedConditionExpression {
-        /// Expression language identifier.
-        language: String,
-        /// Expression source text.
-        expression: String,
-    },
     /// A loop back-edge exceeded the configured iteration guard.
     #[error(
         "procedure loop `{edge_id}` exceeded max iterations: attempted {attempted_iterations}, max {max_iterations}"

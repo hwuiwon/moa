@@ -167,25 +167,6 @@ impl CredentialVault for EnvironmentCredentialVault {
             .insert((service.to_string(), scope.to_string()), cred);
         Ok(())
     }
-
-    async fn delete(&self, service: &str, scope: &str) -> Result<()> {
-        self.credentials
-            .write()
-            .await
-            .remove(&(service.to_string(), scope.to_string()));
-        Ok(())
-    }
-
-    async fn list(&self, scope: &str) -> Result<Vec<String>> {
-        Ok(self
-            .credentials
-            .read()
-            .await
-            .keys()
-            .filter(|(_, candidate_scope)| candidate_scope == scope)
-            .map(|(service, _)| service.clone())
-            .collect())
-    }
 }
 
 fn credential_from_env(config: &McpCredentialConfig) -> Result<Credential> {
@@ -265,14 +246,6 @@ mod tests {
             _cred: Credential,
         ) -> moa_core::Result<()> {
             Ok(())
-        }
-
-        async fn delete(&self, _service: &str, _scope: &str) -> moa_core::Result<()> {
-            Ok(())
-        }
-
-        async fn list(&self, _scope: &str) -> moa_core::Result<Vec<String>> {
-            Ok(Vec::new())
         }
     }
 

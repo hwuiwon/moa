@@ -234,9 +234,9 @@ async fn seed_workspace_embedder_state(
         "#,
     )
     .bind(storage_partition_id)
-    .bind(embedder.model_name())
+    .bind(embedder.model_id())
     .bind(embedder.model_version())
-    .bind(embedder.dimension() as i32)
+    .bind(embedder.dimensions() as i32)
     .execute(conn.as_mut())
     .await?;
     conn.commit().await?;

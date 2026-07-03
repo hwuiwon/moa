@@ -136,19 +136,6 @@ impl CredentialVault for SingleCredentialVault {
             "Postmark e2e vault is read-only".to_string(),
         ))
     }
-
-    async fn delete(&self, _service: &str, _scope: &str) -> moa_core::Result<()> {
-        Err(MoaError::StorageError(
-            "Postmark e2e vault is read-only".to_string(),
-        ))
-    }
-
-    async fn list(&self, scope: &str) -> moa_core::Result<Vec<String>> {
-        if scope == TEST_SCOPE {
-            return Ok(vec![POSTMARK_SERVER_TOKEN_SERVICE.to_string()]);
-        }
-        Ok(Vec::new())
-    }
 }
 
 fn local_env_bool(name: &str) -> bool {

@@ -832,10 +832,4 @@ pub trait CredentialVault: Send + Sync {
 
     /// Stores credentials for a service and scope.
     async fn set(&self, service: &str, scope: &str, cred: StoredCredential) -> Result<()>;
-
-    /// Deletes credentials for a service and scope.
-    async fn delete(&self, service: &str, scope: &str) -> Result<()>;
-
-    /// Lists services with stored credentials in a scope.
-    async fn list(&self, scope: &str) -> Result<Vec<String>>;
 }
