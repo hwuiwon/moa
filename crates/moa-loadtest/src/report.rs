@@ -62,6 +62,10 @@ pub struct ErrorTaxonomy {
     pub turn_failures: u64,
     /// Turns whose outcome was Cancelled.
     pub turn_cancellations: u64,
+    /// Scheduled arrivals dropped because no session slot freed up within the
+    /// pool-wait budget (the system, or a decayed pool, could not accept the
+    /// offered load).
+    pub arrivals_dropped: u64,
     /// Event-log reads that failed after a completed turn.
     pub event_load_failures: u64,
     /// Sessions that could not be created.
@@ -75,9 +79,13 @@ pub struct ErrorTaxonomy {
 
 impl ErrorTaxonomy {
     /// Total failed turn attempts (start failures, timeouts, failures,
-    /// cancellations).
+    /// cancellations, and dropped arrivals).
     pub fn failed_turns(&self) -> u64 {
-        self.turn_start_failures + self.turn_timeouts + self.turn_failures + self.turn_cancellations
+        self.turn_start_failures
+            + self.turn_timeouts
+            + self.turn_failures
+            + self.turn_cancellations
+            + self.arrivals_dropped
     }
 }
 
@@ -256,11 +264,12 @@ pub fn render_human_report(report: &LoadTestReport) -> String {
     );
     let _ = writeln!(
         &mut output,
-        "Errors: start {} | timeout {} | failed {} | cancelled {} | event-load {} | setup {} | event-errors {} | tool-errors {}",
+        "Errors: start {} | timeout {} | failed {} | cancelled {} | dropped {} | event-load {} | setup {} | event-errors {} | tool-errors {}",
         report.errors.turn_start_failures,
         report.errors.turn_timeouts,
         report.errors.turn_failures,
         report.errors.turn_cancellations,
+        report.errors.arrivals_dropped,
         report.errors.event_load_failures,
         report.errors.session_setup_failures,
         report.errors.event_error_events,

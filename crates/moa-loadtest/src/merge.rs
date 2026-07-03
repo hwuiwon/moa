@@ -45,6 +45,7 @@ fn add_errors(total: &mut ErrorTaxonomy, part: &ErrorTaxonomy) {
     total.turn_timeouts += part.turn_timeouts;
     total.turn_failures += part.turn_failures;
     total.turn_cancellations += part.turn_cancellations;
+    total.arrivals_dropped += part.arrivals_dropped;
     total.event_load_failures += part.event_load_failures;
     total.session_setup_failures += part.session_setup_failures;
     total.event_error_events += part.event_error_events;

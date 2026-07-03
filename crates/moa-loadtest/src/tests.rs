@@ -169,11 +169,12 @@ fn turn_error_rate_counts_failed_turns_over_scheduled_arrivals() {
         turn_timeouts: 2,
         turn_failures: 3,
         turn_cancellations: 4,
+        arrivals_dropped: 5,
         event_load_failures: 100,
         session_setup_failures: 100,
         event_error_events: 100,
         tool_error_events: 100,
     };
 
-    assert_eq!(errors.failed_turns(), 10);
+    assert_eq!(errors.failed_turns(), 15);
 }

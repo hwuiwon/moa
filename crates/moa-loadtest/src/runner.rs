@@ -18,8 +18,23 @@ use crate::*;
 
 /// Length of one report window.
 const WINDOW_LEN: Duration = Duration::from_secs(10);
-/// Concurrency for initial session-pool setup.
-const SETUP_CONCURRENCY: usize = 16;
+/// Concurrency for session-pool setup and end-of-run finalization. These are
+/// lightweight store RPCs (create/meta reads), so a wide fan-out keeps a
+/// multi-thousand-session pool's setup and drain in the seconds range.
+const SETUP_CONCURRENCY: usize = 64;
+/// How long one scheduled arrival may wait for an idle session before it is
+/// dropped. Without this bound, a pool that decays to zero (every failed
+/// replacement shrinks it) deadlocks the dispatcher on `idle_rx.recv()`,
+/// because the context's own sender keeps the channel open forever.
+const POOL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long to wait for the first pool session before aborting the run.
+const FIRST_SESSION_DEADLINE: Duration = Duration::from_secs(60);
+/// Arrivals already this far past their intended start are shed outright.
+/// At saturation, slots trickle back just often enough that per-arrival
+/// waits never time out — without a staleness cutoff the dispatcher would
+/// run the whole remaining schedule in slow motion (duration times the
+/// overload factor) instead of ending on time.
+const ARRIVAL_STALENESS_BUDGET: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub(crate) struct TurnObservation {
@@ -55,6 +70,9 @@ enum CollectorMessage {
         completed: Duration,
         kind: TurnFailureKind,
     },
+    ArrivalDropped {
+        at: Duration,
+    },
     SessionFinished(SessionReport),
 }
 
@@ -77,6 +95,9 @@ struct DispatchCtx {
     collector_tx: mpsc::UnboundedSender<CollectorMessage>,
     idle_tx: mpsc::UnboundedSender<SessionSlot>,
     generating: AtomicBool,
+    /// Live sessions (created minus finalized); zero means the dispatcher can
+    /// never receive another idle slot.
+    pool_size: AtomicUsize,
     think_time: Duration,
     turn_timeout: Duration,
     run_start: tokio::time::Instant,
@@ -101,6 +122,7 @@ impl DispatchCtx {
         match self.targets[target_index].start_session(&plan).await {
             Ok(session_id) => {
                 let _ = self.collector_tx.send(CollectorMessage::SessionStarted);
+                self.pool_size.fetch_add(1, Ordering::Relaxed);
                 Some(SessionSlot {
                     target_index,
                     session_id,
@@ -121,6 +143,7 @@ impl DispatchCtx {
     /// drain at schedule end, where an incomplete plan is expected and not a
     /// failure.
     async fn finalize_session(&self, slot: SessionSlot, failure: Option<String>, end_of_run: bool) {
+        self.pool_size.fetch_sub(1, Ordering::Relaxed);
         let target = &self.targets[slot.target_index];
         let completed_turns = slot.next_turn;
         let report = match target.session_meta(slot.session_id).await {
@@ -219,6 +242,7 @@ pub(crate) async fn run_sessions(
         collector_tx,
         idle_tx,
         generating: AtomicBool::new(true),
+        pool_size: AtomicUsize::new(0),
         think_time: options.think_time,
         turn_timeout: options.turn_timeout,
         run_start: tokio::time::Instant::now(),
@@ -228,57 +252,115 @@ pub(crate) async fn run_sessions(
         seed: options.seed,
     });
 
-    // Fill the initial pool concurrently so setup cost does not eat into the
-    // schedule.
-    let setup = futures_util::stream::iter((0..options.sessions).map(|_| {
-        let ctx = ctx.clone();
-        async move {
-            if let Some(slot) = ctx.create_session().await {
-                let _ = ctx.idle_tx.send(slot);
-                true
-            } else {
-                false
+    // Build the pool in the background: sessions enter the idle queue as they
+    // are created, so a slow or backlogged store cannot wedge the run inside
+    // setup. The schedule anchors on the first ready session and late
+    // creations simply join the pool mid-run.
+    let requested_sessions = options.sessions;
+    let setup_ctx = ctx.clone();
+    let setup = tokio::spawn(async move {
+        let outcomes = futures_util::stream::iter((0..requested_sessions).map(|_| {
+            let ctx = setup_ctx.clone();
+            async move {
+                if !ctx.generating.load(Ordering::Relaxed) {
+                    return false;
+                }
+                if let Some(slot) = ctx.create_session().await {
+                    let _ = ctx.idle_tx.send(slot);
+                    true
+                } else {
+                    false
+                }
             }
+        }))
+        .buffer_unordered(SETUP_CONCURRENCY)
+        .collect::<Vec<bool>>()
+        .await;
+        let ready = outcomes.iter().filter(|ok| **ok).count();
+        if ready < requested_sessions {
+            tracing::warn!(
+                requested = requested_sessions,
+                ready,
+                "loadtest pool finished setup degraded"
+            );
         }
-    }))
-    .buffer_unordered(SETUP_CONCURRENCY)
-    .collect::<Vec<bool>>()
-    .await;
-    let ready_sessions = setup.iter().filter(|ok| **ok).count();
-    if ready_sessions == 0 {
-        return Err(MoaError::ProviderError(
-            "loadtest could not create any sessions; aborting".to_string(),
-        ));
-    }
-    if ready_sessions < options.sessions {
-        tracing::warn!(
-            requested = options.sessions,
-            ready = ready_sessions,
-            "loadtest pool started degraded"
-        );
+    });
+    let first_slot_deadline = tokio::time::Instant::now() + FIRST_SESSION_DEADLINE;
+    while ctx.pool_size.load(Ordering::Relaxed) == 0 {
+        if tokio::time::Instant::now() >= first_slot_deadline {
+            setup.abort();
+            return Err(MoaError::ProviderError(format!(
+                "no session became ready within {FIRST_SESSION_DEADLINE:?}; aborting"
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     // The schedule clock starts after setup: reset run_start-relative offsets
     // by re-anchoring the deadline base here.
     let schedule_base = tokio::time::Instant::now();
     let mut turn_tasks = tokio::task::JoinSet::new();
-    for offset in &schedule {
+    'schedule: for offset in &schedule {
         tokio::time::sleep_until(schedule_base + *offset).await;
-        let Some(slot) = idle_rx.recv().await else {
-            break;
-        };
         let intended = *offset + (schedule_base - ctx.run_start);
+        // Shed hopelessly late arrivals so a saturated run still ends on
+        // schedule; each shed is reported as a dropped arrival.
+        if ctx.elapsed() > intended + ARRIVAL_STALENESS_BUDGET {
+            let _ = ctx.collector_tx.send(CollectorMessage::ArrivalDropped {
+                at: ctx.elapsed(),
+            });
+            continue 'schedule;
+        }
+        let slot = tokio::select! {
+            received = idle_rx.recv() => match received {
+                Some(slot) => slot,
+                None => break 'schedule,
+            },
+            _ = tokio::time::sleep(POOL_WAIT_TIMEOUT) => {
+                // No slot freed within the budget: drop this arrival so the
+                // schedule (and the run) always terminates, and give the
+                // pool one recovery attempt.
+                let _ = ctx.collector_tx.send(CollectorMessage::ArrivalDropped {
+                    at: ctx.elapsed(),
+                });
+                if ctx.pool_size.load(Ordering::Relaxed) == 0 {
+                    tracing::warn!("session pool decayed to zero; replenishing one session");
+                    ctx.replace_session().await;
+                    if ctx.pool_size.load(Ordering::Relaxed) == 0 {
+                        tracing::error!(
+                            "session pool empty and replenishment failed; aborting schedule"
+                        );
+                        break 'schedule;
+                    }
+                }
+                continue 'schedule;
+            }
+        };
         let ctx = ctx.clone();
         turn_tasks.spawn(run_one_turn(ctx, slot, intended));
     }
     ctx.generating.store(false, Ordering::Relaxed);
     while turn_tasks.join_next().await.is_some() {}
+    // Stop any setup still in flight; a create cancelled mid-await can leave
+    // pool_size slightly high, which only ever costs one 30s pool wait.
+    setup.abort();
+    let _ = setup.await;
 
     // Drain sessions still parked in the pool; their plans were cut short by
-    // the end of the schedule, which is expected.
+    // the end of the schedule, which is expected. Finalization fetches one
+    // session_meta per slot, so run it pool-setup-wide instead of serially —
+    // a large pool would otherwise add minutes of post-measurement tail.
+    let mut parked = Vec::new();
     while let Ok(slot) = idle_rx.try_recv() {
-        ctx.finalize_session(slot, None, true).await;
+        parked.push(slot);
     }
+    futures_util::stream::iter(parked.into_iter().map(|slot| {
+        let ctx = ctx.clone();
+        async move { ctx.finalize_session(slot, None, true).await }
+    }))
+    .buffer_unordered(SETUP_CONCURRENCY)
+    .collect::<Vec<()>>()
+    .await;
     drop(ctx);
 
     let state = collector
@@ -421,6 +503,12 @@ async fn run_collector(
                     .record_turn(intended, dispatched, completed, ttft)
                 {
                     tracing::warn!(%error, "latency recording failed");
+                }
+            }
+            CollectorMessage::ArrivalDropped { at } => {
+                state.errors.arrivals_dropped += 1;
+                if let Err(error) = state.recorder.record_turn_error(at) {
+                    tracing::warn!(%error, "error recording failed");
                 }
             }
             CollectorMessage::TurnFailed { completed, kind } => {

@@ -1,43 +1,21 @@
 {
   "keyed": [
     {
-      "match": "hello-loadtest-sentinel",
-      "completion": {
-        "content": "The probe command succeeded. The sandbox is healthy and the requested inspection is complete: the workspace builds a Restate-backed agent orchestrator with a Postgres event log, and the file you asked about wires its runtime metrics.",
-        "latency_ms": 700,
-        "ttft_ms": 300,
-        "input_tokens": 2400,
-        "cached_input_tokens": 1600
-      }
-    },
-    {
       "match": "Use tools",
       "completion": {
-        "content": "",
-        "tool_calls": [
-          {
-            "name": "bash",
-            "input": { "command": "echo hello-loadtest-sentinel" }
-          }
-        ],
-        "latency_ms": 1200,
-        "ttft_ms": 500,
-        "input_tokens": 1800,
-        "cached_input_tokens": 1100
+        "content": "Inspection complete: the workspace builds a Restate-backed agent orchestrator with a Postgres event log and per-step latency metrics.",
+        "latency_ms": 2000,
+        "ttft_ms": 600,
+        "input_tokens": 1900,
+        "cached_input_tokens": 1200
       }
     },
     {
       "match": "Inspect",
       "completion": {
-        "content": "",
-        "tool_calls": [
-          {
-            "name": "bash",
-            "input": { "command": "echo hello-loadtest-sentinel" }
-          }
-        ],
-        "latency_ms": 1100,
-        "ttft_ms": 450,
+        "content": "The inspected section wires runtime metrics: turn steps are recorded into Prometheus histograms with sub-10ms buckets.",
+        "latency_ms": 1800,
+        "ttft_ms": 550,
         "input_tokens": 1900,
         "cached_input_tokens": 1200
       }
@@ -45,15 +23,9 @@
     {
       "match": "Read ",
       "completion": {
-        "content": "",
-        "tool_calls": [
-          {
-            "name": "bash",
-            "input": { "command": "echo hello-loadtest-sentinel" }
-          }
-        ],
-        "latency_ms": 1000,
-        "ttft_ms": 400,
+        "content": "The requested lines define the module layout and the metric registration entry points.",
+        "latency_ms": 1600,
+        "ttft_ms": 500,
         "input_tokens": 2000,
         "cached_input_tokens": 1300
       }
