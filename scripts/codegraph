@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Repo-pinned CodeGraph launcher.
+#
+# CodeGraph's self-contained installer can put `codegraph` on PATH, but this
+# wrapper keeps MOA's contributor commands on the same checked version without a
+# global install.
+
+exec npx --yes @colbymchenry/codegraph@1.2.0 "$@"

@@ -5,6 +5,7 @@
 .direnv
 .agents
 .codex
+.codegraph
 target
 sequence
 scripts

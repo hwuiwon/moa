@@ -1,3 +1,5 @@
-# graphify
-- **graphify** (`.claude/skills/graphify/SKILL.md`) - any input to knowledge graph. Trigger: `/graphify`
-When the user types `/graphify`, invoke the Skill tool with `skill: "graphify"` before doing anything else.
+# CodeGraph
+
+In repositories indexed by CodeGraph, use `codegraph_explore` for codebase
+structure questions before grep/find or reading files. For shells and
+subagents without MCP access, use `./scripts/codegraph explore "<question>"`.

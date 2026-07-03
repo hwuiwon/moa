@@ -115,9 +115,9 @@ OpenFGA, edge, PII, audit shipper, or loadtest services. Check state with
 to preserve volumes. Use `docker compose down -v` or `make dev-wipe` only for an
 explicit reset.
 
-## Graphify
+## CodeGraph
 
-For codebase questions, first use `graphify query "<question>"` when
-`graphify-out/graph.json` exists. Use `graphify path` or `graphify explain` for
-focused relationships, and run `graphify update .` after code changes that
-should refresh the graph.
+For codebase questions, first use `codegraph_explore` when a `.codegraph/`
+index exists. If MCP tools are not available, use
+`./scripts/codegraph explore "<question>"`. For focused local checks, use
+`./scripts/codegraph node`, `query`, `callers`, `callees`, or `impact`.

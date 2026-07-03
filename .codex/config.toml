@@ -2,6 +2,10 @@
 command = "npx"
 args = ["-y", "@upstash/context7-mcp"]
 
+[mcp_servers.codegraph]
+command = "./scripts/codegraph"
+args = ["serve", "--mcp"]
+
 [features]
 multi_agent = true
 shell_snapshot = true

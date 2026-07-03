@@ -40,6 +40,5 @@ __pycache__/
 # Large local inference assets
 *.onnx
 
-# graphify
-graphify-out/cost.json
-graphify-out/cache/
+# CodeGraph
+.codegraph/

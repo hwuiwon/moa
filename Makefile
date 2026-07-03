@@ -1,10 +1,7 @@
-.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status test-fast test-affected test-ci test-db-session test-db-memory test-authz-pentest test-service-e2e test-provider-e2e build-timings e2e-clean e2e-clean-live loadtest-mock loadtest-live graphify
+.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status test-fast test-affected test-ci test-db-session test-db-memory test-authz-pentest test-service-e2e test-provider-e2e build-timings e2e-clean e2e-clean-live loadtest-mock loadtest-live codegraph
 
-# Install the repo-pinned graphify CLI (version from
-# .agents/skills/graphify/.graphify_version) via uv, so every contributor runs
-# the same version the skill and .claude hooks expect.
-graphify:
-	@./scripts/setup-graphify.sh
+codegraph:
+	@./scripts/codegraph init
 
 dev:
 ifeq ($(MOA_SKIP_FGA),1)

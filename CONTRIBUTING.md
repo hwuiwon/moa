@@ -2,26 +2,19 @@
 
 For test quality rules, read `AGENTS.md`'s `Testing standards` section before adding, weakening, or deleting tests.
 
-## Graphify CLI
+## CodeGraph CLI
 
-This repo uses the `graphify` knowledge-graph CLI (see `AGENTS.md`'s `Graphify`
-section and the `.claude` hooks). The version is pinned in
-`.agents/skills/graphify/.graphify_version`, and everything resolves to that one
-version via [`uv`](https://docs.astral.sh/uv/) — no pyenv/venv setup required.
+This repo uses the CodeGraph code knowledge graph CLI for local code navigation.
+The generated index lives in `.codegraph/` and is intentionally untracked.
 
-- **Agents / `.claude` hooks** invoke `./scripts/graphify`, a wrapper that runs
-  the pinned version with `uvx`. This needs only `uv` installed; there is no
-  separate install step, and it never depends on whatever `graphify` you may
-  have globally.
-- **To type `graphify` directly** in your own shell, optionally install the
-  pinned version onto your `PATH`:
+- `./scripts/codegraph` runs the repo-pinned package version without requiring a
+  global install.
+- `make codegraph` initializes or refreshes the local `.codegraph/` index.
+- Use `./scripts/codegraph explore "<question>"` when MCP tools are unavailable.
 
-  ```sh
-  make graphify
-  ```
-
-  Re-run it if the pinned version changes. The wrapper above stays pinned
-  automatically regardless.
+Agent-level MCP wiring is managed by CodeGraph's installer. Run
+`./scripts/codegraph install` if you want CodeGraph available in your local
+agent configuration.
 
 ## How Tests Are Organized
 
