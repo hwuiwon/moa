@@ -98,21 +98,6 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
-    /// Builds a registry from the provider API keys available in standard provider env vars.
-    #[must_use]
-    pub fn from_env() -> Self {
-        let mut registry = Self::default();
-        for descriptor in PROVIDER_DESCRIPTORS {
-            if configured_env(descriptor.default_api_key_env) {
-                registry.register_factory(
-                    descriptor,
-                    Arc::new(move |model| (descriptor.build_from_env)(model)),
-                );
-            }
-        }
-        registry
-    }
-
     /// Builds a registry from configured provider API keys.
     #[must_use]
     pub fn from_config(config: &MoaConfig) -> Self {
@@ -502,12 +487,6 @@ impl ProviderRegistry {
         };
         cache.entry(key).or_insert(provider);
     }
-}
-
-fn configured_env(key: &str) -> bool {
-    std::env::var(key)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
 }
 
 fn configured_secret(value: &str) -> bool {

@@ -416,11 +416,6 @@ fn canonicalize(
     out.push_str(planned.strategy.as_str());
     out.push_str("|scope=");
     push_scope(&mut out, &req.scope);
-    out.push_str("|layers=");
-    for layer in &planned.scope_ancestors {
-        push_scope(&mut out, layer);
-        out.push(',');
-    }
     out.push_str("|query_hash=");
     out.push_str(&blake3::hash(req.query_text.as_bytes()).to_hex());
     out.push_str("|seeds=");
@@ -888,7 +883,6 @@ mod tests {
             seeds: vec![Uuid::from_bytes(seed_bytes)],
             label_hint: Some(vec![NodeLabel::Fact]),
             scope: scope.clone(),
-            scope_ancestors: scope.ancestors(),
             temporal_filter: None,
         }
     }

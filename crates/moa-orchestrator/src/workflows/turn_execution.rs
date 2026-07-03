@@ -75,9 +75,8 @@ use crate::objects::worker::WorkerClient;
 use crate::restate_identity::with_identity_headers;
 use crate::services::{llm_gateway::LLMGatewayClient, session_store::RestateSessionStoreClient};
 use crate::tool_invocation::governed::{
-    GovernedInvocationOrigin, GovernedInvocationOutcome, GovernedInvocationProgress,
-    GovernedInvocationRequest, invoke_governed_tool,
-    record_segment_tool_use as record_governed_segment_tool_use,
+    GovernedInvocationOrigin, GovernedInvocationOutcome, GovernedInvocationRequest,
+    invoke_governed_tool, record_segment_tool_use as record_governed_segment_tool_use,
 };
 use crate::turn::util::{
     TurnEvidence, allowed_tool_names, annotate_unresolved_verification,
@@ -351,14 +350,8 @@ async fn execute_turn_inside_workflow(
     let meta = load_session_meta(ctx, session_id).await?;
     let user_sequence_num = match request.trigger {
         TurnTrigger::UserMessage => {
-            if let Some(outcome) = evaluate_input_guardrail(
-                ctx,
-                session_id,
-                &request.turn_id,
-                &meta,
-                &request.user_message,
-            )
-            .await?
+            if let Some(outcome) =
+                evaluate_input_guardrail(ctx, session_id, &meta, &request.user_message).await?
             {
                 return Ok(outcome);
             }
@@ -618,7 +611,6 @@ async fn append_clarification_response(
 async fn evaluate_input_guardrail(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
-    turn_id: &str,
     meta: &SessionMeta,
     user_message: &str,
 ) -> Result<Option<BodyOutcome>, HandlerError> {
@@ -634,17 +626,7 @@ async fn evaluate_input_guardrail(
         return Ok(None);
     }
 
-    let cadence = driver_progress::current_cadence();
-    turn_progress::maybe_emit(
-        ctx,
-        session_id,
-        turn_id,
-        TurnPhase::Compiling,
-        SUMMARY_CALLING_MODEL,
-        cadence.first_delay_ms,
-        cadence.interval_ms,
-    )
-    .await?;
+    turn_progress::maybe_emit(ctx, session_id, SUMMARY_CALLING_MODEL).await?;
     let guardrail_request = crate::guardrails::guardrail_completion_request(
         &OrchestratorCtx::current_config(),
         GuardrailDirection::Input,
@@ -702,7 +684,6 @@ async fn visible_response_after_output_guardrail(
     session_id: SessionId,
     meta: &SessionMeta,
     response: &CompletionResponse,
-    turn_id: &str,
 ) -> Result<(CompletionResponse, bool), HandlerError> {
     if response.text.is_empty() {
         return Ok((response.clone(), false));
@@ -720,17 +701,7 @@ async fn visible_response_after_output_guardrail(
     }
 
     driver_progress::set_phase(ctx, TurnPhase::Persisting);
-    let cadence = driver_progress::current_cadence();
-    turn_progress::maybe_emit(
-        ctx,
-        session_id,
-        turn_id,
-        TurnPhase::Persisting,
-        SUMMARY_CHECKING_RESULTS,
-        cadence.first_delay_ms,
-        cadence.interval_ms,
-    )
-    .await?;
+    turn_progress::maybe_emit(ctx, session_id, SUMMARY_CHECKING_RESULTS).await?;
     let guardrail_request = crate::guardrails::guardrail_completion_request(
         &OrchestratorCtx::current_config(),
         GuardrailDirection::Output,
@@ -845,17 +816,7 @@ async fn run_once_inside_workflow(
 
     let progress_turn_id = turn_id.0.to_string();
     driver_progress::set_phase(ctx, TurnPhase::Compiling);
-    let cadence = driver_progress::current_cadence();
-    turn_progress::maybe_emit(
-        ctx,
-        session_id,
-        &progress_turn_id,
-        TurnPhase::Compiling,
-        SUMMARY_WORKING,
-        cadence.first_delay_ms,
-        cadence.interval_ms,
-    )
-    .await?;
+    turn_progress::maybe_emit(ctx, session_id, SUMMARY_WORKING).await?;
     let Some(built_request) = build_request_inside_workflow(ctx, session_id, turn_id).await? else {
         return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Idle));
     };
@@ -899,7 +860,6 @@ async fn run_once_inside_workflow(
     match maybe_schedule_auto_delegation(
         ctx,
         AutoDelegationContext {
-            turn_id: &progress_turn_id,
             meta: &meta,
             session_id,
             trusted_sandbox_manifest: trusted_sandbox_manifest.as_ref(),
@@ -937,17 +897,7 @@ async fn run_once_inside_workflow(
     }
 
     driver_progress::set_phase(ctx, TurnPhase::Streaming);
-    let cadence = driver_progress::current_cadence();
-    turn_progress::maybe_emit(
-        ctx,
-        session_id,
-        &progress_turn_id,
-        TurnPhase::Streaming,
-        SUMMARY_CALLING_MODEL,
-        cadence.first_delay_ms,
-        cadence.interval_ms,
-    )
-    .await?;
+    turn_progress::maybe_emit(ctx, session_id, SUMMARY_CALLING_MODEL).await?;
     let span = llm_call_span(&meta);
     let llm_started = Instant::now();
     let response = {
@@ -968,14 +918,8 @@ async fn run_once_inside_workflow(
     };
     let llm_call_duration = llm_started.elapsed();
     record_turn_llm_call_duration(llm_call_duration);
-    let (visible_response, output_blocked) = visible_response_after_output_guardrail(
-        ctx,
-        session_id,
-        &meta,
-        &response,
-        &progress_turn_id,
-    )
-    .await?;
+    let (visible_response, output_blocked) =
+        visible_response_after_output_guardrail(ctx, session_id, &meta, &response).await?;
     let (visible_response, verification_annotated) =
         annotate_unresolved_verification(&visible_response, turn_evidence);
     let response_usage = visible_response.token_usage();
@@ -994,11 +938,11 @@ async fn run_once_inside_workflow(
         response_sequence_num,
     )
     .await?;
-    let response_event = latest_matching_brain_response_event(
+    let response_event = brain_response_event_by_sequence(
         ctx,
         session_id,
         turn_context.identity,
-        &visible_response,
+        response_sequence_num,
     )
     .await?;
     let lineage = OrchestratorCtx::current_lineage();
@@ -1028,7 +972,6 @@ async fn run_once_inside_workflow(
     match dispatch_response_tool_calls(
         ctx,
         RootToolContext {
-            turn_id: &progress_turn_id,
             meta: &meta,
             session_id,
             active_canary: active_canary.as_deref(),
@@ -1166,7 +1109,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 struct AutoDelegationContext<'a> {
-    turn_id: &'a str,
     meta: &'a SessionMeta,
     session_id: SessionId,
     trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
@@ -1436,8 +1378,7 @@ async fn maybe_fan_in_auto_delegation_results(
                 driver_progress::RootTurnStateKey::AUTO_DELEGATION_FAN_IN_STUCK_COUNT,
                 Json::from(next_count),
             );
-            wait_for_auto_delegation_worker(ctx, session_id, turn_id, &worker_id, last_summary)
-                .await
+            wait_for_auto_delegation_worker(ctx, session_id, &worker_id, last_summary).await
         }
         AutoDelegationFanInStatus::NotRunning => Ok(AutoDelegationFanInOutcome::Skipped),
     }
@@ -1446,7 +1387,6 @@ async fn maybe_fan_in_auto_delegation_results(
 async fn wait_for_auto_delegation_worker(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
-    turn_id: &str,
     worker_id: &str,
     last_summary: &mut Option<String>,
 ) -> Result<AutoDelegationFanInOutcome, HandlerError> {
@@ -1456,17 +1396,7 @@ async fn wait_for_auto_delegation_worker(
     }
 
     driver_progress::set_phase(ctx, TurnPhase::Tooling);
-    let cadence = driver_progress::current_cadence();
-    turn_progress::maybe_emit(
-        ctx,
-        session_id,
-        turn_id,
-        TurnPhase::Tooling,
-        SUMMARY_CHECKING_RESULTS,
-        cadence.first_delay_ms,
-        cadence.interval_ms,
-    )
-    .await?;
+    turn_progress::maybe_emit(ctx, session_id, SUMMARY_CHECKING_RESULTS).await?;
 
     let (awakeable_id, terminal_future) = ctx.awakeable::<String>();
     moa_core::record_worker_vo_call();
@@ -1721,15 +1651,10 @@ async fn dispatch_auto_delegation_spawn(
     );
     append_tool_call_event(ctx, schedule_context.session_id, tool_id, &tool_call).await?;
 
-    let cadence = driver_progress::current_cadence();
     turn_progress::maybe_emit(
         ctx,
         schedule_context.session_id,
-        schedule_context.turn_id,
-        TurnPhase::Tooling,
         turn_progress::running_tool_summary(&invocation.name),
-        cadence.first_delay_ms,
-        cadence.interval_ms,
     )
     .await?;
 
@@ -1792,7 +1717,6 @@ async fn append_auto_delegation_result(
 }
 
 struct RootToolContext<'a> {
-    turn_id: &'a str,
     meta: &'a SessionMeta,
     session_id: SessionId,
     active_canary: Option<&'a str>,
@@ -1854,10 +1778,8 @@ async fn handle_tool_call(
     let meta = tool_context.meta;
     let session_id = tool_context.session_id;
     let active_canary = tool_context.active_canary;
-    let turn_id = tool_context.turn_id;
     let turn_evidence = &mut *tool_context.turn_evidence;
     let tool_id = stable_tool_call_id(session_id, index, tool_call);
-    let cadence = driver_progress::current_cadence();
     let outcome = invoke_governed_tool(
         ctx,
         GovernedInvocationRequest {
@@ -1870,11 +1792,6 @@ async fn handle_tool_call(
             active_canary,
             trusted_sandbox_manifest: tool_context.trusted_sandbox_manifest,
             origin: GovernedInvocationOrigin::RootTurn,
-            progress: GovernedInvocationProgress {
-                turn_id,
-                first_delay_ms: cadence.first_delay_ms,
-                interval_ms: cadence.interval_ms,
-            },
         },
     )
     .await?;
@@ -1890,7 +1807,6 @@ async fn handle_tool_call(
             handle_delegation_tool(
                 ctx,
                 DelegationToolRequest {
-                    turn_id,
                     meta,
                     session_id,
                     tool_id,
@@ -1906,7 +1822,6 @@ async fn handle_tool_call(
 }
 
 struct DelegationToolRequest<'a> {
-    turn_id: &'a str,
     meta: &'a SessionMeta,
     session_id: SessionId,
     tool_id: ToolCallId,
@@ -1920,7 +1835,6 @@ async fn handle_delegation_tool(
     turn_evidence: &mut TurnEvidence,
 ) -> Result<(), HandlerError> {
     let DelegationToolRequest {
-        turn_id,
         meta,
         session_id,
         tool_id,
@@ -1938,15 +1852,10 @@ async fn handle_delegation_tool(
     };
 
     let span = tool_dispatch_span(&invocation.name);
-    let cadence = driver_progress::current_cadence();
     turn_progress::maybe_emit(
         ctx,
         session_id,
-        turn_id,
-        TurnPhase::Tooling,
         turn_progress::running_tool_summary(&invocation.name),
-        cadence.first_delay_ms,
-        cadence.interval_ms,
     )
     .await?;
     let dispatch_started = Instant::now();
@@ -2618,31 +2527,29 @@ async fn record_response(
     Ok(())
 }
 
-async fn latest_matching_brain_response_event(
+async fn brain_response_event_by_sequence(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     identity: &moa_core::traits::Identity,
-    response: &CompletionResponse,
+    sequence_num: u64,
 ) -> Result<Option<EventRecord>, HandlerError> {
     let request = ctx
         .service_client::<RestateSessionStoreClient>()
         .get_events(Json(GetEventsRequest {
             session_id,
-            range: EventRange::recent(8),
+            range: EventRange {
+                from_seq: Some(sequence_num),
+                to_seq: Some(sequence_num),
+                event_types: Some(vec![EventType::BrainResponse]),
+                limit: Some(1),
+            },
         }));
-    let events = with_identity_headers(request, identity)
+    Ok(with_identity_headers(request, identity)
         .call()
         .await?
-        .into_inner();
-    Ok(events
+        .into_inner()
         .into_iter()
-        .filter(|record| match &record.event {
-            Event::BrainResponse { text, model, .. } => {
-                text == &response.text && model == &response.model
-            }
-            _ => false,
-        })
-        .max_by_key(|record| record.sequence_num))
+        .next())
 }
 
 async fn record_selected_segment_skills(

@@ -139,15 +139,17 @@ pub(crate) async fn finish_with_live_delivery(
 pub(crate) async fn maybe_emit(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
-    _turn_id: &str,
-    _phase: TurnPhase,
     summary: impl Into<String>,
-    first_delay_ms: u64,
-    interval_ms: u64,
 ) -> Result<(), HandlerError> {
     let mut state = load_workflow_state(ctx).await?;
     let now = workflow_utc_now(ctx).await?;
-    let attempt = state.attempt(now, summary.into(), first_delay_ms, interval_ms);
+    let limits = &crate::OrchestratorCtx::current_config().session_limits;
+    let attempt = state.attempt(
+        now,
+        summary.into(),
+        limits.progress_first_delay_ms,
+        limits.progress_interval_ms,
+    );
     if let Some(summary) = attempt.emit {
         progress_delivery::maybe_deliver(ctx, session_id, &summary).await?;
     }

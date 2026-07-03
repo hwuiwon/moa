@@ -483,32 +483,11 @@ pub const CATALOG: &[ProviderModel] = &[
         },
         tier: CapabilityTier::Fast,
     },
-    // Flash-Lite is now GA (no `-preview` suffix on the pricing page); the
-    // legacy preview id is retained so existing configs keep routing.
+    // Flash-Lite is now GA (no `-preview` suffix on the pricing page).
     ProviderModel {
         provider: PROVIDER_GOOGLE,
         id: "gemini-3.1-flash-lite",
         display_name: "Gemini 3.1 Flash-Lite",
-        context_window: 1_048_576,
-        max_output_tokens: 65_536,
-        supports_tools: true,
-        supports_vision: true,
-        supports_prefix_caching: true,
-        cache_ttl_secs: None,
-        tool_call_format: ToolCallFormat::Gemini,
-        pricing: TokenPricing {
-            input_per_mtok: 0.25,
-            output_per_mtok: 1.5,
-            cached_input_per_mtok: Some(0.025),
-            cache_write_5m_per_mtok: None,
-            cache_write_1h_per_mtok: None,
-        },
-        tier: CapabilityTier::Light,
-    },
-    ProviderModel {
-        provider: PROVIDER_GOOGLE,
-        id: "gemini-3.1-flash-lite-preview",
-        display_name: "Gemini 3.1 Flash-Lite (preview)",
         context_window: 1_048_576,
         max_output_tokens: 65_536,
         supports_tools: true,
@@ -652,27 +631,7 @@ mod tests {
         assert!(find("gemini-3-pro-preview").is_some());
         assert!(find("gemini-3.5-flash").is_some());
         assert!(find("gemini-3-flash-preview").is_some());
-        // Flash-Lite GA id plus the retained legacy preview id.
         assert!(find("gemini-3.1-flash-lite").is_some());
-        assert!(find("gemini-3.1-flash-lite-preview").is_some());
-    }
-
-    #[test]
-    fn flash_lite_ga_and_preview_ids_route_to_their_own_entries() {
-        // Pins: the GA id and the legacy preview id resolve to distinct entries
-        // via longest-prefix matching, so neither shadows the other.
-        assert_eq!(
-            find_model("gemini-3.1-flash-lite")
-                .expect("GA id resolves")
-                .id,
-            "gemini-3.1-flash-lite"
-        );
-        assert_eq!(
-            find_model("gemini-3.1-flash-lite-preview")
-                .expect("preview id resolves")
-                .id,
-            "gemini-3.1-flash-lite-preview"
-        );
     }
 
     #[test]

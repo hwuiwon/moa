@@ -177,8 +177,6 @@ pub struct MoaEnvOverlay {
     pub local_sandbox_dir: Option<String>,
     /// `MOA_LOCAL_MEMORY_DIR`.
     pub local_memory_dir: Option<String>,
-    /// `MOA_MEMORY_AUTO_BOOTSTRAP`.
-    pub memory_auto_bootstrap: Option<bool>,
     /// `MOA_MEMORY_EMBEDDING_MODEL`.
     pub memory_embedding_model: Option<String>,
     /// `MOA_MEMORY_RETRIEVAL_RERANKER_MODEL`.

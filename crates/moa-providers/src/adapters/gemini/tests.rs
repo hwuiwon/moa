@@ -170,10 +170,6 @@ fn gemini_preview_model_ids_pass_through_unchanged() {
         canonical_model_id("gemini-3-flash-preview").unwrap(),
         "gemini-3-flash-preview"
     );
-    assert_eq!(
-        canonical_model_id("gemini-3.1-flash-lite-preview").unwrap(),
-        "gemini-3.1-flash-lite-preview"
-    );
 }
 
 #[test]
@@ -202,15 +198,6 @@ fn gemini_3_flash_preview_uses_documented_price_envelope() {
     assert_eq!(capabilities.max_output, 65_536);
     assert_eq!(capabilities.pricing.input_per_mtok, 0.5);
     assert_eq!(capabilities.pricing.output_per_mtok, 3.0);
-}
-
-#[test]
-fn gemini_3_1_flash_lite_preview_uses_documented_price_envelope() {
-    let capabilities = capabilities_for_model("gemini-3.1-flash-lite-preview").unwrap();
-    assert_eq!(capabilities.context_window, 1_048_576);
-    assert_eq!(capabilities.max_output, 65_536);
-    assert_eq!(capabilities.pricing.input_per_mtok, 0.25);
-    assert_eq!(capabilities.pricing.output_per_mtok, 1.5);
 }
 
 #[test]

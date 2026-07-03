@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryConfig {
-    /// Automatically bootstrap tenant-visible memory when it is empty.
-    pub auto_bootstrap: bool,
     /// Optional HTTP base URL for the PII classification sidecar.
     pub pii_service_url: Option<String>,
     /// Embedding model selector used for graph memory embedding backfills and queries.
@@ -25,7 +23,6 @@ pub struct MemoryConfig {
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
-            auto_bootstrap: true,
             pii_service_url: None,
             embedding_model: "openai:text-embedding-3-small".to_string(),
             retrieval: MemoryRetrievalConfig::default(),
@@ -257,10 +254,6 @@ impl super::MoaEnvOverlay {
     pub(in crate::config) fn apply_memory_overlay(&self, config: &mut super::MoaConfig) {
         use super::env_overlay::{set_copy_if_some, set_if_some, set_option_if_some};
 
-        set_copy_if_some(
-            &mut config.memory.auto_bootstrap,
-            self.memory_auto_bootstrap,
-        );
         set_if_some(
             &mut config.memory.embedding_model,
             &self.memory_embedding_model,

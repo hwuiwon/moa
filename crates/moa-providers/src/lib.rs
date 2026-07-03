@@ -22,8 +22,8 @@ pub use adapters::scripted::{
     ScriptedBlock, ScriptedFault, ScriptedProvider, ScriptedResponse, ScriptedTiming,
 };
 pub use core::factory::{
-    ProviderSelection, build_provider_from_config, build_provider_from_selection,
-    resolve_provider_selection, resolve_rewriter_provider,
+    build_provider_from_config, build_provider_from_selection, resolve_provider_selection,
+    resolve_rewriter_provider,
 };
 pub use core::models::{
     CATALOG, CapabilityTier, ProviderModel, by_provider, capabilities_for_provider_model,

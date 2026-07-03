@@ -30,22 +30,12 @@ fn main() -> Result<()> {
         Some("compare-eval-reports") => compare_eval_reports::run(args),
         Some("compute-memory-quality-scores") => compute_memory_quality_scores::run(args),
         Some("generate-memory-eval-corpus") => generate_memory_eval_corpus::run(args),
-        Some("migrate-test-db") => cmd_migrate_test_db(),
         Some("record-memory-extractions") => record_memory_extractions::run(args),
         Some("record-memory-merges") => record_memory_merges::run(args),
         Some("run-memory-retrieval-eval") => run_memory_retrieval_eval::run(args),
         Some(command) => bail!("unknown xtask command: {command}"),
         None => bail!("missing xtask command; try `cargo xtask audit-paths`"),
     }
-}
-
-fn cmd_migrate_test_db() -> Result<()> {
-    let database_url = env::var("MOA_DATABASE_URL").context("MOA_DATABASE_URL must be set")?;
-    let redacted = redact_password(&database_url);
-    println!(
-        "test database configured at {redacted}; MOA integration tests create migrated isolated schemas during bootstrap"
-    );
-    Ok(())
 }
 
 fn cmd_check_migrations() -> Result<()> {
@@ -255,27 +245,6 @@ fn file_name(path: &Path) -> Result<&str> {
     path.file_name()
         .and_then(|name| name.to_str())
         .with_context(|| format!("path has no UTF-8 file name: {}", path.display()))
-}
-
-fn redact_password(database_url: &str) -> String {
-    let Some(scheme_end) = database_url.find("://") else {
-        return database_url.to_string();
-    };
-    let auth_start = scheme_end + 3;
-    let Some(at_offset) = database_url[auth_start..].find('@') else {
-        return database_url.to_string();
-    };
-    let at_index = auth_start + at_offset;
-    let auth = &database_url[auth_start..at_index];
-    let Some(colon_offset) = auth.rfind(':') else {
-        return database_url.to_string();
-    };
-    let password_start = auth_start + colon_offset + 1;
-    format!(
-        "{}***{}",
-        &database_url[..password_start],
-        &database_url[at_index..]
-    )
 }
 
 fn cmd_audit_paths() -> Result<()> {

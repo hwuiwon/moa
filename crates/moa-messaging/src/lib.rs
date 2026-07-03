@@ -22,8 +22,8 @@ pub mod slack;
 pub use action_review::prepare_outbound_message;
 pub use control::{MessagingControlAction, control_action_for_inbound};
 pub use delivery::{
-    DeliveryMessage, DeliveryPurpose, DeliveryReceipt, DeliverySink,
-    EnvironmentDeliveryCredentialVault, ProviderDeliverySink,
+    DeliveryMessage, DeliveryPurpose, DeliveryReceipt, EnvironmentDeliveryCredentialVault,
+    ProviderDeliverySink,
 };
 pub use edit_window::{
     MessagingEditOutcome, MessagingEditResponse, edit_with_followup_fallback,

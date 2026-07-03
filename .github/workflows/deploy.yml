@@ -214,9 +214,6 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Probe test database
-        run: cargo run -p xtask --release -- migrate-test-db
-
       - name: Run recorded long-conversation scenarios
         run: cargo test -p moa-eval --test long_conversation_smoke_eval --locked -- --ignored
 

@@ -2428,7 +2428,6 @@ mod tests {
             seeds: Vec::new(),
             label_hint: None,
             scope: scope.clone(),
-            scope_ancestors: scope.ancestors(),
             temporal_filter,
         }
     }

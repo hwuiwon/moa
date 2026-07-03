@@ -1,0 +1,25 @@
+# Simplification Deferred Regressions
+
+This file tracks regressions, degradations, and validation blockers found while
+simplifying the codebase. These are intentionally deferred so the simplification
+queue can continue without mixing unrelated loadtest/runtime repair work into
+small cleanup cuts.
+
+## Open Items
+
+| ID | Surface | Status | Evidence | Impact | Later Fix Direction |
+|---|---|---|---|---|---|
+| REG-001 | Retrieval perf gate hardware floor | Deferred | `cargo run --release -p moa-loadtest --bin perf_gate -- --profile retrieval --tenants 2 --facts-per-tenant 50 --qps 5 --duration 15s ...` built successfully, then exited with `hardware floor unmet: x86_64 with AVX2 is required`. | Local developer machines that do not satisfy the x86 AVX2 floor cannot run the graph-memory retrieval perf gate after RAG/retrieval changes. | Keep the release gate strict, but add a documented local/dev retrieval smoke profile or CI-only path so non-x86 developers can still get a bounded regression signal. |
+| REG-002 | `make loadtest-mock` OpenFGA env handling | Deferred | After relocating RustFS ports, `make loadtest-mock` restarted the orchestrator, but readiness timed out. Logs showed `configuration error: MOA_AUTHZ_OPENFGA_STORE_ID is required when configuring this section`. Running `make fga-bootstrap` and exporting `.env.fga` fixed startup. | The target assumes the caller has sourced generated OpenFGA IDs, so a nominal loadtest target can fail after a costly Docker rebuild. | Make the target fail early with a clearer preflight or have it source `.env.fga`/run bootstrap the same way `make dev` does. |
+| REG-003 | RustFS host port collision during loadtest | Deferred | Initial `make loadtest-mock` failed on `Bind for 0.0.0.0:9000 failed: port is already allocated`. Rerun with `MOA_RUSTFS_PORT=10090 MOA_RUSTFS_CONSOLE_PORT=10091` got past networking. | Local loadtest is brittle when common host ports 9000/9001 are already in use. | Prefer non-conflicting local defaults for loadtest or add a preflight that suggests/export-safe alternate ports before compose starts. |
+| REG-004 | Fixed-rate mock loadtest overloads local stack | Deferred | `make loadtest-mock` completed with exit code 0 after setup fixes, but reported 2,553/2,999 turns completed, 446 dropped, 14.87% error rate, corrected p95 33.01s, service-time p95 3.58s, dispatch-delay p95 30.00s. | The target exits successfully while the report clearly indicates local capacity/backlog degradation. This is not useful as a pass/fail regression signal. | Split local smoke from capacity load, add pass/fail thresholds for the mock target, and reduce the default local rate or require an explicit capacity profile. |
+| REG-005 | Low-scale mock perf gate session setup/auth failures | Deferred | `perf_gate --profile mock-short --duration 20s --vus 1 ...` failed budget with corrected p95 30.67s and 31.66% turn error rate while service-time p95 was 564.7ms. Restate logs showed `403 forbidden ... not participant` during loadtest `SessionStore/create_session`. | Even a small local mock perf run can fail from loadtest tenancy/session setup rather than the product path under test. | Inspect the loadtest tenancy/session grant path and Restate cleanup expectations; make setup deterministic before treating mock perf failures as product regressions. |
+
+## Notes
+
+- These items were observed while validating simplification finding #58, which
+  removed the identity-only `MemoryScope::ancestors()` chain and duplicate
+  retrieval cache-key `layers=` material.
+- The focused code checks for #58 passed. The retrieval/perf gates above are
+  deferred validation work, not blockers for continuing the simplification
+  queue.

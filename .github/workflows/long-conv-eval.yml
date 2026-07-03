@@ -46,9 +46,6 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Probe test database
-        run: cargo run -p xtask --release -- migrate-test-db
-
       - name: Run recorded long-conversation scenarios
         run: cargo test -p moa-eval --test long_conversation_smoke_eval --locked -- --ignored
 
@@ -99,9 +96,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-
-      - name: Probe test database
-        run: cargo run -p xtask --release -- migrate-test-db
 
       - name: Generate natural memory corpus
         run: cargo run -p xtask --release -- generate-memory-eval-corpus --profile pr --transcript-style natural --seed 1 --seed 2 --seed 3 --output target/memory-eval/pr-natural

@@ -213,9 +213,6 @@ pub async fn blob_store_from_config(
             )),
             None => Ok(Arc::new(PostgresBlobStore::new(pool).await?)),
         },
-        SessionBlobBackend::ObjectStore => Err(MoaError::ConfigError(
-            "session.blob_backend = object_store is not implemented; use postgres for durable cloud claim-check payloads".to_string(),
-        )),
     }
 }
 

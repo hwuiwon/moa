@@ -32,22 +32,6 @@ pub enum ScopeTier {
 }
 
 impl MemoryScope {
-    /// Returns the retrieval scopes to search for this runtime memory scope.
-    pub fn ancestors(&self) -> Vec<MemoryScope> {
-        match self {
-            MemoryScope::Tenant { tenant_id } => vec![MemoryScope::Tenant {
-                tenant_id: *tenant_id,
-            }],
-            MemoryScope::Contact {
-                tenant_id,
-                contact_id,
-            } => vec![MemoryScope::Contact {
-                tenant_id: *tenant_id,
-                contact_id: *contact_id,
-            }],
-        }
-    }
-
     /// Returns the tenant identifier for this scope.
     pub fn tenant_id(&self) -> TenantId {
         match self {

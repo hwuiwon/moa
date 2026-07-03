@@ -52,10 +52,12 @@ fn estimate_run_cost_range(
     config: &AgentConfig,
     case: &TestCase,
 ) -> (f64, f64) {
-    let Ok(selection) = resolve_provider_selection(base_config, config.model.as_deref()) else {
+    let Ok((provider_id, model_id)) =
+        resolve_provider_selection(base_config, config.model.as_deref())
+    else {
         return (0.0, 0.0);
     };
-    let Ok(provider) = build_provider_from_selection(base_config, &selection) else {
+    let Ok(provider) = build_provider_from_selection(base_config, provider_id, &model_id) else {
         return (0.0, 0.0);
     };
     let pricing = provider.capabilities().pricing;

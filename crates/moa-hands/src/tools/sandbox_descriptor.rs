@@ -65,14 +65,7 @@ pub(crate) enum SandboxActionPattern {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SandboxReviewPreviewMetadata {
     /// Command preview with an optional working-directory field.
-    Command {
-        /// Input field containing the command.
-        command_field: &'static str,
-        /// Review label for the command.
-        command_label: &'static str,
-        /// Review label for the working directory.
-        working_dir_label: &'static str,
-    },
+    Command,
     /// Preview one string field from the input.
     SingleField {
         /// Input field containing the preview value.
@@ -226,11 +219,7 @@ static SANDBOX_TOOL_DESCRIPTORS: &[SandboxToolDescriptor] = &[
             ToolInputShape::Command,
             SandboxActionPattern::ShellFirstCommand,
         ),
-        review_preview: SandboxReviewPreviewMetadata::Command {
-            command_field: "cmd",
-            command_label: "Command",
-            working_dir_label: "Working dir",
-        },
+        review_preview: SandboxReviewPreviewMetadata::Command,
         capability: SandboxToolCapability::Bash,
     },
     SandboxToolDescriptor {

@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moa_core::{Channel, ContactId};
-use moa_messaging::{DeliveryMessage, DeliveryPurpose, DeliverySink, ProviderDeliverySink};
+use moa_messaging::{DeliveryMessage, DeliveryPurpose, ProviderDeliverySink};
 use serde_json::json;
 use uuid::Uuid;
 use wiremock::matchers::{header, method, path};

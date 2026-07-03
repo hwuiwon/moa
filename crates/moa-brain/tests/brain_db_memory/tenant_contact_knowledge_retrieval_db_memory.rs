@@ -872,13 +872,11 @@ fn cached_retriever(
 
 fn planned_chunk_query(tenant_id: TenantId, _query: &str) -> PlannedQuery {
     let scope = tenant_memory_scope(tenant_id);
-    let scope_ancestors = scope.ancestors();
     PlannedQuery {
         strategy: Strategy::Both,
         seeds: Vec::new(),
         label_hint: Some(vec![NodeLabel::Chunk]),
         scope,
-        scope_ancestors,
         temporal_filter: None,
     }
 }

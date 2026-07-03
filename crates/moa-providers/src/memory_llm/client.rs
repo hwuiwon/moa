@@ -23,10 +23,6 @@ pub struct LlmChatClient {
     model: String,
     api_key: SecretString,
     pacer: RatePacer,
-    /// Optional ordered fallback chat clients tried when the primary is
-    /// retryably rate limited. Empty unless a caller opts in via
-    /// [`LlmChatClient::with_fallback`].
-    fallbacks: Vec<LlmChatClient>,
 }
 
 impl LlmChatClient {
@@ -49,7 +45,6 @@ impl LlmChatClient {
             model: model.to_string(),
             api_key,
             pacer: RatePacer::new(PacerConfig::requests_per_min(COHERE_CHAT_REQUESTS_PER_MIN)),
-            fallbacks: Vec::new(),
         }
     }
 
@@ -75,35 +70,9 @@ impl LlmChatClient {
         self
     }
 
-    /// Appends a fallback chat client tried when the primary is rate limited.
-    ///
-    /// Opt-in only: `moa-memory` ingestion construction sites are deliberately
-    /// left unwired (that crate is owned elsewhere), so ingestion keeps its
-    /// single-client behavior unless a caller explicitly builds a chain here.
-    #[must_use]
-    pub fn with_fallback(mut self, fallback: LlmChatClient) -> Self {
-        self.fallbacks.push(fallback);
-        self
-    }
-
     /// Sends a non-streaming chat request and returns the assistant text.
-    ///
-    /// On a retryable (rate-limit-class) failure of the primary, falls over to
-    /// each configured fallback in order before surfacing the primary's error.
     pub async fn chat(&self, system: &str, user: &str) -> Result<String, LlmChatError> {
-        match self.chat_with_retry(system, user).await {
-            Ok(text) => Ok(text),
-            Err(error) => {
-                if error.is_retryable() {
-                    for fallback in &self.fallbacks {
-                        if let Ok(text) = fallback.chat_with_retry(system, user).await {
-                            return Ok(text);
-                        }
-                    }
-                }
-                Err(error)
-            }
-        }
+        self.chat_with_retry(system, user).await
     }
 
     async fn chat_with_retry(&self, system: &str, user: &str) -> Result<String, LlmChatError> {

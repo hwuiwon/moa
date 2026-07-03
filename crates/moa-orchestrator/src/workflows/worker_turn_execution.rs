@@ -38,9 +38,8 @@ use crate::objects::session::SessionClient;
 use crate::objects::worker::{MAX_WORKER_TURNS_PER_WORKFLOW, WorkerClient};
 use crate::services::{llm_gateway::LLMGatewayClient, session_store::RestateSessionStoreClient};
 use crate::tool_invocation::governed::{
-    GovernedInvocationOrigin, GovernedInvocationOutcome, GovernedInvocationProgress,
-    GovernedInvocationRequest, invoke_governed_tool,
-    record_segment_tool_use as record_governed_segment_tool_use,
+    GovernedInvocationOrigin, GovernedInvocationOutcome, GovernedInvocationRequest,
+    invoke_governed_tool, record_segment_tool_use as record_governed_segment_tool_use,
 };
 use crate::turn::util::{
     TurnEvidence, allowed_tool_names, annotate_unresolved_verification, response_tool_calls,
@@ -316,17 +315,7 @@ async fn run_worker_iteration(
         selected_procedure_skill_refs(&input.completion_request.metadata);
 
     driver_progress::set_phase(ctx, TurnPhase::Streaming);
-    let cadence = driver_progress::current_cadence();
-    turn_progress::maybe_emit(
-        ctx,
-        input.parent_session,
-        &input.request.turn_id,
-        TurnPhase::Streaming,
-        SUMMARY_CALLING_MODEL,
-        cadence.first_delay_ms,
-        cadence.interval_ms,
-    )
-    .await?;
+    turn_progress::maybe_emit(ctx, input.parent_session, SUMMARY_CALLING_MODEL).await?;
     record_worker_heartbeat(ctx, &input.request.worker_id).await?;
     let span = llm_call_span(&input.meta);
     let llm_started = Instant::now();
@@ -517,7 +506,6 @@ async fn handle_tool_call(
         .await;
     }
 
-    let cadence = driver_progress::current_cadence();
     let outcome = invoke_governed_tool(
         ctx,
         GovernedInvocationRequest {
@@ -532,11 +520,6 @@ async fn handle_tool_call(
             origin: GovernedInvocationOrigin::Worker {
                 worker_id,
                 turn_id: tool_context.turn_id,
-            },
-            progress: GovernedInvocationProgress {
-                turn_id: tool_context.turn_id,
-                first_delay_ms: cadence.first_delay_ms,
-                interval_ms: cadence.interval_ms,
             },
         },
     )
@@ -616,15 +599,10 @@ async fn handle_delegation_tool(
     // turn instead of steering the model back on task.
 
     let span = tool_dispatch_span(&invocation.name);
-    let cadence = driver_progress::current_cadence();
     turn_progress::maybe_emit(
         ctx,
         session_id,
-        turn_id,
-        TurnPhase::Tooling,
         turn_progress::running_tool_summary(&invocation.name),
-        cadence.first_delay_ms,
-        cadence.interval_ms,
     )
     .await?;
     record_worker_heartbeat(ctx, worker_id).await?;
@@ -978,18 +956,6 @@ async fn record_worker_turn_cap_stop(
     Ok(message)
 }
 
-#[cfg(test)]
-fn parent_session_from_initial_message(
-    message: &moa_core::WorkerMessage,
-) -> Result<SessionId, HandlerError> {
-    match message {
-        moa_core::WorkerMessage::InitialTask(initial) => Ok(initial.parent_session),
-        moa_core::WorkerMessage::FollowUp { .. } | moa_core::WorkerMessage::ProvideInput { .. } => {
-            Err(TerminalError::new("reserved child did not include an initial task message").into())
-        }
-    }
-}
-
 async fn record_tool_result(
     ctx: &WorkflowContext<'_>,
     turn_id: &str,
@@ -1186,7 +1152,7 @@ mod tests {
 
     use super::{
         build_child_report_signal, build_failed_child_signal, build_needs_input_signal,
-        parent_session_from_initial_message, short_failure_summary,
+        short_failure_summary,
     };
 
     #[test]
@@ -1311,34 +1277,5 @@ mod tests {
         let summary = short_failure_summary(&long);
         assert!(summary.chars().count() <= 201, "summary must be bounded");
         assert!(summary.ends_with('…'), "overlong summary is truncated");
-    }
-
-    #[test]
-    fn reserved_child_parent_session_requires_initial_message() {
-        // Pins: worker spawn events derive their root session only from validated initial child messages.
-        let session_id = SessionId::new();
-        let message = moa_core::WorkerMessage::InitialTask(Box::new(moa_core::WorkerInitialTask {
-            task: "inspect".to_string(),
-            tool_subset: Vec::new(),
-            budget_tokens: 100,
-            max_turns: Some(2),
-            parent_session: session_id,
-            depth: 1,
-            tenant_id: moa_core::TenantId::new(),
-            user_id: moa_core::UserId::new("user"),
-            model: moa_core::ModelId::new("model"),
-            trusted_sandbox_manifest: None,
-        }));
-
-        assert_eq!(
-            parent_session_from_initial_message(&message)
-                .expect("initial task should expose parent session"),
-            session_id
-        );
-        let error = parent_session_from_initial_message(&moa_core::WorkerMessage::FollowUp {
-            text: "continue".to_string(),
-        })
-        .expect_err("follow-up messages should not be accepted as reservations");
-        assert!(format!("{error:?}").contains("initial task message"));
     }
 }

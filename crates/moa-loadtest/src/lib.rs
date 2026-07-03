@@ -3,7 +3,6 @@
 pub mod scenarios;
 
 mod backend;
-mod config;
 mod edge_backend;
 mod harness;
 mod hist;
@@ -20,7 +19,6 @@ mod tenancy;
 mod tests;
 
 use std::fmt::Write as _;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -46,7 +44,6 @@ pub use report::{
 pub use schedule::{ArrivalProcess, LoadShape};
 
 pub(crate) use backend::*;
-pub(crate) use config::*;
 pub(crate) use edge_backend::*;
 pub(crate) use hist::*;
 pub(crate) use metrics::*;

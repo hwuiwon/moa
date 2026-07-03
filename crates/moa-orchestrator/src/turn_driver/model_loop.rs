@@ -61,7 +61,6 @@ pub(crate) fn root_loop_plan(
         attachment_count: request.attachment_count,
         request_max_turns: request.request_max_turns,
         has_recent_target: request.has_recent_target,
-        is_workflow_context: false,
         is_worker_context: false,
         available_tool_count: request.available_tool_count,
     });
@@ -78,7 +77,6 @@ pub(crate) fn worker_loop_plan(
         attachment_count: 0,
         request_max_turns: request.request_max_turns,
         has_recent_target: true,
-        is_workflow_context: false,
         is_worker_context: true,
         available_tool_count: 0,
     });

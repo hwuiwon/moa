@@ -52,9 +52,6 @@ impl ProviderId {
     }
 }
 
-/// Factory used to construct a provider from a model id and default env var.
-pub type EnvProviderFactory = fn(&str) -> moa_core::Result<Arc<dyn LLMProvider>>;
-
 /// Factory used to construct a provider from runtime config and a model id.
 pub type ConfigProviderFactory = fn(&MoaConfig, &str) -> moa_core::Result<Arc<dyn LLMProvider>>;
 
@@ -81,12 +78,8 @@ pub struct ProviderDescriptor {
     pub default_priority: u8,
     /// Lower values win when resolving the default query-rewrite provider.
     pub rewriter_priority: u8,
-    /// Standard API-key environment variable used by provider-level constructors.
-    pub default_api_key_env: &'static str,
     /// Config accessor for this provider's loaded API key.
     pub api_key: ApiKeyAccessor,
-    /// Provider factory using this provider's default API-key env var.
-    pub build_from_env: EnvProviderFactory,
     /// Provider factory using full runtime config.
     pub build_from_config: ConfigProviderFactory,
 }
@@ -103,9 +96,7 @@ const OPENAI_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     infer_model: is_openai_model,
     default_priority: 0,
     rewriter_priority: 1,
-    default_api_key_env: "MOA_OPENAI_API_KEY",
     api_key: openai_api_key,
-    build_from_env: build_openai_provider,
     build_from_config: build_openai_provider_from_config,
 };
 
@@ -117,9 +108,7 @@ const ANTHROPIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     infer_model: is_anthropic_model,
     default_priority: 1,
     rewriter_priority: 0,
-    default_api_key_env: "MOA_ANTHROPIC_API_KEY",
     api_key: anthropic_api_key,
-    build_from_env: build_anthropic_provider,
     build_from_config: build_anthropic_provider_from_config,
 };
 
@@ -131,9 +120,7 @@ const GOOGLE_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     infer_model: is_google_model,
     default_priority: 2,
     rewriter_priority: 2,
-    default_api_key_env: "MOA_GOOGLE_API_KEY",
     api_key: google_api_key,
-    build_from_env: build_google_provider,
     build_from_config: build_google_provider_from_config,
 };
 
@@ -182,18 +169,6 @@ fn openai_api_key(config: &MoaConfig) -> &str {
 
 fn google_api_key(config: &MoaConfig) -> &str {
     &config.providers.google.api_key
-}
-
-fn build_anthropic_provider(model: &str) -> moa_core::Result<Arc<dyn LLMProvider>> {
-    Ok(Arc::new(AnthropicProvider::from_env(model)?))
-}
-
-fn build_openai_provider(model: &str) -> moa_core::Result<Arc<dyn LLMProvider>> {
-    Ok(Arc::new(OpenAIProvider::from_env(model)?))
-}
-
-fn build_google_provider(model: &str) -> moa_core::Result<Arc<dyn LLMProvider>> {
-    Ok(Arc::new(GeminiProvider::from_env(model)?))
 }
 
 fn build_anthropic_provider_from_config(

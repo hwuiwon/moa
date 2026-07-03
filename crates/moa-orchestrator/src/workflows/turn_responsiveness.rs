@@ -15,8 +15,6 @@ pub(crate) struct TurnResponsivenessInput<'a> {
     pub(crate) request_max_turns: Option<u32>,
     /// Whether cheap existing metadata already points at a recent target.
     pub(crate) has_recent_target: bool,
-    /// Whether this turn is running inside an explicit workflow adapter context.
-    pub(crate) is_workflow_context: bool,
     /// Whether this turn is running inside a delegated worker context.
     pub(crate) is_worker_context: bool,
     /// Count of tool schemas known to be available without compiling context.
@@ -32,7 +30,6 @@ impl<'a> TurnResponsivenessInput<'a> {
             attachment_count: 0,
             request_max_turns: None,
             has_recent_target: false,
-            is_workflow_context: false,
             is_worker_context: false,
             available_tool_count: 0,
         }
@@ -47,7 +44,7 @@ impl<'a> TurnResponsivenessInput<'a> {
 pub(crate) fn classify_turn_request(input: TurnResponsivenessInput<'_>) -> TurnComplexityClass {
     let normalized = normalize_text(input.user_text);
     let text = normalized.as_str();
-    if input.is_workflow_context || input.is_worker_context {
+    if input.is_worker_context {
         return TurnComplexityClass::Complex;
     }
 
@@ -812,16 +809,7 @@ mod tests {
 
     #[test]
     fn workflow_shaped_request_is_complex() {
-        // Pins: explicit workflow contexts and broad implementation prompts get the hard cap.
-        let workflow_input = TurnResponsivenessInput {
-            is_workflow_context: true,
-            ..TurnResponsivenessInput::root("")
-        };
-        assert_eq!(
-            classify_turn_request(workflow_input),
-            TurnComplexityClass::Complex
-        );
-
+        // Pins: broad implementation prompts get the hard cap.
         let task_input = TurnResponsivenessInput::root(
             "Task Goal: implement the new workflow policy. Acceptance Criteria: run verification.",
         );

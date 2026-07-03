@@ -115,13 +115,6 @@ pub struct DeliveryReceipt {
     pub provider_status: Option<String>,
 }
 
-/// Async sink for contact-facing message delivery.
-#[async_trait]
-pub trait DeliverySink: Send + Sync {
-    /// Delivers one already-rendered message through the selected channel.
-    async fn deliver(&self, message: DeliveryMessage) -> Result<DeliveryReceipt>;
-}
-
 /// Delivery sink backed by Postmark email and Twilio SMS clients.
 #[derive(Clone)]
 pub struct ProviderDeliverySink {
@@ -263,11 +256,8 @@ impl ProviderDeliverySink {
             provider_status: Some(result.status),
         })
     }
-}
-
-#[async_trait]
-impl DeliverySink for ProviderDeliverySink {
-    async fn deliver(&self, message: DeliveryMessage) -> Result<DeliveryReceipt> {
+    /// Delivers one already-rendered message through the selected channel.
+    pub async fn deliver(&self, message: DeliveryMessage) -> Result<DeliveryReceipt> {
         let span = delivery_span(&message);
         async move {
             match message.channel {

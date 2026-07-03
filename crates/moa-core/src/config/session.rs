@@ -12,8 +12,6 @@ pub enum SessionBlobBackend {
     /// Store claim-check payloads in Postgres.
     #[default]
     Postgres,
-    /// Store claim-check payloads in an object store.
-    ObjectStore,
 }
 
 /// Supported object stores for user-visible session attachments.

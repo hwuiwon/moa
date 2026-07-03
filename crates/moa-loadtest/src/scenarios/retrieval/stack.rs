@@ -147,7 +147,6 @@ impl TenantRetriever {
             seeds: Vec::new(),
             label_hint: Some(vec![NodeLabel::Fact]),
             scope: self.scope.clone(),
-            scope_ancestors: self.scope.ancestors(),
             temporal_filter: None,
         };
         let request = RetrievalRequest {

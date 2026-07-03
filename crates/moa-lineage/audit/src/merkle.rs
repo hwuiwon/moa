@@ -1,9 +1,6 @@
 //! Certificate-Transparency-style Merkle window helpers.
 //!
 //! The public audit root uses BLAKE3 over domain-separated leaf and node hashes.
-//! The `ct-merkle` crate is also linked and exercised through
-//! [`ct_sha256_root`] so the RFC 6962 proof shape stays visible in the crate,
-//! but the compliance root committed by MOA is BLAKE3-256.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,10 +8,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use blake3::{Hash, Hasher};
 use chrono::{DateTime, Utc};
-use ct_merkle::mem_backed_tree::MemoryBackedTree;
 use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -332,20 +327,6 @@ fn audit_root_object_path(
     ))
 }
 
-/// Returns an RFC-6962-shaped SHA-256 root via `ct-merkle`.
-pub fn ct_sha256_root(leaves: &[Vec<u8>]) -> Result<Vec<u8>> {
-    if leaves.is_empty() {
-        return Err(AuditError::Invalid(
-            "cannot compute a ct-merkle root for an empty window".to_string(),
-        ));
-    }
-    let mut tree = MemoryBackedTree::<Sha256, Vec<u8>>::new();
-    for leaf in leaves {
-        tree.push(leaf.clone());
-    }
-    Ok(tree.root().as_bytes().to_vec())
-}
-
 /// Builds an inclusion proof as sibling BLAKE3 hashes from leaf to root.
 pub fn blake3_inclusion_proof(leaves: &[Vec<u8>], index: usize) -> Result<Vec<Vec<u8>>> {
     if leaves.is_empty() || index >= leaves.len() {
@@ -429,8 +410,8 @@ fn hash_from_vec(bytes: &[u8]) -> Result<Hash> {
 #[cfg(test)]
 mod tests {
     use super::{
-        audit_root_object_path, blake3_inclusion_proof, blake3_merkle_root, ct_sha256_root,
-        stable_root_id, verify_blake3_inclusion,
+        audit_root_object_path, blake3_inclusion_proof, blake3_merkle_root, stable_root_id,
+        verify_blake3_inclusion,
     };
 
     use chrono::{Duration as ChronoDuration, Utc};
@@ -444,14 +425,6 @@ mod tests {
         let proof = blake3_inclusion_proof(&leaves, 3).expect("proof");
 
         verify_blake3_inclusion(&leaves[3], 3, &proof, root).expect("proof verifies");
-    }
-
-    #[test]
-    fn ct_merkle_root_is_available_for_rfc6962_shape() {
-        let leaves = vec![b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()];
-        let root = ct_sha256_root(&leaves).expect("ct root");
-
-        assert_eq!(root.len(), 32);
     }
 
     #[test]

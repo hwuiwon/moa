@@ -33,7 +33,6 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
 
     let mut config = moa_core::MoaConfig::default();
     config.models.main = "claude-sonnet-4-6".to_string();
-    config.memory.auto_bootstrap = false;
     config.skill_budget.max_manifest_chars = Some(512);
 
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store().await?;
@@ -177,7 +176,6 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
 
     let mut config = moa_core::MoaConfig::default();
     config.models.main = "claude-sonnet-4-6".to_string();
-    config.memory.auto_bootstrap = false;
     config.skill_budget.max_manifest_chars = Some(512);
 
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store().await?;

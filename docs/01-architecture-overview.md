@@ -463,15 +463,14 @@ Lineage DSAR bundle export uses the privacy export signing key contract,
 `MOA_PRIVACY_EXPORT_SIGNING_KEY_ID`.
 
 **ATTESTATION GATE - DO NOT REPRESENT THIS AS COMPLIANCE EVIDENCE TO REGULATORS
-OR CUSTOMERS UNTIL EXTERNAL CRYPTOGRAPHIC REVIEW IS COMPLETE.** The
-`ct-merkle` crate is explicitly not audited by its authors. `moa-lineage-audit`
-must receive external cryptographer or appsec review before DSAR exports,
-regulator responses, audit attestations, or certifications rely on this layer as
-compliance-grade evidence. Internal debugging and forensics may use it before
-that review. The review must cover BLAKE3 canonicalization and chain extension,
-Ed25519 key handling, Merkle inclusion and consistency proof construction, PII
-crypto-shredding semantics, S3 Object Lock configuration, timestamp discipline,
-and replay resistance on the verify path.
+OR CUSTOMERS UNTIL EXTERNAL CRYPTOGRAPHIC REVIEW IS COMPLETE.**
+`moa-lineage-audit` must receive external cryptographer or appsec review before
+DSAR exports, regulator responses, audit attestations, or certifications rely on
+this layer as compliance-grade evidence. Internal debugging and forensics may
+use it before that review. The review must cover BLAKE3 canonicalization and
+chain extension, Ed25519 key handling, Merkle inclusion and consistency proof
+construction, PII crypto-shredding semantics, S3 Object Lock configuration,
+timestamp discipline, and replay resistance on the verify path.
 
 ## Workspace Layout
 
