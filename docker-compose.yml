@@ -239,6 +239,8 @@ services:
       MOA_PROVIDERS_OVERRIDE: ${MOA_PROVIDERS_OVERRIDE:-}
       MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS: "false"
       MOA_DEREGISTER_ON_SHUTDOWN: "false"
+      MOA_METRICS_ENABLED: ${MOA_METRICS_ENABLED:-true}
+      MOA_METRICS_LISTEN: 0.0.0.0:9090
       RUST_LOG: "info,moa_orchestrator=debug"
       MOA_ANTHROPIC_API_KEY: ${MOA_ANTHROPIC_API_KEY:-}
       MOA_OPENAI_API_KEY: ${MOA_OPENAI_API_KEY:-}
@@ -250,6 +252,8 @@ services:
       - "10021:9081"
       # SCIM v2 provisioning endpoint.
       - "10022:10022"
+      # Prometheus metrics; scraped by moa-loadtest step-latency reports.
+      - "10023:9090"
     volumes:
       - ./crates/moa-loadtest/scripts:/loadtest-scripts:ro
 
@@ -276,9 +280,13 @@ services:
       MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY: ${MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY:-moa-local-dev-secret}
       MOA_SESSION_ATTACHMENT_ALLOW_HTTP: "true"
       MOA_SESSION_ATTACHMENT_VIRTUAL_HOSTED_STYLE: "false"
+      MOA_METRICS_ENABLED: ${MOA_METRICS_ENABLED:-true}
+      MOA_METRICS_LISTEN: 0.0.0.0:9090
       RUST_LOG: info,moa_edge=debug
     ports:
       - "10000:8080"
+      # Prometheus metrics for the edge layer.
+      - "10001:9090"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
       interval: 5s

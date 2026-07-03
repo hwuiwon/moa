@@ -16,7 +16,12 @@ use moa_core::{
     ModelTier, Result, SessionStatus, TenantId, genai_operation_name, genai_provider_name,
 };
 
-const LATENCY_BUCKETS: &[f64] = &[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0];
+// Sub-10ms buckets exist because turn steps like snapshot_load and
+// pipeline_compile sit in the 1-20ms range at baseline (docs/18-performance.md);
+// without them loadtest percentile reports quantize to a useless 10ms floor.
+const LATENCY_BUCKETS: &[f64] = &[
+    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
+];
 const CACHE_HIT_RATE_BUCKETS: &[f64] = &[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0];
 const GENAI_CLIENT_DURATION_BUCKETS: &[f64] = &[
     0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92,
