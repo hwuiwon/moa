@@ -97,7 +97,7 @@ impl DispatchCtx {
         let ordinal = self.session_ordinal.fetch_add(1, Ordering::Relaxed);
         let mut rng = StdRng::seed_from_u64(self.seed ^ (ordinal as u64).wrapping_mul(0x9E37_79B9));
         let target_index = self.pool.pick_index(&mut rng);
-        let plan = session_plan(ordinal, self.profile, &self.inspection_files);
+        let plan = sampled_session_plan(ordinal, self.profile, &self.inspection_files, &mut rng);
         match self.targets[target_index].start_session(&plan).await {
             Ok(session_id) => {
                 let _ = self.collector_tx.send(CollectorMessage::SessionStarted);
@@ -194,7 +194,7 @@ pub(crate) async fn run_sessions(
     started: Instant,
 ) -> Result<LoadTestReport> {
     let schedule = build_arrival_offsets(
-        options.rate,
+        options.rate_plan(),
         options.duration,
         options.arrival,
         options.seed,
@@ -337,8 +337,10 @@ async fn run_one_turn(ctx: Arc<DispatchCtx>, mut slot: SessionSlot, intended: Du
             });
             slot.next_turn += 1;
             if slot.next_turn < slot.plan.turns.len() {
-                if !ctx.think_time.is_zero() {
-                    tokio::time::sleep(ctx.think_time).await;
+                let think =
+                    sampled_think_time(ctx.think_time, ctx.seed, slot.session_id, slot.next_turn);
+                if !think.is_zero() {
+                    tokio::time::sleep(think).await;
                 }
                 let _ = ctx.idle_tx.send(slot);
             } else {
@@ -497,6 +499,20 @@ fn build_report(
         windows: state.recorder.window_reports(),
         sessions: state.sessions,
     }
+}
+
+/// Samples an exponentially distributed think time with the configured mean,
+/// capped at 5x to bound stragglers. Deterministic per (seed, session, turn).
+fn sampled_think_time(mean: Duration, seed: u64, session_id: SessionId, turn: usize) -> Duration {
+    use rand::Rng as _;
+
+    if mean.is_zero() {
+        return mean;
+    }
+    let session_bits = session_id.0.as_u128() as u64;
+    let mut rng = StdRng::seed_from_u64(seed ^ session_bits ^ ((turn as u64) << 48));
+    let uniform: f64 = rng.gen_range(f64::MIN_POSITIVE..1.0);
+    mean.mul_f64(-uniform.ln()).min(mean * 5)
 }
 
 /// Failure classification for sessions cut short by the end of the schedule.

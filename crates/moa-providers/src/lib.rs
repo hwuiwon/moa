@@ -18,7 +18,9 @@ pub use adapters::gemini::debug_build_gemini_request_body;
 pub use adapters::openai_responses::OpenAIProvider;
 pub use adapters::openai_responses::debug_build_openai_request_body;
 #[cfg(any(test, feature = "scripted-provider"))]
-pub use adapters::scripted::{ScriptedBlock, ScriptedProvider, ScriptedResponse};
+pub use adapters::scripted::{
+    ScriptedBlock, ScriptedFault, ScriptedProvider, ScriptedResponse, ScriptedTiming,
+};
 pub use core::factory::{
     ProviderSelection, build_provider_from_config, build_provider_from_selection,
     resolve_provider_selection, resolve_rewriter_provider,

@@ -67,6 +67,12 @@ pub struct LoadTestOptions {
     pub think_time: Duration,
     /// Offered turn-start rate in turns/second (open loop).
     pub rate: f64,
+    /// Offered-rate shape over the window.
+    pub shape: LoadShape,
+    /// Target rate for ramp/stress shapes.
+    pub rate_end: Option<f64>,
+    /// Burst multiplier for the spike shape.
+    pub spike_factor: f64,
     /// Inter-arrival process for the schedule.
     pub arrival: ArrivalProcess,
     /// Load window duration (schedule length).
@@ -91,6 +97,16 @@ impl LoadTestOptions {
     pub(crate) fn resolved_warmup(&self) -> Duration {
         self.warmup
             .unwrap_or_else(|| (self.duration / 10).min(Duration::from_secs(30)))
+    }
+
+    /// Rate plan for the arrival-schedule builder.
+    pub(crate) fn rate_plan(&self) -> RatePlan {
+        RatePlan {
+            shape: self.shape,
+            rate: self.rate,
+            rate_end: self.rate_end,
+            spike_factor: self.spike_factor,
+        }
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
@@ -137,6 +153,19 @@ impl LoadTestOptions {
             return Err(MoaError::ValidationError(format!(
                 "rate must be a positive finite number; got {}",
                 self.rate
+            )));
+        }
+        if let Some(rate_end) = self.rate_end
+            && (rate_end <= 0.0 || !rate_end.is_finite())
+        {
+            return Err(MoaError::ValidationError(format!(
+                "rate_end must be a positive finite number; got {rate_end}"
+            )));
+        }
+        if self.spike_factor < 1.0 || !self.spike_factor.is_finite() {
+            return Err(MoaError::ValidationError(format!(
+                "spike_factor must be at least 1; got {}",
+                self.spike_factor
             )));
         }
         if self.duration.is_zero() {
@@ -210,6 +239,9 @@ mod tests {
             profile: SessionProfileKind::Short,
             think_time: Duration::from_millis(0),
             rate: 10.0,
+            shape: LoadShape::Steady,
+            rate_end: None,
+            spike_factor: 10.0,
             arrival: ArrivalProcess::Constant,
             duration: Duration::from_secs(5),
             warmup: Some(Duration::from_secs(1)),

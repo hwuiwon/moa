@@ -112,6 +112,34 @@ loadtest-mock:
 loadtest-live:
 	cargo run -p moa-loadtest --release --bin moa-loadtest -- --mode live --endpoint http://localhost:10010
 
+# T2 capacity run: realistic scripted workload, ramp to the knee, windowed
+# report written to target/perf-gate/capacity.json.
+loadtest-capacity:
+	@echo "restarting orchestrator with realistic scripted providers..."
+	@MOA_PROVIDERS_OVERRIDE=scripted:/loadtest-scripts/realistic.json \
+	  docker compose up -d --build --force-recreate moa-orchestrator restate-register
+	@$(MAKE) dev-status
+	@mkdir -p target/perf-gate
+	cargo run -p moa-loadtest --release --bin moa-loadtest -- \
+	  --mode mock --endpoint http://localhost:10010 \
+	  --shape ramp --rate 5 --rate-end 200 --duration 10m \
+	  --profile mixed --think-time-ms 2000 --sessions 800 --tenants 8 \
+	  --metrics-endpoint http://localhost:10023/metrics \
+	  --output json | tee target/perf-gate/capacity.json >/dev/null
+	@echo "capacity report: target/perf-gate/capacity.json"
+
+# Long steady soak at ~70% of measured capacity; watch the window series for
+# drift (leaks, compaction pressure, partition growth).
+loadtest-soak:
+	@mkdir -p target/perf-gate
+	cargo run -p moa-loadtest --release --bin moa-loadtest -- \
+	  --mode mock --endpoint http://localhost:10010 \
+	  --shape soak --rate $${SOAK_RATE:-50} --duration $${SOAK_DURATION:-2h} \
+	  --profile mixed --think-time-ms 2000 --sessions 800 --tenants 8 \
+	  --metrics-endpoint http://localhost:10023/metrics \
+	  --output json | tee target/perf-gate/soak.json >/dev/null
+	@echo "soak report: target/perf-gate/soak.json"
+
 # Generates a local-dev RSA keypair for contact-token signing and prints the
 # env exports the compose stack needs for edge-mode load tests.
 loadtest-edge-keys:

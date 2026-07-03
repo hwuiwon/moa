@@ -64,6 +64,31 @@ pub(crate) async fn first_existing_relative_path(
     Ok(None)
 }
 
+/// Builds a plan whose turn count is sampled geometrically around the
+/// profile's nominal length, so pool churn does not synchronize and session
+/// lengths follow a realistic heavy-ish tail.
+pub(crate) fn sampled_session_plan(
+    index: usize,
+    requested_profile: SessionProfileKind,
+    inspection_files: &InspectionFiles,
+    rng: &mut rand::rngs::StdRng,
+) -> SessionPlan {
+    use rand::Rng as _;
+
+    let mut plan = session_plan(index, requested_profile, inspection_files);
+    let mean = plan.turns.len().max(1) as f64;
+    let success_probability = 1.0 / mean;
+    let uniform: f64 = rng.gen_range(f64::MIN_POSITIVE..1.0);
+    // Geometric inverse-CDF; clamp to [1, 3*mean] to bound stragglers.
+    let sampled = ((1.0 - uniform).ln() / (1.0 - success_probability).ln()).ceil() as usize;
+    let target = sampled.clamp(1, (mean * 3.0) as usize);
+    let base = plan.turns.clone();
+    plan.turns = (0..target)
+        .map(|turn| base[turn % base.len()].clone())
+        .collect();
+    plan
+}
+
 /// Builds the plan for the `index`-th session of a run. Mixed traffic keeps
 /// one long tool-heavy session per four sessions.
 pub(crate) fn session_plan(

@@ -39,7 +39,7 @@ pub use report::{
     ErrorTaxonomy, LoadTestReport, PercentileSummary, SessionReport, StepLatencyReport,
     WindowReport, render_human_report, render_json_report,
 };
-pub use schedule::ArrivalProcess;
+pub use schedule::{ArrivalProcess, LoadShape};
 
 pub(crate) use backend::*;
 pub(crate) use config::*;

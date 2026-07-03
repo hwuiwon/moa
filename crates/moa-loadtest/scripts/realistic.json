@@ -1,0 +1,81 @@
+{
+  "keyed": [
+    {
+      "match": "hello-loadtest-sentinel",
+      "completion": {
+        "content": "The probe command succeeded. The sandbox is healthy and the requested inspection is complete: the workspace builds a Restate-backed agent orchestrator with a Postgres event log, and the file you asked about wires its runtime metrics.",
+        "latency_ms": 700,
+        "ttft_ms": 300,
+        "input_tokens": 2400,
+        "cached_input_tokens": 1600
+      }
+    },
+    {
+      "match": "Use tools",
+      "completion": {
+        "content": "",
+        "tool_calls": [
+          {
+            "name": "bash",
+            "input": { "command": "echo hello-loadtest-sentinel" }
+          }
+        ],
+        "latency_ms": 1200,
+        "ttft_ms": 500,
+        "input_tokens": 1800,
+        "cached_input_tokens": 1100
+      }
+    },
+    {
+      "match": "Inspect",
+      "completion": {
+        "content": "",
+        "tool_calls": [
+          {
+            "name": "bash",
+            "input": { "command": "echo hello-loadtest-sentinel" }
+          }
+        ],
+        "latency_ms": 1100,
+        "ttft_ms": 450,
+        "input_tokens": 1900,
+        "cached_input_tokens": 1200
+      }
+    },
+    {
+      "match": "Read ",
+      "completion": {
+        "content": "",
+        "tool_calls": [
+          {
+            "name": "bash",
+            "input": { "command": "echo hello-loadtest-sentinel" }
+          }
+        ],
+        "latency_ms": 1000,
+        "ttft_ms": 400,
+        "input_tokens": 2000,
+        "cached_input_tokens": 1300
+      }
+    },
+    {
+      "match": "summary",
+      "completion": {
+        "content": "Here is a concise summary of the workspace. MOA is a cloud-first agent platform built in Rust: an edge service terminates credentials and streams turn progress over SSE, a Restate-backed orchestrator owns the durable brain loop, Postgres holds the session event log and graph memory, and provider adapters route LLM traffic with retries, rate guards, and failover. Operationally, per-turn latency decomposes into snapshot load, pipeline compile, the model call, tool dispatch, and event persistence, each tracked by a Prometheus histogram.",
+        "latency_ms": 1600,
+        "ttft_ms": 450,
+        "input_tokens": 1500,
+        "cached_input_tokens": 950
+      }
+    }
+  ],
+  "default": {
+    "completion": {
+      "content": "Based on the available context, the most important operational signal is the per-step turn latency histogram, and the first place to look during a latency spike is the event-persistence and model-call steps because they dominate the tail.",
+      "latency_ms": 900,
+      "ttft_ms": 350,
+      "input_tokens": 1200,
+      "cached_input_tokens": 800
+    }
+  }
+}

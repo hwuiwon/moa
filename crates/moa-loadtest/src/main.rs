@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::Parser;
 use moa_loadtest::{
-    ArrivalProcess, LoadMode, LoadTestOptions, OutputFormat, SessionProfileKind,
+    ArrivalProcess, LoadMode, LoadShape, LoadTestOptions, OutputFormat, SessionProfileKind,
     render_human_report, render_json_report, run_loadtest,
 };
 
@@ -49,6 +49,18 @@ struct Args {
     /// Offered turn-start rate in turns/second (open loop). Defaults per mode.
     #[arg(long)]
     rate: Option<f64>,
+
+    /// Offered-rate shape over the window.
+    #[arg(long, value_enum, default_value_t = LoadShape::Steady)]
+    shape: LoadShape,
+
+    /// Target rate for ramp/stress shapes.
+    #[arg(long)]
+    rate_end: Option<f64>,
+
+    /// Burst multiplier for the spike shape.
+    #[arg(long, default_value_t = 10.0)]
+    spike_factor: f64,
 
     /// Inter-arrival process for the schedule.
     #[arg(long, value_enum, default_value_t = ArrivalProcess::Constant)]
@@ -100,6 +112,9 @@ async fn main() -> Result<()> {
         profile: args.profile,
         think_time: Duration::from_millis(args.think_time_ms),
         rate: args.rate.unwrap_or_else(|| args.mode.default_rate()),
+        shape: args.shape,
+        rate_end: args.rate_end,
+        spike_factor: args.spike_factor,
         arrival: args.arrival,
         duration: args.duration,
         warmup: args.warmup,
