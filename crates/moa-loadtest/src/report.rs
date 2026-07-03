@@ -149,6 +149,8 @@ pub struct LoadTestReport {
     pub total_cost_cents: u64,
     /// Per-window latency/error series.
     pub windows: Vec<WindowReport>,
+    /// Tenants generated for this run; scopes post-run invariant checks.
+    pub tenant_ids: Vec<Uuid>,
     /// Per-session results.
     pub sessions: Vec<SessionReport>,
 }

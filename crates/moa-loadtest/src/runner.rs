@@ -202,6 +202,12 @@ pub(crate) async fn run_sessions(
     let warmup = options.resolved_warmup();
     let recorder = LatencyRecorder::new(WINDOW_LEN, warmup)?;
     let inspection_files = inspectable_files(None).await?;
+    let mut tenant_ids: Vec<Uuid> = pool
+        .entries()
+        .iter()
+        .map(|entry| entry.tenant_id.0)
+        .collect();
+    tenant_ids.dedup();
 
     let (collector_tx, collector_rx) = mpsc::unbounded_channel();
     let (idle_tx, mut idle_rx) = mpsc::unbounded_channel();
@@ -279,7 +285,9 @@ pub(crate) async fn run_sessions(
         .await
         .map_err(|error| MoaError::ProviderError(format!("collector task panicked: {error}")))?;
 
-    Ok(build_report(options, started, &schedule, warmup, state))
+    Ok(build_report(
+        options, started, &schedule, warmup, tenant_ids, state,
+    ))
 }
 
 /// Executes one scheduled turn on one session slot.
@@ -446,6 +454,7 @@ fn build_report(
     started: Instant,
     schedule: &[Duration],
     warmup: Duration,
+    tenant_ids: Vec<Uuid>,
     mut state: CollectorState,
 ) -> LoadTestReport {
     state
@@ -497,6 +506,7 @@ fn build_report(
         cache_hit_rate: summarize_percentiles(&cache_samples),
         total_cost_cents,
         windows: state.recorder.window_reports(),
+        tenant_ids,
         sessions: state.sessions,
     }
 }

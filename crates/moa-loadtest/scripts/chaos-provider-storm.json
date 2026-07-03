@@ -1,0 +1,28 @@
+{
+  "keyed": [
+    {
+      "match": "operational metric",
+      "completion": {
+        "content": "During a latency spike, inspect the per-step turn latency histogram first.",
+        "latency_ms": 800,
+        "ttft_ms": 300,
+        "input_tokens": 1400,
+        "cached_input_tokens": 900,
+        "fault": {
+          "fail_first_n": 30,
+          "status": 429,
+          "retry_after_ms": 500
+        }
+      }
+    }
+  ],
+  "default": {
+    "completion": {
+      "content": "Steady-state answer for chaos background load: the pipeline compiles context, calls the model, dispatches tools, and persists events.",
+      "latency_ms": 600,
+      "ttft_ms": 250,
+      "input_tokens": 1200,
+      "cached_input_tokens": 800
+    }
+  }
+}

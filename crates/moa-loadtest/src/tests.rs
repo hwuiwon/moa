@@ -145,6 +145,7 @@ fn human_report_renders_endpoint_error_taxonomy_and_windows() {
             turn_errors: 1,
             latency_corrected_ms: summary(12.0),
         }],
+        tenant_ids: Vec::new(),
         sessions: Vec::new(),
     };
 

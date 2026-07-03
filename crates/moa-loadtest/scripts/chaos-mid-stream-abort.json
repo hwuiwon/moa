@@ -1,0 +1,27 @@
+{
+  "keyed": [
+    {
+      "match": "readiness summary",
+      "completion": {
+        "content": "This readiness summary will be cut off mid-stream by the fault plan.",
+        "latency_ms": 900,
+        "ttft_ms": 300,
+        "input_tokens": 1400,
+        "cached_input_tokens": 900,
+        "fault": {
+          "fail_first_n": 40,
+          "abort_mid_stream": true
+        }
+      }
+    }
+  ],
+  "default": {
+    "completion": {
+      "content": "Steady-state answer for chaos background load: the pipeline compiles context, calls the model, dispatches tools, and persists events.",
+      "latency_ms": 600,
+      "ttft_ms": 250,
+      "input_tokens": 1200,
+      "cached_input_tokens": 800
+    }
+  }
+}

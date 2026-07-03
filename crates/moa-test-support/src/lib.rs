@@ -8,6 +8,7 @@
 #![deny(missing_docs)]
 
 pub mod fixtures;
+pub mod invariants;
 pub mod postgres;
 pub mod pricing;
 

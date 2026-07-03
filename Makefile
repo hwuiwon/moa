@@ -140,6 +140,19 @@ loadtest-soak:
 	  --output json | tee target/perf-gate/soak.json >/dev/null
 	@echo "soak report: target/perf-gate/soak.json"
 
+# One fast chaos experiment (provider 429 storm) against the compose stack.
+chaos-smoke:
+	@: $${MOA_AUTHZ_OPENFGA_STORE_ID:?run make fga-bootstrap and export the OpenFGA env first}
+	MOA_RUN_CHAOS_TESTS=1 cargo nextest run -p moa-loadtest --test chaos_docker \
+	  --run-ignored all --no-capture -E 'test(provider_storm)'
+
+# The full chaos experiment matrix. Experiments recreate the orchestrator and
+# stop/kill stack services; run only against a disposable dev stack.
+chaos-matrix:
+	@: $${MOA_AUTHZ_OPENFGA_STORE_ID:?run make fga-bootstrap and export the OpenFGA env first}
+	MOA_RUN_CHAOS_TESTS=1 cargo nextest run -p moa-loadtest --test chaos_docker \
+	  --run-ignored all --no-capture --test-threads 1
+
 # Generates a local-dev RSA keypair for contact-token signing and prints the
 # env exports the compose stack needs for edge-mode load tests.
 loadtest-edge-keys:

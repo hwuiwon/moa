@@ -45,7 +45,8 @@ pub struct ScriptedFault {
     /// Optional retry-after hint carried in the error message.
     pub retry_after: Option<Duration>,
     /// Emit the first block, then abort the stream with an error instead of
-    /// completing. Applies on every matching request (not counted).
+    /// completing. Applies to the first `fail_first_n` matching requests, or
+    /// to every request when `fail_first_n` is zero.
     pub abort_mid_stream: bool,
     attempts: Arc<AtomicU32>,
 }
@@ -74,7 +75,7 @@ impl ScriptedFault {
     }
 
     fn take_failure(&self) -> Option<MoaError> {
-        if self.fail_first_n == 0 {
+        if self.abort_mid_stream || self.fail_first_n == 0 {
             return None;
         }
         let attempt = self.attempts.fetch_add(1, Ordering::Relaxed);
@@ -82,6 +83,17 @@ impl ScriptedFault {
             return None;
         }
         Some(self.to_error())
+    }
+
+    /// Whether this request's stream should abort mid-response.
+    fn take_abort(&self) -> bool {
+        if !self.abort_mid_stream {
+            return false;
+        }
+        if self.fail_first_n == 0 {
+            return true;
+        }
+        self.attempts.fetch_add(1, Ordering::Relaxed) < self.fail_first_n
     }
 
     fn to_error(&self) -> MoaError {
@@ -457,7 +469,7 @@ impl LLMProvider for ScriptedProvider {
         let abort_mid_stream = response
             .fault
             .as_ref()
-            .is_some_and(|fault| fault.abort_mid_stream);
+            .is_some_and(|fault| fault.take_abort());
         let timing = response.timing;
 
         let completion_response = CompletionResponse {
