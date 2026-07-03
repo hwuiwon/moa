@@ -2,6 +2,7 @@
 
 use chrono::{NaiveDate, Utc};
 use moa_core::TenantId;
+use moa_memory_lifecycle::TenantConsolidationCursor;
 use moa_memory_vector::{VectorStoreFactory, VectorSyncReport};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
@@ -97,16 +98,16 @@ impl GraphMemoryMaint for GraphMemoryMaintImpl {
         };
         let pool = OrchestratorCtx::current_graph_pool();
         let discovery_request = request.clone();
-        let tenant_ids = ctx
+        let tenant_cursors = ctx
             .run(|| async move {
-                discover_tenant_ids(&pool, &discovery_request)
+                discover_tenant_cursors(&pool, &discovery_request)
                     .await
                     .map(Json::from)
             })
             .name("graph-memory-compact")
             .await?
             .into_inner();
-        let dispatches = build_dispatch_plan(tenant_ids, target_date);
+        let dispatches = build_dispatch_plan(tenant_cursors, target_date);
 
         for dispatch in &dispatches {
             ctx.workflow_client::<ConsolidateClient>(dispatch.workflow_id.clone())
@@ -155,43 +156,61 @@ fn default_vector_sync_drain_limit() -> i64 {
     512
 }
 
-async fn discover_tenant_ids(
+async fn discover_tenant_cursors(
     pool: &PgPool,
     request: &CompactRequest,
-) -> Result<Vec<TenantId>, HandlerError> {
+) -> Result<Vec<TenantConsolidationCursor>, HandlerError> {
     if let Some(tenant_id) = request.tenant_id {
-        return Ok(vec![tenant_id]);
+        let changelog_version = moa_memory_lifecycle::tenant_changelog_version(pool, &tenant_id)
+            .await
+            .map_err(|error| {
+                TerminalError::new(format!("read tenant consolidation cursor: {error}"))
+            })?;
+        return Ok(vec![TenantConsolidationCursor {
+            tenant_id,
+            changelog_version,
+        }]);
     }
 
-    sqlx::query_scalar::<_, uuid::Uuid>(
-        r#"
-        SELECT DISTINCT tenant_id
-        FROM moa.node_index
-        WHERE tenant_id IS NOT NULL
-          AND valid_to IS NULL
-        ORDER BY tenant_id
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .map(|rows| rows.into_iter().map(TenantId::from).collect())
-    .map_err(HandlerError::from)
+    // Enumerate tenants from the partition registry (`storage_partition_state`),
+    // which holds one row per tenant partition, and skip tenants whose graph has
+    // not changed since their last consolidation. This replaces a global
+    // `SELECT DISTINCT` scan over the whole node index and short-circuits idle
+    // tenants entirely.
+    moa_memory_lifecycle::tenants_needing_consolidation(pool)
+        .await
+        .map_err(|error| {
+            TerminalError::new(format!("discover consolidation tenants: {error}")).into()
+        })
 }
 
 fn build_dispatch_plan(
-    mut tenant_ids: Vec<TenantId>,
+    mut tenant_cursors: Vec<TenantConsolidationCursor>,
     target_date: NaiveDate,
 ) -> Vec<ConsolidationDispatch> {
-    tenant_ids.sort_by_key(ToString::to_string);
-    tenant_ids.dedup();
+    tenant_cursors.sort_by_key(|cursor| cursor.tenant_id.to_string());
+    let mut deduped: Vec<TenantConsolidationCursor> = Vec::with_capacity(tenant_cursors.len());
+    for cursor in tenant_cursors {
+        match deduped.last_mut() {
+            Some(previous)
+                if previous.tenant_id == cursor.tenant_id
+                    && previous.changelog_version < cursor.changelog_version =>
+            {
+                previous.changelog_version = cursor.changelog_version;
+            }
+            Some(previous) if previous.tenant_id == cursor.tenant_id => {}
+            _ => deduped.push(cursor),
+        }
+    }
 
-    tenant_ids
+    deduped
         .into_iter()
-        .map(|tenant_id| ConsolidationDispatch {
-            workflow_id: consolidate_workflow_id(&tenant_id, target_date),
+        .map(|cursor| ConsolidationDispatch {
+            workflow_id: consolidate_workflow_id(&cursor.tenant_id, target_date),
             request: ConsolidateRequest {
-                tenant_id,
+                tenant_id: cursor.tenant_id,
                 target_date,
+                observed_changelog_version: Some(cursor.changelog_version),
             },
         })
         .collect()
@@ -224,7 +243,14 @@ mod tests {
     #[test]
     fn dispatch_plan_sorts_and_deduplicates_tenant_workflows() {
         // Pins: graph maintenance queues exactly one deterministic Consolidate workflow per tenant/date.
-        let plan = build_dispatch_plan(vec![tenant(2), tenant(1), tenant(1)], target_date());
+        let plan = build_dispatch_plan(
+            vec![
+                cursor(tenant(2), 12),
+                cursor(tenant(1), 7),
+                cursor(tenant(1), 9),
+            ],
+            target_date(),
+        );
 
         let workflow_ids = plan
             .iter()
@@ -243,6 +269,7 @@ mod tests {
                 (
                     dispatch.request.tenant_id.to_string(),
                     dispatch.request.target_date,
+                    dispatch.request.observed_changelog_version,
                 )
             })
             .collect::<Vec<_>>();
@@ -251,11 +278,13 @@ mod tests {
             vec![
                 (
                     "00000000-0000-0000-0000-000000000001".to_string(),
-                    target_date()
+                    target_date(),
+                    Some(9)
                 ),
                 (
                     "00000000-0000-0000-0000-000000000002".to_string(),
-                    target_date()
+                    target_date(),
+                    Some(12)
                 )
             ]
         );
@@ -288,5 +317,12 @@ mod tests {
 
     fn tenant(value: u128) -> TenantId {
         TenantId::from(uuid::Uuid::from_u128(value))
+    }
+
+    fn cursor(tenant_id: TenantId, changelog_version: i64) -> TenantConsolidationCursor {
+        TenantConsolidationCursor {
+            tenant_id,
+            changelog_version,
+        }
     }
 }

@@ -214,7 +214,12 @@ fn lineage_sink_env_uses_journal() -> bool {
 }
 
 async fn build_runtime_cache_store(config: &MoaConfig) -> Result<Arc<dyn RuntimeCacheStore>> {
-    let selected_backend = moa_runtime_store::select_runtime_cache_backend(&config.runtime_cache);
+    // Backend selection fails closed at the source: `auto` without a Redis URL
+    // (and without an explicit memory opt-in) returns a `ConfigError` rather than
+    // silently selecting the process-local cache. Propagate that error; an
+    // explicit `Memory` backend is rejected below with the orchestrator's own
+    // message.
+    let selected_backend = moa_runtime_store::select_runtime_cache_backend(&config.runtime_cache)?;
     match selected_backend {
         moa_runtime_store::ResolvedRuntimeCacheBackend::Memory => {
             bail!(
@@ -354,15 +359,18 @@ mod tests {
     #[tokio::test]
     async fn runtime_cache_auto_without_redis_url_rejects_memory_fallback() {
         // Pins: orchestrator startup cannot use process-local runtime coordination.
+        // Backend selection now fails closed at the source, so `auto` without a
+        // Redis URL surfaces the selector's ConfigError rather than the
+        // orchestrator's own bail.
         let config = MoaConfig::default();
         let error = match build_runtime_cache_store(&config).await {
             Ok(_) => panic!("auto memory runtime cache should fail startup"),
             Err(error) => error,
         };
 
-        assert_eq!(
-            error.to_string(),
-            "moa-orchestrator requires runtime_cache.backend = redis with runtime_cache.redis_url; memory runtime cache is process-local"
+        assert!(
+            error.to_string().contains("no Redis URL is configured"),
+            "expected fail-closed backend-selection error, got: {error}"
         );
     }
 

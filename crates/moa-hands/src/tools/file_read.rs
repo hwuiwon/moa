@@ -7,6 +7,7 @@ use std::time::Duration;
 use moa_core::{MoaError, Result, ToolOutput};
 use serde::Deserialize;
 use tokio::fs;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
 use crate::tools::docker_file::{
@@ -21,6 +22,9 @@ const LARGE_FILE_HINT_LINES: usize = 200;
 pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
     let params: FileReadInput = serde_json::from_str(input)?;
     let resolved = resolve_existing_sandbox_path(sandbox_dir, &params.path).await?;
+    if is_ranged(&params) {
+        return render_ranged_file_read(&resolved.path, &resolved.display_path, &params).await;
+    }
     let content = fs::read_to_string(&resolved.path).await?;
 
     Ok(render_file_read_output(
@@ -61,6 +65,9 @@ pub(crate) async fn execute_docker_bind_mount(
     let container_path = resolve_container_workspace_path(workspace_root, &params.path)?;
     let display_path = display_container_relative_path(workspace_root, &container_path);
     let resolved = resolve_existing_sandbox_path(host_workspace_root, &display_path).await?;
+    if is_ranged(&params) {
+        return render_ranged_file_read(&resolved.path, &display_path, &params).await;
+    }
     let content = fs::read_to_string(&resolved.path).await?;
     Ok(render_file_read_output(&content, &display_path, &params))
 }
@@ -222,18 +229,19 @@ fn render_file_read_output(
     let lines = split_lines(content);
     let total_lines = lines.len();
 
-    if params.start_line.is_none() && params.end_line.is_none() {
+    if !is_ranged(params) {
         if content.len() <= MAX_UNSCOPED_FILE_READ_BYTES && total_lines <= LARGE_FILE_HINT_LINES {
             return ToolOutput::text(content.to_string(), Duration::default());
         }
 
+        let end_line = total_lines.min(MAX_READ_RANGE_LINES);
         return ToolOutput::text(
             render_numbered_range(
-                &lines,
+                &lines[..end_line],
                 display_path,
                 total_lines,
                 1,
-                total_lines.min(MAX_READ_RANGE_LINES),
+                end_line,
                 true,
             ),
             Duration::default(),
@@ -243,7 +251,7 @@ fn render_file_read_output(
     let (start_line, end_line) = resolve_line_range(params, total_lines);
     ToolOutput::text(
         render_numbered_range(
-            &lines,
+            slice_for_range(&lines, start_line, end_line),
             display_path,
             total_lines,
             start_line,
@@ -252,6 +260,81 @@ fn render_file_read_output(
         ),
         Duration::default(),
     )
+}
+
+/// Renders a ranged `file_read` by streaming the file and materializing only the
+/// requested window, so a bounded range on a large file does not load the whole
+/// file into memory. The full file is still streamed to report an accurate total
+/// line count, but peak allocation is bounded to the window size.
+async fn render_ranged_file_read(
+    path: &Path,
+    display_path: &str,
+    params: &FileReadInput,
+) -> Result<ToolOutput> {
+    let collect_start = params.start_line.unwrap_or(1).max(1);
+    let collect_end = params
+        .end_line
+        .map(|end| end.min(collect_start.saturating_add(MAX_READ_RANGE_LINES - 1)))
+        .unwrap_or_else(|| collect_start.saturating_add(MAX_READ_RANGE_LINES - 1));
+
+    let mut reader = BufReader::new(fs::File::open(path).await?);
+    let mut window: Vec<String> = Vec::new();
+    let mut total_lines = 0usize;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).await? == 0 {
+            break;
+        }
+        total_lines += 1;
+        if total_lines >= collect_start && total_lines <= collect_end {
+            window.push(line.clone());
+        }
+    }
+
+    let (start_line, end_line) = resolve_line_range(params, total_lines);
+    // The resolved start can only fall below the collected window when the file is
+    // shorter than the requested start (a clamp to `total_lines`); that window is
+    // empty, so fall back to a full read for those rare out-of-range requests.
+    if start_line != 0 && start_line < collect_start {
+        let content = fs::read_to_string(path).await?;
+        return Ok(render_file_read_output(&content, display_path, params));
+    }
+
+    let window_refs: Vec<&str> = window.iter().map(String::as_str).collect();
+    let range: &[&str] = if start_line == 0 || end_line == 0 || start_line > end_line {
+        &[]
+    } else {
+        let from = start_line - collect_start;
+        let to = (end_line - collect_start + 1).min(window_refs.len());
+        &window_refs[from..to]
+    };
+
+    Ok(ToolOutput::text(
+        render_numbered_range(
+            range,
+            display_path,
+            total_lines,
+            start_line,
+            end_line,
+            false,
+        ),
+        Duration::default(),
+    ))
+}
+
+fn is_ranged(params: &FileReadInput) -> bool {
+    params.start_line.is_some() || params.end_line.is_some()
+}
+
+/// Returns the `start_line..=end_line` slice of already-loaded lines, or empty
+/// when the range is degenerate or out of bounds.
+fn slice_for_range<'a>(lines: &'a [&'a str], start_line: usize, end_line: usize) -> &'a [&'a str] {
+    if start_line == 0 || end_line == 0 || start_line > end_line || start_line > lines.len() {
+        return &[];
+    }
+    let end = end_line.min(lines.len());
+    &lines[start_line - 1..end]
 }
 
 fn resolve_line_range(params: &FileReadInput, total_lines: usize) -> (usize, usize) {
@@ -273,7 +356,7 @@ fn split_lines(content: &str) -> Vec<&str> {
 }
 
 fn render_numbered_range(
-    lines: &[&str],
+    range_lines: &[&str],
     display_path: &str,
     total_lines: usize,
     start_line: usize,
@@ -290,7 +373,7 @@ fn render_numbered_range(
     }
 
     let width = end_line.to_string().len().max(2);
-    for (offset, line) in lines[start_line - 1..end_line].iter().enumerate() {
+    for (offset, line) in range_lines.iter().enumerate() {
         output.push_str(&format!(
             "{:>width$}\t{}",
             start_line + offset,

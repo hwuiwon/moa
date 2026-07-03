@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -9,11 +10,20 @@ use moa_core::{
     ContextMessage, ContextProcessor, MessageRole, ProcessorOutput, Result, WorkingContext,
     estimate_text_tokens,
 };
+use moka::future::Cache;
 use tokio::process::Command;
 
 use super::memory::MEMORY_REMINDER_PREFIX;
 
 pub(crate) const WORKSPACE_ROOT_METADATA_KEY: &str = "_moa.runtime.workspace_root";
+
+/// Maximum number of workspace roots whose git branch is cached process-wide.
+const GIT_BRANCH_CACHE_CAPACITY: u64 = 64;
+/// How long a detected git branch is reused before re-forking `git`.
+const GIT_BRANCH_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// Cache of workspace root to detected git branch, shared across turns.
+type GitBranchCache = Cache<PathBuf, Option<String>>;
 
 /// Clock abstraction used to freeze runtime context in tests.
 pub trait Clock: Send + Sync {
@@ -56,12 +66,19 @@ impl Clock for FixedClock {
 /// Emits a trailing runtime reminder message that can vary between turns.
 pub struct RuntimeContextProcessor {
     clock: Arc<dyn Clock>,
+    git_branch_cache: GitBranchCache,
 }
 
 impl RuntimeContextProcessor {
     /// Creates a runtime-context processor using the provided clock.
     pub fn new(clock: Arc<dyn Clock>) -> Self {
-        Self { clock }
+        Self {
+            clock,
+            git_branch_cache: Cache::builder()
+                .max_capacity(GIT_BRANCH_CACHE_CAPACITY)
+                .time_to_live(GIT_BRANCH_CACHE_TTL)
+                .build(),
+        }
     }
 
     /// Creates a runtime-context processor with a deterministic fixed clock.
@@ -88,7 +105,7 @@ impl ContextProcessor for RuntimeContextProcessor {
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
-        let reminder = build_runtime_reminder(self.clock.now(), ctx).await;
+        let reminder = build_runtime_reminder(self.clock.now(), ctx, &self.git_branch_cache).await;
         let insertion_index = runtime_context_insertion_index(&ctx.messages);
         let tokens_added = estimate_text_tokens(&reminder);
         ctx.insert_message(insertion_index, ContextMessage::user(reminder));
@@ -101,7 +118,11 @@ impl ContextProcessor for RuntimeContextProcessor {
     }
 }
 
-async fn build_runtime_reminder(now: DateTime<Utc>, ctx: &WorkingContext) -> String {
+async fn build_runtime_reminder(
+    now: DateTime<Utc>,
+    ctx: &WorkingContext,
+    git_branch_cache: &GitBranchCache,
+) -> String {
     let workspace_root = workspace_root_from_context(ctx);
     let project_name = workspace_root
         .as_ref()
@@ -109,7 +130,7 @@ async fn build_runtime_reminder(now: DateTime<Utc>, ctx: &WorkingContext) -> Str
         .and_then(|segment| segment.to_str())
         .map(ToOwned::to_owned);
     let git_branch = match workspace_root.as_ref() {
-        Some(path) => detect_git_branch(path).await,
+        Some(path) => git_branch_cached(git_branch_cache, path).await,
         None => None,
     };
 
@@ -156,6 +177,20 @@ fn runtime_context_insertion_index(messages: &[ContextMessage]) -> usize {
         insertion_index -= 1;
     }
     insertion_index
+}
+
+/// Returns the workspace git branch, reusing a recent cached value to avoid
+/// forking `git` on every turn. A short TTL bounds staleness after a checkout.
+async fn git_branch_cached(cache: &GitBranchCache, workspace_root: &Path) -> Option<String> {
+    if let Some(cached) = cache.get(workspace_root).await {
+        return cached;
+    }
+
+    let branch = detect_git_branch(workspace_root).await;
+    cache
+        .insert(workspace_root.to_path_buf(), branch.clone())
+        .await;
+    branch
 }
 
 async fn detect_git_branch(workspace_root: &Path) -> Option<String> {

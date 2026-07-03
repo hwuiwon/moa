@@ -78,6 +78,16 @@ pub struct PostgresSessionStore {
     attachment_store: AttachmentObjectStore,
 }
 
+/// One event to append via [`PostgresSessionStore::append_events`].
+pub struct EventAppend {
+    /// The event to persist.
+    pub event: Event,
+    /// Optional idempotency key. A retried append with the same
+    /// `(session_id, dedupe_key)` returns the first persisted record instead of
+    /// inserting a second event; `None` always appends.
+    pub dedupe_key: Option<String>,
+}
+
 /// Request to replace a session's active channel route binding.
 pub struct SessionChannelBindingReplacement<'a> {
     /// Tenant that owns the contact and session.
@@ -213,6 +223,7 @@ impl PostgresSessionStore {
             attachment_store,
         };
         store.refresh_active_session_metric().await?;
+        store.spawn_active_session_gauge_refresher();
         Ok(store)
     }
 
@@ -431,6 +442,7 @@ impl PostgresSessionStore {
             attachment_store: backends.attachment_store,
         };
         store.refresh_active_session_metric().await?;
+        store.spawn_active_session_gauge_refresher();
         Ok(store)
     }
 
@@ -494,6 +506,33 @@ impl PostgresSessionStore {
             ),
             None => table_name.to_string(),
         }
+    }
+
+    /// Starts a background task that periodically refreshes the active-session
+    /// gauge, so session create/status/delete never run a `COUNT(*)` inline.
+    ///
+    /// Called only from the production constructors; the task holds a pool handle
+    /// and exits once that pool is closed. Schema-isolated test stores skip it.
+    fn spawn_active_session_gauge_refresher(&self) {
+        const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+        let pool = self.pool.clone();
+        let sessions_table = self.table_name("sessions");
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(REFRESH_INTERVAL);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                if pool.is_closed() {
+                    break;
+                }
+                match helpers::count_running_sessions(&pool, &sessions_table).await {
+                    Ok(active) => moa_observability::record_sessions_active(active),
+                    Err(error) => {
+                        warn!(%error, "failed to refresh active session gauge");
+                    }
+                }
+            }
+        });
     }
 }
 

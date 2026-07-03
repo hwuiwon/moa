@@ -43,6 +43,11 @@ pub async fn compute_quality_scores(
 
     let updated = sqlx::query_scalar::<_, i64>(
         r#"
+        -- `segment_ranges` is bounded to the same lookback window ($2) as the
+        -- retrieval lineage below via `started_at`, so the scan touches only
+        -- recently resolved task segments instead of every segment ever recorded
+        -- for the partition. Segments older than the window are excluded, matching
+        -- the intent of scoring recent retrieval outcomes only.
         WITH segment_ranges AS (
             SELECT
                 session_id,
@@ -65,6 +70,7 @@ pub async fn compute_quality_scores(
             WHERE storage_partition_id = $1
               AND outcome IS NOT NULL
               AND turn_count > 0
+              AND started_at >= now() - ($2::text::interval)
         ),
         scored AS (
             SELECT

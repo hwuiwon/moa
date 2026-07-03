@@ -111,6 +111,7 @@ async fn tenant_consolidation_round_trip_through_restate() -> Result<()> {
             .json(&ConsolidateRequest {
                 tenant_id,
                 target_date,
+                observed_changelog_version: None,
             })
             .send()
             .await

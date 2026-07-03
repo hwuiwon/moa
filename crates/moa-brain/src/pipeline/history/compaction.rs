@@ -1,34 +1,48 @@
 //! History-stage checkpoint generation trigger.
 
-use moa_core::{EventRange, ModelTask, Result, WorkingContext};
+use moa_core::{EventRange, EventRecord, ModelTask, Result, WorkingContext};
 
-use crate::compaction::maybe_compact_events;
+use crate::compaction::{maybe_compact_events, watermark_may_compact};
 
 use super::{CompiledHistory, HistoryCompiler};
 
 impl HistoryCompiler {
-    pub(super) async fn maybe_emit_checkpoint(&self, ctx: &WorkingContext) -> Result<bool> {
-        if self.llm_provider.is_none() {
+    /// Returns whether compaction might fire this turn, using only the cheap
+    /// session-row watermark (event count and last checkpoint sequence).
+    ///
+    /// When this returns `false` the incremental-snapshot fast path can run
+    /// without reading the full event log; only an open gate justifies the
+    /// bounded full read in [`Self::compile_full_messages_compacting`].
+    pub(super) async fn compaction_gate_open(&self, ctx: &WorkingContext) -> Result<bool> {
+        if self.llm_provider.is_none() || !self.compaction.enabled {
             return Ok(false);
         }
 
-        let events = self
-            .session_store
-            .get_events(ctx.session_id, EventRange::all())
-            .await?;
-
-        self.maybe_emit_checkpoint_for_events(ctx, &events).await
+        let meta = self.session_store.get_session(ctx.session_id).await?;
+        Ok(watermark_may_compact(
+            &self.compaction,
+            meta.event_count,
+            meta.last_checkpoint_seq,
+            ctx.token_budget,
+        ))
     }
 
+    /// Runs compaction against an already-loaded event list, returning the
+    /// emitted checkpoint record when one fired so the caller can fold it into
+    /// the list without re-reading the log.
     async fn maybe_emit_checkpoint_for_events(
         &self,
         ctx: &WorkingContext,
-        events: &[moa_core::EventRecord],
-    ) -> Result<bool> {
+        events: &[EventRecord],
+    ) -> Result<Option<EventRecord>> {
         let Some(llm_provider) = &self.llm_provider else {
-            return Ok(false);
+            return Ok(None);
         };
 
+        // The summarization LLM call runs inline here. Item 1's watermark gate
+        // makes this path rare (only when the tail actually crosses the
+        // threshold), and the history stage has no durable self-call to defer
+        // the summary to, so keeping it inline avoids a cross-service hop.
         maybe_compact_events(
             &self.compaction,
             &*self.session_store,
@@ -41,7 +55,10 @@ impl HistoryCompiler {
         .await
     }
 
-    pub(super) async fn compile_full_messages(
+    /// Reads the full log once, applies compaction, and compiles the result,
+    /// folding any freshly emitted checkpoint into the in-memory list instead of
+    /// re-reading the log.
+    pub(super) async fn compile_full_messages_compacting(
         &self,
         ctx: &WorkingContext,
         remaining_budget: usize,
@@ -51,12 +68,26 @@ impl HistoryCompiler {
             .get_events(ctx.session_id, EventRange::all())
             .await?;
 
-        if self.maybe_emit_checkpoint_for_events(ctx, &events).await? {
-            events = self
-                .session_store
-                .get_events(ctx.session_id, EventRange::all())
-                .await?;
+        if let Some(checkpoint) = self.maybe_emit_checkpoint_for_events(ctx, &events).await? {
+            events.push(checkpoint);
         }
+
+        self.compile_messages_with_stats(&events, remaining_budget)
+    }
+
+    /// Reads the full log once and compiles it without attempting compaction.
+    ///
+    /// Used on the full-replay fallback when the watermark gate is closed, so a
+    /// missing or stale snapshot does not pay for a redundant compaction pass.
+    pub(super) async fn compile_full_messages(
+        &self,
+        ctx: &WorkingContext,
+        remaining_budget: usize,
+    ) -> Result<CompiledHistory> {
+        let events = self
+            .session_store
+            .get_events(ctx.session_id, EventRange::all())
+            .await?;
 
         self.compile_messages_with_stats(&events, remaining_budget)
     }

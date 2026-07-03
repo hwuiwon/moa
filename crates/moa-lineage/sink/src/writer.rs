@@ -103,6 +103,7 @@ pub struct LineageWriter;
 pub(crate) struct DurableJournal {
     inner: Arc<StdMutex<Journal>>,
     next_seq: Arc<AtomicU64>,
+    replay_cursor: Arc<AtomicU64>,
 }
 
 impl DurableJournal {
@@ -113,6 +114,9 @@ impl DurableJournal {
         Ok(Self {
             inner: Arc::new(StdMutex::new(journal)),
             next_seq: Arc::new(AtomicU64::new(next_seq)),
+            // Cursor 0 forces the first replay to scan every retained row for crash recovery;
+            // journaled sequence numbers always start at 1.
+            replay_cursor: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -126,34 +130,63 @@ impl DurableJournal {
         .await?
     }
 
-    pub(crate) fn append_accepted_event_sync(&self, evt: LineageEvent) -> Result<u64> {
-        let (seq, _) = self.append_event_row_sync(evt)?;
-        Ok(seq)
-    }
-
+    /// Appends one event under the journal lock so that fjall insert order matches sequence
+    /// order. This invariant lets the writer's low-water-mark replay cursor advance safely: a
+    /// lower sequence can never become visible after a higher one has already been scanned.
     fn append_event_row_sync(&self, evt: LineageEvent) -> Result<(u64, PendingRow)> {
         let row = PendingRow::from_event(evt)?;
         let payload = serde_json::to_vec(&row)?;
+        let journal = self.lock()?;
         let seq = self.next_seq.fetch_add(1, Ordering::AcqRel);
-        self.lock()?.append(seq, &payload)?;
+        journal.append(seq, &payload)?;
+        drop(journal);
         record_journal_acceptance(1);
         Ok((seq, row))
     }
 
+    /// Appends a batch of events under one journal lock and one durability sync (group commit).
+    ///
+    /// Payloads are serialized before the lock is taken; only sequence assignment and the batched
+    /// fjall insert happen under the lock, so the whole batch shares a single fsync window while
+    /// preserving the insert-order-equals-sequence-order invariant.
     async fn append_event_rows(&self, events: Vec<LineageEvent>) -> Result<Vec<(u64, PendingRow)>> {
         let journal = self.clone();
         tokio::task::spawn_blocking(move || {
-            events
-                .into_iter()
-                .map(|event| journal.append_event_row_sync(event))
-                .collect::<Result<Vec<_>>>()
+            let mut rows = Vec::with_capacity(events.len());
+            let mut payloads = Vec::with_capacity(events.len());
+            for event in events {
+                let row = PendingRow::from_event(event)?;
+                payloads.push(serde_json::to_vec(&row)?);
+                rows.push(row);
+            }
+
+            let guard = journal.lock()?;
+            let mut entries = Vec::with_capacity(payloads.len());
+            let mut out = Vec::with_capacity(payloads.len());
+            for (row, payload) in rows.into_iter().zip(payloads) {
+                let seq = journal.next_seq.fetch_add(1, Ordering::AcqRel);
+                entries.push((seq, payload));
+                out.push((seq, row));
+            }
+            guard.append_batch(&entries)?;
+            drop(guard);
+            record_journal_acceptance(entries.len() as u64);
+            Ok(out)
         })
         .await?
     }
 
-    async fn replay(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+    async fn replay_from(&self, after_seq: u64) -> Result<Vec<(u64, Vec<u8>)>> {
         let journal = self.clone();
-        tokio::task::spawn_blocking(move || journal.lock()?.replay()).await?
+        tokio::task::spawn_blocking(move || journal.lock()?.replay_from(after_seq)).await?
+    }
+
+    fn replay_cursor(&self) -> u64 {
+        self.replay_cursor.load(Ordering::Acquire)
+    }
+
+    fn advance_replay_cursor(&self, seq: u64) {
+        self.replay_cursor.fetch_max(seq, Ordering::AcqRel);
     }
 
     async fn ack_range(&self, lo: u64, hi: u64) -> Result<()> {
@@ -363,9 +396,10 @@ async fn replay_pending(
     pool: &sqlx::PgPool,
     stats: &Arc<SharedWriterStats>,
 ) -> Result<()> {
-    let pending = journal.replay().await?;
-    record_journal_depth(stats, pending.len() as u64);
+    let cursor = journal.replay_cursor();
+    let pending = journal.replay_from(cursor).await?;
     if pending.is_empty() {
+        record_journal_depth(stats, journal.approximate_len_async().await? as u64);
         return Ok(());
     }
 
@@ -374,11 +408,16 @@ async fn replay_pending(
         .map(|(_, payload)| decode_pending_row(payload))
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let disposition = write_pending_rows_or_dead_letter(pool, &rows).await?;
-    if should_ack_journal(disposition)
-        && let (Some((lo, _)), Some((hi, _))) = (pending.first(), pending.last())
-    {
+    let (Some((lo, _)), Some((hi, _))) = (pending.first(), pending.last()) else {
+        return Ok(());
+    };
+    if should_ack_journal(disposition) {
         journal.ack_range(*lo, *hi).await?;
     }
+    // Advance the low-water mark past this batch regardless of disposition so retained
+    // (dead-lettered) rows below the cursor are not re-scanned or re-attempted on every
+    // subsequent notification, keeping replay incremental instead of O(N^2).
+    journal.advance_replay_cursor(*hi);
     if disposition == WriteDisposition::Written {
         record_flush(stats, rows.len());
     }
@@ -619,12 +658,12 @@ async fn write_rows(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Result<()> {
     let mut tx = pool.begin().await?;
     apply_compliance_hashes(&mut tx, &mut rows).await?;
 
-    sqlx::query("DROP TABLE IF EXISTS lineage_copy")
-        .execute(&mut *tx)
-        .await?;
+    // Reuse a persistent per-connection staging table instead of dropping and recreating one
+    // per drain: `ON COMMIT DELETE ROWS` empties it at each commit, so there is no catalog churn
+    // and prepared-statement caching for the COPY/INSERT is preserved.
     sqlx::query(
         r#"
-        CREATE TEMP TABLE lineage_copy (
+        CREATE TEMP TABLE IF NOT EXISTS lineage_copy (
             turn_id        UUID        NOT NULL,
             session_id     UUID        NOT NULL,
             user_id        TEXT        NOT NULL,
@@ -635,7 +674,7 @@ async fn write_rows(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Result<()> {
             payload        JSONB       NOT NULL,
             integrity_hash BYTEA       NOT NULL,
             prev_hash      BYTEA
-        );
+        ) ON COMMIT DELETE ROWS;
         "#,
     )
     .execute(&mut *tx)
@@ -702,56 +741,76 @@ async fn write_rows(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Result<()> {
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("DROP TABLE IF EXISTS lineage_copy")
-        .execute(&mut *tx)
-        .await?;
     tx.commit().await?;
     Ok(())
 }
 
+/// In-memory outcome of folding one compliance partition's hash chain over a flush batch.
+struct PartitionChainOutcome {
+    /// Chain tip after the last newly linked row, when at least one row was linked.
+    final_hash: Option<Vec<u8>>,
+    /// Timestamp of the last newly linked row, mirrored into the partition state.
+    last_ts: Option<DateTime<Utc>>,
+    /// Number of rows newly linked into the chain (existing rows are reused, not re-linked).
+    new_rows: usize,
+}
+
+/// Applies compliance hash chaining to a flush batch with per-partition (not per-row) round trips.
+///
+/// The enabled-tenant check runs once for the whole batch. For each compliance-enabled partition
+/// the advisory lock is taken once, the chain tip is read once `FOR UPDATE`, already-persisted
+/// rows are fetched once for idempotent reuse, the chain is folded in memory, and the partition
+/// state is updated once. This turns a `512`-row batch from `512+` serial round trips into a small
+/// constant per distinct partition while producing the same chain as a per-row walk.
 async fn apply_compliance_hashes(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     rows: &mut [LineageRow],
 ) -> Result<()> {
-    for row in rows {
-        let enabled = sqlx::query_scalar::<_, bool>(
-            r#"
-            SELECT COALESCE((
-                SELECT enabled
-                FROM analytics.compliance_tenants
-                WHERE storage_partition_id = $1
-            ), FALSE)
-            "#,
-        )
-        .bind(&row.storage_partition_id)
-        .fetch_one(&mut **tx)
-        .await?;
-        if !enabled {
-            continue;
-        }
+    if rows.is_empty() {
+        return Ok(());
+    }
 
+    let partitions: Vec<String> = rows
+        .iter()
+        .map(|row| row.storage_partition_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let enabled: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT storage_partition_id
+        FROM analytics.compliance_tenants
+        WHERE storage_partition_id = ANY($1) AND enabled
+        "#,
+    )
+    .bind(&partitions)
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .collect();
+    if enabled.is_empty() {
+        return Ok(());
+    }
+
+    // Group row indices by enabled partition, preserving batch order within a partition so the
+    // folded chain matches a per-row walk. Locking in sorted partition order keeps the advisory
+    // lock acquisition order consistent across concurrent writers.
+    let mut by_partition: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (idx, row) in rows.iter().enumerate() {
+        if enabled.contains(&row.storage_partition_id) {
+            by_partition
+                .entry(row.storage_partition_id.clone())
+                .or_default()
+                .push(idx);
+        }
+    }
+
+    for (partition, indices) in by_partition {
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-            .bind(format!("compliance:{}", row.storage_partition_id))
+            .bind(format!("compliance:{partition}"))
             .execute(&mut **tx)
             .await?;
-
-        if let Some(existing) = sqlx::query(
-            r#"
-            SELECT integrity_hash, prev_hash
-            FROM analytics.turn_lineage
-            WHERE turn_id = $1 AND record_kind = $2 AND ts = $3
-            "#,
-        )
-        .bind(row.turn_id)
-        .bind(row.record_kind)
-        .bind(row.ts)
-        .fetch_optional(&mut **tx)
-        .await?
-        {
-            row.integrity_hash = existing.try_get("integrity_hash")?;
-            row.prev_hash = existing.try_get("prev_hash")?;
-            continue;
-        }
 
         sqlx::query(
             r#"
@@ -760,7 +819,7 @@ async fn apply_compliance_hashes(
             ON CONFLICT (storage_partition_id) DO NOTHING
             "#,
         )
-        .bind(&row.storage_partition_id)
+        .bind(&partition)
         .execute(&mut **tx)
         .await?;
 
@@ -772,30 +831,113 @@ async fn apply_compliance_hashes(
             FOR UPDATE
             "#,
         )
-        .bind(&row.storage_partition_id)
+        .bind(&partition)
         .fetch_one(&mut **tx)
         .await?;
-        let prev = prev_hash.as_deref().map(hash_from_slice).transpose()?;
-        let (integrity_hash, prev) = HashChain::link(prev, &row.payload)?;
-        row.integrity_hash = integrity_hash.as_bytes().to_vec();
-        row.prev_hash = prev.map(|hash| hash.as_bytes().to_vec());
 
-        sqlx::query(
-            r#"
-            UPDATE analytics.compliance_storage_partition_state
-            SET last_integrity_hash = $2,
-                last_ts = $3,
-                record_count = record_count + 1
-            WHERE storage_partition_id = $1
-            "#,
-        )
-        .bind(&row.storage_partition_id)
-        .bind(&row.integrity_hash)
-        .bind(row.ts)
-        .execute(&mut **tx)
-        .await?;
+        let existing = fetch_existing_chain_rows(tx, &partition, rows, &indices).await?;
+        let outcome = fold_partition_chain(prev_hash.as_deref(), rows, &indices, &existing)?;
+
+        if outcome.new_rows > 0 {
+            sqlx::query(
+                r#"
+                UPDATE analytics.compliance_storage_partition_state
+                SET last_integrity_hash = $2,
+                    last_ts = $3,
+                    record_count = record_count + $4
+                WHERE storage_partition_id = $1
+                "#,
+            )
+            .bind(&partition)
+            .bind(&outcome.final_hash)
+            .bind(outcome.last_ts)
+            .bind(outcome.new_rows as i64)
+            .execute(&mut **tx)
+            .await?;
+        }
     }
     Ok(())
+}
+
+/// Map from a lineage row identity to its already-persisted `(integrity_hash, prev_hash)`.
+type ExistingChainRows =
+    std::collections::HashMap<(Uuid, i16, DateTime<Utc>), (Vec<u8>, Option<Vec<u8>>)>;
+
+/// Fetches already-persisted chain hashes for the batch's rows in one query for idempotent reuse.
+async fn fetch_existing_chain_rows(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    partition: &str,
+    rows: &[LineageRow],
+    indices: &[usize],
+) -> Result<ExistingChainRows> {
+    let turn_ids: Vec<Uuid> = indices.iter().map(|&idx| rows[idx].turn_id).collect();
+    let record_kinds: Vec<i16> = indices.iter().map(|&idx| rows[idx].record_kind).collect();
+    let timestamps: Vec<DateTime<Utc>> = indices.iter().map(|&idx| rows[idx].ts).collect();
+
+    let existing_rows = sqlx::query(
+        r#"
+        SELECT turn_id, record_kind, ts, integrity_hash, prev_hash
+        FROM analytics.turn_lineage
+        WHERE storage_partition_id = $1
+          AND (turn_id, record_kind, ts) IN (
+            SELECT * FROM UNNEST($2::uuid[], $3::smallint[], $4::timestamptz[])
+          )
+        "#,
+    )
+    .bind(partition)
+    .bind(&turn_ids)
+    .bind(&record_kinds)
+    .bind(&timestamps)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let mut existing = ExistingChainRows::with_capacity(existing_rows.len());
+    for row in existing_rows {
+        let turn_id: Uuid = row.try_get("turn_id")?;
+        let record_kind: i16 = row.try_get("record_kind")?;
+        let ts: DateTime<Utc> = row.try_get("ts")?;
+        let integrity_hash: Vec<u8> = row.try_get("integrity_hash")?;
+        let prev_hash: Option<Vec<u8>> = row.try_get("prev_hash")?;
+        existing.insert((turn_id, record_kind, ts), (integrity_hash, prev_hash));
+    }
+    Ok(existing)
+}
+
+/// Folds a compliance partition's hash chain over the batch's rows, in place.
+///
+/// Rows already present in `existing` reuse their stored hashes and do not advance the chain, so
+/// replayed batches are idempotent. New rows are linked from the current tip and mutate the batch
+/// rows' `integrity_hash`/`prev_hash` fields.
+fn fold_partition_chain(
+    prev: Option<&[u8]>,
+    rows: &mut [LineageRow],
+    indices: &[usize],
+    existing: &ExistingChainRows,
+) -> Result<PartitionChainOutcome> {
+    let mut prev = prev.map(hash_from_slice).transpose()?;
+    let mut final_hash = None;
+    let mut last_ts = None;
+    let mut new_rows = 0;
+    for &idx in indices {
+        let key = (rows[idx].turn_id, rows[idx].record_kind, rows[idx].ts);
+        if let Some((integrity_hash, prev_hash)) = existing.get(&key) {
+            rows[idx].integrity_hash = integrity_hash.clone();
+            rows[idx].prev_hash = prev_hash.clone();
+            continue;
+        }
+        let (integrity_hash, prev_echo) = HashChain::link(prev, &rows[idx].payload)?;
+        rows[idx].integrity_hash = integrity_hash.as_bytes().to_vec();
+        rows[idx].prev_hash = prev_echo.map(|hash| hash.as_bytes().to_vec());
+        prev = Some(integrity_hash);
+        final_hash = Some(integrity_hash.as_bytes().to_vec());
+        last_ts = Some(rows[idx].ts);
+        new_rows += 1;
+    }
+    Ok(PartitionChainOutcome {
+        final_hash,
+        last_ts,
+        new_rows,
+    })
 }
 
 fn render_copy_csv(rows: &[LineageRow]) -> String {
@@ -827,13 +969,12 @@ async fn write_score_rows(pool: &sqlx::PgPool, rows: &[ScoreRow]) -> Result<()> 
         return Ok(());
     }
 
-    let mut conn = pool.acquire().await?;
-    sqlx::query("DROP TABLE IF EXISTS lineage_scores_copy")
-        .execute(&mut *conn)
-        .await?;
+    let mut tx = pool.begin().await?;
+    // Reuse a persistent per-connection staging table (see `write_rows`): `ON COMMIT DELETE ROWS`
+    // clears it at commit, avoiding per-drain catalog churn and preserving statement caching.
     sqlx::query(
         r#"
-        CREATE TEMP TABLE lineage_scores_copy (
+        CREATE TEMP TABLE IF NOT EXISTS lineage_scores_copy (
             score_id           UUID             NOT NULL,
             ts                 TIMESTAMPTZ      NOT NULL,
             storage_partition_id       TEXT             NOT NULL,
@@ -852,14 +993,14 @@ async fn write_score_rows(pool: &sqlx::PgPool, rows: &[ScoreRow]) -> Result<()> 
             source             TEXT             NOT NULL,
             model_or_evaluator TEXT             NOT NULL,
             comment            TEXT
-        );
+        ) ON COMMIT DELETE ROWS;
         "#,
     )
-    .execute(&mut *conn)
+    .execute(&mut *tx)
     .await?;
 
     let copy_payload = render_score_copy_csv(rows);
-    let mut copy = conn
+    let mut copy = (*tx)
         .copy_in_raw(
             r#"
             COPY lineage_scores_copy (
@@ -953,12 +1094,10 @@ async fn write_score_rows(pool: &sqlx::PgPool, rows: &[ScoreRow]) -> Result<()> 
             comment = EXCLUDED.comment
         "#,
     )
-    .execute(&mut *conn)
+    .execute(&mut *tx)
     .await?;
 
-    sqlx::query("DROP TABLE IF EXISTS lineage_scores_copy")
-        .execute(&mut *conn)
-        .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1219,10 +1358,126 @@ fn score_source_to_db(source: ScoreSource) -> &'static str {
 mod tests {
     use chrono::Utc;
     use moa_core::StoragePartitionId;
+    use moa_lineage_core::chain::HashChain;
     use moa_lineage_core::{
         LineageEvent, ScoreRecord, ScoreSource, ScoreTarget, ScoreValue, TurnId,
     };
     use uuid::Uuid;
+
+    fn test_lineage_row(partition: &str, payload: serde_json::Value) -> super::LineageRow {
+        super::LineageRow {
+            turn_id: Uuid::now_v7(),
+            session_id: Uuid::now_v7(),
+            user_id: "chain-user".to_string(),
+            storage_partition_id: partition.to_string(),
+            ts: Utc::now(),
+            tier: 1,
+            record_kind: 1,
+            payload,
+            integrity_hash: Vec::new(),
+            prev_hash: None,
+        }
+    }
+
+    #[test]
+    fn append_batch_groups_appends_into_one_persist() {
+        // Pins: a batched append performs exactly one durability sync regardless of batch size
+        // (group commit), while single appends sync per row.
+        use crate::fjall_journal::Journal;
+
+        let dir = std::env::temp_dir().join(format!("moa-lineage-groupcommit-{}", Uuid::now_v7()));
+        let journal = Journal::open(&dir).expect("journal should open");
+
+        let baseline = journal.persist_count();
+        let entries: Vec<(u64, Vec<u8>)> = (1..=5).map(|seq| (seq, vec![seq as u8; 8])).collect();
+        journal
+            .append_batch(&entries)
+            .expect("batch append should sync");
+        assert_eq!(
+            journal.persist_count() - baseline,
+            1,
+            "a five-row batch append must sync exactly once"
+        );
+        assert_eq!(journal.approximate_len(), 5);
+
+        let before_single = journal.persist_count();
+        journal
+            .append(6, b"one")
+            .expect("single append should sync");
+        journal
+            .append(7, b"two")
+            .expect("single append should sync");
+        assert_eq!(
+            journal.persist_count() - before_single,
+            2,
+            "single appends must sync once per row"
+        );
+    }
+
+    #[test]
+    fn fold_partition_chain_matches_sequential_link_walk() {
+        // Pins: the batched in-memory fold yields the same per-row integrity/prev hashes and the
+        // same final tip as a straight per-row HashChain::link walk from the same starting tip.
+        let payloads: Vec<serde_json::Value> = (0..4)
+            .map(|n| serde_json::json!({ "event": "e", "n": n }))
+            .collect();
+        let partition = "chain-partition";
+        let mut rows: Vec<super::LineageRow> = payloads
+            .iter()
+            .map(|payload| test_lineage_row(partition, payload.clone()))
+            .collect();
+        let indices: Vec<usize> = (0..rows.len()).collect();
+        let existing = super::ExistingChainRows::new();
+
+        let outcome = super::fold_partition_chain(None, &mut rows, &indices, &existing)
+            .expect("fold should succeed");
+        assert_eq!(outcome.new_rows, 4);
+
+        let mut prev = None;
+        let mut expected_final = None;
+        for (row, payload) in rows.iter().zip(&payloads) {
+            let (integrity, prev_echo) = HashChain::link(prev, payload).expect("link");
+            assert_eq!(row.integrity_hash, integrity.as_bytes().to_vec());
+            assert_eq!(
+                row.prev_hash,
+                prev_echo.map(|hash| hash.as_bytes().to_vec())
+            );
+            prev = Some(integrity);
+            expected_final = Some(integrity.as_bytes().to_vec());
+        }
+        assert_eq!(outcome.final_hash, expected_final);
+        assert_eq!(outcome.last_ts, Some(rows[3].ts));
+    }
+
+    #[test]
+    fn fold_partition_chain_reuses_existing_rows_without_advancing() {
+        // Pins: a row already present in turn_lineage reuses its stored hashes and does not
+        // advance the chain tip, so replayed batches are idempotent.
+        let payload_a = serde_json::json!({ "event": "a" });
+        let payload_b = serde_json::json!({ "event": "b" });
+        let partition = "chain-partition";
+        let mut rows = vec![
+            test_lineage_row(partition, payload_a),
+            test_lineage_row(partition, payload_b.clone()),
+        ];
+        let indices = vec![0_usize, 1];
+
+        let mut existing = super::ExistingChainRows::new();
+        existing.insert(
+            (rows[0].turn_id, rows[0].record_kind, rows[0].ts),
+            (vec![9_u8; 32], Some(vec![8_u8; 32])),
+        );
+
+        let outcome = super::fold_partition_chain(None, &mut rows, &indices, &existing)
+            .expect("fold should succeed");
+
+        assert_eq!(rows[0].integrity_hash, vec![9_u8; 32]);
+        assert_eq!(rows[0].prev_hash, Some(vec![8_u8; 32]));
+        assert_eq!(outcome.new_rows, 1);
+        let (expected, _) = HashChain::link(None, &payload_b).expect("link");
+        assert_eq!(rows[1].integrity_hash, expected.as_bytes().to_vec());
+        assert_eq!(outcome.final_hash, Some(expected.as_bytes().to_vec()));
+    }
 
     #[test]
     fn pending_row_routes_eval_events_to_scores() {

@@ -10,6 +10,7 @@ async-trait.workspace = true
 moa-authz-schema.workspace = true
 moa-core.workspace = true
 moa-ocsf.workspace = true
+moka.workspace = true
 reqwest.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

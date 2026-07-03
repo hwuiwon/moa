@@ -5,8 +5,9 @@
 //!     model that needs a specific provider.
 //!   * Hosted API and gateway/admin surfaces that need model capability metadata.
 //!
-//! Context windows and prices reflect public information as of 2026-04. Update
-//! this file when providers ship new models, extend windows, or change pricing.
+//! Context windows and prices reflect public provider documentation verified on
+//! 2026-07-02. Update this file when providers ship new models, extend windows,
+//! or change pricing.
 
 use std::time::Duration;
 
@@ -19,6 +20,59 @@ use moa_core::{
 pub const PROVIDER_ANTHROPIC: &str = "anthropic";
 pub const PROVIDER_OPENAI: &str = "openai";
 pub const PROVIDER_GOOGLE: &str = "google";
+
+/// Capability class of a chat model, used to keep LLM failover within a nearby
+/// capability band (a request should not fail over from, say, a frontier model
+/// to a light one). Ranked 0 (most capable) through 4 (least).
+///
+/// This is intentionally distinct from [`moa_core::ModelTier`], which is a coarse
+/// pricing/analytics tier (`Main`/`Auxiliary`); this is a finer capability ladder
+/// used for routing/failover decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityTier {
+    /// Most capable frontier models.
+    Frontier,
+    /// Top general-purpose models just below frontier.
+    Flagship,
+    /// Balanced cost/capability workhorses.
+    Balanced,
+    /// Fast, lower-cost models.
+    Fast,
+    /// Lightest, cheapest models.
+    Light,
+}
+
+impl CapabilityTier {
+    /// Returns the capability rank (0 = most capable, 4 = least).
+    #[must_use]
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Frontier => 0,
+            Self::Flagship => 1,
+            Self::Balanced => 2,
+            Self::Fast => 3,
+            Self::Light => 4,
+        }
+    }
+
+    /// Returns the number of capability tiers between two models.
+    #[must_use]
+    pub fn distance(self, other: Self) -> u8 {
+        self.rank().abs_diff(other.rank())
+    }
+
+    /// Returns a stable lowercase label for diagnostics and error messages.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Frontier => "frontier",
+            Self::Flagship => "flagship",
+            Self::Balanced => "balanced",
+            Self::Fast => "fast",
+            Self::Light => "light",
+        }
+    }
+}
 
 /// One catalog entry.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,6 +103,8 @@ pub struct ProviderModel {
     pub tool_call_format: ToolCallFormat,
     /// Token pricing for cost analytics.
     pub pricing: TokenPricing,
+    /// Capability tier used to constrain failover to a nearby capability band.
+    pub tier: CapabilityTier,
 }
 
 impl ProviderModel {
@@ -76,11 +132,71 @@ impl ProviderModel {
 /// Full catalog, ordered provider-then-capability so downstream
 /// dropdowns don't need a separate sort step.
 ///
-/// Context-window numbers reflect 2026-04 provider docs:
-/// Claude Opus/Sonnet 4.6 → 1M; Haiku 4.5 → 200K; GPT-5.4 → 1.05M;
-/// GPT-5.4 mini → 400K; GPT-4o → 128K; Gemini 3 family → ~1.05M.
+/// Context windows/prices verified against provider docs on 2026-07-02.
+/// Anthropic cache pricing convention: cached read = 0.1x input, 5m cache write =
+/// 1.25x input, 1h cache write = 2x input.
 pub const CATALOG: &[ProviderModel] = &[
     // ---- Anthropic ----
+    ProviderModel {
+        provider: PROVIDER_ANTHROPIC,
+        id: "claude-fable-5",
+        display_name: "Claude Fable 5",
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        supports_tools: true,
+        supports_vision: true,
+        supports_prefix_caching: true,
+        cache_ttl_secs: Some(300),
+        tool_call_format: ToolCallFormat::Anthropic,
+        pricing: TokenPricing {
+            input_per_mtok: 10.0,
+            output_per_mtok: 50.0,
+            cached_input_per_mtok: Some(1.0),
+            cache_write_5m_per_mtok: Some(12.5),
+            cache_write_1h_per_mtok: Some(20.0),
+        },
+        tier: CapabilityTier::Frontier,
+    },
+    ProviderModel {
+        provider: PROVIDER_ANTHROPIC,
+        id: "claude-opus-4-8",
+        display_name: "Claude Opus 4.8",
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        supports_tools: true,
+        supports_vision: true,
+        supports_prefix_caching: true,
+        cache_ttl_secs: Some(300),
+        tool_call_format: ToolCallFormat::Anthropic,
+        pricing: TokenPricing {
+            input_per_mtok: 5.0,
+            output_per_mtok: 25.0,
+            cached_input_per_mtok: Some(0.5),
+            cache_write_5m_per_mtok: Some(6.25),
+            cache_write_1h_per_mtok: Some(10.0),
+        },
+        tier: CapabilityTier::Flagship,
+    },
+    ProviderModel {
+        provider: PROVIDER_ANTHROPIC,
+        id: "claude-opus-4-7",
+        display_name: "Claude Opus 4.7",
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        supports_tools: true,
+        supports_vision: true,
+        supports_prefix_caching: true,
+        cache_ttl_secs: Some(300),
+        tool_call_format: ToolCallFormat::Anthropic,
+        pricing: TokenPricing {
+            input_per_mtok: 5.0,
+            output_per_mtok: 25.0,
+            cached_input_per_mtok: Some(0.5),
+            cache_write_5m_per_mtok: Some(6.25),
+            cache_write_1h_per_mtok: Some(10.0),
+        },
+        tier: CapabilityTier::Flagship,
+    },
     ProviderModel {
         provider: PROVIDER_ANTHROPIC,
         id: "claude-opus-4-6",
@@ -99,13 +215,36 @@ pub const CATALOG: &[ProviderModel] = &[
             cache_write_5m_per_mtok: Some(6.25),
             cache_write_1h_per_mtok: Some(10.0),
         },
+        tier: CapabilityTier::Flagship,
+    },
+    ProviderModel {
+        provider: PROVIDER_ANTHROPIC,
+        id: "claude-sonnet-5",
+        display_name: "Claude Sonnet 5",
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        supports_tools: true,
+        supports_vision: true,
+        supports_prefix_caching: true,
+        cache_ttl_secs: Some(300),
+        tool_call_format: ToolCallFormat::Anthropic,
+        // The catalog carries standard pricing; introductory pricing of
+        // $2/$10 per MTok runs through 2026-08-31.
+        pricing: TokenPricing {
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+            cached_input_per_mtok: Some(0.3),
+            cache_write_5m_per_mtok: Some(3.75),
+            cache_write_1h_per_mtok: Some(6.0),
+        },
+        tier: CapabilityTier::Balanced,
     },
     ProviderModel {
         provider: PROVIDER_ANTHROPIC,
         id: "claude-sonnet-4-6",
         display_name: "Claude Sonnet 4.6",
         context_window: 1_000_000,
-        max_output_tokens: 64_000,
+        max_output_tokens: 128_000,
         supports_tools: true,
         supports_vision: true,
         supports_prefix_caching: true,
@@ -118,27 +257,51 @@ pub const CATALOG: &[ProviderModel] = &[
             cache_write_5m_per_mtok: Some(3.75),
             cache_write_1h_per_mtok: Some(6.0),
         },
+        tier: CapabilityTier::Balanced,
     },
     ProviderModel {
         provider: PROVIDER_ANTHROPIC,
         id: "claude-haiku-4-5",
         display_name: "Claude Haiku 4.5",
         context_window: 200_000,
-        max_output_tokens: 16_000,
+        max_output_tokens: 64_000,
         supports_tools: true,
         supports_vision: true,
         supports_prefix_caching: true,
         cache_ttl_secs: Some(300),
         tool_call_format: ToolCallFormat::Anthropic,
         pricing: TokenPricing {
-            input_per_mtok: 0.8,
-            output_per_mtok: 4.0,
-            cached_input_per_mtok: Some(0.08),
-            cache_write_5m_per_mtok: Some(1.0),
-            cache_write_1h_per_mtok: Some(1.6),
+            input_per_mtok: 1.0,
+            output_per_mtok: 5.0,
+            cached_input_per_mtok: Some(0.10),
+            cache_write_5m_per_mtok: Some(1.25),
+            cache_write_1h_per_mtok: Some(2.0),
         },
+        tier: CapabilityTier::Fast,
     },
     // ---- OpenAI ----
+    // Excluded until GA: gpt-5.5-pro ($30/$180) and the GPT-5.6 Sol/Terra/Luna
+    // family (limited preview).
+    ProviderModel {
+        provider: PROVIDER_OPENAI,
+        id: "gpt-5.5",
+        display_name: "GPT-5.5",
+        context_window: 1_050_000,
+        max_output_tokens: 128_000,
+        supports_tools: true,
+        supports_vision: true,
+        supports_prefix_caching: true,
+        cache_ttl_secs: None,
+        tool_call_format: ToolCallFormat::OpenAiCompatible,
+        pricing: TokenPricing {
+            input_per_mtok: 5.0,
+            output_per_mtok: 30.0,
+            cached_input_per_mtok: Some(0.50),
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
+        },
+        tier: CapabilityTier::Frontier,
+    },
     ProviderModel {
         provider: PROVIDER_OPENAI,
         id: "gpt-5.4",
@@ -157,6 +320,7 @@ pub const CATALOG: &[ProviderModel] = &[
             cache_write_5m_per_mtok: None,
             cache_write_1h_per_mtok: None,
         },
+        tier: CapabilityTier::Flagship,
     },
     ProviderModel {
         provider: PROVIDER_OPENAI,
@@ -176,6 +340,7 @@ pub const CATALOG: &[ProviderModel] = &[
             cache_write_5m_per_mtok: None,
             cache_write_1h_per_mtok: None,
         },
+        tier: CapabilityTier::Fast,
     },
     ProviderModel {
         provider: PROVIDER_OPENAI,
@@ -195,6 +360,7 @@ pub const CATALOG: &[ProviderModel] = &[
             cache_write_5m_per_mtok: None,
             cache_write_1h_per_mtok: None,
         },
+        tier: CapabilityTier::Light,
     },
     ProviderModel {
         provider: PROVIDER_OPENAI,
@@ -214,6 +380,7 @@ pub const CATALOG: &[ProviderModel] = &[
             cache_write_5m_per_mtok: None,
             cache_write_1h_per_mtok: None,
         },
+        tier: CapabilityTier::Fast,
     },
     ProviderModel {
         provider: PROVIDER_OPENAI,
@@ -233,6 +400,7 @@ pub const CATALOG: &[ProviderModel] = &[
             cache_write_5m_per_mtok: None,
             cache_write_1h_per_mtok: None,
         },
+        tier: CapabilityTier::Light,
     },
     // ---- Google ----
     ProviderModel {
@@ -253,6 +421,7 @@ pub const CATALOG: &[ProviderModel] = &[
             cache_write_5m_per_mtok: None,
             cache_write_1h_per_mtok: None,
         },
+        tier: CapabilityTier::Frontier,
     },
     ProviderModel {
         provider: PROVIDER_GOOGLE,
@@ -272,6 +441,27 @@ pub const CATALOG: &[ProviderModel] = &[
             cache_write_5m_per_mtok: None,
             cache_write_1h_per_mtok: None,
         },
+        tier: CapabilityTier::Flagship,
+    },
+    ProviderModel {
+        provider: PROVIDER_GOOGLE,
+        id: "gemini-3.5-flash",
+        display_name: "Gemini 3.5 Flash",
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+        supports_tools: true,
+        supports_vision: true,
+        supports_prefix_caching: true,
+        cache_ttl_secs: None,
+        tool_call_format: ToolCallFormat::Gemini,
+        pricing: TokenPricing {
+            input_per_mtok: 1.5,
+            output_per_mtok: 9.0,
+            cached_input_per_mtok: Some(0.15),
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
+        },
+        tier: CapabilityTier::Balanced,
     },
     ProviderModel {
         provider: PROVIDER_GOOGLE,
@@ -291,10 +481,13 @@ pub const CATALOG: &[ProviderModel] = &[
             cache_write_5m_per_mtok: None,
             cache_write_1h_per_mtok: None,
         },
+        tier: CapabilityTier::Fast,
     },
+    // Flash-Lite is now GA (no `-preview` suffix on the pricing page); the
+    // legacy preview id is retained so existing configs keep routing.
     ProviderModel {
         provider: PROVIDER_GOOGLE,
-        id: "gemini-3.1-flash-lite-preview",
+        id: "gemini-3.1-flash-lite",
         display_name: "Gemini 3.1 Flash-Lite",
         context_window: 1_048_576,
         max_output_tokens: 65_536,
@@ -310,6 +503,27 @@ pub const CATALOG: &[ProviderModel] = &[
             cache_write_5m_per_mtok: None,
             cache_write_1h_per_mtok: None,
         },
+        tier: CapabilityTier::Light,
+    },
+    ProviderModel {
+        provider: PROVIDER_GOOGLE,
+        id: "gemini-3.1-flash-lite-preview",
+        display_name: "Gemini 3.1 Flash-Lite (preview)",
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+        supports_tools: true,
+        supports_vision: true,
+        supports_prefix_caching: true,
+        cache_ttl_secs: None,
+        tool_call_format: ToolCallFormat::Gemini,
+        pricing: TokenPricing {
+            input_per_mtok: 0.25,
+            output_per_mtok: 1.5,
+            cached_input_per_mtok: Some(0.025),
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
+        },
+        tier: CapabilityTier::Light,
     },
 ];
 
@@ -433,11 +647,66 @@ mod tests {
     }
 
     #[test]
-    fn google_catalog_includes_latest_gemini_3_series() {
+    fn google_catalog_includes_latest_gemini_series() {
         assert!(find("gemini-3.1-pro-preview").is_some());
         assert!(find("gemini-3-pro-preview").is_some());
+        assert!(find("gemini-3.5-flash").is_some());
         assert!(find("gemini-3-flash-preview").is_some());
+        // Flash-Lite GA id plus the retained legacy preview id.
+        assert!(find("gemini-3.1-flash-lite").is_some());
         assert!(find("gemini-3.1-flash-lite-preview").is_some());
+    }
+
+    #[test]
+    fn flash_lite_ga_and_preview_ids_route_to_their_own_entries() {
+        // Pins: the GA id and the legacy preview id resolve to distinct entries
+        // via longest-prefix matching, so neither shadows the other.
+        assert_eq!(
+            find_model("gemini-3.1-flash-lite")
+                .expect("GA id resolves")
+                .id,
+            "gemini-3.1-flash-lite"
+        );
+        assert_eq!(
+            find_model("gemini-3.1-flash-lite-preview")
+                .expect("preview id resolves")
+                .id,
+            "gemini-3.1-flash-lite-preview"
+        );
+    }
+
+    #[test]
+    fn anthropic_catalog_reflects_the_2026_07_refresh() {
+        // Pins: the refreshed Anthropic pricing/limits and new models.
+        assert!(find("claude-fable-5").is_some());
+        assert!(find("claude-opus-4-8").is_some());
+        assert!(find("claude-opus-4-7").is_some());
+        assert!(find("claude-sonnet-5").is_some());
+
+        let haiku = find("claude-haiku-4-5").expect("Haiku 4.5 catalogued");
+        assert_eq!(haiku.pricing.input_per_mtok, 1.0);
+        assert_eq!(haiku.pricing.output_per_mtok, 5.0);
+        assert_eq!(haiku.pricing.cached_input_per_mtok, Some(0.10));
+        assert_eq!(haiku.max_output_tokens, 64_000);
+
+        let sonnet = find("claude-sonnet-4-6").expect("Sonnet 4.6 catalogued");
+        assert_eq!(sonnet.max_output_tokens, 128_000);
+    }
+
+    #[test]
+    fn capability_tier_distance_is_symmetric_and_ranked() {
+        // Pins: tier distance is the absolute rank difference, so adjacent tiers
+        // are distance 1 and frontier↔fast is distance 3.
+        assert_eq!(
+            CapabilityTier::Frontier.distance(CapabilityTier::Flagship),
+            1
+        );
+        assert_eq!(CapabilityTier::Flagship.distance(CapabilityTier::Fast), 2);
+        assert_eq!(CapabilityTier::Frontier.distance(CapabilityTier::Fast), 3);
+        assert_eq!(
+            CapabilityTier::Balanced.distance(CapabilityTier::Balanced),
+            0
+        );
     }
 
     #[test]
@@ -522,7 +791,8 @@ mod tests {
                 cheapest.id,
             );
         }
-        // The 2026-04 catalog's cheapest combined price is GPT-5 nano.
+        // The refreshed catalog's cheapest combined price is still GPT-5 nano
+        // ($0.05 + $0.40 = $0.45/MTok).
         assert_eq!(cheapest.id, "gpt-5-nano");
     }
 

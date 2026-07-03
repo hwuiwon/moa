@@ -24,9 +24,12 @@ use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
+use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_BLOCK_THRESHOLD};
 use crate::core::http::build_http_client;
 use crate::core::instrumentation::LLMSpanRecorder;
+use crate::core::pacer::{PacerConfig, RatePacer};
 use crate::core::provider_tools::enabled_native_tools;
+use crate::core::rate_guard::{self, RateGuard};
 use crate::core::retry::RetryPolicy;
 use crate::core::streaming::{
     finalize_streamed_completion, parse_sse_json, send_with_transport_phase,
@@ -86,6 +89,9 @@ pub struct GeminiProvider {
     default_capabilities: ModelCapabilities,
     retry_policy: RetryPolicy,
     web_search_enabled: bool,
+    pacer: RatePacer,
+    limiter: ConcurrencyLimiter,
+    guard: RateGuard,
 }
 
 impl GeminiProvider {
@@ -112,6 +118,10 @@ impl GeminiProvider {
             default_capabilities,
             retry_policy: RetryPolicy::default().with_max_retries(DEFAULT_MAX_RETRIES),
             web_search_enabled: true,
+            pacer: RatePacer::new(PacerConfig::disabled()),
+            // LLM concurrency is unbounded by default; operators opt in per key.
+            limiter: ConcurrencyLimiter::unbounded(),
+            guard: RateGuard::new(),
         })
     }
 
@@ -130,12 +140,19 @@ impl GeminiProvider {
             &config.providers.google.api_key,
         )?;
 
-        Self::new_with_reasoning_effort(
+        let mut provider = Self::new_with_reasoning_effort(
             api_key,
             default_model,
             config.general.reasoning_effort.clone(),
-        )
-        .map(|provider| provider.with_web_search_enabled(config.general.web_search_enabled))
+        )?
+        .with_web_search_enabled(config.general.web_search_enabled);
+        if let Some(max) = config.providers.google.max_requests_per_min {
+            provider = provider.with_rate_limits(PacerConfig::requests_per_min(max));
+        }
+        if let Some(max) = config.providers.google.max_concurrent_requests {
+            provider = provider.with_max_concurrent_requests(max as usize);
+        }
+        Ok(provider)
     }
 
     /// Creates a provider from the `MOA_GOOGLE_API_KEY` environment variable.
@@ -163,6 +180,23 @@ impl GeminiProvider {
         self.web_search_enabled = enabled;
         self
     }
+
+    /// Overrides request-per-minute pacing for this provider instance.
+    #[must_use]
+    pub fn with_rate_limits(mut self, config: PacerConfig) -> Self {
+        self.pacer = RatePacer::new(config);
+        self
+    }
+
+    /// Caps the number of in-flight completions this provider keeps open at once.
+    ///
+    /// Unbounded by default; a configured ceiling makes queued generations wait
+    /// for a slot before dispatching.
+    #[must_use]
+    pub fn with_max_concurrent_requests(mut self, max_in_flight: usize) -> Self {
+        self.limiter = ConcurrencyLimiter::new(max_in_flight);
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -176,6 +210,13 @@ impl LLMProvider for GeminiProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        // Cooperative 429 short-circuit: while paused, return a typed rate-limit
+        // error immediately without an HTTP round trip so callers can fail over.
+        if let Some(remaining) = self.guard.pause_remaining() {
+            return Err(rate_guard::rate_limited_paused(remaining));
+        }
+        self.guard.note_request();
+
         let requested_model = request
             .model
             .as_ref()
@@ -213,15 +254,32 @@ impl LLMProvider for GeminiProvider {
             }
         };
 
+        // Take an in-flight slot before dispatching; a gate that stays saturated
+        // past the block threshold is a failover-eligible block, not a queue.
+        let permit = match self.limiter.acquire_within(DEFAULT_BLOCK_THRESHOLD).await {
+            Some(lease) => lease,
+            None => {
+                let error = rate_guard::rate_limited_saturated(DEFAULT_BLOCK_THRESHOLD);
+                span_recorder.fail_at_stage("transport", &error);
+                return Err(error);
+            }
+        };
+        // Chat completions are request-rate limited; pace after taking the
+        // in-flight slot so queued callers do not consume rate budget early.
+        self.pacer.acquire(1, 0).await;
         let client = self.client.clone();
         let api_key = Arc::clone(&self.api_key);
         let api_base = Arc::clone(&self.api_base);
         let retry_policy = self.retry_policy.clone();
+        let guard = self.guard.clone();
         let (tx, rx) = mpsc::channel(DEFAULT_STREAM_BUFFER);
 
         let completion_task = tokio::spawn(
             async move {
                 let mut span_recorder = span_recorder;
+                // Hold the in-flight slot for the whole generation; released when
+                // the streamed completion finishes.
+                let _permit = permit;
                 let started_at = Instant::now();
                 let url = format!(
                     "{}/models/{}:streamGenerateContent?alt=sse",
@@ -229,15 +287,16 @@ impl LLMProvider for GeminiProvider {
                     resolved_model
                 );
 
-                let response = send_with_transport_phase(&span_recorder, &retry_policy, || {
-                    client
-                        .post(&url)
-                        .header("x-goog-api-key", &*api_key)
-                        .header(ACCEPT, "text/event-stream")
-                        .header(CONTENT_TYPE, "application/json")
-                        .json(&request_body)
-                })
-                .await?;
+                let response =
+                    send_with_transport_phase(&span_recorder, &retry_policy, &guard, || {
+                        client
+                            .post(&url)
+                            .header("x-goog-api-key", &*api_key)
+                            .header(ACCEPT, "text/event-stream")
+                            .header(CONTENT_TYPE, "application/json")
+                            .json(&request_body)
+                    })
+                    .await?;
 
                 span_recorder.set_phase("stream");
                 let consumed = consume_sse_events(

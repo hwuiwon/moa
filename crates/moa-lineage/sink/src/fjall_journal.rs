@@ -1,6 +1,7 @@
 //! Durable fjall journal for pending lineage rows.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use fjall::{
     KeyspaceCreateOptions, PersistMode, Readable, SingleWriterTxDatabase, SingleWriterTxKeyspace,
@@ -12,6 +13,7 @@ use crate::{Error, Result};
 pub struct Journal {
     keyspace: SingleWriterTxDatabase,
     partition: SingleWriterTxKeyspace,
+    persists: AtomicU64,
 }
 
 impl Journal {
@@ -22,17 +24,37 @@ impl Journal {
         Ok(Self {
             keyspace,
             partition,
+            persists: AtomicU64::new(0),
         })
     }
 
-    /// Appends one pending row under the provided sequence number.
+    /// Appends one pending row under the provided sequence number with its own durability sync.
+    ///
+    /// This single-row form fsyncs per call; it backs the awaitable durability path where each
+    /// event must be synced before its caller is acknowledged. High-throughput callers should
+    /// prefer [`Journal::append_batch`] so a batch costs one sync window instead of `N`.
     pub fn append(&self, seq: u64, payload: &[u8]) -> Result<()> {
         self.partition.insert(seq.to_be_bytes(), payload)?;
-        self.keyspace.persist(PersistMode::SyncData)?;
+        self.persist()?;
         Ok(())
     }
 
-    /// Acknowledges a sequence range after successful database write.
+    /// Appends a batch of pending rows under a single durability sync (group commit).
+    ///
+    /// Rows are inserted in the caller-provided order and one `SyncData` persist covers the whole
+    /// batch, so `N` appends cost one sync window rather than `N`.
+    pub fn append_batch(&self, entries: &[(u64, Vec<u8>)]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        for (seq, payload) in entries {
+            self.partition.insert(seq.to_be_bytes(), payload)?;
+        }
+        self.persist()?;
+        Ok(())
+    }
+
+    /// Acknowledges a sequence range after a successful database write.
     pub fn ack_range(&self, lo: u64, hi: u64) -> Result<()> {
         if lo > hi {
             return Ok(());
@@ -43,15 +65,21 @@ impl Journal {
             tx.remove(&self.partition, seq.to_be_bytes());
         }
         tx.commit()?;
-        self.keyspace.persist(PersistMode::SyncData)?;
+        self.persist()?;
         Ok(())
     }
 
-    /// Replays pending rows in sequence order.
-    pub fn replay(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+    /// Replays pending rows whose sequence number is greater than `after_seq`, in sequence order.
+    ///
+    /// Callers keep a low-water-mark cursor and pass the highest already-processed sequence so the
+    /// scan only visits newly journaled rows instead of the entire pending set on every call. The
+    /// underlying range scan skips lower keys at the index level, so retained (dead-lettered) rows
+    /// below the cursor are not re-read.
+    pub fn replay_from(&self, after_seq: u64) -> Result<Vec<(u64, Vec<u8>)>> {
         let mut out = Vec::new();
         let read_tx = self.keyspace.read_tx();
-        for kv in read_tx.iter(&self.partition) {
+        let start = after_seq.saturating_add(1).to_be_bytes();
+        for kv in read_tx.range(&self.partition, start..) {
             let (key, value) = kv.into_inner()?;
             let bytes: [u8; 8] = key
                 .as_ref()
@@ -63,9 +91,29 @@ impl Journal {
         Ok(out)
     }
 
+    /// Replays all pending rows in sequence order.
+    pub fn replay(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+        self.replay_from(0)
+    }
+
     /// Returns the approximate pending row count.
     #[must_use]
     pub fn approximate_len(&self) -> usize {
         self.partition.approximate_len()
+    }
+
+    /// Returns the number of durability syncs issued so far.
+    ///
+    /// Exposed so group-commit tests can assert that a batch append performs exactly one sync.
+    #[cfg(test)]
+    #[must_use]
+    pub fn persist_count(&self) -> u64 {
+        self.persists.load(Ordering::Relaxed)
+    }
+
+    fn persist(&self) -> Result<()> {
+        self.keyspace.persist(PersistMode::SyncData)?;
+        self.persists.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 }

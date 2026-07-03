@@ -36,6 +36,75 @@ pub(super) const MAX_TURNS_PER_POST: usize = 50;
 pub(super) const MAX_CLEANUP_RELEASE_ATTEMPTS: u32 = 5;
 pub(super) const WORKER_BUDGET_EXHAUSTED_MESSAGE: &str = "MOA stopped because this worker exhausted its token budget. Narrow the scope or ask MOA to continue.";
 
+/// Byte threshold above which an aged-out history entry's serialized body is offloaded to a
+/// content-addressed claim-check blob instead of being retained inline in Worker VO state.
+///
+/// Chosen at 12 KiB: large raw tool outputs (the dominant contributor to Worker VO state
+/// growth) exceed this, while ordinary assistant/user turns and short tool results stay
+/// inline. The blob body is the full serialized [`ContextMessage`], so hydration is lossless.
+pub(super) const HISTORY_CLAIM_CHECK_THRESHOLD_BYTES: usize = 12 * 1024;
+
+/// Number of most-recent history entries always kept inline regardless of size.
+///
+/// The claim-check sweep never offloads an entry within this trailing window, so the hot
+/// tail the next turn re-reads (and the model attends to most) never incurs a blob
+/// hydration round-trip.
+pub(super) const HISTORY_INLINE_TAIL: usize = 6;
+
+/// Maximum characters retained in a claimed entry's inline preview.
+const HISTORY_PREVIEW_CHARS: usize = 256;
+
+/// One buffered worker-history slot.
+///
+/// Kept inline for small messages and the hot tail; large aged-out messages are replaced
+/// with a [`ClaimedHistoryEntry`] referencing a content-addressed blob so Worker VO state
+/// stays compact. Serialized with the Worker VO under `K_HISTORY`.
+// The large `Inline(ContextMessage)` variant is the common, hot case (most history entries
+// are inline, and this key was previously a `Vec<ContextMessage>` with the same per-element
+// size). Boxing it would add a heap allocation per buffered message on the hot path to shrink
+// the rare `Claimed` variant, so the size difference is accepted deliberately.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum WorkerHistoryEntry {
+    /// A message held inline in VO state.
+    Inline(ContextMessage),
+    /// A large message whose full body was offloaded to a claim-check blob.
+    Claimed(ClaimedHistoryEntry),
+}
+
+impl WorkerHistoryEntry {
+    /// Wraps a compiled message as an inline history slot.
+    pub(super) fn inline(message: ContextMessage) -> Self {
+        Self::Inline(message)
+    }
+}
+
+/// Compact reference to a history message whose full body lives in a claim-check blob.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ClaimedHistoryEntry {
+    /// Role of the offloaded message, retained so projections that only need the role
+    /// (e.g. the latest-assistant-text fallback) avoid a blob read.
+    pub role: MessageRole,
+    /// Content-addressed blob id holding the full serialized [`ContextMessage`].
+    pub blob_id: String,
+    /// Serialized body size in bytes.
+    pub size: usize,
+    /// Short inline preview of the offloaded content for observability and fallbacks.
+    pub preview: String,
+    /// Approximate token count of the offloaded content.
+    pub token_estimate: usize,
+}
+
+/// Truncated, human-readable preview of a message's text content.
+pub(super) fn history_preview(content: &str) -> String {
+    content.chars().take(HISTORY_PREVIEW_CHARS).collect()
+}
+
+/// Rough token estimate (~4 chars/token) used for claimed-entry accounting.
+pub(super) fn estimate_history_tokens(content: &str) -> usize {
+    content.trim().chars().count().div_ceil(4)
+}
+
 /// Serializable projection of the Worker VO's durable state keys.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkerVoState {
@@ -66,7 +135,11 @@ pub struct WorkerVoState {
     /// Buffered parent messages waiting for the next turn.
     pub pending: Vec<UserMessage>,
     /// Buffered conversation history carried across turns.
-    pub history: Vec<ContextMessage>,
+    ///
+    /// Large aged-out entries (notably raw tool outputs) are offloaded to claim-check
+    /// blobs and stored as [`WorkerHistoryEntry::Claimed`] references so this key stays
+    /// compact; the most-recent [`HISTORY_INLINE_TAIL`] entries are always inline.
+    pub history: Vec<WorkerHistoryEntry>,
     /// Child workers currently owned by this worker.
     pub children: Vec<WorkerChildRef>,
     /// Summary of the last assistant response.
@@ -261,8 +334,60 @@ impl WorkerVoState {
     pub(super) fn complete_after_budget_exhausted(&mut self) {
         let message = WORKER_BUDGET_EXHAUSTED_MESSAGE.to_string();
         self.last_turn_summary = Some(message.clone());
-        self.history.push(ContextMessage::assistant(message));
+        self.history
+            .push(WorkerHistoryEntry::inline(ContextMessage::assistant(
+                message,
+            )));
         self.apply_turn_outcome(TurnOutcome::Idle);
+    }
+
+    /// Returns `(index, serialized_body)` for every history entry that should be offloaded
+    /// to a claim-check blob.
+    ///
+    /// A candidate is an inline entry older than the most-recent [`HISTORY_INLINE_TAIL`]
+    /// window whose full serialized [`ContextMessage`] exceeds
+    /// [`HISTORY_CLAIM_CHECK_THRESHOLD_BYTES`]. The trailing window is always left inline so
+    /// the hot tail the next turn re-reads never needs hydration. Kept pure (no `ctx`) so the
+    /// threshold/tail logic is unit-testable; the handler performs the journaled blob store.
+    pub(super) fn history_entries_to_claim_check(
+        &self,
+    ) -> Result<Vec<(usize, String)>, HandlerError> {
+        let len = self.history.len();
+        if len <= HISTORY_INLINE_TAIL {
+            return Ok(Vec::new());
+        }
+        let cutoff = len - HISTORY_INLINE_TAIL;
+        let mut candidates = Vec::new();
+        for (idx, entry) in self.history.iter().enumerate().take(cutoff) {
+            let WorkerHistoryEntry::Inline(message) = entry else {
+                continue;
+            };
+            let body = serde_json::to_string(message).map_err(|error| {
+                HandlerError::from(TerminalError::new(format!(
+                    "failed to serialize worker history entry for claim-check: {error}"
+                )))
+            })?;
+            if body.len() >= HISTORY_CLAIM_CHECK_THRESHOLD_BYTES {
+                candidates.push((idx, body));
+            }
+        }
+        Ok(candidates)
+    }
+
+    /// Replaces the inline entry at `idx` with a claim-check reference after its body was
+    /// offloaded to `blob`. A no-op if the slot is not inline (e.g. already claimed).
+    pub(super) fn claim_history_entry(&mut self, idx: usize, blob: ClaimCheck) {
+        let Some(WorkerHistoryEntry::Inline(message)) = self.history.get(idx) else {
+            return;
+        };
+        let claimed = ClaimedHistoryEntry {
+            role: message.role.clone(),
+            size: blob.size,
+            blob_id: blob.blob_id,
+            preview: history_preview(&message.content),
+            token_estimate: estimate_history_tokens(&message.content),
+        };
+        self.history[idx] = WorkerHistoryEntry::Claimed(claimed);
     }
 
     /// Builds the public status projection returned by the shared status handler.
@@ -357,6 +482,80 @@ impl WorkerVoState {
             awaiting_input: !self.pending_input_requests.is_empty(),
         }
     }
+
+    /// Loads only the keys the `status` poll projection needs, then reuses
+    /// [`Self::status_view`] to build the projection.
+    ///
+    /// Hot fan-in polls call this instead of [`VoState::load_from`] so they never
+    /// deserialize the buffered history, pending queue, or the many scalar keys
+    /// the status view does not read.
+    pub(super) async fn load_status_view<R: VoReader>(
+        reader: &R,
+    ) -> Result<WorkerStatus, HandlerError> {
+        let projection = Self {
+            status: reader.get_json(K_STATUS).await?,
+            depth: reader.get_json(K_DEPTH).await?.unwrap_or_default(),
+            tokens_used: reader.get_json(K_TOKENS_USED).await?.unwrap_or_default(),
+            budget_remaining: reader
+                .get_json(K_BUDGET_REMAINING)
+                .await?
+                .unwrap_or_default(),
+            children: reader.get_json(K_CHILDREN).await?.unwrap_or_default(),
+            ..Self::default()
+        };
+        Ok(projection.status_view())
+    }
+
+    /// Loads only the keys the `progress_summary` poll projection needs, then
+    /// reuses [`Self::progress_summary`].
+    pub(super) async fn load_progress_summary<R: VoReader>(
+        reader: &R,
+        worker_id: WorkerId,
+        now: DateTime<Utc>,
+        stale_threshold_ms: u64,
+    ) -> Result<WorkerProgressSummary, HandlerError> {
+        let projection = Self {
+            status: reader.get_json(K_STATUS).await?,
+            active_turn_id: reader.get_json(K_ACTIVE_TURN_ID).await?,
+            last_turn_summary: reader.get_json(K_LAST_TURN_SUMMARY).await?,
+            tokens_used: reader.get_json(K_TOKENS_USED).await?.unwrap_or_default(),
+            budget_remaining: reader
+                .get_json(K_BUDGET_REMAINING)
+                .await?
+                .unwrap_or_default(),
+            last_heartbeat_at: reader.get_json(K_LAST_HEARTBEAT_AT).await?,
+            pending_input_requests: reader
+                .get_json(K_PENDING_INPUT_REQUESTS)
+                .await?
+                .unwrap_or_default(),
+            ..Self::default()
+        };
+        Ok(projection.progress_summary(worker_id, now, stale_threshold_ms))
+    }
+
+    /// Loads only the keys the terminal `result` projection needs.
+    ///
+    /// Reads the buffered history (the result output can fall back to the latest
+    /// assistant turn) but skips children, the pending queue, and the many
+    /// configuration keys the result projection never touches.
+    pub(super) async fn load_terminal_result<R: VoReader>(
+        reader: &R,
+        worker_id: WorkerId,
+    ) -> Result<Option<WorkerResult>, HandlerError> {
+        let projection = Self {
+            status: reader.get_json(K_STATUS).await?,
+            last_turn_summary: reader.get_json(K_LAST_TURN_SUMMARY).await?,
+            history: reader.get_json(K_HISTORY).await?.unwrap_or_default(),
+            task: reader.get_json(K_TASK).await?,
+            cancel_reason: reader.get_json(K_CANCEL_REASON).await?,
+            tokens_used: reader.get_json(K_TOKENS_USED).await?.unwrap_or_default(),
+            tools_invoked: reader.get_json(K_TOOLS_INVOKED).await?.unwrap_or_default(),
+            ..Self::default()
+        };
+        Ok(projection
+            .terminal_result(worker_id)
+            .map(|terminal| terminal.result))
+    }
 }
 
 impl VoState for WorkerVoState {
@@ -448,17 +647,157 @@ impl VoState for WorkerVoState {
         );
         set_or_clear_vec(ctx, K_PENDING_INPUT_REQUESTS, &self.pending_input_requests);
     }
+
+    fn persist_changes(&self, ctx: &ObjectContext<'_>, baseline: &Self) {
+        set_changed_opt(
+            ctx,
+            K_STATUS,
+            self.status.as_ref(),
+            baseline.status.as_ref(),
+        );
+        set_changed_opt(
+            ctx,
+            K_PARENT_SESSION,
+            self.parent_session.as_ref(),
+            baseline.parent_session.as_ref(),
+        );
+        set_changed_scalar(ctx, K_DEPTH, self.depth, &baseline.depth, 0);
+        set_changed_scalar(
+            ctx,
+            K_BUDGET_REMAINING,
+            self.budget_remaining,
+            &baseline.budget_remaining,
+            0,
+        );
+        set_changed_scalar(
+            ctx,
+            K_TOKENS_USED,
+            self.tokens_used,
+            &baseline.tokens_used,
+            0,
+        );
+        set_changed_opt(ctx, K_TASK, self.task.as_ref(), baseline.task.as_ref());
+        set_changed_vec(ctx, K_TOOL_SUBSET, &self.tool_subset, &baseline.tool_subset);
+        set_changed_opt(
+            ctx,
+            K_TENANT_ID,
+            self.tenant_id.as_ref(),
+            baseline.tenant_id.as_ref(),
+        );
+        set_changed_opt(
+            ctx,
+            K_USER_ID,
+            self.user_id.as_ref(),
+            baseline.user_id.as_ref(),
+        );
+        set_changed_opt(ctx, K_MODEL, self.model.as_ref(), baseline.model.as_ref());
+        set_changed_opt(
+            ctx,
+            K_MAX_TURNS,
+            self.max_turns.as_ref(),
+            baseline.max_turns.as_ref(),
+        );
+        set_changed_opt(
+            ctx,
+            K_TRUSTED_SANDBOX_MANIFEST,
+            self.trusted_sandbox_manifest.as_ref(),
+            baseline.trusted_sandbox_manifest.as_ref(),
+        );
+        set_changed_vec(ctx, K_PENDING, &self.pending, &baseline.pending);
+        set_changed_vec(ctx, K_HISTORY, &self.history, &baseline.history);
+        set_changed_vec(ctx, K_CHILDREN, &self.children, &baseline.children);
+        set_changed_opt(
+            ctx,
+            K_LAST_TURN_SUMMARY,
+            self.last_turn_summary.as_ref(),
+            baseline.last_turn_summary.as_ref(),
+        );
+        set_changed_scalar(
+            ctx,
+            K_TOOLS_INVOKED,
+            self.tools_invoked,
+            &baseline.tools_invoked,
+            0,
+        );
+        set_changed_opt(
+            ctx,
+            K_CANCEL_REASON,
+            self.cancel_reason.as_ref(),
+            baseline.cancel_reason.as_ref(),
+        );
+        set_changed_opt(
+            ctx,
+            K_ACTIVE_TURN_ID,
+            self.active_turn_id.as_ref(),
+            baseline.active_turn_id.as_ref(),
+        );
+        set_changed_opt(
+            ctx,
+            K_LAST_OUTCOME,
+            self.last_outcome.as_ref(),
+            baseline.last_outcome.as_ref(),
+        );
+        set_changed_scalar(
+            ctx,
+            K_NOTIFICATION_DELIVERED,
+            self.notification_delivered,
+            &baseline.notification_delivered,
+            false,
+        );
+        set_changed_vec(
+            ctx,
+            K_RESULT_WAITERS,
+            &self.result_waiters,
+            &baseline.result_waiters,
+        );
+        set_changed_opt(
+            ctx,
+            K_LAST_HEARTBEAT_AT,
+            self.last_heartbeat_at.as_ref(),
+            baseline.last_heartbeat_at.as_ref(),
+        );
+        set_changed_scalar(
+            ctx,
+            K_CLEANUP_GENERATION,
+            self.cleanup_generation,
+            &baseline.cleanup_generation,
+            0,
+        );
+        set_changed_scalar(
+            ctx,
+            K_CLEANUP_RELEASE_ATTEMPTS,
+            self.cleanup_release_attempts,
+            &baseline.cleanup_release_attempts,
+            0,
+        );
+        set_changed_vec(
+            ctx,
+            K_PENDING_INPUT_REQUESTS,
+            &self.pending_input_requests,
+            &baseline.pending_input_requests,
+        );
+    }
 }
 
-fn latest_assistant_text(history: &[ContextMessage]) -> Option<String> {
-    history
-        .iter()
-        .rev()
-        .find(|message| {
-            matches!(message.role, moa_core::MessageRole::Assistant)
-                && !message.content.trim().is_empty()
-        })
-        .map(|message| message.content.clone())
+fn latest_assistant_text(history: &[WorkerHistoryEntry]) -> Option<String> {
+    history.iter().rev().find_map(|entry| match entry {
+        WorkerHistoryEntry::Inline(message)
+            if matches!(message.role, moa_core::MessageRole::Assistant)
+                && !message.content.trim().is_empty() =>
+        {
+            Some(message.content.clone())
+        }
+        // A claimed assistant body is surfaced here only as a last-resort fallback for the
+        // terminal result output (reached solely when no `last_turn_summary` was recorded),
+        // so the stored preview is sufficient and avoids a blob read on the terminal path.
+        WorkerHistoryEntry::Claimed(claimed)
+            if matches!(claimed.role, moa_core::MessageRole::Assistant)
+                && !claimed.preview.trim().is_empty() =>
+        {
+            Some(claimed.preview.clone())
+        }
+        _ => None,
+    })
 }
 
 impl WorkerVoState {
@@ -527,8 +866,11 @@ mod tests {
         ModelId, SessionId, TenantId, TurnOutcome, UserId, WorkerInitialTask, WorkerMessage,
     };
 
-    use super::{WORKER_BUDGET_EXHAUSTED_MESSAGE, WorkerVoState, latest_assistant_text};
-    use moa_core::WorkerState;
+    use super::{
+        ClaimedHistoryEntry, HISTORY_CLAIM_CHECK_THRESHOLD_BYTES, HISTORY_INLINE_TAIL,
+        WORKER_BUDGET_EXHAUSTED_MESSAGE, WorkerHistoryEntry, WorkerVoState, latest_assistant_text,
+    };
+    use moa_core::{ClaimCheck, ContextMessage, MessageRole, WorkerState};
 
     fn initial_task() -> WorkerMessage {
         WorkerMessage::InitialTask(Box::new(WorkerInitialTask {
@@ -887,5 +1229,140 @@ mod tests {
             vec!["awake-1".to_string(), "awake-2".to_string()]
         );
         assert!(state.result_waiters.is_empty());
+    }
+
+    #[test]
+    fn history_claim_check_selects_only_large_aged_out_entries() {
+        // Pins: the claim-check sweep offloads only inline entries older than the inline tail
+        // whose serialized body exceeds the threshold; sub-threshold entries and every entry
+        // inside the hot tail (even a large one) stay inline so the next turn never hydrates.
+        let mut state = WorkerVoState::default();
+        let big = "x".repeat(HISTORY_CLAIM_CHECK_THRESHOLD_BYTES + 100);
+        let small = "small".to_string();
+        // idx 0: large + aged out -> the only candidate.
+        state
+            .history
+            .push(WorkerHistoryEntry::inline(ContextMessage::tool_result(
+                "t0",
+                big.clone(),
+                None,
+            )));
+        // idx 1: small + aged out -> below threshold, not a candidate.
+        state
+            .history
+            .push(WorkerHistoryEntry::inline(ContextMessage::assistant(
+                small.clone(),
+            )));
+        // Fill the inline tail; its first entry is large but must stay inline (hot tail).
+        for i in 0..HISTORY_INLINE_TAIL {
+            let text = if i == 0 { big.clone() } else { small.clone() };
+            state
+                .history
+                .push(WorkerHistoryEntry::inline(ContextMessage::assistant(text)));
+        }
+
+        let candidates = state
+            .history_entries_to_claim_check()
+            .expect("history entries serialize");
+        assert_eq!(
+            candidates.iter().map(|(idx, _)| *idx).collect::<Vec<_>>(),
+            vec![0],
+            "only the large aged-out entry is a claim-check candidate"
+        );
+        // A history no larger than the tail never offloads anything.
+        let mut short = WorkerVoState::default();
+        for _ in 0..HISTORY_INLINE_TAIL {
+            short
+                .history
+                .push(WorkerHistoryEntry::inline(ContextMessage::assistant(
+                    big.clone(),
+                )));
+        }
+        assert!(
+            short
+                .history_entries_to_claim_check()
+                .expect("serialize")
+                .is_empty(),
+            "entries within the inline tail are never offloaded even when large"
+        );
+    }
+
+    #[test]
+    fn claim_history_entry_replaces_inline_with_compact_reference() {
+        // Pins: offloading an entry swaps the inline body for a compact reference that keeps
+        // the role, blob id/size, and a non-empty content preview for fallbacks.
+        let mut state = WorkerVoState::default();
+        let body = "hello world tool output ".repeat(50);
+        state
+            .history
+            .push(WorkerHistoryEntry::inline(ContextMessage::tool_result(
+                "tool-1",
+                body.clone(),
+                None,
+            )));
+        let claim = ClaimCheck {
+            blob_id: "blob-abc".to_string(),
+            size: 4096,
+            preview: "unused-store-preview".to_string(),
+        };
+
+        state.claim_history_entry(0, claim);
+
+        match &state.history[0] {
+            WorkerHistoryEntry::Claimed(claimed) => {
+                assert_eq!(claimed.blob_id, "blob-abc");
+                assert_eq!(claimed.size, 4096);
+                assert_eq!(claimed.role, MessageRole::Tool);
+                assert!(!claimed.preview.is_empty());
+                assert!(
+                    body.starts_with(&claimed.preview),
+                    "preview is a prefix of the offloaded content"
+                );
+                assert!(claimed.token_estimate > 0);
+            }
+            other => panic!("expected a claimed entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_entries_round_trip_through_json_with_references() {
+        // Pins: a mix of inline and claim-checked slots survives K_HISTORY (de)serialization,
+        // so a reloaded Worker VO reconstructs the buffered history losslessly.
+        let history = vec![
+            WorkerHistoryEntry::inline(ContextMessage::user("hi".to_string())),
+            WorkerHistoryEntry::Claimed(ClaimedHistoryEntry {
+                role: MessageRole::Tool,
+                blob_id: "blob-xyz".to_string(),
+                size: 20_000,
+                preview: "preview text".to_string(),
+                token_estimate: 5_000,
+            }),
+        ];
+
+        let json = serde_json::to_string(&history).expect("history serializes");
+        let decoded: Vec<WorkerHistoryEntry> =
+            serde_json::from_str(&json).expect("history deserializes");
+        assert_eq!(decoded, history);
+    }
+
+    #[test]
+    fn latest_assistant_text_falls_back_to_claimed_preview() {
+        // Pins: the terminal-result fallback reads a claimed assistant entry's preview without
+        // hydrating its blob, so a claim-checked final assistant turn still yields output.
+        let history = vec![
+            WorkerHistoryEntry::inline(ContextMessage::user("q".to_string())),
+            WorkerHistoryEntry::Claimed(ClaimedHistoryEntry {
+                role: MessageRole::Assistant,
+                blob_id: "b".to_string(),
+                size: 30_000,
+                preview: "the answer preview".to_string(),
+                token_estimate: 7_000,
+            }),
+        ];
+
+        assert_eq!(
+            latest_assistant_text(&history).as_deref(),
+            Some("the answer preview")
+        );
     }
 }

@@ -5,6 +5,7 @@
 //! the internal Restate ingress.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
@@ -22,6 +23,18 @@ struct Args {
     /// Internal Restate ingress base URL.
     #[arg(long, env = "MOA_EDGE_UPSTREAM")]
     upstream: Option<String>,
+    /// Maximum edge Postgres pool connections.
+    #[arg(long, env = "MOA_EDGE_DB_MAX_CONNECTIONS", default_value_t = 50)]
+    db_max_connections: u32,
+    /// Minimum edge Postgres pool connections kept warm.
+    #[arg(long, env = "MOA_EDGE_DB_MIN_CONNECTIONS", default_value_t = 5)]
+    db_min_connections: u32,
+    /// Timeout, in seconds, to acquire a connection before failing fast.
+    #[arg(long, env = "MOA_EDGE_DB_ACQUIRE_TIMEOUT_SECONDS", default_value_t = 3)]
+    db_acquire_timeout_seconds: u64,
+    /// Maximum lifetime, in seconds, of a pooled connection.
+    #[arg(long, env = "MOA_EDGE_DB_MAX_LIFETIME_SECONDS", default_value_t = 1800)]
+    db_max_lifetime_seconds: u64,
 }
 
 #[tokio::main]
@@ -46,7 +59,10 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(bind = %args.bind, upstream = %upstream, "starting moa-edge");
 
     let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(args.db_max_connections)
+        .min_connections(args.db_min_connections)
+        .acquire_timeout(Duration::from_secs(args.db_acquire_timeout_seconds))
+        .max_lifetime(Duration::from_secs(args.db_max_lifetime_seconds))
         .connect(&database_url)
         .await
         .context("connect edge api-key database")?;

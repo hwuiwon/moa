@@ -72,7 +72,7 @@ pub(super) async fn run_narration_tick(
     ctx: &ObjectContext<'_>,
     generation: u64,
 ) -> Result<(), HandlerError> {
-    let mut state = SessionVoState::load_from(ctx).await?;
+    let mut state = Tracked::<SessionVoState>::load(ctx).await?;
 
     // Stale: a newer generation now owns scheduling, so do not reschedule.
     if tick_is_stale(generation, state.narration_tick_generation) {
@@ -83,7 +83,7 @@ pub(super) async fn run_narration_tick(
     let limits = &config.session_limits;
     if !limits.progress_narration_enabled {
         state.narration_tick_outstanding = false;
-        state.persist_into(ctx);
+        state.persist(ctx);
         return Ok(());
     }
 
@@ -94,7 +94,7 @@ pub(super) async fn run_narration_tick(
     if !has_active {
         // Nothing active: stop scheduling and clear the outstanding flag.
         state.narration_tick_outstanding = false;
-        state.persist_into(ctx);
+        state.persist(ctx);
         return Ok(());
     }
 
@@ -157,6 +157,11 @@ pub(super) async fn run_narration_tick(
             }
         }
     }
+    // A tick that neither narrates nor rolls the rate-limit window leaves every
+    // durable field unchanged; persisting it would journal the full state for no
+    // reason on each idle poll.
+    let window_changed = window.start != state.narration_window_start
+        || window.count != state.narration_window_count;
     state.narration_window_start = window.start;
     state.narration_window_count = window.count;
 
@@ -167,7 +172,9 @@ pub(super) async fn run_narration_tick(
         now,
         limits.progress_narration_interval_ms,
     );
-    state.persist_into(ctx);
+    if outcome.narrate || window_changed {
+        state.persist(ctx);
+    }
     Ok(())
 }
 

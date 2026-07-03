@@ -63,7 +63,7 @@ pub(super) async fn run_child_liveness_check(
     ctx: &ObjectContext<'_>,
     req: CheckChildLivenessRequest,
 ) -> Result<(), HandlerError> {
-    let mut state = SessionVoState::load_from(ctx).await?;
+    let mut state = Tracked::<SessionVoState>::load(ctx).await?;
 
     // Per-child generation guard: a superseded (or cleared) check no longer owns
     // scheduling for this child, so drop it without rescheduling.
@@ -81,7 +81,7 @@ pub(super) async fn run_child_liveness_check(
         Some(terminal) => terminal,
         None => {
             state.clear_child_liveness(&req.worker_id);
-            state.persist_into(ctx);
+            state.persist(ctx);
             return Ok(());
         }
     };
@@ -114,7 +114,7 @@ pub(super) async fn run_child_liveness_check(
     ) {
         ChildLivenessDecision::Stop => {
             state.clear_child_liveness(&req.worker_id);
-            state.persist_into(ctx);
+            state.persist(ctx);
         }
         ChildLivenessDecision::Reschedule { delay_ms } => {
             // Same generation: the single outstanding check continues watching this child.
@@ -126,7 +126,7 @@ pub(super) async fn run_child_liveness_check(
             // The watchdog has raised the alarm; stop so a stuck child cannot fan out a
             // stream of resume signals while it stays stale.
             state.clear_child_liveness(&req.worker_id);
-            state.persist_into(ctx);
+            state.persist(ctx);
         }
     }
     Ok(())

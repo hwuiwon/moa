@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -31,6 +32,10 @@ const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 const DOCKER_DETECTION_TIMEOUT: Duration = Duration::from_secs(2);
 const DOCKER_TMPFS_OPTIONS: &str = "rw,nosuid,nodev,size=64m";
 const DEFAULT_DOCKER_WORKSPACE: &str = "/workspace";
+
+/// Optional Docker seccomp profile path, resolved from the environment once.
+static DOCKER_SECCOMP_PROFILE: LazyLock<Option<String>> =
+    LazyLock::new(|| std::env::var("MOA_DOCKER_SECCOMP_PROFILE").ok());
 
 #[derive(Debug, Clone)]
 struct LocalSandbox {
@@ -138,7 +143,7 @@ impl LocalHandProvider {
             "-v".to_string(),
             mount,
         ];
-        if let Ok(profile) = std::env::var("MOA_DOCKER_SECCOMP_PROFILE") {
+        if let Some(profile) = DOCKER_SECCOMP_PROFILE.as_ref() {
             args.push("--security-opt".to_string());
             args.push(format!("seccomp={profile}"));
         }

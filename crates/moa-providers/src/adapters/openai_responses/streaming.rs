@@ -7,7 +7,9 @@ use super::tools::{
 };
 use super::*;
 use crate::core::provider_tools::{web_search_completed_block, web_search_started_block};
+use crate::core::rate_guard::RateGuard;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_responses_with_retry(
     client: &OpenAiClient<OpenAIConfig>,
     request: &CreateResponse,
@@ -15,6 +17,7 @@ pub(crate) async fn stream_responses_with_retry(
     fallback_model: ModelId,
     started_at: Instant,
     retry_policy: RetryPolicy,
+    guard: &RateGuard,
     mut span_recorder: LLMSpanRecorder,
 ) -> Result<CompletionResponse> {
     let mut attempt = 0usize;
@@ -41,7 +44,8 @@ pub(crate) async fn stream_responses_with_retry(
                     Err(error)
                         if error.retryable
                             && !error.emitted_content
-                            && attempt < retry_policy.max_retries =>
+                            && attempt < retry_policy.max_retries
+                            && guard.allow_retry() =>
                     {
                         let delay = retry_policy.delay_for_attempt(attempt);
                         tracing::warn!(
@@ -59,6 +63,7 @@ pub(crate) async fn stream_responses_with_retry(
                             // Match the shared RetryPolicy: an exhausted rate
                             // limit is a typed RateLimited, never a generic
                             // ProviderError or HttpStatus{429}.
+                            guard.record_rate_limited(None);
                             let message = match error.error {
                                 MoaError::RateLimited { message, .. }
                                 | MoaError::ProviderError(message) => message,
@@ -74,8 +79,9 @@ pub(crate) async fn stream_responses_with_retry(
                 }
             }
             Err(error) if is_retryable_openai_error(&error) => {
-                if attempt >= retry_policy.max_retries {
+                if attempt >= retry_policy.max_retries || !guard.allow_retry() {
                     let error = if is_rate_limit_error(&error) {
+                        guard.record_rate_limited(None);
                         MoaError::RateLimited {
                             retries: retry_policy.max_retries,
                             message: error.to_string(),

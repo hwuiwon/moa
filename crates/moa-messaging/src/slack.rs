@@ -1,6 +1,6 @@
 //! Slack channel adapter built on top of `slack-morphism` Socket Mode.
 
-use std::{collections::HashMap, sync::Arc, time::Duration, time::Instant};
+use std::{sync::Arc, time::Duration, time::Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -9,13 +9,11 @@ use moa_core::{
     Channel, ChannelActor, ChannelCapabilities, ChannelRef, InboundMessage, MessageId, MoaConfig,
     MoaError, OutboundMessage, Result,
 };
+use moka::future::Cache;
 use serde::{Deserialize, Serialize};
 use slack_morphism::errors::SlackClientError;
 use slack_morphism::prelude::*;
-use tokio::{
-    sync::{RwLock, mpsc},
-    time::sleep,
-};
+use tokio::{sync::mpsc, time::sleep};
 use tracing::{Instrument, field, warn};
 use uuid::Uuid;
 
@@ -32,16 +30,29 @@ const SLACK_OUTBOUND_REF_CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 *
 const SLACK_OUTBOUND_REF_LOCK_TTL: Duration = Duration::from_secs(120);
 const SLACK_OUTBOUND_REF_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 const SLACK_OUTBOUND_REF_LOCK_RELEASE_TTL: Duration = Duration::from_millis(1);
+/// Deadline for acquiring the shared outbound-ref update lock before giving up.
+///
+/// A crashed holder's lock auto-expires after [`SLACK_OUTBOUND_REF_LOCK_TTL`], so
+/// waiting one lock TTL guarantees acquisition after a dead holder while bounding
+/// how long an edit/delete can block on a live contender.
+const SLACK_OUTBOUND_REF_LOCK_ACQUIRE_TIMEOUT: Duration = SLACK_OUTBOUND_REF_LOCK_TTL;
+/// Upper bound on entries retained by each process-local Slack cache.
+const SLACK_CACHE_MAX_CAPACITY: u64 = 100_000;
+/// Retention for process-local inbound reply-context refs, matched to the shared
+/// outbound-ref TTL so both sides of a conversation age out together.
+const SLACK_INBOUND_CONTEXT_TTL: Duration = SLACK_OUTBOUND_REF_CACHE_TTL;
+/// Retention for the last-edit timestamps used only for edit-interval logging.
+const SLACK_LAST_EDIT_TTL: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Clone)]
 struct SlackListenerState {
     event_tx: mpsc::Sender<InboundMessage>,
-    inbound_contexts: Arc<RwLock<HashMap<String, SlackMessageRef>>>,
+    inbound_contexts: Cache<String, SlackMessageRef>,
 }
 
 #[derive(Clone)]
 struct SlackOutboundMessageRefs {
-    hot_refs: Arc<RwLock<HashMap<String, Vec<SlackMessageRef>>>>,
+    hot_refs: Cache<String, Vec<SlackMessageRef>>,
     runtime_cache: Option<Arc<dyn RuntimeCacheStore>>,
 }
 
@@ -68,7 +79,10 @@ impl SlackOutboundRefUpdateLock {
 impl SlackOutboundMessageRefs {
     fn new(runtime_cache: Option<Arc<dyn RuntimeCacheStore>>) -> Self {
         Self {
-            hot_refs: Arc::new(RwLock::new(HashMap::new())),
+            hot_refs: Cache::builder()
+                .max_capacity(SLACK_CACHE_MAX_CAPACITY)
+                .time_to_live(SLACK_OUTBOUND_REF_CACHE_TTL)
+                .build(),
             runtime_cache,
         }
     }
@@ -129,7 +143,7 @@ impl SlackOutboundMessageRefs {
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    if let Some(refs) = self.hot_refs.read().await.get(msg_id.as_str()).cloned() {
+                    if let Some(refs) = self.hot_refs.get(msg_id.as_str()).await {
                         warn!(
                             message_id = %msg_id,
                             error = %error,
@@ -142,7 +156,7 @@ impl SlackOutboundMessageRefs {
             }
         }
 
-        let refs = self.hot_refs.read().await.get(msg_id.as_str()).cloned();
+        let refs = self.hot_refs.get(msg_id.as_str()).await;
         if let Some(refs) = refs {
             self.refresh_shared_refs_best_effort(msg_id, &refs, "load_hot_refs")
                 .await;
@@ -153,7 +167,7 @@ impl SlackOutboundMessageRefs {
     }
 
     async fn remove_after_external_side_effect(&self, msg_id: &MessageId, operation: &'static str) {
-        self.hot_refs.write().await.remove(msg_id.as_str());
+        self.hot_refs.invalidate(msg_id.as_str()).await;
         if let Some(runtime_cache) = &self.runtime_cache
             && let Err(error) = runtime_cache
                 .delete(&slack_outbound_refs_cache_key(msg_id))
@@ -177,6 +191,11 @@ impl SlackOutboundMessageRefs {
         };
         let key = slack_outbound_refs_lock_key(msg_id);
         let token = Uuid::now_v7().to_string().into_bytes();
+        // The lock is held across the full edit/delete Slack API sequence to
+        // serialize concurrent ref mutations for one message, so its scope is
+        // kept as-is; only acquisition is bounded so an edit/delete cannot block
+        // forever on a live contender or a lost lock release.
+        let deadline = Instant::now() + SLACK_OUTBOUND_REF_LOCK_ACQUIRE_TIMEOUT;
 
         loop {
             let current = runtime_cache.get(&key).await?;
@@ -192,7 +211,15 @@ impl SlackOutboundMessageRefs {
                 }));
             }
 
-            sleep(SLACK_OUTBOUND_REF_LOCK_RETRY_INTERVAL).await;
+            if Instant::now() >= deadline {
+                return Err(MoaError::ProviderQuirk(format!(
+                    "timed out acquiring Slack outbound ref update lock for {msg_id}"
+                )));
+            }
+            sleep(crate::rate_limit::with_jitter(
+                SLACK_OUTBOUND_REF_LOCK_RETRY_INTERVAL,
+            ))
+            .await;
         }
     }
 
@@ -210,9 +237,8 @@ impl SlackOutboundMessageRefs {
 
     async fn remember_hot_refs(&self, msg_id: &MessageId, refs: &[SlackMessageRef]) {
         self.hot_refs
-            .write()
-            .await
-            .insert(msg_id.as_str().to_string(), refs.to_vec());
+            .insert(msg_id.as_str().to_string(), refs.to_vec())
+            .await;
     }
 
     async fn write_shared_refs(&self, msg_id: &MessageId, refs: &[SlackMessageRef]) -> Result<()> {
@@ -253,10 +279,10 @@ pub struct SlackAdapter {
     bot_token: SlackApiToken,
     app_token: SlackApiToken,
     renderer: SlackRenderer,
-    inbound_contexts: Arc<RwLock<HashMap<String, SlackMessageRef>>>,
+    inbound_contexts: Cache<String, SlackMessageRef>,
     outbound_refs: SlackOutboundMessageRefs,
     rate_limiter: MessagingRateLimiter,
-    last_edits: Arc<RwLock<HashMap<String, Instant>>>,
+    last_edits: Cache<String, Instant>,
 }
 
 impl SlackAdapter {
@@ -285,10 +311,16 @@ impl SlackAdapter {
                 token_type: Some(SlackApiTokenType::App),
             },
             renderer: SlackRenderer::new(),
-            inbound_contexts: Arc::new(RwLock::new(HashMap::new())),
+            inbound_contexts: Cache::builder()
+                .max_capacity(SLACK_CACHE_MAX_CAPACITY)
+                .time_to_live(SLACK_INBOUND_CONTEXT_TTL)
+                .build(),
             outbound_refs: SlackOutboundMessageRefs::new(None),
             rate_limiter: MessagingRateLimiter::for_channel(Channel::Slack),
-            last_edits: Arc::new(RwLock::new(HashMap::new())),
+            last_edits: Cache::builder()
+                .max_capacity(SLACK_CACHE_MAX_CAPACITY)
+                .time_to_live(SLACK_LAST_EDIT_TTL)
+                .build(),
         })
     }
 
@@ -341,7 +373,7 @@ impl SlackAdapter {
                 return Ok(last_ref.target());
             }
 
-            if let Some(inbound_ref) = self.inbound_contexts.read().await.get(reply_to).cloned() {
+            if let Some(inbound_ref) = self.inbound_contexts.get(reply_to).await {
                 return Ok(inbound_ref.target());
             }
         }
@@ -426,11 +458,10 @@ impl SlackAdapter {
 
     async fn record_edit_attempt(&self, message_id: &MessageId) {
         let min_interval = self.capabilities().min_edit_interval;
-        let previous = self
-            .last_edits
-            .write()
-            .await
-            .insert(message_id.as_str().to_string(), Instant::now());
+        let previous = self.last_edits.get(message_id.as_str()).await;
+        self.last_edits
+            .insert(message_id.as_str().to_string(), Instant::now())
+            .await;
         if let Some(last_edit) = previous {
             let remaining = min_interval.saturating_sub(last_edit.elapsed());
             if !remaining.is_zero() {
@@ -877,9 +908,8 @@ async fn handle_push_event(
             if let Some(origin) = push_event_origin(&event) {
                 shared
                     .inbound_contexts
-                    .write()
-                    .await
-                    .insert(inbound.channel_msg_id.clone(), origin);
+                    .insert(inbound.channel_msg_id.clone(), origin)
+                    .await;
             }
             if shared.event_tx.send(inbound).await.is_err() {
                 warn!("slack inbound receiver dropped");

@@ -55,7 +55,15 @@ pub(crate) struct MockSessionStore {
 }
 
 impl MockSessionStore {
-    pub(crate) fn new(session: SessionMeta, events: Vec<EventRecord>) -> Self {
+    pub(crate) fn new(mut session: SessionMeta, events: Vec<EventRecord>) -> Self {
+        // Mirror the app-maintained session aggregates so the compaction
+        // watermark gate sees a faithful event count and checkpoint sequence.
+        session.event_count = events.len();
+        session.last_checkpoint_seq = events
+            .iter()
+            .rev()
+            .find(|record| matches!(record.event, Event::Checkpoint { .. }))
+            .map(|record| record.sequence_num);
         Self {
             session: Arc::new(Mutex::new(session)),
             events: Arc::new(Mutex::new(events)),
@@ -75,6 +83,7 @@ impl SessionStore for MockSessionStore {
     async fn emit_event(&self, session_id: SessionId, event: Event) -> Result<SequenceNum> {
         let mut events = self.events.lock().await;
         let sequence_num = events.len() as SequenceNum;
+        let is_checkpoint = matches!(event, Event::Checkpoint { .. });
         events.push(EventRecord {
             id: uuid::Uuid::now_v7(),
             session_id,
@@ -86,6 +95,14 @@ impl SessionStore for MockSessionStore {
             hand_id: None,
             token_count: None,
         });
+        let event_count = events.len();
+        drop(events);
+        // Keep the app-maintained aggregates consistent with the log.
+        let mut session = self.session.lock().await;
+        session.event_count = event_count;
+        if is_checkpoint {
+            session.last_checkpoint_seq = Some(sequence_num);
+        }
         Ok(sequence_num)
     }
 

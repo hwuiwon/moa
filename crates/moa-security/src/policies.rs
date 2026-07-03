@@ -60,23 +60,31 @@ pub struct ActionPolicyCheck {
 }
 
 /// Policy engine for tool action decisions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Config globs are compiled into [`GlobMatcher`]s once at construction so a
+/// per-tool-call [`ActionPolicies::check`] matches cached matchers instead of
+/// recompiling every config pattern.
+#[derive(Debug, Clone)]
 pub struct ActionPolicies {
     default_effect: ActionPolicyEffect,
-    admin_review: Vec<String>,
-    always_deny: Vec<String>,
+    admin_review: Vec<GlobMatcher>,
+    always_deny: Vec<GlobMatcher>,
 }
 
 impl ActionPolicies {
     /// Creates policies from the loaded MOA config.
     pub fn from_config(config: &MoaConfig) -> Result<Self> {
-        let policies = Self {
+        Ok(Self {
             default_effect: config.permissions.default_effect,
-            admin_review: config.permissions.admin_review.clone(),
-            always_deny: config.permissions.always_deny.clone(),
-        };
-        policies.validate_config()?;
-        Ok(policies)
+            admin_review: compile_config_globs(
+                "permissions.admin_review",
+                &config.permissions.admin_review,
+            )?,
+            always_deny: compile_config_globs(
+                "permissions.always_deny",
+                &config.permissions.always_deny,
+            )?,
+        })
     }
 
     /// Evaluates a tool invocation using persistent rules, config defaults, and tool metadata.
@@ -86,7 +94,6 @@ impl ActionPolicies {
         ctx: &ActionPolicyContext,
         rules: &[ActionPolicyRule],
     ) -> Result<ActionPolicyCheck> {
-        self.validate_config()?;
         validate_action_policy_rules(rules)?;
 
         let mut matched_rule: Option<ActionPolicyRule> = None;
@@ -109,7 +116,7 @@ impl ActionPolicies {
             }
         }
 
-        let configured = self.configured_tool_effect(&input.tool_name)?;
+        let configured = self.configured_tool_effect(&input.tool_name);
         if let Some(rule) = matched_rule {
             let (effect, reason) = match configured {
                 Some((configured_effect, configured_reason)) => {
@@ -147,39 +154,26 @@ impl ActionPolicies {
         })
     }
 
-    fn configured_tool_effect(
-        &self,
-        tool_name: &str,
-    ) -> Result<Option<(ActionPolicyEffect, String)>> {
-        for candidate in &self.always_deny {
-            if config_glob_matches("permissions.always_deny", candidate, tool_name)? {
-                return Ok(Some((
-                    ActionPolicyEffect::Deny,
-                    "tool is denied by action-policy config".to_string(),
-                )));
-            }
+    fn configured_tool_effect(&self, tool_name: &str) -> Option<(ActionPolicyEffect, String)> {
+        if self.always_deny.iter().any(|glob| glob.is_match(tool_name)) {
+            return Some((
+                ActionPolicyEffect::Deny,
+                "tool is denied by action-policy config".to_string(),
+            ));
         }
 
-        for candidate in &self.admin_review {
-            if config_glob_matches("permissions.admin_review", candidate, tool_name)? {
-                return Ok(Some((
-                    ActionPolicyEffect::AdminReview,
-                    "tool requires tenant admin review by config".to_string(),
-                )));
-            }
+        if self
+            .admin_review
+            .iter()
+            .any(|glob| glob.is_match(tool_name))
+        {
+            return Some((
+                ActionPolicyEffect::AdminReview,
+                "tool requires tenant admin review by config".to_string(),
+            ));
         }
 
-        Ok(None)
-    }
-
-    fn validate_config(&self) -> Result<()> {
-        for pattern in &self.always_deny {
-            validate_config_policy_glob("permissions.always_deny", pattern)?;
-        }
-        for pattern in &self.admin_review {
-            validate_config_policy_glob("permissions.admin_review", pattern)?;
-        }
-        Ok(())
+        None
     }
 }
 
@@ -238,12 +232,12 @@ fn compile_config_glob(field: &str, pattern: &str) -> Result<GlobMatcher> {
         })
 }
 
-fn validate_config_policy_glob(field: &str, pattern: &str) -> Result<()> {
-    compile_config_glob(field, pattern).map(|_| ())
-}
-
-fn config_glob_matches(field: &str, pattern: &str, candidate: &str) -> Result<bool> {
-    Ok(compile_config_glob(field, pattern)?.is_match(candidate))
+/// Compiles every config glob for one field once, failing closed on a bad pattern.
+fn compile_config_globs(field: &str, patterns: &[String]) -> Result<Vec<GlobMatcher>> {
+    patterns
+        .iter()
+        .map(|pattern| compile_config_glob(field, pattern))
+        .collect()
 }
 
 /// Parses a shell command and matches it against a rule pattern.
@@ -715,11 +709,10 @@ mod tests {
     #[test]
     fn configured_tool_policy_cannot_be_weakened_by_persisted_allow_rule() {
         // Pins: deployment-level deny/review config is a floor, not a tenant-rule suggestion.
-        let policies = ActionPolicies {
-            default_effect: ActionPolicyEffect::Allow,
-            admin_review: Vec::new(),
-            always_deny: vec!["bash".to_string()],
-        };
+        let mut config = MoaConfig::default();
+        config.permissions.always_deny = vec!["bash".to_string()];
+        let policies = ActionPolicies::from_config(&config)
+            .expect("valid always_deny config glob should build an action policy");
         let ctx = ActionPolicyContext::from_session(&session());
         let allow_rule = ActionPolicyRule {
             id: Uuid::now_v7(),

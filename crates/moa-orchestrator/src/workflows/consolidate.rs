@@ -5,7 +5,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use moa_core::{LearningEntry, TenantId};
 use moa_memory_lifecycle::{
     BackfillStats, ConsolidationOptions, ConsolidationOutcome, DecayStats, DigestStats, MergeStats,
-    SweepStats,
+    SweepStats, TenantConsolidationCursor,
 };
 use restate_sdk::prelude::*;
 use uuid::Uuid;
@@ -27,6 +27,9 @@ pub struct ConsolidateRequest {
     pub tenant_id: TenantId,
     /// Logical UTC date this workflow instance owns.
     pub target_date: NaiveDate,
+    /// Changelog version observed before this workflow was dispatched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_changelog_version: Option<i64>,
 }
 
 /// Serializable outcome for one workflow execution.
@@ -227,6 +230,12 @@ pub trait ConsolidateDurableSteps {
     /// Captures the pass timestamp behind a journaled durable step.
     async fn capture_now(&mut self) -> Result<DateTime<Utc>, HandlerError>;
 
+    /// Captures the current tenant changelog version behind a journaled durable step.
+    async fn capture_current_changelog_version(
+        &mut self,
+        request: &ConsolidateRequest,
+    ) -> Result<i64, HandlerError>;
+
     /// Runs the exact-duplicate merge step.
     async fn merge_duplicates(
         &mut self,
@@ -280,6 +289,13 @@ pub trait ConsolidateDurableSteps {
         &mut self,
         report: &ConsolidateReport,
     ) -> Result<(), HandlerError>;
+
+    /// Advances the tenant consolidation watermark after successful completion.
+    async fn advance_consolidation_watermark(
+        &mut self,
+        request: &ConsolidateRequest,
+        changelog_version: i64,
+    ) -> Result<(), HandlerError>;
 }
 
 /// Runs the consolidation workflow body against a durable-step implementation.
@@ -287,6 +303,10 @@ pub async fn run_consolidate_workflow(
     steps: &mut impl ConsolidateDurableSteps,
     request: ConsolidateRequest,
 ) -> Result<ConsolidateReport, HandlerError> {
+    let observed_changelog_version = match request.observed_changelog_version {
+        Some(changelog_version) => changelog_version,
+        None => steps.capture_current_changelog_version(&request).await?,
+    };
     steps.mark_consolidation_started(&request).await?;
     let ran_at = steps.capture_now().await?;
     let merge = steps.merge_duplicates(&request, ran_at).await?;
@@ -310,6 +330,9 @@ pub async fn run_consolidate_workflow(
         .await?;
     steps.record_memory_learning(&report).await?;
     steps.consolidation_completed(&report).await?;
+    steps
+        .advance_consolidation_watermark(&request, observed_changelog_version)
+        .await?;
     Ok(report)
 }
 
@@ -335,6 +358,25 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         self.ctx
             .run(|| async move { Ok(Json::from(Utc::now())) })
             .name("now")
+            .await
+            .map(Json::into_inner)
+            .map_err(HandlerError::from)
+    }
+
+    async fn capture_current_changelog_version(
+        &mut self,
+        request: &ConsolidateRequest,
+    ) -> Result<i64, HandlerError> {
+        let pool = OrchestratorCtx::current_graph_pool();
+        let tenant_id = request.tenant_id;
+        self.ctx
+            .run(|| async move {
+                moa_memory_lifecycle::tenant_changelog_version(&pool, &tenant_id)
+                    .await
+                    .map(Json::from)
+                    .map_err(lifecycle_handler_error)
+            })
+            .name("capture_changelog_version")
             .await
             .map(Json::into_inner)
             .map_err(HandlerError::from)
@@ -487,6 +529,29 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
             .consolidation_completed(Json::from(report.clone()))
             .call()
             .await
+            .map_err(HandlerError::from)
+    }
+
+    async fn advance_consolidation_watermark(
+        &mut self,
+        request: &ConsolidateRequest,
+        changelog_version: i64,
+    ) -> Result<(), HandlerError> {
+        let pool = OrchestratorCtx::current_graph_pool();
+        let cursor = TenantConsolidationCursor {
+            tenant_id: request.tenant_id,
+            changelog_version,
+        };
+        self.ctx
+            .run(|| async move {
+                moa_memory_lifecycle::advance_consolidation_watermark(&pool, &[cursor])
+                    .await
+                    .map(Json::from)
+                    .map_err(lifecycle_handler_error)
+            })
+            .name("advance_consolidation_watermark")
+            .await
+            .map(|_| ())
             .map_err(HandlerError::from)
     }
 }

@@ -272,22 +272,13 @@ pub(super) async fn authenticate_edge_request(
         Some(credential) => credential,
         None => {
             span.record("moa.edge.auth.result", "missing_credential");
-            if let Err(error) = moa_ocsf::emit_authn_failure(
-                &state.pool,
+            moa_ocsf::spawn_authn_failure(
                 Uuid::nil(),
                 None,
                 "unknown",
                 source_ip(headers),
                 "missing credential",
-            )
-            .await
-            {
-                tracing::error!(error = %error, "security audit write failed for missing credential");
-                span.record("http.status_code", 500_i64);
-                return Err(
-                    (StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response()
-                );
-            }
+            );
             span.record("http.status_code", 401_i64);
             return Err((StatusCode::UNAUTHORIZED, "missing credential").into_response());
         }
@@ -301,26 +292,13 @@ pub(super) async fn authenticate_edge_request(
                 tracing::field::display(state.auth.name()),
             );
             span.record("moa.edge.auth.result", "rejected");
-            if let Err(audit_error) = moa_ocsf::emit_authn_failure(
-                &state.pool,
+            moa_ocsf::spawn_authn_failure(
                 Uuid::nil(),
                 None,
                 state.auth.name(),
                 source_ip(headers),
                 &error.to_string(),
-            )
-            .await
-            {
-                tracing::error!(
-                    error = %audit_error,
-                    auth_error = %error,
-                    "security audit write failed for rejected credential"
-                );
-                span.record("http.status_code", 500_i64);
-                return Err(
-                    (StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response()
-                );
-            }
+            );
             tracing::info!(error = %error, provider = state.auth.name(), "authentication rejected");
             span.record("http.status_code", 401_i64);
             return Err((StatusCode::UNAUTHORIZED, "invalid credential").into_response());
@@ -331,19 +309,12 @@ pub(super) async fn authenticate_edge_request(
         tracing::field::display(state.auth.name()),
     );
     span.record("moa.edge.auth.result", "accepted");
-    if let Err(error) = moa_ocsf::emit_authn_success(
-        &state.pool,
+    moa_ocsf::spawn_authn_success(
         identity.tenant_id.0,
         &identity,
         state.auth.name(),
         source_ip(headers),
-    )
-    .await
-    {
-        tracing::error!(error = %error, "security audit write failed for authenticated request");
-        span.record("http.status_code", 500_i64);
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response());
-    }
+    );
     Ok(identity)
 }
 
@@ -1028,11 +999,11 @@ async fn response_to_axum(response: reqwest::Response) -> axum::response::Respon
 
     let mut builder = axum::http::Response::builder().status(status);
     for (name, value) in &headers {
-        let lowercase_name = name.as_str().to_ascii_lowercase();
-        if matches!(
-            lowercase_name.as_str(),
-            "transfer-encoding" | "connection" | "keep-alive"
-        ) {
+        let name_str = name.as_str();
+        if name_str.eq_ignore_ascii_case("transfer-encoding")
+            || name_str.eq_ignore_ascii_case("connection")
+            || name_str.eq_ignore_ascii_case("keep-alive")
+        {
             continue;
         }
         builder = builder.header(name.clone(), value.clone());

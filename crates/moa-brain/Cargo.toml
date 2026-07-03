@@ -12,6 +12,7 @@ eval-harness = []
 async-trait.workspace = true
 blake3.workspace = true
 chrono.workspace = true
+futures-util.workspace = true
 metrics.workspace = true
 moa-artifacts = { workspace = true }
 moa-core = { workspace = true }

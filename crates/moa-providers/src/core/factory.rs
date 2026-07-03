@@ -31,9 +31,13 @@ pub fn resolve_provider_selection(
 }
 
 /// Builds the configured provider using the config's effective default provider/model pair.
+///
+/// The result is wrapped with the configured LLM failover chain
+/// (`models.fallback_models`), matching the main-loop router path.
 pub fn build_provider_from_config(config: &MoaConfig) -> Result<Arc<dyn LLMProvider>> {
     let selection = resolve_provider_selection(config, None)?;
-    build_provider_from_selection(config, &selection)
+    let primary = build_provider_from_selection(config, &selection)?;
+    ProviderRegistry::from_config(config).apply_main_failover(config, &selection.model_id, primary)
 }
 
 /// Builds one provider instance from an explicit provider/model selection.

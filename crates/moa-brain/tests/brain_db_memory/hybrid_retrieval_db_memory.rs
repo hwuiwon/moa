@@ -29,7 +29,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use moa_brain::planning::{PlanningCtx, QueryPlanner, QueryRetrievalCtx};
 use moa_brain::retrieval::{
-    CachedHybridRetriever, HybridRetriever, RetrievalRequest,
+    CachedHybridRetriever, CachedHybridRetrieverConfig, HybridRetriever, RetrievalRequest,
     legs::{lexical_leg, vector_leg},
 };
 
@@ -102,7 +102,16 @@ async fn query_retrieval_ctx_defaults_reranker_off_and_requires_explicit_opt_in(
     let hybrid = Arc::new(
         HybridRetriever::new(pool.clone(), graph.clone(), vector).with_assume_app_role(true),
     );
-    let cached = CachedHybridRetriever::new_for_app_role(hybrid, pool);
+    // Disable the version-read TTL so any write-then-retrieve in this lane
+    // observes changelog bumps immediately rather than within the caching window.
+    let cached = CachedHybridRetriever::with_config_for_app_role(
+        hybrid,
+        pool,
+        CachedHybridRetrieverConfig {
+            version_ttl: std::time::Duration::ZERO,
+            ..CachedHybridRetrieverConfig::default()
+        },
+    );
     let planner = QueryPlanner::new();
     let planning = PlanningCtx::new(scope, graph);
     let embedder = RerankerDefaultEmbedder;
@@ -1302,6 +1311,171 @@ async fn turbopuffer_bm25_error_falls_back_to_postgres_lexical_db_memory() {
 
     let _ = graph
         .hard_purge(fact_uid, "redacted:hybrid-bm25-fallback-test")
+        .await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn lexical_prefix_fallback_matches_word_prefix_when_primary_misses_db_memory() {
+    // Pins: the sargable lexical fallback (name_tsv prefix FTS) still recovers a
+    // node whose stored word extends a short query term — e.g. query "auth"
+    // matches the stored lexeme "authentication" — which the exact/stemmed
+    // primary leg misses. This is the recall the previous non-sargable
+    // LIKE '%term%' scan provided for word-prefix cases.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = test_storage_partition_id();
+    let graph = graph_store(session_store.pool(), &storage_partition_id);
+    set_workspace_embedder_state(session_store.pool(), &storage_partition_id, "test-model").await;
+
+    let node_uid = graph
+        .create_node(node_intent(
+            &storage_partition_id,
+            NodeLabel::Chunk,
+            "authentication service",
+            None,
+        ))
+        .await
+        .expect("create prefix-fallback fact");
+
+    let vector = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(&storage_partition_id),
+    );
+    let retriever = HybridRetriever::new(
+        session_store.pool().clone(),
+        Arc::new(graph.clone()),
+        Arc::new(vector),
+    )
+    .with_assume_app_role(true);
+
+    let hits = retriever
+        .retrieve(RetrievalRequest {
+            seeds: Vec::new(),
+            query_text: "auth".to_string(),
+            query_embedding: Vec::new(),
+            scope: tenant_memory_scope(&storage_partition_id),
+            label_filter: Some(vec![NodeLabel::Chunk]),
+            max_pii_class: PiiClass::Restricted,
+            k_final: 5,
+            use_reranker: false,
+            strategy: None,
+            as_of: None,
+            ranking_reference_time: None,
+            lineage: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: true,
+        })
+        .await
+        .expect("retrieve through sargable prefix fallback");
+
+    let hit = hits
+        .iter()
+        .find(|hit| hit.uid == node_uid)
+        .expect("word-prefix node should be recovered by the prefix fallback");
+    assert!(
+        hit.legs.lexical,
+        "hit must be attributed to the lexical leg"
+    );
+
+    let _ = graph
+        .hard_purge(node_uid, "redacted:prefix-fallback-test")
+        .await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn lexical_fallback_matches_structured_predicate_in_properties_db_memory() {
+    // Pins: the sargable fallback still recovers structured-predicate facts whose
+    // match lives in `properties_summary` (not the name) via the new
+    // `properties_tsv` GIN column — the recall the LIKE scan over
+    // name || properties_summary previously provided.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = test_storage_partition_id();
+    let graph = graph_store(session_store.pool(), &storage_partition_id);
+    set_workspace_embedder_state(session_store.pool(), &storage_partition_id, "test-model").await;
+
+    // Name deliberately carries none of the query terms; the match must come from
+    // the structured predicate stored in properties_summary.
+    let node_uid = graph
+        .create_node(NodeWriteIntent {
+            uid: Uuid::now_v7(),
+            label: NodeLabel::Fact,
+            storage_partition_id: Some(storage_partition_id.clone()),
+            contact_id: None,
+            scope: "tenant".to_string(),
+            name: "unrelated node title".to_string(),
+            properties: json!({
+                "summary": "private repository preference",
+                "predicate": "private_repository",
+                "source": "structured_predicate_test"
+            }),
+            pii_class: PiiClass::None,
+            confidence: Some(0.9),
+            valid_from: Utc::now(),
+            embedding: None,
+            embedding_model: Some("test-model".to_string()),
+            embedding_model_version: Some(1),
+            embedding_text: None,
+            actor_id: Uuid::now_v7().to_string(),
+            actor_kind: "system".to_string(),
+        })
+        .await
+        .expect("create structured-predicate fact");
+
+    let vector = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(&storage_partition_id),
+    );
+    let retriever = HybridRetriever::new(
+        session_store.pool().clone(),
+        Arc::new(graph.clone()),
+        Arc::new(vector),
+    )
+    .with_assume_app_role(true);
+
+    let hits = retriever
+        .retrieve(RetrievalRequest {
+            seeds: Vec::new(),
+            query_text: "Which private work repository should you use for me?".to_string(),
+            query_embedding: Vec::new(),
+            scope: tenant_memory_scope(&storage_partition_id),
+            label_filter: Some(vec![NodeLabel::Fact]),
+            max_pii_class: PiiClass::Restricted,
+            k_final: 5,
+            use_reranker: false,
+            strategy: None,
+            as_of: None,
+            ranking_reference_time: None,
+            lineage: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: true,
+        })
+        .await
+        .expect("retrieve through properties_tsv fallback");
+
+    let hit = hits
+        .iter()
+        .find(|hit| hit.uid == node_uid)
+        .expect("structured-predicate fact should be recovered via properties_tsv");
+    assert!(
+        hit.legs.lexical,
+        "hit must be attributed to the lexical leg"
+    );
+
+    let _ = graph
+        .hard_purge(node_uid, "redacted:properties-fallback-test")
         .await;
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)

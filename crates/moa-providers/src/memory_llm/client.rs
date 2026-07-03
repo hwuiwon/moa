@@ -2,13 +2,18 @@
 
 use std::time::Duration;
 
+use rand::Rng;
 use reqwest::{Client, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
+use crate::core::pacer::{PacerConfig, RatePacer};
+
 const COHERE_CHAT_URL: &str = "https://api.cohere.com/v2/chat";
 const RETRY_DELAY: Duration = Duration::from_millis(200);
+/// Documented Cohere Chat production limit: 500 requests/min (trial keys: 20).
+const COHERE_CHAT_REQUESTS_PER_MIN: u32 = 500;
 
 /// Cohere chat client shared by ingestion components that need text generation.
 #[derive(Clone)]
@@ -17,10 +22,20 @@ pub struct LlmChatClient {
     endpoint: String,
     model: String,
     api_key: SecretString,
+    pacer: RatePacer,
+    /// Optional ordered fallback chat clients tried when the primary is
+    /// retryably rate limited. Empty unless a caller opts in via
+    /// [`LlmChatClient::with_fallback`].
+    fallbacks: Vec<LlmChatClient>,
 }
 
 impl LlmChatClient {
     /// Creates a Cohere chat client from an explicit API key.
+    ///
+    /// Requests are paced to the documented Cohere Chat production ceiling
+    /// (500 req/min) by default; a trial key should lower this with
+    /// [`LlmChatClient::with_rate_limits`] (e.g.
+    /// `PacerConfig::requests_per_min(20)`).
     #[must_use]
     pub fn from_api_key(api_key: SecretString, model: &str, timeout_ms: u64) -> Self {
         let timeout = Duration::from_millis(timeout_ms);
@@ -33,6 +48,8 @@ impl LlmChatClient {
             endpoint: COHERE_CHAT_URL.to_string(),
             model: model.to_string(),
             api_key,
+            pacer: RatePacer::new(PacerConfig::requests_per_min(COHERE_CHAT_REQUESTS_PER_MIN)),
+            fallbacks: Vec::new(),
         }
     }
 
@@ -43,6 +60,14 @@ impl LlmChatClient {
         self
     }
 
+    /// Overrides the per-minute request pacing, e.g. to apply a trial key's
+    /// lower Cohere Chat ceiling (`PacerConfig::requests_per_min(20)`).
+    #[must_use]
+    pub fn with_rate_limits(mut self, config: PacerConfig) -> Self {
+        self.pacer = RatePacer::new(config);
+        self
+    }
+
     /// Overrides the Cohere chat endpoint, primarily for deterministic tests.
     #[must_use]
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
@@ -50,15 +75,45 @@ impl LlmChatClient {
         self
     }
 
+    /// Appends a fallback chat client tried when the primary is rate limited.
+    ///
+    /// Opt-in only: `moa-memory` ingestion construction sites are deliberately
+    /// left unwired (that crate is owned elsewhere), so ingestion keeps its
+    /// single-client behavior unless a caller explicitly builds a chain here.
+    #[must_use]
+    pub fn with_fallback(mut self, fallback: LlmChatClient) -> Self {
+        self.fallbacks.push(fallback);
+        self
+    }
+
     /// Sends a non-streaming chat request and returns the assistant text.
+    ///
+    /// On a retryable (rate-limit-class) failure of the primary, falls over to
+    /// each configured fallback in order before surfacing the primary's error.
     pub async fn chat(&self, system: &str, user: &str) -> Result<String, LlmChatError> {
+        match self.chat_with_retry(system, user).await {
+            Ok(text) => Ok(text),
+            Err(error) => {
+                if error.is_retryable() {
+                    for fallback in &self.fallbacks {
+                        if let Ok(text) = fallback.chat_with_retry(system, user).await {
+                            return Ok(text);
+                        }
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn chat_with_retry(&self, system: &str, user: &str) -> Result<String, LlmChatError> {
         let mut attempt = 0_u8;
         loop {
             match self.chat_once(system, user).await {
                 Ok(text) => return Ok(text),
                 Err(error) if error.is_retryable() && attempt == 0 => {
                     attempt += 1;
-                    sleep(RETRY_DELAY).await;
+                    sleep(retry_delay_with_jitter()).await;
                 }
                 Err(error) => return Err(error),
             }
@@ -87,6 +142,8 @@ impl LlmChatClient {
             messages,
             temperature: 0.0,
         };
+        // Cohere Chat is limited by requests/min; pace before dispatching.
+        self.pacer.acquire(1, 0).await;
         let response = self
             .client
             .post(&self.endpoint)
@@ -161,6 +218,17 @@ impl LlmChatError {
     fn is_retryable(&self) -> bool {
         matches!(self, Self::Timeout { .. } | Self::Transient { .. })
     }
+}
+
+/// Returns the retry backoff with proportional jitter applied.
+///
+/// Adds a uniform random delay of up to half the base [`RETRY_DELAY`] so
+/// concurrent ingestion retries do not resynchronize into a thundering herd
+/// against the shared Cohere chat endpoint.
+fn retry_delay_with_jitter() -> Duration {
+    let base_ms = RETRY_DELAY.as_millis() as u64;
+    let jitter_ms = rand::thread_rng().gen_range(0..=base_ms / 2);
+    RETRY_DELAY + Duration::from_millis(jitter_ms)
 }
 
 fn map_reqwest_error(error: reqwest::Error) -> LlmChatError {
@@ -299,6 +367,43 @@ mod tests {
             .await
             .expect_err("timeout should fail");
         assert!(matches!(error, LlmChatError::Timeout { .. }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn chat_client_defaults_to_cohere_chat_request_pacing() {
+        // Pins: `from_api_key` wires a requests/min pacer at the documented Cohere
+        // Chat ceiling, so once that per-minute budget is spent the next request
+        // waits for the bucket to refill. Exercises the exact pacer the chat path
+        // acquires; pacing is not observable through the HTTP seam under paused
+        // time because auto-advanced virtual time trips the request timeout.
+        let client = client(5_000);
+        client
+            .pacer
+            .acquire(super::COHERE_CHAT_REQUESTS_PER_MIN, 0)
+            .await;
+
+        let before = tokio::time::Instant::now();
+        client.pacer.acquire(1, 0).await;
+        // One token refills at limit/60 per second, so the wait is > 0 once drained.
+        assert!(
+            before.elapsed() >= Duration::from_millis(100),
+            "a drained default budget should pace the next request"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn chat_client_rate_limit_override_lowers_the_ceiling() {
+        // Pins: `with_rate_limits` replaces the default pacer, e.g. a trial key's
+        // 1/min ceiling, so the second request waits ~60s for one token to refill.
+        let client = client(5_000).with_rate_limits(PacerConfig::requests_per_min(1));
+        client.pacer.acquire(1, 0).await;
+
+        let before = tokio::time::Instant::now();
+        client.pacer.acquire(1, 0).await;
+        assert!(
+            before.elapsed() >= Duration::from_secs(55),
+            "a 1/min override should pace the next request by ~60s"
+        );
     }
 
     fn client(timeout_ms: u64) -> LlmChatClient {

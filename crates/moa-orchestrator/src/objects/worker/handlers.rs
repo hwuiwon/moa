@@ -1,6 +1,6 @@
 //! Restate handlers for the Worker VO.
 
-use super::state::MAX_CLEANUP_RELEASE_ATTEMPTS;
+use super::state::{ClaimedHistoryEntry, MAX_CLEANUP_RELEASE_ATTEMPTS, WorkerHistoryEntry};
 use super::*;
 use crate::objects::session::SessionClient;
 use crate::services::tool_executor::{ReleaseWorkerHandsRequest, ToolExecutorClient};
@@ -17,7 +17,7 @@ impl Worker for WorkerImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Worker", "post_message");
         let message = msg.into_inner();
-        let mut state = WorkerVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         match &message {
             // ProvideInput answers an in-flight `request_input` round-trip: resolve the
             // matching awakeable to unblock the parked child turn. It never starts a turn,
@@ -29,7 +29,7 @@ impl Worker for WorkerImpl {
             } => {
                 if let Some(awakeable_id) = state.take_input_awakeable(input_request_id) {
                     ctx.resolve_awakeable(&awakeable_id, text.clone());
-                    state.persist_into(&ctx);
+                    state.persist(&ctx);
                     tracing::info!(
                         key = %ctx.key(),
                         input_request_id = %input_request_id,
@@ -78,7 +78,7 @@ impl Worker for WorkerImpl {
         };
         let max_turns = state.max_turns;
         let trusted_sandbox_manifest = state.trusted_sandbox_manifest.clone();
-        state.persist_into(&ctx);
+        state.persist(&ctx);
 
         if let Some(turn_id) = turn_id {
             start_worker_turn_execution(&ctx, turn_id, max_turns, trusted_sandbox_manifest);
@@ -92,9 +92,7 @@ impl Worker for WorkerImpl {
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<WorkerStatus>, HandlerError> {
         annotate_restate_handler_span("Worker", "status");
-        Ok(Json::from(
-            WorkerVoState::load_from(&ctx).await?.status_view(),
-        ))
+        Ok(Json::from(WorkerVoState::load_status_view(&ctx).await?))
     }
 
     #[tracing::instrument(skip(self, ctx))]
@@ -106,7 +104,6 @@ impl Worker for WorkerImpl {
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<WorkerProgressSummary>, HandlerError> {
         annotate_restate_handler_span("Worker", "progress_summary");
-        let state = WorkerVoState::load_from(&ctx).await?;
         let now = ctx
             .run(|| async { Ok::<_, HandlerError>(Json::from(Utc::now())) })
             .name("worker_progress_summary_now")
@@ -115,11 +112,15 @@ impl Worker for WorkerImpl {
         let stale_threshold_ms = OrchestratorCtx::current_config()
             .session_limits
             .worker_heartbeat_stale_ms;
-        Ok(Json::from(state.progress_summary(
-            ctx.key().to_string(),
-            now,
-            stale_threshold_ms,
-        )))
+        Ok(Json::from(
+            WorkerVoState::load_progress_summary(
+                &ctx,
+                ctx.key().to_string(),
+                now,
+                stale_threshold_ms,
+            )
+            .await?,
+        ))
     }
 
     #[tracing::instrument(skip(self, ctx, at))]
@@ -131,9 +132,9 @@ impl Worker for WorkerImpl {
         at: Json<DateTime<Utc>>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Worker", "record_heartbeat");
-        let mut state = WorkerVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         state.last_heartbeat_at = Some(at.into_inner());
-        state.persist_into(&ctx);
+        state.persist(&ctx);
         Ok(())
     }
 
@@ -143,17 +144,14 @@ impl Worker for WorkerImpl {
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<Option<WorkerResult>>, HandlerError> {
         annotate_restate_handler_span("Worker", "result");
-        let state = WorkerVoState::load_from(&ctx).await?;
-        let result = state
-            .terminal_result(ctx.key().to_string())
-            .map(|terminal| terminal.result);
+        let result = WorkerVoState::load_terminal_result(&ctx, ctx.key().to_string()).await?;
         Ok(Json::from(result))
     }
 
     #[tracing::instrument(skip(self, ctx, reason))]
     async fn cancel(&self, ctx: ObjectContext<'_>, reason: String) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Worker", "cancel");
-        let mut state = WorkerVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         let active_turn_id = state.active_turn_id.clone();
         state.cancel_reason = Some(reason.clone());
         state.status = Some(WorkerState::Cancelled);
@@ -163,7 +161,7 @@ impl Worker for WorkerImpl {
             .filter(|child| child.terminal.is_none())
             .cloned()
             .collect::<Vec<_>>();
-        state.persist_into(&ctx);
+        state.persist(&ctx);
 
         if let Some(turn_id) = active_turn_id {
             ctx.workflow_client::<WorkerTurnExecutionClient>(turn_id)
@@ -196,7 +194,7 @@ impl Worker for WorkerImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Worker", "record_response");
         let record = response.into_inner();
-        let mut state = WorkerVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         if !state.active_turn_matches(&record.turn_id) {
             tracing::warn!(
                 key = %ctx.key(),
@@ -212,8 +210,13 @@ impl Worker for WorkerImpl {
         state.record_token_usage(token_cost);
         let parent_session = state.parent_session;
         state.last_turn_summary = summarize_response_text(&response);
-        apply_response_to_history(&mut state.history, &response);
-        state.persist_into(&ctx);
+        let mut appended = Vec::new();
+        apply_response_to_history(&mut appended, &response);
+        state
+            .history
+            .extend(appended.into_iter().map(WorkerHistoryEntry::inline));
+        claim_check_worker_history(&ctx, &mut state).await?;
+        state.persist(&ctx);
 
         if let Some(parent_session) = parent_session
             && token_cost > 0
@@ -256,7 +259,7 @@ impl Worker for WorkerImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Worker", "apply_turn_outcome");
         let record = outcome.into_inner();
-        let mut state = WorkerVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         if !state.active_turn_matches(&record.turn_id) {
             tracing::warn!(
                 key = %ctx.key(),
@@ -273,7 +276,7 @@ impl Worker for WorkerImpl {
         ) {
             state.apply_turn_outcome(outcome);
         }
-        state.persist_into(&ctx);
+        state.persist(&ctx);
         Ok(())
     }
 
@@ -285,14 +288,14 @@ impl Worker for WorkerImpl {
     ) -> Result<Json<AttachWorkerResultWaiterOutput>, HandlerError> {
         annotate_restate_handler_span("Worker", "attach_result_waiter");
         let input = input.into_inner();
-        let mut state = WorkerVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         if let Some(terminal) = state.terminal_result(ctx.key().to_string()) {
             return Ok(Json::from(AttachWorkerResultWaiterOutput {
                 terminal: Some(terminal),
             }));
         }
         if state.add_result_waiter(input.awakeable_id) {
-            state.persist_into(&ctx);
+            state.persist(&ctx);
         }
         Ok(Json::from(AttachWorkerResultWaiterOutput {
             terminal: None,
@@ -307,9 +310,9 @@ impl Worker for WorkerImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Worker", "remove_result_waiter");
         let input = input.into_inner();
-        let mut state = WorkerVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         if state.remove_result_waiter(&input.awakeable_id) {
-            state.persist_into(&ctx);
+            state.persist(&ctx);
         }
         Ok(())
     }
@@ -324,9 +327,9 @@ impl Worker for WorkerImpl {
         input: Json<WorkerPendingInput>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Worker", "register_input_request");
-        let mut state = WorkerVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         if state.register_input_request(input.into_inner()) {
-            state.persist_into(&ctx);
+            state.persist(&ctx);
         }
         Ok(())
     }
@@ -341,12 +344,12 @@ impl Worker for WorkerImpl {
         input_request_id: Json<String>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Worker", "clear_input_request");
-        let mut state = WorkerVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         if state
             .take_input_awakeable(&input_request_id.into_inner())
             .is_some()
         {
-            state.persist_into(&ctx);
+            state.persist(&ctx);
         }
         Ok(())
     }
@@ -359,7 +362,7 @@ impl Worker for WorkerImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Worker", "record_turn_outcome");
         let outcome = outcome.into_inner();
-        let mut state = WorkerVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         let matches_active = state.clear_active_turn(&outcome.turn_id);
         if matches_active {
             if matches!(outcome.kind, TurnOutcomeKind::Failed) {
@@ -384,7 +387,7 @@ impl Worker for WorkerImpl {
         };
         let max_turns = state.max_turns;
         let trusted_sandbox_manifest = state.trusted_sandbox_manifest.clone();
-        state.persist_into(&ctx);
+        state.persist(&ctx);
 
         if let Some(turn_id) = next_turn_id {
             start_worker_turn_execution(&ctx, turn_id, max_turns, trusted_sandbox_manifest);
@@ -414,7 +417,7 @@ impl Worker for WorkerImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Worker", "cleanup");
         let req = req.into_inner();
-        let mut state = WorkerVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         let has_non_terminal_child = state.children.iter().any(|child| child.terminal.is_none());
         let decision = decide_cleanup(
             req.generation == state.cleanup_generation,
@@ -468,7 +471,7 @@ impl Worker for WorkerImpl {
                         ctx.clear_all();
                     } else {
                         state.cleanup_release_attempts = attempts;
-                        state.persist_into(&ctx);
+                        state.persist(&ctx);
                         reschedule_cleanup(&ctx, state.cleanup_generation).await?;
                         tracing::warn!(
                             key = %ctx.key(),
@@ -636,10 +639,10 @@ fn generate_turn_id(ctx: &mut ObjectContext<'_>) -> String {
 async fn prepare_turn_inner(
     ctx: &mut ObjectContext<'_>,
 ) -> Result<WorkerTurnPreparation, HandlerError> {
-    let mut state = WorkerVoState::load_from(ctx).await?;
+    let mut state = Tracked::<WorkerVoState>::load(ctx).await?;
     if state.cancel_reason.is_some() {
         state.apply_turn_outcome(TurnOutcome::Cancelled);
-        state.persist_into(ctx);
+        state.persist(ctx);
         return Ok(WorkerTurnPreparation::Outcome {
             outcome: TurnOutcome::Cancelled,
         });
@@ -658,12 +661,14 @@ async fn prepare_turn_inner(
     for message in &pending {
         state
             .history
-            .push(ContextMessage::user(render_user_message(message)));
+            .push(WorkerHistoryEntry::inline(ContextMessage::user(
+                render_user_message(message),
+            )));
     }
 
     if state.budget_exhausted() {
         state.complete_after_budget_exhausted();
-        state.persist_into(ctx);
+        state.persist(ctx);
         return Ok(WorkerTurnPreparation::Outcome {
             outcome: TurnOutcome::Idle,
         });
@@ -685,7 +690,8 @@ async fn prepare_turn_inner(
         .ok_or_else(|| TerminalError::new("worker model missing"))?;
 
     let mut request = build_completion_request(&state)?;
-    request.messages.extend(state.history.clone());
+    extend_request_with_history(&*ctx, parent_session, &state.history, &mut request.messages)
+        .await?;
     let active_canary = if request.tools.is_empty() {
         None
     } else {
@@ -712,7 +718,7 @@ async fn prepare_turn_inner(
         .metadata
         .insert("_moa.worker_id".to_string(), json!(ctx.key().to_string()));
     let session_meta = synthetic_session_meta(&state)?;
-    state.persist_into(ctx);
+    state.persist(ctx);
 
     Ok(WorkerTurnPreparation::Request {
         request: Box::new(request),
@@ -739,7 +745,7 @@ async fn record_tool_result_inner(
     record: WorkerToolRecord,
     kind: ToolRecordKind,
 ) -> Result<(), HandlerError> {
-    let mut state = WorkerVoState::load_from(ctx).await?;
+    let mut state = Tracked::<WorkerVoState>::load(ctx).await?;
     if let Some(turn_id) = record.turn_id.as_deref()
         && !state.active_turn_matches(turn_id)
     {
@@ -751,20 +757,112 @@ async fn record_tool_result_inner(
         );
         return Ok(());
     }
-    state.history.push(ContextMessage::tool_result(
-        record
-            .invocation
-            .id
-            .clone()
-            .unwrap_or_else(|| record.tool_id.0.to_string()),
-        record.output.to_text(),
-        Some(record.output.content.clone()),
-    ));
+    state
+        .history
+        .push(WorkerHistoryEntry::inline(ContextMessage::tool_result(
+            record
+                .invocation
+                .id
+                .clone()
+                .unwrap_or_else(|| record.tool_id.0.to_string()),
+            record.output.to_text(),
+            Some(record.output.content.clone()),
+        )));
     if kind.counts_invocation() {
         state.tools_invoked = state.tools_invoked.saturating_add(1);
     }
-    state.persist_into(ctx);
+    claim_check_worker_history(ctx, &mut state).await?;
+    state.persist(ctx);
     Ok(())
+}
+
+/// Offloads aged-out, over-threshold inline history entries to content-addressed blobs.
+///
+/// Runs after any append to `state.history`. The pure candidate selection keeps the
+/// most-recent inline tail resident (no hydration on the hot path) and only offloads older
+/// entries whose serialized body crosses the threshold. Each body is stored via
+/// `store_text_artifact` inside a journaled `ctx.run`: the blob store is content-addressed,
+/// so the recorded blob id is a deterministic function of the body and is reused verbatim on
+/// replay. A worker without an owning session has no blob namespace, so its history stays
+/// inline.
+async fn claim_check_worker_history(
+    ctx: &ObjectContext<'_>,
+    state: &mut WorkerVoState,
+) -> Result<(), HandlerError> {
+    let Some(session_id) = state.parent_session else {
+        return Ok(());
+    };
+    for (idx, body) in state.history_entries_to_claim_check()? {
+        let store = OrchestratorCtx::current_session_store();
+        let claim = ctx
+            .run(|| async move {
+                store
+                    .store_text_artifact(session_id, &body)
+                    .await
+                    .map(Json::from)
+                    .map_err(moa_error_to_handler_error)
+            })
+            .name(format!("worker_history_claim_check_{idx}"))
+            .await?
+            .into_inner();
+        state.claim_history_entry(idx, claim);
+    }
+    Ok(())
+}
+
+/// Appends the worker's buffered history to `out`, hydrating any claim-checked entries.
+///
+/// Inline entries are cloned directly; a `Claimed` entry's full body is read back from its
+/// content-addressed blob and decoded into the original `ContextMessage`. The read is
+/// journaled (rather than a bare content-addressed read) so the compiled turn request is
+/// byte-identical on replay without re-touching the blob store.
+async fn extend_request_with_history(
+    ctx: &ObjectContext<'_>,
+    session_id: SessionId,
+    history: &[WorkerHistoryEntry],
+    out: &mut Vec<ContextMessage>,
+) -> Result<(), HandlerError> {
+    for (idx, entry) in history.iter().enumerate() {
+        match entry {
+            WorkerHistoryEntry::Inline(message) => out.push(message.clone()),
+            WorkerHistoryEntry::Claimed(claimed) => {
+                out.push(hydrate_claimed_history_entry(ctx, session_id, idx, claimed).await?);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reads one claim-checked history entry's full body back from its blob and decodes it.
+async fn hydrate_claimed_history_entry(
+    ctx: &ObjectContext<'_>,
+    session_id: SessionId,
+    idx: usize,
+    claimed: &ClaimedHistoryEntry,
+) -> Result<ContextMessage, HandlerError> {
+    let claim_check = ClaimCheck {
+        blob_id: claimed.blob_id.clone(),
+        size: claimed.size,
+        preview: claimed.preview.clone(),
+    };
+    let store = OrchestratorCtx::current_session_store();
+    let body = ctx
+        .run(|| async move {
+            store
+                .load_text_artifact(session_id, &claim_check)
+                .await
+                .map(Json::from)
+                .map_err(moa_error_to_handler_error)
+        })
+        .name(format!("worker_history_hydrate_{idx}"))
+        .await?
+        .into_inner();
+    serde_json::from_str(&body).map_err(|error| {
+        HandlerError::from(TerminalError::new(format!(
+            "failed to decode claimed worker history entry {}: {error}",
+            claimed.blob_id
+        )))
+    })
 }
 
 fn start_worker_turn_execution(
@@ -784,7 +882,7 @@ fn start_worker_turn_execution(
 }
 
 async fn maybe_resolve_parent_awakeable(ctx: &ObjectContext<'_>) -> Result<(), HandlerError> {
-    let mut state = WorkerVoState::load_from(ctx).await?;
+    let mut state = Tracked::<WorkerVoState>::load(ctx).await?;
     let Some(terminal) = state.terminal_result(ctx.key().to_string()) else {
         return Ok(());
     };
@@ -807,7 +905,7 @@ async fn maybe_resolve_parent_awakeable(ctx: &ObjectContext<'_>) -> Result<(), H
     }
 
     if delivered || waiter_payload.is_some() {
-        state.persist_into(ctx);
+        state.persist(ctx);
     }
     Ok(())
 }

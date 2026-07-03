@@ -2,6 +2,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
 
 use moa_core::{CoordinationSnapshot, SessionId, SessionMeta, TraceContext, TurnReplaySnapshot};
 use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
@@ -53,6 +54,27 @@ pub fn add_session_trace_link(span: &tracing::Span, session_id: SessionId) {
     span.add_link(synthetic_session_span_context(session_id));
 }
 
+/// Returns whether raw/hashed prompt tracing is enabled for turn spans.
+///
+/// Disabled by default so turn spans carry neither the raw prompt as their name (unbounded
+/// cardinality) nor prompt text as an attribute (PII). Set `MOA_TRACE_PROMPT_SAMPLE=1` (or
+/// `true`) to opt in for local debugging; the value is read once per process.
+fn prompt_trace_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MOA_TRACE_PROMPT_SAMPLE")
+            .map(|value| matches!(value.trim(), "1" | "true" | "TRUE"))
+            .unwrap_or(false)
+    })
+}
+
+/// Returns a bounded, non-reversible hash of a prompt for span correlation.
+fn prompt_hash(prompt: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    prompt.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 /// Root span for one brain turn with the standard per-turn trace attributes.
 pub fn session_turn_span(
     meta: &SessionMeta,
@@ -60,19 +82,34 @@ pub fn session_turn_span(
     turn_number: i64,
     environment: Option<&str>,
 ) -> tracing::Span {
-    let trace_name = TraceContext::from_session_meta(meta, prompt)
-        .with_environment(environment.map(str::to_string))
-        .trace_name
-        .unwrap_or_else(|| format!("MOA turn {turn_number}"));
+    session_turn_span_inner(
+        meta,
+        prompt,
+        turn_number,
+        environment,
+        prompt_trace_debug_enabled(),
+    )
+}
+
+fn session_turn_span_inner(
+    meta: &SessionMeta,
+    prompt: Option<&str>,
+    turn_number: i64,
+    environment: Option<&str>,
+    prompt_debug: bool,
+) -> tracing::Span {
     let span = tracing::info_span!(
         "session_turn",
-        otel.name = %trace_name,
+        // Static, low-cardinality span name. The prompt is never used as the span name (PII +
+        // unbounded cardinality); a bounded hash is attached below only when prompt debug is on.
+        otel.name = %format!("MOA turn {turn_number}"),
         moa.session.id = %meta.id,
         moa.worker.id = tracing::field::Empty,
         moa.tenant.id = %meta.tenant_id,
         moa.contact.id = tracing::field::Empty,
         moa.model = %meta.model,
         moa.turn.number = turn_number,
+        moa.turn.prompt_hash = tracing::field::Empty,
         moa.turn.get_events_calls = tracing::field::Empty,
         moa.turn.events_replayed = tracing::field::Empty,
         moa.turn.events_bytes = tracing::field::Empty,
@@ -95,8 +132,14 @@ pub fn session_turn_span(
         moa.turn.compaction_tokens_reclaimed = tracing::field::Empty,
         moa.turn.compaction_messages_elided = tracing::field::Empty,
     );
-    apply_session_trace(&span, meta, prompt, environment);
+    // Keep the raw prompt out of trace metadata by default; only forward it (via the bounded
+    // `moa.trace.name` attribute) and attach the prompt hash when the operator opts in.
+    let traced_prompt = if prompt_debug { prompt } else { None };
+    apply_session_trace(&span, meta, traced_prompt, environment);
     add_session_trace_link(&span, meta.id);
+    if prompt_debug && let Some(prompt) = prompt {
+        span.record("moa.turn.prompt_hash", prompt_hash(prompt));
+    }
     span
 }
 
@@ -361,17 +404,29 @@ mod tests {
     }
 
     #[test]
-    fn session_turn_span_exports_turn_attributes_and_prompt_trace_name() {
-        // Pins: the per-turn root span exports the prompt-derived trace name plus the
-        // session/tenant/model/turn attributes the orchestrator dashboards key on.
+    fn session_turn_span_uses_static_name_and_keeps_prompt_out_by_default() {
+        // Pins: the per-turn root span name is static (never the prompt), the raw prompt is not
+        // exported as an attribute by default, and the session/tenant/model/turn attributes the
+        // orchestrator dashboards key on are still present.
         let meta = test_meta();
         let spans = capture_spans(|| {
-            let span = session_turn_span(&meta, Some("Fix the OAuth bug"), 7, Some("production"));
+            let span = session_turn_span_inner(
+                &meta,
+                Some("Fix the OAuth bug"),
+                7,
+                Some("production"),
+                false,
+            );
             span.in_scope(|| {});
         });
 
-        // `otel.name` overrides the tracing macro name with the prompt-derived trace name.
-        let span = find_span(&spans, "Fix the OAuth bug");
+        let span = find_span(&spans, "MOA turn 7");
+        assert_eq!(
+            attr_string(span, "moa.trace.name"),
+            None,
+            "raw prompt must not be exported by default"
+        );
+        assert_eq!(attr_string(span, "moa.turn.prompt_hash"), None);
         let session_id = meta.id.to_string();
         let tenant_id = meta.tenant_id.to_string();
         assert_eq!(
@@ -391,6 +446,30 @@ mod tests {
         assert_eq!(
             attr_string(span, "moa.environment").as_deref(),
             Some("production")
+        );
+    }
+
+    #[test]
+    fn session_turn_span_prompt_debug_attaches_bounded_hash_not_span_name() {
+        // Pins: with prompt debug enabled the span name stays static and the prompt surfaces only
+        // as a bounded hash attribute plus the moa.trace.name sample, never as the span name.
+        let meta = test_meta();
+        let spans = capture_spans(|| {
+            let span = session_turn_span_inner(&meta, Some("Fix the OAuth bug"), 7, None, true);
+            span.in_scope(|| {});
+        });
+
+        let span = find_span(&spans, "MOA turn 7");
+        let hash = attr_string(span, "moa.turn.prompt_hash").expect("hash attribute present");
+        assert_eq!(
+            hash.len(),
+            16,
+            "prompt hash is a bounded 16-hex-char digest"
+        );
+        assert_ne!(hash, "Fix the OAuth bug");
+        assert_eq!(
+            attr_string(span, "moa.trace.name").as_deref(),
+            Some("Fix the OAuth bug")
         );
     }
 

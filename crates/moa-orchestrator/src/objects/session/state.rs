@@ -29,6 +29,30 @@ pub(super) const K_RESUME_TURN: &str = "resume_turn";
 pub(super) const K_CHILD_LIVENESS_GENERATION: &str = "child_liveness_generation";
 pub(super) const K_CHILD_LIVENESS: &str = "child_liveness";
 pub(super) const K_AUTO_DELEGATION_RUN: &str = "auto_delegation_run";
+pub(super) const K_CHILD_TERMINAL_BLOBS: &str = "child_terminal_blobs";
+
+/// Byte threshold above which a terminal child's output is offloaded from `K_CHILDREN` to a
+/// content-addressed claim-check blob, leaving a compact preview inline in VO state.
+///
+/// The `children` registry is re-read on every Session VO load (progress polls, fan-in,
+/// terminal marking), so a large worker output embedded inline is deserialized repeatedly.
+/// 12 KiB keeps ordinary results inline while offloading the large ones.
+pub(super) const CHILD_OUTPUT_CLAIM_CHECK_THRESHOLD_BYTES: usize = 12 * 1024;
+
+/// Maximum characters retained inline as the preview of a claim-checked child output.
+const CHILD_OUTPUT_PREVIEW_CHARS: usize = 512;
+
+/// Reference to a terminal child's full output offloaded to a claim-check blob.
+///
+/// Held on the Session VO so `consume_child_result` can hydrate the full output for the
+/// coordinator while the `children` registry keeps only a compact preview.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChildTerminalOutputRef {
+    /// Worker whose terminal output was offloaded.
+    pub worker_id: WorkerId,
+    /// Content-addressed blob holding the full output.
+    pub claim_check: ClaimCheck,
+}
 
 /// Maximum unread child→parent control-plane signals retained on the coordinator VO.
 ///
@@ -204,6 +228,12 @@ pub struct SessionVoState {
     pub child_liveness: Vec<ChildLivenessState>,
     /// Active deterministic auto-delegation run waiting for worker result fan-in.
     pub auto_delegation_run: Option<AutoDelegationRun>,
+    /// Claim-check references for terminal child outputs offloaded from `children`.
+    ///
+    /// One entry per terminal child whose output exceeded
+    /// [`CHILD_OUTPUT_CLAIM_CHECK_THRESHOLD_BYTES`]; the inline `children` copy keeps only a
+    /// preview and `consume_child_result` hydrates the full body from the blob.
+    pub child_terminal_blobs: Vec<ChildTerminalOutputRef>,
 }
 
 impl SessionVoState {
@@ -216,6 +246,24 @@ impl SessionVoState {
     /// Returns the current lifecycle status, defaulting to `Created` when state is empty.
     pub fn current_status(&self) -> SessionStatus {
         self.status.clone().unwrap_or(SessionStatus::Created)
+    }
+
+    /// Loads only the lifecycle status key for hot read-only status polls, so the
+    /// handler skips deserializing children, pending, and narration state.
+    pub(super) async fn load_status<R: VoReader>(
+        reader: &R,
+    ) -> Result<SessionStatus, HandlerError> {
+        Ok(reader
+            .get_json(K_STATUS)
+            .await?
+            .unwrap_or(SessionStatus::Created))
+    }
+
+    /// Loads only the child-refs key for hot read-only child polls.
+    pub(super) async fn load_children<R: VoReader>(
+        reader: &R,
+    ) -> Result<Vec<WorkerChildRef>, HandlerError> {
+        Ok(reader.get_json(K_CHILDREN).await?.unwrap_or_default())
     }
 
     /// Ensures that session metadata has been initialized before mutations proceed.
@@ -419,6 +467,24 @@ impl SessionVoState {
             return false;
         }
         run.bundle_emitted = true;
+        // The emitted WorkerResultBundle event is the durable record of every scheduled
+        // worker's result, so the per-worker terminal copies cached on the run are never
+        // read again and are dropped here to bound VO state.
+        run.results = Vec::new();
+        // Evict the consumed terminal children from the transient registry now that their
+        // result is durable in the event log. A run worker still running (e.g. one failed out
+        // synthetically by the fan-in bound while it hangs) keeps its non-terminal registry
+        // entry so cancellation, liveness, and progress continue to track it.
+        let worker_ids = run.worker_ids.clone();
+        for worker_id in worker_ids {
+            if self
+                .children
+                .iter()
+                .any(|child| child.id == worker_id && child.terminal.is_some())
+            {
+                self.remove_child(&worker_id);
+            }
+        }
         true
     }
 
@@ -554,7 +620,59 @@ impl SessionVoState {
         self.children.retain(|child| child.id != worker_id);
         // Drop any outstanding liveness watchdog for the now-removed child.
         self.clear_child_liveness(worker_id);
+        // Drop any claim-check reference for the now-removed child's output; the blob is
+        // reclaimed at session teardown.
+        self.remove_child_terminal_blob(worker_id);
         self.children.len() != before
+    }
+
+    /// Returns the full output of a terminal child when it exceeds the claim-check
+    /// threshold and is still stored inline, so the handler can offload it to a blob.
+    #[must_use]
+    pub fn large_child_terminal_output(&self, worker_id: &str) -> Option<String> {
+        let child = self.children.iter().find(|child| child.id == worker_id)?;
+        let terminal = child.terminal.as_ref()?;
+        (terminal.result.output.len() >= CHILD_OUTPUT_CLAIM_CHECK_THRESHOLD_BYTES)
+            .then(|| terminal.result.output.clone())
+    }
+
+    /// Replaces a terminal child's inline output with a preview after its full body was
+    /// offloaded to `claim_check`, recording the reference for later hydration.
+    pub fn compact_child_terminal_output(&mut self, worker_id: &str, claim_check: ClaimCheck) {
+        {
+            let Some(child) = self.children.iter_mut().find(|child| child.id == worker_id) else {
+                return;
+            };
+            let Some(terminal) = child.terminal.as_mut() else {
+                return;
+            };
+            let preview = child_output_preview(&terminal.result.output);
+            terminal.result.output = preview;
+        }
+        // One reference per worker: replace any stale entry so a revived/re-marked child
+        // cannot accumulate duplicates.
+        self.child_terminal_blobs
+            .retain(|reference| reference.worker_id != worker_id);
+        self.child_terminal_blobs.push(ChildTerminalOutputRef {
+            worker_id: worker_id.to_string(),
+            claim_check,
+        });
+    }
+
+    /// Removes and returns a terminal child's output claim-check reference, if any, so the
+    /// consuming handler can hydrate the full body.
+    pub fn take_child_terminal_blob(&mut self, worker_id: &str) -> Option<ClaimCheck> {
+        let index = self
+            .child_terminal_blobs
+            .iter()
+            .position(|reference| reference.worker_id == worker_id)?;
+        Some(self.child_terminal_blobs.remove(index).claim_check)
+    }
+
+    /// Drops a terminal child's output claim-check reference without returning it.
+    fn remove_child_terminal_blob(&mut self, worker_id: &str) {
+        self.child_terminal_blobs
+            .retain(|reference| reference.worker_id != worker_id);
     }
 
     /// Returns whether the session currently owns the child worker id.
@@ -772,6 +890,11 @@ fn signal_kind_is_action_required(kind: ChildSignalKind) -> bool {
 /// Conservative by design: only blocking/attention-or-failure kinds qualify; plain
 /// `Finding`s never trigger a resume.
 #[must_use]
+/// Truncated, human-readable preview retained inline for a claim-checked child output.
+fn child_output_preview(output: &str) -> String {
+    output.chars().take(CHILD_OUTPUT_PREVIEW_CHARS).collect()
+}
+
 /// Builds a synthetic failed terminal for a worker that never reported one.
 fn failed_worker_terminal(worker_id: &str, reason: &str) -> moa_core::WorkerTerminalResult {
     moa_core::WorkerTerminalResult {
@@ -837,6 +960,10 @@ impl VoState for SessionVoState {
                 .unwrap_or_default(),
             child_liveness: reader.get_json(K_CHILD_LIVENESS).await?.unwrap_or_default(),
             auto_delegation_run: reader.get_json(K_AUTO_DELEGATION_RUN).await?,
+            child_terminal_blobs: reader
+                .get_json(K_CHILD_TERMINAL_BLOBS)
+                .await?
+                .unwrap_or_default(),
         })
     }
 
@@ -904,6 +1031,139 @@ impl VoState for SessionVoState {
             K_AUTO_DELEGATION_RUN,
             self.auto_delegation_run.as_ref(),
         );
+        set_or_clear_vec(ctx, K_CHILD_TERMINAL_BLOBS, &self.child_terminal_blobs);
+    }
+
+    fn persist_changes(&self, ctx: &ObjectContext<'_>, baseline: &Self) {
+        set_changed_opt(ctx, K_META, self.meta.as_ref(), baseline.meta.as_ref());
+        set_changed_opt(
+            ctx,
+            K_STATUS,
+            self.status.as_ref(),
+            baseline.status.as_ref(),
+        );
+        set_changed_vec(ctx, K_PENDING, &self.pending, &baseline.pending);
+        set_changed_vec(ctx, K_CHILDREN, &self.children, &baseline.children);
+        set_changed_opt(
+            ctx,
+            K_LAST_TURN_SUMMARY,
+            self.last_turn_summary.as_ref(),
+            baseline.last_turn_summary.as_ref(),
+        );
+        set_changed_opt(
+            ctx,
+            K_CANCEL_FLAG,
+            self.cancel_flag.as_ref(),
+            baseline.cancel_flag.as_ref(),
+        );
+        set_changed_opt(
+            ctx,
+            K_CURRENT_SEGMENT,
+            self.current_segment.as_ref(),
+            baseline.current_segment.as_ref(),
+        );
+        set_changed_scalar(
+            ctx,
+            K_NARRATION_TICK_GENERATION,
+            self.narration_tick_generation,
+            &baseline.narration_tick_generation,
+            0,
+        );
+        set_changed_scalar(
+            ctx,
+            K_NARRATION_TICK_OUTSTANDING,
+            self.narration_tick_outstanding,
+            &baseline.narration_tick_outstanding,
+            false,
+        );
+        set_changed_scalar(
+            ctx,
+            K_NARRATION_SEQ,
+            self.narration_seq,
+            &baseline.narration_seq,
+            0,
+        );
+        set_changed_opt(
+            ctx,
+            K_LAST_NARRATED_MARKER,
+            self.last_narrated_marker.as_ref(),
+            baseline.last_narrated_marker.as_ref(),
+        );
+        set_changed_opt(
+            ctx,
+            K_LAST_NARRATION_AT,
+            self.last_narration_at.as_ref(),
+            baseline.last_narration_at.as_ref(),
+        );
+        set_changed_opt(
+            ctx,
+            K_NARRATION_WINDOW_START,
+            self.narration_window_start.as_ref(),
+            baseline.narration_window_start.as_ref(),
+        );
+        set_changed_scalar(
+            ctx,
+            K_NARRATION_WINDOW_COUNT,
+            self.narration_window_count,
+            &baseline.narration_window_count,
+            0,
+        );
+        set_changed_opt(
+            ctx,
+            K_OWNING_IDENTITY,
+            self.owning_identity.as_ref(),
+            baseline.owning_identity.as_ref(),
+        );
+        set_changed_vec(
+            ctx,
+            K_UNREAD_CHILD_SIGNALS,
+            &self.unread_child_signals,
+            &baseline.unread_child_signals,
+        );
+        set_changed_opt(
+            ctx,
+            K_PENDING_PARENT_RESUME_SIGNAL,
+            self.pending_parent_resume_signal.as_ref(),
+            baseline.pending_parent_resume_signal.as_ref(),
+        );
+        set_changed_scalar(
+            ctx,
+            K_RESUME_BUDGET,
+            self.resume_budget.clone(),
+            &baseline.resume_budget,
+            ResumeBudget::default(),
+        );
+        set_changed_opt(
+            ctx,
+            K_RESUME_TURN,
+            self.resume_turn.as_ref(),
+            baseline.resume_turn.as_ref(),
+        );
+        set_changed_scalar(
+            ctx,
+            K_CHILD_LIVENESS_GENERATION,
+            self.child_liveness_generation,
+            &baseline.child_liveness_generation,
+            0,
+        );
+        set_changed_vec(
+            ctx,
+            K_CHILD_LIVENESS,
+            &self.child_liveness,
+            &baseline.child_liveness,
+        );
+        set_changed_opt(
+            ctx,
+            K_AUTO_DELEGATION_RUN,
+            self.auto_delegation_run.as_ref(),
+            baseline.auto_delegation_run.as_ref(),
+        );
+        set_changed_vec(
+            ctx,
+            K_CHILD_TERMINAL_BLOBS,
+            &self.child_terminal_blobs,
+            &baseline.child_terminal_blobs,
+        );
     }
 }
 
@@ -912,8 +1172,9 @@ mod tests {
     use chrono::Utc;
     use moa_core::{Attachment, Channel, ModelId};
 
-    use super::SessionVoState;
-    use moa_core::TurnOutcome;
+    use super::{CHILD_OUTPUT_CLAIM_CHECK_THRESHOLD_BYTES, SessionVoState};
+    use crate::objects::session::{ChildProgressFetch, plan_child_progress_fan_in};
+    use moa_core::{ClaimCheck, MarkWorkerChildTerminalInput, TurnOutcome};
 
     fn test_message(text: &str) -> moa_core::UserMessage {
         moa_core::UserMessage {
@@ -1509,21 +1770,24 @@ mod tests {
         );
 
         // The emitted run is unchanged: no second bundle, still not waiting on workers, and the
-        // synthesis is still owned by the already-emitted bundle's sequence.
+        // synthesis is still owned by the already-emitted bundle's sequence. The coordinator's
+        // answer comes from the emitted WorkerResultBundle event (which carried the synthetic
+        // Failed), so the late real result cannot alter it.
         assert_eq!(state.ready_auto_delegation_bundle(), None);
         assert!(!state.auto_delegation_waiting_for_workers());
         assert_eq!(state.pending_auto_delegation_synthesis_sequence(), Some(12));
-        // The run's own slot for the stuck worker is still the synthetic Failed (the late real
-        // result was NOT folded in): the coordinator's answer keeps the synthetic terminal.
-        let stuck_slot = state
-            .auto_delegation_run
-            .as_ref()
-            .expect("run is retained until synthesis clears it")
-            .results[1]
-            .as_ref()
-            .expect("stuck worker's slot stays filled");
-        assert_eq!(stuck_slot.state, moa_core::WorkerState::Failed);
-        assert_eq!(stuck_slot.result.error.as_deref(), Some("stale"));
+        // The run is retained until synthesis clears it, but its per-worker result copies are
+        // freed once the durable bundle is emitted (they are never read again), so the late real
+        // result has nowhere to be folded in.
+        assert!(
+            state
+                .auto_delegation_run
+                .as_ref()
+                .expect("run is retained until synthesis clears it")
+                .results
+                .is_empty(),
+            "emitted run frees its cached result copies"
+        );
     }
 
     #[test]
@@ -1844,5 +2108,160 @@ mod tests {
             .map(|signal| signal.signal_id)
             .collect();
         assert_eq!(remaining, vec![mid_turn]);
+    }
+
+    #[test]
+    fn child_terminal_output_offload_round_trip() {
+        // Pins: a terminal child whose output exceeds the threshold is reported for offload,
+        // compacted to a preview in place, and its claim-check reference is retrievable exactly
+        // once for hydration; a small output stays inline with no reference.
+        let mut state = SessionVoState::default();
+        state.register_child(pending_child("worker-1"));
+        let big = "y".repeat(CHILD_OUTPUT_CLAIM_CHECK_THRESHOLD_BYTES + 10);
+        assert!(state.mark_child_terminal(MarkWorkerChildTerminalInput {
+            worker_id: "worker-1".to_string(),
+            terminal: worker_terminal("worker-1", &big),
+        }));
+        // Over-threshold output is surfaced verbatim for the handler to store to a blob.
+        assert_eq!(
+            state.large_child_terminal_output("worker-1"),
+            Some(big.clone())
+        );
+
+        let claim = ClaimCheck {
+            blob_id: "blob-1".to_string(),
+            size: big.len(),
+            preview: "unused".to_string(),
+        };
+        state.compact_child_terminal_output("worker-1", claim.clone());
+        // The inline copy is now a preview, so it no longer flags as large.
+        assert_eq!(state.large_child_terminal_output("worker-1"), None);
+        // The reference hydrates exactly once.
+        assert_eq!(state.take_child_terminal_blob("worker-1"), Some(claim));
+        assert_eq!(state.take_child_terminal_blob("worker-1"), None);
+
+        // A small output is never offloaded.
+        let mut small = SessionVoState::default();
+        small.register_child(pending_child("worker-2"));
+        small.mark_child_terminal(MarkWorkerChildTerminalInput {
+            worker_id: "worker-2".to_string(),
+            terminal: worker_terminal("worker-2", "short output"),
+        });
+        assert_eq!(small.large_child_terminal_output("worker-2"), None);
+        assert_eq!(small.take_child_terminal_blob("worker-2"), None);
+    }
+
+    #[test]
+    fn remove_child_drops_claim_check_reference() {
+        // Pins: removing a child (worker self-cleanup) also drops its output claim-check
+        // reference so evicted children never leak references in VO state.
+        let mut state = SessionVoState::default();
+        state.register_child(pending_child("worker-1"));
+        let big = "q".repeat(CHILD_OUTPUT_CLAIM_CHECK_THRESHOLD_BYTES + 1);
+        state.mark_child_terminal(MarkWorkerChildTerminalInput {
+            worker_id: "worker-1".to_string(),
+            terminal: worker_terminal("worker-1", &big),
+        });
+        state.compact_child_terminal_output(
+            "worker-1",
+            ClaimCheck {
+                blob_id: "b".to_string(),
+                size: big.len(),
+                preview: "p".to_string(),
+            },
+        );
+
+        assert!(state.remove_child("worker-1"));
+        assert_eq!(state.take_child_terminal_blob("worker-1"), None);
+    }
+
+    #[test]
+    fn bundle_emit_frees_results_evicts_consumed_children_and_preserves_progress() {
+        // Pins: emitting the auto-delegation bundle frees the run's cached results and evicts
+        // the consumed terminal children (dropping their claim-check refs), while a still-running
+        // run worker and an unrelated manual terminal child are retained; the progress fan-in
+        // then renders the surviving terminal child and schedules the running one, with no trace
+        // of the evicted worker.
+        let mut state = SessionVoState::default();
+        state.register_child(pending_child("worker-a"));
+        state.register_child(pending_child("worker-b"));
+        state.register_child(pending_child("worker-c"));
+        assert!(
+            state.register_auto_delegation_run(
+                3,
+                vec!["worker-a".to_string(), "worker-b".to_string()]
+            )
+        );
+
+        // worker-c: a manual terminal child, NOT part of the run.
+        state.mark_child_terminal(MarkWorkerChildTerminalInput {
+            worker_id: "worker-c".to_string(),
+            terminal: worker_terminal("worker-c", "done-c"),
+        });
+        // worker-a: a run worker finishing with a large (claim-checked) output.
+        let big = "z".repeat(CHILD_OUTPUT_CLAIM_CHECK_THRESHOLD_BYTES + 1);
+        state.mark_child_terminal(MarkWorkerChildTerminalInput {
+            worker_id: "worker-a".to_string(),
+            terminal: worker_terminal("worker-a", &big),
+        });
+        state.compact_child_terminal_output(
+            "worker-a",
+            ClaimCheck {
+                blob_id: "blob-a".to_string(),
+                size: big.len(),
+                preview: "pa".to_string(),
+            },
+        );
+        // worker-b never delivers; the fan-in bound fails it out (synthetic run slot only, its
+        // registry entry stays non-terminal).
+        assert_eq!(state.fail_pending_auto_delegation_workers("stuck"), 1);
+        let (seq, results) = state
+            .ready_auto_delegation_bundle()
+            .expect("bundle ready once every run slot is filled");
+        assert_eq!(seq, 3);
+        assert_eq!(results.len(), 2);
+
+        assert!(state.mark_auto_delegation_bundle_emitted(3));
+
+        // Run result copies are freed once the durable bundle event is emitted.
+        assert!(
+            state
+                .auto_delegation_run
+                .as_ref()
+                .expect("run retained until synthesis")
+                .results
+                .is_empty()
+        );
+        // The consumed terminal run child is evicted with its claim-check ref; the still-running
+        // run worker and the unrelated manual terminal child survive.
+        assert!(!state.owns_child("worker-a"));
+        assert_eq!(state.take_child_terminal_blob("worker-a"), None);
+        assert!(state.owns_child("worker-b"));
+        assert!(state.owns_child("worker-c"));
+
+        // Progress fan-in still renders correctly: the manual terminal child as a synthesized
+        // Ready summary, the running worker as a live Fetch, and nothing for the evicted worker.
+        let plan = plan_child_progress_fan_in(&state.children, 8);
+        assert!(
+            plan.iter().any(|item| matches!(
+                item,
+                ChildProgressFetch::Ready(summary) if summary.worker_id == "worker-c"
+            )),
+            "surviving terminal child still renders in progress"
+        );
+        assert!(
+            plan.iter().any(|item| matches!(
+                item,
+                ChildProgressFetch::Fetch(id) if id == "worker-b"
+            )),
+            "still-running run worker is scheduled for a live progress read"
+        );
+        assert!(
+            !plan.iter().any(|item| match item {
+                ChildProgressFetch::Ready(summary) => summary.worker_id == "worker-a",
+                ChildProgressFetch::Fetch(id) => id == "worker-a",
+            }),
+            "the evicted worker leaves no trace in the progress fan-in"
+        );
     }
 }

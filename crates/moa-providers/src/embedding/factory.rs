@@ -1,4 +1,17 @@
 //! Embedding provider selection and construction from runtime config.
+//!
+//! # No cross-provider failover for embeddings — by design
+//!
+//! Unlike the LLM chat path (see [`crate::FailoverLLMProvider`]), embeddings must
+//! NOT fail over to a different provider or model on rate limiting. A stored
+//! vector index is populated by exactly one embedding model; vectors from a
+//! different model live in a different, incompatible geometric space, so serving
+//! a query embedding from a fallback model would silently corrupt similarity
+//! search against the persisted index. Embedding providers therefore rely only on
+//! per-minute pacing ([`PacerConfig`](crate::PacerConfig)), bounded concurrency,
+//! and in-call retry/backoff to ride out rate limits — never substitution. This
+//! is a compile-level guarantee: no embedding builder here accepts or wires a
+//! fallback chain.
 
 use std::sync::Arc;
 
@@ -13,6 +26,7 @@ use super::{
     CohereEmbedding, EmbedRole, EmbedderConstructionRole, GeminiEmbeddingEmbedder, OpenAIEmbedding,
     ZeroEntropyEmbedding,
 };
+use crate::core::pacer::PacerConfig;
 use crate::model_selection::{normalize_provider_name, split_explicit_provider_model};
 
 const OPENAI_PROVIDER_NAME: &str = "openai";
@@ -65,11 +79,33 @@ impl EmbeddingProviderKind {
         match self {
             Self::OpenAi => {
                 let api_key = read_api_key("MOA_OPENAI_API_KEY", &config.providers.openai.api_key)?;
-                Ok(Arc::new(OpenAIEmbedding::new(api_key, model)?))
+                let mut provider = OpenAIEmbedding::new(api_key, model)?;
+                if let Some(pacer) =
+                    embed_pacer_override(config.providers.openai.max_inputs_per_min)
+                {
+                    provider = provider.with_rate_limits(pacer);
+                }
+                if let Some(max) =
+                    concurrency_override(config.providers.openai.max_concurrent_requests)
+                {
+                    provider = provider.with_max_concurrent_requests(max);
+                }
+                Ok(Arc::new(provider))
             }
-            Self::Cohere => Ok(Arc::new(CohereEmbedding::from_config_with_model(
-                config, model,
-            )?)),
+            Self::Cohere => {
+                let mut provider = CohereEmbedding::from_config_with_model(config, model)?;
+                if let Some(pacer) =
+                    embed_pacer_override(config.providers.cohere.max_inputs_per_min)
+                {
+                    provider = provider.with_rate_limits(pacer);
+                }
+                if let Some(max) =
+                    concurrency_override(config.providers.cohere.max_concurrent_requests)
+                {
+                    provider = provider.with_max_concurrent_requests(max);
+                }
+                Ok(Arc::new(provider))
+            }
             Self::Gemini => {
                 if model != GEMINI_V2_MODEL {
                     return Err(MoaError::ConfigError(format!(
@@ -81,9 +117,20 @@ impl EmbeddingProviderKind {
                     EmbedderConstructionRole::Retrieval,
                 )?))
             }
-            Self::ZeroEntropy => Ok(Arc::new(ZeroEntropyEmbedding::from_config_with_model(
-                config, model,
-            )?)),
+            Self::ZeroEntropy => {
+                let mut provider = ZeroEntropyEmbedding::from_config_with_model(config, model)?;
+                if let Some(pacer) =
+                    embed_pacer_override(config.providers.zeroentropy.max_inputs_per_min)
+                {
+                    provider = provider.with_rate_limits(pacer);
+                }
+                if let Some(max) =
+                    concurrency_override(config.providers.zeroentropy.max_concurrent_requests)
+                {
+                    provider = provider.with_max_concurrent_requests(max);
+                }
+                Ok(Arc::new(provider))
+            }
         }
     }
 
@@ -97,20 +144,40 @@ impl EmbeddingProviderKind {
         match self {
             Self::OpenAi => {
                 let api_key = read_api_key("MOA_OPENAI_API_KEY", &config.providers.openai.api_key)?;
-                let provider = OpenAIEmbedding::new(api_key, model)?;
+                let mut provider = OpenAIEmbedding::new(api_key, model)?;
                 if provider.dimensions() != cfg.output_dim {
                     return Err(MoaError::ConfigError(format!(
                         "openai embedding output dimension is {}; configure memory.vector.embedder.output_dim to match",
                         provider.dimensions()
                     )));
                 }
+                if let Some(pacer) =
+                    embed_pacer_override(config.providers.openai.max_inputs_per_min)
+                {
+                    provider = provider.with_rate_limits(pacer);
+                }
+                if let Some(max) =
+                    concurrency_override(config.providers.openai.max_concurrent_requests)
+                {
+                    provider = provider.with_max_concurrent_requests(max);
+                }
                 Ok(Arc::new(provider))
             }
             Self::Cohere => {
                 let api_key = read_api_key("MOA_COHERE_API_KEY", &config.providers.cohere.api_key)?;
-                Ok(Arc::new(
-                    CohereEmbedding::new(api_key, model)?.with_dimensions(cfg.output_dim)?,
-                ))
+                let mut provider =
+                    CohereEmbedding::new(api_key, model)?.with_dimensions(cfg.output_dim)?;
+                if let Some(pacer) =
+                    embed_pacer_override(config.providers.cohere.max_inputs_per_min)
+                {
+                    provider = provider.with_rate_limits(pacer);
+                }
+                if let Some(max) =
+                    concurrency_override(config.providers.cohere.max_concurrent_requests)
+                {
+                    provider = provider.with_max_concurrent_requests(max);
+                }
+                Ok(Arc::new(provider))
             }
             Self::Gemini => {
                 if model != GEMINI_V2_MODEL {
@@ -125,12 +192,38 @@ impl EmbeddingProviderKind {
                     "MOA_ZEROENTROPY_API_KEY",
                     &config.providers.zeroentropy.api_key,
                 )?;
-                Ok(Arc::new(
-                    ZeroEntropyEmbedding::new(api_key, model)?.with_dimensions(cfg.output_dim)?,
-                ))
+                let mut provider =
+                    ZeroEntropyEmbedding::new(api_key, model)?.with_dimensions(cfg.output_dim)?;
+                if let Some(pacer) =
+                    embed_pacer_override(config.providers.zeroentropy.max_inputs_per_min)
+                {
+                    provider = provider.with_rate_limits(pacer);
+                }
+                if let Some(max) =
+                    concurrency_override(config.providers.zeroentropy.max_concurrent_requests)
+                {
+                    provider = provider.with_max_concurrent_requests(max);
+                }
+                Ok(Arc::new(provider))
             }
         }
     }
+}
+
+/// Maps a configured `max_inputs_per_min` override to an embed pacer config.
+///
+/// Embeddings are limited by inputs/min, so an override replaces the provider's
+/// default input-rate pacing; `None` leaves the provider default in place.
+fn embed_pacer_override(max_inputs_per_min: Option<u32>) -> Option<PacerConfig> {
+    max_inputs_per_min.map(PacerConfig::inputs_per_min)
+}
+
+/// Maps a configured `max_concurrent_requests` override to an in-flight ceiling.
+///
+/// `None` leaves the provider's default embedding concurrency window in place; a
+/// configured value overrides it (0 is treated as unbounded by the limiter).
+fn concurrency_override(max_concurrent_requests: Option<u32>) -> Option<usize> {
+    max_concurrent_requests.map(|max| max as usize)
 }
 
 /// Builds a vector-space embedder from the tenant memory embedder configuration.
@@ -154,7 +247,14 @@ fn build_gemini_embedder(
         EmbedderConstructionRole::Ingestion => EmbedRole::Document { title: None },
         EmbedderConstructionRole::Retrieval => parse_embed_role(&cfg.gemini.default_role)?,
     };
-    GeminiEmbeddingEmbedder::new(api_key, cfg.output_dim, role)
+    let mut embedder = GeminiEmbeddingEmbedder::new(api_key, cfg.output_dim, role)?;
+    if let Some(pacer) = embed_pacer_override(config.providers.google.max_inputs_per_min) {
+        embedder = embedder.with_rate_limits(pacer);
+    }
+    if let Some(max) = concurrency_override(config.providers.google.max_concurrent_requests) {
+        embedder = embedder.with_max_concurrent_requests(max);
+    }
+    Ok(embedder)
 }
 
 fn read_api_key(env_name: &'static str, value: &str) -> Result<String> {
@@ -240,6 +340,25 @@ mod tests {
         build_embedder_from_config, build_embedding_provider_from_config, resolve_embedding_model,
     };
     use crate::model_selection::normalize_provider_name;
+    #[test]
+    fn embed_pacer_override_maps_configured_inputs_limit() {
+        // Pins: a configured max_inputs_per_min becomes an inputs/min pacer
+        // override; an unset value leaves the provider default in place.
+        assert_eq!(super::embed_pacer_override(None), None);
+        assert_eq!(
+            super::embed_pacer_override(Some(500)),
+            Some(crate::core::pacer::PacerConfig::inputs_per_min(500))
+        );
+    }
+
+    #[test]
+    fn concurrency_override_maps_configured_in_flight_ceiling() {
+        // Pins: a configured max_concurrent_requests becomes the embedder's
+        // in-flight ceiling; an unset value leaves the provider default in place.
+        assert_eq!(super::concurrency_override(None), None);
+        assert_eq!(super::concurrency_override(Some(4)), Some(4));
+    }
+
     #[test]
     fn embedding_provider_kind_accepts_supported_provider_prefixes() {
         // Pins: provider:model parsing accepts provider ids, not model aliases in provider position.

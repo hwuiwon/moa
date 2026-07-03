@@ -61,7 +61,8 @@ pub(super) fn build_request_body(
                 .map(provider_native_tool_json),
         );
     }
-    if should_mark_stable_prefix(request) {
+    let cache_estimate = CacheTokenEstimate::from_request(request);
+    if cache_estimate.should_mark_stable_prefix() {
         mark_stable_prefix_cache_control(&mut system_messages, &mut tools);
     }
 
@@ -78,7 +79,7 @@ pub(super) fn build_request_body(
             anthropic_output_config(response_format),
         );
     }
-    if should_enable_automatic_cache_control(request) {
+    if cache_estimate.should_enable_automatic_cache_control() {
         body.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
     }
 
@@ -123,37 +124,52 @@ fn anthropic_output_config(format: &JsonResponseFormat) -> Value {
     })
 }
 
-fn should_enable_automatic_cache_control(request: &CompletionRequest) -> bool {
-    let tool_tokens = request
-        .tools
-        .iter()
-        .map(|tool| estimate_text_tokens(&tool.to_string()))
-        .sum::<usize>();
-    let message_tokens = request
-        .messages
-        .iter()
-        .map(|message| estimate_text_tokens(&message.content))
-        .sum::<usize>();
-    tool_tokens + message_tokens >= MIN_CACHEABLE_TOKENS
+/// Cached token estimate for the Anthropic request's cacheable regions.
+///
+/// The tool schemas and message contents are only serialized/estimated once here
+/// and shared between the automatic and stable-prefix cache-control decisions,
+/// avoiding re-serializing every tool and message up to twice per request.
+struct CacheTokenEstimate {
+    tool_tokens: usize,
+    system_prefix_tokens: usize,
+    all_message_tokens: usize,
 }
 
-fn should_mark_stable_prefix(request: &CompletionRequest) -> bool {
-    stable_prefix_tokens(request) >= MIN_CACHEABLE_TOKENS
-}
+impl CacheTokenEstimate {
+    fn from_request(request: &CompletionRequest) -> Self {
+        let tool_tokens = request
+            .tools
+            .iter()
+            .map(|tool| estimate_text_tokens(&tool.to_string()))
+            .sum::<usize>();
 
-fn stable_prefix_tokens(request: &CompletionRequest) -> usize {
-    let tool_tokens = request
-        .tools
-        .iter()
-        .map(|tool| estimate_text_tokens(&tool.to_string()))
-        .sum::<usize>();
-    let system_tokens = request
-        .messages
-        .iter()
-        .take_while(|message| message.role == MessageRole::System)
-        .map(|message| estimate_text_tokens(&message.content))
-        .sum::<usize>();
-    tool_tokens + system_tokens
+        let mut system_prefix_tokens = 0;
+        let mut all_message_tokens = 0;
+        let mut in_leading_system_prefix = true;
+        for message in &request.messages {
+            let tokens = estimate_text_tokens(&message.content);
+            all_message_tokens += tokens;
+            if in_leading_system_prefix && message.role == MessageRole::System {
+                system_prefix_tokens += tokens;
+            } else {
+                in_leading_system_prefix = false;
+            }
+        }
+
+        Self {
+            tool_tokens,
+            system_prefix_tokens,
+            all_message_tokens,
+        }
+    }
+
+    fn should_enable_automatic_cache_control(&self) -> bool {
+        self.tool_tokens + self.all_message_tokens >= MIN_CACHEABLE_TOKENS
+    }
+
+    fn should_mark_stable_prefix(&self) -> bool {
+        self.tool_tokens + self.system_prefix_tokens >= MIN_CACHEABLE_TOKENS
+    }
 }
 
 fn mark_stable_prefix_cache_control(system_messages: &mut [Value], tools: &mut [Value]) {

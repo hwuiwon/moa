@@ -433,11 +433,13 @@ ALTER TABLE events ALTER COLUMN tenant_id SET NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_events_tenant_session ON events(tenant_id, session_id, sequence_num);
 CREATE INDEX IF NOT EXISTS idx_events_contact ON events(tenant_id, contact_id, timestamp)
     WHERE contact_id IS NOT NULL;
+-- Serves tenant_cost_since: WHERE tenant_id = $1 AND event_type = $2 AND timestamp >= $3.
+CREATE INDEX IF NOT EXISTS idx_events_tenant_type_time ON events(tenant_id, event_type, timestamp);
+-- No BEFORE INSERT trigger on the hot `events` table: every writer
+-- (moa_session::store::session_store) binds tenant_id/contact_id explicitly from
+-- the locked session row, so the per-row `set_runtime_tenant_columns` trigger was
+-- pure overhead on the append path. The shared function stays for other tables.
 DROP TRIGGER IF EXISTS events_set_tenant_columns ON events;
-CREATE TRIGGER events_set_tenant_columns
-    BEFORE INSERT OR UPDATE ON events
-    FOR EACH ROW
-    EXECUTE FUNCTION moa.set_runtime_tenant_columns();
 
 DROP VIEW IF EXISTS session_summary;
 CREATE VIEW session_summary AS

@@ -28,13 +28,36 @@
 -- BEFORE INSERT trigger that derives it from the session, and
 -- `moa.apply_tenant_rls(...)`.
 
+-- HASH-partitioned on `session_id` across 16 child tables to match the `events`
+-- table this is written alongside in the same transaction: a session's dedupe
+-- rows and its events hash to the same partition index, keeping the co-written
+-- pair co-located. The primary key already leads with `session_id` (the
+-- partition column), so it carries over as a partitioned unique constraint
+-- unchanged, and every access filters or inserts by `session_id` (partition
+-- pruning). This table carries no tenant columns or RLS (see the note above), so
+-- partitioning adds nothing beyond the child tables themselves.
 CREATE TABLE IF NOT EXISTS session_event_dedupe (
     session_id   UUID NOT NULL,
     dedupe_key   TEXT NOT NULL,
     sequence_num BIGINT NOT NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (session_id, dedupe_key)
-);
+) PARTITION BY HASH (session_id);
+
+DO $$
+DECLARE
+    partition_index INT;
+BEGIN
+    FOR partition_index IN 0..15 LOOP
+        EXECUTE format(
+            'CREATE TABLE IF NOT EXISTS session_event_dedupe_p%s
+             PARTITION OF session_event_dedupe
+             FOR VALUES WITH (MODULUS 16, REMAINDER %s)',
+            lpad(partition_index::TEXT, 2, '0'),
+            partition_index
+        );
+    END LOOP;
+END $$;
 
 -- The runtime application role appends events through this table; grant it the
 -- minimal privileges it needs (matching the grants `events` receives).

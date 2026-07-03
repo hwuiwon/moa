@@ -155,14 +155,21 @@ impl QueryPlanner {
     pub async fn plan(&self, query_text: &str, ctx: &PlanningCtx) -> Result<PlannedQuery> {
         let temporal_filter = parse_temporal(query_text);
         let spans = self.ner.extract(query_text);
-        let mut seeds = Vec::new();
-        for span in &spans {
-            let candidates = ctx
-                .graph
-                .lookup_seeds(&span.text, ctx.seed_limit_per_span, temporal_filter)
-                .await?;
-            seeds.extend(candidates.into_iter().map(|candidate| candidate.uid));
-        }
+        // Resolve every NER span's seeds in one batched query instead of one
+        // round trip per span; results are order-independent because they are
+        // sorted and deduplicated below.
+        let span_texts = spans
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<Vec<_>>();
+        let mut seeds = ctx
+            .graph
+            .lookup_seeds_batch(&span_texts, ctx.seed_limit_per_span, temporal_filter)
+            .await?
+            .into_iter()
+            .flatten()
+            .map(|candidate| candidate.uid)
+            .collect::<Vec<_>>();
         seeds.sort_unstable();
         seeds.dedup();
 

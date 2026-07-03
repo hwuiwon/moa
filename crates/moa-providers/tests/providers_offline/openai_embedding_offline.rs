@@ -9,7 +9,7 @@ use moa_core::{MoaError, traits::EmbeddingProvider};
 use moa_providers::OpenAIEmbedding;
 use serde_json::{Value, json};
 use wiremock::matchers::{body_partial_json, header, method};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const MODEL: &str = "text-embedding-3-small";
 
@@ -135,6 +135,84 @@ async fn openai_embedding_offline_http_error_surfaces_status() {
         matches!(error, MoaError::HttpStatus { status: 401, .. }),
         "expected HTTP 401, got {error:?}"
     );
+}
+
+#[tokio::test]
+async fn openai_embedding_offline_chunks_inputs_beyond_request_limit() {
+    // Pins: inputs beyond the 2048-per-request limit are split across multiple
+    // `/v1/embeddings` calls whose results reassemble in input order.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("authorization", "Bearer test-key"))
+        .respond_with(MarkedOpenAIEmbeddings {
+            dimensions: OpenAIEmbedding::new("test-key", MODEL)
+                .expect("provider config")
+                .dimensions(),
+        })
+        .mount(&server)
+        .await;
+    let provider = provider(&server);
+
+    // 2049 inputs => one full 2048-input request plus a 1-input request.
+    let inputs: Vec<String> = (0..2049).map(|index| format!("doc-{index}")).collect();
+    let embeddings = provider
+        .embed(&inputs)
+        .await
+        .expect("chunked OpenAI embed request should succeed");
+
+    assert_eq!(embeddings.len(), 2049);
+    for (index, embedding) in embeddings.iter().enumerate() {
+        assert_eq!(
+            embedding[0], index as f32,
+            "output at position {index} must correspond to input {index}"
+        );
+    }
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose OpenAI embed requests");
+    assert_eq!(requests.len(), 2, "2049 inputs split into two requests");
+    let mut sizes: Vec<usize> = requests
+        .iter()
+        .map(|request| {
+            let body: Value =
+                serde_json::from_slice(&request.body).expect("request body should be JSON");
+            body["input"].as_array().expect("input array").len()
+        })
+        .collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes, vec![1, 2048]);
+}
+
+/// Responds to `/v1/embeddings` with one vector per input, marking position 0
+/// with the numeric suffix parsed from each input so ordering can be asserted
+/// across chunk boundaries.
+struct MarkedOpenAIEmbeddings {
+    dimensions: usize,
+}
+
+impl Respond for MarkedOpenAIEmbeddings {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&request.body).expect("request JSON");
+        let data: Vec<Value> = body["input"]
+            .as_array()
+            .expect("input array")
+            .iter()
+            .enumerate()
+            .map(|(local_index, input)| {
+                let marker = input
+                    .as_str()
+                    .and_then(|text| text.rsplit_once("doc-"))
+                    .and_then(|(_, suffix)| suffix.parse::<f32>().ok())
+                    .expect("input should carry a numeric marker");
+                let mut embedding = vec![0.0_f32; self.dimensions];
+                embedding[0] = marker;
+                json!({ "index": local_index, "embedding": embedding })
+            })
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({ "data": data }))
+    }
 }
 
 async fn mount_embed_response(server: &MockServer, inputs: &[String], body: Value) {

@@ -430,10 +430,10 @@ fn supported_models_return_expected_capabilities() {
     assert_eq!(haiku_caps.context_window, 200_000);
     assert_eq!(opus_caps.context_window, 1_000_000);
     assert_eq!(sonnet_caps.context_window, 1_000_000);
-    assert_eq!(haiku_caps.max_output, 16_000);
+    assert_eq!(haiku_caps.max_output, 64_000);
     assert_eq!(opus_caps.max_output, 128_000);
-    assert_eq!(sonnet_caps.max_output, 64_000);
-    assert!((haiku_caps.pricing.input_per_mtok - 0.8_f64).abs() < f64::EPSILON);
+    assert_eq!(sonnet_caps.max_output, 128_000);
+    assert!((haiku_caps.pricing.input_per_mtok - 1.0_f64).abs() < f64::EPSILON);
     assert!((opus_caps.pricing.input_per_mtok - 5.0_f64).abs() < f64::EPSILON);
     assert!((sonnet_caps.pricing.input_per_mtok - 3.0_f64).abs() < f64::EPSILON);
     assert_eq!(haiku_caps.model_id, ModelId::new(MODEL_HAIKU_4_5));

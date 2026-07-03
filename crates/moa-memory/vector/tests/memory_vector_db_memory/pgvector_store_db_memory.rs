@@ -14,6 +14,8 @@ use moa_memory_vector::{
 use moa_session::testing;
 use moa_test_support::fixtures::stable_uuid_from_label;
 use sqlx::PgPool;
+use sqlx::Row;
+use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
 /// Test-only target backend whose KNN never overlaps the source, so promotion
@@ -60,6 +62,17 @@ fn tenant_scope(storage_partition_id: impl AsRef<str>) -> RlsContext {
 fn basis_vector(index: usize) -> Vec<f32> {
     let mut vector = vec![0.0; 1024];
     vector[index % 1024] = 1.0;
+    vector
+}
+
+/// Builds a 1024-dim vector spanning the first two axes so that cosine distance
+/// to `basis_vector(0)` is fully determined by the `x`/`y` ratio. Values are
+/// small integers that are exact in `halfvec` (fp16), so the induced ordering is
+/// deterministic across runs.
+fn mixed_vector(x: f32, y: f32) -> Vec<f32> {
+    let mut vector = vec![0.0; 1024];
+    vector[0] = x;
+    vector[1] = y;
     vector
 }
 
@@ -652,6 +665,267 @@ async fn promotion_validate_storage_partition_scores_real_backend_overlap_db_mem
 
     source.delete(&uids).await.expect("delete source vectors");
     delete_node_index_rows(session_store.pool(), &uids).await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn pgvector_knn_returns_topk_in_strict_distance_order_db_memory() {
+    // Pins: after the KNN rewrite (single-bound probe vector, HNSW iterative_scan,
+    // subquery `LIMIT` + outer re-sort) the returned rows and their distance order
+    // are unchanged. Five vectors with distinct, monotone cosine distances to the
+    // probe must come back sorted by descending score, and a smaller `k` must yield
+    // exactly the top-k prefix of that ordering.
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = Uuid::now_v7().to_string();
+
+    // Ordered nearest -> farthest to basis_vector(0): (1,0) sim 1.0, (3,1) sim
+    // 0.949, (1,1) sim 0.707, (1,3) sim 0.316, (0,1) sim 0.0.
+    let ordered: Vec<(f32, f32)> = vec![(1.0, 0.0), (3.0, 1.0), (1.0, 1.0), (1.0, 3.0), (0.0, 1.0)];
+    let items: Vec<_> = ordered
+        .iter()
+        .map(|(x, y)| {
+            vector_item(
+                Uuid::now_v7(),
+                &storage_partition_id,
+                "Fact",
+                mixed_vector(*x, *y),
+            )
+        })
+        .collect();
+    let expected_order: Vec<Uuid> = items.iter().map(|item| item.uid).collect();
+    let uids: Vec<_> = expected_order.clone();
+    insert_node_index_rows(session_store.pool(), &storage_partition_id, &items).await;
+    set_workspace_embedder_state(session_store.pool(), &storage_partition_id, "test-model").await;
+
+    let store = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(storage_partition_id.clone()),
+    );
+    store.upsert(&items).await.expect("upsert ordered vectors");
+
+    let probe = mixed_vector(1.0, 0.0);
+    let full = store
+        .knn(&VectorQuery {
+            embedding: probe.clone(),
+            k: 5,
+            label_filter: Some(vec!["Fact".to_string()]),
+            max_pii_class: "restricted".to_string(),
+            include_global: false,
+            as_of: None,
+        })
+        .await
+        .expect("query full ordering");
+    let full_uids: Vec<Uuid> = full.iter().map(|row| row.uid).collect();
+    assert_eq!(
+        full_uids, expected_order,
+        "KNN must return rows in strict descending-score (ascending-distance) order"
+    );
+    for window in full.windows(2) {
+        assert!(
+            window[0].score > window[1].score,
+            "scores must be strictly descending: {} !> {}",
+            window[0].score,
+            window[1].score
+        );
+    }
+
+    // A smaller k must return exactly the top-k prefix of the same ordering.
+    let topk = store
+        .knn(&VectorQuery {
+            embedding: probe,
+            k: 3,
+            label_filter: Some(vec!["Fact".to_string()]),
+            max_pii_class: "restricted".to_string(),
+            include_global: false,
+            as_of: None,
+        })
+        .await
+        .expect("query top-3");
+    let topk_uids: Vec<Uuid> = topk.iter().map(|row| row.uid).collect();
+    assert_eq!(
+        topk_uids,
+        expected_order[..3].to_vec(),
+        "a smaller k must yield the top-k prefix of the full ordering"
+    );
+
+    store.delete(&uids).await.expect("delete vectors");
+    delete_node_index_rows(session_store.pool(), &uids).await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn pgvector_knn_excludes_soft_deleted_embedding_even_when_nearest_db_memory() {
+    // Pins: the validity predicate survives the KNN rewrite. A soft-deleted
+    // embedding (embedding.valid_to set) that is the exact nearest neighbor must
+    // still be excluded from a default (as_of = None) query, and only the valid
+    // farther row is returned. The subquery/outer-sort restructuring must not let
+    // an invalid row leak in ahead of the WHERE filter.
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = Uuid::now_v7().to_string();
+
+    let valid_item = vector_item(
+        Uuid::now_v7(),
+        &storage_partition_id,
+        "Fact",
+        mixed_vector(1.0, 1.0),
+    );
+    let expired_item = VectorItem {
+        valid_to: Some(utc("2020-01-01T00:00:00Z")),
+        ..vector_item(
+            Uuid::now_v7(),
+            &storage_partition_id,
+            "Fact",
+            mixed_vector(1.0, 0.0),
+        )
+    };
+    let items = vec![valid_item.clone(), expired_item.clone()];
+    let uids: Vec<_> = items.iter().map(|item| item.uid).collect();
+    insert_node_index_rows(session_store.pool(), &storage_partition_id, &items).await;
+    set_workspace_embedder_state(session_store.pool(), &storage_partition_id, "test-model").await;
+
+    let store = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(storage_partition_id.clone()),
+    );
+    store.upsert(&items).await.expect("upsert soft-deleted mix");
+
+    let matches = store
+        .knn(&VectorQuery {
+            embedding: mixed_vector(1.0, 0.0),
+            k: 5,
+            label_filter: Some(vec!["Fact".to_string()]),
+            max_pii_class: "restricted".to_string(),
+            include_global: false,
+            as_of: None,
+        })
+        .await
+        .expect("query with soft-deleted nearest neighbor");
+    let match_uids: Vec<Uuid> = matches.iter().map(|row| row.uid).collect();
+    assert_eq!(
+        match_uids,
+        vec![valid_item.uid],
+        "soft-deleted nearest neighbor must be excluded; only the valid row survives"
+    );
+
+    store.delete(&uids).await.expect("delete vectors");
+    delete_node_index_rows(session_store.pool(), &uids).await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn pgvector_knn_hnsw_tuning_does_not_leak_past_transaction_db_memory() {
+    // Pins: the per-query HNSW tuning is applied with SET LOCAL semantics
+    // (set_config(..., true)) on the KNN's own ScopedConn transaction, so it is
+    // discarded at commit and never persists onto the pooled connection. A
+    // dedicated single-connection pool guarantees the follow-up SHOW runs on the
+    // same backend that served the KNN; if the store had used session-level SET,
+    // ef_search/iterative_scan would still read the tuned values here.
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = Uuid::now_v7().to_string();
+    let item = vector_item(
+        Uuid::now_v7(),
+        &storage_partition_id,
+        "Fact",
+        mixed_vector(1.0, 0.0),
+    );
+    insert_node_index_rows(
+        session_store.pool(),
+        &storage_partition_id,
+        std::slice::from_ref(&item),
+    )
+    .await;
+    set_workspace_embedder_state(session_store.pool(), &storage_partition_id, "test-model").await;
+
+    // Seed through the shared store, then pin all KNN + verification traffic to one
+    // physical connection so a leaked GUC would be observable.
+    let seed_store = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(storage_partition_id.clone()),
+    );
+    seed_store
+        .upsert(std::slice::from_ref(&item))
+        .await
+        .expect("upsert leak-test vector");
+
+    let search_path = format!("\"{schema_name}\", public");
+    let pinned_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(move |conn, _meta| {
+            let search_path = search_path.clone();
+            Box::pin(async move {
+                sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
+                    .bind(search_path)
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(&database_url)
+        .await
+        .expect("connect single-connection leak-test pool");
+
+    let pinned_store = PgvectorStore::new_for_app_role(
+        pinned_pool.clone(),
+        tenant_scope(storage_partition_id.clone()),
+    );
+    // k = 10 -> ef_search floors at 100, so the tuned value differs from the 40
+    // default; any leak would surface as "100" below.
+    let matches = pinned_store
+        .knn(&VectorQuery {
+            embedding: mixed_vector(1.0, 0.0),
+            k: 10,
+            label_filter: Some(vec!["Fact".to_string()]),
+            max_pii_class: "restricted".to_string(),
+            include_global: false,
+            as_of: None,
+        })
+        .await
+        .expect("query on pinned connection");
+    assert_eq!(matches.first().map(|row| row.uid), Some(item.uid));
+
+    let ef_search: String = sqlx::query("SHOW hnsw.ef_search")
+        .fetch_one(&pinned_pool)
+        .await
+        .expect("read hnsw.ef_search on pinned connection")
+        .try_get(0)
+        .expect("hnsw.ef_search value column");
+    assert_eq!(
+        ef_search, "40",
+        "hnsw.ef_search must revert to the pgvector default after the KNN transaction commits"
+    );
+
+    let iterative_scan: String = sqlx::query("SHOW hnsw.iterative_scan")
+        .fetch_one(&pinned_pool)
+        .await
+        .expect("read hnsw.iterative_scan on pinned connection")
+        .try_get(0)
+        .expect("hnsw.iterative_scan value column");
+    assert_eq!(
+        iterative_scan, "off",
+        "hnsw.iterative_scan must revert to the pgvector default after the KNN transaction commits"
+    );
+
+    pinned_store
+        .delete(std::slice::from_ref(&item.uid))
+        .await
+        .expect("delete leak-test vector");
+    delete_node_index_rows(session_store.pool(), &[item.uid]).await;
+    pinned_pool.close().await;
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)
         .await

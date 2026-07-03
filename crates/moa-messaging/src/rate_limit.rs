@@ -4,14 +4,23 @@ use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, Utc};
 use moa_core::traits::RuntimeCacheStore;
 use moa_core::{Channel, MoaError, Result};
+use rand::Rng;
 use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep};
 
 const RATE_LIMIT_CACHE_TTL: Duration = Duration::from_secs(300);
+/// Fallback delay used when a rate-limited response omits `Retry-After`.
+const RATE_LIMIT_FALLBACK_BACKOFF: Duration = Duration::from_secs(1);
+/// Initial backoff between shared-slot compare-and-set contention retries.
+const RATE_LIMIT_CAS_BASE_BACKOFF: Duration = Duration::from_millis(5);
+/// Ceiling for the shared-slot compare-and-set contention backoff.
+const RATE_LIMIT_CAS_MAX_BACKOFF: Duration = Duration::from_millis(200);
 
 /// Normalized response metadata needed by the messaging rate-limit policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,16 +76,17 @@ impl MessagingSendResponse {
     }
 
     fn retry_after(&self) -> Duration {
-        self.retry_after_opt()
-            .unwrap_or_else(|| Duration::from_secs(1))
+        // Honor an explicit provider `Retry-After` exactly; only the locally
+        // chosen fallback backoff gets jitter, so synchronized clients that must
+        // guess a delay do not resynchronize into a thundering herd.
+        match self.retry_after_opt() {
+            Some(explicit) => explicit,
+            None => with_jitter(RATE_LIMIT_FALLBACK_BACKOFF),
+        }
     }
 
     fn retry_after_opt(&self) -> Option<Duration> {
-        let retry_after = self.header("retry-after");
-        retry_after
-            .and_then(|value| value.parse::<f64>().ok())
-            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-            .map(Duration::from_secs_f64)
+        self.header("retry-after").and_then(parse_retry_after)
     }
 
     fn header(&self, name: &str) -> Option<&str> {
@@ -129,29 +139,54 @@ impl MessagingSendFailure {
 }
 
 /// In-memory counters emitted by the messaging rate-limit policy.
+///
+/// One registry is attached per (single-channel) limiter, so the counters are
+/// held as lock-free atomics keyed by a fixed, statically known set of
+/// `(metric, outcome)` pairs. This replaces a global `Mutex<HashMap>` plus a
+/// `format!`-built key on every increment, keeping the send hot path allocation-
+/// and-lock-free.
 #[derive(Debug, Default)]
 pub struct MessagingRateLimitMetrics {
-    counters: Mutex<HashMap<String, u64>>,
+    send_failures_retryable: AtomicU64,
+    send_failures_permanent: AtomicU64,
+    send_retries_success: AtomicU64,
+    send_retries_exhausted: AtomicU64,
+    send_429_received: AtomicU64,
 }
 
 impl MessagingRateLimitMetrics {
-    /// Increments one named counter with channel and outcome dimensions encoded in the key.
-    pub async fn increment(&self, name: &str, channel: Channel, outcome: Option<&str>) {
-        let key = match outcome {
-            Some(outcome) => format!("{name}|channel={channel}|outcome={outcome}"),
-            None => format!("{name}|channel={channel}"),
-        };
-        let mut counters = self.counters.lock().await;
-        *counters.entry(key).or_insert(0) += 1;
+    /// Increments the counter matching one metric name and outcome dimension.
+    ///
+    /// The `channel` dimension is fixed per limiter, so it is not part of the
+    /// key; unknown `(name, outcome)` pairs are ignored rather than allocated.
+    pub async fn increment(&self, name: &str, _channel: Channel, outcome: Option<&str>) {
+        if let Some(counter) = self.counter_field(name, outcome) {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
-    /// Returns one counter value.
-    pub async fn counter(&self, name: &str, channel: Channel, outcome: Option<&str>) -> u64 {
-        let key = match outcome {
-            Some(outcome) => format!("{name}|channel={channel}|outcome={outcome}"),
-            None => format!("{name}|channel={channel}"),
-        };
-        self.counters.lock().await.get(&key).copied().unwrap_or(0)
+    /// Returns one counter value, or zero for an unknown metric/outcome pair.
+    pub async fn counter(&self, name: &str, _channel: Channel, outcome: Option<&str>) -> u64 {
+        self.counter_field(name, outcome)
+            .map(|counter| counter.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    fn counter_field(&self, name: &str, outcome: Option<&str>) -> Option<&AtomicU64> {
+        match (name, outcome) {
+            ("messaging_send_failures_total", Some("retryable")) => {
+                Some(&self.send_failures_retryable)
+            }
+            ("messaging_send_failures_total", Some("permanent")) => {
+                Some(&self.send_failures_permanent)
+            }
+            ("messaging_send_retries_total", Some("success")) => Some(&self.send_retries_success),
+            ("messaging_send_retries_total", Some("exhausted")) => {
+                Some(&self.send_retries_exhausted)
+            }
+            ("messaging_send_429_received_total", None) => Some(&self.send_429_received),
+            _ => None,
+        }
     }
 }
 
@@ -357,6 +392,7 @@ impl MessagingRateLimiter {
         let cache_key = self.cache_key(channel_key);
         let interval_ms = duration_millis(self.per_channel_interval)?;
 
+        let mut cas_attempt: u32 = 0;
         loop {
             let now_ms = unix_millis_now()?;
             let current = runtime_cache.get(&cache_key).await?;
@@ -392,7 +428,11 @@ impl MessagingRateLimiter {
                 return Ok(());
             }
 
-            tokio::task::yield_now().await;
+            // The claim was lost to a concurrent replica. Back off with capped
+            // exponential + jittered delay instead of busy-spinning on yield,
+            // so contending replicas desynchronize their retries.
+            sleep(cas_backoff_with_jitter(cas_attempt)).await;
+            cas_attempt = cas_attempt.saturating_add(1);
         }
     }
 
@@ -403,6 +443,42 @@ impl MessagingRateLimiter {
 
 fn is_retryable_status(status: u16) -> bool {
     matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
+}
+
+/// Parses a `Retry-After` header value expressed as seconds or an RFC 2822 date.
+pub(crate) fn parse_retry_after(value: &str) -> Option<Duration> {
+    if let Ok(seconds) = value.trim().parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+
+    let reset_at = DateTime::parse_from_rfc2822(value).ok()?;
+    let reset_at = reset_at.with_timezone(&Utc);
+    let remaining = reset_at.signed_duration_since(Utc::now());
+    let millis = remaining.num_milliseconds().max(0) as u64;
+    Some(Duration::from_millis(millis))
+}
+
+/// Adds up to +50% uniform jitter to a backoff delay.
+///
+/// Proportional jitter spreads otherwise-synchronized retries across replicas so
+/// they do not resynchronize into a thundering herd against the same provider.
+pub(crate) fn with_jitter(base: Duration) -> Duration {
+    if base.is_zero() {
+        return base;
+    }
+    let base_ms = base.as_millis().min(u128::from(u64::MAX)) as u64;
+    let jitter_ms = rand::thread_rng().gen_range(0..=base_ms / 2);
+    base + Duration::from_millis(jitter_ms)
+}
+
+/// Returns the jittered, capped exponential backoff for CAS-contention retry `attempt`.
+fn cas_backoff_with_jitter(attempt: u32) -> Duration {
+    let shift = attempt.min(5);
+    let scaled = RATE_LIMIT_CAS_BASE_BACKOFF
+        .checked_mul(1u32 << shift)
+        .unwrap_or(RATE_LIMIT_CAS_MAX_BACKOFF)
+        .min(RATE_LIMIT_CAS_MAX_BACKOFF);
+    with_jitter(scaled)
 }
 
 fn unix_millis_now() -> Result<u64> {
@@ -428,7 +504,24 @@ mod tests {
     use moa_core::traits::RuntimeCacheStore;
     use moa_runtime_store::MemoryRuntimeCacheStore;
 
-    use super::MessagingRateLimiter;
+    use super::{MessagingFailureClass, MessagingRateLimiter, MessagingSendResponse};
+
+    #[test]
+    fn retry_after_accepts_http_date_headers() {
+        // Pins: messaging response classification uses the shared Retry-After
+        // parser, including the HTTP-date form accepted by channel providers.
+        let response = MessagingSendResponse::new(503, "temporary outage")
+            .with_header("Retry-After", "Wed, 21 Oct 2099 07:28:00 GMT");
+        let failure = response
+            .failure_for_channel(Channel::Slack)
+            .expect("503 should classify as a failed Slack send response");
+
+        assert_eq!(failure.class, MessagingFailureClass::Retryable);
+        assert!(
+            failure.retry_after.expect("date should parse") > Duration::ZERO,
+            "future HTTP-date Retry-After should produce a positive delay"
+        );
+    }
 
     #[tokio::test]
     async fn shared_runtime_cache_coordinates_channel_pacing_across_limiter_instances() {

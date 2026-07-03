@@ -1,6 +1,7 @@
 //! Blob storage and claim-check helpers for large session event payloads.
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -138,6 +139,37 @@ impl BlobStore for PostgresBlobStore {
             .ok_or_else(|| MoaError::BlobNotFound(blob_id.to_string()))
     }
 
+    /// Retrieves many blobs with one `blob_id = ANY(...)` query.
+    ///
+    /// Ids with no stored row are simply absent from the returned map, matching
+    /// the [`BlobStore::get_many`] contract.
+    async fn get_many(
+        &self,
+        session_id: &SessionId,
+        blob_ids: &[String],
+    ) -> Result<HashMap<String, Vec<u8>>> {
+        if blob_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows = sqlx::query(&format!(
+            "SELECT blob_id, content FROM {} WHERE session_id = $1 AND blob_id = ANY($2)",
+            self.table_name
+        ))
+        .bind(session_id.0)
+        .bind(blob_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        let mut found = HashMap::with_capacity(rows.len());
+        for row in rows {
+            found.insert(
+                row.get::<String, _>("blob_id"),
+                row.get::<Vec<u8>, _>("content"),
+            );
+        }
+        Ok(found)
+    }
+
     /// Deletes every blob belonging to one session.
     async fn delete_session(&self, session_id: &SessionId) -> Result<()> {
         sqlx::query(&format!(
@@ -269,6 +301,47 @@ pub(crate) async fn decode_event_from_storage(
     for (path, claim_check) in blob_refs {
         let bytes = blob_store.get(session_id, &claim_check.blob_id).await?;
         let value = String::from_utf8(bytes).map_err(|error| {
+            MoaError::StorageError(format!(
+                "blob `{}` did not contain valid UTF-8: {error}",
+                claim_check.blob_id
+            ))
+        })?;
+        replace_value_at_path(&mut payload, &path, Value::String(value))?;
+    }
+
+    serde_json::from_value(payload).map_err(Into::into)
+}
+
+/// Collects the claim-check blob ids referenced by a stored event payload.
+///
+/// Used to gather the distinct blob ids across a batch of replayed rows so they
+/// can be fetched together instead of one blob `get` per event.
+pub(crate) fn collect_claim_check_blob_ids(payload: &Value, out: &mut Vec<String>) -> Result<()> {
+    let mut blob_refs = Vec::new();
+    collect_blob_refs(payload, &mut Vec::new(), &mut blob_refs)?;
+    for (_, claim_check) in blob_refs {
+        out.push(claim_check.blob_id);
+    }
+    Ok(())
+}
+
+/// Deserializes a stored event, resolving blob references from an already-fetched
+/// cache instead of issuing a blob `get` per reference.
+///
+/// The cache must contain every claim-checked blob id in `payload`
+/// (see [`collect_claim_check_blob_ids`]); a missing entry is a
+/// [`MoaError::BlobNotFound`].
+pub(crate) fn decode_event_from_cache(
+    mut payload: Value,
+    cache: &HashMap<String, Vec<u8>>,
+) -> Result<Event> {
+    let mut blob_refs = Vec::new();
+    collect_blob_refs(&payload, &mut Vec::new(), &mut blob_refs)?;
+    for (path, claim_check) in blob_refs {
+        let bytes = cache
+            .get(&claim_check.blob_id)
+            .ok_or_else(|| MoaError::BlobNotFound(claim_check.blob_id.clone()))?;
+        let value = String::from_utf8(bytes.clone()).map_err(|error| {
             MoaError::StorageError(format!(
                 "blob `{}` did not contain valid UTF-8: {error}",
                 claim_check.blob_id

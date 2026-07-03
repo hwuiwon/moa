@@ -284,6 +284,7 @@ async fn schedule_consolidation_inner(
         .run(Json(ConsolidateRequest {
             tenant_id,
             target_date: next.date_naive(),
+            observed_changelog_version: None,
         }))
         .send_after(delay);
     tracing::info!(

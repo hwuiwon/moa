@@ -9,11 +9,30 @@ use async_trait::async_trait;
 use jsonwebtoken::{Algorithm, Validation, decode, decode_header};
 use moa_core::TenantId;
 use moa_core::traits::{AuthError, AuthProvider, Credential, Identity, IdentityType};
+use moka::future::Cache;
 use serde::Deserialize;
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use uuid::Uuid;
+
+/// Maximum number of `(sub, tenant) -> user_id` mappings held in-process.
+const USER_ID_CACHE_CAPACITY: u64 = 50_000;
+/// TTL for cached identity resolutions. The mapping is immutable once created,
+/// so this only bounds memory footprint, not correctness.
+const USER_ID_CACHE_TTL: Duration = Duration::from_secs(3600);
+
+static USER_ID_CACHE: OnceLock<Cache<(String, Uuid), Uuid>> = OnceLock::new();
+
+fn user_id_cache() -> &'static Cache<(String, Uuid), Uuid> {
+    USER_ID_CACHE.get_or_init(|| {
+        Cache::builder()
+            .max_capacity(USER_ID_CACHE_CAPACITY)
+            .time_to_live(USER_ID_CACHE_TTL)
+            .build()
+    })
+}
 
 /// Auth0-backed JWT authentication provider.
 pub struct Auth0AuthProvider {
@@ -123,6 +142,10 @@ impl AuthProvider for Auth0AuthProvider {
 }
 
 /// Resolve or create the MOA UUID mapped to an external identity provider subject.
+///
+/// The common case — an already-provisioned subject — is served from an
+/// in-process cache and, on a miss, a single non-transactional `SELECT`. A
+/// transaction is opened only to provision a first-seen subject.
 pub async fn resolve_or_provision_static(
     pool: &PgPool,
     sub: &str,
@@ -130,19 +153,38 @@ pub async fn resolve_or_provision_static(
     identity_type: IdentityType,
     source: &str,
 ) -> Result<Uuid, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let cache_key = (sub.to_string(), tenant_id);
+    if let Some(user_id) = user_id_cache().get(&cache_key).await {
+        return Ok(user_id);
+    }
+
+    // Fast path: existing subject resolves with a plain read, no transaction.
     if let Some((existing_id,)) = sqlx::query_as::<_, (Uuid,)>(
         "SELECT user_id FROM auth0_user_map WHERE sub = $1 AND tenant_id = $2",
     )
     .bind(sub)
     .bind(tenant_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(pool)
     .await?
     {
-        tx.commit().await?;
+        user_id_cache().insert(cache_key, existing_id).await;
         return Ok(existing_id);
     }
 
+    let resolved_id = provision_static(pool, sub, tenant_id, identity_type, source).await?;
+    user_id_cache().insert(cache_key, resolved_id).await;
+    Ok(resolved_id)
+}
+
+/// Provision a first-seen subject inside a transaction and return its MOA UUID.
+async fn provision_static(
+    pool: &PgPool,
+    sub: &str,
+    tenant_id: Uuid,
+    identity_type: IdentityType,
+    source: &str,
+) -> Result<Uuid, sqlx::Error> {
+    let mut tx = pool.begin().await?;
     let new_id = Uuid::new_v4();
     if identity_type == IdentityType::User {
         let external_id = format!("{source}:{sub}");

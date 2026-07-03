@@ -241,6 +241,21 @@ mod tests {
         "MOA_GOOGLE_API_KEY",
         "MOA_COHERE_API_KEY",
         "MOA_ZEROENTROPY_API_KEY",
+        "MOA_ANTHROPIC_MAX_REQUESTS_PER_MIN",
+        "MOA_ANTHROPIC_MAX_INPUTS_PER_MIN",
+        "MOA_ANTHROPIC_MAX_CONCURRENT_REQUESTS",
+        "MOA_OPENAI_MAX_REQUESTS_PER_MIN",
+        "MOA_OPENAI_MAX_INPUTS_PER_MIN",
+        "MOA_OPENAI_MAX_CONCURRENT_REQUESTS",
+        "MOA_GOOGLE_MAX_REQUESTS_PER_MIN",
+        "MOA_GOOGLE_MAX_INPUTS_PER_MIN",
+        "MOA_GOOGLE_MAX_CONCURRENT_REQUESTS",
+        "MOA_COHERE_MAX_REQUESTS_PER_MIN",
+        "MOA_COHERE_MAX_INPUTS_PER_MIN",
+        "MOA_COHERE_MAX_CONCURRENT_REQUESTS",
+        "MOA_ZEROENTROPY_MAX_REQUESTS_PER_MIN",
+        "MOA_ZEROENTROPY_MAX_INPUTS_PER_MIN",
+        "MOA_ZEROENTROPY_MAX_CONCURRENT_REQUESTS",
         "MOA_DATABASE_NEON_ENABLED",
         "MOA_DATABASE_NEON_PROJECT_ID",
         "MOA_DATABASE_NEON_MAX_CHECKPOINTS",
@@ -390,6 +405,35 @@ mod tests {
             config.memory.vector.embedder.zeroentropy.api_key,
             "MOA_TEST_ZEROENTROPY_KEY"
         );
+    }
+
+    #[test]
+    fn env_only_loads_provider_rate_and_concurrency_caps() {
+        // Pins: per-provider rate/concurrency caps use the flat MOA_<PROVIDER>_MAX_*
+        // env names (the env-driven trial-key flow), unset caps stay None, and an
+        // env override sets the provider's in-flight/rate ceiling.
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let _env = EnvRestore::clear(CONFIG_ENV_KEYS);
+        unsafe {
+            std::env::set_var("MOA_COHERE_API_KEY", "MOA_TEST_COHERE_KEY");
+            std::env::set_var("MOA_COHERE_MAX_REQUESTS_PER_MIN", "10");
+            std::env::set_var("MOA_COHERE_MAX_INPUTS_PER_MIN", "2000");
+            std::env::set_var("MOA_COHERE_MAX_CONCURRENT_REQUESTS", "2");
+            std::env::set_var("MOA_ZEROENTROPY_MAX_REQUESTS_PER_MIN", "5");
+            std::env::set_var("MOA_OPENAI_MAX_CONCURRENT_REQUESTS", "16");
+        }
+
+        let config = MoaConfig::load_from_env().expect("load config from env");
+
+        assert_eq!(config.providers.cohere.max_requests_per_min, Some(10));
+        assert_eq!(config.providers.cohere.max_inputs_per_min, Some(2000));
+        assert_eq!(config.providers.cohere.max_concurrent_requests, Some(2));
+        assert_eq!(config.providers.zeroentropy.max_requests_per_min, Some(5));
+        assert_eq!(config.providers.openai.max_concurrent_requests, Some(16));
+        // Unset caps remain None (provider built-in defaults apply).
+        assert_eq!(config.providers.cohere.max_concurrent_requests, Some(2));
+        assert_eq!(config.providers.openai.max_inputs_per_min, None);
+        assert_eq!(config.providers.anthropic.max_concurrent_requests, None);
     }
 
     #[test]

@@ -6,12 +6,16 @@ use moa_core::traits::EmbeddingProvider;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_EMBEDDING_CONCURRENCY};
 use crate::core::http::{
-    build_http_client, post_json, validate_embedding_count, validate_embedding_dimension,
+    build_json_http_client, post_json, validate_embedding_count, validate_embedding_dimension,
 };
+use crate::core::pacer::{PacerConfig, RatePacer};
 
 const OPENAI_EMBEDDINGS_URL: &str = "https://api.openai.com/v1/embeddings";
 const OPENAI_DIMENSIONS: usize = 1_536;
+/// Maximum inputs the OpenAI `/v1/embeddings` endpoint accepts per request.
+const OPENAI_MAX_INPUTS_PER_REQUEST: usize = 2_048;
 
 /// OpenAI embeddings client backed by the `/v1/embeddings` endpoint.
 #[derive(Clone)]
@@ -20,16 +24,21 @@ pub struct OpenAIEmbedding {
     api_key: String,
     model: String,
     embeddings_url: String,
+    pacer: RatePacer,
+    limiter: ConcurrencyLimiter,
 }
 
 impl OpenAIEmbedding {
     /// Creates an OpenAI embedding client from an API key and model id.
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Result<Self> {
         Ok(Self {
-            client: build_http_client()?,
+            client: build_json_http_client()?,
             api_key: api_key.into(),
             model: model.into(),
             embeddings_url: OPENAI_EMBEDDINGS_URL.to_string(),
+            // Pacing off by default; OpenAI limits are tier-specific.
+            pacer: RatePacer::new(PacerConfig::disabled()),
+            limiter: ConcurrencyLimiter::new(DEFAULT_EMBEDDING_CONCURRENCY),
         })
     }
 
@@ -39,23 +48,29 @@ impl OpenAIEmbedding {
         self.embeddings_url = embeddings_url.into();
         self
     }
-}
 
-#[async_trait]
-impl EmbeddingProvider for OpenAIEmbedding {
-    fn model_id(&self) -> &str {
-        &self.model
+    /// Enables request/input pacing, off by default for tier-specific limits.
+    #[must_use]
+    pub fn with_rate_limits(mut self, config: PacerConfig) -> Self {
+        self.pacer = RatePacer::new(config);
+        self
     }
 
-    fn dimensions(&self) -> usize {
-        OPENAI_DIMENSIONS
+    /// Overrides the in-flight concurrency ceiling for embedding requests.
+    #[must_use]
+    pub fn with_max_concurrent_requests(mut self, max_in_flight: usize) -> Self {
+        self.limiter = ConcurrencyLimiter::new(max_in_flight);
+        self
     }
 
-    async fn embed(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
-        if inputs.is_empty() {
-            return Ok(Vec::new());
-        }
-
+    /// Embeds one chunk of inputs in a single `/v1/embeddings` round trip.
+    ///
+    /// Callers must keep `inputs` within [`OPENAI_MAX_INPUTS_PER_REQUEST`]; the
+    /// returned embeddings preserve request order one-to-one with `inputs`.
+    async fn embed_chunk(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
+        // In-flight slot first, then rate budget (see `ConcurrencyLimiter`).
+        let _permit = self.limiter.acquire().await;
+        self.pacer.acquire(1, inputs.len() as u32).await;
         let payload: OpenAIEmbeddingResponse = post_json(
             &self.client,
             &self.embeddings_url,
@@ -77,6 +92,29 @@ impl EmbeddingProvider for OpenAIEmbedding {
         // truncated or malformed response cannot silently poison the vector store.
         for embedding in &embeddings {
             validate_embedding_dimension(OPENAI_DIMENSIONS, embedding)?;
+        }
+        Ok(embeddings)
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for OpenAIEmbedding {
+    fn model_id(&self) -> &str {
+        &self.model
+    }
+
+    fn dimensions(&self) -> usize {
+        OPENAI_DIMENSIONS
+    }
+
+    async fn embed(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut embeddings = Vec::with_capacity(inputs.len());
+        for chunk in inputs.chunks(OPENAI_MAX_INPUTS_PER_REQUEST) {
+            embeddings.extend(self.embed_chunk(chunk).await?);
         }
         Ok(embeddings)
     }

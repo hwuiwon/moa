@@ -199,13 +199,13 @@ impl ToolRouter {
             }
 
             match self
-                .execute_hand_once(
+                .execute_hand_on_handle(
                     session,
                     worker_id,
                     invocation,
                     tool_definition,
                     provider,
-                    tier,
+                    &hand,
                     None,
                 )
                 .await

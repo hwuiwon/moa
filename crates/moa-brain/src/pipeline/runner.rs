@@ -89,80 +89,36 @@ impl ContextPipeline {
         async {
             let mut reports = Vec::with_capacity(self.stages.len());
 
-            for stage in &self.stages {
-                let stage_name = stage.name().to_string();
-                let stage_span_name = format!("pipeline.stage {stage_name}");
-                let stage_span = tracing::info_span!(
-                    "pipeline_stage",
-                    otel.name = %stage_span_name,
-                    moa.session.id = %ctx.session_id,
-                    moa.tenant.id = %ctx.tenant_id,
-                    moa.contact.id = %contact_id,
-                    moa.model = %ctx.model_capabilities.model_id,
-                    moa.pipeline.stage.number = stage.stage() as i64,
-                    moa.pipeline.stage.name = %stage_name,
-                    moa.pipeline.stage.tokens_added = tracing::field::Empty,
-                    moa.pipeline.stage.tokens_removed = tracing::field::Empty,
-                    moa.pipeline.stage.items_included = tracing::field::Empty,
-                    moa.pipeline.stage.items_excluded = tracing::field::Empty,
-                    moa.pipeline.stage.tokens_before = tracing::field::Empty,
-                    moa.pipeline.stage.tokens_after = tracing::field::Empty,
-                    moa.query_rewrite.decision = tracing::field::Empty,
-                    moa.query_rewrite.reason = tracing::field::Empty,
-                    moa.query_rewrite.llm_called = tracing::field::Empty,
-                );
-
-                let started_at = Instant::now();
-                let tokens_before = ctx.token_count;
-                stage_span.record("moa.pipeline.stage.tokens_before", tokens_before as i64);
-                let instrument_stage_span = stage_span.clone();
-                let mut output = async { stage.process(ctx).await }
-                    .instrument(instrument_stage_span)
-                    .await
-                    .map_err(|error| stage_error(&stage_name, error))?;
-                output.duration = started_at.elapsed();
-                let tokens_after = ctx.token_count;
-
-                stage_span.record(
-                    "moa.pipeline.stage.tokens_added",
-                    output.tokens_added as i64,
-                );
-                stage_span.record(
-                    "moa.pipeline.stage.tokens_removed",
-                    output.tokens_removed as i64,
-                );
-                stage_span.record(
-                    "moa.pipeline.stage.items_included",
-                    output.items_included.len() as i64,
-                );
-                stage_span.record(
-                    "moa.pipeline.stage.items_excluded",
-                    output.items_excluded.len() as i64,
-                );
-                stage_span.record("moa.pipeline.stage.tokens_after", tokens_after as i64);
-                if stage.name() == "query_rewrite" {
-                    record_query_rewrite_stage_metadata(&stage_span, &output);
+            // Stages run in a fixed order, but a maximal run of adjacent stages
+            // that opt into `ContextProcessor::parallelizable` overlaps its
+            // read-only `fetch` I/O concurrently, then `apply`s each result to
+            // `&mut WorkingContext` in that same fixed order. Applying serially
+            // preserves the deterministic message/tool layout the prompt cache
+            // depends on, while the independent per-turn round trips (skill
+            // registry reads, standing digest reads, and graph-memory
+            // retrieval) run at once instead of one after another. Stages that
+            // read post-group context (history budgeting off `token_count`,
+            // runtime reminders relative to appended messages) keep
+            // `parallelizable() == false` and run sequentially via `process`.
+            let mut index = 0;
+            while index < self.stages.len() {
+                if self.stages[index].parallelizable() {
+                    let start = index;
+                    while index < self.stages.len() && self.stages[index].parallelizable() {
+                        index += 1;
+                    }
+                    run_parallel_group(&self.stages[start..index], ctx, &contact_id, &mut reports)
+                        .await?;
+                } else {
+                    run_sequential_stage(
+                        self.stages[index].as_ref(),
+                        ctx,
+                        &contact_id,
+                        &mut reports,
+                    )
+                    .await?;
+                    index += 1;
                 }
-
-                tracing::info!(
-                    stage = stage.stage(),
-                    name = stage.name(),
-                    tokens_before,
-                    tokens_after,
-                    tokens_added = output.tokens_added,
-                    tokens_removed = output.tokens_removed,
-                    items_included = ?output.items_included,
-                    items_excluded = ?output.items_excluded,
-                    excluded_items = ?output.excluded_items,
-                    duration_ms = output.duration.as_millis(),
-                    "pipeline stage completed"
-                );
-
-                reports.push(PipelineStageReport {
-                    stage: stage.stage(),
-                    name: stage.name().to_string(),
-                    output,
-                });
             }
 
             let cache_ratio = cache_prefix_ratio(ctx);
@@ -176,6 +132,184 @@ impl ContextPipeline {
         .instrument(instrument_pipeline_span)
         .await
     }
+}
+
+/// Builds the per-stage tracing span carrying the shared pipeline fields.
+fn build_stage_span(
+    ctx: &WorkingContext,
+    contact_id: &str,
+    stage: &dyn ContextProcessor,
+) -> tracing::Span {
+    let stage_name = stage.name();
+    let stage_span_name = format!("pipeline.stage {stage_name}");
+    tracing::info_span!(
+        "pipeline_stage",
+        otel.name = %stage_span_name,
+        moa.session.id = %ctx.session_id,
+        moa.tenant.id = %ctx.tenant_id,
+        moa.contact.id = %contact_id,
+        moa.model = %ctx.model_capabilities.model_id,
+        moa.pipeline.stage.number = stage.stage() as i64,
+        moa.pipeline.stage.name = %stage_name,
+        moa.pipeline.stage.tokens_added = tracing::field::Empty,
+        moa.pipeline.stage.tokens_removed = tracing::field::Empty,
+        moa.pipeline.stage.items_included = tracing::field::Empty,
+        moa.pipeline.stage.items_excluded = tracing::field::Empty,
+        moa.pipeline.stage.tokens_before = tracing::field::Empty,
+        moa.pipeline.stage.tokens_after = tracing::field::Empty,
+        moa.query_rewrite.decision = tracing::field::Empty,
+        moa.query_rewrite.reason = tracing::field::Empty,
+        moa.query_rewrite.llm_called = tracing::field::Empty,
+    )
+}
+
+/// Runs one stage sequentially through `process`, recording its span and report.
+async fn run_sequential_stage(
+    stage: &dyn ContextProcessor,
+    ctx: &mut WorkingContext,
+    contact_id: &str,
+    reports: &mut Vec<PipelineStageReport>,
+) -> Result<()> {
+    let stage_name = stage.name().to_string();
+    let stage_span = build_stage_span(ctx, contact_id, stage);
+    let started_at = Instant::now();
+    let tokens_before = ctx.token_count;
+    stage_span.record("moa.pipeline.stage.tokens_before", tokens_before as i64);
+    let mut output = async { stage.process(ctx).await }
+        .instrument(stage_span.clone())
+        .await
+        .map_err(|error| stage_error(&stage_name, error))?;
+    output.duration = started_at.elapsed();
+    let tokens_after = ctx.token_count;
+    finalize_stage_report(
+        &stage_span,
+        stage,
+        output,
+        tokens_before,
+        tokens_after,
+        reports,
+    );
+    Ok(())
+}
+
+/// Runs a contiguous run of parallelizable stages: the read-only `fetch` phase
+/// runs concurrently, then each result is applied to the context in stage order.
+///
+/// Ordered application preserves the exact `WorkingContext` a fully sequential
+/// run would produce, provided each stage's `fetch` reads only context that no
+/// other stage in the group mutates during `apply` — the invariant every
+/// `parallelizable` stage must uphold.
+async fn run_parallel_group(
+    group: &[Box<dyn ContextProcessor>],
+    ctx: &mut WorkingContext,
+    contact_id: &str,
+    reports: &mut Vec<PipelineStageReport>,
+) -> Result<()> {
+    let spans = group
+        .iter()
+        .map(|stage| build_stage_span(ctx, contact_id, stage.as_ref()))
+        .collect::<Vec<_>>();
+
+    // Fetch phase: every stage's read-only I/O runs against the same immutable
+    // context, overlapping the independent round trips.
+    let fetched = {
+        let ctx_ref: &WorkingContext = ctx;
+        let fetches = group.iter().zip(&spans).map(|(stage, span)| {
+            let stage_name = stage.name().to_string();
+            let span = span.clone();
+            async move {
+                let started = Instant::now();
+                let apply = stage
+                    .fetch(ctx_ref)
+                    .instrument(span)
+                    .await
+                    .map_err(|error| stage_error(&stage_name, error))?;
+                Ok::<_, moa_core::MoaError>((started.elapsed(), apply))
+            }
+        });
+        futures_util::future::try_join_all(fetches).await?
+    };
+
+    // Apply phase: strictly in stage order so message/tool layout is
+    // deterministic regardless of which fetch finished first.
+    for ((stage, span), (fetch_elapsed, apply)) in group.iter().zip(&spans).zip(fetched) {
+        let stage_name = stage.name().to_string();
+        let tokens_before = ctx.token_count;
+        span.record("moa.pipeline.stage.tokens_before", tokens_before as i64);
+        let apply_started = Instant::now();
+        let mut output = match apply {
+            Some(apply) => {
+                let _enter = span.enter();
+                apply(ctx).map_err(|error| stage_error(&stage_name, error))?
+            }
+            None => async { stage.process(ctx).await }
+                .instrument(span.clone())
+                .await
+                .map_err(|error| stage_error(&stage_name, error))?,
+        };
+        output.duration = fetch_elapsed + apply_started.elapsed();
+        let tokens_after = ctx.token_count;
+        finalize_stage_report(
+            span,
+            stage.as_ref(),
+            output,
+            tokens_before,
+            tokens_after,
+            reports,
+        );
+    }
+    Ok(())
+}
+
+/// Records the stage span fields, logs completion, and appends the stage report.
+fn finalize_stage_report(
+    stage_span: &tracing::Span,
+    stage: &dyn ContextProcessor,
+    output: ProcessorOutput,
+    tokens_before: usize,
+    tokens_after: usize,
+    reports: &mut Vec<PipelineStageReport>,
+) {
+    stage_span.record(
+        "moa.pipeline.stage.tokens_added",
+        output.tokens_added as i64,
+    );
+    stage_span.record(
+        "moa.pipeline.stage.tokens_removed",
+        output.tokens_removed as i64,
+    );
+    stage_span.record(
+        "moa.pipeline.stage.items_included",
+        output.items_included.len() as i64,
+    );
+    stage_span.record(
+        "moa.pipeline.stage.items_excluded",
+        output.items_excluded.len() as i64,
+    );
+    stage_span.record("moa.pipeline.stage.tokens_after", tokens_after as i64);
+    if stage.name() == "query_rewrite" {
+        record_query_rewrite_stage_metadata(stage_span, &output);
+    }
+
+    tracing::info!(
+        stage = stage.stage(),
+        name = stage.name(),
+        tokens_before,
+        tokens_after,
+        tokens_added = output.tokens_added,
+        tokens_removed = output.tokens_removed,
+        items_included = ?output.items_included,
+        items_excluded = ?output.items_excluded,
+        excluded_items = ?output.excluded_items,
+        duration_ms = output.duration.as_millis(),
+        "pipeline stage completed"
+    );
+
+    reports.push(PipelineStageReport {
+        stage: stage.stage(),
+        name: stage.name().to_string(),
+        output,
+    });
 }
 
 fn record_query_rewrite_stage_metadata(span: &tracing::Span, output: &ProcessorOutput) {
@@ -239,11 +373,19 @@ fn stage_error(stage_name: &str, error: moa_core::MoaError) -> moa_core::MoaErro
 }
 
 fn cache_prefix_ratio(ctx: &WorkingContext) -> f64 {
+    // Reuse the tool loadout token count the tools stage already computed rather
+    // than re-serializing and re-tokenizing every schema at the end of the turn.
     let tool_tokens = ctx
-        .tools()
-        .iter()
-        .map(|tool| estimate_text_tokens(&tool.to_string()))
-        .sum::<usize>();
+        .metadata()
+        .get(crate::pipeline::tools::TOOLS_TOKEN_COUNT_METADATA_KEY)
+        .and_then(serde_json::Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or_else(|| {
+            ctx.tools()
+                .iter()
+                .map(|tool| estimate_text_tokens(&tool.to_string()))
+                .sum::<usize>()
+        });
     let total_tokens = ctx.token_count + tool_tokens;
 
     if total_tokens == 0 {
@@ -262,10 +404,13 @@ fn cache_prefix_ratio(ctx: &WorkingContext) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
     use async_trait::async_trait;
     use moa_core::{
         Channel, ContextMessage, ContextProcessor, MoaError, ModelCapabilities, ModelId,
-        ProcessorOutput, Result, SessionId, SessionMeta, TokenPricing, ToolCallFormat,
+        ProcessorOutput, Result, SessionId, SessionMeta, StageApply, TokenPricing, ToolCallFormat,
         WorkingContext,
     };
     use serde_json::json;
@@ -424,6 +569,248 @@ mod tests {
         assert!(
             ratio > 0.5,
             "tool tokens should contribute to the cached prefix"
+        );
+    }
+
+    /// Test stage that appends a system message and records its fetch and apply
+    /// order, with an optional fetch delay to force out-of-order fetch completion.
+    struct OrderedParallelStage {
+        stage: u8,
+        name: &'static str,
+        parallel: bool,
+        fetch_delay: Duration,
+        fetch_order: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl ContextProcessor for OrderedParallelStage {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn stage(&self) -> u8 {
+            self.stage
+        }
+
+        fn parallelizable(&self) -> bool {
+            self.parallel
+        }
+
+        async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
+            match self.fetch(ctx).await? {
+                Some(apply) => apply(ctx),
+                None => Ok(ProcessorOutput::default()),
+            }
+        }
+
+        async fn fetch(&self, _ctx: &WorkingContext) -> Result<Option<StageApply>> {
+            tokio::time::sleep(self.fetch_delay).await;
+            self.fetch_order
+                .lock()
+                .expect("fetch order lock")
+                .push(self.name);
+            let name = self.name;
+            let apply: StageApply = Box::new(move |ctx: &mut WorkingContext| {
+                ctx.append_system(name);
+                let mut order = ctx
+                    .metadata()
+                    .get("apply_order")
+                    .cloned()
+                    .unwrap_or_else(|| json!([]));
+                order
+                    .as_array_mut()
+                    .expect("apply_order metadata is an array")
+                    .push(json!(name));
+                ctx.insert_metadata("apply_order", order);
+                Ok(ProcessorOutput {
+                    tokens_added: estimate_text_tokens(name),
+                    ..ProcessorOutput::default()
+                })
+            });
+            Ok(Some(apply))
+        }
+    }
+
+    fn ordered_session() -> SessionMeta {
+        SessionMeta {
+            id: SessionId::new(),
+            channel: Channel::Chat,
+            model: ModelId::new("claude-sonnet-4-6"),
+            ..SessionMeta::default()
+        }
+    }
+
+    fn message_contents(ctx: &WorkingContext) -> Vec<String> {
+        ctx.messages
+            .iter()
+            .map(|message| message.content.clone())
+            .collect()
+    }
+
+    fn report_names(reports: &[PipelineStageReport]) -> Vec<String> {
+        reports.iter().map(|report| report.name.clone()).collect()
+    }
+
+    #[tokio::test]
+    async fn parallel_group_matches_sequential_final_context() {
+        // Pins: running a run of parallelizable stages through the concurrent
+        // fetch/apply runner produces the same final WorkingContext (messages in
+        // order, token count, apply-order metadata) and the same ordered stage
+        // reports as running the identical stages sequentially via `process`.
+        let build = |parallel: bool| {
+            ContextPipeline::new(vec![
+                Box::new(OrderedParallelStage {
+                    stage: 1,
+                    name: "alpha",
+                    parallel,
+                    fetch_delay: Duration::from_millis(40),
+                    fetch_order: Arc::new(Mutex::new(Vec::new())),
+                }) as Box<dyn ContextProcessor>,
+                Box::new(OrderedParallelStage {
+                    stage: 2,
+                    name: "bravo",
+                    parallel,
+                    fetch_delay: Duration::from_millis(0),
+                    fetch_order: Arc::new(Mutex::new(Vec::new())),
+                }),
+                Box::new(OrderedParallelStage {
+                    stage: 3,
+                    name: "charlie",
+                    parallel,
+                    fetch_delay: Duration::from_millis(0),
+                    fetch_order: Arc::new(Mutex::new(Vec::new())),
+                }),
+            ])
+        };
+        let session = ordered_session();
+
+        let mut sequential_ctx = WorkingContext::new(&session, capabilities());
+        let sequential_reports = build(false)
+            .run(&mut sequential_ctx)
+            .await
+            .expect("sequential pipeline should run");
+
+        let mut parallel_ctx = WorkingContext::new(&session, capabilities());
+        let parallel_reports = build(true)
+            .run(&mut parallel_ctx)
+            .await
+            .expect("parallel pipeline should run");
+
+        assert_eq!(
+            message_contents(&sequential_ctx),
+            message_contents(&parallel_ctx),
+        );
+        assert_eq!(
+            message_contents(&parallel_ctx),
+            vec![
+                "alpha".to_string(),
+                "bravo".to_string(),
+                "charlie".to_string()
+            ],
+        );
+        assert_eq!(
+            parallel_ctx.metadata().get("apply_order"),
+            Some(&json!(["alpha", "bravo", "charlie"])),
+        );
+        assert_eq!(
+            sequential_ctx.metadata().get("apply_order"),
+            parallel_ctx.metadata().get("apply_order"),
+        );
+        assert_eq!(sequential_ctx.token_count, parallel_ctx.token_count);
+        assert_eq!(
+            report_names(&sequential_reports),
+            report_names(&parallel_reports),
+        );
+        assert_eq!(
+            report_names(&parallel_reports),
+            vec![
+                "alpha".to_string(),
+                "bravo".to_string(),
+                "charlie".to_string()
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_group_applies_in_stage_order_despite_fetch_completion_order() {
+        // Pins: the concurrent group overlaps fetches (a zero-delay stage's fetch
+        // finishes before a slow earlier stage's) yet applies strictly in stage
+        // order, so message layout never depends on which fetch finished first.
+        let fetch_order = Arc::new(Mutex::new(Vec::new()));
+        let pipeline = ContextPipeline::new(vec![
+            Box::new(OrderedParallelStage {
+                stage: 1,
+                name: "slow",
+                parallel: true,
+                fetch_delay: Duration::from_millis(50),
+                fetch_order: fetch_order.clone(),
+            }) as Box<dyn ContextProcessor>,
+            Box::new(OrderedParallelStage {
+                stage: 2,
+                name: "fast",
+                parallel: true,
+                fetch_delay: Duration::from_millis(0),
+                fetch_order: fetch_order.clone(),
+            }),
+        ]);
+        let session = ordered_session();
+        let mut ctx = WorkingContext::new(&session, capabilities());
+
+        pipeline.run(&mut ctx).await.expect("pipeline should run");
+
+        assert_eq!(
+            *fetch_order.lock().expect("fetch order lock"),
+            vec!["fast", "slow"],
+            "the fast stage's fetch must finish first, proving the fetches overlapped",
+        );
+        assert_eq!(
+            ctx.metadata().get("apply_order"),
+            Some(&json!(["slow", "fast"])),
+            "apply order must follow stage order, not fetch-completion order",
+        );
+        assert_eq!(
+            message_contents(&ctx),
+            vec!["slow".to_string(), "fast".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_sequential_and_parallel_stages_preserve_declared_order() {
+        // Pins: a parallelizable run bounded by sequential stages still applies
+        // every stage in full declared order across the group boundaries.
+        let fetch_order = Arc::new(Mutex::new(Vec::new()));
+        let stage = |stage: u8, name: &'static str, parallel: bool| {
+            Box::new(OrderedParallelStage {
+                stage,
+                name,
+                parallel,
+                fetch_delay: Duration::from_millis(0),
+                fetch_order: fetch_order.clone(),
+            }) as Box<dyn ContextProcessor>
+        };
+        let pipeline = ContextPipeline::new(vec![
+            stage(1, "lead", false),
+            stage(2, "mid_a", true),
+            stage(3, "mid_b", true),
+            stage(4, "tail", false),
+        ]);
+        let session = ordered_session();
+        let mut ctx = WorkingContext::new(&session, capabilities());
+
+        pipeline.run(&mut ctx).await.expect("pipeline should run");
+
+        assert_eq!(
+            ctx.metadata().get("apply_order"),
+            Some(&json!(["lead", "mid_a", "mid_b", "tail"])),
+        );
+        assert_eq!(
+            message_contents(&ctx),
+            vec![
+                "lead".to_string(),
+                "mid_a".to_string(),
+                "mid_b".to_string(),
+                "tail".to_string(),
+            ],
         );
     }
 

@@ -250,6 +250,40 @@ impl ToolOutput {
         exit_code: i32,
         duration: Duration,
     ) -> Self {
+        Self::from_process_parts(stdout, stderr, exit_code, duration, false, false, None)
+    }
+
+    /// Creates a process-backed tool result whose raw stdout or stderr was
+    /// truncated by the execution adapter before router-level budgeting.
+    pub fn from_process_with_source_truncation(
+        stdout: String,
+        stderr: String,
+        exit_code: i32,
+        duration: Duration,
+        stdout_truncated: bool,
+        stderr_truncated: bool,
+        original_output_tokens: Option<u32>,
+    ) -> Self {
+        Self::from_process_parts(
+            stdout,
+            stderr,
+            exit_code,
+            duration,
+            stdout_truncated,
+            stderr_truncated,
+            original_output_tokens,
+        )
+    }
+
+    fn from_process_parts(
+        stdout: String,
+        stderr: String,
+        exit_code: i32,
+        duration: Duration,
+        stdout_truncated: bool,
+        stderr_truncated: bool,
+        original_output_tokens: Option<u32>,
+    ) -> Self {
         let mut content = Vec::new();
         if !stdout.is_empty() {
             content.push(ToolContent::Text {
@@ -274,10 +308,12 @@ impl ToolOutput {
                 "stdout": stdout,
                 "stderr": stderr,
                 "exit_code": exit_code,
+                "stdout_truncated": stdout_truncated,
+                "stderr_truncated": stderr_truncated,
             })),
             duration,
-            truncated: false,
-            original_output_tokens: None,
+            truncated: stdout_truncated || stderr_truncated,
+            original_output_tokens,
             artifact: None,
         }
     }

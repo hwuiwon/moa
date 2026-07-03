@@ -6,9 +6,11 @@ use moa_core::{MoaConfig, MoaError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_EMBEDDING_CONCURRENCY};
 use crate::core::http::{
-    build_http_client, post_json, validate_embedding_count, validate_embedding_dimension,
+    build_json_http_client, post_json, validate_embedding_count, validate_embedding_dimension,
 };
+use crate::core::pacer::{PacerConfig, RatePacer};
 
 const ZEROENTROPY_EMBEDDINGS_URL: &str = "https://api.zeroentropy.dev/v1/models/embed";
 /// Default ZeroEntropy embedding model id, used as a fixture by selector tests.
@@ -28,18 +30,23 @@ pub struct ZeroEntropyEmbedding {
     embeddings_url: String,
     input_type: String,
     dimensions: usize,
+    pacer: RatePacer,
+    limiter: ConcurrencyLimiter,
 }
 
 impl ZeroEntropyEmbedding {
     /// Creates a ZeroEntropy embedding client from an API key and model id.
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Result<Self> {
         Ok(Self {
-            client: build_http_client()?,
+            client: build_json_http_client()?,
             api_key: api_key.into(),
             model: model.into(),
             embeddings_url: ZEROENTROPY_EMBEDDINGS_URL.to_string(),
             input_type: ZEROENTROPY_DEFAULT_INPUT_TYPE.to_string(),
             dimensions: ZEROENTROPY_DEFAULT_DIMENSIONS,
+            // Pacing off by default; ZeroEntropy limits are tier-specific.
+            pacer: RatePacer::new(PacerConfig::disabled()),
+            limiter: ConcurrencyLimiter::new(DEFAULT_EMBEDDING_CONCURRENCY),
         })
     }
 
@@ -59,6 +66,20 @@ impl ZeroEntropyEmbedding {
         self
     }
 
+    /// Enables request/input pacing, off by default for tier-specific limits.
+    #[must_use]
+    pub fn with_rate_limits(mut self, config: PacerConfig) -> Self {
+        self.pacer = RatePacer::new(config);
+        self
+    }
+
+    /// Overrides the in-flight concurrency ceiling for embedding requests.
+    #[must_use]
+    pub fn with_max_concurrent_requests(mut self, max_in_flight: usize) -> Self {
+        self.limiter = ConcurrencyLimiter::new(max_in_flight);
+        self
+    }
+
     /// Overrides the fixed output dimensionality expected from ZeroEntropy.
     pub fn with_dimensions(mut self, dimensions: usize) -> Result<Self> {
         if !ZEROENTROPY_SUPPORTED_DIMENSIONS.contains(&dimensions) {
@@ -72,6 +93,9 @@ impl ZeroEntropyEmbedding {
     }
 
     async fn embed_chunk(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
+        // In-flight slot first, then rate budget (see `ConcurrencyLimiter`).
+        let _permit = self.limiter.acquire().await;
+        self.pacer.acquire(1, inputs.len() as u32).await;
         let payload: ZeroEntropyEmbeddingResponse = post_json(
             &self.client,
             &self.embeddings_url,

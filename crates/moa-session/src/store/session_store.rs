@@ -1,6 +1,82 @@
 //! `moa_core::SessionStore` implementation for `PostgresSessionStore`.
 
+use std::collections::HashMap;
+
 use super::*;
+
+/// One event prepared for insertion: blobs already offloaded, metadata computed.
+struct PreparedAppend {
+    id: Uuid,
+    event: Event,
+    event_type: &'static str,
+    event_type_record: EventType,
+    hand_id: Option<String>,
+    token_count: usize,
+    payload: serde_json::Value,
+    dedupe_key: Option<String>,
+}
+
+/// Where an appended event's persisted identity comes from in the result set.
+enum AppendPlan {
+    /// Freshly inserted at this sequence number.
+    Insert { sequence_num: u64 },
+    /// A dedupe hit against an event already persisted in a prior transaction.
+    DbHit { sequence_num: u64 },
+    /// A dedupe hit against an earlier entry in this same batch.
+    BatchDup { sequence_num: u64 },
+}
+
+/// Deltas folded into the session aggregate columns by a single UPDATE.
+///
+/// Mirrors the retired `update_session_aggregates()` trigger exactly: only
+/// `BrainResponse` and `Checkpoint` contribute token/cost totals, and only
+/// `BrainResponse` increments `turn_count`.
+#[derive(Default)]
+struct SessionAggregateDelta {
+    event_count: i64,
+    turn_count: i64,
+    input_tokens_uncached: i64,
+    input_tokens_cache_write: i64,
+    input_tokens_cache_read: i64,
+    output_tokens: i64,
+    cost_cents: i64,
+    last_checkpoint_seq: Option<i64>,
+}
+
+impl SessionAggregateDelta {
+    fn add_event(&mut self, event: &Event, sequence_num: u64) {
+        self.event_count += 1;
+        match event {
+            Event::BrainResponse {
+                input_tokens_uncached,
+                input_tokens_cache_write,
+                input_tokens_cache_read,
+                output_tokens,
+                cost_cents,
+                ..
+            } => {
+                self.turn_count += 1;
+                self.input_tokens_uncached += *input_tokens_uncached as i64;
+                self.input_tokens_cache_write += *input_tokens_cache_write as i64;
+                self.input_tokens_cache_read += *input_tokens_cache_read as i64;
+                self.output_tokens += *output_tokens as i64;
+                self.cost_cents += i64::from(*cost_cents);
+            }
+            Event::Checkpoint {
+                input_tokens,
+                output_tokens,
+                cost_cents,
+                ..
+            } => {
+                self.input_tokens_uncached += *input_tokens as i64;
+                self.output_tokens += *output_tokens as i64;
+                self.cost_cents += i64::from(*cost_cents);
+                self.last_checkpoint_seq = Some(sequence_num as i64);
+            }
+            _ => {}
+        }
+    }
+}
 
 fn validate_session_create_meta(meta: &SessionMeta) -> Result<()> {
     if meta.contact.is_none() && meta.created_by.is_none() {
@@ -358,6 +434,300 @@ impl PostgresSessionStore {
         .await
         .map_err(map_sqlx_error)
     }
+
+    /// Appends a batch of events to one session in a single transaction.
+    ///
+    /// All events are inserted under one `sessions ... FOR UPDATE` lock via a
+    /// single multi-row INSERT and a single aggregate UPDATE. Large string fields
+    /// are offloaded to the blob store *before* the transaction opens, so blob I/O
+    /// never holds the session-row lock. Dedupe keys are honored per entry with
+    /// the same semantics as the single append: an entry whose
+    /// `(session_id, dedupe_key)` already exists — persisted earlier or repeated
+    /// within this batch — is not re-inserted and its first persisted record is
+    /// returned in place. Returns one [`EventRecord`] per input entry, in order.
+    pub async fn append_events(
+        &self,
+        session_id: moa_core::SessionId,
+        appends: Vec<EventAppend>,
+    ) -> Result<Vec<EventRecord>> {
+        if appends.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Offload blobs before opening the transaction (uses a second pooled
+        // connection) so the append transaction only does index-friendly work.
+        let now = Utc::now();
+        let mut prepared = Vec::with_capacity(appends.len());
+        for append in appends {
+            let event = append.event;
+            let payload = encode_event_for_storage(
+                self.blob_store.as_ref(),
+                &session_id,
+                &event,
+                self.blob_threshold_bytes,
+            )
+            .await?;
+            prepared.push(PreparedAppend {
+                id: Uuid::now_v7(),
+                event_type: event.type_name(),
+                event_type_record: event.event_type(),
+                hand_id: event_hand_id(&event),
+                token_count: event.token_count(),
+                payload,
+                dedupe_key: append.dedupe_key,
+                event,
+            });
+        }
+
+        let sessions = self.table_name("sessions");
+        let events = self.table_name("events");
+        let dedupe = self.table_name("session_event_dedupe");
+
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
+
+        let locked_session = sqlx::query(&format!(
+            "SELECT event_count, tenant_id, storage_partition_id, user_id, contact_id \
+             FROM {sessions} WHERE id = $1 FOR UPDATE"
+        ))
+        .bind(session_id.0)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(map_sqlx_error)?
+        .ok_or(MoaError::SessionNotFound(session_id))?;
+        let base_sequence = locked_session.col::<i64>("event_count")? as u64;
+        let tenant_id = locked_session.col::<Uuid>("tenant_id")?;
+        let storage_partition_id = locked_session.col::<String>("storage_partition_id")?;
+        let actor_storage_key = locked_session.col::<String>("user_id")?;
+        let session_contact_id = locked_session.col::<Option<Uuid>>("contact_id")?;
+
+        // Resolve prior-transaction dedupe hits with a single lookup.
+        let lookup_keys: Vec<String> = prepared
+            .iter()
+            .filter_map(|entry| entry.dedupe_key.clone())
+            .collect();
+        let mut existing_by_key: HashMap<String, u64> = HashMap::new();
+        if !lookup_keys.is_empty() {
+            let rows = sqlx::query(&format!(
+                "SELECT dedupe_key, sequence_num FROM {dedupe} \
+                 WHERE session_id = $1 AND dedupe_key = ANY($2)"
+            ))
+            .bind(session_id.0)
+            .bind(&lookup_keys)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(map_sqlx_error)?;
+            for row in &rows {
+                existing_by_key.insert(
+                    row.col::<String>("dedupe_key")?,
+                    row.col::<i64>("sequence_num")? as u64,
+                );
+            }
+        }
+
+        // Plan each entry: fresh insert, prior-transaction hit, or in-batch dup.
+        let mut plans = Vec::with_capacity(prepared.len());
+        let mut insert_entries: Vec<(usize, u64)> = Vec::new();
+        let mut in_batch_keys: HashMap<String, u64> = HashMap::new();
+        let mut db_hit_seqs: Vec<u64> = Vec::new();
+        let mut next_sequence = base_sequence;
+        for (index, entry) in prepared.iter().enumerate() {
+            if let Some(key) = entry.dedupe_key.as_deref() {
+                if let Some(&sequence_num) = existing_by_key.get(key) {
+                    db_hit_seqs.push(sequence_num);
+                    plans.push(AppendPlan::DbHit { sequence_num });
+                    continue;
+                }
+                if let Some(&sequence_num) = in_batch_keys.get(key) {
+                    plans.push(AppendPlan::BatchDup { sequence_num });
+                    continue;
+                }
+                in_batch_keys.insert(key.to_string(), next_sequence);
+            }
+            plans.push(AppendPlan::Insert {
+                sequence_num: next_sequence,
+            });
+            insert_entries.push((index, next_sequence));
+            next_sequence += 1;
+        }
+
+        // Fetch persisted records for prior-transaction dedupe hits so callers
+        // receive the original event, not the retry payload.
+        let mut db_records: HashMap<u64, EventRecord> = HashMap::new();
+        if !db_hit_seqs.is_empty() {
+            let seqs: Vec<i64> = db_hit_seqs.iter().map(|seq| *seq as i64).collect();
+            let rows = sqlx::query(&format!(
+                "SELECT id, session_id, sequence_num, event_type, payload, timestamp, brain_id, \
+                        hand_id, token_count \
+                 FROM {events} \
+                 WHERE session_id = $1 AND sequence_num = ANY($2)"
+            ))
+            .bind(session_id.0)
+            .bind(&seqs)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(map_sqlx_error)?;
+            for row in &rows {
+                let record = self.event_record_from_row(row).await?;
+                db_records.insert(record.sequence_num, record);
+            }
+        }
+
+        // Insert survivors with one multi-row statement and fold aggregate deltas.
+        if !insert_entries.is_empty() {
+            let count = insert_entries.len();
+            let mut ids = Vec::with_capacity(count);
+            let mut sequence_nums = Vec::with_capacity(count);
+            let mut event_types = Vec::with_capacity(count);
+            let mut payloads = Vec::with_capacity(count);
+            let mut hand_ids: Vec<Option<String>> = Vec::with_capacity(count);
+            let mut token_counts = Vec::with_capacity(count);
+            let mut dedupe_rows: Vec<(String, i64)> = Vec::new();
+            let mut delta = SessionAggregateDelta::default();
+            for &(index, sequence_num) in &insert_entries {
+                let entry = &prepared[index];
+                ids.push(entry.id);
+                sequence_nums.push(sequence_num as i64);
+                event_types.push(entry.event_type.to_string());
+                payloads.push(serde_json::to_string(&entry.payload).map_err(|error| {
+                    MoaError::SerializationError(format!("failed to encode event payload: {error}"))
+                })?);
+                hand_ids.push(entry.hand_id.clone());
+                token_counts.push(entry.token_count as i32);
+                if let Some(key) = entry.dedupe_key.clone() {
+                    dedupe_rows.push((key, sequence_num as i64));
+                }
+                delta.add_event(&entry.event, sequence_num);
+            }
+
+            sqlx::query(&format!(
+                "INSERT INTO {events} \
+                 (id, session_id, tenant_id, contact_id, storage_partition_id, user_id, \
+                  sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
+                 SELECT u.id, $2, $3, $4, $5, $6, u.sequence_num, u.event_type, u.payload::jsonb, \
+                        $7, NULL::uuid, u.hand_id, u.token_count \
+                 FROM UNNEST($1::uuid[], $8::bigint[], $9::text[], $10::text[], $11::text[], $12::int[]) \
+                      AS u(id, sequence_num, event_type, payload, hand_id, token_count)"
+            ))
+            .bind(&ids)
+            .bind(session_id.0)
+            .bind(tenant_id)
+            .bind(session_contact_id)
+            .bind(&storage_partition_id)
+            .bind(&actor_storage_key)
+            .bind(now)
+            .bind(&sequence_nums)
+            .bind(&event_types)
+            .bind(&payloads)
+            .bind(&hand_ids)
+            .bind(&token_counts)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx_error)?;
+
+            if !dedupe_rows.is_empty() {
+                let (keys, seqs): (Vec<String>, Vec<i64>) = dedupe_rows.into_iter().unzip();
+                sqlx::query(&format!(
+                    "INSERT INTO {dedupe} (session_id, dedupe_key, sequence_num) \
+                     SELECT $1, u.dedupe_key, u.sequence_num \
+                     FROM UNNEST($2::text[], $3::bigint[]) AS u(dedupe_key, sequence_num)"
+                ))
+                .bind(session_id.0)
+                .bind(&keys)
+                .bind(&seqs)
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_sqlx_error)?;
+            }
+
+            // One aggregate UPDATE for the whole batch, replacing the retired
+            // per-row AFTER INSERT trigger.
+            sqlx::query(&format!(
+                "UPDATE {sessions} SET \
+                     event_count = event_count + $2, \
+                     turn_count = turn_count + $3, \
+                     total_input_tokens_uncached = total_input_tokens_uncached + $4, \
+                     total_input_tokens_cache_write = total_input_tokens_cache_write + $5, \
+                     total_input_tokens_cache_read = total_input_tokens_cache_read + $6, \
+                     total_output_tokens = total_output_tokens + $7, \
+                     total_cost_cents = total_cost_cents + $8, \
+                     last_checkpoint_seq = COALESCE($9, last_checkpoint_seq), \
+                     updated_at = GREATEST(updated_at, $10) \
+                 WHERE id = $1"
+            ))
+            .bind(session_id.0)
+            .bind(delta.event_count)
+            .bind(delta.turn_count)
+            .bind(delta.input_tokens_uncached)
+            .bind(delta.input_tokens_cache_write)
+            .bind(delta.input_tokens_cache_read)
+            .bind(delta.output_tokens)
+            .bind(delta.cost_cents)
+            .bind(delta.last_checkpoint_seq)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+
+        transaction.commit().await.map_err(map_sqlx_error)?;
+
+        // Build results in input order and record metrics for newly inserted events.
+        let mut records = Vec::with_capacity(prepared.len());
+        let mut batch_records: HashMap<u64, EventRecord> = HashMap::new();
+        for (plan, entry) in plans.into_iter().zip(prepared) {
+            match plan {
+                AppendPlan::DbHit { sequence_num } => {
+                    let record = db_records.get(&sequence_num).cloned().ok_or_else(|| {
+                        MoaError::StorageError(format!(
+                            "dedupe hit referenced missing persisted event at sequence {sequence_num}"
+                        ))
+                    })?;
+                    records.push(record);
+                }
+                AppendPlan::BatchDup { sequence_num } => {
+                    let record = batch_records.get(&sequence_num).cloned().ok_or_else(|| {
+                        MoaError::StorageError(format!(
+                            "batch dedupe referenced missing inserted event at sequence {sequence_num}"
+                        ))
+                    })?;
+                    records.push(record);
+                }
+                AppendPlan::Insert { sequence_num } => {
+                    let PreparedAppend {
+                        id: entry_id,
+                        event,
+                        event_type,
+                        event_type_record,
+                        hand_id,
+                        token_count,
+                        ..
+                    } = entry;
+                    if let Event::BrainResponse {
+                        model, model_tier, ..
+                    } = &event
+                    {
+                        record_turn_completed(model, *model_tier);
+                    }
+                    record_session_event_append(event_type);
+
+                    let record = EventRecord {
+                        id: entry_id,
+                        session_id,
+                        sequence_num,
+                        event_type: event_type_record,
+                        event,
+                        timestamp: now,
+                        brain_id: None,
+                        hand_id,
+                        token_count: Some(token_count),
+                    };
+                    batch_records.insert(sequence_num, record.clone());
+                    records.push(record);
+                }
+            }
+        }
+        Ok(records)
+    }
 }
 
 #[async_trait]
@@ -521,7 +891,8 @@ impl SessionStore for PostgresSessionStore {
         let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
         let session_id = self.create_session_in_tx(&mut transaction, meta).await?;
         transaction.commit().await.map_err(map_sqlx_error)?;
-        self.refresh_active_session_metric().await?;
+        // The active-session gauge is refreshed off the write path on a timer
+        // (see `spawn_active_session_gauge_refresher`); no COUNT(*) here.
 
         Ok(session_id)
     }
@@ -549,136 +920,13 @@ impl SessionStore for PostgresSessionStore {
         event: Event,
         dedupe_key: Option<String>,
     ) -> Result<EventRecord> {
-        let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let event_id = Uuid::now_v7();
-        let event_type = event.type_name();
-        let event_type_record = event.event_type();
-        let hand_id = event_hand_id(&event);
-        let token_count = event.token_count();
-        let payload = encode_event_for_storage(
-            self.blob_store.as_ref(),
-            &session_id,
-            &event,
-            self.blob_threshold_bytes,
-        )
-        .await?;
-        let now = Utc::now();
-        let sessions = self.table_name("sessions");
-        let events = self.table_name("events");
-
-        let locked_session = sqlx::query(&format!(
-            "SELECT event_count, tenant_id, storage_partition_id, user_id, contact_id FROM {sessions} WHERE id = $1 FOR UPDATE"
-        ))
-        .bind(session_id.0)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(map_sqlx_error)?
-        .ok_or(MoaError::SessionNotFound(session_id))?;
-        let sequence_num = locked_session.col::<i64>("event_count")? as u64;
-        let tenant_id = locked_session.col::<Uuid>("tenant_id")?;
-        let storage_partition_id = locked_session.col::<String>("storage_partition_id")?;
-        let actor_storage_key = locked_session.col::<String>("user_id")?;
-        let contact_id = locked_session.col::<Option<Uuid>>("contact_id")?;
-
-        // Idempotency fast path: if this `(session_id, dedupe_key)` was already
-        // appended, return the first persisted record without inserting again.
-        if let Some(key) = dedupe_key.as_deref() {
-            let dedupe = self.table_name("session_event_dedupe");
-            if let Some(existing) = sqlx::query(&format!(
-                "SELECT sequence_num FROM {dedupe} WHERE session_id = $1 AND dedupe_key = $2"
-            ))
-            .bind(session_id.0)
-            .bind(key)
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(map_sqlx_error)?
-            {
-                let existing_seq = existing.col::<i64>("sequence_num")? as u64;
-                let existing_event = sqlx::query(&format!(
-                    "SELECT id, timestamp FROM {events} WHERE session_id = $1 AND sequence_num = $2"
-                ))
-                .bind(session_id.0)
-                .bind(existing_seq as i64)
-                .fetch_optional(&mut *transaction)
-                .await
-                .map_err(map_sqlx_error)?;
-                transaction.commit().await.map_err(map_sqlx_error)?;
-                let (existing_id, existing_timestamp) = match existing_event {
-                    Some(row) => (
-                        row.col::<Uuid>("id")?,
-                        row.col::<DateTime<Utc>>("timestamp")?,
-                    ),
-                    None => (event_id, now),
-                };
-                return Ok(EventRecord {
-                    id: existing_id,
-                    session_id,
-                    sequence_num: existing_seq,
-                    event_type: event_type_record,
-                    event,
-                    timestamp: existing_timestamp,
-                    brain_id: None,
-                    hand_id,
-                    token_count: Some(token_count),
-                });
-            }
-        }
-
-        sqlx::query(&format!(
-            "INSERT INTO {events} \
-             (id, session_id, tenant_id, contact_id, storage_partition_id, user_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
-        ))
-        .bind(event_id)
-        .bind(session_id.0)
-        .bind(tenant_id)
-        .bind(contact_id)
-        .bind(storage_partition_id)
-        .bind(actor_storage_key)
-        .bind(sequence_num as i64)
-        .bind(event_type)
-        .bind(Json(payload))
-        .bind(now)
-        .bind(Option::<Uuid>::None)
-        .bind(&hand_id)
-        .bind(token_count as i32)
-        .execute(&mut *transaction)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        // Record the dedupe key in the same transaction so a retry of the same
-        // logical append short-circuits on the fast path above.
-        if let Some(key) = dedupe_key.as_deref() {
-            let dedupe = self.table_name("session_event_dedupe");
-            sqlx::query(&format!(
-                "INSERT INTO {dedupe} (session_id, dedupe_key, sequence_num) VALUES ($1, $2, $3)"
-            ))
-            .bind(session_id.0)
-            .bind(key)
-            .bind(sequence_num as i64)
-            .execute(&mut *transaction)
-            .await
-            .map_err(map_sqlx_error)?;
-        }
-
-        transaction.commit().await.map_err(map_sqlx_error)?;
-        if let Event::BrainResponse {
-            model, model_tier, ..
-        } = &event
-        {
-            record_turn_completed(model, *model_tier);
-        }
-        record_session_event_append(event_type);
-        Ok(EventRecord {
-            id: event_id,
-            session_id,
-            sequence_num,
-            event_type: event_type_record,
-            event,
-            timestamp: now,
-            brain_id: None,
-            hand_id,
-            token_count: Some(token_count),
+        let mut records = self
+            .append_events(session_id, vec![EventAppend { event, dedupe_key }])
+            .await?;
+        records.pop().ok_or_else(|| {
+            MoaError::StorageError(
+                "append_events returned no record for a single event".to_string(),
+            )
         })
     }
 
@@ -774,9 +1022,27 @@ impl SessionStore for PostgresSessionStore {
                 })?;
             Ok::<_, MoaError>(total + payload_bytes.len() as u64)
         })?;
-        let mut events = Vec::with_capacity(rows.len());
+        // Collect the distinct claim-checked blob ids across all rows and fetch
+        // them once, instead of one blob `get` per event during decode.
+        let mut payloads = Vec::with_capacity(rows.len());
+        let mut blob_ids: Vec<String> = Vec::new();
+        let mut seen_blob_ids = std::collections::HashSet::new();
         for row in &rows {
-            events.push(self.event_record_from_row(row).await?);
+            let payload = row.col::<serde_json::Value>("payload")?;
+            let mut ids = Vec::new();
+            crate::blob::collect_claim_check_blob_ids(&payload, &mut ids)?;
+            for id in ids {
+                if seen_blob_ids.insert(id.clone()) {
+                    blob_ids.push(id);
+                }
+            }
+            payloads.push(payload);
+        }
+        let blob_cache = self.blob_store.get_many(&session_id, &blob_ids).await?;
+        let mut events = Vec::with_capacity(rows.len());
+        for (row, payload) in rows.iter().zip(payloads) {
+            let event = crate::blob::decode_event_from_cache(payload, &blob_cache)?;
+            events.push(Self::event_record_from_row_parts(row, event)?);
         }
         if use_recent_order {
             events.reverse();
@@ -857,7 +1123,7 @@ impl SessionStore for PostgresSessionStore {
         if affected == 0 {
             return Err(MoaError::SessionNotFound(session_id));
         }
-        self.refresh_active_session_metric().await?;
+        // Active-session gauge is refreshed off the write path on a timer.
 
         Ok(())
     }
@@ -959,17 +1225,22 @@ impl SessionStore for PostgresSessionStore {
         let events = self.table_name("events");
         let sessions = self.table_name("sessions");
 
+        // The `events` table carries no STORED tsvector column (dropped from the
+        // append hot path). This rare, admin-only search computes the vector on
+        // the fly over `event_type` + payload text.
         let mut query = QueryBuilder::<Postgres>::new(
             "SELECT e.id, e.session_id, e.sequence_num, e.event_type, e.payload, \
              e.timestamp, e.brain_id, e.hand_id, e.token_count, \
-             ts_rank(e.search_vector, plainto_tsquery('english', "
+             ts_rank(to_tsvector('english', e.event_type || ' ' || e.payload::text), \
+             plainto_tsquery('english', "
                 .to_string(),
         );
         query.push_bind(normalized_query.clone());
         query.push(format!(
             ")) AS rank \
              FROM {events} e JOIN {sessions} s ON s.id = e.session_id \
-             WHERE e.search_vector @@ plainto_tsquery('english', "
+             WHERE to_tsvector('english', e.event_type || ' ' || e.payload::text) \
+             @@ plainto_tsquery('english', "
         ));
         query.push_bind(normalized_query);
         query.push(")");
@@ -1167,7 +1438,7 @@ impl SessionStore for PostgresSessionStore {
         }
 
         transaction.commit().await.map_err(map_sqlx_error)?;
-        self.refresh_active_session_metric().await?;
+        // Active-session gauge is refreshed off the write path on a timer.
 
         if let Err(err) = self.blob_store.delete_session(&session_id).await {
             tracing::warn!(%err, session_id = %session_id, "blob cleanup failed after empty session delete");

@@ -9,10 +9,13 @@ use chrono::{DateTime, Utc};
 use moa_core::{
     Credential, CredentialVault, McpCredentialConfig, McpServerConfig, MoaError, Result, SessionId,
 };
+use moka::future::Cache;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(15 * 60);
+/// Upper bound on entries retained by each MCP proxy cache.
+const MAX_CACHED_ENTRIES: u64 = 100_000;
 
 #[derive(Debug, Clone)]
 struct ProxyGrant {
@@ -35,7 +38,7 @@ impl McpSessionToken {
 /// MCP credential proxy that resolves real credentials via a vault only at call time.
 pub struct MCPCredentialProxy {
     vault: Arc<dyn CredentialVault>,
-    session_tokens: RwLock<HashMap<String, ProxyGrant>>,
+    session_tokens: Cache<String, ProxyGrant>,
     token_ttl: Duration,
 }
 
@@ -44,7 +47,7 @@ impl MCPCredentialProxy {
     pub fn new(vault: Arc<dyn CredentialVault>) -> Self {
         Self {
             vault,
-            session_tokens: RwLock::new(HashMap::new()),
+            session_tokens: build_token_cache(DEFAULT_TOKEN_TTL),
             token_ttl: DEFAULT_TOKEN_TTL,
         }
     }
@@ -52,6 +55,7 @@ impl MCPCredentialProxy {
     /// Overrides the default token time-to-live.
     pub fn with_token_ttl(mut self, token_ttl: Duration) -> Self {
         self.token_ttl = token_ttl;
+        self.session_tokens = build_token_cache(token_ttl);
         self
     }
 
@@ -62,25 +66,27 @@ impl MCPCredentialProxy {
         service: impl Into<String>,
         scope: impl Into<String>,
     ) -> Result<McpSessionToken> {
-        self.prune_expired_tokens().await;
         let token = format!("mcp_{}_{}", session_id, Uuid::now_v7());
-        self.session_tokens.write().await.insert(
-            token.clone(),
-            ProxyGrant {
-                service: service.into(),
-                scope: scope.into(),
-                expires_at: Utc::now()
-                    + chrono::Duration::from_std(self.token_ttl).map_err(|error| {
-                        MoaError::ValidationError(format!("invalid MCP proxy token ttl: {error}"))
-                    })?,
-            },
-        );
+        let expires_at = Utc::now()
+            + chrono::Duration::from_std(self.token_ttl).map_err(|error| {
+                MoaError::ValidationError(format!("invalid MCP proxy token ttl: {error}"))
+            })?;
+        self.session_tokens
+            .insert(
+                token.clone(),
+                ProxyGrant {
+                    service: service.into(),
+                    scope: scope.into(),
+                    expires_at,
+                },
+            )
+            .await;
         Ok(McpSessionToken(token))
     }
 
     /// Revokes a previously issued proxy token before it is used.
     pub async fn revoke_session_token(&self, token: &McpSessionToken) {
-        self.session_tokens.write().await.remove(token.as_str());
+        self.session_tokens.invalidate(token.as_str()).await;
     }
 
     /// Resolves and injects credential headers for one opaque proxy token.
@@ -98,23 +104,23 @@ impl MCPCredentialProxy {
     }
 
     async fn lookup_grant(&self, token: &McpSessionToken) -> Result<ProxyGrant> {
-        self.prune_expired_tokens().await;
-        self.session_tokens
-            .write()
-            .await
-            .remove(token.as_str())
-            .ok_or_else(|| {
-                MoaError::PermissionDenied("unknown or expired MCP proxy token".to_string())
-            })
+        // Per-entry TTL eviction (moka) plus a belt-and-suspenders expiry check
+        // replace the previous full-scan prune on every lookup. `remove` also
+        // makes the grant single-use without a separate write.
+        match self.session_tokens.remove(token.as_str()).await {
+            Some(grant) if grant.expires_at > Utc::now() => Ok(grant),
+            _ => Err(MoaError::PermissionDenied(
+                "unknown or expired MCP proxy token".to_string(),
+            )),
+        }
     }
+}
 
-    async fn prune_expired_tokens(&self) {
-        let now = Utc::now();
-        self.session_tokens
-            .write()
-            .await
-            .retain(|_, grant| grant.expires_at > now);
-    }
+fn build_token_cache(ttl: Duration) -> Cache<String, ProxyGrant> {
+    Cache::builder()
+        .max_capacity(MAX_CACHED_ENTRIES)
+        .time_to_live(ttl)
+        .build()
 }
 
 /// Environment-backed credential vault built from MCP server configuration.

@@ -211,6 +211,80 @@ async fn retry_after_header_is_respected(channel: Channel, header_name: &str) {
     assert_eq!(response.status, 200);
 }
 
+#[tokio::test]
+async fn rate_limit_metrics_track_each_known_outcome_and_ignore_unknown_pairs() {
+    // Pins: the atomic-backed metric registry maps each known (metric, outcome)
+    // pair to a distinct counter, accumulates repeats, and returns zero for
+    // unknown pairs instead of allocating a per-key entry.
+    use moa_messaging::MessagingRateLimitMetrics;
+
+    let metrics = MessagingRateLimitMetrics::default();
+    for (name, outcome) in [
+        ("messaging_send_failures_total", Some("retryable")),
+        ("messaging_send_failures_total", Some("permanent")),
+        ("messaging_send_retries_total", Some("success")),
+        ("messaging_send_retries_total", Some("exhausted")),
+        ("messaging_send_429_received_total", None),
+        ("messaging_send_429_received_total", None),
+        ("unknown_metric", Some("whatever")),
+    ] {
+        metrics.increment(name, Channel::Slack, outcome).await;
+    }
+
+    assert_eq!(
+        metrics
+            .counter(
+                "messaging_send_failures_total",
+                Channel::Slack,
+                Some("retryable")
+            )
+            .await,
+        1
+    );
+    assert_eq!(
+        metrics
+            .counter(
+                "messaging_send_failures_total",
+                Channel::Slack,
+                Some("permanent")
+            )
+            .await,
+        1
+    );
+    assert_eq!(
+        metrics
+            .counter(
+                "messaging_send_retries_total",
+                Channel::Slack,
+                Some("success")
+            )
+            .await,
+        1
+    );
+    assert_eq!(
+        metrics
+            .counter(
+                "messaging_send_retries_total",
+                Channel::Slack,
+                Some("exhausted")
+            )
+            .await,
+        1
+    );
+    assert_eq!(
+        metrics
+            .counter("messaging_send_429_received_total", Channel::Slack, None)
+            .await,
+        2
+    );
+    assert_eq!(
+        metrics
+            .counter("unknown_metric", Channel::Slack, Some("whatever"))
+            .await,
+        0
+    );
+}
+
 async fn wait_for_request_count(server: &Arc<wiremock::MockServer>, count: usize) {
     for _ in 0..100 {
         let received = server

@@ -18,6 +18,12 @@ use crate::retrieval::{RetrievalHit, RetrievalRequest};
 const DEFAULT_MAX_TENANTS: u64 = 1_000;
 const DEFAULT_TENANT_CAPACITY: u64 = 200;
 const DEFAULT_TTL: Duration = Duration::from_secs(300);
+/// Default changelog-version TTL.
+///
+/// Zero keeps cache freshness exact by re-reading the tenant version before each
+/// retrieval-cache hit. A non-zero value is available for explicit tuning, but
+/// can serve stale graph-memory hits until it expires.
+const DEFAULT_VERSION_TTL: Duration = Duration::ZERO;
 
 type TenantCache = Cache<CacheKey, CachedEntry>;
 
@@ -40,6 +46,24 @@ pub trait PlannedRetriever: Send + Sync {
         planned: &PlannedQuery,
         req: RetrievalRequest,
     ) -> Result<Vec<RetrievalHit>>;
+
+    /// Returns cached hits when a fresh cache entry already exists, without
+    /// running the backend or requiring a query embedding.
+    ///
+    /// Callers use this to probe the cache before computing an embedding: a
+    /// `Some` result means the full retrieval can be skipped, while `None`
+    /// signals the caller to embed the query and call [`Self::retrieve`]. The
+    /// default returns `None` so non-caching retrievers always fall back to the
+    /// backend. The supplied `req` must carry every field that participates in
+    /// the cache key (the query embedding does not), so an empty embedding is
+    /// sufficient here.
+    async fn retrieve_cached(
+        &self,
+        _planned: &PlannedQuery,
+        _req: &RetrievalRequest,
+    ) -> Result<Option<Vec<RetrievalHit>>> {
+        Ok(None)
+    }
 }
 
 #[async_trait]
@@ -95,6 +119,9 @@ pub struct CachedHybridRetrieverConfig {
     pub tenant_capacity: u64,
     /// Time-to-live for each cached retrieval entry.
     pub ttl: Duration,
+    /// Time-to-live for the per-tenant changelog version. Zero disables version
+    /// caching so every freshness check re-reads the durable graph version.
+    pub version_ttl: Duration,
     /// Whether user-scope queries may be cached.
     pub cache_user_scope: bool,
 }
@@ -105,6 +132,7 @@ impl Default for CachedHybridRetrieverConfig {
             max_tenants: DEFAULT_MAX_TENANTS,
             tenant_capacity: DEFAULT_TENANT_CAPACITY,
             ttl: DEFAULT_TTL,
+            version_ttl: DEFAULT_VERSION_TTL,
             cache_user_scope: false,
         }
     }
@@ -136,6 +164,9 @@ pub struct CachedHybridRetriever {
     inner: Arc<dyn RetrievalBackend>,
     version_reader: Arc<dyn ChangelogVersionReader>,
     tenants: Cache<String, TenantCache>,
+    /// Per-tenant changelog version cached for a short TTL so the freshness
+    /// check is not a DB round trip on every cache hit.
+    versions: Cache<String, i64>,
     config: CachedHybridRetrieverConfig,
 }
 
@@ -197,12 +228,38 @@ impl CachedHybridRetriever {
             .max_capacity(config.max_tenants)
             .time_to_live(config.ttl)
             .build();
+        let versions = Cache::builder()
+            .max_capacity(config.max_tenants)
+            .time_to_live(config.version_ttl)
+            .build();
         Self {
             inner,
             version_reader,
             tenants,
+            versions,
             config,
         }
+    }
+
+    /// Returns the tenant's changelog version, reusing a recent cached value to
+    /// avoid a DB round trip on every retrieval/probe.
+    async fn current_version_cached(
+        &self,
+        scope: &MemoryScope,
+        tenant_cache_id: &str,
+    ) -> Result<i64> {
+        if self.config.version_ttl.is_zero() {
+            return self.version_reader.current_version(scope).await;
+        }
+        if let Some(version) = self.versions.get(tenant_cache_id).await {
+            return Ok(version);
+        }
+
+        let version = self.version_reader.current_version(scope).await?;
+        self.versions
+            .insert(tenant_cache_id.to_string(), version)
+            .await;
+        Ok(version)
     }
 
     /// Retrieves graph-memory hits, using the versioned cache when eligible.
@@ -218,7 +275,9 @@ impl CachedHybridRetriever {
         }
 
         let tenant_cache_id = tenant_cache_id(&req.scope);
-        let current_version = self.version_reader.current_version(&req.scope).await?;
+        let current_version = self
+            .current_version_cached(&req.scope, &tenant_cache_id)
+            .await?;
         let key = CacheKey {
             tenant_cache_id: tenant_cache_id.clone(),
             fingerprint: fingerprint(planned, &req, self.inner.ranking_fingerprint()),
@@ -255,6 +314,40 @@ impl CachedHybridRetriever {
         Ok(hits)
     }
 
+    /// Returns a fresh cache entry without touching the backend or embedding.
+    ///
+    /// Used as a pre-embedding probe: the query embedding never participates in
+    /// the cache key, so a caller can look up hits before paying for the
+    /// embedding provider call and only embed when this returns `None`.
+    pub async fn retrieve_cached(
+        &self,
+        planned: &PlannedQuery,
+        req: &RetrievalRequest,
+    ) -> Result<Option<Vec<RetrievalHit>>> {
+        if !self.cacheable_scope(&req.scope) {
+            return Ok(None);
+        }
+
+        let tenant_cache_id = tenant_cache_id(&req.scope);
+        let current_version = self
+            .current_version_cached(&req.scope, &tenant_cache_id)
+            .await?;
+        let key = CacheKey {
+            tenant_cache_id: tenant_cache_id.clone(),
+            fingerprint: fingerprint(planned, req, self.inner.ranking_fingerprint()),
+        };
+        let tenant_cache = self.tenant_cache(&tenant_cache_id).await;
+
+        if let Some(entry) = tenant_cache.get(&key).await
+            && entry.changelog_version == current_version
+        {
+            metrics::counter!("moa_retrieval_cache_total", "outcome" => "hit").increment(1);
+            return Ok(Some(entry.hits));
+        }
+
+        Ok(None)
+    }
+
     async fn tenant_cache(&self, tenant_cache_id: &str) -> TenantCache {
         if let Some(cache) = self.tenants.get(tenant_cache_id).await {
             return cache;
@@ -283,6 +376,14 @@ impl PlannedRetriever for CachedHybridRetriever {
         req: RetrievalRequest,
     ) -> Result<Vec<RetrievalHit>> {
         CachedHybridRetriever::retrieve(self, planned, req).await
+    }
+
+    async fn retrieve_cached(
+        &self,
+        planned: &PlannedQuery,
+        req: &RetrievalRequest,
+    ) -> Result<Option<Vec<RetrievalHit>>> {
+        CachedHybridRetriever::retrieve_cached(self, planned, req).await
     }
 }
 
@@ -464,6 +565,40 @@ mod tests {
             .expect("stale retrieval should refresh");
 
         assert_eq!(backend.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn version_check_is_cached_within_ttl() {
+        // Pins: the per-tenant changelog version is read once and reused within
+        // the TTL, so a burst of cache hits does not issue a DB read per hit.
+        let backend = Arc::new(CountingBackend::new());
+        let version = Arc::new(MockVersionReader::new(1));
+        let cache = CachedHybridRetriever::with_parts(
+            backend.clone(),
+            version.clone(),
+            CachedHybridRetrieverConfig {
+                version_ttl: std::time::Duration::from_secs(60),
+                ..CachedHybridRetrieverConfig::default()
+            },
+        );
+        let planned = planned_query(tenant_scope(), "auth service");
+        let req = request(&planned, "what owns auth?");
+
+        cache
+            .retrieve(&planned, req.clone())
+            .await
+            .expect("cold retrieval should succeed");
+        cache
+            .retrieve(&planned, req)
+            .await
+            .expect("warm retrieval should hit cache");
+
+        assert_eq!(backend.calls(), 1, "second retrieval should be a cache hit");
+        assert_eq!(
+            version.reads(),
+            1,
+            "changelog version should be read once and reused within the TTL"
+        );
     }
 
     #[tokio::test]
@@ -703,23 +838,30 @@ mod tests {
 
     struct MockVersionReader {
         version: AtomicI64,
+        reads: AtomicUsize,
     }
 
     impl MockVersionReader {
         fn new(version: i64) -> Self {
             Self {
                 version: AtomicI64::new(version),
+                reads: AtomicUsize::new(0),
             }
         }
 
         fn set(&self, version: i64) {
             self.version.store(version, Ordering::SeqCst);
         }
+
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
     }
 
     #[async_trait]
     impl ChangelogVersionReader for MockVersionReader {
         async fn current_version(&self, _scope: &MemoryScope) -> Result<i64> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
             Ok(self.version.load(Ordering::SeqCst))
         }
     }

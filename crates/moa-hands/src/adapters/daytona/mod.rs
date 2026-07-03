@@ -1,5 +1,6 @@
 //! Daytona-backed hand provider for cloud container execution.
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -29,6 +30,10 @@ const DEFAULT_DAYTONA_TOOLBOX_URL: &str = "https://proxy.app.daytona.io/toolbox"
 const DEFAULT_DAYTONA_IMAGE: &str = "daytonaio/workspace:latest";
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 const DESTROY_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Optional Daytona organization id, resolved from the environment once.
+static DAYTONA_ORGANIZATION_ID: LazyLock<Option<String>> =
+    LazyLock::new(|| std::env::var("DAYTONA_ORGANIZATION_ID").ok());
 
 /// Daytona cloud hand provider.
 #[derive(Clone)]
@@ -306,6 +311,59 @@ impl DaytonaHandProvider {
             started_at.elapsed(),
         ))
     }
+
+    /// Routes one already-parsed tool invocation to its Daytona toolbox call.
+    async fn dispatch_tool(
+        &self,
+        workspace_id: &str,
+        tool: &str,
+        input: &str,
+        payload: &Value,
+    ) -> Result<ToolOutput> {
+        match supported_capability_for_tool(tool, DAYTONA_SUPPORTED_CAPABILITIES) {
+            Some(SandboxToolCapability::Bash) => {
+                self.execute_command(
+                    workspace_id,
+                    required_string_field(payload, "cmd")?,
+                    None,
+                    payload.get("timeout_secs").and_then(Value::as_u64),
+                )
+                .await
+            }
+            Some(SandboxToolCapability::Grep) => {
+                let command = grep::remote_shell_command(input, "/")?;
+                self.execute_command(workspace_id, &command, None, None)
+                    .await
+            }
+            Some(SandboxToolCapability::FileOutline) => {
+                let path = required_string_field(payload, "path")?;
+                let content = self.read_file(workspace_id, path).await?.to_text();
+                file_outline::execute_with_content(input, path, &content)
+            }
+            Some(SandboxToolCapability::FileRead) => {
+                let path = required_string_field(payload, "path")?;
+                let content = self.read_file(workspace_id, path).await?.to_text();
+                file_read::execute_with_content(input, path, &content)
+            }
+            Some(SandboxToolCapability::StrReplace) => {
+                self.str_replace_file(workspace_id, required_string_field(payload, "path")?, input)
+                    .await
+            }
+            Some(SandboxToolCapability::FileWrite) => {
+                self.write_file(
+                    workspace_id,
+                    required_string_field(payload, "path")?,
+                    required_string_field(payload, "content")?,
+                )
+                .await
+            }
+            Some(SandboxToolCapability::FileSearch) => {
+                self.search_files(workspace_id, required_string_field(payload, "pattern")?)
+                    .await
+            }
+            None => Err(unsupported_tool("Daytona", tool)),
+        }
+    }
 }
 
 #[async_trait]
@@ -327,53 +385,24 @@ impl HandProvider for DaytonaHandProvider {
     async fn execute(&self, handle: &HandHandle, tool: &str, input: &str) -> Result<ToolOutput> {
         let workspace_id = handle.daytona_id()?;
         let payload: Value = serde_json::from_str(input)?;
-        self.resume(handle).await?;
-        match supported_capability_for_tool(tool, DAYTONA_SUPPORTED_CAPABILITIES) {
-            Some(SandboxToolCapability::Bash) => {
-                self.execute_command(
-                    workspace_id,
-                    required_string_field(&payload, "cmd")?,
-                    None,
-                    payload.get("timeout_secs").and_then(Value::as_u64),
-                )
-                .await
-            }
-            Some(SandboxToolCapability::Grep) => {
-                let command = grep::remote_shell_command(input, "/")?;
-                self.execute_command(workspace_id, &command, None, None)
-                    .await
-            }
-            Some(SandboxToolCapability::FileOutline) => {
-                let path = required_string_field(&payload, "path")?;
-                let content = self.read_file(workspace_id, path).await?.to_text();
-                file_outline::execute_with_content(input, path, &content)
-            }
-            Some(SandboxToolCapability::FileRead) => {
-                let path = required_string_field(&payload, "path")?;
-                let content = self.read_file(workspace_id, path).await?.to_text();
-                file_read::execute_with_content(input, path, &content)
-            }
-            Some(SandboxToolCapability::StrReplace) => {
-                self.str_replace_file(
-                    workspace_id,
-                    required_string_field(&payload, "path")?,
-                    input,
-                )
-                .await
-            }
-            Some(SandboxToolCapability::FileWrite) => {
-                self.write_file(
-                    workspace_id,
-                    required_string_field(&payload, "path")?,
-                    required_string_field(&payload, "content")?,
-                )
-                .await
-            }
-            Some(SandboxToolCapability::FileSearch) => {
-                self.search_files(workspace_id, required_string_field(&payload, "pattern")?)
-                    .await
-            }
-            None => Err(unsupported_tool("Daytona", tool)),
+        // Attempt the tool directly rather than resuming on every call. The
+        // sandbox is only probed and resumed after a failure, and only when it is
+        // genuinely not running (so the tool never started); this keeps the happy
+        // path free of a status()+resume() round trip while still recovering a
+        // sandbox that auto-stopped between calls without risking a double run.
+        match self
+            .dispatch_tool(workspace_id, tool, input, &payload)
+            .await
+        {
+            Ok(output) => Ok(output),
+            Err(error) => match self.status(handle).await {
+                Ok(HandStatus::Stopped | HandStatus::Paused) => {
+                    self.resume(handle).await?;
+                    self.dispatch_tool(workspace_id, tool, input, &payload)
+                        .await
+                }
+                _ => Err(error),
+            },
         }
     }
 
@@ -515,10 +544,10 @@ fn default_headers(api_key: &str) -> Result<HeaderMap> {
             MoaError::ValidationError(format!("invalid Daytona API key header: {error}"))
         })?,
     );
-    if let Ok(org_id) = std::env::var("DAYTONA_ORGANIZATION_ID") {
+    if let Some(org_id) = DAYTONA_ORGANIZATION_ID.as_ref() {
         headers.insert(
             "X-Daytona-Organization-ID",
-            HeaderValue::from_str(&org_id).map_err(|error| {
+            HeaderValue::from_str(org_id).map_err(|error| {
                 MoaError::ValidationError(format!(
                     "invalid Daytona organization header value: {error}"
                 ))

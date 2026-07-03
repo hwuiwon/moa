@@ -12,9 +12,10 @@ use serde::{Deserialize, Serialize};
 use tracing::{Instrument, field};
 
 use crate::provider_http::{
-    is_retryable_http_status, optional_field, record_api_error, required_field, response_text,
-    retry_after_delay,
+    default_http_client, is_retryable_http_status, optional_field, record_api_error,
+    required_field, response_text, retry_after_delay,
 };
+use crate::rate_limit::with_jitter;
 
 const POSTMARK_EMAIL_PATH: &str = "/email";
 const DEFAULT_RATE_LIMIT_RETRIES: usize = 3;
@@ -211,7 +212,7 @@ impl PostmarkEmailClient {
     /// Creates a Postmark client from a server token.
     pub fn new(server_token: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: default_http_client(),
             server_token: SecretString::from(server_token.into()),
             base_url: "https://api.postmarkapp.com".to_string(),
             default_message_stream: Some("outbound".to_string()),
@@ -330,7 +331,12 @@ impl PostmarkEmailClient {
             let body = response_text(response).await;
 
             if status == StatusCode::TOO_MANY_REQUESTS && retries < self.max_rate_limit_retries {
-                let delay = retry_after_delay(&headers).unwrap_or(self.rate_limit_backoff);
+                // Honor an explicit `Retry-After` exactly; jitter only the local
+                // fallback backoff so synchronized senders do not resynchronize.
+                let delay = match retry_after_delay(&headers) {
+                    Some(explicit) => explicit,
+                    None => with_jitter(self.rate_limit_backoff),
+                };
                 record_api_error(
                     "postmark",
                     Some(status),

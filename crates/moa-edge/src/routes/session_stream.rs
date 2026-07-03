@@ -27,6 +27,20 @@ use std::time::{Duration, Instant};
 /// comments.
 const LIVENESS_FRAME_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Baseline progress-poll interval while durable events are flowing.
+const POLL_INTERVAL_MIN: Duration = Duration::from_secs(1);
+/// Upper bound the poll interval backs off to during sustained silence.
+const POLL_INTERVAL_MAX: Duration = Duration::from_secs(3);
+
+/// Progress-poll delay for a given run of consecutive unchanged polls.
+///
+/// Grows one second per unchanged poll from [`POLL_INTERVAL_MIN`] up to
+/// [`POLL_INTERVAL_MAX`]; any new durable event resets the run to zero.
+fn poll_backoff(unchanged_polls: u32) -> Duration {
+    let extra = Duration::from_secs(u64::from(unchanged_polls));
+    (POLL_INTERVAL_MIN + extra).min(POLL_INTERVAL_MAX)
+}
+
 use super::{AppState, EdgeJsonError, call_contacts_handler};
 
 pub(super) fn session_message_stream_response(
@@ -55,6 +69,7 @@ pub(super) fn session_message_stream_response(
         pending_events,
         closed: false,
         last_frame_at: Instant::now(),
+        unchanged_polls: 0,
     };
     Sse::new(stream::unfold(stream_state, next_session_message_event))
         .keep_alive(KeepAlive::default())
@@ -105,6 +120,9 @@ struct SessionMessageStreamState {
     /// Wall-clock instant the last SSE frame was emitted, used to gate the
     /// silence-filler `working` liveness frame.
     last_frame_at: Instant,
+    /// Consecutive progress polls that produced no durable event, used to grow
+    /// the poll interval during quiet periods. Reset when a new event arrives.
+    unchanged_polls: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -155,6 +173,8 @@ async fn next_session_message_event(
                     .then(|| done_sse_event(&state, &progress));
                 enqueue_progress_events(&mut state, progress.events);
                 if let Some(event) = state.pending_events.pop_front() {
+                    // New durable event: reset the poll interval to the baseline.
+                    state.unchanged_polls = 0;
                     state.last_frame_at = Instant::now();
                     return Some((Ok(event), state));
                 }
@@ -169,13 +189,18 @@ async fn next_session_message_event(
                     state.last_frame_at = Instant::now();
                     return Some((Ok(frame), state));
                 }
+                // Quiet poll: back off so a long idle turn stops hammering the
+                // orchestrator every second.
+                state.unchanged_polls = state.unchanged_polls.saturating_add(1);
             }
             Err(error) => {
                 state.closed = true;
                 return Some((Ok(error_sse_event(error.summary())), state));
             }
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Contact progress is the durable cross-process boundary for this
+        // stream; quiet turns use adaptive backoff to bound idle load.
+        tokio::time::sleep(poll_backoff(state.unchanged_polls)).await;
     }
 }
 
@@ -409,6 +434,16 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn poll_backoff_ramps_from_baseline_and_caps() {
+        // Pins: the progress poll stays at 1s while events flow, grows one second
+        // per consecutive quiet poll, and never exceeds the 3s cap.
+        assert_eq!(poll_backoff(0), POLL_INTERVAL_MIN);
+        assert_eq!(poll_backoff(1), Duration::from_secs(2));
+        assert_eq!(poll_backoff(2), POLL_INTERVAL_MAX);
+        assert_eq!(poll_backoff(50), POLL_INTERVAL_MAX);
+    }
 
     #[test]
     fn session_message_stream_cursor_starts_after_latest_event() {

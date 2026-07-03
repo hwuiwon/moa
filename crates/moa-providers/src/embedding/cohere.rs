@@ -1,20 +1,27 @@
 //! Cohere embedding provider client.
 
 use async_trait::async_trait;
+use futures_util::future::try_join_all;
 use moa_core::traits::EmbeddingProvider;
 use moa_core::{MoaConfig, MoaError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_EMBEDDING_CONCURRENCY};
 use crate::core::http::{
-    build_http_client, post_json, validate_embedding_count, validate_embedding_dimension,
+    build_json_http_client, post_json, validate_embedding_count, validate_embedding_dimension,
 };
+use crate::core::pacer::{PacerConfig, RatePacer};
 
 const COHERE_EMBEDDINGS_URL: &str = "https://api.cohere.com/v2/embed";
 pub(super) const COHERE_DEFAULT_MODEL: &str = "embed-v4.0";
 const COHERE_DEFAULT_INPUT_TYPE: &str = "search_document";
 const COHERE_FLOAT_EMBEDDING_TYPE: &str = "float";
 const COHERE_MAX_TEXTS: usize = 96;
+/// Maximum embedding chunks Cohere requests are allowed to have in flight at once.
+const COHERE_EMBED_CONCURRENCY: usize = 4;
+/// Documented Cohere Embed (text) limit: 2,000 inputs/min (trial and production).
+const COHERE_EMBED_INPUTS_PER_MIN: u32 = 2_000;
 const COHERE_DEFAULT_DIMENSIONS: usize = 1_536;
 const COHERE_GRAPH_MEMORY_DIMENSIONS: usize = 1_024;
 
@@ -27,18 +34,22 @@ pub struct CohereEmbedding {
     embeddings_url: String,
     input_type: String,
     dimensions: usize,
+    pacer: RatePacer,
+    limiter: ConcurrencyLimiter,
 }
 
 impl CohereEmbedding {
     /// Creates a Cohere embedding client from an API key and model id.
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Result<Self> {
         Ok(Self {
-            client: build_http_client()?,
+            client: build_json_http_client()?,
             api_key: api_key.into(),
             model: model.into(),
             embeddings_url: COHERE_EMBEDDINGS_URL.to_string(),
             input_type: COHERE_DEFAULT_INPUT_TYPE.to_string(),
             dimensions: COHERE_DEFAULT_DIMENSIONS,
+            pacer: RatePacer::new(PacerConfig::inputs_per_min(COHERE_EMBED_INPUTS_PER_MIN)),
+            limiter: ConcurrencyLimiter::new(DEFAULT_EMBEDDING_CONCURRENCY),
         })
     }
 
@@ -58,6 +69,20 @@ impl CohereEmbedding {
         self
     }
 
+    /// Overrides the request/input pacing, e.g. to apply trial-tier limits.
+    #[must_use]
+    pub fn with_rate_limits(mut self, config: PacerConfig) -> Self {
+        self.pacer = RatePacer::new(config);
+        self
+    }
+
+    /// Overrides the in-flight concurrency ceiling for embedding requests.
+    #[must_use]
+    pub fn with_max_concurrent_requests(mut self, max_in_flight: usize) -> Self {
+        self.limiter = ConcurrencyLimiter::new(max_in_flight);
+        self
+    }
+
     /// Overrides the fixed output dimensionality expected from Cohere.
     pub fn with_dimensions(mut self, dimensions: usize) -> Result<Self> {
         if dimensions == 0 {
@@ -70,6 +95,11 @@ impl CohereEmbedding {
     }
 
     async fn embed_chunk(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
+        // Take an in-flight slot before spending rate budget, then hold it across
+        // the round trip (see `ConcurrencyLimiter` for the ordering rationale).
+        let _permit = self.limiter.acquire().await;
+        // Cohere Embed is limited by inputs/min; pace on this chunk's input count.
+        self.pacer.acquire(1, inputs.len() as u32).await;
         let payload: CohereEmbeddingResponse = post_json(
             &self.client,
             &self.embeddings_url,
@@ -107,9 +137,18 @@ impl EmbeddingProvider for CohereEmbedding {
             return Ok(Vec::new());
         }
 
+        // Run chunk requests in windows of at most COHERE_EMBED_CONCURRENCY in
+        // flight. `try_join_all` resolves each window in request order and the
+        // windows run sequentially, so the flattened output stays in input order
+        // while still overlapping the HTTP round trips within a window.
+        let chunks: Vec<&[String]> = inputs.chunks(COHERE_MAX_TEXTS).collect();
         let mut embeddings = Vec::with_capacity(inputs.len());
-        for chunk in inputs.chunks(COHERE_MAX_TEXTS) {
-            embeddings.extend(self.embed_chunk(chunk).await?);
+        for window in chunks.chunks(COHERE_EMBED_CONCURRENCY) {
+            let window_results =
+                try_join_all(window.iter().map(|chunk| self.embed_chunk(chunk))).await?;
+            for chunk_embeddings in window_results {
+                embeddings.extend(chunk_embeddings);
+            }
         }
         Ok(embeddings)
     }
@@ -134,6 +173,20 @@ impl CohereV4Embedder {
     #[must_use]
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.inner = self.inner.with_embeddings_url(endpoint);
+        self
+    }
+
+    /// Overrides the request/input pacing, e.g. to apply trial-tier limits.
+    #[must_use]
+    pub fn with_rate_limits(mut self, config: PacerConfig) -> Self {
+        self.inner = self.inner.with_rate_limits(config);
+        self
+    }
+
+    /// Overrides the in-flight concurrency ceiling for embedding requests.
+    #[must_use]
+    pub fn with_max_concurrent_requests(mut self, max_in_flight: usize) -> Self {
+        self.inner = self.inner.with_max_concurrent_requests(max_in_flight);
         self
     }
 }

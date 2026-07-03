@@ -1,10 +1,13 @@
 //! Shared provider plumbing used by vendor adapters.
 
+pub(crate) mod concurrency;
 pub mod factory;
 pub(crate) mod http;
 pub(crate) mod instrumentation;
 pub mod models;
+pub(crate) mod pacer;
 pub(crate) mod provider_tools;
+pub(crate) mod rate_guard;
 pub(crate) mod retry;
 pub mod router;
 pub(crate) mod schema;

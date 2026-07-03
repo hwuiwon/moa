@@ -9,6 +9,7 @@ use super::cohere::COHERE_DEFAULT_RERANK_MODEL;
 use super::zeroentropy::ZEROENTROPY_DEFAULT_RERANK_MODEL;
 use super::zeroentropy::ZeroEntropyRerankLatency;
 use super::{CohereReranker, NOOP_RERANK_MODEL, NoopReranker, Reranker, ZeroEntropyReranker};
+use crate::core::pacer::PacerConfig;
 use crate::model_selection::{normalize_provider_name, split_explicit_provider_model};
 
 const COHERE_PROVIDER_NAME: &str = "cohere";
@@ -123,7 +124,16 @@ fn build_provider(provider: RerankerProviderKind, config: &MoaConfig) -> Result<
                 "MOA_COHERE_API_KEY",
                 &config.providers.cohere.api_key,
             )?;
-            Ok(Arc::new(CohereReranker::new(api_key)?))
+            let mut reranker = CohereReranker::new(api_key)?;
+            if let Some(pacer) = rerank_pacer_override(config.providers.cohere.max_requests_per_min)
+            {
+                reranker = reranker.with_rate_limits(pacer);
+            }
+            if let Some(max) = concurrency_override(config.providers.cohere.max_concurrent_requests)
+            {
+                reranker = reranker.with_max_concurrent_requests(max);
+            }
+            Ok(Arc::new(reranker))
         }
         RerankerProviderKind::ZeroEntropy => {
             let api_key = moa_core::config::required_config_secret(
@@ -138,11 +148,36 @@ fn build_provider(provider: RerankerProviderKind, config: &MoaConfig) -> Result<
                 .filter(|value| !value.trim().is_empty())
                 .map(ZeroEntropyRerankLatency::parse)
                 .transpose()?;
-            Ok(Arc::new(
-                ZeroEntropyReranker::new(api_key)?.with_latency(latency),
-            ))
+            let mut reranker = ZeroEntropyReranker::new(api_key)?.with_latency(latency);
+            if let Some(pacer) =
+                rerank_pacer_override(config.providers.zeroentropy.max_requests_per_min)
+            {
+                reranker = reranker.with_rate_limits(pacer);
+            }
+            if let Some(max) =
+                concurrency_override(config.providers.zeroentropy.max_concurrent_requests)
+            {
+                reranker = reranker.with_max_concurrent_requests(max);
+            }
+            Ok(Arc::new(reranker))
         }
     }
+}
+
+/// Maps a configured `max_requests_per_min` override to a rerank pacer config.
+///
+/// Rerank is limited by requests/min, so an override replaces the provider's
+/// default request-rate pacing; `None` leaves the provider default in place.
+fn rerank_pacer_override(max_requests_per_min: Option<u32>) -> Option<PacerConfig> {
+    max_requests_per_min.map(PacerConfig::requests_per_min)
+}
+
+/// Maps a configured `max_concurrent_requests` override to an in-flight ceiling.
+///
+/// `None` leaves the provider's default rerank concurrency window in place; a
+/// configured value overrides it (0 is treated as unbounded by the limiter).
+fn concurrency_override(max_concurrent_requests: Option<u32>) -> Option<usize> {
+    max_concurrent_requests.map(|max| max as usize)
 }
 
 fn ensure_no_zeroentropy_latency(config: &MoaConfig, provider: RerankerProviderKind) -> Result<()> {
@@ -170,6 +205,26 @@ mod tests {
         build_reranker_from_config, resolve_reranker_model,
     };
     use crate::model_selection::normalize_provider_name;
+
+    #[test]
+    fn rerank_pacer_override_maps_configured_requests_limit() {
+        // Pins: a configured max_requests_per_min becomes a requests/min pacer
+        // override (e.g. lowering Cohere rerank to a trial key's 10/min); an unset
+        // value leaves the provider default in place.
+        assert_eq!(super::rerank_pacer_override(None), None);
+        assert_eq!(
+            super::rerank_pacer_override(Some(10)),
+            Some(crate::core::pacer::PacerConfig::requests_per_min(10))
+        );
+    }
+
+    #[test]
+    fn concurrency_override_maps_configured_in_flight_ceiling() {
+        // Pins: a configured max_concurrent_requests becomes the reranker's
+        // in-flight ceiling; an unset value leaves the provider default in place.
+        assert_eq!(super::concurrency_override(None), None);
+        assert_eq!(super::concurrency_override(Some(3)), Some(3));
+    }
 
     #[test]
     fn reranker_provider_kind_accepts_supported_provider_prefixes() {

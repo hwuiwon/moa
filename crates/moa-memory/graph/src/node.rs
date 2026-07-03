@@ -320,6 +320,92 @@ where
         .map_err(GraphError::from)
 }
 
+/// Looks up graph seed nodes for several names in one round trip.
+///
+/// Returns one result vector per input name, in the same order as `names`. Each
+/// inner vector is the same ranked, `limit`-bounded seed set that
+/// [`lookup_seed_by_name`] returns for that name (names with no matches yield an
+/// empty vector rather than being dropped). The per-name full-text match,
+/// ranking, and limit are evaluated in a single `CROSS JOIN LATERAL` so callers
+/// can replace an N+1 loop of [`lookup_seed_by_name`] calls with one query.
+///
+/// The ranking mirrors [`lookup_seed_by_name`]; the parity test
+/// `lookup_seeds_batch_matches_single_name_lookups` pins the two in sync.
+pub async fn lookup_seeds_by_names<'e, E>(
+    executor: E,
+    names: &[&str],
+    limit: i64,
+    as_of: Option<DateTime<Utc>>,
+) -> Result<Vec<Vec<NodeIndexRow>>>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    if names.is_empty() || limit <= 0 {
+        return Ok(names.iter().map(|_| Vec::new()).collect());
+    }
+
+    let owned_names: Vec<String> = names.iter().map(|name| name.to_string()).collect();
+    let mut builder =
+        QueryBuilder::<Postgres>::new("SELECT queries.ord AS ord, seeds.*\n        FROM unnest(");
+    builder.push_bind(owned_names);
+    builder.push(
+        r#"::text[]) WITH ORDINALITY AS queries(term, ord)
+        CROSS JOIN LATERAL (
+            SELECT "#,
+    );
+    builder.push(NODE_INDEX_COLUMNS);
+    builder.push(
+        r#"
+            FROM moa.node_index
+            WHERE "#,
+    );
+    crate::push_validity_filter(&mut builder, None, as_of);
+    builder.push(
+        r#"
+              AND name_tsv @@ plainto_tsquery('simple', queries.term)
+            ORDER BY (LOWER(name) = LOWER(queries.term)) DESC,
+                     ts_rank(name_tsv, plainto_tsquery('simple', queries.term)) DESC,
+                     (
+                       0.55 * (1.0 / (1.0 + GREATEST(EXTRACT(EPOCH FROM (now() - valid_from)) / 86400.0, 0.0))) +
+                       0.35 * LEAST(GREATEST(COALESCE(confidence, 0.0), 0.0), 1.0) +
+                       0.10 * (LN(LEAST(reference_count, 100)::DOUBLE PRECISION + 1.0) / LN(101.0))
+                     ) DESC,
+                     uid ASC
+            LIMIT "#,
+    );
+    builder.push_bind(limit);
+    builder.push(
+        r#"
+        ) AS seeds
+        ORDER BY queries.ord
+        "#,
+    );
+
+    let rows = builder
+        .build()
+        .fetch_all(executor)
+        .await
+        .map_err(GraphError::from)?;
+
+    let mut results: Vec<Vec<NodeIndexRow>> = names.iter().map(|_| Vec::new()).collect();
+    for row in &rows {
+        let ord: i64 = row.try_get("ord")?;
+        let index = usize::try_from(ord - 1).map_err(|error| {
+            GraphError::GraphQuery(format!(
+                "seed lookup returned invalid ordinality `{ord}`: {error}"
+            ))
+        })?;
+        let Some(bucket) = results.get_mut(index) else {
+            return Err(GraphError::GraphQuery(format!(
+                "seed lookup returned out-of-range ordinality `{ord}` for {} names",
+                names.len()
+            )));
+        };
+        bucket.push(NodeIndexRow::from_row(row).map_err(GraphError::from)?);
+    }
+    Ok(results)
+}
+
 /// Updates `last_accessed_at` for projected graph node rows.
 pub async fn bump_last_accessed(conn: &mut PgConnection, uids: &[Uuid]) -> Result<()> {
     if uids.is_empty() {

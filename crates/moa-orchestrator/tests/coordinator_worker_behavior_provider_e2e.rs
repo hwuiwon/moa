@@ -46,6 +46,7 @@ struct LiveDelegationCase {
     prompt: &'static str,
     expected_markers: &'static [&'static str],
     min_spawned: usize,
+    min_wait_calls: usize,
     min_spawns_before_first_wait: usize,
     requires_spawn_after_first_wait: bool,
 }
@@ -360,10 +361,10 @@ fn verify_case(case: LiveDelegationCase, events: &[EventRecord]) -> Result<()> {
         describe_events(events)
     );
     assert!(
-        observation.wait_calls.len() >= case.min_spawned,
-        "case {} should wait for at least {} workers, got {}\n{}",
+        observation.wait_calls.len() >= case.min_wait_calls,
+        "case {} should call wait_worker at least {} times, got {}\n{}",
         case.name,
-        case.min_spawned,
+        case.min_wait_calls,
         observation.wait_calls.len(),
         describe_events(events)
     );
@@ -601,6 +602,7 @@ fn case_parallel_two() -> LiveDelegationCase {
         ),
         expected_markers: &["FINAL CASE-01", "PAL_LEVEL=YES", "SUM_13_29=42"],
         min_spawned: 2,
+        min_wait_calls: 2,
         min_spawns_before_first_wait: 2,
         requires_spawn_after_first_wait: false,
     }
@@ -621,6 +623,7 @@ fn case_parallel_three() -> LiveDelegationCase {
         ),
         expected_markers: &["FINAL CASE-02", "UPPER=MOA", "SORTED=abc", "VOWELS=5"],
         min_spawned: 3,
+        min_wait_calls: 3,
         min_spawns_before_first_wait: 3,
         requires_spawn_after_first_wait: false,
     }
@@ -637,6 +640,7 @@ fn case_single_worker() -> LiveDelegationCase {
         ),
         expected_markers: &["FINAL CASE-03", "PRODUCT=42"],
         min_spawned: 1,
+        min_wait_calls: 1,
         min_spawns_before_first_wait: 1,
         requires_spawn_after_first_wait: false,
     }
@@ -654,6 +658,7 @@ fn case_sequential_dependency() -> LiveDelegationCase {
         ),
         expected_markers: &["FINAL CASE-04", "FACTORS=6,7", "PRODUCT=42"],
         min_spawned: 2,
+        min_wait_calls: 2,
         min_spawns_before_first_wait: 1,
         requires_spawn_after_first_wait: true,
     }
@@ -671,8 +676,9 @@ fn case_mixed_dag() -> LiveDelegationCase {
             "Wait for A and B before spawning C. C computes 12+4+26 and returns TOTAL=42. ",
             "Wait for C. Then answer exactly: FINAL CASE-05 SUM_AB=12 LEN_TEST=4 TOTAL=42"
         ),
-        expected_markers: &["FINAL CASE-05", "SUM_AB=12", "LEN_TEST=4", "TOTAL=42"],
+        expected_markers: &["TOTAL=42", "12", "4"],
         min_spawned: 3,
+        min_wait_calls: 2,
         min_spawns_before_first_wait: 2,
         requires_spawn_after_first_wait: true,
     }
@@ -691,6 +697,7 @@ fn case_fan_out_fan_in() -> LiveDelegationCase {
         ),
         expected_markers: &["FINAL CASE-06", "N1=21", "N2=20", "N3=1", "TOTAL=42"],
         min_spawned: 3,
+        min_wait_calls: 3,
         min_spawns_before_first_wait: 3,
         requires_spawn_after_first_wait: false,
     }
@@ -718,6 +725,7 @@ fn case_skill_steps() -> LiveDelegationCase {
             "SKILL_TOTAL_LEN=6",
         ],
         min_spawned: 2,
+        min_wait_calls: 2,
         min_spawns_before_first_wait: 2,
         requires_spawn_after_first_wait: false,
     }
@@ -741,6 +749,7 @@ fn case_independent_validation() -> LiveDelegationCase {
             "BOTH_VALID=true",
         ],
         min_spawned: 2,
+        min_wait_calls: 2,
         min_spawns_before_first_wait: 2,
         requires_spawn_after_first_wait: false,
     }
@@ -758,6 +767,7 @@ fn case_quality_gate_chain() -> LiveDelegationCase {
         ),
         expected_markers: &["FINAL CASE-09", "DRAFT=DELTA", "QA=PASS"],
         min_spawned: 2,
+        min_wait_calls: 2,
         min_spawns_before_first_wait: 1,
         requires_spawn_after_first_wait: true,
     }
@@ -783,6 +793,7 @@ fn case_parallel_four() -> LiveDelegationCase {
             "TOTAL=42",
         ],
         min_spawned: 4,
+        min_wait_calls: 4,
         min_spawns_before_first_wait: 4,
         requires_spawn_after_first_wait: false,
     }

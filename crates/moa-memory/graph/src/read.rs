@@ -56,6 +56,26 @@ impl GraphStore for PostgresGraphStore {
         fetch_node(&self.pool, uid).await
     }
 
+    async fn bulk_get_nodes(&self, uids: &[Uuid]) -> Result<Vec<NodeIndexRow>, GraphError> {
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(mut conn) = self.begin().await? {
+            let rows = fetch_nodes(conn.as_mut(), uids).await?;
+            conn.commit().await?;
+            return Ok(rows);
+        }
+
+        fetch_nodes(&self.pool, uids).await
+    }
+
+    async fn bulk_create_nodes(
+        &self,
+        intents: Vec<NodeWriteIntent>,
+    ) -> Result<Vec<Uuid>, GraphError> {
+        crate::write::bulk_create_nodes(self, intents).await
+    }
+
     async fn neighbors(
         &self,
         seed: Uuid,
@@ -166,6 +186,25 @@ impl GraphStore for PostgresGraphStore {
 
         crate::node::lookup_seed_by_name(&self.pool, name, limit, as_of).await
     }
+
+    async fn lookup_seeds_batch(
+        &self,
+        names: &[&str],
+        limit: i64,
+        as_of: Option<DateTime<Utc>>,
+    ) -> Result<Vec<Vec<NodeIndexRow>>, GraphError> {
+        if names.is_empty() || limit <= 0 {
+            return Ok(names.iter().map(|_| Vec::new()).collect());
+        }
+        if let Some(mut conn) = self.begin().await? {
+            let rows =
+                crate::node::lookup_seeds_by_names(conn.as_mut(), names, limit, as_of).await?;
+            conn.commit().await?;
+            return Ok(rows);
+        }
+
+        crate::node::lookup_seeds_by_names(&self.pool, names, limit, as_of).await
+    }
 }
 
 fn unique_uids(uids: &[Uuid]) -> Vec<Uuid> {
@@ -275,31 +314,48 @@ fn build_expansion_query<'a>(
     as_of: Option<DateTime<Utc>>,
     limit: i64,
 ) -> QueryBuilder<'a, Postgres> {
+    // Seed-anchored traversal: rather than materializing every visible node in
+    // the tenant into a CTE and joining against it (which forced a full
+    // `node_index` scan before the `LIMIT`), the base case is a primary-key
+    // lookup on the seed uids and each recursive hop joins `edge_index` and
+    // `node_index` directly with the validity filter inlined into the JOIN. This
+    // lets Postgres drive the walk from the seeds outward using the edge and uid
+    // indexes. The reachable set, validity semantics, and result ordering are
+    // unchanged from the previous `visible_nodes` formulation.
+    //
+    // Each hop follows edges in both directions. Instead of a single
+    // `edge_row.start_uid = walk.uid OR edge_row.end_uid = walk.uid` join — which
+    // Postgres cannot service with either single-column edge index — the step is
+    // a `LATERAL` of two index-friendly branches: one keyed on `start_uid` (uses
+    // `edge_index(tenant_id, start_uid)`), one on `end_uid` (uses
+    // `edge_index(tenant_id, end_uid)`). The two forms enumerate the same
+    // (neighbor, edge label) multiset for every walk row: a non-self-loop edge
+    // matches exactly one branch (the endpoint equal to `walk.uid`), and a
+    // self-loop matches both branches but is dropped by the path-cycle guard just
+    // as it was under the `OR` form. The reachable set and `edges` arrays are
+    // therefore identical.
     let mut builder =
         QueryBuilder::<Postgres>::new("WITH RECURSIVE seed_uids(uid) AS (SELECT unnest(");
     builder.push_bind(seeds);
     builder.push(
         r#"::uuid[])),
-        visible_nodes AS (
-            SELECT node_row.uid, node_row.label, node_row.valid_from
-            FROM moa.node_index AS node_row
-            WHERE "#,
-    );
-    crate::push_validity_filter(&mut builder, Some("node_row"), as_of);
-    builder.push(
-        r#"
-        ),
         walk(seed, uid, label, seed_valid_from, valid_from, hop, edges, path_uids) AS (
             SELECT seed_uids.uid,
-                   visible_nodes.uid,
-                   visible_nodes.label,
-                   visible_nodes.valid_from,
-                   visible_nodes.valid_from,
+                   seed_node.uid,
+                   seed_node.label,
+                   seed_node.valid_from,
+                   seed_node.valid_from,
                    0::int,
                    ARRAY[]::text[],
-                   ARRAY[visible_nodes.uid]
+                   ARRAY[seed_node.uid]
             FROM seed_uids
-            JOIN visible_nodes ON visible_nodes.uid = seed_uids.uid
+            JOIN moa.node_index AS seed_node
+              ON seed_node.uid = seed_uids.uid
+             AND "#,
+    );
+    crate::push_validity_filter(&mut builder, Some("seed_node"), as_of);
+    builder.push(
+        r#"
             UNION ALL
             SELECT walk.seed,
                    next_node.uid,
@@ -307,19 +363,24 @@ fn build_expansion_query<'a>(
                    walk.seed_valid_from,
                    next_node.valid_from,
                    walk.hop + 1,
-                   array_append(walk.edges, edge_row.label),
+                   array_append(walk.edges, step.label),
                    array_append(walk.path_uids, next_node.uid)
             FROM walk
-            JOIN moa.edge_index AS edge_row
-              ON edge_row.start_uid = walk.uid
-              OR edge_row.end_uid = walk.uid
-            JOIN visible_nodes AS next_node
-              ON next_node.uid = CASE
-                  WHEN edge_row.start_uid = walk.uid THEN edge_row.end_uid
-                  ELSE edge_row.start_uid
-              END
-            WHERE walk.hop < "#,
+            JOIN LATERAL (
+                SELECT edge_row.end_uid AS neighbor_uid, edge_row.label AS label
+                FROM moa.edge_index AS edge_row
+                WHERE edge_row.start_uid = walk.uid
+                UNION ALL
+                SELECT edge_row.start_uid AS neighbor_uid, edge_row.label AS label
+                FROM moa.edge_index AS edge_row
+                WHERE edge_row.end_uid = walk.uid
+            ) AS step ON true
+            JOIN moa.node_index AS next_node
+              ON next_node.uid = step.neighbor_uid
+             AND "#,
     );
+    crate::push_validity_filter(&mut builder, Some("next_node"), as_of);
+    builder.push(" WHERE walk.hop < ");
     builder.push_bind(i32::from(max_hops));
     builder.push(
         r#"
@@ -379,6 +440,19 @@ where
     ))
     .bind(uid)
     .fetch_optional(executor)
+    .await
+    .map_err(GraphError::from)
+}
+
+async fn fetch_nodes<'e, E>(executor: E, uids: &[Uuid]) -> Result<Vec<NodeIndexRow>, GraphError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    sqlx::query_as::<_, NodeIndexRow>(&format!(
+        "SELECT {NODE_INDEX_COLUMNS} FROM moa.node_index WHERE uid = ANY($1)"
+    ))
+    .bind(uids)
+    .fetch_all(executor)
     .await
     .map_err(GraphError::from)
 }

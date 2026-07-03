@@ -5,7 +5,9 @@ use moa_core::{MoaError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::core::http::{build_http_client, post_json};
+use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_RERANK_CONCURRENCY};
+use crate::core::http::{build_json_http_client, post_json};
+use crate::core::pacer::{PacerConfig, RatePacer};
 
 use super::{RerankHit, Reranker};
 
@@ -48,16 +50,21 @@ pub struct ZeroEntropyReranker {
     api_key: String,
     endpoint: String,
     latency: Option<ZeroEntropyRerankLatency>,
+    pacer: RatePacer,
+    limiter: ConcurrencyLimiter,
 }
 
 impl ZeroEntropyReranker {
     /// Creates a ZeroEntropy reranker using the production endpoint.
     pub fn new(api_key: impl Into<String>) -> Result<Self> {
         Ok(Self {
-            client: build_http_client()?,
+            client: build_json_http_client()?,
             api_key: api_key.into(),
             endpoint: ZEROENTROPY_RERANK_URL.to_string(),
             latency: None,
+            // Pacing off by default; ZeroEntropy limits are tier-specific.
+            pacer: RatePacer::new(PacerConfig::disabled()),
+            limiter: ConcurrencyLimiter::new(DEFAULT_RERANK_CONCURRENCY),
         })
     }
 
@@ -65,6 +72,20 @@ impl ZeroEntropyReranker {
     #[must_use]
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.endpoint = endpoint.into();
+        self
+    }
+
+    /// Enables request/input pacing, off by default for tier-specific limits.
+    #[must_use]
+    pub fn with_rate_limits(mut self, config: PacerConfig) -> Self {
+        self.pacer = RatePacer::new(config);
+        self
+    }
+
+    /// Overrides the in-flight concurrency ceiling for rerank requests.
+    #[must_use]
+    pub fn with_max_concurrent_requests(mut self, max_in_flight: usize) -> Self {
+        self.limiter = ConcurrencyLimiter::new(max_in_flight);
         self
     }
 
@@ -89,6 +110,9 @@ impl Reranker for ZeroEntropyReranker {
             return Ok(Vec::new());
         }
 
+        // In-flight slot first, then rate budget (see `ConcurrencyLimiter`).
+        let _permit = self.limiter.acquire().await;
+        self.pacer.acquire(1, 0).await;
         let body: ZeroEntropyRerankResponse = post_json(
             &self.client,
             &self.endpoint,

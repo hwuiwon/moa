@@ -1,25 +1,38 @@
 //! Stage 7: graph memory retrieval and prompt injection.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use futures_util::future::try_join_all;
 #[cfg(test)]
 use moa_core::AgentKnowledgePolicy;
 use moa_core::RlsContext;
 use moa_core::{
     AgentKnowledgeScopeMode, ContextMessage, ContextProcessor, ExcludedItem, LineageHandle,
-    MoaError, NullLineageHandle, ProcessorOutput, QueryRewriteResult, Result, WorkingContext,
-    traits::EmbeddingProvider,
+    MoaError, NullLineageHandle, ProcessorOutput, QueryRewriteResult, Result, StageApply,
+    WorkingContext, traits::EmbeddingProvider,
 };
 use moa_memory_graph::{GraphStore, PiiClass, PostgresGraphStore};
-use moa_memory_types::{MemoryScope, ScopeTier};
+use moa_memory_types::MemoryScope;
 use moa_memory_vector::VectorStoreFactory;
 use sqlx::PgPool;
 
-use crate::retrieval::PlannedRetriever;
+use crate::planning::PlannedQuery;
+use crate::retrieval::{PlannedRetriever, RetrievalHit, RetrievalRequest};
+
+/// Maximum number of scope-keyed retrieval runtimes retained process-wide.
+const SCOPED_RUNTIME_CACHE_CAPACITY: u64 = 512;
+/// Idle lifetime for a cached scope retrieval runtime before it is rebuilt.
+const SCOPED_RUNTIME_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// Builds the capacity- and time-bounded cache of per-scope retrieval runtimes.
+fn build_scoped_runtime_cache() -> moka::future::Cache<MemoryScope, Arc<ScopedRetrievalRuntime>> {
+    moka::future::Cache::builder()
+        .max_capacity(SCOPED_RUNTIME_CACHE_CAPACITY)
+        .time_to_live(SCOPED_RUNTIME_CACHE_TTL)
+        .build()
+}
 
 mod lineage;
 mod rendering;
@@ -37,14 +50,12 @@ const GRAPH_MEMORY_RESULTS: usize = 4;
 const MIN_PAGE_EXCERPT_TOKENS: usize = 96;
 pub(crate) const MEMORY_REMINDER_PREFIX: &str = "<memory-reminder>";
 
-struct ScopeRetrievalInput<'a> {
-    ctx: &'a WorkingContext,
-    query: &'a str,
-    query_embedding: &'a [f32],
+/// One planned scope together with the outcome of its pre-embedding cache probe.
+struct ScopeProbe<'a> {
     scope_plan: &'a RetrievalScopePlan,
-    emit_storage_lineage: bool,
-    result_limit: usize,
-    max_pii_class: PiiClass,
+    planned: PlannedQuery,
+    runtime: Arc<ScopedRetrievalRuntime>,
+    cached_hits: Option<Vec<RetrievalHit>>,
 }
 
 /// Injects graph-memory retrieval hits into the active turn context.
@@ -56,7 +67,7 @@ pub struct GraphMemoryRetriever {
     lineage: Arc<dyn LineageHandle>,
     result_limit: usize,
     planner: crate::planning::QueryPlanner,
-    scoped_runtimes: Mutex<HashMap<MemoryScope, Arc<ScopedRetrievalRuntime>>>,
+    scoped_runtimes: moka::future::Cache<MemoryScope, Arc<ScopedRetrievalRuntime>>,
     runtime_factory: Arc<dyn ScopedRetrievalRuntimeFactory>,
 }
 
@@ -84,8 +95,16 @@ impl ContextProcessor for SharedGraphMemoryRetriever {
         self.inner.stage()
     }
 
+    fn parallelizable(&self) -> bool {
+        self.inner.parallelizable()
+    }
+
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
         self.inner.process(ctx).await
+    }
+
+    async fn fetch(&self, ctx: &WorkingContext) -> Result<Option<StageApply>> {
+        self.inner.fetch(ctx).await
     }
 }
 
@@ -188,7 +207,7 @@ impl GraphMemoryRetriever {
             lineage: Arc::new(NullLineageHandle),
             result_limit: GRAPH_MEMORY_RESULTS,
             planner: crate::planning::QueryPlanner::new(),
-            scoped_runtimes: Mutex::new(HashMap::new()),
+            scoped_runtimes: build_scoped_runtime_cache(),
             runtime_factory: Arc::new(PostgresScopedRetrievalRuntimeFactory),
         }
     }
@@ -221,7 +240,7 @@ impl GraphMemoryRetriever {
         runtime_factory: Arc<dyn ScopedRetrievalRuntimeFactory>,
     ) -> Self {
         self.runtime_factory = runtime_factory;
-        self.scoped_runtimes = Mutex::new(HashMap::new());
+        self.scoped_runtimes = build_scoped_runtime_cache();
         self
     }
 
@@ -235,7 +254,7 @@ impl GraphMemoryRetriever {
         &self,
         ctx: &WorkingContext,
         query: String,
-    ) -> Result<Vec<crate::retrieval::RetrievalHit>> {
+    ) -> Result<Vec<RetrievalHit>> {
         let policy = agent_knowledge_policy(ctx)?;
         let retrieval_plan = default_retrieval_plan(ctx, &policy);
         if retrieval_plan.is_empty() {
@@ -243,55 +262,148 @@ impl GraphMemoryRetriever {
         }
         let result_limit = effective_result_limit(&policy, self.result_limit);
         let max_pii_class = effective_max_pii_class(&policy)?;
-        let query_embedding = if let Some(embedder) = self.embedder.as_deref() {
-            embed_query(embedder, &query).await?
+        let query_str = query.as_str();
+
+        // Plan every scope and probe its read-time cache in parallel, before
+        // paying for a query embedding. The embedding is not part of the cache
+        // key, so a probe can hit without one.
+        let probes = try_join_all(retrieval_plan.iter().map(|scope_plan| {
+            self.probe_scope(ctx, query_str, scope_plan, max_pii_class, result_limit)
+        }))
+        .await?;
+
+        // Embed once, and only when at least one scope missed the cache.
+        let needs_backend = probes.iter().any(|probe| probe.cached_hits.is_none());
+        let query_embedding = if needs_backend {
+            match self.embedder.as_deref() {
+                Some(embedder) => embed_query(embedder, query_str).await?,
+                None => Vec::new(),
+            }
         } else {
             Vec::new()
         };
+
+        // Resolve the missed scopes against the backend in parallel; cached
+        // scopes reuse their probe result.
+        let query_embedding = query_embedding.as_slice();
+        let scope_hits = try_join_all(probes.iter().map(|probe| async move {
+            match &probe.cached_hits {
+                Some(hits) => Ok::<_, MoaError>(hits.clone()),
+                None => {
+                    self.retrieve_scope_backend(
+                        ctx,
+                        query_str,
+                        probe,
+                        query_embedding,
+                        max_pii_class,
+                        result_limit,
+                    )
+                    .await
+                }
+            }
+        }))
+        .await?;
+
+        // Merge in scope order, admitting each scope's hits under its own plan.
         let mut hits = Vec::new();
-        for scope_plan in &retrieval_plan {
-            let scope_hits = self
-                .retrieve_hits_for_scope(ScopeRetrievalInput {
-                    ctx,
-                    query: &query,
-                    query_embedding: &query_embedding,
-                    scope_plan,
-                    emit_storage_lineage: true,
-                    result_limit,
-                    max_pii_class,
-                })
-                .await?;
+        for (probe, results) in probes.iter().zip(scope_hits) {
             hits.extend(
-                scope_hits
+                results
                     .into_iter()
-                    .filter_map(|hit| admit_retrieval_hit(hit, scope_plan, &policy)),
+                    .filter_map(|hit| admit_retrieval_hit(hit, probe.scope_plan, &policy)),
             );
         }
         Ok(dedupe_and_rank_hits(hits, result_limit))
     }
 
-    async fn retrieve_hits_for_scope(
+    /// Plans one scope and probes its read-time cache without an embedding.
+    async fn probe_scope<'a>(
         &self,
-        input: ScopeRetrievalInput<'_>,
-    ) -> Result<Vec<crate::retrieval::RetrievalHit>> {
-        let ScopeRetrievalInput {
+        ctx: &WorkingContext,
+        query: &str,
+        scope_plan: &'a RetrievalScopePlan,
+        max_pii_class: PiiClass,
+        result_limit: usize,
+    ) -> Result<ScopeProbe<'a>> {
+        let runtime = self.runtime_for_scope(&scope_plan.scope).await?;
+        let planning =
+            crate::planning::PlanningCtx::new(scope_plan.scope.clone(), runtime.graph.clone());
+        let planned = self.planner.plan(query, &planning).await.map_err(|error| {
+            MoaError::StorageError(format!("graph memory planning failed: {error}"))
+        })?;
+        // The probe request omits the embedding and lineage — neither takes part
+        // in the cache key, so this fingerprints identically to the backend run.
+        let probe_request = self.build_scope_request(
             ctx,
             query,
-            query_embedding,
+            Vec::new(),
             scope_plan,
-            emit_storage_lineage,
-            result_limit,
+            &planned,
             max_pii_class,
-        } = input;
-        let scope = &scope_plan.scope;
-        let runtime = self.runtime_for_scope(scope).await?;
-        let planning = crate::planning::PlanningCtx::new(scope.clone(), runtime.graph.clone());
-        let planned = self.planner.plan(query, &planning).await.map_err(|error| {
-            moa_core::MoaError::StorageError(format!("graph memory planning failed: {error}"))
-        })?;
+            result_limit,
+            false,
+        );
+        let cached_hits = runtime
+            .hybrid
+            .retrieve_cached(&planned, &probe_request)
+            .await
+            .map_err(|error| {
+                MoaError::StorageError(format!("graph memory retrieval failed: {error}"))
+            })?;
+        Ok(ScopeProbe {
+            scope_plan,
+            planned,
+            runtime,
+            cached_hits,
+        })
+    }
+
+    /// Runs the backend retrieval for a scope that missed the read-time cache.
+    async fn retrieve_scope_backend(
+        &self,
+        ctx: &WorkingContext,
+        query: &str,
+        probe: &ScopeProbe<'_>,
+        query_embedding: &[f32],
+        max_pii_class: PiiClass,
+        result_limit: usize,
+    ) -> Result<Vec<RetrievalHit>> {
+        let request = self.build_scope_request(
+            ctx,
+            query,
+            query_embedding.to_vec(),
+            probe.scope_plan,
+            &probe.planned,
+            max_pii_class,
+            result_limit,
+            true,
+        );
+        probe
+            .runtime
+            .hybrid
+            .retrieve(&probe.planned, request)
+            .await
+            .map_err(|error| {
+                MoaError::StorageError(format!("graph memory retrieval failed: {error}"))
+            })
+    }
+
+    /// Builds a scope retrieval request from a planned query and scope plan.
+    #[allow(clippy::too_many_arguments)]
+    fn build_scope_request(
+        &self,
+        ctx: &WorkingContext,
+        query: &str,
+        query_embedding: Vec<f32>,
+        scope_plan: &RetrievalScopePlan,
+        planned: &PlannedQuery,
+        max_pii_class: PiiClass,
+        result_limit: usize,
+        emit_storage_lineage: bool,
+    ) -> RetrievalRequest {
         let mut request = planned.clone().into_retrieval_request(
             query.to_string(),
-            query_embedding.to_vec(),
+            query_embedding,
             max_pii_class,
             result_limit,
             true,
@@ -302,39 +414,22 @@ impl GraphMemoryRetriever {
         if emit_storage_lineage {
             request.lineage = Some(lineage_context_from_context(ctx));
         }
-        runtime
-            .hybrid
-            .retrieve(&planned, request)
-            .await
-            .map_err(|error| {
-                moa_core::MoaError::StorageError(format!("graph memory retrieval failed: {error}"))
-            })
+        request
     }
 
+    /// Returns a per-scope retrieval runtime, reusing one from the bounded cache
+    /// when present. All scope tiers (tenant and contact) share the same
+    /// capacity- and time-bounded cache, so repeated turns for the same scope
+    /// avoid rebuilding backends while total retained runtimes stay bounded.
     async fn runtime_for_scope(&self, scope: &MemoryScope) -> Result<Arc<ScopedRetrievalRuntime>> {
-        if matches!(scope.tier(), ScopeTier::Contact) {
-            return Ok(Arc::new(self.build_runtime_for_scope(scope).await?));
-        }
-
-        {
-            let runtimes = self.scoped_runtimes.lock().map_err(|_| {
-                moa_core::MoaError::StorageError(
-                    "graph memory runtime cache lock poisoned".to_string(),
-                )
-            })?;
-            if let Some(runtime) = runtimes.get(scope) {
-                return Ok(runtime.clone());
-            }
+        if let Some(runtime) = self.scoped_runtimes.get(scope).await {
+            return Ok(runtime);
         }
 
         let runtime = Arc::new(self.build_runtime_for_scope(scope).await?);
-        let mut runtimes = self.scoped_runtimes.lock().map_err(|_| {
-            moa_core::MoaError::StorageError("graph memory runtime cache lock poisoned".to_string())
-        })?;
-        if let Some(existing) = runtimes.get(scope) {
-            return Ok(existing.clone());
-        }
-        runtimes.insert(scope.clone(), runtime.clone());
+        self.scoped_runtimes
+            .insert(scope.clone(), runtime.clone())
+            .await;
         Ok(runtime)
     }
 
@@ -355,19 +450,37 @@ impl ContextProcessor for GraphMemoryRetriever {
         7
     }
 
+    fn parallelizable(&self) -> bool {
+        true
+    }
+
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
-        if agent_knowledge_policy(ctx)?.mode == AgentKnowledgeScopeMode::Disabled {
-            return Ok(ProcessorOutput {
-                items_excluded: vec!["graph_memory".to_string()],
-                excluded_items: vec![ExcludedItem {
-                    item: "graph_memory".to_string(),
-                    reason: "disabled by pinned agent knowledge policy".to_string(),
-                }],
-                ..ProcessorOutput::default()
-            });
+        match self.fetch(ctx).await? {
+            Some(apply) => apply(ctx),
+            None => Ok(ProcessorOutput::default()),
         }
+    }
+
+    async fn fetch(&self, ctx: &WorkingContext) -> Result<Option<StageApply>> {
+        if agent_knowledge_policy(ctx)?.mode == AgentKnowledgeScopeMode::Disabled {
+            return Ok(Some(Box::new(|_ctx| {
+                Ok(ProcessorOutput {
+                    items_excluded: vec!["graph_memory".to_string()],
+                    excluded_items: vec![ExcludedItem {
+                        item: "graph_memory".to_string(),
+                        reason: "disabled by pinned agent knowledge policy".to_string(),
+                    }],
+                    ..ProcessorOutput::default()
+                })
+            })));
+        }
+        // Resolve the retrieval query and run all retrieval I/O against the
+        // immutable turn context. When query rewrite ran (the default), the
+        // query comes from its metadata, written before this concurrent group;
+        // otherwise it is the turn's latest user message as of this read, which
+        // precedes any skill manifest a peer stage appends during apply.
         let Some(query) = extract_search_query(ctx) else {
-            return Ok(ProcessorOutput::default());
+            return Ok(Some(Box::new(|_ctx| Ok(ProcessorOutput::default()))));
         };
         let retrieval_started = Instant::now();
         let hits = self.retrieve_hits(ctx, query.clone()).await?;
@@ -379,29 +492,33 @@ impl ContextProcessor for GraphMemoryRetriever {
             retrieval_started.elapsed(),
         );
         if hits.is_empty() {
-            return Ok(ProcessorOutput::default());
+            return Ok(Some(Box::new(|_ctx| Ok(ProcessorOutput::default()))));
         }
 
-        let tokens_before = ctx.token_count;
-        let memory_budget = (ctx.token_budget / MEMORY_BUDGET_DIVISOR).max(MIN_PAGE_EXCERPT_TOKENS);
-        let per_hit_budget = (memory_budget / hits.len().max(1)).max(MIN_PAGE_EXCERPT_TOKENS);
-        let rendered = render_memory_context(&hits, per_hit_budget);
+        let apply: StageApply = Box::new(move |ctx: &mut WorkingContext| {
+            let tokens_before = ctx.token_count;
+            let memory_budget =
+                (ctx.token_budget / MEMORY_BUDGET_DIVISOR).max(MIN_PAGE_EXCERPT_TOKENS);
+            let per_hit_budget = (memory_budget / hits.len().max(1)).max(MIN_PAGE_EXCERPT_TOKENS);
+            let rendered = render_memory_context(&hits, per_hit_budget);
 
-        let reminder = format!(
-            "{MEMORY_REMINDER_PREFIX}\n{}\n</memory-reminder>",
-            rendered.section
-        );
-        let insertion_index = trailing_user_insertion_index(&ctx.messages);
-        ctx.insert_message(
-            insertion_index,
-            ContextMessage::user(reminder).with_source_refs(rendered.source_refs),
-        );
+            let reminder = format!(
+                "{MEMORY_REMINDER_PREFIX}\n{}\n</memory-reminder>",
+                rendered.section
+            );
+            let insertion_index = trailing_user_insertion_index(&ctx.messages);
+            ctx.insert_message(
+                insertion_index,
+                ContextMessage::user(reminder).with_source_refs(rendered.source_refs),
+            );
 
-        Ok(ProcessorOutput {
-            tokens_added: ctx.token_count.saturating_sub(tokens_before),
-            items_included: rendered.items_included,
-            ..ProcessorOutput::default()
-        })
+            Ok(ProcessorOutput {
+                tokens_added: ctx.token_count.saturating_sub(tokens_before),
+                items_included: rendered.items_included,
+                ..ProcessorOutput::default()
+            })
+        });
+        Ok(Some(apply))
     }
 }
 
@@ -686,6 +803,123 @@ mod tests {
         }
     }
 
+    /// Retriever whose cache probe always hits, so no backend or embedding runs.
+    #[derive(Debug)]
+    struct CacheHitRetriever {
+        retrieve_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl crate::retrieval::PlannedRetriever for CacheHitRetriever {
+        async fn retrieve(
+            &self,
+            _planned: &crate::planning::PlannedQuery,
+            _req: crate::retrieval::RetrievalRequest,
+        ) -> crate::retrieval::Result<Vec<crate::retrieval::RetrievalHit>> {
+            self.retrieve_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+
+        async fn retrieve_cached(
+            &self,
+            _planned: &crate::planning::PlannedQuery,
+            _req: &crate::retrieval::RetrievalRequest,
+        ) -> crate::retrieval::Result<Option<Vec<crate::retrieval::RetrievalHit>>> {
+            Ok(Some(Vec::new()))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct CacheHitRuntimeFactory {
+        retriever: Arc<CacheHitRetriever>,
+    }
+
+    #[async_trait]
+    impl ScopedRetrievalRuntimeFactory for CacheHitRuntimeFactory {
+        async fn build_runtime(
+            &self,
+            _scope: &MemoryScope,
+            _config: &moa_core::MoaConfig,
+            _pool: &sqlx::PgPool,
+            _assume_app_role: bool,
+        ) -> moa_core::Result<ScopedRetrievalRuntime> {
+            let retriever: Arc<dyn crate::retrieval::PlannedRetriever> = self.retriever.clone();
+            Ok(ScopedRetrievalRuntime::new(
+                Arc::new(NoopGraphStore),
+                retriever,
+            ))
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountingEmbedder {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl moa_core::traits::EmbeddingProvider for CountingEmbedder {
+        fn model_id(&self) -> &str {
+            "counting-embedder"
+        }
+
+        fn dimensions(&self) -> usize {
+            4
+        }
+
+        async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(inputs.iter().map(|_| vec![0.0; 4]).collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn retrieval_skips_embedding_when_cache_probe_hits() {
+        // Pins: cache-before-embed ordering — when every scope's read-time cache
+        // probe hits, the stage must not call the embedding provider or the
+        // retrieval backend.
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/moa_test")
+            .expect("lazy test pool should not connect");
+        let embed_calls = Arc::new(AtomicUsize::new(0));
+        let retrieve_calls = Arc::new(AtomicUsize::new(0));
+        let retriever = GraphMemoryRetriever::new(
+            pool,
+            Some(Arc::new(CountingEmbedder {
+                calls: embed_calls.clone(),
+            })),
+        )
+        .with_scoped_runtime_factory(Arc::new(CacheHitRuntimeFactory {
+            retriever: Arc::new(CacheHitRetriever {
+                retrieve_calls: retrieve_calls.clone(),
+            }),
+        }));
+        let session = SessionMeta {
+            id: SessionId::new(),
+            tenant_id: TenantId::new(),
+            channel: Channel::Chat,
+            model: ModelId::new("claude-sonnet-4-6"),
+            ..SessionMeta::default()
+        };
+        let mut ctx = WorkingContext::new(&session, capabilities());
+        ctx.append_message(moa_core::ContextMessage::user("what is the cached answer"));
+
+        retriever
+            .process(&mut ctx)
+            .await
+            .expect("cache-hit retrieval should assemble context");
+
+        assert_eq!(
+            embed_calls.load(Ordering::SeqCst),
+            0,
+            "a cache-probe hit must not embed the query"
+        );
+        assert_eq!(
+            retrieve_calls.load(Ordering::SeqCst),
+            0,
+            "a cache-probe hit must not touch the retrieval backend"
+        );
+    }
+
     #[tokio::test]
     async fn shared_graph_memory_retriever_preserves_processor_identity() {
         // Pins: shared graph-memory runtime remains the stage-7 memory processor.
@@ -701,8 +935,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_scoped_runtime_is_not_cached_in_process_lifetime_map() {
-        // Pins: process-wide graph-memory retrievers must not retain one runtime per user.
+    async fn scoped_runtimes_are_reused_within_a_bounded_cache() {
+        // Pins: every scope tier (tenant and contact) reuses one runtime from a
+        // capacity-bounded process-wide cache, so repeated turns for the same
+        // scope never rebuild backends while total retained runtimes stay
+        // bounded rather than growing one-per-contact without limit.
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://localhost/moa_test")
             .expect("lazy test pool should not connect");
@@ -723,15 +960,14 @@ mod tests {
             .runtime_for_scope(&contact_scope)
             .await
             .expect("contact runtime should build");
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        retriever
+            .runtime_for_scope(&contact_scope)
+            .await
+            .expect("contact runtime should be reused");
         assert_eq!(
-            retriever
-                .scoped_runtimes
-                .lock()
-                .expect("runtime cache lock")
-                .len(),
-            0,
-            "contact scopes should not grow the process-lifetime runtime cache"
+            calls.load(Ordering::SeqCst),
+            1,
+            "contact scope should reuse its cached runtime across turns"
         );
 
         retriever
@@ -742,15 +978,17 @@ mod tests {
             .runtime_for_scope(&tenant_scope)
             .await
             .expect("tenant runtime should be reused");
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(
-            retriever
-                .scoped_runtimes
-                .lock()
-                .expect("runtime cache lock")
-                .len(),
-            1,
-            "tenant scopes should still reuse one cached runtime"
+            calls.load(Ordering::SeqCst),
+            2,
+            "tenant scope should reuse its cached runtime across turns"
+        );
+
+        retriever.scoped_runtimes.run_pending_tasks().await;
+        assert_eq!(
+            retriever.scoped_runtimes.entry_count(),
+            2,
+            "each distinct scope retains exactly one bounded cache entry"
         );
     }
 

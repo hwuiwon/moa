@@ -36,6 +36,9 @@ use crate::{
     repository::{DocumentVersionIngestionClaim, KnowledgeRepository},
 };
 
+/// Maximum objects fetched and tombstoned per source-selection prune page.
+const PRUNE_BATCH_SIZE: i64 = 500;
+
 /// Graph write report returned by the tenant-knowledge graph sink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GraphWriteReport {
@@ -97,17 +100,31 @@ where
         let mut report = GraphWriteReport::default();
         let mut key_to_uid = HashMap::new();
         let mut seen_node_uids = HashSet::new();
+        let mut unique_nodes = Vec::new();
         for node in &delta.nodes {
             key_to_uid.insert(node.key.clone(), node.uid);
-            if !seen_node_uids.insert(node.uid) {
-                continue;
+            if seen_node_uids.insert(node.uid) {
+                unique_nodes.push(node);
             }
-            if let Some(existing) = self
-                .graph
-                .get_node(node.uid)
-                .await
-                .map_err(map_graph_error)?
-            {
+        }
+
+        // Resolve which nodes already exist in one lookup instead of an
+        // N+1 `get_node` loop, then reactivate (hard-purge) any that were
+        // invalidated and create the rest with a single batched write. Active
+        // existing nodes are left untouched, matching the previous per-node
+        // create-or-skip behavior.
+        let unique_uids = unique_nodes.iter().map(|node| node.uid).collect::<Vec<_>>();
+        let existing_by_uid = self
+            .graph
+            .bulk_get_nodes(&unique_uids)
+            .await
+            .map_err(map_graph_error)?
+            .into_iter()
+            .map(|row| (row.uid, row))
+            .collect::<HashMap<_, _>>();
+        let mut create_intents = Vec::new();
+        for node in unique_nodes {
+            if let Some(existing) = existing_by_uid.get(&node.uid) {
                 if existing.valid_to.is_none() {
                     continue;
                 }
@@ -119,33 +136,35 @@ where
             let properties = compact_properties(node.properties.clone());
             let embedding = embeddings.get(&node.uid).cloned();
             let embedding_text = embedding.as_ref().and_then(|_| node.embedding_text.clone());
-            self.graph
-                .create_node(NodeWriteIntent {
-                    uid: node.uid,
-                    label: node_label(&node.label)?,
-                    storage_partition_id: Some(self.scope.tenant_id().0.to_string()),
-                    contact_id: None,
-                    scope: "tenant".to_string(),
-                    name: node_name(&node.label, &properties),
-                    properties,
-                    pii_class: PiiClass::None,
-                    confidence: Some(0.95),
-                    valid_from: Utc::now(),
-                    embedding,
-                    embedding_model: embeddings
-                        .contains_key(&node.uid)
-                        .then(|| embedding_model.to_string()),
-                    embedding_model_version: embeddings
-                        .contains_key(&node.uid)
-                        .then_some(embedding_model_version),
-                    embedding_text,
-                    actor_id: self.actor_id.clone(),
-                    actor_kind: "system".to_string(),
-                })
-                .await
-                .map_err(map_graph_error)?;
-            report.nodes_upserted = report.nodes_upserted.saturating_add(1);
+            create_intents.push(NodeWriteIntent {
+                uid: node.uid,
+                label: node_label(&node.label)?,
+                storage_partition_id: Some(self.scope.tenant_id().0.to_string()),
+                contact_id: None,
+                scope: "tenant".to_string(),
+                name: node_name(&node.label, &properties),
+                properties,
+                pii_class: PiiClass::None,
+                confidence: Some(0.95),
+                valid_from: Utc::now(),
+                embedding,
+                embedding_model: embeddings
+                    .contains_key(&node.uid)
+                    .then(|| embedding_model.to_string()),
+                embedding_model_version: embeddings
+                    .contains_key(&node.uid)
+                    .then_some(embedding_model_version),
+                embedding_text,
+                actor_id: self.actor_id.clone(),
+                actor_kind: "system".to_string(),
+            });
         }
+        let created = create_intents.len() as u64;
+        self.graph
+            .bulk_create_nodes(create_intents)
+            .await
+            .map_err(map_graph_error)?;
+        report.nodes_upserted = report.nodes_upserted.saturating_add(created);
 
         let mut seen_edge_uids = HashSet::new();
         for edge in &delta.edges {
@@ -175,14 +194,22 @@ where
 
     async fn invalidate_chunks(&self, graph_node_uids: &[Uuid]) -> Result<GraphWriteReport> {
         let mut report = GraphWriteReport::default();
+        if graph_node_uids.is_empty() {
+            return Ok(report);
+        }
+        // Resolve existence in one lookup rather than an N+1 `get_node` loop, then
+        // invalidate each existing node individually so the per-node changelog and
+        // already-invalidated error semantics are preserved.
+        let existing_uids = self
+            .graph
+            .bulk_get_nodes(graph_node_uids)
+            .await
+            .map_err(map_graph_error)?
+            .into_iter()
+            .map(|row| row.uid)
+            .collect::<HashSet<_>>();
         for uid in graph_node_uids {
-            if self
-                .graph
-                .get_node(*uid)
-                .await
-                .map_err(map_graph_error)?
-                .is_some()
-            {
+            if existing_uids.contains(uid) {
                 self.graph
                     .invalidate_node(*uid, "knowledge_chunk_orphaned")
                     .await
@@ -358,17 +385,37 @@ where
         tenant_id: moa_core::TenantId,
         seen_source_ids: &HashSet<String>,
     ) -> Result<PageIngestionReport> {
-        let active_objects = self
-            .repository
-            .active_objects_for_connection(connection_uid)
-            .await?;
+        // Compute the prune set in SQL (active objects not in the seen set) and
+        // page through it with a keyset cursor so a large already-seen set is
+        // never materialized on the client. Each pruned object flips to
+        // `deleted`, but the cursor advances independently, guaranteeing
+        // termination.
+        let seen = seen_source_ids.iter().cloned().collect::<Vec<_>>();
         let mut report = PageIngestionReport::default();
-        for object in active_objects {
-            if object.tenant_id != tenant_id || seen_source_ids.contains(&object.source_id) {
-                continue;
+        let mut cursor: Option<(String, Uuid)> = None;
+        loop {
+            let batch = self
+                .repository
+                .unseen_active_objects_for_connection(
+                    connection_uid,
+                    tenant_id,
+                    &seen,
+                    cursor.take(),
+                    PRUNE_BATCH_SIZE,
+                )
+                .await?;
+            let Some(last) = batch.last() else {
+                break;
+            };
+            cursor = Some((last.source_id.clone(), last.object_uid));
+            let batch_len = batch.len();
+            for object in batch {
+                let deleted = self.handle_pruned_object(sync_run_uid, object).await?;
+                report.records_deleted = report.records_deleted.saturating_add(deleted);
             }
-            let deleted = self.handle_pruned_object(sync_run_uid, object).await?;
-            report.records_deleted = report.records_deleted.saturating_add(deleted);
+            if batch_len < PRUNE_BATCH_SIZE as usize {
+                break;
+            }
         }
         self.record_counter_step(
             sync_run_uid,
@@ -776,7 +823,17 @@ where
         )
         .await?;
 
-        let chunks = blocks_to_chunks(version.version_uid, &blocks, self.chunking);
+        let mut chunks = blocks_to_chunks(version.version_uid, &blocks, self.chunking);
+        let delta = document_chunk_delta(&object, &version, &chunks);
+        // Fold each chunk's graph node UID and the `active` retrieval marker into
+        // the rows before the batch insert. Persisting them up front makes chunk
+        // storage a single multi-row write and removes the former per-chunk
+        // `set_chunk_graph_uid` round trip.
+        for chunk in &mut chunks {
+            let graph_uid = chunk_graph_uid(&delta, object.tenant_id, chunk)?;
+            chunk.graph_node_uid = Some(graph_uid);
+            chunk.metadata = mark_metadata_active(std::mem::take(&mut chunk.metadata));
+        }
         self.repository
             .replace_chunks(version.version_uid, chunks.clone())
             .await?;
@@ -809,15 +866,13 @@ where
         )
         .await?;
 
-        let delta = document_chunk_delta(&object, &version, &chunks);
         let mut embedding_inputs = Vec::new();
         let mut embedding_uids = Vec::new();
         for chunk in &chunks {
-            let graph_uid = chunk_graph_uid(&delta, object.tenant_id, chunk)?;
-            self.repository
-                .set_chunk_graph_uid(chunk.chunk_uid, graph_uid)
-                .await?;
-            if !old_by_hash.contains_key(&chunk.chunk_hash) {
+            if old_by_hash.contains_key(&chunk.chunk_hash) {
+                continue;
+            }
+            if let Some(graph_uid) = chunk.graph_node_uid {
                 embedding_uids.push(graph_uid);
                 embedding_inputs.push(chunk.text.clone());
             }
@@ -1480,6 +1535,20 @@ struct PersistedIngestion {
     delta: KnowledgeGraphDelta,
     embeddings_created: u64,
     ingested: bool,
+}
+
+/// Returns `metadata` as a JSON object with the `active` retrieval flag set.
+///
+/// This mirrors the previous `set_chunk_graph_uid` marker write: non-object
+/// metadata is replaced with an empty object before the flag is inserted, so a
+/// freshly persisted chunk is always visible to active retrieval.
+fn mark_metadata_active(metadata: Value) -> Value {
+    let mut object = match metadata {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    object.insert("active".to_string(), Value::Bool(true));
+    Value::Object(object)
 }
 
 fn chunk_graph_uid(

@@ -2,6 +2,7 @@
 
 mod adapters;
 mod core;
+mod failover;
 mod model_selection;
 mod registry;
 mod routing;
@@ -23,9 +24,11 @@ pub use core::factory::{
     resolve_provider_selection, resolve_rewriter_provider,
 };
 pub use core::models::{
-    CATALOG, ProviderModel, by_provider, capabilities_for_provider_model, cheapest_chat_model,
-    context_window, find, find_for_provider_model, find_model, pricing_for_model,
+    CATALOG, CapabilityTier, ProviderModel, by_provider, capabilities_for_provider_model,
+    cheapest_chat_model, context_window, find, find_for_provider_model, find_model,
+    pricing_for_model,
 };
+pub use core::pacer::PacerConfig;
 pub use core::router::ModelRouter;
 #[cfg(any(test, feature = "mock-embedding"))]
 pub use embedding::MockEmbedding;
@@ -34,6 +37,7 @@ pub use embedding::{
     GeminiEmbeddingEmbedder, OpenAIEmbedding, ZeroEntropyEmbedding, build_embedder_from_config,
     build_embedding_provider_from_config,
 };
+pub use failover::FailoverLLMProvider;
 pub use memory_llm::{
     EXTRACTION_PROMPT_VERSION, LlmChatClient, LlmChatError, LlmEntityMergeClient, LlmExtractedFact,
     LlmFactExtractionChunk, LlmFactExtractionClient, MERGE_PROMPT_VERSION,

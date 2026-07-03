@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::ModelRouter;
+use crate::core::models::find_model;
 use crate::routing::{
     PROVIDER_DESCRIPTORS, ProviderDescriptor, ProviderId, infer_provider_id,
     provider_descriptor_by_name, split_explicit_provider,
@@ -288,8 +289,14 @@ impl ProviderRegistry {
     }
 
     /// Builds a model-task router using this registry's resolved provider instances.
+    ///
+    /// The main-loop provider is wrapped with the configured LLM failover chain
+    /// (`models.fallback_models`) so a rate-limited primary transparently fails
+    /// over; the auxiliary provider is left unwrapped.
     pub fn model_router_for_config(&self, config: &MoaConfig) -> moa_core::Result<ModelRouter> {
-        let main = self.provider_for_model(Some(config.model_for_task(ModelTask::MainLoop)))?;
+        let main_model = config.model_for_task(ModelTask::MainLoop);
+        let main = self.provider_for_model(Some(main_model))?;
+        let main = self.apply_main_failover(config, main_model, main)?;
         let auxiliary = config
             .models
             .auxiliary
@@ -297,6 +304,69 @@ impl ProviderRegistry {
             .map(|model| self.provider_for_model(Some(model)))
             .transpose()?;
         Ok(ModelRouter::new(main, auxiliary))
+    }
+
+    /// Wraps the main-loop provider with the configured failover chain, validating
+    /// each fallback at build time.
+    ///
+    /// A fallback is a HARD config error (fails startup, so operators find out at
+    /// boot rather than at failover time) when it is not in the model catalog, or
+    /// when its capability tier is more than one tier from the primary's (so an
+    /// operator cannot, e.g., silently fall a flagship model over to a fast one).
+    /// A fallback that validates but whose provider is not configured (missing API
+    /// key) is skipped with a warning rather than failing startup. Returns `main`
+    /// unchanged when no fallbacks are configured.
+    pub(crate) fn apply_main_failover(
+        &self,
+        config: &MoaConfig,
+        primary_model: &str,
+        main: Arc<dyn LLMProvider>,
+    ) -> moa_core::Result<Arc<dyn LLMProvider>> {
+        if config.models.fallback_models.is_empty() {
+            return Ok(main);
+        }
+
+        let primary_model_id = strip_provider_prefix(primary_model);
+        let primary_tier = find_model(primary_model_id).map(|model| model.tier);
+
+        let mut fallbacks = Vec::new();
+        for entry in &config.models.fallback_models {
+            let fallback_model_id = strip_provider_prefix(entry.trim());
+            let catalog_entry = find_model(fallback_model_id).ok_or_else(|| {
+                MoaError::ConfigError(format!(
+                    "LLM fallback model '{fallback_model_id}' (models.fallback_models entry '{entry}') is not in the model catalog"
+                ))
+            })?;
+
+            if let Some(primary_tier) = primary_tier {
+                let distance = primary_tier.distance(catalog_entry.tier);
+                if distance > 1 {
+                    return Err(MoaError::ConfigError(format!(
+                        "LLM fallback '{fallback_model_id}' (tier {}) is {distance} capability tiers from primary '{primary_model_id}' (tier {}); configure a fallback within one tier",
+                        catalog_entry.tier.as_str(),
+                        primary_tier.as_str()
+                    )));
+                }
+            }
+
+            // Catalog/tier shape is valid; a fallback whose provider is not
+            // configured (missing key) is skipped rather than failing boot.
+            match self
+                .resolve_provider_id(Some(entry))
+                .and_then(|(id, model)| {
+                    self.provider_for_id(id, &model)
+                        .map(|r| (r.provider, model))
+                }) {
+                Ok(pair) => fallbacks.push(pair),
+                Err(error) => tracing::warn!(
+                    fallback = %entry,
+                    %error,
+                    "skipping LLM fallback whose provider is unavailable"
+                ),
+            }
+        }
+
+        Ok(crate::FailoverLLMProvider::wrap(main, fallbacks))
     }
 
     /// Resolves the provider instance that should serve a requested model.
@@ -442,6 +512,11 @@ fn configured_env(key: &str) -> bool {
 
 fn configured_secret(value: &str) -> bool {
     !value.trim().is_empty()
+}
+
+/// Strips a leading `provider:` prefix from a model selector, returning the model id.
+fn strip_provider_prefix(model: &str) -> &str {
+    model.split_once(':').map_or(model, |(_, model)| model)
 }
 
 fn default_provider_id(provider_name: &str) -> moa_core::Result<ProviderId> {
@@ -843,6 +918,83 @@ mod tests {
 
         assert_eq!(id, ProviderId::OpenAI);
         assert_eq!(model, ModelId::new("scripted-loadtest"));
+    }
+
+    #[test]
+    fn failover_accepts_adjacent_tier_fallback() {
+        // Pins: a within-one-tier fallback (fable-5 Frontier → opus-4-8 Flagship)
+        // is accepted and wraps the primary provider.
+        let mut config = moa_core::MoaConfig::default();
+        config.models.main = "claude-fable-5".to_string();
+        config.models.fallback_models = vec!["claude-opus-4-8".to_string()];
+        let registry = ProviderRegistry::with_static_providers(
+            Some(provider("claude-fable-5")),
+            Some(provider("gpt-5.4")),
+            None,
+        );
+        let main = provider("claude-fable-5");
+
+        let wrapped = registry
+            .apply_main_failover(&config, "claude-fable-5", main.clone())
+            .expect("an adjacent-tier fallback should be accepted");
+
+        assert!(
+            !Arc::ptr_eq(&wrapped, &main),
+            "an accepted fallback should wrap the primary in a failover provider"
+        );
+    }
+
+    #[test]
+    fn failover_rejects_two_tier_gap_naming_both_tiers() {
+        // Pins: a fallback more than one tier from the primary (gpt-5.4 Flagship →
+        // claude-haiku-4-5 Fast) is a hard config error at build time.
+        let mut config = moa_core::MoaConfig::default();
+        config.models.main = "gpt-5.4".to_string();
+        config.models.fallback_models = vec!["claude-haiku-4-5".to_string()];
+        let registry = ProviderRegistry::with_static_providers(
+            Some(provider("claude-fable-5")),
+            Some(provider("gpt-5.4")),
+            None,
+        );
+
+        let Err(error) = registry.apply_main_failover(&config, "gpt-5.4", provider("gpt-5.4"))
+        else {
+            panic!("a two-tier fallback gap must be rejected");
+        };
+        let message = error.to_string();
+
+        assert!(
+            message.contains("flagship"),
+            "names the primary tier: {message}"
+        );
+        assert!(
+            message.contains("fast"),
+            "names the fallback tier: {message}"
+        );
+        assert!(
+            message.contains("claude-haiku-4-5"),
+            "names the rejected fallback model: {message}"
+        );
+    }
+
+    #[test]
+    fn failover_rejects_fallback_absent_from_catalog() {
+        // Pins: a fallback model that is not catalogued is a hard config error.
+        let mut config = moa_core::MoaConfig::default();
+        config.models.main = "gpt-5.4".to_string();
+        config.models.fallback_models = vec!["claude-imaginary-9".to_string()];
+        let registry =
+            ProviderRegistry::with_static_providers(None, Some(provider("gpt-5.4")), None);
+
+        let Err(error) = registry.apply_main_failover(&config, "gpt-5.4", provider("gpt-5.4"))
+        else {
+            panic!("an uncatalogued fallback must be rejected");
+        };
+
+        assert!(
+            error.to_string().contains("not in the model catalog"),
+            "{error}"
+        );
     }
 
     #[test]

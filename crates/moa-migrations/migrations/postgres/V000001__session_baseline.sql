@@ -182,9 +182,22 @@ CREATE INDEX IF NOT EXISTS idx_sessions_storage_partition ON sessions(storage_pa
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_scope ON sessions(storage_partition_id, scope, user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+-- Serves the periodic active-session gauge COUNT (status = 'running') as an
+-- index-only scan; the gauge is refreshed off the write path on a timer.
+CREATE INDEX IF NOT EXISTS idx_sessions_running ON sessions(status) WHERE status = 'running';
 
+-- `events` is the hottest write target in the system, so it is HASH-partitioned
+-- on `session_id` across 16 child tables to spread append contention and index
+-- maintenance. Every hot query filters on `session_id`, so reads prune to a
+-- single partition; the cross-session admin scans (`search_events`,
+-- `tenant_cost_since`) fan out across all partitions, which is acceptable for
+-- their rare, off-hot-path use. Mirrors `moa.embeddings` (HASH) and
+-- `moa.graph_changelog` (RANGE) below. PostgreSQL requires every unique/primary
+-- key on a partitioned table to include the partition column, so the surrogate
+-- `id` joins `session_id` in the primary key and `UNIQUE(session_id,
+-- sequence_num)` (already partition-key-prefixed) is preserved unchanged.
 CREATE TABLE IF NOT EXISTS events (
-    id UUID PRIMARY KEY,
+    id UUID NOT NULL,
     session_id UUID NOT NULL REFERENCES sessions(id),
     storage_partition_id TEXT NOT NULL,
     user_id TEXT,
@@ -196,17 +209,31 @@ CREATE TABLE IF NOT EXISTS events (
     brain_id UUID,
     hand_id TEXT,
     token_count INTEGER,
-    search_vector TSVECTOR GENERATED ALWAYS AS (
-        setweight(to_tsvector('english', coalesce(event_type, '')), 'A') ||
-        setweight(to_tsvector('english', coalesce(payload::text, '')), 'B')
-    ) STORED,
+    PRIMARY KEY (id, session_id),
     UNIQUE(session_id, sequence_num)
-);
+) PARTITION BY HASH (session_id);
 
+DO $$
+DECLARE
+    partition_index INT;
+BEGIN
+    FOR partition_index IN 0..15 LOOP
+        EXECUTE format(
+            'CREATE TABLE IF NOT EXISTS events_p%s
+             PARTITION OF events
+             FOR VALUES WITH (MODULUS 16, REMAINDER %s)',
+            lpad(partition_index::TEXT, 2, '0'),
+            partition_index
+        );
+    END LOOP;
+END $$;
+
+-- No STORED full-text `search_vector` column or GIN index: it doubled the write
+-- cost of every event append on the hot path to serve only the rare, admin-only
+-- `search_events` query, which now computes `to_tsvector` on the fly instead.
 CREATE INDEX IF NOT EXISTS idx_events_session_type ON events(session_id, event_type);
 CREATE INDEX IF NOT EXISTS idx_events_scope ON events(storage_partition_id, scope, user_id);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
-CREATE INDEX IF NOT EXISTS idx_events_fts ON events USING GIN(search_vector);
 
 CREATE TABLE IF NOT EXISTS pending_signals (
     id UUID PRIMARY KEY,
@@ -291,60 +318,20 @@ ALTER TABLE sessions
         END
     ) STORED;
 
-CREATE INDEX IF NOT EXISTS idx_sessions_cache_hit_rate
-    ON sessions(cache_hit_rate);
+-- No per-row indexes on the generated `cache_hit_rate` / `total_cost_cents`
+-- columns: no query orders by or filters on them (analytics roll up via
+-- materialized views with full scans), and they would be re-maintained on every
+-- aggregate UPDATE the append path now issues. Dropped to keep the append write
+-- path lean.
 
-CREATE INDEX IF NOT EXISTS idx_sessions_cost_cents
-    ON sessions(total_cost_cents DESC);
-
-CREATE OR REPLACE FUNCTION update_session_aggregates() RETURNS TRIGGER
-LANGUAGE plpgsql
-SET search_path FROM CURRENT
-AS $$
-DECLARE
-    event_data JSONB := COALESCE(NEW.payload -> 'data', '{}'::JSONB);
-BEGIN
-    UPDATE sessions
-    SET
-        event_count = event_count + 1,
-        turn_count = turn_count + CASE WHEN NEW.event_type = 'BrainResponse' THEN 1 ELSE 0 END,
-        total_input_tokens_uncached = total_input_tokens_uncached + CASE
-            WHEN NEW.event_type = 'BrainResponse' THEN COALESCE((event_data ->> 'input_tokens_uncached')::BIGINT, 0)
-            WHEN NEW.event_type = 'Checkpoint' THEN COALESCE((event_data ->> 'input_tokens')::BIGINT, 0)
-            ELSE 0
-        END,
-        total_input_tokens_cache_write = total_input_tokens_cache_write + CASE
-            WHEN NEW.event_type = 'BrainResponse' THEN COALESCE((event_data ->> 'input_tokens_cache_write')::BIGINT, 0)
-            ELSE 0
-        END,
-        total_input_tokens_cache_read = total_input_tokens_cache_read + CASE
-            WHEN NEW.event_type = 'BrainResponse' THEN COALESCE((event_data ->> 'input_tokens_cache_read')::BIGINT, 0)
-            ELSE 0
-        END,
-        total_output_tokens = total_output_tokens + CASE
-            WHEN NEW.event_type IN ('BrainResponse', 'Checkpoint') THEN COALESCE((event_data ->> 'output_tokens')::BIGINT, 0)
-            ELSE 0
-        END,
-        total_cost_cents = total_cost_cents + CASE
-            WHEN NEW.event_type IN ('BrainResponse', 'Checkpoint') THEN COALESCE((event_data ->> 'cost_cents')::BIGINT, 0)
-            ELSE 0
-        END,
-        last_checkpoint_seq = CASE
-            WHEN NEW.event_type = 'Checkpoint' THEN NEW.sequence_num
-            ELSE last_checkpoint_seq
-        END,
-        updated_at = GREATEST(updated_at, NEW.timestamp)
-    WHERE id = NEW.session_id;
-    RETURN NEW;
-END;
-$$;
-
+-- Session aggregate columns are maintained by the application in the SAME
+-- transaction as the (batched) event append: one UPDATE per append call instead
+-- of a per-row AFTER INSERT trigger. The trigger `trg_update_session_aggregates`
+-- and its `update_session_aggregates()` function are intentionally gone; see
+-- `moa_session::store::session_store::append_events`. The one-time backfill below
+-- still initializes existing rows on migration.
 DROP TRIGGER IF EXISTS trg_update_session_aggregates ON events;
-
-CREATE TRIGGER trg_update_session_aggregates
-    AFTER INSERT ON events
-    FOR EACH ROW
-    EXECUTE FUNCTION update_session_aggregates();
+DROP FUNCTION IF EXISTS update_session_aggregates();
 
 WITH event_aggregates AS (
     SELECT
@@ -934,7 +921,10 @@ CREATE TABLE IF NOT EXISTS moa.node_index (
     invalidated_by UUID,
     invalidated_reason TEXT,
     last_accessed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    properties_summary JSONB
+    properties_summary JSONB,
+    properties_tsv TSVECTOR GENERATED ALWAYS AS (
+        to_tsvector('simple', coalesce(properties_summary::text, ''))
+    ) STORED
 );
 
 ALTER TABLE moa.node_index
@@ -945,6 +935,8 @@ CREATE INDEX IF NOT EXISTS node_index_ws_scope_label
     WHERE valid_to IS NULL;
 CREATE INDEX IF NOT EXISTS node_index_name_tsv_idx
     ON moa.node_index USING GIN (name_tsv);
+CREATE INDEX IF NOT EXISTS node_index_properties_tsv_idx
+    ON moa.node_index USING GIN (properties_tsv);
 CREATE INDEX IF NOT EXISTS node_index_pii_idx
     ON moa.node_index (pii_class)
     WHERE valid_to IS NULL;
@@ -1120,6 +1112,10 @@ CREATE TABLE IF NOT EXISTS moa.storage_partition_state (
     user_id TEXT,
     scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     changelog_version BIGINT NOT NULL DEFAULT 0,
+    -- Incremental consolidation cursor: the `changelog_version` observed the last
+    -- time a consolidation pass was dispatched for this partition. Periodic
+    -- maintenance skips a tenant while `changelog_version` has not moved past it.
+    consolidated_changelog_version BIGINT NOT NULL DEFAULT 0,
     vector_backend TEXT NOT NULL DEFAULT 'pgvector'
         CHECK (vector_backend IN ('pgvector', 'turbopuffer')),
     vector_backend_state TEXT NOT NULL DEFAULT 'steady'
@@ -1142,7 +1138,8 @@ ALTER TABLE moa.storage_partition_state
     ADD COLUMN IF NOT EXISTS embedding_model_version INT NOT NULL DEFAULT 1,
     ADD COLUMN IF NOT EXISTS embedding_dimension INT NOT NULL DEFAULT 1024 CHECK (embedding_dimension > 0),
     ADD COLUMN IF NOT EXISTS reembed_state TEXT NOT NULL DEFAULT 'steady'
-        CHECK (reembed_state IN ('steady', 'in_progress'));
+        CHECK (reembed_state IN ('steady', 'in_progress')),
+    ADD COLUMN IF NOT EXISTS consolidated_changelog_version BIGINT NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS storage_partition_state_version_idx
     ON moa.storage_partition_state (storage_partition_id, changelog_version);
@@ -1802,6 +1799,12 @@ CREATE INDEX IF NOT EXISTS ix_plaintext_storage_partition
 
 -- Source: V000028__session_events_append_only.sql
 
+-- `events` is HASH-partitioned (see above). A row-level trigger created on the
+-- partitioned parent is automatically cloned onto every existing partition and
+-- onto any partition created later (PostgreSQL 13+), so the append-only guard
+-- below is defined once on `events` and enforced across all partitions without
+-- per-partition wiring. The REVOKE likewise applies to writes routed through the
+-- parent, which is the only path the runtime uses.
 REVOKE UPDATE, DELETE, TRUNCATE ON TABLE events FROM moa_app;
 
 CREATE OR REPLACE FUNCTION events_append_only_guard() RETURNS trigger AS $$

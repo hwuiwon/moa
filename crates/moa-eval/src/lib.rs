@@ -1,4 +1,5 @@
 //! Offline evaluation harnesses and internal-improvement runners for MOA.
+#![recursion_limit = "256"]
 
 pub mod collector;
 pub mod engine;

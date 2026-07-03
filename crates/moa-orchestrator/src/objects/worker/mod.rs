@@ -6,13 +6,13 @@ use chrono::{DateTime, Utc};
 use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentTurnUsageRequest};
 use moa_core::{
     AgentSignalId, AttachWorkerResultWaiterInput, AttachWorkerResultWaiterOutput, ChildSignalKind,
-    CompletionRequest, ContextMessage, Event, MarkWorkerChildTerminalInput, MoaError,
-    ModelCapabilities, ModelId, ParentResumePolicy, RemoveWorkerResultWaiterInput, SessionId,
-    SessionMeta, SessionStatus, SignalSeverity, TenantId, TrustedSandboxFileManifestRef,
-    TurnOutcome, UserId, UserMessage, WorkerChildRef, WorkerId, WorkerMessage, WorkerPendingInput,
-    WorkerProgressSummary, WorkerResult, WorkerSignal, WorkerState, WorkerStatus,
-    WorkerTerminalResult, WorkerToolRecord, WorkerTurnOutcomeRecord, WorkerTurnPreparation,
-    WorkerTurnResponseRecord, child_report_tool_schemas,
+    ClaimCheck, CompletionRequest, ContextMessage, Event, MarkWorkerChildTerminalInput,
+    MessageRole, MoaError, ModelCapabilities, ModelId, ParentResumePolicy,
+    RemoveWorkerResultWaiterInput, SessionId, SessionMeta, SessionStatus, SignalSeverity, TenantId,
+    TrustedSandboxFileManifestRef, TurnOutcome, UserId, UserMessage, WorkerChildRef, WorkerId,
+    WorkerMessage, WorkerPendingInput, WorkerProgressSummary, WorkerResult, WorkerSignal,
+    WorkerState, WorkerStatus, WorkerTerminalResult, WorkerToolRecord, WorkerTurnOutcomeRecord,
+    WorkerTurnPreparation, WorkerTurnResponseRecord, child_report_tool_schemas,
 };
 use restate_sdk::prelude::*;
 use serde_json::json;
@@ -22,8 +22,8 @@ use crate::objects::durable_utc_now;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::turn::util::{apply_response_to_history, summarize_response_text};
 use crate::vo::{
-    VoReader, VoState, schedule_generation_guarded_self_call, set_or_clear_opt,
-    set_or_clear_scalar, set_or_clear_vec,
+    Tracked, VoReader, VoState, schedule_generation_guarded_self_call, set_changed_opt,
+    set_changed_scalar, set_changed_vec, set_or_clear_opt, set_or_clear_scalar, set_or_clear_vec,
 };
 use crate::worker_dispatch::MAX_WORKER_DEPTH;
 use moa_observability::restate_observability::annotate_restate_handler_span;

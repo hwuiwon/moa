@@ -49,15 +49,131 @@ pub async fn create_node_in_conn(
     Ok(intent.uid)
 }
 
+/// Creates several graph nodes, sidecar rows, optional vectors, and changelog rows atomically.
+///
+/// All nodes are written inside one transaction: the `node_index` rows are
+/// inserted with a single `UNNEST` multi-row statement (JSON travels as `TEXT[]`
+/// cast to `JSONB`, mirroring the tenant-knowledge batch inserts), every
+/// embedding-bearing node's vector is upserted in one call, and each node still
+/// writes its own `graph_changelog` outbox row so the per-node create audit and
+/// the storage-partition version bump match a loop of [`create_node`]. Returns
+/// the created uids in input order.
+pub async fn bulk_create_nodes(
+    store: &PostgresGraphStore,
+    intents: Vec<NodeWriteIntent>,
+) -> Result<Vec<Uuid>> {
+    if intents.is_empty() {
+        return Ok(Vec::new());
+    }
+    for intent in &intents {
+        validate_node_scope(intent)?;
+    }
+
+    let count = intents.len();
+    let mut uids = Vec::with_capacity(count);
+    let mut labels = Vec::with_capacity(count);
+    let mut storage_partition_ids: Vec<Option<String>> = Vec::with_capacity(count);
+    let mut user_ids: Vec<Option<String>> = Vec::with_capacity(count);
+    let mut tenant_ids = Vec::with_capacity(count);
+    let mut contact_ids: Vec<Option<Uuid>> = Vec::with_capacity(count);
+    let mut names = Vec::with_capacity(count);
+    let mut pii_classes = Vec::with_capacity(count);
+    let mut confidences: Vec<Option<f64>> = Vec::with_capacity(count);
+    let mut reference_counts = Vec::with_capacity(count);
+    let mut valid_froms = Vec::with_capacity(count);
+    let mut properties = Vec::with_capacity(count);
+    let mut vector_items = Vec::new();
+    for intent in &intents {
+        let (tenant_id, contact_id) = runtime_ids_for_node(store, intent)?;
+        if let Some(item) = vector_item_from_intent(intent)? {
+            vector_items.push(item);
+        }
+        uids.push(intent.uid);
+        labels.push(intent.label.as_str().to_string());
+        storage_partition_ids.push(intent.storage_partition_id.clone());
+        user_ids.push(intent.contact_id.clone());
+        tenant_ids.push(tenant_id);
+        contact_ids.push(contact_id);
+        names.push(intent.name.clone());
+        pii_classes.push(intent.pii_class.as_str().to_string());
+        confidences.push(intent.confidence);
+        reference_counts.push(reference_count_from_properties(&intent.properties));
+        valid_froms.push(intent.valid_from);
+        properties.push(serde_json::to_string(&intent.properties)?);
+    }
+
+    let mut conn = store.begin_required().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.node_index
+            (uid, label, storage_partition_id, user_id, tenant_id, contact_id, name, pii_class,
+             confidence, reference_count, valid_from, properties_summary)
+        SELECT n.uid, n.label, n.storage_partition_id, n.user_id, n.tenant_id, n.contact_id,
+               n.name, n.pii_class, n.confidence, n.reference_count, n.valid_from,
+               n.properties::JSONB
+        FROM UNNEST(
+            $1::UUID[], $2::TEXT[], $3::TEXT[], $4::TEXT[], $5::UUID[], $6::UUID[], $7::TEXT[],
+            $8::TEXT[], $9::DOUBLE PRECISION[], $10::BIGINT[], $11::TIMESTAMPTZ[], $12::TEXT[]
+        ) AS n(uid, label, storage_partition_id, user_id, tenant_id, contact_id, name, pii_class,
+               confidence, reference_count, valid_from, properties)
+        "#,
+    )
+    .bind(&uids)
+    .bind(&labels)
+    .bind(&storage_partition_ids)
+    .bind(&user_ids)
+    .bind(&tenant_ids)
+    .bind(&contact_ids)
+    .bind(&names)
+    .bind(&pii_classes)
+    .bind(&confidences)
+    .bind(&reference_counts)
+    .bind(&valid_froms)
+    .bind(&properties)
+    .execute(conn.as_mut())
+    .await?;
+
+    if !vector_items.is_empty() {
+        let vector = require_vector_store(store)?;
+        vector.upsert_in_tx(conn.as_mut(), &vector_items).await?;
+    }
+
+    for intent in &intents {
+        write_and_bump(conn.as_mut(), create_changelog(intent, None)).await?;
+    }
+
+    conn.commit().await?;
+    sync_vector_post_commit(store, "bulk_create_nodes").await;
+    Ok(uids)
+}
+
 /// Supersedes one active graph node with a replacement node atomically.
 pub async fn supersede_node(
     store: &PostgresGraphStore,
     old_uid: Uuid,
+    new: NodeWriteIntent,
+) -> Result<Uuid> {
+    let mut conn = store.begin_required().await?;
+    let uid = supersede_node_in_conn(store, conn.as_mut(), old_uid, new).await?;
+    conn.commit().await?;
+    sync_vector_post_commit(store, "supersede_node").await;
+    Ok(uid)
+}
+
+/// Supersedes one active graph node with a replacement node in a caller-owned tx.
+///
+/// Callers that batch several graph mutations into a single transaction use this
+/// primitive so the relational rows, sidecar vector, and changelog records commit
+/// together; unlike [`supersede_node`], it neither commits nor drains the external
+/// vector-sync outbox, leaving both to the caller.
+pub async fn supersede_node_in_conn(
+    store: &PostgresGraphStore,
+    conn: &mut PgConnection,
+    old_uid: Uuid,
     mut new: NodeWriteIntent,
 ) -> Result<Uuid> {
     validate_node_scope(&new)?;
-    let mut conn = store.begin_required().await?;
-    let (current_uid, old) = fetch_current_supersession_target(conn.as_mut(), old_uid).await?;
+    let (current_uid, old) = fetch_current_supersession_target(&mut *conn, old_uid).await?;
     ensure_same_scope(&new, &old, "supersession nodes must share the same scope")?;
     if new.valid_from <= old.valid_from {
         new.valid_from = old.valid_from + Duration::microseconds(1);
@@ -66,7 +182,7 @@ pub async fn supersede_node(
 
     let now = Utc::now();
     close_node_index(
-        conn.as_mut(),
+        &mut *conn,
         current_uid,
         new.valid_from,
         now,
@@ -74,10 +190,10 @@ pub async fn supersede_node(
         "superseded",
     )
     .await?;
-    insert_node_index(store, conn.as_mut(), &new).await?;
+    insert_node_index(store, &mut *conn, &new).await?;
     insert_supersedes_edge_index(
         store,
-        conn.as_mut(),
+        &mut *conn,
         new.uid,
         current_uid,
         new.storage_partition_id.as_deref(),
@@ -87,10 +203,10 @@ pub async fn supersede_node(
     .await?;
 
     if let Some(vector) = store.vector() {
-        vector.delete_in_tx(conn.as_mut(), &[current_uid]).await?;
+        vector.delete_in_tx(&mut *conn, &[current_uid]).await?;
         if let Some(item) = vector_item.as_ref() {
             vector
-                .upsert_in_tx(conn.as_mut(), std::slice::from_ref(item))
+                .upsert_in_tx(&mut *conn, std::slice::from_ref(item))
                 .await?;
         }
     } else if vector_item.is_some() {
@@ -100,7 +216,7 @@ pub async fn supersede_node(
     }
 
     let old_change = write_and_bump(
-        conn.as_mut(),
+        &mut *conn,
         ChangelogRecord {
             storage_partition_id: old.storage_partition_id.clone(),
             contact_id: old.contact_id.clone(),
@@ -123,10 +239,8 @@ pub async fn supersede_node(
         },
     )
     .await?;
-    write_and_bump(conn.as_mut(), create_changelog(&new, Some(old_change))).await?;
+    write_and_bump(&mut *conn, create_changelog(&new, Some(old_change))).await?;
 
-    conn.commit().await?;
-    sync_vector_post_commit(store, "supersede_node").await;
     Ok(new.uid)
 }
 
@@ -466,19 +580,32 @@ pub async fn hard_purge_with_audit(
 
 /// Creates a graph edge and changelog row atomically.
 pub async fn create_edge(store: &PostgresGraphStore, intent: EdgeWriteIntent) -> Result<Uuid> {
-    validate_edge_scope(&intent)?;
     let mut conn = store.begin_required().await?;
-    if edge_exists(conn.as_mut(), intent.uid).await? {
-        conn.commit().await?;
+    let uid = create_edge_in_conn(store, conn.as_mut(), intent).await?;
+    conn.commit().await?;
+    Ok(uid)
+}
+
+/// Creates a graph edge and changelog row in a caller-owned transaction.
+///
+/// Batching callers use this primitive to write several edges alongside their
+/// node mutations inside one transaction; unlike [`create_edge`], it does not
+/// commit. Edges never write sidecar vectors, so there is no vector-sync work.
+pub async fn create_edge_in_conn(
+    store: &PostgresGraphStore,
+    conn: &mut PgConnection,
+    intent: EdgeWriteIntent,
+) -> Result<Uuid> {
+    validate_edge_scope(&intent)?;
+    if edge_exists(&mut *conn, intent.uid).await? {
         return Ok(intent.uid);
     }
-    validate_edge_endpoints(conn.as_mut(), &intent).await?;
-    if !insert_edge_index(store, conn.as_mut(), &intent).await? {
-        conn.commit().await?;
+    validate_edge_endpoints(&mut *conn, &intent).await?;
+    if !insert_edge_index(store, &mut *conn, &intent).await? {
         return Ok(intent.uid);
     }
     write_and_bump(
-        conn.as_mut(),
+        &mut *conn,
         ChangelogRecord {
             storage_partition_id: intent.storage_partition_id.clone(),
             contact_id: intent.contact_id.clone(),
@@ -502,7 +629,6 @@ pub async fn create_edge(store: &PostgresGraphStore, intent: EdgeWriteIntent) ->
     )
     .await?;
 
-    conn.commit().await?;
     Ok(intent.uid)
 }
 

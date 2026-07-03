@@ -24,8 +24,13 @@ pub const ALL: &[&str] = &[
     H_ACTING_ON_BEHALF_OF,
 ];
 
-/// Returns true when a lowercased header name belongs to the MOA identity namespace.
+/// Returns true when a header name belongs to the MOA identity namespace.
+///
+/// Matched case-insensitively against the `x-moa-` prefix (which covers every
+/// name in [`ALL`]) so callers need not allocate a lowercased copy per header.
 #[must_use]
-pub fn is_moa_header(lowercase_name: &str) -> bool {
-    ALL.contains(&lowercase_name) || lowercase_name.starts_with("x-moa-")
+pub fn is_moa_header(name: &str) -> bool {
+    const PREFIX: &[u8] = b"x-moa-";
+    let bytes = name.as_bytes();
+    bytes.len() >= PREFIX.len() && bytes[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
 }

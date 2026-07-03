@@ -5,9 +5,49 @@ use std::borrow::Cow;
 use moa_core::estimate_text_tokens;
 use moa_core::{
     CompactionConfig, CompletionRequest, ContextMessage, Event, EventRecord, LLMProvider,
-    ModelTier, Result, SessionId, SessionStore, TokenPricing,
+    ModelTier, Result, SequenceNum, SessionId, SessionStore, TokenPricing,
 };
 use tracing::Instrument;
+
+/// Upper bound on the tokens a single compactable event contributes to the
+/// summarizer prompt. `event_summary_line` truncates each event to a 240-char
+/// payload plus a short `#<seq> <kind>: ` prefix, so a ~4-chars-per-token
+/// estimate keeps one line comfortably under this cap.
+const MAX_COMPACTION_LINE_TOKENS: usize = 80;
+
+/// Returns whether the cheap session-row watermark shows the unsummarized tail
+/// *might* be large enough to trigger compaction.
+///
+/// A `false` result guarantees [`should_compact`] would also be `false`, so the
+/// full-log read that compaction needs can be skipped entirely. The watermark
+/// counts events appended since the last checkpoint (or since the session began
+/// when none exists); that is a lower bound on the true unsummarized tail
+/// because the verbatim turns a prior checkpoint intentionally left behind are
+/// not counted. The gate can therefore under-trigger by at most one
+/// `recent_turns_verbatim` window. Compaction is an optimization rather than a
+/// correctness requirement, so a slightly delayed checkpoint is acceptable and
+/// never yields an incorrect context.
+pub(crate) fn watermark_may_compact(
+    config: &CompactionConfig,
+    event_count: usize,
+    last_checkpoint_seq: Option<SequenceNum>,
+    token_budget: usize,
+) -> bool {
+    if !config.enabled {
+        return false;
+    }
+
+    let events_since_checkpoint = match last_checkpoint_seq {
+        Some(seq) => event_count.saturating_sub((seq as usize).saturating_add(1)),
+        None => event_count,
+    };
+    if events_since_checkpoint >= config.event_threshold {
+        return true;
+    }
+
+    let token_threshold = ((token_budget as f64) * config.token_ratio_threshold).ceil() as usize;
+    events_since_checkpoint.saturating_mul(MAX_COMPACTION_LINE_TOKENS) >= token_threshold
+}
 
 /// Latest checkpoint summary state derived from the append-only event log.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +138,9 @@ pub(crate) fn should_compact(
 }
 
 /// Emits a new cumulative checkpoint when the configured threshold is exceeded.
+///
+/// Returns the persisted checkpoint record when compaction fired so callers can
+/// fold it into an already-loaded event list without re-reading the full log.
 pub(crate) async fn maybe_compact_events(
     config: &CompactionConfig,
     store: &dyn SessionStore,
@@ -106,17 +149,17 @@ pub(crate) async fn maybe_compact_events(
     session_id: SessionId,
     token_budget: usize,
     events: &[EventRecord],
-) -> Result<bool> {
+) -> Result<Option<EventRecord>> {
     let span = tracing::info_span!("compaction", moa.session.id = %session_id);
     async move {
         let unsummarized = unsummarized_events(events);
         if !should_compact(config, &unsummarized, token_budget) {
-            return Ok(false);
+            return Ok(None);
         }
 
         let candidate_end = recent_turn_boundary(&unsummarized, config.recent_turns_verbatim);
         if candidate_end == 0 {
-            return Ok(false);
+            return Ok(None);
         }
 
         let checkpoint = latest_checkpoint_state(events);
@@ -140,8 +183,8 @@ pub(crate) async fn maybe_compact_events(
             .unwrap_or(0)
             + candidate.len();
 
-        store
-            .emit_event(
+        let record = store
+            .emit_event_record(
                 session_id,
                 Event::Checkpoint {
                     summary: summary.clone(),
@@ -153,10 +196,11 @@ pub(crate) async fn maybe_compact_events(
                     output_tokens: usage.output_tokens,
                     cost_cents,
                 },
+                None,
             )
             .await?;
 
-        Ok(true)
+        Ok(Some(record))
     }
     .instrument(span)
     .await
@@ -477,7 +521,63 @@ mod tests {
     };
     use uuid::Uuid;
 
-    use super::{compaction_request, should_compact};
+    use super::{compaction_request, should_compact, watermark_may_compact};
+
+    #[test]
+    fn watermark_gate_matches_event_threshold_boundary() {
+        // Pins: the cheap watermark opens exactly at the event-count threshold so
+        // turns below it skip the full-log read entirely.
+        let config = moa_core::CompactionConfig {
+            enabled: true,
+            event_threshold: 4,
+            token_ratio_threshold: 1.0,
+            ..moa_core::CompactionConfig::default()
+        };
+        let budget = 1_000_000;
+
+        assert!(
+            !watermark_may_compact(&config, 3, None, budget),
+            "3 events is below the threshold of 4"
+        );
+        assert!(
+            watermark_may_compact(&config, 4, None, budget),
+            "4 events reaches the threshold"
+        );
+    }
+
+    #[test]
+    fn watermark_gate_counts_events_after_last_checkpoint() {
+        // Pins: events already folded into a checkpoint do not re-open the gate;
+        // only the tail appended after `last_checkpoint_seq` counts.
+        let config = moa_core::CompactionConfig {
+            enabled: true,
+            event_threshold: 3,
+            token_ratio_threshold: 1.0,
+            ..moa_core::CompactionConfig::default()
+        };
+        let budget = 1_000_000;
+
+        // 10 total events, checkpoint at seq 8 -> only seq 9 is unsummarized.
+        assert!(
+            !watermark_may_compact(&config, 10, Some(8), budget),
+            "a single post-checkpoint event must not open the gate"
+        );
+        // 12 total events, checkpoint at seq 8 -> seq 9..=11 (3 events) reach it.
+        assert!(
+            watermark_may_compact(&config, 12, Some(8), budget),
+            "three post-checkpoint events reach the threshold"
+        );
+    }
+
+    #[test]
+    fn watermark_gate_stays_closed_when_disabled() {
+        let config = moa_core::CompactionConfig {
+            enabled: false,
+            event_threshold: 1,
+            ..moa_core::CompactionConfig::default()
+        };
+        assert!(!watermark_may_compact(&config, 100, None, 1_000_000));
+    }
 
     #[test]
     fn compaction_request_pins_resume_and_validation_sections() {

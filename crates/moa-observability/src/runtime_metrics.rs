@@ -64,6 +64,17 @@ pub enum TurnLatencyStep {
 }
 
 impl TurnLatencyStep {
+    /// All turn-latency steps in a stable order, used to pre-build cached metric handles.
+    const ALL: [TurnLatencyStep; 7] = [
+        Self::SnapshotLoad,
+        Self::SnapshotWrite,
+        Self::PipelineCompile,
+        Self::LlmCall,
+        Self::ToolDispatch,
+        Self::EventPersist,
+        Self::LlmTtft,
+    ];
+
     /// Returns the stable Prometheus label for this turn step.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -75,6 +86,19 @@ impl TurnLatencyStep {
             Self::ToolDispatch => "tool_dispatch",
             Self::EventPersist => "event_persist",
             Self::LlmTtft => "llm_ttft",
+        }
+    }
+
+    /// Returns the dense index of this step into [`TurnLatencyStep::ALL`].
+    const fn index(self) -> usize {
+        match self {
+            Self::SnapshotLoad => 0,
+            Self::SnapshotWrite => 1,
+            Self::PipelineCompile => 2,
+            Self::LlmCall => 3,
+            Self::ToolDispatch => 4,
+            Self::EventPersist => 5,
+            Self::LlmTtft => 6,
         }
     }
 }
@@ -137,11 +161,13 @@ pub fn metrics_endpoint_url(config: &MetricsConfig) -> Option<String> {
 }
 
 /// Records one created session.
-pub fn record_session_created(tenant_id: &TenantId, status: &SessionStatus) {
+///
+/// The tenant is intentionally not a label: a per-tenant UUID would make `moa_sessions_total`
+/// unbounded cardinality. Per-tenant session counts belong in the event store, not Prometheus.
+pub fn record_session_created(_tenant_id: &TenantId, status: &SessionStatus) {
     counter!(
         "moa_sessions_total",
-        "tenant" => tenant_id.to_string(),
-        "status" => session_status_label(status).to_string()
+        "status" => session_status_label(status)
     )
     .increment(1);
 }
@@ -156,7 +182,7 @@ pub fn record_turn_completed(model: &ModelId, model_tier: ModelTier) {
     counter!(
         "moa_turns_total",
         "model" => model.to_string(),
-        "model_tier" => model_tier.as_str().to_string()
+        "model_tier" => model_tier.as_str()
     )
     .increment(1);
 }
@@ -290,15 +316,16 @@ pub fn record_session_error(scope: &str) {
 
 /// Records one tool call completion and its latency.
 pub fn record_tool_call(tool_name: &str, status: &str, duration: Duration) {
+    let tool_name = tool_name_label(tool_name);
     counter!(
         "moa_tool_calls_total",
-        "tool_name" => tool_name.to_string(),
+        "tool_name" => tool_name,
         "status" => status.to_string()
     )
     .increment(1);
     histogram!(
         "moa_tool_call_duration_seconds",
-        "tool_name" => tool_name.to_string()
+        "tool_name" => tool_name
     )
     .record(duration.as_secs_f64());
 }
@@ -309,7 +336,7 @@ pub fn record_tool_failure(provider: &str, tool_name: &str, class: &str) {
         "moa_tool_failure_total",
         "class" => class.to_string(),
         "provider" => provider.to_string(),
-        "tool" => tool_name.to_string()
+        "tool" => tool_name_label(tool_name)
     )
     .increment(1);
 }
@@ -337,7 +364,7 @@ pub fn record_tool_retry(provider: &str, attempt: u32) {
 pub fn record_tool_output_truncated_metric(tool_name: &str) {
     counter!(
         "moa_tool_output_truncated_total",
-        "tool_name" => tool_name.to_string()
+        "tool_name" => tool_name_label(tool_name)
     )
     .increment(1);
 }
@@ -357,12 +384,17 @@ pub fn record_turn_latency(duration: Duration) {
 }
 
 /// Records one aggregate turn-step duration sample.
+///
+/// The per-step histogram handles are resolved once (on first record after the recorder is
+/// installed) and cached, so the hot per-turn path avoids re-resolving a metric handle on every
+/// call. The `step` label is one of a fixed, bounded set.
 pub fn record_turn_step_duration(step: TurnLatencyStep, duration: Duration) {
-    histogram!(
-        TURN_STEP_DURATION_METRIC,
-        "step" => step.as_str()
-    )
-    .record(duration.as_secs_f64());
+    static TURN_STEP_HISTOGRAMS: OnceLock<[metrics::Histogram; 7]> = OnceLock::new();
+    let histograms = TURN_STEP_HISTOGRAMS.get_or_init(|| {
+        TurnLatencyStep::ALL
+            .map(|step| histogram!(TURN_STEP_DURATION_METRIC, "step" => step.as_str()))
+    });
+    histograms[step.index()].record(duration.as_secs_f64());
 }
 
 /// Records one terminal turn-workflow outcome and its total workflow latency.
@@ -376,14 +408,14 @@ pub fn record_turn_workflow_outcome(
         "moa_turn_outcomes_total",
         "scope" => scope.to_string(),
         "result" => result.to_string(),
-        "model_tier" => model_tier.as_str().to_string()
+        "model_tier" => model_tier.as_str()
     )
     .increment(1);
     histogram!(
         "moa_turn_workflow_latency_seconds",
         "scope" => scope.to_string(),
         "result" => result.to_string(),
-        "model_tier" => model_tier.as_str().to_string()
+        "model_tier" => model_tier.as_str()
     )
     .record(duration.as_secs_f64());
 }
@@ -817,6 +849,44 @@ fn format_metrics_endpoint_url(addr: SocketAddr) -> String {
     format!("http://{host}:{}/metrics", addr.port())
 }
 
+/// Built-in tool names that are safe to use verbatim as a metric label.
+///
+/// Every other tool name (tenant- or MCP-defined) is bucketed as `"other"` by
+/// [`tool_name_label`] so tool metrics keep bounded cardinality.
+const BUILTIN_TOOL_NAMES: &[&str] = &[
+    "bash",
+    "file_read",
+    "file_write",
+    "file_search",
+    "file_outline",
+    "grep",
+    "str_replace",
+    "memory_remember",
+    "memory_forget",
+    "memory_supersede",
+    "memory_search",
+    "session_search",
+    "tool_result_read",
+    "tool_result_search",
+    "spawn_worker",
+    "wait_worker",
+    "message_worker",
+    "list_workers",
+    "cancel_worker",
+    "provide_worker_input",
+    "report_to_parent",
+    "request_input",
+];
+
+/// Returns a bounded tool-name label: the name itself when it is a known built-in, else `"other"`.
+fn tool_name_label(tool_name: &str) -> &'static str {
+    BUILTIN_TOOL_NAMES
+        .iter()
+        .copied()
+        .find(|builtin| *builtin == tool_name)
+        .unwrap_or("other")
+}
+
 fn knowledge_metric_label(value: &str) -> String {
     let normalized = value
         .chars()
@@ -876,7 +946,7 @@ fn register_metric_descriptions() {
     );
     describe_counter!(
         "moa_sessions_total",
-        "Total sessions created, labeled by tenant and initial status."
+        "Total sessions created, labeled by initial status."
     );
     describe_counter!(
         "moa_turns_total",
@@ -1153,6 +1223,60 @@ mod tests {
     use tokio::time::{Instant, sleep};
 
     use super::*;
+
+    #[test]
+    fn tool_name_label_buckets_unknown_tools_as_other() {
+        // Pins: built-in tool names pass through as metric labels; tenant/MCP-defined names bucket
+        // to "other" so tool metric cardinality stays bounded.
+        assert_eq!(tool_name_label("bash"), "bash");
+        assert_eq!(tool_name_label("spawn_worker"), "spawn_worker");
+        assert_eq!(tool_name_label("memory_search"), "memory_search");
+        assert_eq!(tool_name_label("acme_customer_lookup"), "other");
+        assert_eq!(tool_name_label(""), "other");
+    }
+
+    #[test]
+    fn tool_and_session_metrics_use_bounded_labels() {
+        // Pins: tool metrics bucket unknown tool names to "other" and moa_sessions_total carries
+        // no per-tenant label. Asserted against rendered Prometheus output.
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            register_metric_descriptions();
+            record_tool_call("bash", "ok", Duration::from_millis(1));
+            record_tool_call("acme_customer_lookup", "ok", Duration::from_millis(1));
+            record_tool_failure("mock", "acme_customer_lookup", "transient");
+            record_session_created(&TenantId::new(), &SessionStatus::Created);
+        });
+        let rendered = handle.render();
+
+        assert!(
+            rendered.contains("tool_name=\"bash\""),
+            "built-in tool name should pass through:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("tool_name=\"other\""),
+            "unknown tool name should bucket to other:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("acme_customer_lookup"),
+            "raw tenant/MCP tool name must never appear as a label:\n{rendered}"
+        );
+
+        let session_series = rendered
+            .lines()
+            .filter(|line| line.starts_with("moa_sessions_total"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !session_series.is_empty(),
+            "sessions metric should render:\n{rendered}"
+        );
+        assert!(
+            !session_series.contains("tenant="),
+            "moa_sessions_total must not carry a per-tenant label:\n{session_series}"
+        );
+    }
 
     #[test]
     fn metrics_endpoint_url_uses_localhost_for_unspecified_listener() {

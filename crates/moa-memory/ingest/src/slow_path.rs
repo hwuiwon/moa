@@ -1,35 +1,40 @@
 //! Restate virtual object for slow-path graph-memory ingestion.
 
 use std::time::Duration;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::{
     ClassifiedFact, Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact,
-    EntityResolutionRequest, EntityResolver, ExtractedFact, ExtractedFactScopeHint, FactExtractor,
-    HeuristicFactExtractor, IngestApplyReport, IngestCtx, IngestDecision, ResolvedEntity,
-    RrfPlusJudgeDetector, SessionTurn, chunk_turn, current_runtime, extraction_confidence_hint,
-    fact_hash, fact_uid_from_hash, scoped_fact_uid, should_ingest_degraded,
+    EntityResolutionPlan, EntityResolutionRequest, EntityResolver, ExtractedFact,
+    ExtractedFactScopeHint, FactExtractor, HeuristicFactExtractor, IngestApplyReport, IngestCtx,
+    IngestDecision, RrfPlusJudgeDetector, SessionTurn, chunk_turn, current_runtime,
+    extraction_confidence_hint, fact_hash, fact_uid_from_hash, scoped_fact_uid,
+    should_ingest_degraded,
 };
+use futures_util::{StreamExt, TryStreamExt, stream};
 use moa_core::RlsContext;
 use moa_core::{MoaConfig, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
-    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore,
+    EdgeLabel, EdgeWriteIntent, NodeLabel, NodeWriteIntent, PostgresGraphStore,
 };
-use moa_memory_pii::{
-    OpenAiPrivacyFilterClassifier, PiiClassifier, PiiResult, PiiSpan, classify_heuristic,
-    redact_text,
-};
+use moa_memory_pii::{PiiClassifier, PiiResult, PiiSpan, redact_text};
 use moa_memory_vector::{VectorStore, VectorStoreFactory};
-use moa_providers::CohereV4Embedder;
 use restate_sdk::prelude::*;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 const DONE_KEY_PREFIX: &str = "done";
 const CHUNK_TARGET_TOKENS: usize = 700;
 const CHUNK_OVERLAP_TOKENS: usize = 100;
+/// Maximum concurrent PII classification requests issued for one turn's facts.
+const PII_CLASSIFY_CONCURRENCY: usize = 8;
+/// Maximum concurrent contradiction pipelines evaluated for one turn's facts.
+const CONTRADICTION_CONCURRENCY: usize = 8;
 
 /// Restate virtual object surface for slow-path turn ingestion.
 #[restate_sdk::object]
@@ -61,8 +66,8 @@ impl IngestionVO for IngestionVOImpl {
 
         let runtime = current_runtime().map_err(HandlerError::from)?;
         let pool = runtime.pool().clone();
-        let pii_service_url = runtime.pii_service_url().map(str::to_string);
-        let cohere_api_key = runtime.cohere_api_key().to_string();
+        let pii_classifier = runtime.pii_classifier();
+        let embedder = runtime.embedder();
         let contradiction_detector = runtime.contradiction_detector();
         let vector_factory = runtime.vector_store_factory();
         let degraded = storage_partition_degraded(&pool, &turn).await?;
@@ -106,9 +111,10 @@ impl IngestionVO for IngestionVOImpl {
             .into_inner();
 
         let classify_facts_input = extracted.clone();
+        let classify_pii = pii_classifier.clone();
         let classified = ctx
             .run(|| async move {
-                classify_facts(&classify_facts_input, pii_service_url.as_deref())
+                classify_facts_with(classify_pii.as_ref(), &classify_facts_input)
                     .await
                     .map(Json::from)
             })
@@ -118,10 +124,10 @@ impl IngestionVO for IngestionVOImpl {
             .into_inner();
 
         let embed_input = classified.clone();
-        let embed_cohere_api_key = cohere_api_key.clone();
+        let embed_embedder = embedder.clone();
         let embedded = ctx
             .run(|| async move {
-                embed_batch(&embed_input, &embed_cohere_api_key)
+                embed_batch_shared(embed_embedder.as_deref(), &embed_input)
                     .await
                     .map(Json::from)
             })
@@ -192,8 +198,8 @@ pub async fn ingest_turn_direct(turn: SessionTurn) -> Result<IngestApplyReport, 
     ingest_turn_direct_with_pool_and_pii(
         DirectIngestDeps {
             pool: runtime.pool().clone(),
-            pii_service_url: runtime.pii_service_url().map(str::to_string),
-            cohere_api_key: runtime.cohere_api_key().to_string(),
+            pii_classifier: runtime.pii_classifier(),
+            embedder: runtime.embedder(),
             extractor: runtime.extractor(),
             entity_resolver: runtime.entity_resolver(),
             entity_blocking_embedder: runtime.entity_blocking_embedder(),
@@ -219,13 +225,14 @@ pub async fn ingest_turn_direct_with_pool(
     let config = MoaConfig::load_from_env().map_err(HandlerError::from)?;
     let contradiction_detector = Arc::new(RrfPlusJudgeDetector::from_config_or_heuristic(&config));
     let vector_factory = VectorStoreFactory::from_config(&config);
-    let memory = config.memory;
-    let cohere_api_key = config.providers.cohere.api_key;
+    let pii_classifier =
+        crate::ctx::build_shared_pii_classifier(config.memory.pii_service_url.as_deref());
+    let embedder = crate::ctx::build_shared_embedder(&config.providers.cohere.api_key);
     ingest_turn_direct_with_pool_and_pii(
         DirectIngestDeps {
             pool,
-            pii_service_url: memory.pii_service_url,
-            cohere_api_key,
+            pii_classifier,
+            embedder,
             extractor: Arc::new(HeuristicFactExtractor),
             entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
             entity_blocking_embedder: None,
@@ -239,8 +246,8 @@ pub async fn ingest_turn_direct_with_pool(
 
 struct DirectIngestDeps {
     pool: PgPool,
-    pii_service_url: Option<String>,
-    cohere_api_key: String,
+    pii_classifier: Arc<dyn PiiClassifier>,
+    embedder: Option<Arc<dyn EmbeddingProvider>>,
     extractor: Arc<dyn FactExtractor>,
     entity_resolver: Arc<EntityResolver>,
     entity_blocking_embedder: Option<Arc<dyn EmbeddingProvider>>,
@@ -254,8 +261,8 @@ async fn ingest_turn_direct_with_pool_and_pii(
 ) -> Result<IngestApplyReport, HandlerError> {
     let DirectIngestDeps {
         pool,
-        pii_service_url,
-        cohere_api_key,
+        pii_classifier,
+        embedder,
         extractor,
         entity_resolver,
         entity_blocking_embedder,
@@ -279,8 +286,8 @@ async fn ingest_turn_direct_with_pool_and_pii(
         .extract(&chunks)
         .await
         .map_err(HandlerError::from)?;
-    let classified = classify_facts(&extracted, pii_service_url.as_deref()).await?;
-    let embedded = embed_batch(&classified, &cohere_api_key).await?;
+    let classified = classify_facts_with(pii_classifier.as_ref(), &extracted).await?;
+    let embedded = embed_batch_shared(embedder.as_deref(), &classified).await?;
     let decisions = detect_contradictions_with(
         contradiction_detector.as_ref(),
         pool.clone(),
@@ -375,47 +382,38 @@ pub fn turn_transcript(messages: &[moa_core::ContextMessage], response_text: &st
     lines.join("\n")
 }
 
-async fn classify_facts(
-    facts: &[ExtractedFact],
-    pii_service_url: Option<&str>,
-) -> Result<Vec<ClassifiedFact>, HandlerError> {
-    if let Some(url) = pii_service_url {
-        let classifier =
-            OpenAiPrivacyFilterClassifier::new(url.to_string()).map_err(HandlerError::from)?;
-        return classify_facts_with(&classifier, facts).await;
-    }
-
-    let mut classified = Vec::with_capacity(facts.len());
-    for fact in facts {
-        let result = classify_heuristic(&fact.summary);
-        let redacted_fact = redact_fact(fact, &result);
-        classified.push(ClassifiedFact {
-            fact: redacted_fact,
-            pii_class: result.class,
-            pii_spans: result.spans,
-        });
-    }
-    Ok(classified)
-}
-
 async fn classify_facts_with(
     classifier: &dyn PiiClassifier,
     facts: &[ExtractedFact],
 ) -> Result<Vec<ClassifiedFact>, HandlerError> {
-    let mut classified = Vec::with_capacity(facts.len());
-    for fact in facts {
-        let result = classifier
-            .classify(&fact.summary)
-            .await
-            .map_err(HandlerError::from)?;
-        let redacted_fact = redact_fact(fact, &result);
-        classified.push(ClassifiedFact {
-            fact: redacted_fact,
-            pii_class: result.class,
-            pii_spans: result.spans,
-        });
-    }
-    Ok(classified)
+    // Classify a turn's facts with bounded concurrency. The privacy-filter
+    // sidecar exposes only a single-text endpoint, so facts are classified as
+    // concurrent requests capped at `PII_CLASSIFY_CONCURRENCY`. `buffered`
+    // preserves fact order, keeping redaction and downstream dedup identity
+    // deterministic regardless of which request completes first.
+    let summaries = facts
+        .iter()
+        .map(|fact| fact.summary.clone())
+        .collect::<Vec<_>>();
+    let results: Vec<PiiResult> = stream::iter(summaries)
+        .map(|summary| async move { classifier.classify(&summary).await })
+        .buffered(PII_CLASSIFY_CONCURRENCY)
+        .try_collect()
+        .await
+        .map_err(HandlerError::from)?;
+
+    Ok(facts
+        .iter()
+        .zip(results)
+        .map(|(fact, result)| {
+            let redacted_fact = redact_fact(fact, &result);
+            ClassifiedFact {
+                fact: redacted_fact,
+                pii_class: result.class,
+                pii_spans: result.spans,
+            }
+        })
+        .collect())
 }
 
 fn redact_fact(fact: &ExtractedFact, result: &PiiResult) -> ExtractedFact {
@@ -491,13 +489,13 @@ fn redaction_replacement(source_text: &str, span: &PiiSpan) -> String {
     )
 }
 
-async fn embed_batch(
+async fn embed_batch_shared(
+    embedder: Option<&dyn EmbeddingProvider>,
     facts: &[ClassifiedFact],
-    cohere_api_key: &str,
 ) -> Result<Vec<EmbeddedFact>, HandlerError> {
-    let api_key = cohere_api_key.trim();
-    if api_key.is_empty() {
-        return Ok(facts
+    match embedder {
+        Some(embedder) => embed_batch_with(embedder, facts).await,
+        None => Ok(facts
             .iter()
             .cloned()
             .map(|classified| EmbeddedFact {
@@ -506,11 +504,8 @@ async fn embed_batch(
                 embedding_model: None,
                 embedding_model_version: None,
             })
-            .collect());
+            .collect()),
     }
-
-    let embedder = CohereV4Embedder::new(api_key.to_string()).map_err(HandlerError::from)?;
-    embed_batch_with(&embedder, facts).await
 }
 
 async fn embed_batch_with(
@@ -542,24 +537,48 @@ async fn detect_contradictions_with(
     turn: &SessionTurn,
     embedded: &[EmbeddedFact],
 ) -> Result<Vec<IngestDecision>, HandlerError> {
-    let mut decisions = Vec::with_capacity(embedded.len());
+    // Resolve one vector store per distinct scope up front (cheap, cached) so the
+    // per-fact contradiction pipelines can run concurrently without sharing a
+    // mutable cache across tasks.
     let mut vector_cache = ConfiguredVectorStoreCache::default();
-
+    let mut scoped_vectors = Vec::with_capacity(embedded.len());
     for fact in embedded {
         let scope = fact_scope(turn, fact);
         let vector = vector_cache
             .configured_for_scope(&pool, vector_factory, scope.clone(), true)
             .await
             .map_err(HandlerError::from)?;
-        let ctx = ContradictionContext::for_app_role(pool.clone(), scope, vector);
-        let conflict = detector
-            .check_one_slow(fact, &ctx)
-            .await
-            .map_err(HandlerError::from)?;
-        decisions.push(decision_from_conflict(conflict, fact.clone()));
+        scoped_vectors.push((scope, vector));
     }
 
-    Ok(decisions)
+    // Contradiction detection reads only already-committed graph state, so the
+    // per-fact pipelines are independent and evaluated with bounded concurrency.
+    // `buffered` preserves fact order so the resulting decisions apply
+    // deterministically.
+    let pipelines = embedded
+        .iter()
+        .cloned()
+        .zip(scoped_vectors)
+        .map(|(fact, (scope, vector))| {
+            let pool = pool.clone();
+            async move {
+                let ctx = ContradictionContext::for_app_role(pool, scope, vector);
+                detector.check_one_slow(&fact, &ctx).await
+            }
+        })
+        .collect::<Vec<_>>();
+    let conflicts: Vec<Conflict> = stream::iter(pipelines)
+        .buffered(CONTRADICTION_CONCURRENCY)
+        .try_collect()
+        .await
+        .map_err(HandlerError::from)?;
+
+    Ok(embedded
+        .iter()
+        .cloned()
+        .zip(conflicts)
+        .map(|(fact, conflict)| decision_from_conflict(conflict, fact))
+        .collect())
 }
 
 struct DirectIngestClaim {
@@ -640,19 +659,32 @@ async fn apply_decisions(
     decisions: &[IngestDecision],
 ) -> Result<IngestApplyReport, HandlerError> {
     let mut report = IngestApplyReport::default();
+    // Embed every distinct entity name for the whole turn's facts in one provider
+    // call up front, so per-fact entity resolution reuses the precomputed vectors
+    // instead of issuing one batch-size-one embed per subject and object.
+    let entity_embeddings =
+        precompute_entity_embeddings(entity_blocking_embedder.as_deref(), decisions).await?;
     let mut deps = ApplyDecisionDeps {
         pool,
         vector_factory,
         vector_cache: ConfiguredVectorStoreCache::default(),
         entity_resolver,
         entity_blocking_embedder,
+        entity_embeddings,
     };
 
+    let mut drain_scopes: HashMap<String, RlsContext> = HashMap::new();
     for decision in decisions {
         let scope = decision_scope(turn, decision);
         match apply_one_decision(&mut deps, &scope, turn, decision).await {
-            Ok(ApplyOutcome::Inserted) => report.inserted += 1,
-            Ok(ApplyOutcome::Superseded) => report.superseded += 1,
+            Ok(ApplyOutcome::Inserted) => {
+                report.inserted += 1;
+                record_drain_scope(&mut drain_scopes, &scope);
+            }
+            Ok(ApplyOutcome::Superseded) => {
+                report.superseded += 1;
+                record_drain_scope(&mut drain_scopes, &scope);
+            }
             Ok(ApplyOutcome::Skipped) => report.skipped += 1,
             Err(error) => {
                 report.failed += 1;
@@ -668,7 +700,54 @@ async fn apply_decisions(
         }
     }
 
+    drain_external_vector_sync(pool, vector_factory, drain_scopes).await;
+
     Ok(report)
+}
+
+/// Records one write scope for a single post-batch external vector-sync drain.
+///
+/// Scopes are deduplicated by storage partition because the outbox drain claims
+/// rows per storage partition, covering every scope tier within it.
+fn record_drain_scope(drain_scopes: &mut HashMap<String, RlsContext>, scope: &RlsContext) {
+    drain_scopes
+        .entry(scope.storage_partition_id().to_string())
+        .or_insert_with(|| scope.clone());
+}
+
+/// Drains the external vector-sync outbox once per storage partition after a turn.
+///
+/// Partitions whose vector backend is pgvector never enqueue outbox rows, so the
+/// drain is skipped entirely for them; only partitions with an external backend
+/// (for example Turbopuffer) pay the single post-batch drain.
+async fn drain_external_vector_sync(
+    pool: &PgPool,
+    vector_factory: &VectorStoreFactory,
+    drain_scopes: HashMap<String, RlsContext>,
+) {
+    for (storage_partition_id, scope) in drain_scopes {
+        match vector_factory
+            .partition_uses_external_backend(pool, &storage_partition_id)
+            .await
+        {
+            Ok(true) => {
+                let backend = vector_factory.transactional_graph_backend(pool.clone(), scope, true);
+                if let Err(error) = backend.sync_post_commit().await {
+                    tracing::warn!(
+                        error = %error,
+                        storage_partition_id = %storage_partition_id,
+                        "post-batch vector sync drain failed; queued rows remain pending"
+                    );
+                }
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                error = %error,
+                storage_partition_id = %storage_partition_id,
+                "failed to resolve vector backend for post-batch drain; queued rows remain pending"
+            ),
+        }
+    }
 }
 
 struct ApplyDecisionDeps<'a> {
@@ -677,6 +756,8 @@ struct ApplyDecisionDeps<'a> {
     vector_cache: ConfiguredVectorStoreCache,
     entity_blocking_embedder: Option<Arc<dyn EmbeddingProvider>>,
     entity_resolver: &'a EntityResolver,
+    /// Precomputed embeddings keyed by normalized entity name for this turn's facts.
+    entity_embeddings: HashMap<String, Vec<f32>>,
 }
 
 async fn apply_one_decision(
@@ -715,16 +796,26 @@ async fn apply_one_decision(
         deps.vector_factory,
         scoped_resolver.is_some(),
     );
-    apply_one_decision_with_graph(deps.pool, scope, &graph, resolver, turn, decision).await
+    apply_one_decision_with_graph(
+        deps.pool,
+        scope,
+        &graph,
+        resolver,
+        turn,
+        decision,
+        &deps.entity_embeddings,
+    )
+    .await
 }
 
 async fn apply_one_decision_with_graph(
     pool: &PgPool,
     scope: &RlsContext,
-    graph: &dyn GraphStore,
+    store: &PostgresGraphStore,
     entity_resolver: &EntityResolver,
     turn: &SessionTurn,
     decision: &IngestDecision,
+    entity_embeddings: &HashMap<String, Vec<f32>>,
 ) -> Result<ApplyOutcome, HandlerError> {
     let Some(fact) = decision_fact(decision) else {
         return Ok(ApplyOutcome::Skipped);
@@ -734,29 +825,50 @@ async fn apply_one_decision_with_graph(
         return Ok(ApplyOutcome::Skipped);
     }
 
-    let entities = resolve_fact_entities(pool, scope, graph, entity_resolver, turn, fact).await?;
+    // Entity resolution reads run before the transaction and yield node-create
+    // intents; the actual writes join the fact's transaction below.
+    let entities =
+        resolve_fact_entities(pool, scope, entity_resolver, turn, fact, entity_embeddings).await?;
     let fact_uid = scoped_fact_uid(&turn.tenant_id, &turn.session_id, turn.turn_seq, &hash);
-    match decision {
+
+    // Apply the entity nodes, the fact node, both entity edges, and the dedup row
+    // in one scoped transaction via the in-conn write primitives, instead of the
+    // previous separate transaction per write (entity nodes previously committed
+    // in their own transactions). The external vector-sync outbox is drained once
+    // per turn by the caller (`drain_external_vector_sync`).
+    let mut conn = ScopedConn::begin_as_app(pool, scope, true)
+        .await
+        .map_err(HandlerError::from)?;
+    write_entity_nodes_in_conn(store, conn.as_mut(), &entities).await?;
+    let (uid, outcome) = match decision {
         IngestDecision::Insert { fact } => {
-            let uid = graph
-                .create_node(node_intent(turn, scope, fact, &hash, fact_uid))
-                .await
-                .map_err(HandlerError::from)?;
-            attach_fact_entity_edges(graph, turn, scope, uid, fact, &entities).await?;
-            insert_dedup(pool, scope, turn, &hash, uid).await?;
-            Ok(ApplyOutcome::Inserted)
+            let uid = moa_memory_graph::write::create_node_in_conn(
+                store,
+                conn.as_mut(),
+                node_intent(turn, scope, fact, &hash, fact_uid),
+            )
+            .await
+            .map_err(HandlerError::from)?;
+            (uid, ApplyOutcome::Inserted)
         }
         IngestDecision::Supersede { old_uid, fact } => {
-            let uid = graph
-                .supersede_node(*old_uid, node_intent(turn, scope, fact, &hash, fact_uid))
-                .await
-                .map_err(HandlerError::from)?;
-            attach_fact_entity_edges(graph, turn, scope, uid, fact, &entities).await?;
-            insert_dedup(pool, scope, turn, &hash, uid).await?;
-            Ok(ApplyOutcome::Superseded)
+            let uid = moa_memory_graph::write::supersede_node_in_conn(
+                store,
+                conn.as_mut(),
+                *old_uid,
+                node_intent(turn, scope, fact, &hash, fact_uid),
+            )
+            .await
+            .map_err(HandlerError::from)?;
+            (uid, ApplyOutcome::Superseded)
         }
-        IngestDecision::SkipDuplicate { .. } => Ok(ApplyOutcome::Skipped),
-    }
+        IngestDecision::SkipDuplicate { .. } => return Ok(ApplyOutcome::Skipped),
+    };
+    write_fact_entity_edges_in_conn(store, conn.as_mut(), turn, scope, uid, fact, &entities)
+        .await?;
+    insert_dedup_in_conn(conn.as_mut(), scope, turn, &hash, uid).await?;
+    conn.commit().await.map_err(HandlerError::from)?;
+    Ok(outcome)
 }
 
 #[derive(Default)]
@@ -791,12 +903,16 @@ fn graph_store(
     vector_factory: &VectorStoreFactory,
     needs_entity_vector_writes: bool,
 ) -> PostgresGraphStore {
+    // Attach only the transactional pgvector store, not the post-commit external
+    // sync hook. Ingesting a turn writes many nodes and edges; draining the
+    // external vector-sync outbox after every individual write is wasteful (and
+    // for pgvector-only partitions the outbox is always empty). The outbox is
+    // drained once per storage partition after the whole batch commits — see
+    // `apply_decisions` and `drain_external_vector_sync`.
     let store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope.clone());
     if fact.embedding.is_some() || needs_entity_vector_writes {
         let vector_backend = vector_factory.transactional_graph_backend(pool, scope, true);
-        store
-            .with_vector_store(vector_backend.vector_store())
-            .with_vector_post_commit_sync(vector_backend.post_commit_sync())
+        store.with_vector_store(vector_backend.vector_store())
     } else {
         store
     }
@@ -873,26 +989,25 @@ fn turn_actor_kind(turn: &SessionTurn) -> &'static str {
 
 #[derive(Debug, Clone)]
 struct ResolvedFactEntities {
-    subject: ResolvedEntity,
-    object: ResolvedEntity,
+    subject: EntityResolutionPlan,
+    object: EntityResolutionPlan,
 }
 
 async fn resolve_fact_entities(
     pool: &PgPool,
     scope: &RlsContext,
-    graph: &dyn GraphStore,
     entity_resolver: &EntityResolver,
     turn: &SessionTurn,
     fact: &EmbeddedFact,
+    entity_embeddings: &HashMap<String, Vec<f32>>,
 ) -> Result<ResolvedFactEntities, HandlerError> {
     let extracted = &fact.classified.fact;
     let confidence = extracted_confidence(extracted);
     let actor_id = turn_actor_id(turn);
     let actor_kind = turn_actor_kind(turn);
     let subject = entity_resolver
-        .resolve(
+        .plan_resolution(
             pool,
-            graph,
             EntityResolutionRequest {
                 scope,
                 name: &extracted.subject,
@@ -901,14 +1016,14 @@ async fn resolve_fact_entities(
                 valid_from: turn.finalized_at,
                 actor_id: &actor_id,
                 actor_kind,
+                precomputed_embedding: entity_embedding_for(entity_embeddings, &extracted.subject),
             },
         )
         .await
         .map_err(HandlerError::from)?;
     let object = entity_resolver
-        .resolve(
+        .plan_resolution(
             pool,
-            graph,
             EntityResolutionRequest {
                 scope,
                 name: &extracted.object,
@@ -917,6 +1032,7 @@ async fn resolve_fact_entities(
                 valid_from: turn.finalized_at,
                 actor_id: &actor_id,
                 actor_kind,
+                precomputed_embedding: entity_embedding_for(entity_embeddings, &extracted.object),
             },
         )
         .await
@@ -925,43 +1041,142 @@ async fn resolve_fact_entities(
     Ok(ResolvedFactEntities { subject, object })
 }
 
+/// Looks up the precomputed embedding for one entity mention by its normalized name.
+fn entity_embedding_for<'a>(
+    entity_embeddings: &'a HashMap<String, Vec<f32>>,
+    name: &str,
+) -> Option<&'a [f32]> {
+    entity_embeddings
+        .get(&crate::entity_resolution::normalize_entity_name(name))
+        .map(Vec::as_slice)
+}
+
+/// Writes the resolved entities' node-create intents into the fact's transaction.
+///
+/// Only mentions that resolved to a new entity carry a create intent. Intents are
+/// deduplicated by uid so a fact whose subject and object normalize to the same
+/// entity writes that node once instead of hitting a primary-key conflict.
+async fn write_entity_nodes_in_conn(
+    store: &PostgresGraphStore,
+    conn: &mut PgConnection,
+    entities: &ResolvedFactEntities,
+) -> Result<(), HandlerError> {
+    let mut written: HashSet<uuid::Uuid> = HashSet::new();
+    for plan in [&entities.subject, &entities.object] {
+        if let Some(intent) = plan.create.as_ref()
+            && written.insert(intent.uid)
+        {
+            moa_memory_graph::write::create_node_in_conn(store, &mut *conn, intent.clone())
+                .await
+                .map_err(HandlerError::from)?;
+        }
+    }
+    Ok(())
+}
+
+/// Precomputes the embedding of every distinct entity name in the batch in one call.
+///
+/// Returns a map keyed by normalized entity name. When embedding blocking is
+/// disabled (`embedder` is `None`) the map is empty and resolution stays
+/// deterministic. A name whose normalized form is byte-identical to a fact's
+/// summary reuses that fact's already-computed embedding (embedding the same text
+/// yields the same vector), avoiding a redundant provider input.
+async fn precompute_entity_embeddings(
+    embedder: Option<&dyn EmbeddingProvider>,
+    decisions: &[IngestDecision],
+) -> Result<HashMap<String, Vec<f32>>, HandlerError> {
+    let Some(embedder) = embedder else {
+        return Ok(HashMap::new());
+    };
+    let mut map: HashMap<String, Vec<f32>> = HashMap::new();
+    let mut pending: Vec<String> = Vec::new();
+    let mut pending_seen: HashSet<String> = HashSet::new();
+    for decision in decisions {
+        let Some(fact) = decision_fact(decision) else {
+            continue;
+        };
+        let extracted = &fact.classified.fact;
+        for raw in [extracted.subject.as_str(), extracted.object.as_str()] {
+            let normalized = crate::entity_resolution::normalize_entity_name(raw);
+            if normalized.is_empty()
+                || map.contains_key(&normalized)
+                || pending_seen.contains(&normalized)
+            {
+                continue;
+            }
+            if let Some(embedding) = fact
+                .embedding
+                .as_ref()
+                .filter(|_| normalized == extracted.summary)
+            {
+                map.insert(normalized, embedding.clone());
+            } else {
+                pending_seen.insert(normalized.clone());
+                pending.push(normalized);
+            }
+        }
+    }
+    if !pending.is_empty() {
+        let embeddings = embedder.embed(&pending).await.map_err(HandlerError::from)?;
+        if embeddings.len() != pending.len() {
+            return Err(TerminalError::new(format!(
+                "entity name embedding count {} does not match {} requested names",
+                embeddings.len(),
+                pending.len()
+            ))
+            .into());
+        }
+        for (name, embedding) in pending.into_iter().zip(embeddings) {
+            map.insert(name, embedding);
+        }
+    }
+    Ok(map)
+}
+
 fn extracted_confidence(fact: &ExtractedFact) -> f64 {
     fact.confidence
         .unwrap_or_else(|| extraction_confidence_hint(&fact.summary))
         .clamp(0.0, 1.0)
 }
 
-async fn attach_fact_entity_edges(
-    graph: &dyn GraphStore,
+async fn write_fact_entity_edges_in_conn(
+    store: &PostgresGraphStore,
+    conn: &mut PgConnection,
     turn: &SessionTurn,
     scope: &RlsContext,
     fact_uid: uuid::Uuid,
     fact: &EmbeddedFact,
     entities: &ResolvedFactEntities,
 ) -> Result<(), HandlerError> {
-    graph
-        .create_edge(entity_fact_edge_intent(
+    moa_memory_graph::write::create_edge_in_conn(
+        store,
+        &mut *conn,
+        entity_fact_edge_intent(
             turn,
             scope,
-            entities.subject.uid,
+            entities.subject.resolved.uid,
             fact_uid,
             "subject",
-            entities.subject.alias_mention.as_deref(),
-        ))
-        .await
-        .map_err(HandlerError::from)?;
-    graph
-        .create_edge(fact_entity_edge_intent(
+            entities.subject.resolved.alias_mention.as_deref(),
+        ),
+    )
+    .await
+    .map_err(HandlerError::from)?;
+    moa_memory_graph::write::create_edge_in_conn(
+        store,
+        &mut *conn,
+        fact_entity_edge_intent(
             turn,
             scope,
             fact_uid,
-            entities.object.uid,
+            entities.object.resolved.uid,
             "object",
             &fact.classified.fact.predicate,
-            entities.object.alias_mention.as_deref(),
-        ))
-        .await
-        .map_err(HandlerError::from)?;
+            entities.object.resolved.alias_mention.as_deref(),
+        ),
+    )
+    .await
+    .map_err(HandlerError::from)?;
     Ok(())
 }
 
@@ -1105,16 +1320,13 @@ async fn dedup_fact_uid(
     Ok(uid)
 }
 
-async fn insert_dedup(
-    pool: &PgPool,
+async fn insert_dedup_in_conn(
+    conn: &mut PgConnection,
     scope: &RlsContext,
     turn: &SessionTurn,
     hash: &[u8],
     fact_uid: uuid::Uuid,
 ) -> Result<(), HandlerError> {
-    let mut conn = ScopedConn::begin(pool, scope)
-        .await
-        .map_err(HandlerError::from)?;
     let turn_seq = turn_seq_i64(turn)?;
     let user_id = scope_user_id(scope);
     sqlx::query(
@@ -1131,10 +1343,10 @@ async fn insert_dedup(
     .bind(turn_seq)
     .bind(hash)
     .bind(fact_uid)
-    .execute(conn.as_mut())
+    .execute(conn)
     .await
     .map_err(HandlerError::from)?;
-    conn.commit().await.map_err(HandlerError::from)
+    Ok(())
 }
 
 async fn write_dlq(
@@ -1206,16 +1418,200 @@ enum ApplyOutcome {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use chrono::Utc;
+    use moa_core::traits::EmbeddingProvider;
     use moa_core::{ContactId, ContextMessage, SessionId, TenantId};
     use moa_memory_graph::{EdgeLabel, PiiClass};
-    use moa_memory_pii::{PiiCategory, PiiResult, PiiSpan, classify_heuristic};
+    use moa_memory_pii::{PiiCategory, PiiClassifier, PiiResult, PiiSpan, classify_heuristic};
 
     use super::{
-        direct_ingest_claim_key, entity_fact_edge_intent, fact_entity_edge_intent,
-        fact_object_edge_label, redact_fact, turn_tenant_scope, turn_transcript,
+        classify_facts_with, direct_ingest_claim_key, entity_fact_edge_intent,
+        fact_entity_edge_intent, fact_object_edge_label, precompute_entity_embeddings, redact_fact,
+        turn_tenant_scope, turn_transcript,
     };
-    use crate::{ExtractedFact, ExtractedFactScopeHint, fact_hash};
+    use crate::{
+        ClassifiedFact, EmbeddedFact, ExtractedFact, ExtractedFactScopeHint, IngestDecision,
+        fact_hash,
+    };
+
+    /// PII classifier that counts calls and echoes input so ordering can be pinned.
+    struct CountingClassifier {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl PiiClassifier for CountingClassifier {
+        async fn classify(&self, text: &str) -> moa_memory_pii::Result<PiiResult> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(PiiResult {
+                class: PiiClass::None,
+                spans: Vec::new(),
+                model_version: text.to_string(),
+                abstained: false,
+            })
+        }
+    }
+
+    /// Embedder that counts calls and records the last batch size for one-call pins.
+    struct CountingEmbedder {
+        calls: Arc<AtomicUsize>,
+        last_batch_len: Arc<AtomicUsize>,
+        dim: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for CountingEmbedder {
+        fn model_id(&self) -> &str {
+            "counting"
+        }
+
+        fn dimensions(&self) -> usize {
+            self.dim
+        }
+
+        async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.last_batch_len.store(inputs.len(), Ordering::SeqCst);
+            Ok(inputs
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    let mut vector = vec![0.0; self.dim];
+                    vector[index % self.dim] = 1.0;
+                    vector
+                })
+                .collect())
+        }
+    }
+
+    fn embedded_decision(
+        subject: &str,
+        object: &str,
+        summary: &str,
+        embedding: Option<Vec<f32>>,
+    ) -> IngestDecision {
+        let mut fact = ExtractedFact {
+            uid: uuid::Uuid::nil(),
+            subject: subject.to_string(),
+            predicate: "predicate".to_string(),
+            object: object.to_string(),
+            summary: summary.to_string(),
+            source_chunk: 0,
+            scope_hint: ExtractedFactScopeHint::Contact,
+            confidence: Some(0.9),
+        };
+        let hash = fact_hash(&fact).expect("fact hashes");
+        fact.uid = crate::fact_uid_from_hash(&hash);
+        let embedding_model = embedding.as_ref().map(|_| "counting".to_string());
+        IngestDecision::Insert {
+            fact: EmbeddedFact {
+                classified: ClassifiedFact {
+                    fact,
+                    pii_class: PiiClass::None,
+                    pii_spans: Vec::new(),
+                },
+                embedding,
+                embedding_model,
+                embedding_model_version: Some(1),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn precompute_entity_embeddings_batches_one_call_dedupes_and_reuses_fact_embedding() {
+        // Pins: entity-name embedding for a whole fact batch is a single deduped
+        // provider call; a name whose normalized form equals a fact summary reuses
+        // that fact's own embedding instead of re-embedding it (item: batch
+        // entity-name embeddings).
+        let calls = Arc::new(AtomicUsize::new(0));
+        let batch_len = Arc::new(AtomicUsize::new(0));
+        let embedder = CountingEmbedder {
+            calls: calls.clone(),
+            last_batch_len: batch_len.clone(),
+            dim: 8,
+        };
+        let reuse_vector = vec![0.5; 8];
+        let decisions = vec![
+            embedded_decision("API Service", "DB", "api service uses db", None),
+            embedded_decision("api-service", "cache", "api service uses cache", None),
+            embedded_decision(
+                "payments",
+                "ignored object",
+                "payments",
+                Some(reuse_vector.clone()),
+            ),
+        ];
+
+        let map = precompute_entity_embeddings(Some(&embedder), &decisions)
+            .await
+            .expect("precompute entity embeddings");
+
+        // One batched provider call for the four distinct non-reused names
+        // ("api service", "db", "cache", "ignored object"); "payments" reuses the
+        // fact embedding because its normalized name equals the fact summary.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(batch_len.load(Ordering::SeqCst), 4);
+        assert_eq!(map.len(), 5);
+        assert_eq!(map.get("payments"), Some(&reuse_vector));
+        assert!(map.contains_key("api service"));
+        assert!(map.contains_key("ignored object"));
+    }
+
+    #[tokio::test]
+    async fn precompute_entity_embeddings_is_empty_without_embedder() {
+        // Pins: entity embedding blocking stays gated off when no embedder is
+        // configured (Cohere key absent), so no vectors are precomputed.
+        let decisions = vec![embedded_decision("api", "db", "api uses db", None)];
+
+        let map = precompute_entity_embeddings(None, &decisions)
+            .await
+            .expect("precompute without embedder");
+
+        assert!(map.is_empty());
+    }
+
+    fn plain_fact(summary: &str) -> ExtractedFact {
+        let mut fact = ExtractedFact {
+            uid: uuid::Uuid::nil(),
+            subject: "subject".to_string(),
+            predicate: "predicate".to_string(),
+            object: "object".to_string(),
+            summary: summary.to_string(),
+            source_chunk: 0,
+            scope_hint: ExtractedFactScopeHint::Contact,
+            confidence: Some(0.9),
+        };
+        let hash = fact_hash(&fact).expect("fact hashes");
+        fact.uid = crate::fact_uid_from_hash(&hash);
+        fact
+    }
+
+    #[tokio::test]
+    async fn classify_facts_with_issues_one_call_per_fact_in_order() {
+        // Pins: batch PII classification issues exactly one request per fact and
+        // preserves fact order regardless of completion order (item: batch classify).
+        let calls = Arc::new(AtomicUsize::new(0));
+        let classifier = CountingClassifier {
+            calls: calls.clone(),
+        };
+        let facts = (0..12)
+            .map(|index| plain_fact(&format!("fact number {index}")))
+            .collect::<Vec<_>>();
+
+        let classified = classify_facts_with(&classifier, &facts)
+            .await
+            .expect("classify batch succeeds");
+
+        assert_eq!(calls.load(Ordering::SeqCst), facts.len());
+        assert_eq!(classified.len(), facts.len());
+        for (index, entry) in classified.iter().enumerate() {
+            assert_eq!(entry.fact.summary, format!("fact number {index}"));
+            assert_eq!(entry.pii_class, PiiClass::None);
+        }
+    }
 
     #[test]
     fn turn_transcript_keeps_user_messages_and_response() {

@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use moa_core::RlsContext;
 use moa_core::{
     ContextMessage, ContextProcessor, MemoryDigestConfig, MoaError, ProcessorOutput, Result,
-    WorkingContext,
+    StageApply, WorkingContext,
 };
 use moa_db::ScopedConn;
 use serde_json::json;
@@ -65,49 +65,66 @@ impl ContextProcessor for DigestProcessor {
         6
     }
 
+    fn parallelizable(&self) -> bool {
+        true
+    }
+
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
+        match self.fetch(ctx).await? {
+            Some(apply) => apply(ctx),
+            None => Ok(ProcessorOutput::default()),
+        }
+    }
+
+    async fn fetch(&self, ctx: &WorkingContext) -> Result<Option<StageApply>> {
         if !self.config.enabled {
-            return Ok(ProcessorOutput::default());
+            return Ok(Some(Box::new(|_ctx| Ok(ProcessorOutput::default()))));
         }
 
+        // Read-only I/O: the standing digest rows depend only on the session's
+        // tenant/contact, none of which other stages mutate during the turn.
         let rows = self.read_digest_rows(ctx).await?;
-        if rows.is_empty() {
-            return Ok(ProcessorOutput::default());
-        }
 
-        let tokens_before = ctx.token_count;
-        let block = render_digest_block(&rows);
-        let insertion_index = trailing_user_insertion_index(&ctx.messages);
-        ctx.insert_message(insertion_index, ContextMessage::user(block));
+        let apply: StageApply = Box::new(move |ctx: &mut WorkingContext| {
+            if rows.is_empty() {
+                return Ok(ProcessorOutput::default());
+            }
 
-        let contact_updated_at = rows
-            .iter()
-            .find(|row| row.contact_id.is_some())
-            .map(|row| row.updated_at.to_rfc3339());
-        let tenant_updated_at = rows
-            .iter()
-            .find(|row| row.contact_id.is_none())
-            .map(|row| row.updated_at.to_rfc3339());
-        tracing::info!(
-            contact_digest_updated_at = contact_updated_at.as_deref().unwrap_or("missing"),
-            tenant_digest_updated_at = tenant_updated_at.as_deref().unwrap_or("missing"),
-            "memory digest context injected"
-        );
+            let tokens_before = ctx.token_count;
+            let block = render_digest_block(&rows);
+            let insertion_index = trailing_user_insertion_index(&ctx.messages);
+            ctx.insert_message(insertion_index, ContextMessage::user(block));
 
-        Ok(ProcessorOutput {
-            tokens_added: ctx.token_count.saturating_sub(tokens_before),
-            items_included: rows
+            let contact_updated_at = rows
                 .iter()
-                .map(|row| format!("digest:{}", row.scope))
+                .find(|row| row.contact_id.is_some())
+                .map(|row| row.updated_at.to_rfc3339());
+            let tenant_updated_at = rows
+                .iter()
+                .find(|row| row.contact_id.is_none())
+                .map(|row| row.updated_at.to_rfc3339());
+            tracing::info!(
+                contact_digest_updated_at = contact_updated_at.as_deref().unwrap_or("missing"),
+                tenant_digest_updated_at = tenant_updated_at.as_deref().unwrap_or("missing"),
+                "memory digest context injected"
+            );
+
+            Ok(ProcessorOutput {
+                tokens_added: ctx.token_count.saturating_sub(tokens_before),
+                items_included: rows
+                    .iter()
+                    .map(|row| format!("digest:{}", row.scope))
+                    .collect(),
+                metadata: serde_json::Map::from_iter([
+                    ("contact_updated_at".to_string(), json!(contact_updated_at)),
+                    ("tenant_updated_at".to_string(), json!(tenant_updated_at)),
+                ])
+                .into_iter()
                 .collect(),
-            metadata: serde_json::Map::from_iter([
-                ("contact_updated_at".to_string(), json!(contact_updated_at)),
-                ("tenant_updated_at".to_string(), json!(tenant_updated_at)),
-            ])
-            .into_iter()
-            .collect(),
-            ..ProcessorOutput::default()
-        })
+                ..ProcessorOutput::default()
+            })
+        });
+        Ok(Some(apply))
     }
 }
 

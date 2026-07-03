@@ -10,7 +10,7 @@ use moa_lineage_core::{LineageEvent, LineageSink};
 use tokio::sync::mpsc;
 
 use crate::writer::{DurableJournal, WriterCommand, WriterHandle, spawn_writer_for_sink};
-use crate::{Error, Result, WriterStats};
+use crate::{Result, WriterStats};
 
 /// Configuration for the production mpsc lineage sink.
 #[derive(Clone, Debug)]
@@ -23,8 +23,6 @@ pub struct MpscSinkConfig {
     pub batch_max_age: Duration,
     /// fjall journal directory.
     pub journal_path: PathBuf,
-    /// Allows non-audit telemetry events to drop under channel pressure.
-    pub lossy_telemetry: bool,
 }
 
 impl Default for MpscSinkConfig {
@@ -34,7 +32,6 @@ impl Default for MpscSinkConfig {
             batch_size: 512,
             batch_max_age: Duration::from_secs(2),
             journal_path: "/var/lib/moa/lineage-journal".into(),
-            lossy_telemetry: false,
         }
     }
 }
@@ -46,7 +43,6 @@ impl From<&moa_core::LineageConfig> for MpscSinkConfig {
             batch_size: config.batch_size,
             batch_max_age: Duration::from_secs(config.batch_max_age_secs),
             journal_path: expand_home(&config.journal_path),
-            lossy_telemetry: false,
         }
     }
 }
@@ -101,13 +97,6 @@ impl MpscSinkBuilder {
         self
     }
 
-    /// Enables lossy channel behavior for non-audit telemetry events.
-    #[must_use]
-    pub fn lossy_telemetry(mut self, lossy_telemetry: bool) -> Self {
-        self.config.lossy_telemetry = lossy_telemetry;
-        self
-    }
-
     /// Spawns a sink and writer against the provided SQL pool.
     pub async fn spawn(self, pool: sqlx::PgPool) -> Result<(MpscSink, WriterHandle)> {
         MpscSink::spawn(self.config, pool).await
@@ -120,7 +109,6 @@ pub struct MpscSink {
     tx: mpsc::Sender<WriterCommand>,
     journal: DurableJournal,
     dropped: Arc<AtomicU64>,
-    lossy_telemetry: bool,
 }
 
 impl MpscSink {
@@ -136,27 +124,52 @@ impl MpscSink {
                 tx,
                 journal,
                 dropped,
-                lossy_telemetry: config.lossy_telemetry,
             },
             writer_handle,
         ))
     }
 
-    fn record_durable(&self, evt: LineageEvent) {
+    /// Enqueues an event to the single journal-writer task with one bounded `try_send`.
+    ///
+    /// Best-effort by contract: the writer batches enqueued events and group-commits them to the
+    /// journal, so the hot path neither blocks nor spawns per-event work. When the writer channel
+    /// is saturated the event is dropped and counted. Callers that require guaranteed durability
+    /// use [`MpscSink::record_durable_event`], which awaits journal acceptance instead.
+    fn enqueue(&self, evt: LineageEvent) {
         let event_class = lineage_event_class(&evt);
-        let journal = self.journal.clone();
-        let tx = self.tx.clone();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                record_durable_async(journal, tx, evt, event_class).await;
-            });
-            return;
+        match self.tx.try_send(WriterCommand::Event(Box::new(evt))) {
+            Ok(()) => {
+                metrics::counter!(
+                    "moa_lineage_enqueued_total",
+                    "mode" => "durable",
+                    "event_class" => event_class
+                )
+                .increment(1);
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                metrics::counter!(
+                    "moa_lineage_dropped_total",
+                    "mode" => "durable",
+                    "event_class" => event_class
+                )
+                .increment(1);
+                tracing::warn!(
+                    event_class,
+                    "lineage event dropped because the writer channel is saturated"
+                );
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                metrics::counter!(
+                    "moa_lineage_failed_total",
+                    "mode" => "durable",
+                    "event_class" => event_class,
+                    "reason" => "channel_closed"
+                )
+                .increment(1);
+                tracing::error!(event_class, "lineage writer channel is closed; event lost");
+            }
         }
-
-        std::thread::spawn(move || match journal.append_accepted_event_sync(evt) {
-            Ok(seq) => record_journal_notification(&tx, seq, event_class),
-            Err(error) => record_journal_failure(error, event_class),
-        });
     }
 
     /// Records an event and returns after it has reached the durable journal.
@@ -174,63 +187,15 @@ impl MpscSink {
             .map(|_| ())
             .map_err(|error| MoaError::StorageError(error.to_string()))
     }
-
-    fn record_lossy_telemetry(&self, evt: LineageEvent) {
-        match self.tx.try_send(WriterCommand::Event(Box::new(evt))) {
-            Ok(()) => {
-                metrics::counter!(
-                    "moa_lineage_enqueued_total",
-                    "mode" => "lossy_telemetry",
-                    "event_class" => "score"
-                )
-                .increment(1);
-            }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
-                metrics::counter!(
-                    "moa_lineage_dropped_total",
-                    "mode" => "lossy_telemetry",
-                    "event_class" => "score"
-                )
-                .increment(1);
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                metrics::counter!(
-                    "moa_lineage_failed_total",
-                    "mode" => "lossy_telemetry",
-                    "event_class" => "score",
-                    "reason" => "channel_closed"
-                )
-                .increment(1);
-                tracing::error!("lossy telemetry lineage writer channel is closed");
-            }
-        }
-    }
 }
 
 impl LineageSink for MpscSink {
     fn record(&self, evt: LineageEvent) {
-        if self.lossy_telemetry && is_lossy_score_event(&evt) {
-            self.record_lossy_telemetry(evt);
-        } else {
-            self.record_durable(evt);
-        }
+        self.enqueue(evt);
     }
 
     fn dropped_count(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
-    }
-}
-
-async fn record_durable_async(
-    journal: DurableJournal,
-    tx: mpsc::Sender<WriterCommand>,
-    evt: LineageEvent,
-    event_class: &'static str,
-) {
-    match journal.append_accepted_event(evt).await {
-        Ok(seq) => record_journal_notification(&tx, seq, event_class),
-        Err(error) => record_journal_failure(error, event_class),
     }
 }
 
@@ -271,21 +236,6 @@ fn record_journal_notification(
             );
         }
     }
-}
-
-fn record_journal_failure(error: Error, event_class: &'static str) {
-    metrics::counter!(
-        "moa_lineage_failed_total",
-        "mode" => "durable",
-        "event_class" => event_class,
-        "reason" => "journal_append"
-    )
-    .increment(1);
-    tracing::error!(%error, event_class, "lineage event failed before durable journal append");
-}
-
-fn is_lossy_score_event(evt: &LineageEvent) -> bool {
-    matches!(evt, LineageEvent::Eval(_))
 }
 
 fn lineage_event_class(evt: &LineageEvent) -> &'static str {
@@ -412,8 +362,7 @@ mod tests {
     use chrono::Utc;
     use moa_core::{SessionId, StoragePartitionId, TenantId, UserId};
     use moa_lineage_core::{
-        BackendIntrospection, LineageEvent, RetrievalLineage, RetrievalStage, ScoreRecord,
-        ScoreSource, ScoreTarget, ScoreValue, StageTimings, TurnId,
+        BackendIntrospection, LineageEvent, RetrievalLineage, RetrievalStage, StageTimings, TurnId,
     };
     use moa_memory_types::MemoryScope;
     use uuid::Uuid;
@@ -421,52 +370,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lossy_telemetry_drops_scores_when_channel_is_full() {
-        // Pins: only explicit lossy telemetry mode uses the lineage dropped counter.
+    fn record_enqueues_bounded_event_command_without_dropping() {
+        // Pins: fire-and-forget record enqueues exactly one WriterCommand::Event with a bounded
+        // try_send (no per-event task) and does not drop while the channel has capacity.
+        let (tx, mut rx) = mpsc::channel(4);
+        let journal = test_journal();
+        let sink = MpscSink {
+            tx,
+            journal,
+            dropped: Arc::new(AtomicU64::new(0)),
+        };
+
+        LineageSink::record(&sink, sample_event());
+
+        assert_eq!(LineageSink::dropped_count(&sink), 0);
+        assert!(
+            matches!(rx.try_recv(), Ok(WriterCommand::Event(_))),
+            "record should enqueue a WriterCommand::Event for the writer to group-commit"
+        );
+    }
+
+    #[test]
+    fn record_drops_event_when_channel_is_full() {
+        // Pins: a saturated writer channel drops the event and increments the bounded drop
+        // counter instead of blocking the hot path or spawning unbounded work.
         let (tx, _rx) = mpsc::channel(1);
         let journal = test_journal();
         let sink = MpscSink {
             tx,
             journal,
             dropped: Arc::new(AtomicU64::new(0)),
-            lossy_telemetry: true,
         };
 
-        LineageSink::record(&sink, sample_score_event());
-        LineageSink::record(&sink, sample_score_event());
+        LineageSink::record(&sink, sample_event());
+        LineageSink::record(&sink, sample_event());
 
         assert_eq!(LineageSink::dropped_count(&sink), 1);
     }
 
     #[tokio::test]
-    async fn lossy_telemetry_never_drops_turn_lineage_events() {
-        // Pins: turn_lineage rows may be compliance hash-chained, so lossy
-        // mode cannot drop them just because the writer channel is saturated.
-        let (tx, _rx) = mpsc::channel(1);
-        let journal = test_journal();
-        let sink = MpscSink {
-            tx,
-            journal: journal.clone(),
-            dropped: Arc::new(AtomicU64::new(0)),
-            lossy_telemetry: true,
-        };
-
-        LineageSink::record(&sink, sample_event());
-
-        assert_eq!(LineageSink::dropped_count(&sink), 0);
-        wait_for_journal_len(&journal, 1).await;
-    }
-
-    #[tokio::test]
     async fn record_durable_event_returns_after_journal_acceptance() {
-        // Pins: the awaitable audit path resolves only after fjall acceptance.
+        // Pins: the awaitable durability path resolves only after fjall acceptance.
         let (tx, _rx) = mpsc::channel(1);
         let journal = test_journal();
         let sink = MpscSink {
             tx,
             journal: journal.clone(),
             dropped: Arc::new(AtomicU64::new(0)),
-            lossy_telemetry: false,
         };
 
         let seq = sink
@@ -522,38 +472,5 @@ mod tests {
             introspection: BackendIntrospection::default(),
             stage: RetrievalStage::Single,
         })
-    }
-
-    fn sample_score_event() -> LineageEvent {
-        LineageEvent::Eval(ScoreRecord {
-            score_id: Uuid::now_v7(),
-            ts: Utc::now(),
-            target: ScoreTarget::Turn {
-                turn_id: TurnId::new_v7(),
-            },
-            storage_partition_id: StoragePartitionId::new("test-partition"),
-            user_id: Some(UserId::new("test-user")),
-            name: "test_score".to_string(),
-            value: ScoreValue::Numeric(1.0),
-            source: ScoreSource::OnlineJudge,
-            model_or_evaluator: "test".to_string(),
-            run_id: None,
-            dataset_id: None,
-            comment: None,
-        })
-    }
-
-    async fn wait_for_journal_len(journal: &DurableJournal, expected: usize) {
-        for _ in 0..50 {
-            if journal
-                .approximate_len()
-                .expect("journal depth should be readable")
-                == expected
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("journal did not reach expected depth {expected}");
     }
 }

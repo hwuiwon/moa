@@ -18,7 +18,7 @@ use moka::future::Cache;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{FromRow, PgPool, Row};
 use tokio::time::timeout;
 use uuid::Uuid;
 
@@ -295,18 +295,18 @@ impl RrfPlusJudgeDetector {
     ) -> Result<Vec<NodeIndexRow>> {
         let vector_hits =
             vector_candidate_uids(fact_text, embedding, label, pii_class, ctx).await?;
-        let lexical_hits = lexical_candidate_uids(fact_text, label, ctx).await?;
+        let (lexical_hits, hydrated) =
+            lexical_candidates_and_hydrate(fact_text, label, &vector_hits, ctx).await?;
         let ranked = rrf_fuse(
             &vector_hits,
             &lexical_hits,
             VECTOR_K.max(usize::try_from(LEXICAL_K).unwrap_or(VECTOR_K)),
         );
-        let uids = ranked
+        Ok(ranked
             .into_iter()
             .take(VECTOR_K)
-            .map(|(uid, _score)| uid)
-            .collect::<Vec<_>>();
-        hydrate_candidates(&uids, ctx).await
+            .filter_map(|(uid, _score)| hydrated.get(&uid).cloned())
+            .collect())
     }
 
     /// Reranks candidates to the top five using the configured reranker.
@@ -549,64 +549,72 @@ fn contradiction_candidate_max_pii_class(pii_class: PiiClass) -> &'static str {
     pii_class.as_str()
 }
 
-async fn lexical_candidate_uids(
+/// Retrieves lexical candidates and hydrates them together with the vector
+/// candidates in a single query.
+///
+/// This merges the former two round trips — a uid-only lexical search followed by
+/// a hydrate of the reciprocal-rank-fused set — into one statement. The `lexical`
+/// CTE reproduces the previous lexical selection exactly (same filter, ordering,
+/// and `LIMIT`), assigning each kept row a `lexical_ord` so callers can rebuild
+/// the ranked uid list for RRF. The outer select then hydrates the union of the
+/// lexical rows and the caller-supplied active vector uids, returning full
+/// [`NodeIndexRow`]s keyed by uid. Every returned row is active (`valid_to IS
+/// NULL`), matching the old hydrate filter, so a fused uid absent from the map is
+/// dropped exactly as before.
+async fn lexical_candidates_and_hydrate(
     fact_text: &str,
     label: NodeLabel,
+    vector_uids: &[Uuid],
     ctx: &ContradictionContext,
-) -> Result<Vec<Uuid>> {
+) -> Result<(Vec<Uuid>, HashMap<Uuid, NodeIndexRow>)> {
     let mut conn = ctx.begin().await?;
-    let uids = sqlx::query_scalar::<_, Uuid>(
+    let rows = sqlx::query(
         r#"
-        SELECT uid
-        FROM moa.node_index
-        WHERE valid_to IS NULL
-          AND label = $2
-          AND name_tsv @@ plainto_tsquery('simple', $1)
-        ORDER BY ts_rank(name_tsv, plainto_tsquery('simple', $1)) DESC,
-                 last_accessed_at DESC
-        LIMIT $3
+        WITH lexical AS (
+            SELECT uid,
+                   ROW_NUMBER() OVER (
+                       ORDER BY ts_rank(name_tsv, plainto_tsquery('simple', $1)) DESC,
+                                last_accessed_at DESC
+                   ) AS lexical_ord
+            FROM moa.node_index
+            WHERE valid_to IS NULL
+              AND label = $2
+              AND name_tsv @@ plainto_tsquery('simple', $1)
+            ORDER BY ts_rank(name_tsv, plainto_tsquery('simple', $1)) DESC,
+                     last_accessed_at DESC
+            LIMIT $3
+        )
+        SELECT n.uid, n.label, n.storage_partition_id, n.user_id, n.scope, n.name, n.pii_class,
+               n.valid_to, n.valid_from, n.properties_summary, n.last_accessed_at,
+               COALESCE(n.quality_score, 0.5) AS quality_score,
+               lexical.lexical_ord AS lexical_ord
+        FROM moa.node_index AS n
+        LEFT JOIN lexical ON lexical.uid = n.uid
+        WHERE n.valid_to IS NULL
+          AND (lexical.lexical_ord IS NOT NULL OR n.uid = ANY($4))
         "#,
     )
     .bind(fact_text)
     .bind(label.as_str())
     .bind(LEXICAL_K)
+    .bind(vector_uids)
     .fetch_all(conn.as_mut())
     .await?;
     conn.commit().await?;
-    Ok(uids)
-}
 
-async fn hydrate_candidates(
-    uids: &[Uuid],
-    ctx: &ContradictionContext,
-) -> Result<Vec<NodeIndexRow>> {
-    if uids.is_empty() {
-        return Ok(Vec::new());
+    let mut lexical_ranked: Vec<(i64, Uuid)> = Vec::new();
+    let mut hydrated: HashMap<Uuid, NodeIndexRow> = HashMap::with_capacity(rows.len());
+    for row in &rows {
+        let lexical_ord: Option<i64> = row.try_get("lexical_ord")?;
+        let node = NodeIndexRow::from_row(row).map_err(IngestError::from)?;
+        if let Some(ord) = lexical_ord {
+            lexical_ranked.push((ord, node.uid));
+        }
+        hydrated.insert(node.uid, node);
     }
-    let mut conn = ctx.begin().await?;
-    let rows = sqlx::query_as::<_, NodeIndexRow>(
-        r#"
-        SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
-               valid_to, valid_from, properties_summary, last_accessed_at,
-               COALESCE(quality_score, 0.5) AS quality_score
-        FROM moa.node_index
-        WHERE uid = ANY($1)
-          AND valid_to IS NULL
-        "#,
-    )
-    .bind(uids)
-    .fetch_all(conn.as_mut())
-    .await?;
-    conn.commit().await?;
-
-    let mut by_uid = rows
-        .into_iter()
-        .map(|row| (row.uid, row))
-        .collect::<HashMap<_, _>>();
-    Ok(uids
-        .iter()
-        .filter_map(|uid| by_uid.remove(uid))
-        .collect::<Vec<_>>())
+    lexical_ranked.sort_by_key(|(ord, _)| *ord);
+    let lexical_hits = lexical_ranked.into_iter().map(|(_, uid)| uid).collect();
+    Ok((lexical_hits, hydrated))
 }
 
 fn conflict_from_judge(response: JudgeResponse) -> Conflict {

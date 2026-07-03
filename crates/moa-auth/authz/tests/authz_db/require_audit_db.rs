@@ -16,6 +16,9 @@ use uuid::Uuid;
 
 const DEFAULT_DATABASE_URL: &str = "postgres://moa_owner:dev@localhost:10040/moa";
 
+/// `(count, class_uid, activity_id, severity_id, actor_user_uid, target_resource_uid)`.
+type AuditEventRow = (i64, i32, i32, i32, Option<String>, Option<String>);
+
 fn test_database_url() -> String {
     std::env::var("MOA_DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_string())
 }
@@ -75,8 +78,9 @@ fn check_body(user: &str, relation: &str, object: &str) -> serde_json::Value {
 
 #[tokio::test]
 async fn denied_require_authz_persists_ocsf_security_event_db() {
-    // Pins: a definitive FGA deny from require_authz writes the configured OCSF
-    // Authorization event before returning Forbidden.
+    // Pins: a definitive FGA deny from require_authz records the configured OCSF
+    // Authorization event before returning Forbidden, so denied decisions remain
+    // fail-closed when security audit is configured.
     let pool = migrated_ocsf_pool().await;
     configure_security_audit(pool.clone(), false);
 
@@ -124,18 +128,27 @@ async fn denied_require_authz_persists_ocsf_security_event_db() {
     );
     denied.assert_hits(1);
 
-    let row: (i64, i32, i32, i32, Option<String>, Option<String>) = sqlx::query_as(
-        r#"
-        SELECT COUNT(*) OVER (), class_uid, activity_id, severity_id,
-               actor_user_uid, target_resource_uid
-        FROM security_events
-        WHERE tenant_id = $1
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_one(&pool)
-    .await
-    .expect("denied authz security event row");
+    // The denial audit is written before the Forbidden result is returned.
+    let mut row: Option<AuditEventRow> = None;
+    for _ in 0..50 {
+        row = sqlx::query_as(
+            r#"
+            SELECT COUNT(*) OVER (), class_uid, activity_id, severity_id,
+                   actor_user_uid, target_resource_uid
+            FROM security_events
+            WHERE tenant_id = $1
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("query denied authz security event row");
+        if row.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let row = row.expect("denied authz security event is persisted asynchronously");
     assert_eq!(row.0, 1, "one denied authz event should be persisted");
     assert_eq!(row.1, 3003, "deny audit must use Authorization class");
     assert_eq!(row.2, 99, "deny audit maps to authz activity Other");

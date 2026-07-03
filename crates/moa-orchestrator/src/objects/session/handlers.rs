@@ -17,9 +17,9 @@ impl Session for SessionImpl {
         meta: Json<SessionMeta>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Session", "set_meta");
-        let mut state = SessionVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
         state.set_meta(meta.into_inner());
-        state.persist_into(&ctx);
+        state.persist(&ctx);
         Ok(())
     }
 
@@ -55,10 +55,10 @@ impl Session for SessionImpl {
         let session_id = parse_session_key(ctx.key())?;
         require_session_participant(&ctx, session_id).await?;
         let scope = scope.into_inner();
-        let mut state = SessionVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
         state.set_cancel_flag(scope);
         let children = state.children.clone();
-        state.persist_into(&ctx);
+        state.persist(&ctx);
         // Both scopes cancel the active coordinator turn.
         if let Some(turn_id) = load_pending_state(&ctx).await?.active_turn_id {
             ctx.workflow_client::<TurnExecutionClient>(turn_id)
@@ -85,9 +85,7 @@ impl Session for SessionImpl {
         annotate_restate_handler_span("Session", "status");
         let session_id = parse_session_key(ctx.key())?;
         require_session_participant(&ctx, session_id).await?;
-        Ok(Json::from(
-            SessionVoState::load_from(&ctx).await?.current_status(),
-        ))
+        Ok(Json::from(SessionVoState::load_status(&ctx).await?))
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -114,7 +112,7 @@ impl Session for SessionImpl {
         let matches_active =
             pending_state.active_turn_id.as_deref() == Some(outcome.turn_id.as_str());
         let session_id = parse_session_key(ctx.key())?;
-        let mut state = SessionVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
 
         if matches_active {
             pending_state.active_turn_id = None;
@@ -151,7 +149,7 @@ impl Session for SessionImpl {
             let now = durable_utc_now(&ctx).await?;
             state.set_status(SessionStatus::Running, now);
             let drained = state.drain_unread_child_signals();
-            state.persist_into(&ctx);
+            state.persist(&ctx);
             persist_pending_state(&ctx, &pending_state);
             sync_status(&ctx, session_id, &state).await?;
             resolve_turn_waiters(&ctx, turn_waiters, &outcome)?;
@@ -205,14 +203,17 @@ impl Session for SessionImpl {
             };
             if !resumed {
                 match outcome.kind {
-                    ExecutionTurnOutcomeKind::Completed => state.set_status(
-                        if state.auto_delegation_waiting_for_workers() {
+                    ExecutionTurnOutcomeKind::Completed => {
+                        // Compute the branch before the `&mut self` call so the
+                        // immutable read does not overlap the mutable borrow
+                        // (the `Tracked` deref forgoes two-phase borrows).
+                        let completed_status = if state.auto_delegation_waiting_for_workers() {
                             SessionStatus::Running
                         } else {
                             SessionStatus::Paused
-                        },
-                        now,
-                    ),
+                        };
+                        state.set_status(completed_status, now)
+                    }
                     ExecutionTurnOutcomeKind::Cancelled => {
                         state.set_status(SessionStatus::Cancelled, now)
                     }
@@ -221,7 +222,7 @@ impl Session for SessionImpl {
                     }
                 }
             }
-            state.persist_into(&ctx);
+            state.persist(&ctx);
             sync_status(&ctx, session_id, &state).await?;
         }
         persist_pending_state(&ctx, &pending_state);
@@ -361,7 +362,7 @@ impl Session for SessionImpl {
         require_session_participant(&ctx, session_id).await?;
         let event_range = request.into_inner().normalized_event_range();
         let pending_state = load_pending_state(&ctx).await?;
-        let children = SessionVoState::load_from(&ctx).await?.children;
+        let children = SessionVoState::load_children(&ctx).await?;
         let active_turn_id = pending_state.active_turn_id.clone();
         let snapshot = SessionSnapshot {
             session_id: ctx.key().to_string(),
@@ -399,7 +400,7 @@ impl Session for SessionImpl {
         child: Json<WorkerChildRef>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Session", "register_child");
-        let mut state = SessionVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
         let child = child.into_inner();
         let worker_id = child.id.clone();
         if state.register_child(child) {
@@ -409,7 +410,7 @@ impl Session for SessionImpl {
             // Active edge: schedule one single-outstanding per-child heartbeat-liveness
             // watchdog so a stuck child is detected without polling across sessions.
             liveness::ensure_child_liveness_scheduled(&ctx, &mut state, &worker_id).await?;
-            state.persist_into(&ctx);
+            state.persist(&ctx);
         }
         Ok(())
     }
@@ -424,13 +425,13 @@ impl Session for SessionImpl {
         annotate_restate_handler_span("Session", "register_auto_delegation_run");
         let session_id = parse_session_key(ctx.key())?;
         let input = input.into_inner();
-        let mut state = SessionVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
         let mut pending_state = load_pending_state(&ctx).await?;
         let changed = state.register_auto_delegation_run(input.user_sequence_num, input.worker_ids);
         maybe_complete_auto_delegation_run(&mut ctx, &mut pending_state, &mut state, session_id)
             .await?;
         if changed || state.auto_delegation_run.is_some() {
-            state.persist_into(&ctx);
+            state.persist(&ctx);
             persist_pending_state(&ctx, &pending_state);
         }
         Ok(())
@@ -446,7 +447,7 @@ impl Session for SessionImpl {
         annotate_restate_handler_span("Session", "poll_auto_delegation_fan_in");
         let session_id = parse_session_key(ctx.key())?;
         let input = input.into_inner();
-        let mut state = SessionVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
         let mut pending_state = load_pending_state(&ctx).await?;
 
         // Only the run for the polling root turn's own user sequence is fanned in here.
@@ -496,7 +497,7 @@ impl Session for SessionImpl {
             AutoDelegationFanInStatus::NotRunning
         };
 
-        state.persist_into(&ctx);
+        state.persist(&ctx);
         persist_pending_state(&ctx, &pending_state);
         Ok(Json::from(status))
     }
@@ -509,9 +510,9 @@ impl Session for SessionImpl {
         worker_id: String,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Session", "remove_child");
-        let mut state = SessionVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
         if state.remove_child(&worker_id) {
-            state.persist_into(&ctx);
+            state.persist(&ctx);
         }
         Ok(())
     }
@@ -525,9 +526,12 @@ impl Session for SessionImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Session", "mark_child_terminal");
         let session_id = parse_session_key(ctx.key())?;
-        let mut state = SessionVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
         let mut pending_state = load_pending_state(&ctx).await?;
-        if state.mark_child_terminal(input.into_inner()) {
+        let input = input.into_inner();
+        let worker_id = input.worker_id.clone();
+        if state.mark_child_terminal(input) {
+            claim_check_child_output(&ctx, &mut state, session_id, &worker_id).await?;
             maybe_complete_auto_delegation_run(
                 &mut ctx,
                 &mut pending_state,
@@ -535,7 +539,7 @@ impl Session for SessionImpl {
                 session_id,
             )
             .await?;
-            state.persist_into(&ctx);
+            state.persist(&ctx);
             persist_pending_state(&ctx, &pending_state);
         }
         Ok(())
@@ -549,11 +553,18 @@ impl Session for SessionImpl {
         input: Json<ConsumeWorkerChildResultInput>,
     ) -> Result<Json<ConsumeWorkerChildResultOutput>, HandlerError> {
         annotate_restate_handler_span("Session", "consume_child_result");
+        let session_id = parse_session_key(ctx.key())?;
         let input = input.into_inner();
-        let mut state = SessionVoState::load_from(&ctx).await?;
-        let terminal = state.consume_child_terminal(&input.worker_id);
-        if terminal.is_some() {
-            state.persist_into(&ctx);
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
+        let mut terminal = state.consume_child_terminal(&input.worker_id);
+        let blob = state.take_child_terminal_blob(&input.worker_id);
+        if terminal.is_some() || blob.is_some() {
+            // Return full-fidelity output: if the cached output was claim-checked, hydrate the
+            // full body from its blob so the coordinator never receives a truncated preview.
+            if let (Some(terminal), Some(claim_check)) = (terminal.as_mut(), blob) {
+                hydrate_child_terminal_output(&ctx, session_id, terminal, claim_check).await?;
+            }
+            state.persist(&ctx);
         }
         Ok(Json::from(ConsumeWorkerChildResultOutput { terminal }))
     }
@@ -565,7 +576,7 @@ impl Session for SessionImpl {
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<Vec<WorkerChildRef>>, HandlerError> {
         annotate_restate_handler_span("Session", "child_refs");
-        Ok(Json::from(SessionVoState::load_from(&ctx).await?.children))
+        Ok(Json::from(SessionVoState::load_children(&ctx).await?))
     }
 
     #[tracing::instrument(skip(self, ctx, signal))]
@@ -584,7 +595,7 @@ impl Session for SessionImpl {
         annotate_restate_handler_span("Session", "record_child_signal");
         let signal = signal.into_inner();
         let session_id = parse_session_key(ctx.key())?;
-        let mut state = SessionVoState::load_from(&ctx).await?;
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
         if signal.parent_session != session_id {
             return Err(TerminalError::new_with_code(
                 403,
@@ -651,7 +662,7 @@ impl Session for SessionImpl {
                 session_id,
             )
             .await?;
-            state.persist_into(&ctx);
+            state.persist(&ctx);
             persist_pending_state(&ctx, &pending_state);
             sync_status(&ctx, session_id, &state).await?;
         }
@@ -713,7 +724,7 @@ impl Session for SessionImpl {
                 state.set_status(SessionStatus::Running, now);
                 state.record_resume_dispatch(turn_id.clone(), now, limits.worker_resume_window_ms);
                 let contact = state.meta.as_ref().and_then(|meta| meta.contact.clone());
-                state.persist_into(&ctx);
+                state.persist(&ctx);
                 persist_pending_state(&ctx, &pending_state);
                 sync_status(&ctx, session_id, &state).await?;
                 dispatch_turn_execution(
@@ -773,7 +784,7 @@ impl Session for SessionImpl {
             );
         }
 
-        state.persist_into(&ctx);
+        state.persist(&ctx);
         tracing::debug!(
             key = %ctx.key(),
             signal_id = %signal.signal_id,
@@ -969,6 +980,64 @@ async fn forward_user_input_reply(
         "forwarded user reply to worker input request"
     );
     Ok(Some(signal))
+}
+
+/// Offloads a just-marked terminal child's large output to a content-addressed blob.
+///
+/// A no-op unless the child's output exceeds the claim-check threshold. The full body is
+/// stored via a journaled `ctx.run` (content-addressed, so the recorded blob id is
+/// deterministic and reused on replay) and the inline `children` copy is compacted to a
+/// preview. The separate auto-delegation run copy keeps the full output for the bundle event.
+async fn claim_check_child_output(
+    ctx: &ObjectContext<'_>,
+    state: &mut SessionVoState,
+    session_id: SessionId,
+    worker_id: &str,
+) -> Result<(), HandlerError> {
+    let Some(full_output) = state.large_child_terminal_output(worker_id) else {
+        return Ok(());
+    };
+    let store = OrchestratorCtx::current_session_store();
+    let claim = ctx
+        .run(|| async move {
+            store
+                .store_text_artifact(session_id, &full_output)
+                .await
+                .map(Json::from)
+                .map_err(moa_error_to_handler_error)
+        })
+        .name(format!("child_terminal_output_claim_check_{worker_id}"))
+        .await?
+        .into_inner();
+    state.compact_child_terminal_output(worker_id, claim);
+    Ok(())
+}
+
+/// Hydrates a consumed terminal child's full output back into `terminal` from its blob.
+async fn hydrate_child_terminal_output(
+    ctx: &ObjectContext<'_>,
+    session_id: SessionId,
+    terminal: &mut WorkerTerminalResult,
+    claim_check: ClaimCheck,
+) -> Result<(), HandlerError> {
+    let name = format!(
+        "child_terminal_output_hydrate_{}",
+        terminal.result.worker_id
+    );
+    let store = OrchestratorCtx::current_session_store();
+    let body = ctx
+        .run(|| async move {
+            store
+                .load_text_artifact(session_id, &claim_check)
+                .await
+                .map(Json::from)
+                .map_err(moa_error_to_handler_error)
+        })
+        .name(name)
+        .await?
+        .into_inner();
+    terminal.result.output = body;
+    Ok(())
 }
 
 async fn maybe_complete_auto_delegation_run(

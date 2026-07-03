@@ -15,7 +15,7 @@ use moa_memory_graph::{
 use moa_memory_ingest::normalize_entity_name;
 use moa_memory_vector::VectorStoreFactory;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -152,9 +152,20 @@ pub async fn consolidate_tenant(
     now: DateTime<Utc>,
     embedder: Option<Arc<dyn EmbeddingProvider>>,
 ) -> Result<ConsolidationOutcome> {
-    let merge = merge_duplicates(pool, &tenant_id, now).await?;
+    // Load the tenant's active fact set once and share it across the exact-duplicate
+    // merge and the contradiction sweep. Merge invalidates duplicate nodes, so their
+    // uids are removed from the shared snapshot before the sweep runs; otherwise the
+    // sweep could try to supersede into a node that merge already closed. Confidence
+    // decay is a set-based UPDATE and the digest re-reads post-decay confidence, so
+    // neither of those passes consumes the in-memory snapshot.
+    let facts = active_fact_rows(pool, &tenant_id).await?;
+    let (merge, merged_closed) = merge_duplicate_rows(pool, &facts, now).await?;
     let decay = decay_confidence(pool, &tenant_id, now, &opts).await?;
-    let sweep = sweep_contradictions(pool, &tenant_id, now).await?;
+    let live_after_merge = facts
+        .into_iter()
+        .filter(|fact| !merged_closed.contains(&fact.uid))
+        .collect::<Vec<_>>();
+    let (sweep, _swept_closed) = sweep_contradiction_rows(pool, &live_after_merge, now).await?;
     let backfill = backfill_entities(pool, &tenant_id, embedder).await?;
     let storage_partition_id = storage_partition_id(&tenant_id);
     let digest = rebuild_storage_digests(pool, &storage_partition_id, now, &opts.digest).await?;
@@ -179,14 +190,31 @@ pub async fn merge_duplicates(
     now: DateTime<Utc>,
 ) -> Result<MergeStats> {
     let facts = active_fact_rows(pool, tenant_id).await?;
-    let groups = duplicate_groups(&facts);
-    let mut merged = 0_u64;
+    Ok(merge_duplicate_rows(pool, &facts, now).await?.0)
+}
 
-    for group in groups {
+/// Merges exact-duplicate facts from a preloaded active-fact snapshot.
+///
+/// Returns the merge statistics together with the node uids invalidated by the
+/// merge, so a caller sharing the snapshot across passes can drop those rows
+/// before running the contradiction sweep.
+async fn merge_duplicate_rows(
+    pool: &PgPool,
+    facts: &[LifecycleNodeRow],
+    now: DateTime<Utc>,
+) -> Result<(MergeStats, BTreeSet<Uuid>)> {
+    let mut merged = 0_u64;
+    let mut closed = BTreeSet::new();
+
+    for group in duplicate_groups(facts) {
+        // Every row in a duplicate group shares the same `(tenant, contact, scope)`
+        // ownership by construction, so the scoped store is built once per group
+        // instead of once per invalidated node.
+        let store = scoped_graph_for(pool, group[0].scope_context());
         let canonical = &group[0];
         for duplicate in group.iter().skip(1) {
             close_into_existing(
-                pool,
+                &store,
                 duplicate,
                 canonical,
                 duplicate.valid_from,
@@ -194,62 +222,133 @@ pub async fn merge_duplicates(
                 now,
             )
             .await?;
+            closed.insert(duplicate.uid);
             merged += 1;
         }
     }
 
-    let remaining = duplicate_groups(&active_fact_rows(pool, tenant_id).await?)
-        .into_iter()
-        .filter(|group| group.len() > 1)
-        .count() as u64;
-    Ok(MergeStats {
-        merged,
-        duplicates_remaining: remaining,
-    })
+    // Each returned group has more than one active node and is collapsed to its
+    // single canonical node above, so no exact-duplicate group survives the pass.
+    Ok((
+        MergeStats {
+            merged,
+            duplicates_remaining: 0,
+        },
+        closed,
+    ))
 }
 
 /// Applies anchored confidence decay to idle active facts.
+///
+/// The decay is computed and written by a single set-based `UPDATE` (mirroring
+/// the pattern in [`crate::quality`]) rather than reading the whole active-fact
+/// set and issuing one write per node. The SQL reproduces [`decay_target`]
+/// exactly: it anchors to the stored `base_confidence` (falling back to the live
+/// confidence), applies the half-life decay over whole idle-days, clamps to the
+/// floor, and only rewrites rows whose confidence actually changes. The pass
+/// bumps the partition changelog version once when it writes anything, matching
+/// the quality-scoring maintenance path.
 pub async fn decay_confidence(
     pool: &PgPool,
     tenant_id: &TenantId,
     now: DateTime<Utc>,
     opts: &ConsolidationOptions,
 ) -> Result<DecayStats> {
-    let facts = active_fact_rows(pool, tenant_id).await?;
-    let mut decayed = 0_u64;
-    let mut at_floor = 0_u64;
-
-    for fact in facts {
-        let Some(current) = fact.confidence else {
-            continue;
-        };
-        let Some(target) = decay_target(&fact, current, now, opts) else {
-            continue;
-        };
-        if (target - opts.decay_floor).abs() <= EPSILON {
-            at_floor += 1;
-        }
-        if (target - current).abs() <= EPSILON {
-            continue;
-        }
-
-        let mut properties = fact.properties_object();
-        properties
-            .entry("base_confidence".to_string())
-            .or_insert_with(|| json!(current));
-        properties.insert("confidence".to_string(), json!(target));
-        scoped_graph(pool, &fact)
-            .update_node_properties(NodePropertyUpdateIntent {
-                uid: fact.uid,
-                properties: Value::Object(properties),
-                confidence: Some(target),
-                actor_id: CONSOLIDATION_ACTOR.to_string(),
-                actor_kind: CONSOLIDATION_ACTOR_KIND.to_string(),
-            })
-            .await?;
-        decayed += 1;
+    // `decay_target` bails out for a non-positive or non-finite half-life; skip the
+    // whole set-based pass in that case so no row is rewritten.
+    if opts.decay_half_life_days <= 0.0 || !opts.decay_half_life_days.is_finite() {
+        return Ok(DecayStats::default());
     }
+    let storage_partition_id = storage_partition_id(tenant_id).to_string();
 
+    let row = sqlx::query(
+        r#"
+        WITH candidates AS (
+            SELECT node.uid,
+                   node.confidence AS current_conf,
+                   node.properties_summary,
+                   COALESCE(
+                       (node.properties_summary->>'base_confidence')::double precision,
+                       node.confidence
+                   ) AS base_conf,
+                   GREATEST(
+                       TRUNC(EXTRACT(EPOCH FROM ($2::timestamptz - node.last_accessed_at))),
+                       0
+                   )::double precision / 86400.0 AS idle_days
+            FROM moa.node_index AS node
+            WHERE node.tenant_id = $1
+              AND node.label = 'Fact'
+              AND node.valid_to IS NULL
+              AND node.confidence IS NOT NULL
+              AND EXTRACT(EPOCH FROM ($2::timestamptz - node.last_accessed_at))
+                  >= ($3::double precision * 86400.0)
+        ),
+        computed AS (
+            SELECT uid,
+                   current_conf,
+                   properties_summary,
+                   LEAST(
+                       GREATEST(
+                           GREATEST(base_conf * power(0.5::double precision, idle_days / $4), $5),
+                           0.0
+                       ),
+                       1.0
+                   ) AS target
+            FROM candidates
+        ),
+        to_update AS (
+            SELECT uid, current_conf, properties_summary, target
+            FROM computed
+            WHERE ABS(target - current_conf) > $6
+        ),
+        updated AS (
+            UPDATE moa.node_index AS node
+            SET confidence = tu.target,
+                properties_summary = jsonb_set(
+                    CASE
+                        WHEN node.properties_summary ? 'base_confidence'
+                            THEN COALESCE(node.properties_summary, '{}'::jsonb)
+                        ELSE jsonb_set(
+                            COALESCE(node.properties_summary, '{}'::jsonb),
+                            '{base_confidence}',
+                            to_jsonb(tu.current_conf)
+                        )
+                    END,
+                    '{confidence}',
+                    to_jsonb(tu.target)
+                )
+            FROM to_update AS tu
+            WHERE node.uid = tu.uid
+            RETURNING node.uid
+        ),
+        bumped AS (
+            INSERT INTO moa.storage_partition_state (storage_partition_id, changelog_version)
+            SELECT $7, 1
+            WHERE EXISTS (SELECT 1 FROM updated)
+            ON CONFLICT (storage_partition_id) DO UPDATE
+                SET changelog_version = moa.storage_partition_state.changelog_version + 1,
+                    updated_at = now()
+            RETURNING 1
+        )
+        SELECT
+            (SELECT COUNT(*) FROM updated)::bigint AS decayed,
+            (SELECT COUNT(*) FROM computed WHERE ABS(target - $5) <= $6)::bigint AS at_floor
+        "#,
+    )
+    .bind(tenant_id.0)
+    .bind(now)
+    .bind(opts.decay_idle_days as f64)
+    .bind(opts.decay_half_life_days)
+    .bind(opts.decay_floor)
+    .bind(EPSILON)
+    .bind(storage_partition_id)
+    .fetch_one(pool)
+    .await?;
+
+    let decayed = u64::try_from(row.try_get::<i64, _>("decayed")?)
+        .map_err(|_| Error::InvalidRow("negative decayed count".to_string()))?;
+    let at_floor = u64::try_from(row.try_get::<i64, _>("at_floor")?)
+        .map_err(|_| Error::InvalidRow("negative at_floor count".to_string()))?;
     Ok(DecayStats { decayed, at_floor })
 }
 
@@ -260,9 +359,25 @@ pub async fn sweep_contradictions(
     now: DateTime<Utc>,
 ) -> Result<SweepStats> {
     let facts = active_fact_rows(pool, tenant_id).await?;
-    let mut supersessions = 0_u64;
+    Ok(sweep_contradiction_rows(pool, &facts, now).await?.0)
+}
 
-    for group in contradiction_groups(&facts) {
+/// Sweeps contradictory facts from a preloaded active-fact snapshot.
+///
+/// Returns the sweep statistics together with the node uids superseded by the
+/// sweep, so callers sharing the snapshot can drop those rows from later passes.
+async fn sweep_contradiction_rows(
+    pool: &PgPool,
+    facts: &[LifecycleNodeRow],
+    now: DateTime<Utc>,
+) -> Result<(SweepStats, BTreeSet<Uuid>)> {
+    let mut supersessions = 0_u64;
+    let mut closed = BTreeSet::new();
+
+    for group in contradiction_groups(facts) {
+        // Every row in a contradiction group shares the same `(tenant, contact, scope)`
+        // ownership, so the scoped store is built once per group.
+        let store = scoped_graph_for(pool, group[0].scope_context());
         let keeper = &group[0];
         for old in group.iter().skip(1) {
             let valid_to = if keeper.valid_from > old.valid_from {
@@ -270,14 +385,18 @@ pub async fn sweep_contradictions(
             } else {
                 old.valid_from
             };
-            close_into_existing(pool, old, keeper, valid_to, "contradiction_sweep", now).await?;
+            close_into_existing(&store, old, keeper, valid_to, "contradiction_sweep", now).await?;
+            closed.insert(old.uid);
             supersessions += 1;
         }
     }
 
-    Ok(SweepStats {
-        contradiction_supersessions: supersessions,
-    })
+    Ok((
+        SweepStats {
+            contradiction_supersessions: supersessions,
+        },
+        closed,
+    ))
 }
 
 /// Backfills missing entity embeddings and promotes edge alias mentions to entity properties.
@@ -289,6 +408,9 @@ pub async fn backfill_entities(
     let entities = active_entity_rows(pool, tenant_id).await?;
     let mut embeddings = 0_u64;
     let mut aliases = 0_u64;
+    // One scoped graph store per distinct `(tenant, contact)` scope, reused across
+    // the embedding and alias writes instead of rebuilt for every node.
+    let mut stores: BTreeMap<Option<Uuid>, PostgresGraphStore> = BTreeMap::new();
 
     if let Some(embedder) = embedder {
         let missing = entities
@@ -302,7 +424,7 @@ pub async fn backfill_entities(
                 .collect::<Vec<_>>();
             let vectors = embedder.embed(&inputs).await?;
             for (entity, vector) in missing.into_iter().zip(vectors) {
-                scoped_graph(pool, entity)
+                scoped_graph_cached(&mut stores, pool, entity)
                     .upsert_node_embedding(NodeEmbeddingIntent {
                         uid: entity.uid,
                         embedding: vector,
@@ -327,6 +449,7 @@ pub async fn backfill_entities(
         edge_aliases_for_entities(pool, &storage_partition_id, &entities).await?;
     for entity in &entities {
         let promoted = promote_aliases_for_entity(
+            &mut stores,
             pool,
             entity,
             aliases_by_entity.remove(&entity.uid).unwrap_or_default(),
@@ -352,15 +475,116 @@ pub async fn rebuild_digests(
     rebuild_storage_digests(pool, &storage_partition_id, now, config).await
 }
 
-async fn close_into_existing(
+/// Tenant consolidation cursor captured from the partition registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TenantConsolidationCursor {
+    /// Tenant whose graph changed after the last successful consolidation.
+    pub tenant_id: TenantId,
+    /// Changelog version observed when the tenant was selected.
+    pub changelog_version: i64,
+}
+
+/// Returns the tenants whose graph changed since their last consolidation.
+///
+/// This is the incremental cursor that lets periodic maintenance skip idle
+/// tenants. Each tenant partition tracks two watermarks in
+/// `moa.storage_partition_state`: `changelog_version`, bumped on every graph
+/// write (and by set-based maintenance), and `consolidated_changelog_version`,
+/// advanced by [`advance_consolidation_watermark`] after a successful
+/// consolidation pass. A tenant is returned only when its live version has moved
+/// past the recorded consolidation watermark, so tenants with no new graph
+/// activity short-circuit without dispatching a workflow. The registry holds
+/// one row per tenant partition, so this replaces a `SELECT DISTINCT` scan over
+/// the entire node index. Results are ordered by tenant id for deterministic
+/// dispatch.
+pub async fn tenants_needing_consolidation(
     pool: &PgPool,
+) -> Result<Vec<TenantConsolidationCursor>> {
+    let rows = sqlx::query_as::<_, (Uuid, i64)>(
+        r#"
+        SELECT tenant_id, changelog_version
+        FROM moa.storage_partition_state
+        WHERE tenant_id IS NOT NULL
+          AND changelog_version > consolidated_changelog_version
+        ORDER BY tenant_id
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(tenant_id, changelog_version)| TenantConsolidationCursor {
+            tenant_id: TenantId::from(tenant_id),
+            changelog_version,
+        })
+        .collect())
+}
+
+/// Returns the current changelog version for one tenant partition.
+pub async fn tenant_changelog_version(pool: &PgPool, tenant_id: &TenantId) -> Result<i64> {
+    sqlx::query_scalar(
+        r#"
+        SELECT changelog_version
+        FROM moa.storage_partition_state
+        WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_id.0)
+    .fetch_optional(pool)
+    .await
+    .map(|version| version.unwrap_or_default())
+    .map_err(Into::into)
+}
+
+/// Advances tenant consolidation watermarks to observed changelog versions.
+///
+/// Callers invoke this only after a consolidation pass succeeds. The target
+/// version comes from the tenant cursor observed before the workflow started,
+/// not from the live registry row at update time, so writes that arrive while a
+/// workflow is running remain pending for the next maintenance tick.
+pub async fn advance_consolidation_watermark(
+    pool: &PgPool,
+    cursors: &[TenantConsolidationCursor],
+) -> Result<()> {
+    if cursors.is_empty() {
+        return Ok(());
+    }
+    let tenant_uuids = cursors
+        .iter()
+        .map(|cursor| cursor.tenant_id.0)
+        .collect::<Vec<_>>();
+    let changelog_versions = cursors
+        .iter()
+        .map(|cursor| cursor.changelog_version)
+        .collect::<Vec<_>>();
+    sqlx::query(
+        r#"
+        UPDATE moa.storage_partition_state AS state
+        SET consolidated_changelog_version = GREATEST(
+                state.consolidated_changelog_version,
+                LEAST(state.changelog_version, cursor.changelog_version)
+            ),
+            updated_at = now()
+        FROM UNNEST($1::uuid[], $2::bigint[]) AS cursor(tenant_id, changelog_version)
+        WHERE state.tenant_id = cursor.tenant_id
+        "#,
+    )
+    .bind(&tenant_uuids)
+    .bind(&changelog_versions)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn close_into_existing(
+    store: &PostgresGraphStore,
     old: &LifecycleNodeRow,
     replacement: &LifecycleNodeRow,
     valid_to: DateTime<Utc>,
     reason: &str,
     now: DateTime<Utc>,
 ) -> Result<()> {
-    scoped_graph(pool, old)
+    store
         .close_existing_node_with_supersession(ExistingSupersessionIntent {
             old_uid: old.uid,
             replacement_uid: replacement.uid,
@@ -455,34 +679,55 @@ fn is_sweepable_contradiction_predicate(predicate: &str) -> bool {
     )
 }
 
-fn decay_target(
-    fact: &LifecycleNodeRow,
-    current: f64,
+/// Computes the anchored confidence-decay target for a single fact.
+///
+/// This is the reference implementation the set-based [`decay_confidence`] pass
+/// reproduces in SQL: given the anchor `base_confidence` (the fact's stored
+/// `base_confidence`, or its live confidence when no anchor has been recorded)
+/// and the fact's `last_accessed_at`, it applies half-life decay over whole idle
+/// days and clamps to the configured floor. It returns `None` when the fact is
+/// too fresh to decay or the half-life is not a usable positive, finite value,
+/// meaning the fact's confidence is left untouched.
+#[must_use]
+pub fn decay_target_confidence(
+    base_confidence: f64,
+    last_accessed_at: DateTime<Utc>,
     now: DateTime<Utc>,
     opts: &ConsolidationOptions,
 ) -> Option<f64> {
-    let idle = now.signed_duration_since(fact.last_accessed_at);
+    let idle = now.signed_duration_since(last_accessed_at);
     if idle < Duration::days(opts.decay_idle_days) {
         return None;
     }
     if opts.decay_half_life_days <= 0.0 || !opts.decay_half_life_days.is_finite() {
         return None;
     }
+    let idle_days = idle.num_seconds().max(0) as f64 / 86_400.0;
+    Some(
+        (base_confidence * 0.5_f64.powf(idle_days / opts.decay_half_life_days))
+            .max(opts.decay_floor)
+            .clamp(0.0, 1.0),
+    )
+}
+
+#[cfg(test)]
+fn decay_target(
+    fact: &LifecycleNodeRow,
+    current: f64,
+    now: DateTime<Utc>,
+    opts: &ConsolidationOptions,
+) -> Option<f64> {
     let base = fact
         .properties
         .as_ref()
         .and_then(|value| value.get("base_confidence"))
         .and_then(Value::as_f64)
         .unwrap_or(current);
-    let idle_days = idle.num_seconds().max(0) as f64 / 86_400.0;
-    Some(
-        (base * 0.5_f64.powf(idle_days / opts.decay_half_life_days))
-            .max(opts.decay_floor)
-            .clamp(0.0, 1.0),
-    )
+    decay_target_confidence(base, fact.last_accessed_at, now, opts)
 }
 
 async fn promote_aliases_for_entity(
+    stores: &mut BTreeMap<Option<Uuid>, PostgresGraphStore>,
     pool: &PgPool,
     entity: &LifecycleNodeRow,
     aliases: BTreeSet<String>,
@@ -512,7 +757,7 @@ async fn promote_aliases_for_entity(
         "aliases".to_string(),
         Value::Array(existing.into_iter().map(Value::String).collect()),
     );
-    scoped_graph(pool, entity)
+    scoped_graph_cached(stores, pool, entity)
         .update_node_properties(NodePropertyUpdateIntent {
             uid: entity.uid,
             properties: Value::Object(properties),
@@ -532,35 +777,29 @@ async fn edge_aliases_for_entities(
     if entities.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let entity_uids = entities
-        .iter()
-        .map(|entity| entity.uid.to_string())
-        .collect::<Vec<_>>();
+    let entity_uids = entities.iter().map(|entity| entity.uid).collect::<Vec<_>>();
+    // Derive alias mentions from the live edge table rather than scanning the
+    // append-only `graph_changelog` with non-indexable JSON expressions. Edge
+    // creation writes `properties` verbatim into `moa.edge_index` (the same value
+    // it records under `payload->'after'` in the changelog), and the
+    // `(storage_partition_id, start_uid)` / `(storage_partition_id, end_uid)`
+    // indexes make the lookup selective. Reading live edges also excludes edges
+    // that were later removed, which is the desired promotion semantics.
     let rows = sqlx::query(
         r#"
-        WITH candidate_aliases AS (
-            SELECT payload->>'start_uid' AS entity_uid,
-                   payload->'after'->>'alias_mention' AS alias
-            FROM moa.graph_changelog
-            WHERE storage_partition_id = $1
-              AND target_kind = 'edge'
-              AND op = 'create'
-              AND payload->>'start_uid' = ANY($2)
-              AND payload->'after' ? 'alias_mention'
-            UNION
-            SELECT payload->>'end_uid' AS entity_uid,
-                   payload->'after'->>'alias_mention' AS alias
-            FROM moa.graph_changelog
-            WHERE storage_partition_id = $1
-              AND target_kind = 'edge'
-              AND op = 'create'
-              AND payload->>'end_uid' = ANY($2)
-              AND payload->'after' ? 'alias_mention'
-        )
-        SELECT DISTINCT entity_uid, alias
-        FROM candidate_aliases
-        WHERE entity_uid IS NOT NULL
-          AND alias IS NOT NULL
+        SELECT edge.start_uid AS entity_uid,
+               edge.properties->>'alias_mention' AS alias
+        FROM moa.edge_index AS edge
+        WHERE edge.storage_partition_id = $1
+          AND edge.start_uid = ANY($2)
+          AND edge.properties ? 'alias_mention'
+        UNION
+        SELECT edge.end_uid AS entity_uid,
+               edge.properties->>'alias_mention' AS alias
+        FROM moa.edge_index AS edge
+        WHERE edge.storage_partition_id = $1
+          AND edge.end_uid = ANY($2)
+          AND edge.properties ? 'alias_mention'
         "#,
     )
     .bind(storage_partition_id.to_string())
@@ -570,10 +809,11 @@ async fn edge_aliases_for_entities(
 
     let mut aliases_by_entity = BTreeMap::<Uuid, BTreeSet<String>>::new();
     for row in rows {
-        let entity_uid = row.try_get::<String, _>("entity_uid")?;
-        let entity_uid = Uuid::parse_str(&entity_uid)
-            .map_err(|error| Error::InvalidRow(format!("invalid alias entity uid: {error}")))?;
-        let alias = row.try_get::<String, _>("alias")?.trim().to_string();
+        let entity_uid = row.try_get::<Uuid, _>("entity_uid")?;
+        let Some(alias) = row.try_get::<Option<String>, _>("alias")? else {
+            continue;
+        };
+        let alias = alias.trim().to_string();
         if !alias.is_empty() {
             aliases_by_entity
                 .entry(entity_uid)
@@ -685,8 +925,7 @@ fn lifecycle_row_from_sql(
     })
 }
 
-fn scoped_graph(pool: &PgPool, row: &LifecycleNodeRow) -> PostgresGraphStore {
-    let scope = row.scope_context();
+fn scoped_graph_for(pool: &PgPool, scope: RlsContext) -> PostgresGraphStore {
     let vector_backend = VectorStoreFactory::default().transactional_graph_backend(
         pool.clone(),
         scope.clone(),
@@ -695,6 +934,19 @@ fn scoped_graph(pool: &PgPool, row: &LifecycleNodeRow) -> PostgresGraphStore {
     PostgresGraphStore::scoped(pool.clone(), scope)
         .with_vector_store(vector_backend.vector_store())
         .with_vector_post_commit_sync(vector_backend.post_commit_sync())
+}
+
+/// Returns a scoped graph store for `row`, building and caching one store per
+/// distinct `(tenant, contact)` scope so per-node loops stop reconstructing the
+/// store (and its vector backend) on every write.
+fn scoped_graph_cached<'a>(
+    stores: &'a mut BTreeMap<Option<Uuid>, PostgresGraphStore>,
+    pool: &PgPool,
+    row: &LifecycleNodeRow,
+) -> &'a PostgresGraphStore {
+    stores
+        .entry(row.contact_id)
+        .or_insert_with(|| scoped_graph_for(pool, row.scope_context()))
 }
 
 fn normalized_entity_name(entity: &LifecycleNodeRow) -> String {

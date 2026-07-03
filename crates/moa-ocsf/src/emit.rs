@@ -1,8 +1,11 @@
 //! High-level OCSF emission helpers.
 //!
-//! Every helper synchronously signs and inserts a `security_events` row. This
-//! is intentionally fail-closed: if the audit write fails, callers should roll
-//! back the state mutation that would otherwise be missing an audit trail.
+//! The `emit_*` helpers synchronously sign and insert a `security_events` row and
+//! are intentionally fail-closed: if the audit write fails, callers can roll back
+//! the state mutation that would otherwise be missing an audit trail. The
+//! `spawn_*` helpers instead hand the event to the background batch writer
+//! ([`crate::init_background_audit`]); they never block or fail the caller and are
+//! used on hot request paths where an audit write must not gate the response.
 
 use crate::classes::{
     AccountChangeEvent, Actor, AuthenticationEvent, AuthorizationEvent, EntityManagementEvent,
@@ -78,16 +81,13 @@ impl ActorInput {
     }
 }
 
-/// Emit an authentication success event.
-pub async fn emit_authn_success(
-    pool: &PgPool,
-    tenant_id: Uuid,
+/// Build an authentication success event.
+fn authn_success_event(
     identity: &Identity,
     auth_protocol: &str,
     src_ip: Option<&str>,
-) -> Result<Uuid, EmitError> {
-    let actor = ActorInput::from_identity(identity);
-    let event = AuthenticationEvent {
+) -> AuthenticationEvent {
+    AuthenticationEvent {
         class_uid: class_uid::AUTHENTICATION,
         class_name: "Authentication".to_string(),
         category_uid: category_uid::IAM,
@@ -101,23 +101,20 @@ pub async fn emit_authn_success(
         status: "Success".to_string(),
         time: Utc::now(),
         metadata: metadata(),
-        actor: actor_from_input(actor),
+        actor: actor_from_input(ActorInput::from_identity(identity)),
         auth_protocol: auth_protocol.to_string(),
         src_endpoint: src_ip.map(network_endpoint),
-    };
-    insert_pool(pool, tenant_id, &event, None).await
+    }
 }
 
-/// Emit an authentication failure event.
-pub async fn emit_authn_failure(
-    pool: &PgPool,
-    tenant_id: Uuid,
+/// Build an authentication failure event.
+fn authn_failure_event(
     actor_uid: Option<&str>,
     auth_protocol: &str,
     src_ip: Option<&str>,
     reason: &str,
-) -> Result<Uuid, EmitError> {
-    let event = AuthenticationEvent {
+) -> AuthenticationEvent {
+    AuthenticationEvent {
         class_uid: class_uid::AUTHENTICATION,
         class_name: "Authentication".to_string(),
         category_uid: category_uid::IAM,
@@ -140,8 +137,63 @@ pub async fn emit_authn_failure(
         }),
         auth_protocol: auth_protocol.to_string(),
         src_endpoint: src_ip.map(network_endpoint),
-    };
+    }
+}
+
+/// Emit an authentication success event synchronously, failing closed.
+pub async fn emit_authn_success(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    identity: &Identity,
+    auth_protocol: &str,
+    src_ip: Option<&str>,
+) -> Result<Uuid, EmitError> {
+    let event = authn_success_event(identity, auth_protocol, src_ip);
     insert_pool(pool, tenant_id, &event, None).await
+}
+
+/// Enqueue an authentication success event on the background audit writer.
+///
+/// This never blocks the caller and never fails: if the queue is saturated or
+/// uninitialized the event is dropped and counted. Use this on hot request
+/// paths where an audit write must not gate the response.
+pub fn spawn_authn_success(
+    tenant_id: Uuid,
+    identity: &Identity,
+    auth_protocol: &str,
+    src_ip: Option<&str>,
+) {
+    let event = authn_success_event(identity, auth_protocol, src_ip);
+    enqueue_event(tenant_id, &event, None);
+}
+
+/// Emit an authentication failure event synchronously, failing closed.
+pub async fn emit_authn_failure(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    actor_uid: Option<&str>,
+    auth_protocol: &str,
+    src_ip: Option<&str>,
+    reason: &str,
+) -> Result<Uuid, EmitError> {
+    let event = authn_failure_event(actor_uid, auth_protocol, src_ip, reason);
+    insert_pool(pool, tenant_id, &event, None).await
+}
+
+/// Enqueue an authentication failure event on the background audit writer.
+///
+/// Non-blocking and non-fatal like [`spawn_authn_success`]. This is used for
+/// unauthenticated and rejected credentials so a flood of bad requests cannot
+/// amplify into synchronous signed inserts on the request path.
+pub fn spawn_authn_failure(
+    tenant_id: Uuid,
+    actor_uid: Option<&str>,
+    auth_protocol: &str,
+    src_ip: Option<&str>,
+    reason: &str,
+) {
+    let event = authn_failure_event(actor_uid, auth_protocol, src_ip, reason);
+    enqueue_event(tenant_id, &event, None);
 }
 
 /// Emit an authorization decision event.
@@ -167,6 +219,34 @@ pub async fn emit_authz_decision(
         },
     );
     insert_pool(pool, tenant_id.0, &event, Some(object_uid)).await
+}
+
+/// Enqueue an authorization decision event on the background audit writer.
+///
+/// Non-blocking and non-fatal: denial audits (and allow audits, when enabled)
+/// are recorded off the request path so an authorization check never fails or
+/// stalls because of an audit write.
+pub fn spawn_authz_decision(
+    tenant_id: TenantId,
+    identity: &Identity,
+    object_uid: &str,
+    object_type: &str,
+    relation: &str,
+    allowed: bool,
+) {
+    let event = authorization_event(
+        ActorInput::from_identity(identity),
+        object_uid,
+        object_type,
+        relation,
+        allowed,
+        if allowed {
+            authz_activity::GRANT_PRIVILEGES
+        } else {
+            authz_activity::OTHER
+        },
+    );
+    enqueue_event(tenant_id.0, &event, Some(object_uid.to_string()));
 }
 
 /// Emit an API-key creation event in an existing transaction.
@@ -599,21 +679,8 @@ async fn insert_tx<E: serde::Serialize>(
     let value = serde_json::to_value(event)?;
     let (signing_key_id, signature_hex, event_jcs) =
         signing::sign_tx(tx, tenant_id, &value).await?;
-    let id = Uuid::now_v7();
-    let class_uid = json_i32(&value, "class_uid");
-    let activity_id = json_i32(&value, "activity_id");
-    let category_uid = json_i32(&value, "category_uid");
-    let severity_id = json_i32(&value, "severity_id");
-    let type_uid = value.get("type_uid").and_then(Value::as_i64).unwrap_or(0);
-    let actor_user_uid = value
-        .pointer("/actor/user/uid")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let actor_session_uid = value
-        .pointer("/actor/session/uid")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let occurred_at = occurred_at(&value);
+    let columns = EventColumns::from_value(&value);
+    let id = columns.id;
 
     sqlx::query(
         r#"
@@ -626,22 +693,77 @@ async fn insert_tx<E: serde::Serialize>(
     )
     .bind(id)
     .bind(tenant_id)
-    .bind(class_uid)
-    .bind(activity_id)
-    .bind(category_uid)
-    .bind(severity_id)
-    .bind(type_uid)
-    .bind(actor_user_uid)
-    .bind(actor_session_uid)
+    .bind(columns.class_uid)
+    .bind(columns.activity_id)
+    .bind(columns.category_uid)
+    .bind(columns.severity_id)
+    .bind(columns.type_uid)
+    .bind(columns.actor_user_uid)
+    .bind(columns.actor_session_uid)
     .bind(target_resource_uid)
     .bind(&event_jcs)
     .bind(signature_hex)
     .bind(signing_key_id)
-    .bind(occurred_at)
+    .bind(columns.occurred_at)
     .execute(&mut **tx)
     .await?;
 
     Ok(id)
+}
+
+/// Non-signature `security_events` columns derived from a serialized event.
+///
+/// Shared by the synchronous [`insert_tx`] path and the background batch writer
+/// so both persist identical column values for a given event.
+pub(crate) struct EventColumns {
+    pub(crate) id: Uuid,
+    pub(crate) class_uid: i32,
+    pub(crate) activity_id: i32,
+    pub(crate) category_uid: i32,
+    pub(crate) severity_id: i32,
+    pub(crate) type_uid: i64,
+    pub(crate) actor_user_uid: Option<String>,
+    pub(crate) actor_session_uid: Option<String>,
+    pub(crate) occurred_at: DateTime<Utc>,
+}
+
+impl EventColumns {
+    pub(crate) fn from_value(value: &Value) -> Self {
+        Self {
+            id: Uuid::now_v7(),
+            class_uid: json_i32(value, "class_uid"),
+            activity_id: json_i32(value, "activity_id"),
+            category_uid: json_i32(value, "category_uid"),
+            severity_id: json_i32(value, "severity_id"),
+            type_uid: value.get("type_uid").and_then(Value::as_i64).unwrap_or(0),
+            actor_user_uid: value
+                .pointer("/actor/user/uid")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            actor_session_uid: value
+                .pointer("/actor/session/uid")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            occurred_at: occurred_at(value),
+        }
+    }
+}
+
+/// Serialize an event and hand it to the background audit writer.
+///
+/// Serialization failures are logged and dropped rather than surfaced: the
+/// spawn variants are used only where an audit write must never fail a request.
+fn enqueue_event<E: serde::Serialize>(
+    tenant_id: Uuid,
+    event: &E,
+    target_resource_uid: Option<String>,
+) {
+    match serde_json::to_value(event) {
+        Ok(value) => crate::audit_sink::enqueue(tenant_id, value, target_resource_uid),
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to serialize security audit event; dropping");
+        }
+    }
 }
 
 fn authorization_event(

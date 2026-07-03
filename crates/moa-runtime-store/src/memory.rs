@@ -9,10 +9,31 @@ use moa_core::traits::RuntimeCacheStore;
 use tokio::sync::RwLock;
 use tokio::time::Instant;
 
+/// Minimum interval between opportunistic sweeps of expired entries.
+///
+/// Keeping this coarse means a sweep costs at most one `HashMap::retain` per interval on the
+/// write path, so steady-state writes do not pay an O(n) scan on every call.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Process-local runtime cache backed by a Tokio `RwLock`.
 #[derive(Debug, Default)]
 pub struct MemoryRuntimeCacheStore {
-    entries: RwLock<HashMap<String, Entry>>,
+    state: RwLock<State>,
+}
+
+#[derive(Debug)]
+struct State {
+    entries: HashMap<String, Entry>,
+    last_sweep: Instant,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            last_sweep: Instant::now(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +54,25 @@ impl MemoryRuntimeCacheStore {
             .checked_add(ttl)
             .ok_or_else(|| MoaError::ValidationError("runtime cache TTL is too large".to_string()))
     }
+
+    /// Drops expired entries when at least [`SWEEP_INTERVAL`] has elapsed since the last sweep.
+    ///
+    /// Lazy expiry on read only reclaims keys that are read again; this sweep bounds growth from
+    /// keys that are written once and never touched again. It runs on the write path (which
+    /// already holds the lock and is the only path that grows the map), so no background task is
+    /// needed for a process-local dev cache.
+    fn sweep_expired(state: &mut State) {
+        let now = Instant::now();
+        if now.duration_since(state.last_sweep) >= SWEEP_INTERVAL {
+            state.entries.retain(|_, entry| entry.expires_at > now);
+            state.last_sweep = now;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn entry_count(&self) -> usize {
+        self.state.read().await.entries.len()
+    }
 }
 
 #[async_trait]
@@ -40,8 +80,8 @@ impl RuntimeCacheStore for MemoryRuntimeCacheStore {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let now = Instant::now();
         {
-            let entries = self.entries.read().await;
-            if let Some(entry) = entries.get(key) {
+            let state = self.state.read().await;
+            if let Some(entry) = state.entries.get(key) {
                 if entry.expires_at > now {
                     return Ok(Some(entry.value.clone()));
                 }
@@ -50,12 +90,13 @@ impl RuntimeCacheStore for MemoryRuntimeCacheStore {
             }
         }
 
-        let mut entries = self.entries.write().await;
-        if entries
+        let mut state = self.state.write().await;
+        if state
+            .entries
             .get(key)
             .is_some_and(|entry| entry.expires_at <= Instant::now())
         {
-            entries.remove(key);
+            state.entries.remove(key);
         }
         Ok(None)
     }
@@ -65,12 +106,14 @@ impl RuntimeCacheStore for MemoryRuntimeCacheStore {
             value,
             expires_at: Self::expires_at(ttl)?,
         };
-        self.entries.write().await.insert(key.to_string(), entry);
+        let mut state = self.state.write().await;
+        Self::sweep_expired(&mut state);
+        state.entries.insert(key.to_string(), entry);
         Ok(())
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
-        self.entries.write().await.remove(key);
+        self.state.write().await.entries.remove(key);
         Ok(())
     }
 
@@ -81,20 +124,22 @@ impl RuntimeCacheStore for MemoryRuntimeCacheStore {
         value: Vec<u8>,
         ttl: Duration,
     ) -> Result<bool> {
-        let mut entries = self.entries.write().await;
-        if entries
+        let mut state = self.state.write().await;
+        Self::sweep_expired(&mut state);
+        if state
+            .entries
             .get(key)
             .is_some_and(|entry| entry.expires_at <= Instant::now())
         {
-            entries.remove(key);
+            state.entries.remove(key);
         }
 
-        let current = entries.get(key).map(|entry| entry.value.as_slice());
+        let current = state.entries.get(key).map(|entry| entry.value.as_slice());
         if current != expected {
             return Ok(false);
         }
 
-        entries.insert(
+        state.entries.insert(
             key.to_string(),
             Entry {
                 value,
@@ -105,13 +150,13 @@ impl RuntimeCacheStore for MemoryRuntimeCacheStore {
     }
 
     async fn expire(&self, key: &str, ttl: Duration) -> Result<()> {
-        let mut entries = self.entries.write().await;
-        match entries.get_mut(key) {
+        let mut state = self.state.write().await;
+        match state.entries.get_mut(key) {
             Some(entry) if entry.expires_at > Instant::now() => {
                 entry.expires_at = Self::expires_at(ttl)?;
             }
             Some(_) => {
-                entries.remove(key);
+                state.entries.remove(key);
             }
             None => {}
         }

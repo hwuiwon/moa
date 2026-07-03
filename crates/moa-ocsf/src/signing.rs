@@ -3,15 +3,34 @@
 use crate::jcs::{self, JcsError};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use hmac::{Hmac, Mac};
+use moka::future::Cache;
 use rand::{RngCore, rngs::OsRng};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
 use sha2::Sha256;
 use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
+use std::sync::OnceLock;
+use std::time::Duration;
 use thiserror::Error;
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Maximum number of tenant signing keys held in the in-process cache.
+const SIGNING_KEY_CACHE_CAPACITY: u64 = 10_000;
+/// How long a cached active signing key is trusted before it is re-read.
+const SIGNING_KEY_CACHE_TTL: Duration = Duration::from_secs(300);
+
+static SIGNING_KEY_CACHE: OnceLock<Cache<Uuid, ActiveKey>> = OnceLock::new();
+
+fn signing_key_cache() -> &'static Cache<Uuid, ActiveKey> {
+    SIGNING_KEY_CACHE.get_or_init(|| {
+        Cache::builder()
+            .max_capacity(SIGNING_KEY_CACHE_CAPACITY)
+            .time_to_live(SIGNING_KEY_CACHE_TTL)
+            .build()
+    })
+}
 
 /// Signing failures.
 #[derive(Debug, Error)]
@@ -82,6 +101,7 @@ pub async fn rotate_key(pool: &PgPool, tenant_id: Uuid) -> Result<Uuid, SigningE
     let mut tx = pool.begin().await?;
     let key_id = rotate_key_tx(&mut tx, tenant_id).await?;
     tx.commit().await?;
+    signing_key_cache().invalidate(&tenant_id).await;
     Ok(key_id)
 }
 
@@ -131,6 +151,63 @@ pub async fn sign(
     let signed = sign_tx(&mut tx, tenant_id, event_json).await?;
     tx.commit().await?;
     Ok(signed)
+}
+
+/// Sign a JSON event using the tenant's active key, reusing a cached key.
+///
+/// Unlike [`sign`], this never opens a transaction on the hot path: the active
+/// key is read once per tenant and then served from an in-process cache with a
+/// short TTL. It is used by the background audit writer, where per-event key
+/// SELECTs would dominate the cost. If the tenant has no active key yet one is
+/// created (a rare, first-event write).
+pub async fn sign_cached(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    event_json: &Value,
+) -> Result<(Uuid, String, Vec<u8>), SigningError> {
+    let active = active_key_cached(pool, tenant_id).await?;
+    let key_bytes = B64
+        .decode(active.key.expose_secret())
+        .map_err(|error| SigningError::InvalidKey(error.to_string()))?;
+    let event_jcs = jcs::canonicalize(event_json)?;
+    let signature_hex = hmac_hex(&key_bytes, &event_jcs)?;
+    Ok((active.key_id, signature_hex, event_jcs))
+}
+
+/// Return the tenant's active signing key from cache, reading or creating it on
+/// a miss. Cached entries are invalidated by [`rotate_key`].
+async fn active_key_cached(pool: &PgPool, tenant_id: Uuid) -> Result<ActiveKey, SigningError> {
+    if let Some(active) = signing_key_cache().get(&tenant_id).await {
+        return Ok(active);
+    }
+    let active = match active_key_for(pool, tenant_id).await {
+        Ok(active) => active,
+        Err(SigningError::NoActiveKey(_)) => {
+            if let Err(error) = rotate_key(pool, tenant_id).await
+                && !matches!(
+                    &error,
+                    SigningError::Database(database_error)
+                        if is_unique_violation(database_error)
+                )
+            {
+                return Err(error);
+            }
+            // Another first-event signer created the tenant's active key
+            // concurrently. Refetch it instead of dropping this audit row.
+            active_key_for(pool, tenant_id).await?
+        }
+        Err(error) => return Err(error),
+    };
+    signing_key_cache().insert(tenant_id, active.clone()).await;
+    Ok(active)
+}
+
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(database_error)
+            if database_error.code().as_deref() == Some("23505")
+    )
 }
 
 /// Sign a JSON event inside an existing transaction.

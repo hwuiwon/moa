@@ -7,19 +7,50 @@ use moa_core::{
 };
 use serde_json::Value;
 
+/// Metadata key exposing the compiled tool loadout's precomputed token count so
+/// later stages need not re-serialize and re-tokenize the schemas.
+pub(crate) const TOOLS_TOKEN_COUNT_METADATA_KEY: &str = "_moa.tools.token_count";
+
 // WARNING: Tool schemas live in the cached prompt prefix.
 // Keep ordering deterministic and do not inject workspace- or turn-specific metadata here.
+
+/// One tool schema pre-canonicalized once so per-turn work is just policy
+/// filtering — no re-cloning, key sorting, re-serialization, or re-tokenizing of
+/// the fixed loadout.
+#[derive(Clone)]
+struct CanonicalTool {
+    name: String,
+    schema: Value,
+    token_count: usize,
+}
 
 /// Injects deterministic tool schemas into the working context.
 #[derive(Clone)]
 pub struct ToolDefinitionProcessor {
-    tool_schemas: Vec<Value>,
+    canonical_tools: Vec<CanonicalTool>,
 }
 
 impl ToolDefinitionProcessor {
     /// Creates a tool processor from a fixed list of schemas.
+    ///
+    /// The loadout is canonicalized once here (object keys sorted, ordered by
+    /// tool name, token count precomputed) because it is constant for the life
+    /// of the processor; per-turn `process` only applies the pinned agent policy.
     pub fn new(tool_schemas: Vec<Value>) -> Self {
-        Self { tool_schemas }
+        let mut canonical_tools = tool_schemas
+            .into_iter()
+            .map(|mut schema| {
+                sort_json_keys(&mut schema);
+                let token_count = estimate_text_tokens(&schema.to_string());
+                CanonicalTool {
+                    name: tool_name(&schema).to_string(),
+                    schema,
+                    token_count,
+                }
+            })
+            .collect::<Vec<_>>();
+        canonical_tools.sort_by(|left, right| left.name.cmp(&right.name));
+        Self { canonical_tools }
     }
 }
 
@@ -40,40 +71,38 @@ impl ContextProcessor for ToolDefinitionProcessor {
             .map(|agent_context| agent_context.parsed_policy_snapshot())
             .transpose()?
             .map(|snapshot| snapshot.tool_policy);
+        const MAX_TOOLS: usize = 30;
         let mut tool_schemas = Vec::new();
+        let mut items_included = Vec::new();
+        let mut tokens_added = 0usize;
         let mut excluded_items = Vec::new();
-        for schema in &self.tool_schemas {
-            let name = tool_name(schema);
-            if agent_allows_tool(agent_tool_policy.as_ref(), name) {
-                tool_schemas.push(schema.clone());
+        // The canonical loadout is already key-sorted and name-ordered; retain
+        // the first `MAX_TOOLS` allowed tools, matching the prior
+        // filter-then-truncate ordering.
+        for tool in &self.canonical_tools {
+            if agent_allows_tool(agent_tool_policy.as_ref(), &tool.name) {
+                if tool_schemas.len() < MAX_TOOLS {
+                    tool_schemas.push(tool.schema.clone());
+                    tokens_added += tool.token_count;
+                    items_included.push(tool.name.clone());
+                }
             } else {
                 excluded_items.push(ExcludedItem {
-                    item: name.to_string(),
+                    item: tool.name.clone(),
                     reason: "denied by pinned agent tool policy".to_string(),
                 });
             }
         }
-        for schema in &mut tool_schemas {
-            sort_json_keys(schema);
-        }
-        tool_schemas.sort_by(|left, right| tool_name(left).cmp(tool_name(right)));
-        tool_schemas.truncate(30);
-
-        let tokens_added = tool_schemas
-            .iter()
-            .map(|schema| estimate_text_tokens(&schema.to_string()))
-            .sum();
-        let items_included = tool_schemas
-            .iter()
-            .filter_map(|schema| schema.get("name").and_then(Value::as_str))
-            .map(ToString::to_string)
-            .collect();
         let items_excluded = excluded_items
             .iter()
             .map(|item| item.item.clone())
             .collect::<Vec<_>>();
 
         ctx.set_tools(tool_schemas);
+        ctx.insert_metadata(
+            TOOLS_TOKEN_COUNT_METADATA_KEY,
+            serde_json::json!(tokens_added),
+        );
 
         Ok(ProcessorOutput {
             tokens_added,

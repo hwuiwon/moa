@@ -12,6 +12,7 @@ constant_time_eq.workspace = true
 hex.workspace = true
 hmac.workspace = true
 moa-core.workspace = true
+moka.workspace = true
 rand = { workspace = true, features = ["std", "std_rng"] }
 secrecy.workspace = true
 serde = { workspace = true, features = ["derive"] }
@@ -19,6 +20,8 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 sha2.workspace = true
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"] }
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tracing.workspace = true
 uuid = { workspace = true, features = ["v4", "v7", "serde"] }
 workspace-hack = { workspace = true }
 

@@ -184,6 +184,55 @@ pub trait KnowledgeRepository: Send + Sync {
         connection_uid: Uuid,
     ) -> Result<Vec<KnowledgeObject>>;
 
+    /// Lists active objects for one connection whose source id is absent from
+    /// `seen_source_ids`, scoped to `tenant_id` and ordered by
+    /// `(source_id, object_uid)` for stable keyset pagination.
+    ///
+    /// `after` is an exclusive keyset cursor holding the last
+    /// `(source_id, object_uid)` returned by a previous page; `None` starts from
+    /// the beginning. At most `limit` objects are returned.
+    ///
+    /// The default implementation loads every active object and filters in
+    /// memory; the Postgres implementation computes the prune set in SQL so a
+    /// large already-seen set is never materialized on the client.
+    async fn unseen_active_objects_for_connection(
+        &self,
+        connection_uid: Uuid,
+        tenant_id: TenantId,
+        seen_source_ids: &[String],
+        after: Option<(String, Uuid)>,
+        limit: i64,
+    ) -> Result<Vec<KnowledgeObject>> {
+        let seen = seen_source_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        let mut unseen = self
+            .active_objects_for_connection(connection_uid)
+            .await?
+            .into_iter()
+            .filter(|object| {
+                object.tenant_id == tenant_id && !seen.contains(object.source_id.as_str())
+            })
+            .filter(|object| match &after {
+                Some((source_id, object_uid)) => {
+                    (object.source_id.as_str(), object.object_uid)
+                        > (source_id.as_str(), *object_uid)
+                }
+                None => true,
+            })
+            .collect::<Vec<_>>();
+        unseen.sort_by(|left, right| {
+            left.source_id
+                .cmp(&right.source_id)
+                .then_with(|| left.object_uid.cmp(&right.object_uid))
+        });
+        if let Ok(limit) = usize::try_from(limit) {
+            unseen.truncate(limit);
+        }
+        Ok(unseen)
+    }
+
     /// Gets the latest document version for an object.
     async fn latest_document_version(&self, object_uid: Uuid) -> Result<Option<DocumentVersion>>;
 
@@ -1172,6 +1221,47 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         rows.iter().map(object_from_row).collect()
     }
 
+    async fn unseen_active_objects_for_connection(
+        &self,
+        connection_uid: Uuid,
+        tenant_id: TenantId,
+        seen_source_ids: &[String],
+        after: Option<(String, Uuid)>,
+        limit: i64,
+    ) -> Result<Vec<KnowledgeObject>> {
+        let (after_source_id, after_object_uid) = match after {
+            Some((source_id, object_uid)) => (Some(source_id), object_uid),
+            None => (None, Uuid::nil()),
+        };
+        let mut conn = self.begin().await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT object_uid, tenant_id, connection_id, object_type, external_object_id,
+                   parent_external_object_id, source_uri, title, change_token, metadata,
+                   status, last_modified_at, deleted_at
+            FROM moa.knowledge_objects
+            WHERE connection_id = $1
+              AND tenant_id = $2
+              AND status <> 'deleted'
+              AND NOT (external_object_id = ANY($3))
+              AND ($4::TEXT IS NULL OR (external_object_id, object_uid) > ($4, $5))
+            ORDER BY external_object_id ASC, object_uid ASC
+            LIMIT $6
+            "#,
+        )
+        .bind(connection_uid)
+        .bind(tenant_id.0)
+        .bind(seen_source_ids)
+        .bind(after_source_id)
+        .bind(after_object_uid)
+        .bind(limit)
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await.map_err(map_moa_error)?;
+        rows.iter().map(object_from_row).collect()
+    }
+
     async fn latest_document_version(&self, object_uid: Uuid) -> Result<Option<DocumentVersion>> {
         let mut conn = self.begin().await?;
         let row = sqlx::query(
@@ -1502,32 +1592,62 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             .execute(conn.as_mut())
             .await
             .map_err(map_sqlx_error)?;
-        for block in blocks {
-            let result = sqlx::query(
-                r#"
-                INSERT INTO moa.knowledge_blocks (
-                    block_uid, tenant_id, storage_partition_id, document_version_id,
-                    element_id, block_hash, ordinal, normalized_text, heading_path, metadata
-                )
-                SELECT $1, tenant_id, storage_partition_id, document_version_uid,
-                       $3, $4, $5, $6, $7, $8
-                FROM moa.knowledge_document_versions
-                WHERE document_version_uid = $2
-                "#,
-            )
-            .bind(block.block_uid)
-            .bind(version_uid)
-            .bind(block.element_id)
-            .bind(block.block_hash)
-            .bind(i32::try_from(block.ordinal).map_err(map_int_error)?)
-            .bind(block.normalized_text)
-            .bind(block.heading_path)
-            .bind(block.metadata)
-            .execute(conn.as_mut())
-            .await
-            .map_err(map_sqlx_error)?;
-            ensure_rows_affected(result.rows_affected(), "replace blocks parent version")?;
+        if blocks.is_empty() {
+            return conn.commit().await.map_err(map_moa_error);
         }
+        let expected = blocks.len() as u64;
+        let mut block_uids = Vec::with_capacity(blocks.len());
+        let mut element_ids = Vec::with_capacity(blocks.len());
+        let mut block_hashes = Vec::with_capacity(blocks.len());
+        let mut ordinals = Vec::with_capacity(blocks.len());
+        let mut normalized_texts = Vec::with_capacity(blocks.len());
+        let mut heading_paths = Vec::with_capacity(blocks.len());
+        let mut metadatas = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            block_uids.push(block.block_uid);
+            element_ids.push(block.element_id);
+            block_hashes.push(block.block_hash);
+            ordinals.push(i32::try_from(block.ordinal).map_err(map_int_error)?);
+            normalized_texts.push(block.normalized_text);
+            heading_paths.push(encode_text_array(&block.heading_path)?);
+            metadatas.push(encode_jsonb(&block.metadata)?);
+        }
+        // Single multi-row insert: UNNEST the parallel arrays and join once to the
+        // parent version so tenant/partition columns and the parent-visibility
+        // guard match the previous per-row statement.
+        let result = sqlx::query(
+            r#"
+            INSERT INTO moa.knowledge_blocks (
+                block_uid, tenant_id, storage_partition_id, document_version_id,
+                element_id, block_hash, ordinal, normalized_text, heading_path, metadata
+            )
+            SELECT b.block_uid, dv.tenant_id, dv.storage_partition_id, dv.document_version_uid,
+                   b.element_id, b.block_hash, b.ordinal, b.normalized_text,
+                   ARRAY(SELECT jsonb_array_elements_text(b.heading_path::JSONB)),
+                   b.metadata::JSONB
+            FROM moa.knowledge_document_versions dv
+            CROSS JOIN UNNEST(
+                $2::UUID[], $3::TEXT[], $4::TEXT[], $5::INT[], $6::TEXT[], $7::TEXT[], $8::TEXT[]
+            ) AS b(block_uid, element_id, block_hash, ordinal, normalized_text, heading_path, metadata)
+            WHERE dv.document_version_uid = $1
+            "#,
+        )
+        .bind(version_uid)
+        .bind(&block_uids)
+        .bind(&element_ids)
+        .bind(&block_hashes)
+        .bind(&ordinals)
+        .bind(&normalized_texts)
+        .bind(&heading_paths)
+        .bind(&metadatas)
+        .execute(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        ensure_all_rows_written(
+            result.rows_affected(),
+            expected,
+            "replace blocks parent version",
+        )?;
         conn.commit().await.map_err(map_moa_error)
     }
 
@@ -1538,35 +1658,72 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             .execute(conn.as_mut())
             .await
             .map_err(map_sqlx_error)?;
-        for chunk in chunks {
-            let result = sqlx::query(
-                r#"
-                INSERT INTO moa.knowledge_chunks (
-                    chunk_uid, tenant_id, storage_partition_id, document_version_id,
-                    graph_node_uid, chunk_hash, block_hashes, heading_path, text, ordinal,
-                    token_count, metadata
-                )
-                SELECT $1, tenant_id, storage_partition_id, document_version_uid,
-                       $3, $4, $5, $6, $7, $8, $9, $10
-                FROM moa.knowledge_document_versions
-                WHERE document_version_uid = $2
-                "#,
-            )
-            .bind(chunk.chunk_uid)
-            .bind(version_uid)
-            .bind(chunk.graph_node_uid)
-            .bind(chunk.chunk_hash)
-            .bind(chunk.block_hashes)
-            .bind(chunk.heading_path)
-            .bind(chunk.text)
-            .bind(i32::try_from(chunk.ordinal).map_err(map_int_error)?)
-            .bind(i32::try_from(chunk.token_count).map_err(map_int_error)?)
-            .bind(chunk.metadata)
-            .execute(conn.as_mut())
-            .await
-            .map_err(map_sqlx_error)?;
-            ensure_rows_affected(result.rows_affected(), "replace chunks parent version")?;
+        if chunks.is_empty() {
+            return conn.commit().await.map_err(map_moa_error);
         }
+        let expected = chunks.len() as u64;
+        let mut chunk_uids = Vec::with_capacity(chunks.len());
+        let mut graph_node_uids: Vec<Option<Uuid>> = Vec::with_capacity(chunks.len());
+        let mut chunk_hashes = Vec::with_capacity(chunks.len());
+        let mut block_hashes = Vec::with_capacity(chunks.len());
+        let mut heading_paths = Vec::with_capacity(chunks.len());
+        let mut texts = Vec::with_capacity(chunks.len());
+        let mut ordinals = Vec::with_capacity(chunks.len());
+        let mut token_counts = Vec::with_capacity(chunks.len());
+        let mut metadatas = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            chunk_uids.push(chunk.chunk_uid);
+            graph_node_uids.push(chunk.graph_node_uid);
+            chunk_hashes.push(chunk.chunk_hash);
+            block_hashes.push(encode_text_array(&chunk.block_hashes)?);
+            heading_paths.push(encode_text_array(&chunk.heading_path)?);
+            texts.push(chunk.text);
+            ordinals.push(i32::try_from(chunk.ordinal).map_err(map_int_error)?);
+            token_counts.push(i32::try_from(chunk.token_count).map_err(map_int_error)?);
+            metadatas.push(encode_jsonb(&chunk.metadata)?);
+        }
+        // Single multi-row insert: UNNEST the parallel arrays and join once to the
+        // parent version. `block_hashes`/`heading_path` travel as JSON text and are
+        // rebuilt into `TEXT[]`; `graph_node_uid` NULLs are preserved.
+        let result = sqlx::query(
+            r#"
+            INSERT INTO moa.knowledge_chunks (
+                chunk_uid, tenant_id, storage_partition_id, document_version_id,
+                graph_node_uid, chunk_hash, block_hashes, heading_path, text, ordinal,
+                token_count, metadata
+            )
+            SELECT c.chunk_uid, dv.tenant_id, dv.storage_partition_id, dv.document_version_uid,
+                   c.graph_node_uid, c.chunk_hash,
+                   ARRAY(SELECT jsonb_array_elements_text(c.block_hashes::JSONB)),
+                   ARRAY(SELECT jsonb_array_elements_text(c.heading_path::JSONB)),
+                   c.text, c.ordinal, c.token_count, c.metadata::JSONB
+            FROM moa.knowledge_document_versions dv
+            CROSS JOIN UNNEST(
+                $2::UUID[], $3::UUID[], $4::TEXT[], $5::TEXT[], $6::TEXT[], $7::TEXT[],
+                $8::INT[], $9::INT[], $10::TEXT[]
+            ) AS c(chunk_uid, graph_node_uid, chunk_hash, block_hashes, heading_path, text,
+                   ordinal, token_count, metadata)
+            WHERE dv.document_version_uid = $1
+            "#,
+        )
+        .bind(version_uid)
+        .bind(&chunk_uids)
+        .bind(&graph_node_uids)
+        .bind(&chunk_hashes)
+        .bind(&block_hashes)
+        .bind(&heading_paths)
+        .bind(&texts)
+        .bind(&ordinals)
+        .bind(&token_counts)
+        .bind(&metadatas)
+        .execute(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        ensure_all_rows_written(
+            result.rows_affected(),
+            expected,
+            "replace chunks parent version",
+        )?;
         conn.commit().await.map_err(map_moa_error)
     }
 
@@ -1885,6 +2042,35 @@ fn ensure_rows_affected(rows: u64, operation: &str) -> Result<()> {
     Err(Error::Repository(format!(
         "{operation} wrote no rows because its parent was not visible"
     )))
+}
+
+/// Confirms a batch insert wrote exactly the expected number of rows.
+///
+/// A multi-row `INSERT ... SELECT` joined to a parent row writes all `expected`
+/// rows when the parent is visible and zero when it is not, so any other count
+/// signals a lost or duplicated row and is reported as a repository error.
+fn ensure_all_rows_written(rows: u64, expected: u64, operation: &str) -> Result<()> {
+    if rows == expected {
+        return Ok(());
+    }
+    Err(Error::Repository(format!(
+        "{operation} wrote {rows} rows but expected {expected}; parent may not be visible"
+    )))
+}
+
+/// Encodes a string slice as a JSON array literal for transport as `TEXT`.
+///
+/// The literal is rebuilt into a Postgres `TEXT[]` with `jsonb_array_elements_text`,
+/// which sidesteps binding nested `TEXT[][]` arrays through multi-column `UNNEST`.
+fn encode_text_array(values: &[String]) -> Result<String> {
+    serde_json::to_string(values)
+        .map_err(|error| Error::Repository(format!("failed to encode text array: {error}")))
+}
+
+/// Encodes JSON metadata as a string for transport as `TEXT` cast to `JSONB`.
+fn encode_jsonb(value: &serde_json::Value) -> Result<String> {
+    serde_json::to_string(value)
+        .map_err(|error| Error::Repository(format!("failed to encode jsonb value: {error}")))
 }
 
 fn connection_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeConnection> {

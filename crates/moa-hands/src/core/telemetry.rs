@@ -66,7 +66,7 @@ pub(super) fn record_tool_execution_result(
         Ok((_, output)) => {
             let succeeded = !output.is_error;
             span.set_attribute("moa.tool.success", succeeded);
-            span.set_attribute("moa.tool.output", truncate_tool_span_text(output.to_text()));
+            record_tool_output_fields(span, &output.to_text(), trace_tool_output_enabled());
             record_tool_call(
                 tool_name,
                 if succeeded { "success" } else { "error" },
@@ -101,6 +101,54 @@ fn sandbox_tier_label(tier: &SandboxTier) -> &'static str {
     }
 }
 
+/// Env flag that opts execution spans back into carrying tool-output bodies.
+const TRACE_TOOL_OUTPUT_ENV: &str = "MOA_TRACE_TOOL_OUTPUT";
+
+/// Records the tool-output telemetry fields on `span`.
+///
+/// The output byte length and a short content hash are always recorded so spans
+/// stay useful for correlation and size analysis. The (capped) body is attached
+/// only when `attach_body` is set, so normal operation does not ship up to 8 KiB
+/// of tenant tool output on every call.
+fn record_tool_output_fields(span: &tracing::Span, output_text: &str, attach_body: bool) {
+    span.set_attribute("moa.tool.output.bytes", output_text.len() as i64);
+    span.set_attribute("moa.tool.output.hash", short_content_hash(output_text));
+    if let Some(body) = tool_output_body_field(output_text, attach_body) {
+        span.set_attribute("moa.tool.output", body);
+    }
+}
+
+/// Returns the capped tool-output body to attach, or `None` when body tracing is
+/// disabled.
+fn tool_output_body_field(output_text: &str, attach_body: bool) -> Option<String> {
+    attach_body.then(|| truncate_tool_span_text(output_text.to_string()))
+}
+
+/// Returns whether tool-output bodies should be attached to execution spans.
+///
+/// Off by default; enabled when [`TRACE_TOOL_OUTPUT_ENV`] is set to `1`/`true`.
+/// Read per call so an operator (or test) can toggle it without a process restart.
+fn trace_tool_output_enabled() -> bool {
+    parse_trace_flag(std::env::var(TRACE_TOOL_OUTPUT_ENV).ok().as_deref())
+}
+
+/// Parses a `MOA_TRACE_TOOL_OUTPUT` value into an enabled/disabled decision.
+fn parse_trace_flag(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), Some("1" | "true"))
+}
+
+/// Computes a short, stable hex digest of tool output for span correlation.
+///
+/// This is a non-cryptographic content fingerprint used only to correlate or
+/// deduplicate outputs across spans, not a security primitive.
+fn short_content_hash(value: &str) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 fn truncate_tool_span_text(mut value: String) -> String {
     const LIMIT: usize = 8 * 1024;
     if value.len() <= LIMIT {
@@ -114,4 +162,47 @@ fn truncate_tool_span_text(mut value: String) -> String {
     value.truncate(truncate_at);
     value.push('…');
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_trace_flag, short_content_hash, tool_output_body_field};
+
+    #[test]
+    fn trace_flag_only_enables_on_explicit_truthy_values() {
+        // Pins: body tracing is opt-in; only "1"/"true" (trimmed) enable it, and a
+        // missing or falsey value keeps bodies off.
+        assert!(parse_trace_flag(Some("1")));
+        assert!(parse_trace_flag(Some("true")));
+        assert!(parse_trace_flag(Some(" 1 ")));
+        assert!(!parse_trace_flag(Some("0")));
+        assert!(!parse_trace_flag(Some("yes")));
+        assert!(!parse_trace_flag(Some("")));
+        assert!(!parse_trace_flag(None));
+    }
+
+    #[test]
+    fn tool_output_body_is_gated_and_capped() {
+        // Pins: the body is attached only when tracing is enabled, and even then it
+        // stays within the 8 KiB span cap.
+        assert_eq!(tool_output_body_field("hello", false), None);
+        assert_eq!(
+            tool_output_body_field("hello", true),
+            Some("hello".to_string())
+        );
+
+        let large = "x".repeat(16 * 1024);
+        let body = tool_output_body_field(&large, true).expect("enabled body should be present");
+        assert!(body.len() <= 8 * 1024 + '…'.len_utf8());
+        assert!(body.ends_with('…'));
+    }
+
+    #[test]
+    fn short_content_hash_is_stable_and_content_sensitive() {
+        // Pins: the hash is deterministic per content (usable for correlation) and
+        // distinguishes different outputs.
+        assert_eq!(short_content_hash("same"), short_content_hash("same"));
+        assert_ne!(short_content_hash("a"), short_content_hash("b"));
+        assert_eq!(short_content_hash("a").len(), 16);
+    }
 }

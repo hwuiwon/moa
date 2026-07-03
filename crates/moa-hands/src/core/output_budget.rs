@@ -32,13 +32,26 @@ impl ToolRouter {
         output: ToolOutput,
     ) -> ToolOutput {
         if output.is_error {
+            if output.truncated {
+                return output;
+            }
             return output.with_original_output_tokens(None);
         }
 
         let existing_truncated = output.truncated;
-        let original_output_tokens = estimate_tokens(&output.to_text());
+        let existing_original_output_tokens = output.original_output_tokens;
+        // Render the original output once and share it with the artifact path
+        // instead of re-rendering the full output via `to_text()` twice.
+        let rendered = output.to_text();
+        let original_output_tokens = estimate_tokens(&rendered);
         if let Some(artifactized_output) = self
-            .artifactize_output(session, tool_definition, &output, original_output_tokens)
+            .artifactize_output(
+                session,
+                tool_definition,
+                &output,
+                &rendered,
+                original_output_tokens,
+            )
             .await
         {
             record_tool_output_truncated_metric(&tool_definition.name);
@@ -80,7 +93,11 @@ impl ToolRouter {
             }
         }
         final_output.truncated = truncated;
-        final_output.original_output_tokens = router_truncated.then_some(original_output_tokens);
+        final_output.original_output_tokens = if router_truncated {
+            Some(original_output_tokens)
+        } else {
+            existing_original_output_tokens
+        };
 
         if router_truncated {
             record_tool_output_truncated_metric(&tool_definition.name);
@@ -94,6 +111,7 @@ impl ToolRouter {
         session: &SessionMeta,
         tool_definition: &ToolDefinition,
         output: &ToolOutput,
+        rendered: &str,
         original_output_tokens: u32,
     ) -> Option<ToolOutput> {
         if original_output_tokens <= tool_definition.max_output_tokens {
@@ -102,9 +120,8 @@ impl ToolRouter {
 
         let session_store = self.session_store.as_ref()?;
 
-        let rendered = output.to_text();
         let combined = match session_store
-            .store_text_artifact(session.id, &rendered)
+            .store_text_artifact(session.id, rendered)
             .await
         {
             Ok(claim_check) => claim_check,
@@ -156,7 +173,7 @@ impl ToolRouter {
         let artifact = ToolOutputArtifact {
             combined,
             estimated_tokens: original_output_tokens,
-            line_count: count_lines(&rendered),
+            line_count: count_lines(rendered),
             stdout,
             stderr,
         };
@@ -168,7 +185,7 @@ impl ToolRouter {
             .saturating_sub(preview_footer.chars().count() as u32)
             as usize;
         let (preview, _) = truncate_head_tail(
-            &rendered,
+            rendered,
             preview_budget_chars.max(1),
             self.tool_output.head_ratio,
         );

@@ -34,6 +34,9 @@ pub struct MoaEnvOverlay {
     pub models_main: Option<String>,
     /// `MOA_MODELS_AUXILIARY`.
     pub models_auxiliary: Option<String>,
+    /// `MOA_MODELS_FALLBACK_MODELS`.
+    #[serde(deserialize_with = "deserialize_optional_list")]
+    pub models_fallback_models: Option<Vec<String>>,
     /// `MOA_ANTHROPIC_API_KEY`.
     pub anthropic_api_key: Option<String>,
     /// `MOA_OPENAI_API_KEY`.
@@ -44,6 +47,36 @@ pub struct MoaEnvOverlay {
     pub cohere_api_key: Option<String>,
     /// `MOA_ZEROENTROPY_API_KEY`.
     pub zeroentropy_api_key: Option<String>,
+    /// `MOA_ANTHROPIC_MAX_REQUESTS_PER_MIN`.
+    pub anthropic_max_requests_per_min: Option<u32>,
+    /// `MOA_ANTHROPIC_MAX_INPUTS_PER_MIN`.
+    pub anthropic_max_inputs_per_min: Option<u32>,
+    /// `MOA_ANTHROPIC_MAX_CONCURRENT_REQUESTS`.
+    pub anthropic_max_concurrent_requests: Option<u32>,
+    /// `MOA_OPENAI_MAX_REQUESTS_PER_MIN`.
+    pub openai_max_requests_per_min: Option<u32>,
+    /// `MOA_OPENAI_MAX_INPUTS_PER_MIN`.
+    pub openai_max_inputs_per_min: Option<u32>,
+    /// `MOA_OPENAI_MAX_CONCURRENT_REQUESTS`.
+    pub openai_max_concurrent_requests: Option<u32>,
+    /// `MOA_GOOGLE_MAX_REQUESTS_PER_MIN`.
+    pub google_max_requests_per_min: Option<u32>,
+    /// `MOA_GOOGLE_MAX_INPUTS_PER_MIN`.
+    pub google_max_inputs_per_min: Option<u32>,
+    /// `MOA_GOOGLE_MAX_CONCURRENT_REQUESTS`.
+    pub google_max_concurrent_requests: Option<u32>,
+    /// `MOA_COHERE_MAX_REQUESTS_PER_MIN`.
+    pub cohere_max_requests_per_min: Option<u32>,
+    /// `MOA_COHERE_MAX_INPUTS_PER_MIN`.
+    pub cohere_max_inputs_per_min: Option<u32>,
+    /// `MOA_COHERE_MAX_CONCURRENT_REQUESTS`.
+    pub cohere_max_concurrent_requests: Option<u32>,
+    /// `MOA_ZEROENTROPY_MAX_REQUESTS_PER_MIN`.
+    pub zeroentropy_max_requests_per_min: Option<u32>,
+    /// `MOA_ZEROENTROPY_MAX_INPUTS_PER_MIN`.
+    pub zeroentropy_max_inputs_per_min: Option<u32>,
+    /// `MOA_ZEROENTROPY_MAX_CONCURRENT_REQUESTS`.
+    pub zeroentropy_max_concurrent_requests: Option<u32>,
     /// `MOA_DATABASE_URL`.
     pub database_url: Option<String>,
     /// `MOA_DATABASE_ADMIN_URL`.
@@ -694,6 +727,19 @@ pub(in crate::config) fn set_copy_if_some<T: Copy>(target: &mut T, value: Option
     }
 }
 
+/// Replaces an optional copyable config value when its env overlay value is present.
+///
+/// A `None` overlay leaves the file-configured value (which may itself be `Some`)
+/// untouched, so an env override only sets, never clears.
+pub(in crate::config) fn set_copy_option_if_some<T: Copy>(
+    target: &mut Option<T>,
+    value: Option<T>,
+) {
+    if value.is_some() {
+        *target = value;
+    }
+}
+
 /// Returns whether any field in one nested overlay section was set.
 pub(in crate::config) fn any_present(values: &[bool]) -> bool {
     values.iter().any(|value| *value)
@@ -1239,6 +1285,31 @@ mod tests {
         assert_ne!(config.models.main, "");
 
         assert_config_error_contains(overlay.apply_to(&mut config), "models.main");
+    }
+
+    #[test]
+    fn fallback_models_env_overrides_model_failover_chain() {
+        // Pins: flat Kubernetes env can configure the main-loop failover chain,
+        // not just the primary and auxiliary models.
+        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+            ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
+            (
+                "MOA_MODELS_FALLBACK_MODELS",
+                "openai:gpt-5.4, anthropic:claude-haiku-4-5",
+            ),
+        ]))
+        .expect("overlay should deserialize");
+        let mut config = MoaConfig::default();
+
+        overlay.apply_to(&mut config).expect("overlay should apply");
+
+        assert_eq!(
+            config.models.fallback_models,
+            vec![
+                "openai:gpt-5.4".to_string(),
+                "anthropic:claude-haiku-4-5".to_string()
+            ]
+        );
     }
 
     fn env_pairs<const N: usize>(pairs: [(&str, &str); N]) -> Vec<(String, String)> {

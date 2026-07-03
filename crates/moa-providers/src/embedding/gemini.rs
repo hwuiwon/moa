@@ -11,10 +11,17 @@ use moa_core::{MoaError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::core::http::{build_http_client, decode_json_response, validate_embedding_dimension};
+use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_EMBEDDING_CONCURRENCY};
+use crate::core::http::{
+    build_json_http_client, decode_json_response, validate_embedding_count,
+    validate_embedding_dimension,
+};
+use crate::core::pacer::{PacerConfig, RatePacer};
 
 const GEMINI_ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta";
 pub(super) const GEMINI_V2_MODEL: &str = "gemini-embedding-2";
+/// Maximum inputs Gemini's `:batchEmbedContents` endpoint accepts per request.
+const GEMINI_MAX_BATCH_SIZE: usize = 100;
 
 /// Construction role used to pin asymmetric retrieval prefixes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,6 +93,8 @@ pub struct GeminiEmbeddingEmbedder {
     endpoint: String,
     output_dim: usize,
     default_role: EmbedRole,
+    pacer: RatePacer,
+    limiter: ConcurrencyLimiter,
 }
 
 impl GeminiEmbeddingEmbedder {
@@ -97,11 +106,14 @@ impl GeminiEmbeddingEmbedder {
     ) -> Result<Self> {
         validate_gemini_output_dim(output_dim)?;
         Ok(Self {
-            client: build_http_client()?,
+            client: build_json_http_client()?,
             api_key: api_key.into(),
             endpoint: GEMINI_ENDPOINT.to_string(),
             output_dim,
             default_role,
+            // Pacing off by default; Gemini limits are tier-specific.
+            pacer: RatePacer::new(PacerConfig::disabled()),
+            limiter: ConcurrencyLimiter::new(DEFAULT_EMBEDDING_CONCURRENCY),
         })
     }
 
@@ -112,8 +124,25 @@ impl GeminiEmbeddingEmbedder {
         self
     }
 
+    /// Enables request/input pacing, off by default for tier-specific limits.
+    #[must_use]
+    pub fn with_rate_limits(mut self, config: PacerConfig) -> Self {
+        self.pacer = RatePacer::new(config);
+        self
+    }
+
+    /// Overrides the in-flight concurrency ceiling for embedding requests.
+    #[must_use]
+    pub fn with_max_concurrent_requests(mut self, max_in_flight: usize) -> Self {
+        self.limiter = ConcurrencyLimiter::new(max_in_flight);
+        self
+    }
+
     /// Embeds one input with a per-call role override.
     pub async fn embed_as(&self, role: &EmbedRole, text: &str) -> Result<Vec<f32>> {
+        // In-flight slot first, then rate budget (see `ConcurrencyLimiter`).
+        let _permit = self.limiter.acquire().await;
+        self.pacer.acquire(1, 1).await;
         let body = V2Request {
             content: GeminiContent {
                 parts: vec![GeminiTextPart {
@@ -127,13 +156,59 @@ impl GeminiEmbeddingEmbedder {
         Ok(response.embedding.values)
     }
 
+    /// Embeds one chunk of inputs in a single `:batchEmbedContents` round trip.
+    ///
+    /// Callers must keep `texts` within [`GEMINI_MAX_BATCH_SIZE`]; the returned
+    /// embeddings preserve request order one-to-one with `texts`.
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        // In-flight slot first, then rate budget (see `ConcurrencyLimiter`).
+        let _permit = self.limiter.acquire().await;
+        self.pacer.acquire(1, texts.len() as u32).await;
+        let requests = texts
+            .iter()
+            .map(|text| BatchEmbedItem {
+                model: format!("models/{GEMINI_V2_MODEL}"),
+                content: GeminiContent {
+                    parts: vec![GeminiTextPart {
+                        text: self.default_role.format(text),
+                    }],
+                },
+                output_dimensionality: Some(self.output_dim),
+            })
+            .collect();
+        let body = BatchEmbedRequest { requests };
+        let response = self.post_batch_embed(GEMINI_V2_MODEL, &body).await?;
+        validate_embedding_count(texts.len(), response.embeddings.len())?;
+        let mut out = Vec::with_capacity(texts.len());
+        for embedding in response.embeddings {
+            validate_embedding_dimension(self.output_dim, &embedding.values)?;
+            out.push(embedding.values);
+        }
+        Ok(out)
+    }
+
     async fn post_embed<T: Serialize>(&self, model: &str, body: &T) -> Result<GeminiResponse> {
+        self.post_json(&format!("models/{model}:embedContent"), body)
+            .await
+    }
+
+    async fn post_batch_embed<T: Serialize>(
+        &self,
+        model: &str,
+        body: &T,
+    ) -> Result<BatchEmbedResponse> {
+        self.post_json(&format!("models/{model}:batchEmbedContents"), body)
+            .await
+    }
+
+    async fn post_json<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
+    where
+        Req: Serialize + ?Sized,
+        Resp: serde::de::DeserializeOwned,
+    {
         let response = self
             .client
-            .post(format!(
-                "{}/models/{model}:embedContent",
-                self.endpoint.trim_end_matches('/')
-            ))
+            .post(format!("{}/{path}", self.endpoint.trim_end_matches('/')))
             .header("x-goog-api-key", &self.api_key)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .json(body)
@@ -159,9 +234,12 @@ impl EmbeddingProvider for GeminiEmbeddingEmbedder {
     }
 
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut out = Vec::with_capacity(texts.len());
-        for text in texts {
-            out.push(self.embed_as(&self.default_role, text).await?);
+        for chunk in texts.chunks(GEMINI_MAX_BATCH_SIZE) {
+            out.extend(self.embed_batch(chunk).await?);
         }
         Ok(out)
     }
@@ -172,6 +250,24 @@ struct V2Request {
     content: GeminiContent,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_dimensionality: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct BatchEmbedRequest {
+    requests: Vec<BatchEmbedItem>,
+}
+
+#[derive(Serialize)]
+struct BatchEmbedItem {
+    model: String,
+    content: GeminiContent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_dimensionality: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct BatchEmbedResponse {
+    embeddings: Vec<GeminiEmbedding>,
 }
 
 #[derive(Serialize)]

@@ -255,6 +255,22 @@ impl VectorStoreFactory {
         Ok(())
     }
 
+    /// Reports whether a storage partition routes vectors to an external backend.
+    ///
+    /// Transactional graph writes only queue `vector_sync_outbox` rows for
+    /// partitions whose `vector_backend` is not `pgvector`, so pgvector-only
+    /// partitions never have external sync work. Callers use this to skip the
+    /// post-commit outbox drain entirely for those partitions. Missing
+    /// `storage_partition_state` rows default to pgvector (returns `false`).
+    pub async fn partition_uses_external_backend(
+        &self,
+        pool: &PgPool,
+        storage_partition_id: &str,
+    ) -> Result<bool> {
+        let state = load_vector_backend_state(pool, storage_partition_id).await?;
+        Ok(state.backend != "pgvector")
+    }
+
     /// Returns the configured Turbopuffer client, when available.
     #[must_use]
     pub fn turbopuffer(&self) -> Option<Arc<TurbopufferStore>> {

@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use moa_core::RlsContext;
 use moa_core::{StoragePartitionId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
-use moa_memory_graph::{GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_graph::{NodeIndexRow, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_vector::{VectorQuery, VectorStore};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -34,6 +34,22 @@ impl EntityMergeVerifier for DeterministicEntityMergeVerifier {
     async fn should_merge(&self, mention: &str, candidate: &NodeIndexRow) -> Result<bool> {
         Ok(normalize_entity_name(mention) == normalize_entity_name(&candidate.name))
     }
+}
+
+/// Outcome of planning one entity resolution: the resolved endpoint plus, when a
+/// new entity node must be written, the intent to create it.
+///
+/// The plan performs only reads. Callers apply `create` inside their own
+/// transaction (for example the per-fact transaction in slow-path ingestion) so
+/// entity node creation commits atomically with the fact node and edges rather
+/// than in a separate transaction. This keeps the resolver free of the
+/// `GraphStore` write abstraction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityResolutionPlan {
+    /// Resolved entity endpoint used for edge writes.
+    pub resolved: ResolvedEntity,
+    /// Node intent to create when the mention resolved to a new entity.
+    pub create: Option<NodeWriteIntent>,
 }
 
 /// Resolved graph entity endpoint for an extracted fact subject or object.
@@ -129,32 +145,48 @@ impl EntityResolver {
         self
     }
 
-    /// Resolves one entity mention, creating an `Entity` node when no active match exists.
-    pub async fn resolve(
+    /// Plans one entity mention's resolution, returning a node-create intent when
+    /// no active match exists.
+    ///
+    /// This performs only reads (block-candidate and embedding-candidate lookups
+    /// each in their own short transaction). The returned
+    /// [`EntityResolutionPlan::create`] intent, when present, is written by the
+    /// caller inside its own transaction so entity creation composes atomically
+    /// with the fact node and edges. When the resolver has embedding blocking
+    /// enabled, [`EntityResolutionRequest::precomputed_embedding`] is reused for
+    /// both the KNN lookup and the created node's vector; otherwise the name is
+    /// embedded once here.
+    pub async fn plan_resolution(
         &self,
         pool: &PgPool,
-        graph: &dyn GraphStore,
         request: EntityResolutionRequest<'_>,
-    ) -> Result<ResolvedEntity> {
+    ) -> Result<EntityResolutionPlan> {
         let normalized_name = normalize_entity_name(request.name);
         let candidates = self
             .lookup_block_candidates(pool, request.scope, &normalized_name)
             .await?;
         if let Some(candidate) = self.match_candidate(request.name, &candidates).await? {
-            return Ok(ResolvedEntity {
-                uid: candidate.uid,
-                name: candidate.name,
-                normalized_name,
-                created: false,
-                alias_mention: None,
+            return Ok(EntityResolutionPlan {
+                resolved: ResolvedEntity {
+                    uid: candidate.uid,
+                    name: candidate.name,
+                    normalized_name,
+                    created: false,
+                    alias_mention: None,
+                },
+                create: None,
             });
         }
 
         let mut mention_embedding = None;
         if let Some(blocker) = &self.embedding_blocker {
-            let embedding = self
-                .embed_normalized_name(blocker, &normalized_name)
-                .await?;
+            let embedding = match request.precomputed_embedding {
+                Some(embedding) => embedding.to_vec(),
+                None => {
+                    self.embed_normalized_name(blocker, &normalized_name)
+                        .await?
+                }
+            };
             mention_embedding = Some(embedding.clone());
             let candidates = self
                 .lookup_embedding_candidates(pool, request.scope, request.pii_class, embedding)
@@ -164,12 +196,15 @@ impl EntityResolver {
                 .await?
             {
                 let alias_mention = alias_mention(request.name, &candidate.name);
-                return Ok(ResolvedEntity {
-                    uid: candidate.uid,
-                    normalized_name: normalize_entity_name(&candidate.name),
-                    name: candidate.name,
-                    created: false,
-                    alias_mention,
+                return Ok(EntityResolutionPlan {
+                    resolved: ResolvedEntity {
+                        uid: candidate.uid,
+                        normalized_name: normalize_entity_name(&candidate.name),
+                        name: candidate.name,
+                        created: false,
+                        alias_mention,
+                    },
+                    create: None,
                 });
             }
         }
@@ -193,43 +228,44 @@ impl EntityResolver {
             } else {
                 (None, None, None)
             };
-        graph
-            .create_node(NodeWriteIntent {
-                uid,
-                label: NodeLabel::Entity,
-                storage_partition_id: Some(
-                    StoragePartitionId::for_tenant(request.scope.tenant_id()).to_string(),
-                ),
-                contact_id: request
-                    .scope
-                    .contact_id()
-                    .map(|contact_id| contact_id.to_string()),
-                scope: request.scope.tier_str().to_string(),
-                name: display_name.clone(),
-                properties: json!({
-                    "uid": uid.to_string(),
-                    "name": display_name.clone(),
-                    "normalized_name": normalized_name.clone(),
-                    "source": "slow_path_entity_resolution",
-                }),
-                pii_class: request.pii_class,
-                confidence: Some(request.confidence),
-                valid_from: request.valid_from,
-                embedding,
-                embedding_model,
-                embedding_model_version,
-                embedding_text: None,
-                actor_id: request.actor_id.to_string(),
-                actor_kind: request.actor_kind.to_string(),
-            })
-            .await?;
-
-        Ok(ResolvedEntity {
+        let create = NodeWriteIntent {
             uid,
-            name: display_name,
-            normalized_name,
-            created: true,
-            alias_mention: None,
+            label: NodeLabel::Entity,
+            storage_partition_id: Some(
+                StoragePartitionId::for_tenant(request.scope.tenant_id()).to_string(),
+            ),
+            contact_id: request
+                .scope
+                .contact_id()
+                .map(|contact_id| contact_id.to_string()),
+            scope: request.scope.tier_str().to_string(),
+            name: display_name.clone(),
+            properties: json!({
+                "uid": uid.to_string(),
+                "name": display_name.clone(),
+                "normalized_name": normalized_name.clone(),
+                "source": "slow_path_entity_resolution",
+            }),
+            pii_class: request.pii_class,
+            confidence: Some(request.confidence),
+            valid_from: request.valid_from,
+            embedding,
+            embedding_model,
+            embedding_model_version,
+            embedding_text: None,
+            actor_id: request.actor_id.to_string(),
+            actor_kind: request.actor_kind.to_string(),
+        };
+
+        Ok(EntityResolutionPlan {
+            resolved: ResolvedEntity {
+                uid,
+                name: display_name,
+                normalized_name,
+                created: true,
+                alias_mention: None,
+            },
+            create: Some(create),
         })
     }
 
@@ -239,6 +275,15 @@ impl EntityResolver {
         scope: &RlsContext,
         normalized_name: &str,
     ) -> Result<Vec<NodeIndexRow>> {
+        // Entity nodes written by this resolver are content-addressed by
+        // `(scope, normalized_name)` through `deterministic_entity_uid`, so the
+        // canonical block candidate is a primary-key lookup on that uid. This
+        // replaces the previous full scan of every active `Entity` row in scope
+        // followed by a Rust-side normalized-name filter (run twice per fact, for
+        // the subject and object). The scope/label guards and the defensive
+        // normalized-name check are retained so a uid collision cannot return an
+        // unrelated node.
+        let candidate_uid = deterministic_entity_uid(scope, normalized_name);
         let storage_partition_id = Some(scope.tenant_id().to_string());
         let user_id = scope.contact_id().map(|contact_id| contact_id.to_string());
         let mut conn = ScopedConn::begin_as_app(pool, scope, self.assume_app_role).await?;
@@ -248,14 +293,16 @@ impl EntityResolver {
                    valid_to, valid_from, properties_summary, last_accessed_at,
                    COALESCE(quality_score, 0.5) AS quality_score
             FROM moa.node_index
-            WHERE valid_to IS NULL
-              AND label = $1
-              AND scope = $2
-              AND (($3::text IS NULL AND storage_partition_id IS NULL) OR storage_partition_id = $3)
-              AND (($4::text IS NULL AND user_id IS NULL) OR user_id = $4)
-            ORDER BY valid_from ASC, uid ASC
+            WHERE uid = $1
+              AND valid_to IS NULL
+              AND label = $2
+              AND scope = $3
+              AND (($4::text IS NULL AND storage_partition_id IS NULL) OR storage_partition_id = $4)
+              AND (($5::text IS NULL AND user_id IS NULL) OR user_id = $5)
+            LIMIT 1
             "#,
         )
+        .bind(candidate_uid)
         .bind(NodeLabel::Entity.as_str())
         .bind(scope.tier_str())
         .bind(storage_partition_id.as_deref())
@@ -416,6 +463,13 @@ pub struct EntityResolutionRequest<'a> {
     pub actor_id: &'a str,
     /// Actor kind written to graph changelog rows.
     pub actor_kind: &'a str,
+    /// Embedding of the mention's normalized name, precomputed for the whole fact
+    /// batch in one provider call.
+    ///
+    /// When `Some`, the resolver reuses it instead of embedding the name again;
+    /// when `None` it falls back to a single-name embed. Ignored when embedding
+    /// blocking is disabled.
+    pub precomputed_embedding: Option<&'a [f32]>,
 }
 
 fn display_entity_name(name: &str, normalized_name: &str) -> String {

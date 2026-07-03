@@ -15,7 +15,12 @@ impl OrchestratorProxy {
     /// Build a proxy for an orchestrator base URL.
     pub fn new(upstream_base: impl Into<String>) -> Result<Self, reqwest::Error> {
         Ok(Self {
-            http: Client::builder().timeout(Duration::from_secs(60)).build()?,
+            http: Client::builder()
+                .timeout(Duration::from_secs(60))
+                .connect_timeout(Duration::from_secs(5))
+                .pool_max_idle_per_host(32)
+                .pool_idle_timeout(Duration::from_secs(90))
+                .build()?,
             upstream_base: upstream_base.into().trim_end_matches('/').to_string(),
         })
     }
@@ -33,10 +38,10 @@ impl OrchestratorProxy {
         let mut request = self.http.request(method, url);
 
         for (name, value) in request_headers {
-            let lowercase_name = name.as_str().to_ascii_lowercase();
-            if headers::is_moa_header(&lowercase_name)
-                || lowercase_name == "authorization"
-                || is_hop_by_hop_header(&lowercase_name)
+            let name_str = name.as_str();
+            if headers::is_moa_header(name_str)
+                || name_str.eq_ignore_ascii_case("authorization")
+                || is_hop_by_hop_header(name_str)
             {
                 continue;
             }
@@ -75,10 +80,10 @@ impl OrchestratorProxy {
         let mut request = self.http.request(method, url);
 
         for (name, value) in request_headers {
-            let lowercase_name = name.as_str().to_ascii_lowercase();
-            if headers::is_moa_header(&lowercase_name)
-                || lowercase_name == "authorization"
-                || is_hop_by_hop_header(&lowercase_name)
+            let name_str = name.as_str();
+            if headers::is_moa_header(name_str)
+                || name_str.eq_ignore_ascii_case("authorization")
+                || is_hop_by_hop_header(name_str)
             {
                 continue;
             }
@@ -102,16 +107,18 @@ fn identity_type_str(identity_type: IdentityType) -> &'static str {
 }
 
 fn is_hop_by_hop_header(name: &str) -> bool {
-    matches!(
-        name,
-        "host"
-            | "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailers"
-            | "transfer-encoding"
-            | "upgrade"
-    )
+    const HOP_BY_HOP: [&str; 9] = [
+        "host",
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailers",
+        "transfer-encoding",
+        "upgrade",
+    ];
+    HOP_BY_HOP
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
 }

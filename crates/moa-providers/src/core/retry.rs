@@ -10,6 +10,8 @@ use reqwest::{
 };
 use serde_json::Value;
 
+use crate::core::rate_guard::RateGuard;
+
 /// Shared retry policy for provider HTTP requests.
 #[derive(Debug, Clone)]
 pub(crate) struct RetryPolicy {
@@ -41,8 +43,15 @@ impl RetryPolicy {
         self
     }
 
-    /// Sends an HTTP request with exponential backoff and jitter on retryable failures.
-    pub(crate) async fn send<F>(&self, build_request: F) -> Result<Response>
+    /// Sends an HTTP request with exponential backoff and jitter, consulting a
+    /// [`RateGuard`]: in-call retries stop early once the retry budget is spent,
+    /// and a terminal 429 records the provider's cooldown so later calls can
+    /// short-circuit or fail over instead of hammering the endpoint.
+    pub(crate) async fn send_gated<F>(
+        &self,
+        build_request: F,
+        guard: &RateGuard,
+    ) -> Result<Response>
     where
         F: Fn() -> RequestBuilder,
     {
@@ -52,7 +61,9 @@ impl RetryPolicy {
             let response = match build_request().send().await {
                 Ok(response) => response,
                 Err(error) => {
-                    if self.is_retryable_transport_error(&error) && attempt < self.max_retries {
+                    let retry_eligible =
+                        self.is_retryable_transport_error(&error) && attempt < self.max_retries;
+                    if retry_eligible && guard.allow_retry() {
                         let delay = self.delay_for_attempt(attempt);
                         tracing::warn!(
                             attempt = attempt + 1,
@@ -64,6 +75,9 @@ impl RetryPolicy {
                         tokio::time::sleep(delay).await;
                         attempt += 1;
                         continue;
+                    }
+                    if retry_eligible {
+                        record_retry_budget_exhausted("transport");
                     }
 
                     return Err(MoaError::ProviderError(format!(
@@ -79,10 +93,21 @@ impl RetryPolicy {
 
             let headers = response.headers().clone();
             let message = response_text(response).await;
-            if Self::is_retryable_status(status) && attempt < self.max_retries {
-                let delay = retry_after_delay_from_message(&message)
-                    .or_else(|| retry_after_delay(status, Some(&headers)))
-                    .unwrap_or_else(|| self.delay_for_attempt(attempt));
+            let rate_limit_delay = (status == StatusCode::TOO_MANY_REQUESTS)
+                .then(|| {
+                    retry_after_delay_from_message(&message)
+                        .or_else(|| retry_after_delay(status, Some(&headers)))
+                })
+                .flatten();
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                // Pause the shared provider guard immediately. This protects
+                // concurrent calls even when this request spends its own retry
+                // budget and later succeeds.
+                guard.record_rate_limited(rate_limit_delay);
+            }
+            let retry_eligible = Self::is_retryable_status(status) && attempt < self.max_retries;
+            if retry_eligible && guard.allow_retry() {
+                let delay = rate_limit_delay.unwrap_or_else(|| self.delay_for_attempt(attempt));
                 tracing::warn!(
                     attempt = attempt + 1,
                     max_retries = self.max_retries,
@@ -94,6 +119,9 @@ impl RetryPolicy {
                 tokio::time::sleep(delay).await;
                 attempt += 1;
                 continue;
+            }
+            if retry_eligible {
+                record_retry_budget_exhausted(status.as_str());
             }
 
             if status == StatusCode::TOO_MANY_REQUESTS {
@@ -142,6 +170,14 @@ impl RetryPolicy {
             .unwrap_or(500_000_000);
         nanos as f64 / 1_000_000_000.0
     }
+}
+
+/// Records that an otherwise-eligible retry was denied by the provider retry
+/// budget, tagged with the triggering `kind` (an HTTP status code or
+/// `"transport"`), so sustained budget exhaustion is observable in metrics.
+fn record_retry_budget_exhausted(kind: &str) {
+    metrics::counter!("moa_llm_retry_budget_exhausted_total", "kind" => kind.to_string())
+        .increment(1);
 }
 
 fn retry_after_delay(status: StatusCode, headers: Option<&HeaderMap>) -> Option<Duration> {
@@ -265,7 +301,9 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::{RetryPolicy, retry_after_delay_from_message};
+    use moa_core::MoaError;
+
+    use super::{RateGuard, RetryPolicy, retry_after_delay_from_message};
 
     #[tokio::test]
     async fn retries_on_rate_limit() {
@@ -297,12 +335,63 @@ mod tests {
         let url = format!("http://{address}/retry");
         let response = RetryPolicy::default()
             .with_max_retries(3)
-            .send(|| client.get(&url))
+            .send_gated(|| client.get(&url), &RateGuard::new())
             .await
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(request_count.load(Ordering::SeqCst), 2);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn retried_rate_limit_records_cooldown_immediately() {
+        // Pins: even when the in-call retry succeeds, the first 429 pauses the
+        // shared provider guard so concurrent calls can fail over instead of
+        // continuing into a provider that just advertised a cooldown.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let request_count_task = Arc::clone(&request_count);
+
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let current = request_count_task.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = vec![0_u8; 2048];
+                let _ = socket.read(&mut buffer).await;
+
+                let response = if current == 0 {
+                    "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 11\r\n\r\nrate limit"
+                } else {
+                    "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok"
+                };
+
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let guard = RateGuard::new();
+        let client = reqwest::Client::new();
+        let url = format!("http://{address}/retry");
+        let response = RetryPolicy {
+            max_retries: 3,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            backoff_factor: 1.0,
+        }
+        .send_gated(|| client.get(&url), &guard)
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            guard.pause_remaining().is_some(),
+            "the guard must be paused by the first 429 even when a retry later succeeds"
+        );
 
         server.abort();
     }
@@ -335,10 +424,57 @@ mod tests {
             backoff_factor: 1.0,
         };
 
-        let result = policy.send(|| client.post(&url).body("payload")).await;
+        let result = policy
+            .send_gated(|| client.post(&url).body("payload"), &RateGuard::new())
+            .await;
 
         assert!(result.is_err());
         assert_eq!(request_count.load(Ordering::SeqCst), 1);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn exhausted_retry_budget_fails_fast_without_retrying() {
+        // Pins: once the retry budget is spent, send_gated does not retry a
+        // retryable status; it fails fast (recording the budget-exhausted counter)
+        // so callers can fail over instead of hammering the endpoint.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let request_count_task = Arc::clone(&request_count);
+
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                request_count_task.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = vec![0_u8; 2048];
+                let _ = socket.read(&mut buffer).await;
+                let response =
+                    "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 10\r\n\r\nrate limit";
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let guard = RateGuard::new();
+        // Drain the retry budget so the next eligible retry is denied.
+        while guard.allow_retry() {}
+
+        let client = reqwest::Client::new();
+        let url = format!("http://{address}/exhausted");
+        let result = RetryPolicy::default()
+            .with_max_retries(3)
+            .send_gated(|| client.get(&url), &guard)
+            .await;
+
+        assert!(matches!(result, Err(MoaError::RateLimited { .. })));
+        assert_eq!(
+            request_count.load(Ordering::SeqCst),
+            1,
+            "an exhausted retry budget must not drive additional requests"
+        );
 
         server.abort();
     }

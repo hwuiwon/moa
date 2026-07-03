@@ -4,6 +4,7 @@ pub mod auth;
 pub mod embedding;
 pub mod runtime_cache;
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -478,6 +479,32 @@ pub trait BlobStore: Send + Sync {
     /// Fetches a previously stored blob by identifier.
     async fn get(&self, session_id: &SessionId, blob_id: &str) -> Result<Vec<u8>>;
 
+    /// Fetches multiple blobs by identifier, returning only those found.
+    ///
+    /// Missing ids are omitted from the returned map rather than raising
+    /// [`MoaError::BlobNotFound`], so a caller replaying an event batch can
+    /// resolve every distinct claim-check id in one round trip and detect
+    /// absences from the map. The default implementation issues one
+    /// [`BlobStore::get`] per id; backends that can batch (for example a single
+    /// `WHERE blob_id = ANY(...)`) should override it.
+    async fn get_many(
+        &self,
+        session_id: &SessionId,
+        blob_ids: &[String],
+    ) -> Result<HashMap<String, Vec<u8>>> {
+        let mut found = HashMap::with_capacity(blob_ids.len());
+        for blob_id in blob_ids {
+            match self.get(session_id, blob_id).await {
+                Ok(bytes) => {
+                    found.insert(blob_id.clone(), bytes);
+                }
+                Err(MoaError::BlobNotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(found)
+    }
+
     /// Deletes every blob associated with the provided session.
     async fn delete_session(&self, session_id: &SessionId) -> Result<()>;
 
@@ -743,6 +770,18 @@ pub trait BuiltInTool: Send + Sync {
     async fn execute(&self, input: &Value, ctx: &ToolContext<'_>) -> Result<ToolOutput>;
 }
 
+/// Deferred, ordered context mutation produced by a stage's read-only
+/// [`ContextProcessor::fetch`] phase.
+///
+/// The pipeline runner runs the fetch phase of adjacent [parallelizable]
+/// stages concurrently against an immutable [`WorkingContext`], then invokes
+/// each returned closure in fixed stage order to apply its result. Keeping the
+/// mutation in an ordered, synchronous closure preserves the deterministic
+/// message/tool layout the prompt cache depends on.
+///
+/// [parallelizable]: ContextProcessor::parallelizable
+pub type StageApply = Box<dyn FnOnce(&mut WorkingContext) -> Result<ProcessorOutput> + Send>;
+
 /// Single stage in the context compilation pipeline.
 #[async_trait]
 pub trait ContextProcessor: Send + Sync {
@@ -754,6 +793,35 @@ pub trait ContextProcessor: Send + Sync {
 
     /// Processes and mutates the working context.
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput>;
+
+    /// Returns whether the pipeline runner may run this stage's read-only I/O
+    /// concurrently with adjacent parallelizable stages via [`fetch`].
+    ///
+    /// A stage that opts in MUST implement [`fetch`] to return `Ok(Some(_))`,
+    /// and its `fetch` MUST NOT depend on `WorkingContext` mutations produced by
+    /// other stages that run in the same concurrent group. Defaults to `false`,
+    /// so the stage runs sequentially through [`process`].
+    ///
+    /// [`fetch`]: ContextProcessor::fetch
+    fn parallelizable(&self) -> bool {
+        false
+    }
+
+    /// Runs the stage's read-only I/O against an immutable context and returns a
+    /// deferred mutation to apply in pipeline order.
+    ///
+    /// Returns `Ok(None)` for stages that are not split into a fetch/apply pair;
+    /// those run through [`process`]. Stages that report
+    /// [`parallelizable`](ContextProcessor::parallelizable) return
+    /// `Ok(Some(_))`. Implementors that override this should also implement
+    /// `process` as `self.fetch(ctx).await?` immediately followed by applying
+    /// the returned closure, so the sequential and concurrent paths share one
+    /// code path.
+    ///
+    /// [`process`]: ContextProcessor::process
+    async fn fetch(&self, _ctx: &WorkingContext) -> Result<Option<StageApply>> {
+        Ok(None)
+    }
 }
 
 /// Secure credential storage abstraction.

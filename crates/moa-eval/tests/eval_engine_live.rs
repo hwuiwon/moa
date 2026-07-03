@@ -1,6 +1,7 @@
 // No offline counterpart possible because: this smoke test verifies the eval engine's real configured provider path, while deterministic engine behavior is already covered by non-live eval tests.
 
 //! Live eval-engine integration coverage that exercises the real provider path.
+#![recursion_limit = "256"]
 
 use std::time::Duration;
 

@@ -515,6 +515,97 @@ async fn expand_seeds_returns_two_hop_fact_via_shared_entity() {
 }
 
 #[tokio::test]
+async fn expand_seeds_reaches_both_edge_directions_from_one_seed() {
+    // Pins: a single expansion hop reaches both an outgoing (start_uid) and an
+    // incoming (end_uid) neighbor of the seed. This exercises both branches of
+    // the LATERAL edge-index step in one query and pins that its reachable set
+    // matches the prior `start_uid = seed OR end_uid = seed` join (item:
+    // expand_seeds edge-index split).
+    let _guard = TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let run_id = Uuid::now_v7().simple().to_string();
+    let storage_partition_id = Uuid::now_v7().to_string();
+    let graph = PostgresGraphStore::scoped_for_app_role(
+        store.pool().clone(),
+        tenant_scope(storage_partition_id.clone()),
+    );
+    let valid_from = utc("2026-02-01T00:00:00Z");
+    let seed_uid = Uuid::now_v7();
+    let outgoing_uid = Uuid::now_v7();
+    let incoming_uid = Uuid::now_v7();
+    for (uid, label, name) in [
+        (seed_uid, NodeLabel::Fact, format!("bidi seed {run_id}")),
+        (
+            outgoing_uid,
+            NodeLabel::Entity,
+            format!("bidi out {run_id}"),
+        ),
+        (incoming_uid, NodeLabel::Entity, format!("bidi in {run_id}")),
+    ] {
+        graph
+            .create_node(node_intent(
+                &storage_partition_id,
+                label,
+                uid,
+                &name,
+                valid_from,
+            ))
+            .await
+            .expect("create bidi node");
+    }
+    // Outgoing edge: seed -> outgoing. Incoming edge: incoming -> seed.
+    create_edge(
+        &graph,
+        &storage_partition_id,
+        seed_uid,
+        outgoing_uid,
+        "object",
+    )
+    .await;
+    create_edge(
+        &graph,
+        &storage_partition_id,
+        incoming_uid,
+        seed_uid,
+        "subject",
+    )
+    .await;
+
+    let hits = graph
+        .expand_seeds(&[seed_uid], 1, None)
+        .await
+        .expect("expand seed in both edge directions");
+    let hop_one = hits
+        .iter()
+        .filter(|hit| hit.seed == seed_uid && hit.hop == 1)
+        .collect::<Vec<_>>();
+
+    assert_eq!(hop_one.len(), 2, "both neighbors reached at hop 1");
+    let outgoing = hits
+        .iter()
+        .find(|hit| hit.uid == outgoing_uid)
+        .expect("outgoing neighbor reached");
+    let incoming = hits
+        .iter()
+        .find(|hit| hit.uid == incoming_uid)
+        .expect("incoming neighbor reached");
+    assert_eq!(outgoing.hop, 1);
+    assert_eq!(outgoing.edges, vec![EdgeLabel::RelatesTo]);
+    assert_eq!(incoming.hop, 1);
+    assert_eq!(incoming.edges, vec![EdgeLabel::RelatesTo]);
+
+    let _ = graph.hard_purge(outgoing_uid, "redacted:expand-bidi").await;
+    let _ = graph.hard_purge(incoming_uid, "redacted:expand-bidi").await;
+    let _ = graph.hard_purge(seed_uid, "redacted:expand-bidi").await;
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
 async fn expand_seeds_traverses_incoming_subject_edge_from_fact_seed() {
     // Pins: retrieval expansion can move from a Fact seed back across Entity -> Fact subject edges.
     let _guard = TEST_LOCK.lock().await;

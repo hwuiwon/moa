@@ -247,6 +247,217 @@ async fn node_valid_to(
     valid_to
 }
 
+async fn node_exists(pool: &PgPool, storage_partition_id: &str, uid: Uuid) -> bool {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
+    let count = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM moa.node_index WHERE uid = $1")
+        .bind(uid)
+        .fetch_one(conn.as_mut())
+        .await
+        .expect("count node rows");
+    conn.commit().await.expect("commit node existence check");
+    count > 0
+}
+
+#[tokio::test]
+async fn in_conn_write_primitives_compose_in_one_transaction_db_memory() {
+    // Pins: the *_in_conn write primitives batch a node create, an edge create, and
+    // a supersede into one caller-owned transaction. An uncommitted transaction
+    // leaves nothing behind, and a single commit persists all writes atomically.
+    // Slow-path ingestion relies on this to apply a fact's writes in one tx.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, _database_url, _schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool();
+    let storage_partition_id = Uuid::now_v7().to_string();
+    let scope = tenant_scope(&storage_partition_id);
+    let store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope);
+
+    let t0 = Utc::now() - Duration::minutes(5);
+    let fact = node_intent(
+        &storage_partition_id,
+        NodeLabel::Fact,
+        "batched fact",
+        t0,
+        None,
+    );
+    let entity = node_intent(
+        &storage_partition_id,
+        NodeLabel::Entity,
+        "batched entity",
+        t0,
+        None,
+    );
+    let fact_uid = fact.uid;
+    let entity_uid = entity.uid;
+    let edge = edge_intent(
+        &storage_partition_id,
+        EdgeLabel::RelatesTo,
+        entity_uid,
+        fact_uid,
+        0,
+    );
+    let edge_uid = edge.uid;
+    let replacement = node_intent(
+        &storage_partition_id,
+        NodeLabel::Fact,
+        "batched fact v2",
+        t0 + Duration::minutes(1),
+        None,
+    );
+    let replacement_uid = replacement.uid;
+
+    // Rollback path: writes in an uncommitted transaction persist nothing.
+    {
+        let mut conn = scoped_conn(pool, &storage_partition_id).await;
+        moa_memory_graph::write::create_node_in_conn(&store, conn.as_mut(), fact.clone())
+            .await
+            .expect("create fact node in conn");
+        moa_memory_graph::write::create_node_in_conn(&store, conn.as_mut(), entity.clone())
+            .await
+            .expect("create entity node in conn");
+        moa_memory_graph::write::create_edge_in_conn(&store, conn.as_mut(), edge.clone())
+            .await
+            .expect("create edge in conn");
+        // Dropped without commit -> transaction rolls back.
+    }
+    assert!(!node_exists(pool, &storage_partition_id, fact_uid).await);
+    assert!(!node_exists(pool, &storage_partition_id, entity_uid).await);
+
+    // Commit path: node + entity + edge + supersede persist atomically on one commit.
+    let mut conn = scoped_conn(pool, &storage_partition_id).await;
+    moa_memory_graph::write::create_node_in_conn(&store, conn.as_mut(), fact)
+        .await
+        .expect("create fact node");
+    moa_memory_graph::write::create_node_in_conn(&store, conn.as_mut(), entity)
+        .await
+        .expect("create entity node");
+    moa_memory_graph::write::create_edge_in_conn(&store, conn.as_mut(), edge)
+        .await
+        .expect("create edge");
+    let new_uid = moa_memory_graph::write::supersede_node_in_conn(
+        &store,
+        conn.as_mut(),
+        fact_uid,
+        replacement,
+    )
+    .await
+    .expect("supersede fact node in conn");
+    assert_eq!(new_uid, replacement_uid);
+    conn.commit().await.expect("commit batched writes");
+
+    assert!(
+        node_valid_to(pool, &storage_partition_id, fact_uid)
+            .await
+            .is_some(),
+        "superseded fact is closed"
+    );
+    assert_eq!(
+        node_valid_to(pool, &storage_partition_id, replacement_uid).await,
+        None,
+        "replacement fact is active"
+    );
+    assert!(node_exists(pool, &storage_partition_id, entity_uid).await);
+    let edge_row = edge_index_row(pool, &storage_partition_id, edge_uid).await;
+    assert_eq!(edge_row.start_uid, entity_uid);
+    assert_eq!(edge_row.end_uid, fact_uid);
+}
+
+async fn changelog_node_create_count(pool: &PgPool, storage_partition_id: &str) -> i64 {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM moa.graph_changelog \
+         WHERE storage_partition_id = $1 AND op = 'create' AND target_kind = 'node'",
+    )
+    .bind(storage_partition_id)
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("count node create changelog rows");
+    conn.commit().await.expect("commit changelog count");
+    count
+}
+
+#[tokio::test]
+async fn bulk_create_nodes_matches_looped_singles_including_changelog_db_memory() {
+    // Pins: bulk_create_nodes writes the same node_index rows in input order, one
+    // changelog row per node (so the storage-partition version bumps once per
+    // node, exactly like a loop of create_node), and the same per-node vector
+    // rows (item: bulk graph primitives).
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool();
+    let batch_partition = Uuid::now_v7().to_string();
+    let loop_partition = Uuid::now_v7().to_string();
+    let batch_graph = graph_store(pool, &batch_partition);
+    let loop_graph = graph_store(pool, &loop_partition);
+    seed_workspace_embedder_state(pool, &batch_partition).await;
+    seed_workspace_embedder_state(pool, &loop_partition).await;
+    let now = Utc::now();
+
+    let intents = |partition: &str| {
+        vec![
+            node_intent(
+                partition,
+                NodeLabel::Fact,
+                "bulk parity 0",
+                now,
+                Some(basis_vector(0)),
+            ),
+            node_intent(
+                partition,
+                NodeLabel::Entity,
+                "bulk parity 1",
+                now,
+                Some(basis_vector(1)),
+            ),
+            node_intent(partition, NodeLabel::Entity, "bulk parity 2", now, None),
+        ]
+    };
+    let batch_intents = intents(&batch_partition);
+    let loop_intents = intents(&loop_partition);
+    let batch_uids = batch_intents
+        .iter()
+        .map(|intent| intent.uid)
+        .collect::<Vec<_>>();
+
+    let returned = batch_graph
+        .bulk_create_nodes(batch_intents)
+        .await
+        .expect("bulk create nodes");
+    assert_eq!(returned, batch_uids, "bulk returns uids in input order");
+    for intent in loop_intents {
+        loop_graph
+            .create_node(intent)
+            .await
+            .expect("single create node");
+    }
+
+    // One storage-partition version bump per node in both paths.
+    assert_eq!(workspace_version(pool, &batch_partition).await, 3);
+    assert_eq!(workspace_version(pool, &loop_partition).await, 3);
+    // Exactly one node-create changelog row per node in both paths.
+    assert_eq!(changelog_node_create_count(pool, &batch_partition).await, 3);
+    assert_eq!(changelog_node_create_count(pool, &loop_partition).await, 3);
+
+    // Every bulk node is present and active.
+    for uid in &batch_uids {
+        assert!(node_exists(pool, &batch_partition, *uid).await);
+        assert_eq!(node_valid_to(pool, &batch_partition, *uid).await, None);
+    }
+    // Vector rows follow the embeddings: the two embedded nodes get a row, the
+    // third does not.
+    assert_eq!(vector_count(pool, &batch_partition, batch_uids[0]).await, 1);
+    assert_eq!(vector_count(pool, &batch_partition, batch_uids[1]).await, 1);
+    assert_eq!(vector_count(pool, &batch_partition, batch_uids[2]).await, 0);
+
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
 async fn edge_index_row(pool: &PgPool, storage_partition_id: &str, uid: Uuid) -> EdgeIndexRow {
     let mut conn = scoped_conn(pool, storage_partition_id).await;
     let row = sqlx::query(

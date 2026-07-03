@@ -6,21 +6,24 @@ use reqwest::{RequestBuilder, Response};
 use serde::de::DeserializeOwned;
 
 use crate::core::instrumentation::LLMSpanRecorder;
+use crate::core::rate_guard::RateGuard;
 use crate::core::retry::RetryPolicy;
 
 /// Drives the shared `transport` span phase for a reqwest-backed SSE provider:
-/// records the phase, sends the request under the retry policy, and marks a
-/// transport-stage failure when the retry budget is exhausted.
+/// records the phase, sends the request under the retry policy and the provider's
+/// rate guard (retry budget + 429 cooldown), and marks a transport-stage failure
+/// when the request ultimately fails.
 pub(crate) async fn send_with_transport_phase<F>(
     span_recorder: &LLMSpanRecorder,
     retry_policy: &RetryPolicy,
+    guard: &RateGuard,
     build_request: F,
 ) -> Result<Response>
 where
     F: Fn() -> RequestBuilder,
 {
     span_recorder.set_phase("transport");
-    match retry_policy.send(build_request).await {
+    match retry_policy.send_gated(build_request, guard).await {
         Ok(response) => Ok(response),
         Err(error) => {
             span_recorder.fail_at_stage("transport", &error);

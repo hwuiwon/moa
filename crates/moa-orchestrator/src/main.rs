@@ -42,6 +42,7 @@ const DEFAULT_HEALTH_PORT: u16 = 10021;
 const DEFAULT_SCIM_PORT: u16 = 10022;
 const ADMIN_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_DRAIN_DELAY: Duration = Duration::from_secs(5);
+const ORCHESTRATOR_WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 /// Process arguments for the orchestrator process.
 #[derive(Debug, Parser)]
@@ -66,8 +67,19 @@ enum Command {
     Migrate,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        // Restate workflow futures carry large request, context, and tracing
+        // state across awaits. Use an explicit worker stack so live workflow
+        // execution does not depend on ambient RUST_MIN_STACK.
+        .thread_stack_size(ORCHESTRATOR_WORKER_STACK_SIZE)
+        .build()
+        .context("build orchestrator Tokio runtime")?
+        .block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     let args = Args::parse();
     let moa_config = load_moa_config_from_env()?;
     let skip_fga = skip_fga_from_env();

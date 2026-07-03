@@ -3,7 +3,7 @@
 //! Wire format: `moa_<env>_<random>_<crc32>`.
 
 use std::str::FromStr;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use argon2::password_hash::{PasswordHash, SaltString, rand_core::OsRng as SaltOsRng};
@@ -28,11 +28,35 @@ const CHARSET: &[u8; 62] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO
 const VALIDATION_CACHE_CAPACITY: u64 = 10_000;
 const VALIDATION_CACHE_TTL: Duration = Duration::from_secs(60);
 const VALIDATION_CACHE_DOMAIN: &[u8] = b"moa.api_key.validation.v1";
+/// Minimum spacing between database revocation re-checks for a cached key.
+///
+/// In-process revocation invalidates the cache immediately, so this only bounds
+/// how long an out-of-process revocation can be served from a cache hit.
+const REVOCATION_RECHECK_INTERVAL: Duration = Duration::from_secs(5);
 type ApiKeyLookupRow = (Uuid, String, Option<Uuid>, Option<Uuid>, Uuid);
 type ValidationCacheKey = [u8; 32];
 
-static VALIDATION_CACHE: OnceLock<Cache<ValidationCacheKey, ResolvedKey>> = OnceLock::new();
+static VALIDATION_CACHE: OnceLock<Cache<ValidationCacheKey, CachedValidation>> = OnceLock::new();
 static VALIDATION_KEY_IDS: OnceLock<Cache<Uuid, ValidationCacheKey>> = OnceLock::new();
+
+/// A cached successful validation plus the last time its revocation state was
+/// confirmed against the database.
+#[derive(Debug, Clone)]
+struct CachedValidation {
+    resolved: ResolvedKey,
+    /// Shared instant of the last DB revocation check. Interior mutability lets a
+    /// re-check advance the timestamp without re-inserting the cache entry.
+    last_checked: Arc<Mutex<Instant>>,
+}
+
+impl CachedValidation {
+    fn new(resolved: ResolvedKey) -> Self {
+        Self {
+            resolved,
+            last_checked: Arc::new(Mutex::new(Instant::now())),
+        }
+    }
+}
 
 /// Environment segment embedded in a MOA API key.
 #[derive(
@@ -331,15 +355,34 @@ pub async fn validate(pool: &sqlx::PgPool, presented: &str) -> Result<ResolvedKe
 async fn validate_cached_resolution(
     pool: &sqlx::PgPool,
     cache_key: ValidationCacheKey,
-    cached: ResolvedKey,
+    cached: CachedValidation,
 ) -> Result<ResolvedKey, ApiKeyError> {
-    if cached_key_is_active(pool, cached.id).await? {
-        return Ok(cached);
+    // In-process revocation invalidates the cache synchronously, so a cache hint
+    // whose revocation state was confirmed within the window is trusted without a
+    // database round trip.
+    if !recheck_due(&cached.last_checked) {
+        return Ok(cached.resolved);
+    }
+
+    if cached_key_is_active(pool, cached.resolved.id).await? {
+        *cached
+            .last_checked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
+        return Ok(cached.resolved);
     }
 
     validation_cache().invalidate(&cache_key).await;
-    validation_key_ids().invalidate(&cached.id).await;
+    validation_key_ids().invalidate(&cached.resolved.id).await;
     Err(ApiKeyError::NotFoundOrRevoked)
+}
+
+/// Whether the cached revocation state is stale enough to re-check.
+fn recheck_due(last_checked: &Mutex<Instant>) -> bool {
+    let last = *last_checked
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    last.elapsed() >= REVOCATION_RECHECK_INTERVAL
 }
 
 async fn cached_key_is_active(pool: &sqlx::PgPool, key_id: Uuid) -> Result<bool, ApiKeyError> {
@@ -375,7 +418,13 @@ async fn validate_inner(pool: &sqlx::PgPool, presented: &str) -> Result<Resolved
         return Err(ApiKeyError::NotFoundOrRevoked);
     };
 
-    if !verify_key(presented, &hash)? {
+    // Argon2 verification is CPU-heavy; run it off the async runtime so it does
+    // not stall other tasks on the worker thread.
+    let presented_owned = presented.to_string();
+    let verified = tokio::task::spawn_blocking(move || verify_key(&presented_owned, &hash))
+        .await
+        .map_err(|error| ApiKeyError::Hash(format!("verify task failed: {error}")))??;
+    if !verified {
         return Err(ApiKeyError::NotFoundOrRevoked);
     }
 
@@ -436,7 +485,7 @@ where
     Ok(())
 }
 
-fn validation_cache() -> &'static Cache<ValidationCacheKey, ResolvedKey> {
+fn validation_cache() -> &'static Cache<ValidationCacheKey, CachedValidation> {
     VALIDATION_CACHE.get_or_init(|| {
         Cache::builder()
             .max_capacity(VALIDATION_CACHE_CAPACITY)
@@ -463,7 +512,9 @@ fn validation_cache_key(presented: &str) -> ValidationCacheKey {
 }
 
 async fn cache_successful_validation(cache_key: ValidationCacheKey, resolved: &ResolvedKey) {
-    validation_cache().insert(cache_key, resolved.clone()).await;
+    validation_cache()
+        .insert(cache_key, CachedValidation::new(resolved.clone()))
+        .await;
     validation_key_ids().insert(resolved.id, cache_key).await;
 }
 
@@ -574,26 +625,54 @@ mod tests {
         assert_ne!(validation_cache_key(key), validation_cache_key(changed));
     }
 
-    #[tokio::test]
-    async fn validation_cache_invalidates_by_key_id() {
-        // Pins: in-process revocation removes cached successful validation results.
-        let cache_key = validation_cache_key("moa_dev_cached_key");
-        let resolved = ResolvedKey {
+    fn sample_resolved() -> ResolvedKey {
+        ResolvedKey {
             id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             owner_user_id: Some(Uuid::new_v4()),
             owner_agent_id: None,
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn validation_cache_invalidates_by_key_id() {
+        // Pins: in-process revocation removes cached successful validation results.
+        let cache_key = validation_cache_key("moa_dev_cached_key");
+        let resolved = sample_resolved();
 
         cache_successful_validation(cache_key, &resolved).await;
-        assert_eq!(
-            validation_cache().get(&cache_key).await,
-            Some(resolved.clone())
-        );
+        let cached = validation_cache()
+            .get(&cache_key)
+            .await
+            .expect("value is cached after a successful validation");
+        assert_eq!(cached.resolved, resolved);
 
         invalidate_validation_cache_for_key_id(resolved.id).await;
 
-        assert_eq!(validation_cache().get(&cache_key).await, None);
+        assert!(validation_cache().get(&cache_key).await.is_none());
         assert_eq!(validation_key_ids().get(&resolved.id).await, None);
+    }
+
+    #[test]
+    fn fresh_cached_validation_skips_the_revocation_recheck() {
+        // Pins: a just-confirmed key is trusted within the window, so a cache hit
+        // does not issue a database revocation query on every request.
+        let cached = CachedValidation::new(sample_resolved());
+        assert!(!recheck_due(&cached.last_checked));
+    }
+
+    #[test]
+    fn stale_cached_validation_triggers_a_revocation_recheck() {
+        // Pins: once the window elapses the next cache hit re-checks revocation.
+        let cached = CachedValidation::new(sample_resolved());
+        if let Some(stale) =
+            Instant::now().checked_sub(REVOCATION_RECHECK_INTERVAL + Duration::from_secs(1))
+        {
+            *cached
+                .last_checked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = stale;
+            assert!(recheck_due(&cached.last_checked));
+        }
     }
 }

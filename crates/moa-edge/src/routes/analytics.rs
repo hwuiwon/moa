@@ -21,6 +21,17 @@ use moa_core::{
     TenantAnalyticsSummary, TenantId, ToolCallSummary,
 };
 use sqlx::Row;
+use std::sync::{Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
+
+/// Minimum spacing between analytics materialized-view refreshes, process-wide.
+const MV_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(60);
+
+static LAST_MV_REFRESH: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+
+fn last_mv_refresh() -> &'static Mutex<Option<Instant>> {
+    LAST_MV_REFRESH.get_or_init(|| Mutex::new(None))
+}
 
 use super::{
     AppState, RouteTranslation, authenticate_direct_request, moa_error_response, parse_json_body,
@@ -94,9 +105,7 @@ pub async fn handle_tenant_stats(
     {
         return response;
     }
-    if let Err(response) = refresh_analytics_materialized_views(&state).await {
-        return response;
-    }
+    maybe_refresh_analytics_materialized_views(&state);
     match moa_session::analytics::get_tenant_stats_control_plane(
         &state.pool,
         state.config.database.schema.as_deref(),
@@ -205,9 +214,7 @@ pub async fn handle_cache_stats(
     {
         return response;
     }
-    if let Err(response) = refresh_analytics_materialized_views(&state).await {
-        return response;
-    }
+    maybe_refresh_analytics_materialized_views(&state);
     let summary = match moa_session::analytics::get_tenant_stats_control_plane(
         &state.pool,
         state.config.database.schema.as_deref(),
@@ -343,11 +350,8 @@ pub async fn handle_session_search(
     {
         return response;
     }
-    let store = match session_store_from_state(&state).await {
-        Ok(store) => store,
-        Err(response) => return response,
-    };
-    let events = match store
+    let events = match state
+        .session_store
         .search_events(
             &request.query,
             EventFilter {
@@ -368,23 +372,34 @@ pub async fn handle_session_search(
     Json(session_search_response_from_events(request, events)).into_response()
 }
 
-async fn session_store_from_state(
-    state: &AppState,
-) -> Result<moa_session::PostgresSessionStore, Response> {
-    moa_session::PostgresSessionStore::from_existing_pool_with_config(
-        &state.config,
-        (*state.pool).clone(),
-    )
-    .await
-    .map_err(moa_error_response)
-}
-
-async fn refresh_analytics_materialized_views(state: &AppState) -> Result<(), Response> {
-    session_store_from_state(state)
-        .await?
-        .refresh_analytics_materialized_views()
-        .await
-        .map_err(moa_error_response)
+/// Trigger an analytics materialized-view refresh at most once per interval.
+///
+/// The refresh runs in the background so the current request never waits for it,
+/// and the timestamp is stamped before spawning so concurrent requests do not
+/// each fire a refresh (single-flight). Queries proceed against the current
+/// materialized-view state; a failed refresh is logged, not surfaced.
+fn maybe_refresh_analytics_materialized_views(state: &AppState) {
+    let due = {
+        let mut guard = last_mv_refresh()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match *guard {
+            Some(last) if last.elapsed() < MV_REFRESH_MIN_INTERVAL => false,
+            _ => {
+                *guard = Some(Instant::now());
+                true
+            }
+        }
+    };
+    if !due {
+        return;
+    }
+    let store = state.session_store.clone();
+    tokio::spawn(async move {
+        if let Err(error) = store.refresh_analytics_materialized_views().await {
+            tracing::warn!(error = %error, "analytics materialized view refresh failed");
+        }
+    });
 }
 
 pub(super) fn translate(

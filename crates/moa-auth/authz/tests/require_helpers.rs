@@ -67,6 +67,30 @@ fn check_body(user: &str, relation: &str, object: &str) -> serde_json::Value {
     })
 }
 
+/// Expected OpenFGA `/batch-check` request body for an ordered list of tuples.
+fn batch_check_body(items: &[(&str, &str, &str)]) -> serde_json::Value {
+    let checks: Vec<serde_json::Value> = items
+        .iter()
+        .enumerate()
+        .map(|(index, (user, relation, object))| {
+            json!({
+                "tuple_key": { "user": user, "relation": relation, "object": object },
+                "correlation_id": format!("c{index}"),
+            })
+        })
+        .collect();
+    json!({ "authorization_model_id": "model-1", "checks": checks })
+}
+
+/// OpenFGA `/batch-check` response body keyed by correlation id.
+fn batch_result(entries: &[(&str, bool)]) -> serde_json::Value {
+    let mut result = serde_json::Map::new();
+    for (correlation_id, allowed) in entries {
+        result.insert((*correlation_id).to_string(), json!({ "allowed": allowed }));
+    }
+    json!({ "result": result })
+}
+
 #[tokio::test]
 async fn tenant_admin_administers_tenant() {
     // Pins: runtime tenant administration checks ask OpenFGA for tenant#admin.
@@ -274,24 +298,31 @@ async fn api_key_subject_still_narrows_access() {
 
 #[tokio::test]
 async fn delegated_agent_still_requires_can_act_as() {
-    // Pins: denied can_act_as stops before the resource check.
+    // Pins: a denied can_act_as yields Forbidden on the agent's can_act_as
+    // relation. The delegation and resource checks are resolved in a single
+    // batch-check round trip; the denied delegation short-circuits the result
+    // regardless of the resource decision.
     let server = MockServer::start();
     let agent_id =
         Uuid::parse_str("66666666-6666-6666-6666-666666666666").expect("valid agent uuid");
     let user_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("valid user uuid");
-    let can_act_as = server.mock(|when, then| {
+    let batch = server.mock(|when, then| {
         when.method(POST)
-            .path("/stores/store-1/check")
-            .json_body(check_body(
-                "user:11111111-1111-1111-1111-111111111111",
-                "can_act_as",
-                "agent:66666666-6666-6666-6666-666666666666",
-            ));
-        then.status(200).json_body(json!({ "allowed": false }));
-    });
-    let resource = server.mock(|when, then| {
-        when.method(POST).path("/stores/store-1/check");
-        then.status(200).json_body(json!({ "allowed": true }));
+            .path("/stores/store-1/batch-check")
+            .json_body(batch_check_body(&[
+                (
+                    "user:11111111-1111-1111-1111-111111111111",
+                    "can_act_as",
+                    "agent:66666666-6666-6666-6666-666666666666",
+                ),
+                (
+                    "agent:66666666-6666-6666-6666-666666666666",
+                    "participant",
+                    "session:22222222-2222-2222-2222-222222222222",
+                ),
+            ]));
+        then.status(200)
+            .json_body(batch_result(&[("c0", false), ("c1", true)]));
     });
 
     let error = require_authz_with_delegation(
@@ -319,53 +350,39 @@ async fn delegated_agent_still_requires_can_act_as() {
             panic!("expected Forbidden, got Engine({engine})");
         }
     }
-    can_act_as.assert_hits(1);
-    resource.assert_hits(0);
+    batch.assert_hits(1);
 }
 
 #[tokio::test]
 async fn delegated_agent_acts_as_agent_subject_not_user() {
     // Pins: a granted can_act_as lets the delegated agent through, but the resource
     // check still runs as agent:<id> — delegation must NOT borrow the user's perms.
+    // The batch-check body carries the agent subject for the resource tuple; a
+    // regression that used the user subject would fail to match the mock body and
+    // the call would error instead of succeeding.
     let server = MockServer::start();
     let agent_id =
         Uuid::parse_str("66666666-6666-6666-6666-666666666666").expect("valid agent uuid");
     let user_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("valid user uuid");
-    let session_id = "22222222-2222-2222-2222-222222222222";
+    let session_id = "88888888-8888-8888-8888-888888888888";
 
-    let can_act_as = server.mock(|when, then| {
+    let batch = server.mock(|when, then| {
         when.method(POST)
-            .path("/stores/store-1/check")
-            .json_body(check_body(
-                "user:11111111-1111-1111-1111-111111111111",
-                "can_act_as",
-                "agent:66666666-6666-6666-6666-666666666666",
-            ));
-        then.status(200).json_body(json!({ "allowed": true }));
-    });
-    // The resource check must be made as the agent subject.
-    let resource_as_agent = server.mock(|when, then| {
-        when.method(POST)
-            .path("/stores/store-1/check")
-            .json_body(check_body(
-                "agent:66666666-6666-6666-6666-666666666666",
-                "participant",
-                "session:22222222-2222-2222-2222-222222222222",
-            ));
-        then.status(200).json_body(json!({ "allowed": true }));
-    });
-    // If delegation wrongly borrowed the user's permissions this would be hit; it
-    // is allowed here precisely so a regression that checks the user subject would
-    // still surface (hits stay at 0).
-    let resource_as_user = server.mock(|when, then| {
-        when.method(POST)
-            .path("/stores/store-1/check")
-            .json_body(check_body(
-                "user:11111111-1111-1111-1111-111111111111",
-                "participant",
-                "session:22222222-2222-2222-2222-222222222222",
-            ));
-        then.status(200).json_body(json!({ "allowed": true }));
+            .path("/stores/store-1/batch-check")
+            .json_body(batch_check_body(&[
+                (
+                    "user:11111111-1111-1111-1111-111111111111",
+                    "can_act_as",
+                    "agent:66666666-6666-6666-6666-666666666666",
+                ),
+                (
+                    "agent:66666666-6666-6666-6666-666666666666",
+                    "participant",
+                    "session:88888888-8888-8888-8888-888888888888",
+                ),
+            ]));
+        then.status(200)
+            .json_body(batch_result(&[("c0", true), ("c1", true)]));
     });
 
     require_authz_with_delegation(
@@ -378,9 +395,7 @@ async fn delegated_agent_acts_as_agent_subject_not_user() {
     .await
     .expect("granted can_act_as agent should pass the resource check as itself");
 
-    can_act_as.assert_hits(1);
-    resource_as_agent.assert_hits(1);
-    resource_as_user.assert_hits(0);
+    batch.assert_hits(1);
 }
 
 #[tokio::test]

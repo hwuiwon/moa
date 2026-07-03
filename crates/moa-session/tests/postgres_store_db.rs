@@ -11,14 +11,13 @@ use moa_core::{
     SessionMeta, SessionStore, StoragePartitionId, TaskFacetSet, TaskFingerprint, TaskSegment,
     TenantId, ToolCallId, ToolOutput, UserId, deterministic_segment_id,
 };
-use moa_session::{PostgresSessionStore, testing};
+use moa_session::{EventAppend, PostgresSessionStore, testing};
 use moa_test_support::postgres::{
     test_action_policy_rules, test_create_and_get_session, test_emit_and_get_events,
     test_event_search, test_list_sessions_with_filter, test_session_status_update,
     test_tenant_cost_since,
 };
 use sqlx::PgPool;
-use sqlx::types::Json;
 use uuid::Uuid;
 
 async fn create_test_store() -> (PostgresSessionStore, String, String) {
@@ -1470,68 +1469,87 @@ async fn postgres_session_summary_tracks_model_tier_costs() {
 
 #[tokio::test]
 #[ignore]
-async fn postgres_trigger_failure_rolls_back_insert() {
+async fn events_hot_path_triggers_are_removed_and_aggregates_maintained_by_app_db() {
+    // Pins: the per-row `trg_update_session_aggregates` and
+    // `events_set_tenant_columns` triggers were removed from the hot `events`
+    // table; session aggregates are now maintained by the application append path.
     let (store, database_url, schema_name) = create_test_store().await;
     let session_id = store
-        .create_session(test_session_meta("rollback-ws", "test-model"))
+        .create_session(test_session_meta("no-trigger-ws", "test-model"))
         .await
         .expect("create session");
 
     let pool = PgPool::connect(&database_url)
         .await
         .expect("postgres inspection pool");
-    let error = sqlx::query(&format!(
-        "INSERT INTO {} \
-         (id, session_id, storage_partition_id, user_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, NULL)",
-        qualified(&schema_name, "events")
-    ))
-    .bind(Uuid::now_v7())
-    .bind(session_id.0)
-    .bind("w1")
-    .bind("u1")
-    .bind(0_i64)
-    .bind("BrainResponse")
-    .bind(Json(serde_json::json!({
-        "type": "BrainResponse",
-        "data": {
-            "text": "bad",
-            "model": "test-model",
-            "input_tokens_uncached": "not-a-number",
-            "input_tokens_cache_write": 0,
-            "input_tokens_cache_read": 0,
-            "output_tokens": 1,
-            "cost_cents": 1,
-            "duration_ms": 1
-        }
-    })))
-    .bind(Utc::now())
-    .execute(&pool)
+    let trigger_names: Vec<String> = sqlx::query_scalar(
+        "SELECT t.tgname FROM pg_trigger t \
+         JOIN pg_class c ON c.oid = t.tgrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.relname = 'events' AND n.nspname = $1 AND NOT t.tgisinternal",
+    )
+    .bind(&schema_name)
+    .fetch_all(&pool)
     .await
-    .expect_err("malformed payload should fail inside trigger");
+    .expect("list events triggers");
     assert!(
-        error.to_string().contains("invalid input syntax"),
-        "unexpected trigger error: {error}"
+        !trigger_names
+            .iter()
+            .any(|name| name == "trg_update_session_aggregates"),
+        "aggregates trigger must be gone from the events hot path: {trigger_names:?}"
+    );
+    assert!(
+        !trigger_names
+            .iter()
+            .any(|name| name == "events_set_tenant_columns"),
+        "tenant-column trigger must be gone from the events hot path: {trigger_names:?}"
     );
 
-    let event_count: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM {} WHERE session_id = $1",
-        qualified(&schema_name, "events")
-    ))
-    .bind(session_id.0)
-    .fetch_one(&pool)
-    .await
-    .expect("count events");
-    let session_event_count: i64 = sqlx::query_scalar(&format!(
-        "SELECT event_count FROM {} WHERE id = $1",
+    // The application append path still maintains session aggregates and binds
+    // tenant_id explicitly (no BEFORE INSERT trigger needed).
+    store
+        .emit_event(
+            session_id,
+            Event::BrainResponse {
+                text: "hi".into(),
+                thought_signature: None,
+                model: ModelId::new("test-model"),
+                model_tier: moa_core::ModelTier::Main,
+                input_tokens_uncached: 12,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens: 3,
+                cost_cents: 5,
+                duration_ms: 1,
+            },
+        )
+        .await
+        .expect("emit brain response");
+
+    let row = sqlx::query(&format!(
+        "SELECT event_count, total_cost_cents FROM {} WHERE id = $1",
         qualified(&schema_name, "sessions")
     ))
     .bind(session_id.0)
     .fetch_one(&pool)
     .await
-    .expect("fetch session event_count");
-    assert_eq!(event_count, 0);
-    assert_eq!(session_event_count, 0);
+    .expect("fetch session aggregates");
+    use sqlx::Row as _;
+    assert_eq!(row.get::<i64, _>("event_count"), 1);
+    assert_eq!(row.get::<i64, _>("total_cost_cents"), 5);
+
+    let event_tenant: Option<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT tenant_id FROM {} WHERE session_id = $1",
+        qualified(&schema_name, "events")
+    ))
+    .bind(session_id.0)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch event tenant_id");
+    assert!(
+        event_tenant.is_some(),
+        "append path must bind a non-null tenant_id without the trigger"
+    );
 
     pool.close().await;
     drop(store);
@@ -1749,6 +1767,189 @@ async fn postgres_materialized_analytics_views_refresh() {
     .await
     .expect("query daily workspace metrics");
     assert_eq!(session_count, 2);
+
+    pool.close().await;
+    drop(store);
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn append_events_batches_inserts_aggregates_and_dedupe_db() {
+    // Pins: append_events inserts a batch in sequence order under one
+    // transaction, folds session aggregates in the application (replacing the
+    // retired per-row trigger), and honors per-entry dedupe keys.
+    use sqlx::Row as _;
+
+    let (store, database_url, schema_name) = create_test_store().await;
+    let session_id = store
+        .create_session(test_session_meta("tenant-batch", "test-model"))
+        .await
+        .expect("create session");
+
+    let batch = vec![
+        EventAppend {
+            event: Event::UserMessage {
+                text: "hello".into(),
+                attachments: vec![],
+            },
+            dedupe_key: None,
+        },
+        EventAppend {
+            event: Event::BrainResponse {
+                text: "hi".into(),
+                thought_signature: None,
+                model: ModelId::new("test"),
+                model_tier: moa_core::ModelTier::Main,
+                input_tokens_uncached: 10,
+                input_tokens_cache_write: 2,
+                input_tokens_cache_read: 3,
+                output_tokens: 5,
+                cost_cents: 7,
+                duration_ms: 10,
+            },
+            dedupe_key: None,
+        },
+        EventAppend {
+            event: Event::Checkpoint {
+                summary: "sum".into(),
+                events_summarized: 2,
+                token_count: 4,
+                model: ModelId::new("test"),
+                model_tier: moa_core::ModelTier::Main,
+                input_tokens: 4,
+                output_tokens: 6,
+                cost_cents: 11,
+            },
+            dedupe_key: Some("dedupe-checkpoint".into()),
+        },
+    ];
+
+    let records = store
+        .append_events(session_id, batch)
+        .await
+        .expect("append batch");
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0].sequence_num, 0);
+    assert_eq!(records[1].sequence_num, 1);
+    assert_eq!(records[2].sequence_num, 2);
+
+    let events = store
+        .get_events(session_id, moa_core::EventRange::all())
+        .await
+        .expect("get events");
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].sequence_num, 0);
+    assert!(matches!(events[0].event, Event::UserMessage { .. }));
+    assert!(matches!(events[2].event, Event::Checkpoint { .. }));
+
+    // Aggregate columns are maintained by the application, not a per-row trigger.
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("inspection pool");
+    let row = sqlx::query(&format!(
+        "SELECT event_count, turn_count, total_input_tokens, total_output_tokens, \
+                total_cost_cents, last_checkpoint_seq \
+         FROM {} WHERE id = $1",
+        qualified(&schema_name, "sessions")
+    ))
+    .bind(session_id.0)
+    .fetch_one(&pool)
+    .await
+    .expect("load session aggregates");
+    assert_eq!(row.get::<i64, _>("event_count"), 3);
+    assert_eq!(row.get::<i64, _>("turn_count"), 1);
+    assert_eq!(row.get::<i64, _>("total_input_tokens"), 19); // (10+2+3) + 4
+    assert_eq!(row.get::<i64, _>("total_output_tokens"), 11); // 5 + 6
+    assert_eq!(row.get::<i64, _>("total_cost_cents"), 18); // 7 + 11
+    assert_eq!(row.get::<Option<i64>, _>("last_checkpoint_seq"), Some(2));
+
+    // A repeated dedupe key short-circuits: no new event, same sequence returned,
+    // aggregates unchanged.
+    let deduped = store
+        .append_events(
+            session_id,
+            vec![EventAppend {
+                event: Event::Checkpoint {
+                    summary: "again".into(),
+                    events_summarized: 0,
+                    token_count: 0,
+                    model: ModelId::new("test"),
+                    model_tier: moa_core::ModelTier::Main,
+                    input_tokens: 100,
+                    output_tokens: 100,
+                    cost_cents: 100,
+                },
+                dedupe_key: Some("dedupe-checkpoint".into()),
+            }],
+        )
+        .await
+        .expect("append deduped");
+    assert_eq!(deduped.len(), 1);
+    assert_eq!(deduped[0].sequence_num, 2);
+    assert_eq!(deduped[0].id, records[2].id);
+    assert!(matches!(
+        &deduped[0].event,
+        Event::Checkpoint {
+            summary,
+            input_tokens,
+            ..
+        } if summary == "sum" && *input_tokens == 4
+    ));
+
+    let after = store
+        .get_events(session_id, moa_core::EventRange::all())
+        .await
+        .expect("get events after dedupe");
+    assert_eq!(after.len(), 3, "dedupe must not insert a new event");
+
+    let cost_after: i64 = sqlx::query_scalar(&format!(
+        "SELECT total_cost_cents FROM {} WHERE id = $1",
+        qualified(&schema_name, "sessions")
+    ))
+    .bind(session_id.0)
+    .fetch_one(&pool)
+    .await
+    .expect("load cost after dedupe");
+    assert_eq!(cost_after, 18, "deduped append must not change aggregates");
+
+    let same_batch_duplicate = store
+        .append_events(
+            session_id,
+            vec![
+                EventAppend {
+                    event: Event::UserMessage {
+                        text: "first duplicate".into(),
+                        attachments: vec![],
+                    },
+                    dedupe_key: Some("same-batch".into()),
+                },
+                EventAppend {
+                    event: Event::Checkpoint {
+                        summary: "should not be returned".into(),
+                        events_summarized: 0,
+                        token_count: 0,
+                        model: ModelId::new("test"),
+                        model_tier: moa_core::ModelTier::Main,
+                        input_tokens: 100,
+                        output_tokens: 100,
+                        cost_cents: 100,
+                    },
+                    dedupe_key: Some("same-batch".into()),
+                },
+            ],
+        )
+        .await
+        .expect("append same-batch duplicate");
+    assert_eq!(same_batch_duplicate.len(), 2);
+    assert_eq!(same_batch_duplicate[0].id, same_batch_duplicate[1].id);
+    assert_eq!(same_batch_duplicate[0].sequence_num, 3);
+    assert_eq!(same_batch_duplicate[1].sequence_num, 3);
+    assert_eq!(same_batch_duplicate[1].event_type, EventType::UserMessage);
+    assert!(matches!(
+        &same_batch_duplicate[1].event,
+        Event::UserMessage { text, .. } if text == "first duplicate"
+    ));
 
     pool.close().await;
     drop(store);

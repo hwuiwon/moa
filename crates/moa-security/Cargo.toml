@@ -9,6 +9,7 @@ async-trait.workspace = true
 chrono.workspace = true
 globset.workspace = true
 moa-core = { workspace = true }
+moka.workspace = true
 serde_json.workspace = true
 shell-words.workspace = true
 tokio.workspace = true

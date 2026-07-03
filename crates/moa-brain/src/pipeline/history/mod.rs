@@ -220,11 +220,16 @@ impl ContextProcessor for HistoryCompiler {
         let history_start_index = ctx.messages.len();
         let remaining_budget = ctx.token_budget.saturating_sub(ctx.token_count);
         let stage_inputs_hash = snapshot_stage_inputs_hash(ctx);
-        let checkpoint_emitted = self.maybe_emit_checkpoint(ctx).await?;
+        let gate_open = self.compaction_gate_open(ctx).await?;
 
-        let compiled = if !checkpoint_emitted
-            && let Some(snapshot) = self.load_snapshot(ctx, stage_inputs_hash).await?
-        {
+        let compiled = if gate_open {
+            // Compaction might fire this turn: read the full log once, compact,
+            // and compile from that same read (folding in any new checkpoint).
+            self.compile_full_messages_compacting(ctx, remaining_budget)
+                .await?
+        } else if let Some(snapshot) = self.load_snapshot(ctx, stage_inputs_hash).await? {
+            // Fast path: the gate proved compaction cannot fire, so replay only
+            // the bounded delta on top of the reusable snapshot — no full read.
             let delta_events = self
                 .session_store
                 .get_events(

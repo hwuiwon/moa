@@ -340,3 +340,125 @@ async fn lexical_search_excludes_invalidated_nodes_with_valid_to_set() {
         vec![keep_a, keep_b, keep_c]
     );
 }
+
+async fn insert_named_fact(
+    graph: &PostgresGraphStore,
+    storage_partition_id: &str,
+    name: &str,
+    valid_from: DateTime<Utc>,
+    confidence: f64,
+    reference_count: i64,
+) -> Uuid {
+    let uid = Uuid::now_v7();
+    graph
+        .create_node(NodeWriteIntent {
+            uid,
+            label: NodeLabel::Fact,
+            storage_partition_id: Some(storage_partition_id.to_string()),
+            contact_id: None,
+            scope: "tenant".to_string(),
+            name: name.to_string(),
+            properties: json!({ "summary": name, "reference_count": reference_count }),
+            pii_class: PiiClass::None,
+            confidence: Some(confidence),
+            valid_from,
+            embedding: None,
+            embedding_model: None,
+            embedding_model_version: None,
+            embedding_text: None,
+            actor_id: Uuid::now_v7().to_string(),
+            actor_kind: "system".to_string(),
+        })
+        .await
+        .expect("insert named lexical fact");
+    uid
+}
+
+/// Pins: batched seed lookup returns exact per-name parity with N single lookups,
+/// preserves input order, keeps an empty slot for a name that matches nothing, and
+/// applies the same recency/confidence/reference ranking within each name (the two
+/// `alpha` facts are ordered by recency over confidence, so a divergent batch
+/// ranking would flip them).
+#[tokio::test]
+async fn lookup_seeds_batch_matches_single_name_lookups() {
+    let _guard = TEST_LOCK.lock().await;
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let storage_partition_id = format!("lexical-batch-{}", Uuid::now_v7().simple());
+    let graph = graph_store(&test_db, &storage_partition_id);
+    let now = Utc::now();
+
+    // "alpha" matches two facts whose ranking hinges on the recency weight: the
+    // fresh-but-low-quality fact must outrank the old-but-high-quality one, so a
+    // batch query with a different recency coefficient would reorder them.
+    insert_named_fact(
+        &graph,
+        &storage_partition_id,
+        "alpha search service",
+        now,
+        0.1,
+        0,
+    )
+    .await;
+    insert_named_fact(
+        &graph,
+        &storage_partition_id,
+        "alpha search platform",
+        now - Duration::days(10),
+        1.0,
+        100,
+    )
+    .await;
+    insert_named_fact(
+        &graph,
+        &storage_partition_id,
+        "beta cache backend",
+        now,
+        0.8,
+        1,
+    )
+    .await;
+    insert_named_fact(
+        &graph,
+        &storage_partition_id,
+        "gamma queue worker",
+        now,
+        0.8,
+        1,
+    )
+    .await;
+
+    let names = ["alpha", "beta", "gamma", "delta"];
+    let batched = graph
+        .lookup_seeds_batch(&names, 10, None)
+        .await
+        .expect("batched seed lookup");
+
+    let mut singles = Vec::with_capacity(names.len());
+    for name in names {
+        singles.push(
+            graph
+                .lookup_seeds(name, 10, None)
+                .await
+                .expect("single seed lookup"),
+        );
+    }
+
+    assert_eq!(
+        batched, singles,
+        "batched lookup must match N single-name lookups per name and in order"
+    );
+    assert_eq!(batched.len(), names.len());
+    assert_eq!(
+        batched[0].len(),
+        2,
+        "alpha matches both alpha-prefixed facts"
+    );
+    assert_eq!(batched[1].len(), 1);
+    assert_eq!(batched[2].len(), 1);
+    assert!(
+        batched[3].is_empty(),
+        "delta matches nothing but keeps its ordinal slot"
+    );
+}

@@ -8,7 +8,7 @@ use std::{
 
 use moa_core::{MoaConfig, traits::EmbeddingProvider};
 use moa_memory_graph::GraphStore;
-use moa_memory_pii::PiiClassifier;
+use moa_memory_pii::{HeuristicPiiClassifier, OpenAiPrivacyFilterClassifier, PiiClassifier};
 use moa_memory_vector::{VectorStore, VectorStoreFactory};
 use moa_providers::CohereV4Embedder;
 use sqlx::PgPool;
@@ -195,6 +195,8 @@ pub struct IngestRuntime {
     pool: PgPool,
     pii_service_url: Option<String>,
     cohere_api_key: String,
+    embedder: Option<Arc<dyn EmbeddingProvider>>,
+    pii_classifier: Arc<dyn PiiClassifier>,
     extractor: Arc<dyn FactExtractor>,
     extractor_name: &'static str,
     entity_resolver: Arc<EntityResolver>,
@@ -227,10 +229,15 @@ impl IngestRuntime {
             entity_blocking_enabled,
             contradiction_detector_name,
         );
+        let cohere_api_key = default_config.providers.cohere.api_key;
+        let embedder = build_shared_embedder(&cohere_api_key);
+        let pii_classifier = build_shared_pii_classifier(None);
         Self {
             pool,
             pii_service_url: None,
-            cohere_api_key: default_config.providers.cohere.api_key,
+            cohere_api_key,
+            embedder,
+            pii_classifier,
             extractor: Arc::new(HeuristicFactExtractor),
             extractor_name,
             entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
@@ -258,10 +265,14 @@ impl IngestRuntime {
             entity_blocking_enabled,
             contradiction_detector_name,
         );
+        let embedder = build_shared_embedder(&config.providers.cohere.api_key);
+        let pii_classifier = build_shared_pii_classifier(config.memory.pii_service_url.as_deref());
         Self {
             pool,
             pii_service_url: config.memory.pii_service_url.clone(),
             cohere_api_key: config.providers.cohere.api_key.clone(),
+            embedder,
+            pii_classifier,
             extractor,
             extractor_name,
             entity_resolver,
@@ -335,6 +346,26 @@ impl IngestRuntime {
         &self.cohere_api_key
     }
 
+    /// Returns the process-shared fact embedder, when a credential is configured.
+    ///
+    /// The embedder owns a pooled HTTP client and is built once at runtime
+    /// installation so ingestion steps reuse it instead of rebuilding a client
+    /// per turn.
+    #[must_use]
+    pub fn embedder(&self) -> Option<Arc<dyn EmbeddingProvider>> {
+        self.embedder.clone()
+    }
+
+    /// Returns the process-shared PII classifier.
+    ///
+    /// Resolves to the `openai/privacy-filter` sidecar client when a service URL
+    /// is configured and otherwise to the deterministic heuristic classifier.
+    /// Built once at runtime installation so its pooled HTTP client is reused.
+    #[must_use]
+    pub fn pii_classifier(&self) -> Arc<dyn PiiClassifier> {
+        self.pii_classifier.clone()
+    }
+
     /// Returns the configured fact extractor.
     #[must_use]
     pub fn extractor(&self) -> Arc<dyn FactExtractor> {
@@ -354,18 +385,15 @@ impl IngestRuntime {
     }
 
     /// Returns an embedder for embedding-blocked entity resolution when configured and credentialed.
+    ///
+    /// Reuses the process-shared embedder rather than constructing a new HTTP
+    /// client per turn.
     #[must_use]
     pub fn entity_blocking_embedder(&self) -> Option<Arc<dyn EmbeddingProvider>> {
         if !self.entity_blocking_enabled {
             return None;
         }
-        let api_key = self.cohere_api_key.trim();
-        if api_key.is_empty() {
-            return None;
-        }
-        CohereV4Embedder::new(api_key.to_string())
-            .ok()
-            .map(|embedder| Arc::new(embedder) as Arc<dyn EmbeddingProvider>)
+        self.embedder.clone()
     }
 
     /// Returns the configured contradiction detector.
@@ -411,6 +439,44 @@ fn entity_resolver_from_config(config: &MoaConfig) -> (Arc<EntityResolver>, &'st
         Arc::new(EntityResolver::deterministic_for_app_role()),
         "deterministic",
     )
+}
+
+/// Builds the process-shared fact embedder from a Cohere credential.
+///
+/// Returns `None` when the credential is absent or the HTTP client cannot be
+/// constructed; ingestion then stores facts without embeddings.
+pub(crate) fn build_shared_embedder(cohere_api_key: &str) -> Option<Arc<dyn EmbeddingProvider>> {
+    let api_key = cohere_api_key.trim();
+    if api_key.is_empty() {
+        return None;
+    }
+    match CohereV4Embedder::new(api_key.to_string()) {
+        Ok(embedder) => Some(Arc::new(embedder) as Arc<dyn EmbeddingProvider>),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "cohere embedder init failed; ingestion will store facts without embeddings"
+            );
+            None
+        }
+    }
+}
+
+/// Builds the process-shared PII classifier from an optional sidecar URL.
+///
+/// Falls back to the deterministic heuristic classifier when no URL is
+/// configured or the sidecar HTTP client cannot be constructed.
+pub(crate) fn build_shared_pii_classifier(pii_service_url: Option<&str>) -> Arc<dyn PiiClassifier> {
+    if let Some(url) = pii_service_url.filter(|url| !url.trim().is_empty()) {
+        match OpenAiPrivacyFilterClassifier::new(url.to_string()) {
+            Ok(classifier) => return Arc::new(classifier) as Arc<dyn PiiClassifier>,
+            Err(error) => tracing::warn!(
+                error = %error,
+                "pii classifier client init failed; falling back to heuristic classifier"
+            ),
+        }
+    }
+    Arc::new(HeuristicPiiClassifier)
 }
 
 fn entity_blocking_enabled_from_config(config: &MoaConfig) -> bool {

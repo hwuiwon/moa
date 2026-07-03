@@ -46,8 +46,99 @@ pub(crate) trait VoState: Default + Sized {
     /// Loads state from any reader, exclusive or shared.
     async fn load_from<R: VoReader>(reader: &R) -> Result<Self, HandlerError>;
 
-    /// Persists state to an exclusive context.
+    /// Persists all state keys to an exclusive context.
     fn persist_into(&self, ctx: &ObjectContext<'_>);
+
+    /// Persists only the keys that differ from `baseline`.
+    ///
+    /// Writing an unchanged key is a durable no-op that still journals a state
+    /// mutation, so skipping unchanged keys is replay-safe (the key retains its
+    /// previously persisted value) and avoids re-journaling large fields such as
+    /// buffered history on mutations that never touched them. The default writes
+    /// everything for VOs that have not opted into dirty-tracking.
+    fn persist_changes(&self, ctx: &ObjectContext<'_>, baseline: &Self) {
+        let _ = baseline;
+        self.persist_into(ctx);
+    }
+}
+
+/// Load-mutate-persist guard that persists only the keys a handler changed.
+///
+/// Captures the loaded state as a baseline, dereferences to the live state for
+/// in-handler mutation, and on [`Tracked::persist`] writes only the keys that
+/// actually changed via [`VoState::persist_changes`].
+pub(crate) struct Tracked<S> {
+    baseline: S,
+    current: S,
+}
+
+impl<S: VoState + Clone> Tracked<S> {
+    /// Loads state and snapshots it as the dirty-tracking baseline.
+    pub(crate) async fn load<R: VoReader>(reader: &R) -> Result<Self, HandlerError> {
+        let current = S::load_from(reader).await?;
+        Ok(Self {
+            baseline: current.clone(),
+            current,
+        })
+    }
+
+    /// Persists only the keys changed since load.
+    pub(crate) fn persist(&self, ctx: &ObjectContext<'_>) {
+        self.current.persist_changes(ctx, &self.baseline);
+    }
+}
+
+impl<S> std::ops::Deref for Tracked<S> {
+    type Target = S;
+
+    fn deref(&self) -> &Self::Target {
+        &self.current
+    }
+}
+
+impl<S> std::ops::DerefMut for Tracked<S> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.current
+    }
+}
+
+/// Sets `key` from `value` only when it differs from the baseline `previous`.
+pub(crate) fn set_changed_opt<T>(
+    ctx: &ObjectContext<'_>,
+    key: &str,
+    value: Option<&T>,
+    previous: Option<&T>,
+) where
+    T: Clone + Serialize + PartialEq + 'static,
+{
+    if value != previous {
+        set_or_clear_opt(ctx, key, value);
+    }
+}
+
+/// Sets `key` from `values` only when they differ from the baseline `previous`.
+pub(crate) fn set_changed_vec<T>(ctx: &ObjectContext<'_>, key: &str, values: &[T], previous: &[T])
+where
+    T: Clone + Serialize + PartialEq + 'static,
+{
+    if values != previous {
+        set_or_clear_vec(ctx, key, values);
+    }
+}
+
+/// Sets `key` from a scalar only when it differs from the baseline `previous`.
+pub(crate) fn set_changed_scalar<T>(
+    ctx: &ObjectContext<'_>,
+    key: &str,
+    value: T,
+    previous: &T,
+    empty_sentinel: T,
+) where
+    T: PartialEq + Serialize + Clone + 'static,
+{
+    if value != *previous {
+        set_or_clear_scalar(ctx, key, value, empty_sentinel);
+    }
 }
 
 /// Sets `key` when `value` is `Some`, clears it otherwise.

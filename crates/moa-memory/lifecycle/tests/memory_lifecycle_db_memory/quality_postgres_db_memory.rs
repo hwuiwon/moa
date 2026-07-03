@@ -278,6 +278,117 @@ async fn quality_scores_skip_when_task_segment_outcome_source_is_unavailable() {
     cleanup_quality_rows(test_db.store().pool(), &storage_partition_id).await;
 }
 
+#[tokio::test]
+async fn quality_scoring_excludes_task_segments_outside_lookback_window() {
+    // Pins: quality scoring only credits task segments started within the lookback
+    // window; a resolved segment older than the window leaves its node neutral even
+    // when the node's retrieval lineage is recent.
+    let _guard = QUALITY_TEST_LOCK.lock().await;
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let tenant_id = TenantId::new();
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
+    let user_id = UserId::new("quality-window-user");
+    let in_window_session = SessionId::new();
+    let out_of_window_session = SessionId::new();
+    let in_window_uid = Uuid::now_v7();
+    let out_of_window_uid = Uuid::now_v7();
+    let now = Utc::now();
+    let out_of_window = now - chrono::Duration::days(60);
+
+    for session_id in [in_window_session, out_of_window_session] {
+        test_db
+            .store()
+            .create_session(SessionMeta {
+                id: session_id,
+                tenant_id,
+                created_by: Some(SessionActorRef::Identity { id: Uuid::now_v7() }),
+                channel: Channel::Chat,
+                model: ModelId::new("mock"),
+                ..SessionMeta::default()
+            })
+            .await
+            .expect("create session row");
+    }
+
+    seed_node_index_row(
+        test_db.store().pool(),
+        &storage_partition_id,
+        &user_id,
+        in_window_uid,
+        "recent segment",
+        now,
+    )
+    .await;
+    seed_node_index_row(
+        test_db.store().pool(),
+        &storage_partition_id,
+        &user_id,
+        out_of_window_uid,
+        "stale segment",
+        now,
+    )
+    .await;
+    // Resolved segment inside the 30-day lookback window.
+    seed_task_segment(
+        test_db.store().pool(),
+        &storage_partition_id,
+        &user_id,
+        tenant_id,
+        in_window_session,
+        0,
+        Some("resolved"),
+        now,
+    )
+    .await;
+    // Resolved segment 60 days old: outside the lookback window, must be ignored.
+    seed_task_segment(
+        test_db.store().pool(),
+        &storage_partition_id,
+        &user_id,
+        tenant_id,
+        out_of_window_session,
+        0,
+        Some("resolved"),
+        out_of_window,
+    )
+    .await;
+    // Both nodes have recent retrieval lineage pointing at turn 1 of their session.
+    seed_retrieval_lineage(
+        test_db.store().pool(),
+        &storage_partition_id,
+        &user_id,
+        in_window_session,
+        in_window_uid,
+        1,
+        now,
+    )
+    .await;
+    seed_retrieval_lineage(
+        test_db.store().pool(),
+        &storage_partition_id,
+        &user_id,
+        out_of_window_session,
+        out_of_window_uid,
+        1,
+        now,
+    )
+    .await;
+
+    let stats = compute_quality_scores(test_db.store().pool(), &tenant_id, 30)
+        .await
+        .expect("compute windowed quality scores");
+
+    assert_eq!(stats.scored, 1, "only the in-window node is scored");
+    // In-window node: 1 use, 1 resolved success -> Beta(1,1) prior of 2/3.
+    assert_quality_score(test_db.store().pool(), in_window_uid, 2.0 / 3.0).await;
+    // Out-of-window node stays neutral because its segment is excluded.
+    assert_quality_score(test_db.store().pool(), out_of_window_uid, 0.5).await;
+
+    cleanup_quality_rows(test_db.store().pool(), &storage_partition_id).await;
+}
+
 async fn seed_node_index_row(
     pool: &PgPool,
     storage_partition_id: &StoragePartitionId,

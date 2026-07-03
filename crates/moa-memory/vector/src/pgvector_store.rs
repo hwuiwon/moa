@@ -138,15 +138,40 @@ impl VectorStore for PgvectorStore {
             sqlx::query("SET LOCAL enable_bitmapscan = off")
                 .execute(conn.as_mut())
                 .await?;
+        } else {
+            // Tune the HNSW scan for this KNN only. `set_config(..., true)` (SET LOCAL) scopes
+            // both GUCs to this ScopedConn transaction, so they are discarded at commit and never
+            // leak onto the pooled connection. `hnsw.iterative_scan = relaxed_order` lets the ANN
+            // scan keep expanding past the initial candidate pool so the WHERE filters (validity,
+            // PII ceiling, scope, label) still return `k` rows instead of being starved by the
+            // fixed default pool, which is how we keep the HNSW index driving a filtered query.
+            let ef_search = knn_ef_search(query.k);
+            sqlx::query(
+                "SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true), \
+                 set_config('hnsw.ef_search', $1, true)",
+            )
+            .bind(ef_search.to_string())
+            .execute(conn.as_mut())
+            .await?;
         }
         guard_storage_partition_embedder(conn.as_mut(), &storage_partition_id).await?;
         validate_dimension(&query.embedding)?;
         let halfvec = HalfVector::from_f32_slice(&query.embedding);
-        let mut builder =
-            QueryBuilder::<Postgres>::new("SELECT embedding.uid, (1.0 - (embedding.embedding <=> ");
-        builder.push_bind(halfvec.clone());
+
+        // The 1024-dim probe vector is bound exactly once, as the inner `dist` column. The inner
+        // `ORDER BY dist` resolves back to `embedding.embedding <=> $vec`, so pgvector can still
+        // drive the HNSW index for the distance ordering while the `LIMIT` is applied there. The
+        // outer `ORDER BY` re-sorts the (at most `k`) surviving rows: this restores strict distance
+        // order (required because `hnsw.iterative_scan = relaxed_order` may return rows slightly out
+        // of order) and applies the deterministic `uid` tie-break, so the returned rows and their
+        // ordering are identical to the previous single-level query.
+        let mut builder = QueryBuilder::<Postgres>::new(
+            "SELECT ranked.uid, (1.0 - ranked.dist)::float4 AS score FROM (\
+             SELECT embedding.uid AS uid, (embedding.embedding <=> ",
+        );
+        builder.push_bind(halfvec);
         builder.push(
-            r#"))::float4 AS score
+            r#") AS dist
                FROM moa.embeddings AS embedding
                JOIN moa.node_index AS node ON node.uid = embedding.uid
                WHERE "#,
@@ -187,11 +212,9 @@ impl VectorStore for PgvectorStore {
             builder.push_bind(labels.as_slice());
             builder.push(")");
         }
-        builder.push(" ORDER BY embedding.embedding <=> ");
-        builder.push_bind(halfvec);
-        builder.push(", embedding.uid ASC");
-        builder.push(" LIMIT ");
+        builder.push(" ORDER BY dist, embedding.uid ASC LIMIT ");
         builder.push_bind(limit);
+        builder.push(") AS ranked ORDER BY ranked.dist, ranked.uid ASC");
 
         let rows = builder
             .build_query_as::<(Uuid, f32)>()
@@ -220,6 +243,17 @@ impl VectorStore for PgvectorStore {
         let storage_partition_id = self.storage_partition_id();
         delete_items(conn, &storage_partition_id, uids).await
     }
+}
+
+/// Derives the HNSW `ef_search` candidate-pool size for a KNN query of `k` neighbors.
+///
+/// pgvector's `hnsw.ef_search` defaults to 40 and is capped at 1000. We over-sample the
+/// requested `k` by 4x so that post-`ORDER BY` filtering (validity window, PII ceiling, scope,
+/// label) still has enough candidates to fill `k`, then floor at 100 to keep recall healthy for
+/// small `k` and cap at pgvector's 1000 maximum. `hnsw.iterative_scan` handles the residual case
+/// where even this pool is exhausted before `k` valid rows are found.
+fn knn_ef_search(k: usize) -> usize {
+    k.saturating_mul(4).clamp(100, 1000)
 }
 
 struct StoragePartitionEmbedderState {

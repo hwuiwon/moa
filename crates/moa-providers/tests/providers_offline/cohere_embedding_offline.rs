@@ -101,6 +101,40 @@ async fn cohere_embedding_offline_rejects_wrong_response_dimension() {
     );
 }
 
+#[tokio::test]
+async fn cohere_embedding_offline_preserves_input_order_across_concurrent_chunks() {
+    // Pins: chunks that run concurrently and may complete out of order still
+    // reassemble into input order (each output vector is marked with its input
+    // index so any reordering would be observable).
+    let server = MockServer::start().await;
+    // 202 inputs => three chunks of 96, 96, and 10 that overflow the concurrency
+    // window and can therefore complete out of order.
+    let inputs: Vec<String> = (0..202).map(|index| format!("doc-{index}")).collect();
+    for range in [0..96, 96..192, 192..202] {
+        let chunk = inputs[range.clone()].to_vec();
+        mount_embed_response(&server, &chunk, marked_embeddings(range)).await;
+    }
+    let provider = provider(&server, 4);
+
+    let embeddings = provider
+        .embed(&inputs)
+        .await
+        .expect("concurrent chunked Cohere embed request should succeed");
+
+    assert_eq!(embeddings.len(), inputs.len());
+    for (index, embedding) in embeddings.iter().enumerate() {
+        assert_eq!(
+            embedding[0], index as f32,
+            "output at position {index} must correspond to input {index}"
+        );
+    }
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose Cohere embed requests");
+    assert_eq!(requests.len(), 3, "three chunks issue three requests");
+}
+
 async fn mount_embed_response(server: &MockServer, texts: &[String], embeddings: Vec<Vec<f32>>) {
     Mock::given(method("POST"))
         .and(header("authorization", "Bearer test-key"))
@@ -139,6 +173,18 @@ fn embeddings(count: usize, dimensions: usize) -> Vec<Vec<f32>> {
         .map(|index| {
             let mut embedding = vec![0.0; dimensions];
             embedding[index % dimensions] = 1.0;
+            embedding
+        })
+        .collect()
+}
+
+/// Builds width-4 vectors whose position 0 carries the global input index so
+/// cross-chunk ordering can be asserted after concurrent completion.
+fn marked_embeddings(range: std::ops::Range<usize>) -> Vec<Vec<f32>> {
+    range
+        .map(|index| {
+            let mut embedding = vec![0.0_f32; 4];
+            embedding[0] = index as f32;
             embedding
         })
         .collect()

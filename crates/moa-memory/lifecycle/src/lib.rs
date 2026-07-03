@@ -17,8 +17,9 @@ pub(crate) fn property_string(properties: &Option<Value>, key: &str) -> Option<S
 
 pub use consolidate::{
     BackfillStats, ConsolidationOptions, ConsolidationOutcome, DecayStats, MergeStats, Result,
-    SweepStats, backfill_entities, consolidate_tenant, decay_confidence, merge_duplicates,
-    rebuild_digests, sweep_contradictions,
+    SweepStats, TenantConsolidationCursor, advance_consolidation_watermark, backfill_entities,
+    consolidate_tenant, decay_confidence, decay_target_confidence, merge_duplicates,
+    rebuild_digests, sweep_contradictions, tenant_changelog_version, tenants_needing_consolidation,
 };
 pub use digest::{
     DIGEST_RENDER_VERSION, DigestFact, DigestScopeKind, DigestStats, RenderedDigest, render_digest,

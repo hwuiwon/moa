@@ -21,6 +21,7 @@ pub use lexical::LexicalStore;
 pub use node::{
     ExistingSupersessionIntent, NodeEmbeddingIntent, NodeIndexRow, NodeLabel,
     NodePropertyUpdateIntent, NodeWriteIntent, PiiClass, bump_last_accessed, lookup_seed_by_name,
+    lookup_seeds_by_names,
 };
 pub use store::PostgresGraphStore;
 pub use validity::push_validity_filter;
@@ -85,6 +86,39 @@ pub trait GraphStore: Send + Sync {
     /// Looks up a single node by stable uid.
     async fn get_node(&self, uid: Uuid) -> Result<Option<NodeIndexRow>>;
 
+    /// Looks up several nodes by stable uid in one round trip.
+    ///
+    /// Returns the rows that exist (missing uids are omitted, mirroring
+    /// [`Self::get_node`] returning `None`); the result order is unspecified, so
+    /// callers that need a uid-keyed view build a map from it. The default
+    /// implementation loops [`Self::get_node`]; stores backed by a batchable
+    /// query override it to replace an N+1 lookup with a single query.
+    async fn bulk_get_nodes(&self, uids: &[Uuid]) -> Result<Vec<NodeIndexRow>> {
+        let mut rows = Vec::with_capacity(uids.len());
+        for uid in uids {
+            if let Some(row) = self.get_node(*uid).await? {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+
+    /// Creates several nodes, sidecar rows, optional vectors, and changelog rows
+    /// in one transaction.
+    ///
+    /// Returns the created uids in input order. The default implementation loops
+    /// [`Self::create_node`] (one transaction per node); stores backed by a
+    /// batchable write override it to insert every `node_index` row in a single
+    /// statement while still writing one `graph_changelog` outbox row per node.
+    /// Callers use this to replace an N+1 create loop.
+    async fn bulk_create_nodes(&self, intents: Vec<NodeWriteIntent>) -> Result<Vec<Uuid>> {
+        let mut uids = Vec::with_capacity(intents.len());
+        for intent in intents {
+            uids.push(self.create_node(intent).await?);
+        }
+        Ok(uids)
+    }
+
     /// Traverses one to three hops from a seed node and returns sidecar rows for visible nodes.
     async fn neighbors(
         &self,
@@ -109,4 +143,25 @@ pub trait GraphStore: Send + Sync {
         limit: i64,
         as_of: Option<DateTime<Utc>>,
     ) -> Result<Vec<NodeIndexRow>>;
+
+    /// Looks up NER seed nodes for several names, returning one result set per name.
+    ///
+    /// Results are returned in the same order as `names`; each entry is the seed
+    /// set [`Self::lookup_seeds`] would return for that name. Callers use this to
+    /// replace an N+1 loop of per-name lookups (for example one query planner
+    /// span per scope) with a single batched query. The default implementation
+    /// loops [`Self::lookup_seeds`]; stores backed by a batchable query override
+    /// it.
+    async fn lookup_seeds_batch(
+        &self,
+        names: &[&str],
+        limit: i64,
+        as_of: Option<DateTime<Utc>>,
+    ) -> Result<Vec<Vec<NodeIndexRow>>> {
+        let mut results = Vec::with_capacity(names.len());
+        for name in names {
+            results.push(self.lookup_seeds(name, limit, as_of).await?);
+        }
+        Ok(results)
+    }
 }

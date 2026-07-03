@@ -21,8 +21,8 @@ pub use ctx::{
     install_runtime_with_pool,
 };
 pub use entity_resolution::{
-    DeterministicEntityMergeVerifier, EntityMergeVerifier, EntityResolutionRequest, EntityResolver,
-    ResolvedEntity, normalize_entity_name,
+    DeterministicEntityMergeVerifier, EntityMergeVerifier, EntityResolutionPlan,
+    EntityResolutionRequest, EntityResolver, ResolvedEntity, normalize_entity_name,
 };
 pub use error::{IngestError, Result};
 pub use extract::{

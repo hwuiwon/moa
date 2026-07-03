@@ -22,14 +22,14 @@ pub(super) async fn apply_tier3(
     session_store: &dyn SessionStore,
     llm_provider: &dyn LLMProvider,
 ) -> Result<Option<Tier3Summary>> {
-    let events = session_store
+    let mut events = session_store
         .get_events(ctx.session_id, moa_core::EventRange::all())
         .await?;
     let mut forced_config = config.clone();
     forced_config.enabled = true;
     forced_config.event_threshold = 1;
     forced_config.token_ratio_threshold = 0.0;
-    if !maybe_compact_events(
+    let Some(checkpoint_record) = maybe_compact_events(
         &forced_config,
         session_store,
         llm_provider,
@@ -39,17 +39,17 @@ pub(super) async fn apply_tier3(
         &events,
     )
     .await?
-    {
-        return Ok(None);
-    }
-
-    let refreshed_events = session_store
-        .get_events(ctx.session_id, moa_core::EventRange::all())
-        .await?;
-    let Some(checkpoint) = latest_checkpoint_state(&refreshed_events) else {
+    else {
         return Ok(None);
     };
-    let non_checkpoint = non_checkpoint_events(&refreshed_events);
+    // Fold the freshly emitted checkpoint into the already-loaded log instead of
+    // re-reading the full event stream.
+    events.push(checkpoint_record);
+
+    let Some(checkpoint) = latest_checkpoint_state(&events) else {
+        return Ok(None);
+    };
+    let non_checkpoint = non_checkpoint_events(&events);
     let summarized = checkpoint.events_summarized.min(non_checkpoint.len());
     let preserved_errors = preserved_error_messages(&non_checkpoint[..summarized]);
     let recent_boundary =

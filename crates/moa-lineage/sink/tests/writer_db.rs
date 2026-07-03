@@ -40,7 +40,6 @@ async fn lineage_writer_flush_on_shutdown_drains_pending_rows_db() -> TestResult
         batch_size: 100,
         batch_max_age: Duration::from_secs(3600),
         journal_path: journal.path().to_path_buf(),
-        lossy_telemetry: false,
     };
 
     let (tx, rx) = mpsc::channel::<LineageEvent>(64);
@@ -91,7 +90,6 @@ async fn lineage_writer_poison_batch_dead_letters_without_acking_journal_db() ->
         batch_size: 100,
         batch_max_age: Duration::from_secs(3600),
         journal_path: journal_path.clone(),
-        lossy_telemetry: false,
     };
 
     let (tx, rx) = mpsc::channel::<LineageEvent>(64);
@@ -169,8 +167,113 @@ async fn lineage_writer_poison_batch_dead_letters_without_acking_journal_db() ->
     Ok(())
 }
 
+#[tokio::test]
+async fn lineage_writer_compliance_partition_writes_verifiable_hash_chain_db() -> TestResult<()> {
+    // Pins: for a compliance-enabled partition the batched hash-chain path writes the same chain a
+    // per-row HashChain::link walk would, links each row to the prior tip (genesis first), and
+    // advances the partition state tip and record count exactly once per row.
+    let (pool, database_name, cleanup_pool) = isolated_pool().await?;
+    let journal = tempfile::tempdir()?;
+    let config = MpscSinkConfig {
+        channel_capacity: 64,
+        batch_size: 100,
+        batch_max_age: Duration::from_secs(3600),
+        journal_path: journal.path().to_path_buf(),
+    };
+
+    let (tx, rx) = mpsc::channel::<LineageEvent>(64);
+    let handle = spawn_writer(rx, config, pool.clone()).await?;
+
+    let partition = "compliance-partition";
+    sqlx::query(
+        r#"
+        INSERT INTO analytics.compliance_tenants
+            (storage_partition_id, s3_bucket, signing_key_label, enabled)
+        VALUES ($1, 'test-bucket', 'test-signing-key', TRUE)
+        "#,
+    )
+    .bind(partition)
+    .execute(&pool)
+    .await?;
+
+    // Distinct, strictly increasing timestamps so read-back `ORDER BY ts` matches the send/chain
+    // order deterministically.
+    let base = Utc::now();
+    for offset in 0..3_i64 {
+        let ts = base + chrono::Duration::seconds(offset);
+        tx.send(retrieval_event_at(Uuid::now_v7(), partition, ts))
+            .await
+            .map_err(|error| test_error(format!("send should enqueue event: {error}")))?;
+    }
+    drop(tx);
+
+    let stats = handle.shutdown().await?;
+    assert_eq!(
+        stats.written, 3,
+        "all three compliance rows must be written"
+    );
+
+    let rows: Vec<(serde_json::Value, Vec<u8>, Option<Vec<u8>>)> = sqlx::query_as(
+        r#"
+        SELECT payload, integrity_hash, prev_hash
+        FROM analytics.turn_lineage
+        WHERE storage_partition_id = $1
+        ORDER BY ts ASC
+        "#,
+    )
+    .bind(partition)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(rows.len(), 3, "three compliance rows should be persisted");
+
+    // The stored integrity hashes must verify as a canonical per-row link chain from genesis.
+    let verify_input: Vec<(&serde_json::Value, &[u8])> = rows
+        .iter()
+        .map(|(payload, integrity_hash, _)| (payload, integrity_hash.as_slice()))
+        .collect();
+    let final_tip = moa_lineage_core::chain::HashChain::verify(verify_input)
+        .expect("stored compliance chain must verify against canonical payloads");
+
+    // Each row links to the prior tip; the first links to genesis.
+    let genesis = moa_lineage_core::chain::genesis_hash();
+    assert_eq!(rows[0].2.as_deref(), Some(genesis.as_bytes().as_slice()));
+    assert_eq!(rows[1].2.as_deref(), Some(rows[0].1.as_slice()));
+    assert_eq!(rows[2].2.as_deref(), Some(rows[1].1.as_slice()));
+
+    // The partition state tip and count are advanced once per new row by the single batched update.
+    let (state_hash, record_count): (Option<Vec<u8>>, i64) = sqlx::query_as(
+        r#"
+        SELECT last_integrity_hash, record_count
+        FROM analytics.compliance_storage_partition_state
+        WHERE storage_partition_id = $1
+        "#,
+    )
+    .bind(partition)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        state_hash.as_deref(),
+        Some(final_tip.as_bytes().as_slice()),
+        "partition state tip must equal the chain's final integrity hash"
+    );
+    assert_eq!(record_count, 3, "record count advances once per new row");
+
+    pool.close().await;
+    drop_database(&cleanup_pool, &database_name).await;
+    Ok(())
+}
+
 /// Builds a minimal but valid retrieval lineage event for one turn.
 fn retrieval_event(turn_id: Uuid, storage_partition_id: &str) -> LineageEvent {
+    retrieval_event_at(turn_id, storage_partition_id, Utc::now())
+}
+
+/// Builds a retrieval lineage event with an explicit timestamp for deterministic chain ordering.
+fn retrieval_event_at(
+    turn_id: Uuid,
+    storage_partition_id: &str,
+    ts: chrono::DateTime<Utc>,
+) -> LineageEvent {
     LineageEvent::Retrieval(RetrievalLineage {
         turn_id: moa_lineage_core::TurnId(turn_id),
         session_id: SessionId::new(),
@@ -179,7 +282,7 @@ fn retrieval_event(turn_id: Uuid, storage_partition_id: &str) -> LineageEvent {
         scope: MemoryScope::Tenant {
             tenant_id: TenantId::from(Uuid::from_u128(0x7)),
         },
-        ts: Utc::now(),
+        ts,
         query_original: "what is oauth".to_string(),
         query_expansions: Vec::new(),
         vector_hits: Vec::new(),

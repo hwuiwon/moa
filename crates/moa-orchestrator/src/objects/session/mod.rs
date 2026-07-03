@@ -12,7 +12,7 @@ use moa_core::wire::turn::{
     TurnTrigger,
 };
 use moa_core::{
-    ActiveSegment, CancelScope, ChildSignalKind, ConsumeWorkerChildResultInput,
+    ActiveSegment, CancelScope, ChildSignalKind, ClaimCheck, ConsumeWorkerChildResultInput,
     ConsumeWorkerChildResultOutput, ContactRef, Event, EventRange, EventRecord, InputAudience,
     MarkWorkerChildTerminalInput, MoaError, ParentResumePolicy, Result as MoaResult, SessionId,
     SessionMeta, SessionStatus, SignalSeverity, UnreadChildSignal, UserMessage, WorkerChildRef,
@@ -27,7 +27,10 @@ use crate::objects::durable_utc_now;
 use crate::objects::worker::WorkerClient;
 use crate::restate_identity::with_identity_headers;
 use crate::services::session_store::RestateSessionStoreClient;
-use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_scalar, set_or_clear_vec};
+use crate::vo::{
+    Tracked, VoReader, VoState, set_changed_opt, set_changed_scalar, set_changed_vec,
+    set_or_clear_opt, set_or_clear_scalar, set_or_clear_vec,
+};
 use crate::worker_dispatch::MAX_WORKER_FAN_OUT;
 use crate::workflows::turn_execution::TurnExecutionClient;
 use moa_observability::restate_observability::{annotate_restate_handler_span, event_persist_span};

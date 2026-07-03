@@ -13,37 +13,43 @@ pub(super) fn redact_password(url: &str) -> String {
     url.to_string()
 }
 
+/// Counts sessions currently in the `Running` status.
+///
+/// Kept off the append/lifecycle write path: the active-session gauge is
+/// refreshed from this only at construction and on a background timer.
+pub(super) async fn count_running_sessions(pool: &PgPool, sessions_table: &str) -> Result<u64> {
+    let active = sqlx::query_scalar::<_, i64>(&format!(
+        "SELECT COUNT(*)::BIGINT FROM {sessions_table} WHERE status = $1"
+    ))
+    .bind(SessionStatus::Running.as_str())
+    .fetch_one(pool)
+    .await
+    .map_err(map_sqlx_error)?;
+    u64::try_from(active)
+        .map_err(|_| MoaError::StorageError("active session count exceeded u64 range".to_string()))
+}
+
 impl PostgresSessionStore {
     /// Refresh the process metric that tracks currently active sessions.
+    ///
+    /// This runs a `COUNT(*)`; callers must keep it off the append/lifecycle write
+    /// path. It is invoked once at construction and periodically by the background
+    /// refresher started for production stores.
     pub async fn refresh_active_session_metric(&self) -> Result<()> {
         let sessions = self.table_name("sessions");
-        let active = sqlx::query_scalar::<_, i64>(&format!(
-            "SELECT COUNT(*)::BIGINT FROM {sessions} WHERE status = $1"
-        ))
-        .bind(SessionStatus::Running.as_str())
-        .fetch_one(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-        let active = u64::try_from(active).map_err(|_| {
-            MoaError::StorageError("active session count exceeded u64 range".to_string())
-        })?;
-        record_sessions_active(active);
+        record_sessions_active(count_running_sessions(&self.pool, &sessions).await?);
         Ok(())
     }
 
-    pub(super) async fn event_record_from_row(
-        &self,
+    /// Builds an [`EventRecord`] from a row whose event has already been decoded.
+    pub(super) fn event_record_from_row_parts(
         row: &sqlx::postgres::PgRow,
+        event: Event,
     ) -> Result<EventRecord> {
         let event_type_text = row.col::<String>("event_type")?;
-        let payload = row.col::<serde_json::Value>("payload")?;
-        let session_id = moa_core::SessionId(row.col::<Uuid>("session_id")?);
-        let event =
-            decode_event_from_storage(self.blob_store.as_ref(), &session_id, payload).await?;
-
         Ok(EventRecord {
             id: row.col::<Uuid>("id")?,
-            session_id,
+            session_id: moa_core::SessionId(row.col::<Uuid>("session_id")?),
             sequence_num: row.col::<i64>("sequence_num")? as u64,
             event_type: from_db("event type", &event_type_text)?,
             event,
@@ -54,6 +60,17 @@ impl PostgresSessionStore {
                 .col::<Option<i32>>("token_count")?
                 .map(|value| value as usize),
         })
+    }
+
+    pub(super) async fn event_record_from_row(
+        &self,
+        row: &sqlx::postgres::PgRow,
+    ) -> Result<EventRecord> {
+        let payload = row.col::<serde_json::Value>("payload")?;
+        let session_id = moa_core::SessionId(row.col::<Uuid>("session_id")?);
+        let event =
+            decode_event_from_storage(self.blob_store.as_ref(), &session_id, payload).await?;
+        Self::event_record_from_row_parts(row, event)
     }
 }
 

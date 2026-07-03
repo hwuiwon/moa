@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    HandStatus, MoaError, Result, SandboxTier, SessionMeta, ToolDefinition, ToolInvocation,
-    ToolOutput,
+    HandHandle, HandStatus, MoaError, Result, SandboxTier, SessionMeta, ToolDefinition,
+    ToolInvocation, ToolOutput,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -320,15 +320,42 @@ impl ToolRouter {
         let hand = self
             .get_or_provision_hand(provider, tier.clone(), session, worker_id)
             .await?;
+        self.execute_hand_on_handle(
+            session,
+            worker_id,
+            invocation,
+            tool_definition,
+            provider,
+            &hand,
+            hard_cancel_token,
+        )
+        .await
+    }
+
+    /// Executes a tool on an already-provisioned hand handle.
+    ///
+    /// The recovery path provisions and health-checks the hand once and passes it
+    /// here, so it does not re-provision per attempt.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn execute_hand_on_handle(
+        &self,
+        session: &SessionMeta,
+        worker_id: Option<&str>,
+        invocation: &ToolInvocation,
+        tool_definition: &ToolDefinition,
+        provider: &str,
+        hand: &HandHandle,
+        hard_cancel_token: Option<&CancellationToken>,
+    ) -> Result<(Option<String>, ToolOutput)> {
         let provider_impl = self
             .providers
             .get(provider)
             .ok_or_else(|| MoaError::ProviderError(format!("unknown hand provider: {provider}")))?;
-        let status = provider_impl.status(&hand).await?;
+        let status = provider_impl.status(hand).await?;
         if matches!(status, HandStatus::Paused) {
-            provider_impl.resume(&hand).await?;
+            provider_impl.resume(hand).await?;
         }
-        self.install_trusted_files_for_hand(session, worker_id, provider, &hand)
+        self.install_trusted_files_for_hand(session, worker_id, provider, hand)
             .await?;
 
         let serialized_input = serde_json::to_string(&invocation.input)?;
@@ -337,26 +364,21 @@ impl ToolRouter {
                 MoaError::ProviderError("local provider missing from tool router".to_string())
             })?;
             local_provider
-                .execute_with_cancel(
-                    &hand,
-                    &invocation.name,
-                    &serialized_input,
-                    hard_cancel_token,
-                )
+                .execute_with_cancel(hand, &invocation.name, &serialized_input, hard_cancel_token)
                 .await?
         } else if let Some(hard_cancel_token) = hard_cancel_token {
             tokio::select! {
-                result = provider_impl.execute(&hand, &invocation.name, &serialized_input) => result?,
+                result = provider_impl.execute(hand, &invocation.name, &serialized_input) => result?,
                 _ = hard_cancel_token.cancelled() => return Err(MoaError::Cancelled),
             }
         } else {
             provider_impl
-                .execute(&hand, &invocation.name, &serialized_input)
+                .execute(hand, &invocation.name, &serialized_input)
                 .await?
         };
 
         Ok((
-            Some(hand_id(&hand)),
+            Some(hand_id(hand)),
             self.apply_output_budget(session, tool_definition, output)
                 .await,
         ))
@@ -374,17 +396,16 @@ impl ToolRouter {
             .get(server_name)
             .ok_or_else(|| MoaError::ProviderError(format!("unknown MCP server: {server_name}")))?;
         let client = self.mcp_client(server_name).await?;
-        let extra_headers = if let (Some(proxy), Some(_credentials)) =
+        let extra_headers = if let (Some(proxy), Some(credentials)) =
             (&self.mcp_proxy, server.credentials.as_ref())
         {
+            // Keep MCP credential grants process-local and single-use: each MCP
+            // call mints one opaque grant and consumes it while enriching this
+            // request's headers.
             let token = proxy
                 .create_session_token(&session.id, server_name, server_name)
                 .await?;
-            let headers = proxy
-                .enrich_headers(&token, server.credentials.as_ref())
-                .await?;
-            proxy.revoke_session_token(&token).await;
-            headers
+            proxy.enrich_headers(&token, Some(credentials)).await?
         } else {
             HashMap::new()
         };

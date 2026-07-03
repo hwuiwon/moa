@@ -1,4 +1,5 @@
 //! Restate-backed orchestrator handlers and shared runtime utilities.
+#![recursion_limit = "256"]
 
 pub(crate) mod action_reviews;
 pub(crate) mod authz_challenges;

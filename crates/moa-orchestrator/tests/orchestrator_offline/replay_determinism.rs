@@ -32,6 +32,7 @@ struct RecordedConsolidateSteps<'a> {
     recorder: &'a mut Recorder,
     clock: FakeClock,
     duration_ms: u64,
+    captured_changelog_version: i64,
 }
 
 #[async_trait]
@@ -54,6 +55,15 @@ impl ConsolidateDurableSteps for RecordedConsolidateSteps<'_> {
 
     async fn capture_now(&mut self) -> Result<chrono::DateTime<Utc>, HandlerError> {
         Ok(self.recorder.run("now", &json!({}), || self.clock.now()))
+    }
+
+    async fn capture_current_changelog_version(
+        &mut self,
+        request: &ConsolidateRequest,
+    ) -> Result<i64, HandlerError> {
+        Ok(self.recorder.run("capture_changelog_version", request, || {
+            self.captured_changelog_version
+        }))
     }
 
     async fn merge_duplicates(
@@ -156,6 +166,22 @@ impl ConsolidateDurableSteps for RecordedConsolidateSteps<'_> {
         );
         Ok(())
     }
+
+    async fn advance_consolidation_watermark(
+        &mut self,
+        request: &ConsolidateRequest,
+        changelog_version: i64,
+    ) -> Result<(), HandlerError> {
+        self.recorder.run(
+            "advance_consolidation_watermark",
+            &json!({
+                "tenant_id": request.tenant_id,
+                "changelog_version": changelog_version,
+            }),
+            || json!({"advanced": true}),
+        );
+        Ok(())
+    }
 }
 
 #[tokio::test]
@@ -164,6 +190,7 @@ async fn consolidate_workflow_first_run_and_replay_emit_identical_durable_steps_
     let request = ConsolidateRequest {
         tenant_id: tenant(1),
         target_date: chrono::NaiveDate::from_ymd_opt(2026, 5, 7).expect("valid target date"),
+        observed_changelog_version: Some(42),
     };
     let clock = fixed_clock();
 
@@ -184,6 +211,7 @@ async fn run_consolidate_trace(
         recorder: &mut recorder,
         clock,
         duration_ms: 250,
+        captured_changelog_version: 42,
     };
     run_consolidate_workflow(&mut steps, request)
         .await

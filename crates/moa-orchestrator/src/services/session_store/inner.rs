@@ -73,10 +73,8 @@ pub(crate) async fn create_session_for_identity(
         .commit()
         .await
         .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
-    store
-        .refresh_active_session_metric()
-        .await
-        .map_err(HandlerError::from)?;
+    // The active-session gauge is refreshed off the write path by the store's
+    // background timer, so session creation does not run a COUNT(*) here.
 
     Ok(session_id)
 }

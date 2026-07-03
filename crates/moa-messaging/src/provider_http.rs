@@ -7,12 +7,32 @@
 
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use moa_core::{MoaError, Result};
 use reqwest::{
-    StatusCode,
+    Client, StatusCode,
     header::{HeaderMap, RETRY_AFTER},
 };
+
+use crate::rate_limit::parse_retry_after;
+
+/// Connection-establishment deadline for the messaging REST connectors.
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Whole-request deadline for the messaging REST connectors.
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Builds the default REST connector HTTP client with connect and request timeouts.
+///
+/// A bare `reqwest::Client::new()` has no timeouts, so a stalled Postmark or
+/// Twilio round trip could hang a notification send indefinitely. This bounds
+/// both the connect and whole-request phases, falling back to the untimed client
+/// only if the builder itself fails (which it does not for a static config).
+pub(crate) fn default_http_client() -> Client {
+    Client::builder()
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .timeout(HTTP_REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_else(|_| Client::new())
+}
 
 /// Reads a response body, substituting a diagnostic string when the body cannot be read.
 pub(crate) async fn response_text(response: reqwest::Response) -> String {
@@ -38,19 +58,6 @@ pub(crate) fn is_retryable_http_status(status: StatusCode) -> bool {
 pub(crate) fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
     let value = headers.get(RETRY_AFTER)?.to_str().ok()?;
     parse_retry_after(value)
-}
-
-/// Parses a `Retry-After` header value expressed as seconds or an RFC 2822 date.
-pub(crate) fn parse_retry_after(value: &str) -> Option<Duration> {
-    if let Ok(seconds) = value.trim().parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
-    }
-
-    let reset_at = DateTime::parse_from_rfc2822(value).ok()?;
-    let reset_at = reset_at.with_timezone(&Utc);
-    let remaining = reset_at.signed_duration_since(Utc::now());
-    let millis = remaining.num_milliseconds().max(0) as u64;
-    Some(Duration::from_millis(millis))
 }
 
 /// Returns the trimmed value when non-empty, otherwise `None`.

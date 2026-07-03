@@ -227,15 +227,68 @@ impl HistoryCompiler {
 
 pub(super) fn snapshot_stage_inputs_hash(ctx: &WorkingContext) -> u64 {
     let mut hasher = DefaultHasher::new();
-    if let Ok(messages) = serde_json::to_string(&ctx.messages) {
-        messages.hash(&mut hasher);
+    for message in &ctx.messages {
+        hash_context_message(&mut hasher, message);
     }
-    if let Ok(tools) = serde_json::to_string(ctx.tools()) {
-        tools.hash(&mut hasher);
+    // Delimit the message and tool sections so distinct structures cannot hash
+    // to the same digest by concatenation.
+    hasher.write_u8(0xff);
+    for tool in ctx.tools() {
+        hash_json_value(&mut hasher, tool);
+        hasher.write_u8(0x1e);
     }
     ctx.model_capabilities.model_id.hash(&mut hasher);
     ctx.token_budget.hash(&mut hasher);
     hasher.finish()
+}
+
+/// `std::io::Write` adapter that streams bytes straight into a [`Hasher`],
+/// letting serde serialize `Value` payloads without an intermediate allocation.
+struct HashWriter<'a, H: Hasher>(&'a mut H);
+
+impl<H: Hasher> std::io::Write for HashWriter<'_, H> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Feeds one context message's structural fields into a streaming hasher without
+/// materializing an intermediate JSON string for the whole message list.
+fn hash_context_message(hasher: &mut impl Hasher, message: &ContextMessage) {
+    std::mem::discriminant(&message.role).hash(hasher);
+    message.content.hash(hasher);
+    message.thought_signature.hash(hasher);
+    message.tool_use_id.hash(hasher);
+    // The remaining fields carry `serde_json::Value` payloads that do not
+    // implement `Hash`; stream them through the hasher instead of allocating.
+    hash_optional_serialize(hasher, message.tools.as_ref());
+    hash_optional_serialize(hasher, message.content_blocks.as_ref());
+    hash_optional_serialize(hasher, message.tool_invocation.as_ref());
+    hasher.write_usize(message.source_refs.len());
+    hash_serialize(hasher, &message.source_refs);
+}
+
+fn hash_optional_serialize<T: serde::Serialize>(hasher: &mut impl Hasher, value: Option<&T>) {
+    match value {
+        Some(value) => {
+            hasher.write_u8(1);
+            hash_serialize(hasher, value);
+        }
+        None => hasher.write_u8(0),
+    }
+}
+
+fn hash_json_value(hasher: &mut impl Hasher, value: &serde_json::Value) {
+    hash_serialize(hasher, value);
+}
+
+fn hash_serialize<T: serde::Serialize>(hasher: &mut impl Hasher, value: &T) {
+    let _ = serde_json::to_writer(HashWriter(hasher), value);
 }
 
 pub(super) fn build_snapshot_state(

@@ -1,6 +1,7 @@
 //! Individual retrieval legs and reciprocal-rank fusion helpers.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -343,9 +344,19 @@ pub async fn lexical_leg(
     Ok(rank_uids(uids))
 }
 
+/// Returns the process-wide English stemmer.
+///
+/// `Stemmer::create` compiles the Snowball automaton, so it is built once and
+/// reused instead of being reconstructed on every lexical query.
+fn english_stemmer() -> &'static rust_stemmers::Stemmer {
+    static ENGLISH_STEMMER: OnceLock<rust_stemmers::Stemmer> = OnceLock::new();
+    ENGLISH_STEMMER
+        .get_or_init(|| rust_stemmers::Stemmer::create(rust_stemmers::Algorithm::English))
+}
+
 /// Builds an OR `to_tsquery` input from query terms and their stems.
 fn lexical_or_tsquery(query: &str) -> String {
-    let stemmer = rust_stemmers::Stemmer::create(rust_stemmers::Algorithm::English);
+    let stemmer = english_stemmer();
     let mut variants = Vec::new();
     for term in lexical_fallback_terms(query) {
         let stemmed = stemmer.stem(&term).into_owned();
@@ -362,35 +373,54 @@ fn lexical_or_tsquery(query: &str) -> String {
         .join(" | ")
 }
 
+/// Builds a prefix `to_tsquery` input (`'term':* | ...`) from fallback terms.
+///
+/// Prefix matching broadens the primary leg's exact/stemmed lexeme match — e.g.
+/// a short query term like `auth` matches the stored lexeme `authentication` —
+/// while staying sargable against the `name_tsv` GIN index.
+fn lexical_prefix_tsquery(terms: &[String]) -> String {
+    terms
+        .iter()
+        .filter(|term| !term.is_empty())
+        .map(|term| format!("'{}':*", term.replace('\'', "")))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 async fn lexical_fallback_leg(
     pool: &PgPool,
     req: &RetrievalRequest,
     assume_app_role: bool,
     terms: &[String],
 ) -> Result<Vec<LegCandidate>> {
+    // Reuse the `name_tsv` / `properties_tsv` GIN FTS path with prefix matching
+    // instead of a non-sargable `LIKE '%term%'` over `name || properties_summary`,
+    // which forced a full `node_index` scan. Searching `properties_tsv` keeps the
+    // structured-predicate recall the LIKE scan provided (e.g. private_repository
+    // / response_style aliases stored in `properties_summary`).
+    let prefix_query = lexical_prefix_tsquery(terms);
+    if prefix_query.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let mut conn = begin_scoped(pool, &req.scope, assume_app_role).await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
-        WITH terms(term) AS (SELECT unnest("#,
-    );
-    builder.push_bind(terms);
-    builder.push(
-        r#"::text[]))
-        SELECT node.uid
-        FROM moa.node_index AS node
-        CROSS JOIN LATERAL (
-            SELECT COUNT(*) AS match_count
-            FROM terms
-            WHERE LOWER(node.name || ' ' || COALESCE(node.properties_summary::text, ''))
-                  LIKE '%' || terms.term || '%'
-        ) AS matches
+        SELECT uid
+        FROM moa.node_index
         WHERE "#,
     );
-    push_validity_filter(&mut builder, Some("node"), req.as_of);
+    push_validity_filter(&mut builder, None, req.as_of);
     builder.push(
         r#"
-          AND matches.match_count > 0
-          AND CASE node.pii_class
+          AND (name_tsv @@ to_tsquery('simple', "#,
+    );
+    builder.push_bind(prefix_query.clone());
+    builder.push(") OR properties_tsv @@ to_tsquery('simple', ");
+    builder.push_bind(prefix_query.clone());
+    builder.push(
+        r#"))
+          AND CASE pii_class
                 WHEN 'none' THEN 0
                 WHEN 'pii' THEN 1
                 WHEN 'phi' THEN 2
@@ -399,14 +429,18 @@ async fn lexical_fallback_leg(
               END <= "#,
     );
     builder.push_bind(pii_rank(req.max_pii_class));
-    builder.push(" AND node.label = ANY(");
+    builder.push(" AND label = ANY(");
     builder.push_bind(effective_label_filter_values(req.label_filter.as_deref()));
     builder.push(")");
     builder.push(
         r#"
-        ORDER BY matches.match_count DESC, "#,
+        ORDER BY (ts_rank(name_tsv, to_tsquery('simple', "#,
     );
-    push_accessed_ordering(&mut builder, Some("node"), req.ranking_reference_time);
+    builder.push_bind(prefix_query.clone());
+    builder.push(")) + ts_rank(properties_tsv, to_tsquery('simple', ");
+    builder.push_bind(prefix_query);
+    builder.push("))) DESC, ");
+    push_accessed_ordering(&mut builder, None, req.ranking_reference_time);
     builder.push(" LIMIT ");
     builder.push_bind(LEXICAL_LIMIT);
 
@@ -749,10 +783,28 @@ mod tests {
 
     use super::{
         GRAPH_WEIGHT, LEXICAL_WEIGHT, LegCandidate, RetrievalRequest, VECTOR_WEIGHT,
-        exact_seed_candidates, lexical_fallback_terms, lexical_or_tsquery, merge_ordered_uids,
-        prefer_lexical_fallback_first, rrf_fuse, score_expansion, should_run_lexical_fallback,
-        vector_leg,
+        exact_seed_candidates, lexical_fallback_terms, lexical_or_tsquery, lexical_prefix_tsquery,
+        merge_ordered_uids, prefer_lexical_fallback_first, rrf_fuse, score_expansion,
+        should_run_lexical_fallback, vector_leg,
     };
+
+    #[test]
+    fn lexical_prefix_tsquery_builds_sargable_prefix_disjunction() {
+        // Pins: the sargable fallback emits a prefix (`:*`) OR-disjunction so it
+        // stays on the name_tsv GIN path, skips empty terms, and never leaks a
+        // raw apostrophe into the generated to_tsquery text.
+        assert_eq!(lexical_prefix_tsquery(&[]), "");
+        assert_eq!(
+            lexical_prefix_tsquery(&["auth".to_string(), "billing".to_string()]),
+            "'auth':* | 'billing':*"
+        );
+
+        let query = lexical_prefix_tsquery(&["o'brien".to_string(), String::new()]);
+        assert_eq!(
+            query, "'obrien':*",
+            "apostrophes stripped, empty term skipped"
+        );
+    }
 
     #[test]
     fn lexical_or_tsquery_handles_empty_stopword_and_quoted_input() {

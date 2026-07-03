@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use moa_core::{
     AgentSkillPolicy, AgentSkillPolicyMode, ContextMessage, ContextProcessor, ExcludedItem,
     ProcessorOutput, Result, SegmentStore, SessionStore, SkillBudgetConfig, SkillMetadata,
-    WorkingContext,
+    StageApply, WorkingContext,
 };
 use serde_json::json;
 use sqlx::PgPool;
@@ -75,8 +75,16 @@ impl ContextProcessor for SharedSkillInjector {
         self.inner.stage()
     }
 
+    fn parallelizable(&self) -> bool {
+        self.inner.parallelizable()
+    }
+
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
         self.inner.process(ctx).await
+    }
+
+    async fn fetch(&self, ctx: &WorkingContext) -> Result<Option<StageApply>> {
+        self.inner.fetch(ctx).await
     }
 }
 
@@ -152,17 +160,31 @@ impl ContextProcessor for SkillInjector {
         5
     }
 
+    fn parallelizable(&self) -> bool {
+        true
+    }
+
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
+        match self.fetch(ctx).await? {
+            Some(apply) => apply(ctx),
+            None => Ok(ProcessorOutput::default()),
+        }
+    }
+
+    async fn fetch(&self, ctx: &WorkingContext) -> Result<Option<StageApply>> {
         let skills = self.load_skill_metadata(ctx).await?;
-        let tokens_before = ctx.token_count;
 
         if skills.is_empty() {
-            return Ok(ProcessorOutput::default());
+            return Ok(Some(Box::new(|_ctx| Ok(ProcessorOutput::default()))));
         }
 
-        let query_keywords = self.query_keywords(ctx).await?;
-        let resolution_rates = self.skill_resolution_rates(ctx).await?;
-        let task_strategy_rates = self.task_strategy_success_rates(ctx).await?;
+        // These three signal sources are independent read-only queries; run them
+        // concurrently instead of serializing three round-trips per turn.
+        let (query_keywords, resolution_rates, task_strategy_rates) = tokio::try_join!(
+            self.query_keywords(ctx),
+            self.skill_resolution_rates(ctx),
+            self.task_strategy_success_rates(ctx),
+        )?;
         let budget = self.compute_budget(ctx.model_capabilities.context_window);
         let policy = agent_skill_policy(ctx)?;
         let policy_filtered = filter_skills_by_agent_policy(skills, &policy);
@@ -187,6 +209,8 @@ impl ContextProcessor for SkillInjector {
             .iter()
             .map(|skill| skill.metadata.clone())
             .collect::<Vec<_>>();
+        // Read-only I/O for the selected skills' sandbox files; depends only on
+        // the selection computed above, not on other stages' mutations.
         let selected_files = match &self.source {
             SkillSource::Registry(pool) => {
                 registry::load_selected_skill_files(pool, ctx, &selected_metadata).await?
@@ -195,10 +219,6 @@ impl ContextProcessor for SkillInjector {
             SkillSource::Static(_) => Vec::new(),
         };
         let selected_file_count = selected_files.len();
-
-        if !manifest.is_empty() {
-            ctx.append_message(ContextMessage::user(manifest));
-        }
 
         let items_included = selection
             .selected
@@ -217,62 +237,74 @@ impl ContextProcessor for SkillInjector {
             .iter()
             .map(|item| item.item.clone())
             .collect::<Vec<_>>();
-        ctx.insert_metadata(
-            SELECTED_SKILL_NAMES_METADATA_KEY,
-            json!(items_included.clone()),
-        );
-        ctx.insert_metadata(
-            SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY,
-            json!(procedure_skill_names.clone()),
-        );
-        ctx.insert_metadata(
-            SELECTED_SKILL_FILE_COUNT_METADATA_KEY,
-            json!(selected_file_count),
-        );
-        ctx.extend_trusted_sandbox_files(selected_files);
-        let output_metadata = HashMap::from([
-            (
-                QUERY_KEYWORDS_METADATA_KEY.to_string(),
-                json!(query_keywords),
-            ),
-            (
-                MANIFEST_BUDGET_METADATA_KEY.to_string(),
-                json!(budget.max_manifest_chars),
-            ),
-            (
-                TASK_STRATEGY_RATES_METADATA_KEY.to_string(),
-                json!(task_strategy_rates.keys().collect::<Vec<_>>()),
-            ),
-            (
-                MANIFEST_CHARS_USED_METADATA_KEY.to_string(),
-                json!(selection.chars_used),
-            ),
-            (
-                EXCLUDED_ITEMS_METADATA_KEY.to_string(),
-                json!(excluded_items.clone()),
-            ),
-            (
-                SELECTED_SKILL_NAMES_METADATA_KEY.to_string(),
-                json!(items_included.clone()),
-            ),
-            (
-                SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY.to_string(),
-                json!(procedure_skill_names),
-            ),
-            (
-                SELECTED_SKILL_FILE_COUNT_METADATA_KEY.to_string(),
-                json!(selected_file_count),
-            ),
-        ]);
+        let manifest_budget_chars = budget.max_manifest_chars;
+        let manifest_chars_used = selection.chars_used;
+        let task_strategy_rate_keys = task_strategy_rates.keys().cloned().collect::<Vec<_>>();
 
-        Ok(ProcessorOutput {
-            tokens_added: ctx.token_count.saturating_sub(tokens_before),
-            items_included,
-            items_excluded,
-            excluded_items,
-            metadata: output_metadata,
-            ..ProcessorOutput::default()
-        })
+        let apply: StageApply = Box::new(move |ctx: &mut WorkingContext| {
+            let tokens_before = ctx.token_count;
+            if !manifest.is_empty() {
+                ctx.append_message(ContextMessage::user(manifest));
+            }
+
+            ctx.insert_metadata(
+                SELECTED_SKILL_NAMES_METADATA_KEY,
+                json!(items_included.clone()),
+            );
+            ctx.insert_metadata(
+                SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY,
+                json!(procedure_skill_names.clone()),
+            );
+            ctx.insert_metadata(
+                SELECTED_SKILL_FILE_COUNT_METADATA_KEY,
+                json!(selected_file_count),
+            );
+            ctx.extend_trusted_sandbox_files(selected_files);
+            let output_metadata = HashMap::from([
+                (
+                    QUERY_KEYWORDS_METADATA_KEY.to_string(),
+                    json!(query_keywords),
+                ),
+                (
+                    MANIFEST_BUDGET_METADATA_KEY.to_string(),
+                    json!(manifest_budget_chars),
+                ),
+                (
+                    TASK_STRATEGY_RATES_METADATA_KEY.to_string(),
+                    json!(task_strategy_rate_keys),
+                ),
+                (
+                    MANIFEST_CHARS_USED_METADATA_KEY.to_string(),
+                    json!(manifest_chars_used),
+                ),
+                (
+                    EXCLUDED_ITEMS_METADATA_KEY.to_string(),
+                    json!(excluded_items.clone()),
+                ),
+                (
+                    SELECTED_SKILL_NAMES_METADATA_KEY.to_string(),
+                    json!(items_included.clone()),
+                ),
+                (
+                    SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY.to_string(),
+                    json!(procedure_skill_names),
+                ),
+                (
+                    SELECTED_SKILL_FILE_COUNT_METADATA_KEY.to_string(),
+                    json!(selected_file_count),
+                ),
+            ]);
+
+            Ok(ProcessorOutput {
+                tokens_added: ctx.token_count.saturating_sub(tokens_before),
+                items_included,
+                items_excluded,
+                excluded_items,
+                metadata: output_metadata,
+                ..ProcessorOutput::default()
+            })
+        });
+        Ok(Some(apply))
     }
 }
 

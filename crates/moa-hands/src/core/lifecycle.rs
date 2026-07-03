@@ -16,6 +16,11 @@ use super::leases::{HandLease, HandLeaseStatus, LeaseHandle};
 use super::{DEFAULT_PROVIDER_NAME, DEFAULT_TOOL_TIMEOUT, ToolRouter};
 
 const HAND_LEASE_TTL_SECS: i64 = 60 * 60;
+/// Remaining-TTL threshold below which a reused active lease is renewed.
+///
+/// Reusing a cached durable hand only rewrites the lease once less than half the
+/// TTL remains, so the hot path avoids a lease UPDATE on every tool call.
+const HAND_LEASE_RENEW_THRESHOLD_SECS: i64 = HAND_LEASE_TTL_SECS / 2;
 const HAND_LEASE_PROVISION_WAIT_MS: u64 = 25;
 
 impl ToolRouter {
@@ -418,15 +423,21 @@ impl ToolRouter {
             self.remove_cached_hand_if_matches(key, cached_handle).await;
             return Ok(None);
         }
-        if !lease_store
-            .renew_active(
-                session.id,
-                scope,
-                provider,
-                lease.generation,
-                hand_lease_expires_at(),
-            )
-            .await?
+        // Renewing on every call issues a lease UPDATE despite the long TTL. The
+        // `get` above already confirmed the lease is Active and unexpired and the
+        // hydrated handle matches the cached one, so the cached hand is safe to
+        // reuse without a write. Only extend (and re-fence the generation via the
+        // renew) once the remaining TTL has dropped below half.
+        if lease_renewal_due(lease.expires_at)
+            && !lease_store
+                .renew_active(
+                    session.id,
+                    scope,
+                    provider,
+                    lease.generation,
+                    hand_lease_expires_at(),
+                )
+                .await?
         {
             self.remove_cached_hand_if_matches(key, cached_handle).await;
             return Ok(None);
@@ -836,6 +847,12 @@ fn tenant_key(session: &SessionMeta) -> TenantId {
 
 fn hand_lease_expires_at() -> chrono::DateTime<Utc> {
     Utc::now() + ChronoDuration::seconds(HAND_LEASE_TTL_SECS)
+}
+
+/// Returns whether a reused active lease should be renewed based on remaining TTL.
+fn lease_renewal_due(expires_at: chrono::DateTime<Utc>) -> bool {
+    expires_at.signed_duration_since(Utc::now())
+        < ChronoDuration::seconds(HAND_LEASE_RENEW_THRESHOLD_SECS)
 }
 
 fn provisioning_wait_budget(tool_timeout: StdDuration) -> StdDuration {
@@ -1485,6 +1502,21 @@ mod tests {
             .expect("load worker lease after failed cleanup")
             .expect("worker lease should remain");
         assert_eq!(lease.status, HandLeaseStatus::Active);
+    }
+
+    #[test]
+    fn lifecycle_lease_renewal_is_deferred_until_half_ttl_remains() {
+        // Pins: a freshly-renewed durable lease is not rewritten on reuse; the
+        // renew (and its generation fence) only fires once less than half the TTL
+        // remains, keeping the hot path free of a lease UPDATE per tool call.
+        assert!(
+            !lease_renewal_due(Utc::now() + ChronoDuration::seconds(HAND_LEASE_TTL_SECS - 60)),
+            "a nearly-full lease should not be renewed on reuse"
+        );
+        assert!(
+            lease_renewal_due(Utc::now() + ChronoDuration::seconds(60)),
+            "a lease with well under half the TTL remaining should be renewed"
+        );
     }
 
     #[test]

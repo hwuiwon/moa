@@ -46,6 +46,9 @@ pub struct ObservabilityConfig {
     /// Application release or version resource attribute.
     pub release: Option<String>,
     /// Trace sampling ratio from 0.0 to 1.0.
+    ///
+    /// Defaults to `0.01` (1%) so a production fleet does not export a full-fidelity span per turn
+    /// by default. Override per environment (for example `1.0` in local development) as needed.
     pub sample_rate: f64,
     /// Durable lineage capture settings.
     pub lineage: LineageConfig,
@@ -61,7 +64,7 @@ impl Default for ObservabilityConfig {
             otlp_headers: HashMap::new(),
             environment: None,
             release: None,
-            sample_rate: 1.0,
+            sample_rate: 0.01,
             lineage: LineageConfig::default(),
         }
     }
