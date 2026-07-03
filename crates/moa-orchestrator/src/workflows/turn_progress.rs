@@ -1,16 +1,10 @@
-//! Durable progress projection helpers for turn workflows.
+//! Transient progress projection helpers for turn workflows.
 
 use chrono::{DateTime, Utc};
-use moa_core::wire::session_store::AppendEventRequest;
+use moa_core::SessionId;
 use moa_core::wire::turn::TurnPhase;
-use moa_core::{Event, SessionId};
-use moa_observability::record_turn_event_persist_duration;
-use moa_observability::restate_observability::event_persist_span;
 use restate_sdk::prelude::*;
-use std::time::Instant;
-use tracing::Instrument;
 
-use crate::services::session_store::RestateSessionStoreClient;
 use crate::workflows::progress_delivery;
 
 const K_PROGRESS_STARTED_AT: &str = "progress_started_at";
@@ -30,7 +24,7 @@ pub(crate) const SUMMARY_CHECKING_RESULTS: &str = "Checking results";
 pub(crate) struct ProgressSnapshot {
     /// Elapsed runtime in milliseconds.
     pub(crate) elapsed_ms: u64,
-    /// Last durable progress summary emitted for this turn.
+    /// Last transient progress summary emitted for this turn.
     pub(crate) last_summary: Option<String>,
 }
 
@@ -106,7 +100,7 @@ impl ProgressState {
     }
 }
 
-/// Initializes helper-owned durable progress state for a turn workflow.
+/// Initializes helper-owned transient progress state for a turn workflow.
 pub(crate) async fn initialize(ctx: &WorkflowContext<'_>) -> Result<(), HandlerError> {
     let now = workflow_utc_now(ctx).await?;
     store_state(ctx, &ProgressState::initialized(now));
@@ -141,12 +135,12 @@ pub(crate) async fn finish_with_live_delivery(
     Ok(())
 }
 
-/// Attempts to append a durable progress event while respecting delay and cadence limits.
+/// Attempts to publish transient progress while respecting delay and cadence limits.
 pub(crate) async fn maybe_emit(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
-    turn_id: &str,
-    phase: TurnPhase,
+    _turn_id: &str,
+    _phase: TurnPhase,
     summary: impl Into<String>,
     first_delay_ms: u64,
     interval_ms: u64,
@@ -155,7 +149,6 @@ pub(crate) async fn maybe_emit(
     let now = workflow_utc_now(ctx).await?;
     let attempt = state.attempt(now, summary.into(), first_delay_ms, interval_ms);
     if let Some(summary) = attempt.emit {
-        append_progress_event(ctx, session_id, turn_id, &phase, &summary, state.elapsed_ms).await?;
         progress_delivery::maybe_deliver(ctx, session_id, &summary).await?;
     }
     store_state(ctx, &state);
@@ -179,34 +172,6 @@ pub(crate) async fn snapshot(
 /// Returns a short safe tool progress summary.
 pub(crate) fn running_tool_summary(tool_name: &str) -> String {
     format!("Running tool: {}", safe_tool_name(tool_name))
-}
-
-async fn append_progress_event(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    turn_id: &str,
-    phase: &TurnPhase,
-    summary: &str,
-    elapsed_ms: u64,
-) -> Result<(), HandlerError> {
-    let persist_span = event_persist_span(1);
-    let persist_started = Instant::now();
-    ctx.service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event: Event::ProgressUpdate {
-                turn_id: turn_id.to_string(),
-                phase: format!("{phase:?}"),
-                summary: summary.to_string(),
-                elapsed_ms,
-            },
-            dedupe_key: None,
-        }))
-        .call()
-        .instrument(persist_span)
-        .await?;
-    record_turn_event_persist_duration(persist_started.elapsed(), 1);
-    Ok(())
 }
 
 async fn load_workflow_state(ctx: &WorkflowContext<'_>) -> Result<ProgressState, HandlerError> {
@@ -322,7 +287,7 @@ mod tests {
 
     #[test]
     fn first_delay_gates_initial_progress_emit() {
-        // Pins: fast turns do not emit durable progress before the first-delay threshold.
+        // Pins: fast turns do not emit transient progress before the first-delay threshold.
         let mut state = ProgressState::initialized(at(0));
         let attempt = state.attempt(at(7_999), SUMMARY_CALLING_MODEL.to_string(), 8_000, 8_000);
 
@@ -334,7 +299,7 @@ mod tests {
 
     #[test]
     fn progress_emits_after_first_delay() {
-        // Pins: the first eligible long-call boundary produces a replayable summary.
+        // Pins: the first eligible long-call boundary records a projection-visible summary.
         let mut state = ProgressState::initialized(at(0));
         let attempt = state.attempt(at(8_000), SUMMARY_CALLING_MODEL.to_string(), 8_000, 8_000);
 
@@ -373,7 +338,7 @@ mod tests {
 
     #[test]
     fn duplicate_progress_summary_does_not_spam_events() {
-        // Pins: repeated identical boundaries do not append duplicate progress events.
+        // Pins: repeated identical boundaries do not emit duplicate transient progress frames.
         let mut state = ProgressState::initialized(at(0));
         let first = state.attempt(at(8_000), SUMMARY_CALLING_MODEL.to_string(), 8_000, 1_000);
         let second = state.attempt(at(20_000), SUMMARY_CALLING_MODEL.to_string(), 8_000, 1_000);

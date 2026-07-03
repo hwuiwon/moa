@@ -221,31 +221,50 @@ impl ContextProcessor for HistoryCompiler {
         let remaining_budget = ctx.token_budget.saturating_sub(ctx.token_count);
         let stage_inputs_hash = snapshot_stage_inputs_hash(ctx);
         let gate_open = self.compaction_gate_open(ctx).await?;
+        let mut loaded_snapshot = None;
 
-        let compiled = if gate_open {
+        let (compiled, delete_snapshot_if_empty) = if gate_open {
             // Compaction might fire this turn: read the full log once, compact,
             // and compile from that same read (folding in any new checkpoint).
-            self.compile_full_messages_compacting(ctx, remaining_budget)
-                .await?
-        } else if let Some(snapshot) = self.load_snapshot(ctx, stage_inputs_hash).await? {
-            // Fast path: the gate proved compaction cannot fire, so replay only
-            // the bounded delta on top of the reusable snapshot — no full read.
-            let delta_events = self
-                .session_store
-                .get_events(
-                    ctx.session_id,
-                    EventRange {
-                        from_seq: Some(snapshot.last_sequence_num.saturating_add(1)),
-                        ..EventRange::default()
-                    },
-                )
-                .await?;
-            match self.compile_messages_from_snapshot(&snapshot, &delta_events, remaining_budget) {
-                Some(result) => result?,
-                None => self.compile_full_messages(ctx, remaining_budget).await?,
-            }
+            (
+                self.compile_full_messages_compacting(ctx, remaining_budget)
+                    .await?,
+                self.snapshot_config.enabled,
+            )
         } else {
-            self.compile_full_messages(ctx, remaining_budget).await?
+            let snapshot_load = self.load_snapshot(ctx, stage_inputs_hash).await?;
+            let stored_snapshot_present = snapshot_load.stored_snapshot_present;
+            if let Some(snapshot) = snapshot_load.snapshot {
+                loaded_snapshot = Some(snapshot.clone());
+                // Fast path: the gate proved compaction cannot fire, so replay only
+                // the bounded delta on top of the reusable snapshot — no full read.
+                let delta_events = self
+                    .session_store
+                    .get_events(
+                        ctx.session_id,
+                        EventRange {
+                            from_seq: Some(snapshot.last_sequence_num.saturating_add(1)),
+                            ..EventRange::default()
+                        },
+                    )
+                    .await?;
+                (
+                    match self.compile_messages_from_snapshot(
+                        &snapshot,
+                        &delta_events,
+                        remaining_budget,
+                    ) {
+                        Some(result) => result?,
+                        None => self.compile_full_messages(ctx, remaining_budget).await?,
+                    },
+                    stored_snapshot_present,
+                )
+            } else {
+                (
+                    self.compile_full_messages(ctx, remaining_budget).await?,
+                    stored_snapshot_present,
+                )
+            }
         };
 
         if compiled.deduplication.deduplicated_count > 0 {
@@ -265,10 +284,9 @@ impl ContextProcessor for HistoryCompiler {
         ctx.extend_messages(messages);
         ctx.insert_metadata(HISTORY_START_INDEX_METADATA_KEY, json!(history_start_index));
         ctx.insert_metadata(HISTORY_END_INDEX_METADATA_KEY, json!(ctx.messages.len()));
-        if let Some(snapshot) = compiled.snapshot.as_ref() {
-            ctx.insert_metadata(
-                HISTORY_SNAPSHOT_METADATA_KEY,
-                serde_json::to_value(ContextSnapshot {
+        if self.snapshot_config.enabled {
+            if let Some(snapshot) = compiled.snapshot.as_ref() {
+                let next_snapshot = ContextSnapshot {
                     format_version: CONTEXT_SNAPSHOT_FORMAT_VERSION,
                     session_id: ctx.session_id,
                     last_sequence_num: snapshot.last_sequence_num,
@@ -277,10 +295,19 @@ impl ContextProcessor for HistoryCompiler {
                     file_read_dedup_state: snapshot.file_read_dedup_state.clone(),
                     token_count: snapshot.token_count,
                     stage_inputs_hash,
-                })?,
-            );
-        } else {
-            ctx.insert_metadata(HISTORY_SNAPSHOT_METADATA_KEY, serde_json::Value::Null);
+                };
+                if loaded_snapshot
+                    .as_ref()
+                    .is_none_or(|loaded| !snapshot_payload_matches(loaded, &next_snapshot))
+                {
+                    ctx.insert_metadata(
+                        HISTORY_SNAPSHOT_METADATA_KEY,
+                        serde_json::to_value(next_snapshot)?,
+                    );
+                }
+            } else if delete_snapshot_if_empty {
+                ctx.insert_metadata(HISTORY_SNAPSHOT_METADATA_KEY, serde_json::Value::Null);
+            }
         }
 
         let mut metadata = HashMap::new();
@@ -302,6 +329,16 @@ impl ContextProcessor for HistoryCompiler {
     }
 }
 
+fn snapshot_payload_matches(left: &ContextSnapshot, right: &ContextSnapshot) -> bool {
+    left.format_version == right.format_version
+        && left.session_id == right.session_id
+        && left.last_sequence_num == right.last_sequence_num
+        && left.messages == right.messages
+        && left.file_read_dedup_state == right.file_read_dedup_state
+        && left.token_count == right.token_count
+        && left.stage_inputs_hash == right.stage_inputs_hash
+}
+
 struct CompiledHistory {
     messages: Vec<ContextMessage>,
     tokens_used: usize,
@@ -311,6 +348,7 @@ struct CompiledHistory {
 
 #[cfg(test)]
 mod tests {
+    use super::{HISTORY_SNAPSHOT_METADATA_KEY, checkpoint::snapshot_stage_inputs_hash};
     use crate::pipeline::history::test_support::prelude::*;
 
     #[tokio::test]
@@ -333,5 +371,88 @@ mod tests {
         assert_eq!(ctx.messages.len(), 1);
         assert_eq!(ctx.messages[0].content, "Hello");
         assert!(output.tokens_added > 0);
+    }
+
+    #[tokio::test]
+    async fn history_processor_skips_snapshot_delete_when_no_snapshot_exists() {
+        let session = session();
+        let events = vec![event_record(
+            &session.id,
+            0,
+            Event::UserMessage {
+                text: "Hello".to_string(),
+                attachments: Vec::new(),
+            },
+        )];
+        let store = Arc::new(MockSessionStore::new(session.clone(), events));
+        let compiler = HistoryCompiler::new(store.clone());
+        let mut ctx = WorkingContext::new(&session, capabilities());
+
+        compiler.process(&mut ctx).await.unwrap();
+
+        assert!(
+            !ctx.metadata().contains_key(HISTORY_SNAPSHOT_METADATA_KEY),
+            "no snapshot metadata means the bridge has no snapshot write or delete to perform"
+        );
+        assert_eq!(
+            store.snapshot_delete_count().await,
+            0,
+            "a missing snapshot should not be deleted on every short-history turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn history_processor_skips_snapshot_write_when_loaded_snapshot_is_unchanged() {
+        let session = session();
+        let events = vec![
+            event_record(
+                &session.id,
+                0,
+                Event::UserMessage {
+                    text: "Hello".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            event_record(
+                &session.id,
+                1,
+                Event::UserMessage {
+                    text: "Follow-up".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+        ];
+        let store = Arc::new(MockSessionStore::new(session.clone(), events));
+        let mut ctx = WorkingContext::new(&session, capabilities());
+        let snapshot_messages = vec![ContextMessage::user("Hello".to_string())];
+        store
+            .put_snapshot(
+                session.id,
+                ContextSnapshot {
+                    format_version: CONTEXT_SNAPSHOT_FORMAT_VERSION,
+                    session_id: session.id,
+                    last_sequence_num: 0,
+                    created_at: Utc::now(),
+                    token_count: moa_core::sum_message_tokens(&snapshot_messages),
+                    messages: snapshot_messages,
+                    file_read_dedup_state: FileReadDedupState::default(),
+                    stage_inputs_hash: snapshot_stage_inputs_hash(&ctx),
+                },
+            )
+            .await
+            .unwrap();
+        let compiler = HistoryCompiler::new(store.clone());
+
+        compiler.process(&mut ctx).await.unwrap();
+
+        assert!(
+            !ctx.metadata().contains_key(HISTORY_SNAPSHOT_METADATA_KEY),
+            "unchanged loaded snapshot should not ask the bridge to upsert it again"
+        );
+        assert_eq!(
+            store.snapshot_write_count().await,
+            1,
+            "only the test setup should write the snapshot"
+        );
     }
 }

@@ -22,7 +22,7 @@ use crate::routing::{
     provider_descriptor_by_name, split_explicit_provider,
 };
 #[cfg(feature = "scripted-provider")]
-use crate::{ScriptedBlock, ScriptedProvider, ScriptedResponse};
+use crate::{ScriptedBlock, ScriptedFault, ScriptedProvider, ScriptedResponse};
 
 #[derive(Clone)]
 enum ProviderSource {
@@ -572,6 +572,27 @@ struct ScriptedCompletion {
     cached_input_tokens: usize,
     cache_write_input_tokens: usize,
     stop_reason: Option<String>,
+    /// Simulated total call latency; the provider actually sleeps this long.
+    latency_ms: Option<u64>,
+    /// Simulated time-to-first-block; defaults to `latency_ms` (single burst).
+    ttft_ms: Option<u64>,
+    /// Optional deterministic fault plan.
+    fault: Option<ScriptedFaultSpec>,
+}
+
+/// JSON fault plan for one scripted completion.
+#[cfg(feature = "scripted-provider")]
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct ScriptedFaultSpec {
+    /// Fail the first N matching requests before succeeding.
+    fail_first_n: u32,
+    /// Modeled provider status (429 becomes a rate-limit error).
+    status: Option<u16>,
+    /// Optional retry-after hint carried in the error.
+    retry_after_ms: Option<u64>,
+    /// Abort every stream after the first block.
+    abort_mid_stream: bool,
 }
 
 #[cfg(feature = "scripted-provider")]
@@ -585,6 +606,9 @@ impl Default for ScriptedCompletion {
             cached_input_tokens: 0,
             cache_write_input_tokens: 0,
             stop_reason: None,
+            latency_ms: None,
+            ttft_ms: None,
+            fault: None,
         }
     }
 }
@@ -662,6 +686,20 @@ fn scripted_response(entry: ScriptedEntry) -> moa_core::Result<ScriptedResponse>
     response.cache_write_input_tokens = completion.cache_write_input_tokens;
     if let Some(stop_reason) = completion.stop_reason {
         response.stop_reason = parse_scripted_stop_reason(&stop_reason)?;
+    }
+    if let Some(latency_ms) = completion.latency_ms {
+        let total = std::time::Duration::from_millis(latency_ms);
+        let ttft = std::time::Duration::from_millis(completion.ttft_ms.unwrap_or(latency_ms));
+        response = response.with_timing(ttft.min(total), total);
+    }
+    if let Some(fault) = completion.fault {
+        let mut plan = ScriptedFault::fail_first(
+            fault.fail_first_n,
+            fault.status.unwrap_or(500),
+            fault.retry_after_ms.map(std::time::Duration::from_millis),
+        );
+        plan.abort_mid_stream = fault.abort_mid_stream;
+        response = response.with_fault(plan);
     }
     Ok(response)
 }

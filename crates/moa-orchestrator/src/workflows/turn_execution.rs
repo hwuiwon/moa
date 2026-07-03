@@ -95,8 +95,8 @@ use crate::workflows::errors::moa_error_to_handler_error;
 use crate::workflows::skill_learning::{RunSkillLearningRequest, SkillLearningClient};
 use crate::workflows::turn_events::{
     append_session_event, append_tool_call_event, append_tool_result_event,
-    append_zero_cost_assistant_response, emit_tool_budget_exceeded, record_segment_tool_use,
-    turn_outcome_kind_label,
+    append_zero_cost_assistant_response, append_zero_cost_assistant_response_with_sequence,
+    emit_tool_budget_exceeded, record_segment_tool_use, turn_outcome_kind_label,
 };
 use crate::workflows::turn_progress::{
     self, SUMMARY_CALLING_MODEL, SUMMARY_CHECKING_RESULTS, SUMMARY_WORKING,
@@ -110,6 +110,18 @@ use crate::workflows::turn_responsiveness::{
 struct BodyOutcome {
     kind: TurnOutcomeKind,
     message: String,
+    post_outcome_assessment: Option<PostOutcomeAssessment>,
+}
+
+#[derive(Clone, Debug)]
+struct PostOutcomeAssessment {
+    meta: SessionMeta,
+    segment: ActiveSegment,
+    phase: AssessmentPhase,
+    overrides: Vec<AssessmentOverride>,
+    cutoff_before_seq: Option<u64>,
+    duration_ms: u64,
+    resolution_config: moa_core::ResolutionConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -251,33 +263,40 @@ impl TurnExecution for TurnExecutionImpl {
         let session_id = parse_session_id(&request.session_id)?;
         let turn_id = parse_turn_id(&request.turn_id)?;
         let workflow_started = Instant::now();
-        let outcome = match execute_turn_inside_workflow(&ctx, &request, session_id, turn_id).await
-        {
-            Ok(body) => {
-                let phase = match body.kind {
-                    TurnOutcomeKind::Completed => TurnPhase::Completed,
-                    TurnOutcomeKind::Cancelled => TurnPhase::Cancelled,
-                    TurnOutcomeKind::Failed => TurnPhase::Failed,
-                };
-                turn_progress::finish_with_live_delivery(&ctx, session_id, phase.clone()).await?;
-                driver_progress::set_phase(&ctx, phase);
-                TurnOutcome {
-                    turn_id: request.turn_id.clone(),
-                    kind: body.kind,
-                    message: body.message,
+        let (outcome, post_outcome_assessment) =
+            match execute_turn_inside_workflow(&ctx, &request, session_id, turn_id).await {
+                Ok(body) => {
+                    let phase = match body.kind {
+                        TurnOutcomeKind::Completed => TurnPhase::Completed,
+                        TurnOutcomeKind::Cancelled => TurnPhase::Cancelled,
+                        TurnOutcomeKind::Failed => TurnPhase::Failed,
+                    };
+                    turn_progress::finish_with_live_delivery(&ctx, session_id, phase.clone())
+                        .await?;
+                    driver_progress::set_phase(&ctx, phase);
+                    (
+                        TurnOutcome {
+                            turn_id: request.turn_id.clone(),
+                            kind: body.kind,
+                            message: body.message,
+                        },
+                        body.post_outcome_assessment,
+                    )
                 }
-            }
-            Err(err) => {
-                turn_progress::finish_with_live_delivery(&ctx, session_id, TurnPhase::Failed)
-                    .await?;
-                driver_progress::set_phase(&ctx, TurnPhase::Failed);
-                TurnOutcome {
-                    turn_id: request.turn_id.clone(),
-                    kind: TurnOutcomeKind::Failed,
-                    message: format!("{err:?}"),
+                Err(err) => {
+                    turn_progress::finish_with_live_delivery(&ctx, session_id, TurnPhase::Failed)
+                        .await?;
+                    driver_progress::set_phase(&ctx, TurnPhase::Failed);
+                    (
+                        TurnOutcome {
+                            turn_id: request.turn_id.clone(),
+                            kind: TurnOutcomeKind::Failed,
+                            message: format!("{err:?}"),
+                        },
+                        None,
+                    )
                 }
-            }
-        };
+            };
 
         record_turn_workflow_outcome(
             "root",
@@ -286,6 +305,9 @@ impl TurnExecution for TurnExecutionImpl {
             workflow_started.elapsed(),
         );
         notify_session_of_outcome(&ctx, &request.session_id, &request.identity, &outcome);
+        if let Some(assessment) = post_outcome_assessment {
+            run_post_outcome_assessment(&ctx, assessment).await;
+        }
         Ok(Json::from(outcome))
     }
 
@@ -319,6 +341,7 @@ async fn execute_turn_inside_workflow(
         return Ok(BodyOutcome {
             kind: TurnOutcomeKind::Cancelled,
             message: reason,
+            post_outcome_assessment: None,
         });
     }
 
@@ -382,6 +405,7 @@ async fn execute_turn_inside_workflow(
         }
     };
     ctx.clear(driver_progress::RootTurnStateKey::QUERY_REWRITE_CACHE);
+    ctx.clear(driver_progress::RootTurnStateKey::LAST_RESPONSE_SEQUENCE);
 
     let recent_target_events = load_recent_target_events(ctx, session_id).await?;
     let has_recent_target = recent_events_have_target(&recent_target_events, user_sequence_num);
@@ -414,6 +438,7 @@ async fn execute_turn_inside_workflow(
         return Ok(BodyOutcome {
             kind: TurnOutcomeKind::Completed,
             message,
+            post_outcome_assessment: None,
         });
     }
 
@@ -426,6 +451,7 @@ async fn execute_turn_inside_workflow(
             return Ok(BodyOutcome {
                 kind: TurnOutcomeKind::Cancelled,
                 message: reason,
+                post_outcome_assessment: None,
             });
         }
 
@@ -496,11 +522,12 @@ async fn execute_turn_inside_workflow(
         match turn_outcome {
             TurnIterationOutcome::Core(CoreTurnOutcome::Continue) => continue,
             TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled) => {
-                assess_current_active_segment(
+                let post_outcome_assessment = capture_current_active_segment_assessment(
                     ctx,
                     session_id,
                     AssessmentPhase::Final,
                     &[AssessmentOverride::Cancelled],
+                    last_response_cutoff_before_seq(ctx).await?,
                 )
                 .await?;
                 return Ok(BodyOutcome {
@@ -508,48 +535,53 @@ async fn execute_turn_inside_workflow(
                     message: last_summary
                         .take()
                         .unwrap_or_else(|| "turn cancelled by provider".to_string()),
+                    post_outcome_assessment,
                 });
             }
             TurnIterationOutcome::Core(CoreTurnOutcome::Idle) => {
-                assess_current_active_segment(ctx, session_id, AssessmentPhase::Final, &[]).await?;
-                return Ok(BodyOutcome {
-                    kind: TurnOutcomeKind::Completed,
-                    message: last_summary.unwrap_or_else(|| "idle".to_string()),
-                });
-            }
-            TurnIterationOutcome::ToolBudgetExceeded(exhaustion) => {
-                assess_current_active_segment(
+                let post_outcome_assessment = capture_current_active_segment_assessment(
                     ctx,
                     session_id,
                     AssessmentPhase::Final,
-                    &[AssessmentOverride::TurnCapExceeded],
+                    &[],
+                    last_response_cutoff_before_seq(ctx).await?,
                 )
                 .await?;
+                return Ok(BodyOutcome {
+                    kind: TurnOutcomeKind::Completed,
+                    message: last_summary.unwrap_or_else(|| "idle".to_string()),
+                    post_outcome_assessment,
+                });
+            }
+            TurnIterationOutcome::ToolBudgetExceeded(exhaustion) => {
                 emit_tool_budget_exceeded(ctx, session_id, &exhaustion).await?;
-                let message = append_zero_cost_assistant_response(
+                let (message, sequence_num) = append_zero_cost_assistant_response_with_sequence(
                     ctx,
                     session_id,
                     &meta,
                     exhaustion.assistant_message(),
                 )
                 .await?;
+                record_last_response_sequence(ctx, sequence_num);
+                let post_outcome_assessment = capture_current_active_segment_assessment(
+                    ctx,
+                    session_id,
+                    AssessmentPhase::Final,
+                    &[AssessmentOverride::TurnCapExceeded],
+                    Some(sequence_num.saturating_add(1)),
+                )
+                .await?;
                 return Ok(BodyOutcome {
                     kind: TurnOutcomeKind::Completed,
                     message,
+                    post_outcome_assessment,
                 });
             }
         }
     }
 
-    assess_current_active_segment(
-        ctx,
-        session_id,
-        AssessmentPhase::Final,
-        &[AssessmentOverride::TurnCapExceeded],
-    )
-    .await?;
     emit_turn_cap_exceeded(ctx, session_id, max_turns).await?;
-    let message = append_zero_cost_assistant_response(
+    let (message, sequence_num) = append_zero_cost_assistant_response_with_sequence(
         ctx,
         session_id,
         &meta,
@@ -558,9 +590,19 @@ async fn execute_turn_inside_workflow(
         ),
     )
     .await?;
+    record_last_response_sequence(ctx, sequence_num);
+    let post_outcome_assessment = capture_current_active_segment_assessment(
+        ctx,
+        session_id,
+        AssessmentPhase::Final,
+        &[AssessmentOverride::TurnCapExceeded],
+        Some(sequence_num.saturating_add(1)),
+    )
+    .await?;
     Ok(BodyOutcome {
         kind: TurnOutcomeKind::Completed,
         message,
+        post_outcome_assessment,
     })
 }
 
@@ -648,6 +690,7 @@ async fn evaluate_input_guardrail(
         return Ok(Some(BodyOutcome {
             kind: TurnOutcomeKind::Completed,
             message: "input guardrail blocked".to_string(),
+            post_outcome_assessment: None,
         }));
     }
 
@@ -745,6 +788,23 @@ async fn append_brain_response_from_completion(
         },
     )
     .await
+}
+
+fn record_last_response_sequence(ctx: &WorkflowContext<'_>, sequence_num: u64) {
+    ctx.set(
+        driver_progress::RootTurnStateKey::LAST_RESPONSE_SEQUENCE,
+        Json::from(sequence_num),
+    );
+}
+
+async fn last_response_cutoff_before_seq(
+    ctx: &WorkflowContext<'_>,
+) -> Result<Option<u64>, HandlerError> {
+    Ok(ctx
+        .get::<Json<u64>>(driver_progress::RootTurnStateKey::LAST_RESPONSE_SEQUENCE)
+        .await?
+        .map(Json::into_inner)
+        .map(|sequence_num| sequence_num.saturating_add(1)))
 }
 
 async fn ingest_deferred_session_turn(
@@ -925,6 +985,7 @@ async fn run_once_inside_workflow(
     );
     let response_sequence_num =
         append_brain_response_from_completion(ctx, session_id, &visible_response).await?;
+    record_last_response_sequence(ctx, response_sequence_num);
     ingest_deferred_session_turn(
         ctx,
         session_id,
@@ -2015,7 +2076,7 @@ async fn assess_completed_segment_at_transition(
             segment_id = %completed.segment_id,
             "segment start event missing; falling back to full event log for completed segment assessment"
         );
-        let events = load_session_events_fallback(ctx, session_id).await?;
+        let events = load_session_events_fallback(ctx, session_id, None).await?;
         let (next_user_message, next_user_seq) = latest_user_message(&events)
             .map(|(text, sequence_num)| (Some(text.to_string()), Some(sequence_num)))
             .unwrap_or((None, None));
@@ -2048,15 +2109,16 @@ async fn assess_completed_segment_at_transition(
     Ok(())
 }
 
-async fn assess_current_active_segment(
+async fn capture_current_active_segment_assessment(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     phase: AssessmentPhase,
     overrides: &[AssessmentOverride],
-) -> Result<(), HandlerError> {
+    cutoff_before_seq: Option<u64>,
+) -> Result<Option<PostOutcomeAssessment>, HandlerError> {
     let runtime = OrchestratorCtx::current();
     if !runtime.config().resolution.enabled {
-        return Ok(());
+        return Ok(None);
     }
 
     let meta = load_session_meta(ctx, session_id).await?;
@@ -2068,46 +2130,99 @@ async fn assess_current_active_segment(
         .into_inner()
         .map(|segment| segment.active_view())
     else {
-        return Ok(());
-    };
-
-    let boundaries = load_segment_boundary_events(ctx, session_id).await?;
-    let segment_events = if let Some(boundary) = segment_boundary_sequences(&boundaries, segment.id)
-    {
-        let events =
-            load_segment_assessment_events(ctx, session_id, segment.id, boundary, None, true)
-                .await?;
-        segment_events_for_assessment(&events, segment.id, None)
-    } else {
-        tracing::warn!(
-            session_id = %session_id,
-            segment_id = %segment.id,
-            "segment start event missing; falling back to full event log for active segment assessment"
-        );
-        let events = load_session_events_fallback(ctx, session_id).await?;
-        segment_events_for_assessment(&events, segment.id, None)
+        return Ok(None);
     };
     let duration_ms = durable_utc_now(ctx, "workflow_utc_now")
         .await?
         .signed_duration_since(segment.started_at)
         .num_milliseconds()
         .max(0) as u64;
+    let cutoff_before_seq = match cutoff_before_seq {
+        Some(sequence_num) => Some(sequence_num),
+        None => latest_event_cutoff_before_seq(ctx, session_id).await?,
+    };
+    Ok(Some(PostOutcomeAssessment {
+        meta,
+        segment,
+        phase,
+        overrides: overrides.to_vec(),
+        cutoff_before_seq,
+        duration_ms,
+        resolution_config: runtime.config().resolution.clone(),
+    }))
+}
+
+async fn run_post_outcome_assessment(ctx: &WorkflowContext<'_>, assessment: PostOutcomeAssessment) {
+    let session_id = assessment.meta.id;
+    if let Err(error) = persist_post_outcome_assessment(ctx, assessment).await {
+        let error_text = format!("{error:?}");
+        tracing::warn!(
+            session_id = %session_id,
+            error = %error_text,
+            "post-outcome segment assessment failed"
+        );
+        if let Err(warning_error) = append_session_event(
+            ctx,
+            session_id,
+            Event::Warning {
+                message: format!("post-outcome segment assessment failed: {error_text}"),
+            },
+        )
+        .await
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                error = ?warning_error,
+                "failed to append post-outcome assessment warning"
+            );
+        }
+    }
+}
+
+async fn persist_post_outcome_assessment(
+    ctx: &WorkflowContext<'_>,
+    assessment: PostOutcomeAssessment,
+) -> Result<(), HandlerError> {
+    let session_id = assessment.meta.id;
+    let segment_id = assessment.segment.id;
+    let boundaries = load_segment_boundary_events(ctx, session_id).await?;
+    let segment_events = if let Some(boundary) = segment_boundary_sequences(&boundaries, segment_id)
+    {
+        let events = load_segment_assessment_events(
+            ctx,
+            session_id,
+            segment_id,
+            boundary,
+            assessment.cutoff_before_seq,
+            true,
+        )
+        .await?;
+        segment_events_for_assessment(&events, segment_id, assessment.cutoff_before_seq)
+    } else {
+        tracing::warn!(
+            session_id = %session_id,
+            segment_id = %segment_id,
+            "segment start event missing; falling back to bounded event log for post-outcome active segment assessment"
+        );
+        let events =
+            load_session_events_fallback(ctx, session_id, assessment.cutoff_before_seq).await?;
+        segment_events_for_assessment(&events, segment_id, assessment.cutoff_before_seq)
+    };
     assess_and_persist_segment(
         ctx,
-        &meta,
+        &assessment.meta,
         SegmentAssessmentInput {
-            target: SegmentAssessmentTarget::Active(&segment),
+            target: SegmentAssessmentTarget::Active(&assessment.segment),
             events: &segment_events,
             next_user_message: None,
             rewrite: None,
-            phase,
-            overrides,
-            duration_ms,
-            resolution_config: &runtime.config().resolution,
+            phase: assessment.phase,
+            overrides: &assessment.overrides,
+            duration_ms: assessment.duration_ms,
+            resolution_config: &assessment.resolution_config,
         },
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 async fn assess_and_persist_segment(
@@ -2306,6 +2421,23 @@ async fn load_events_in_range(
         .into_inner())
 }
 
+async fn latest_event_cutoff_before_seq(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+) -> Result<Option<u64>, HandlerError> {
+    let events = load_events_in_range(
+        ctx,
+        session_id,
+        EventRange::recent(1),
+        "turn_execution_load_latest_event_for_assessment_cutoff",
+    )
+    .await?;
+    Ok(events
+        .into_iter()
+        .map(|record| record.sequence_num.saturating_add(1))
+        .max())
+}
+
 async fn load_recent_target_events(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
@@ -2430,14 +2562,20 @@ async fn load_next_user_message_cutoff(
 async fn load_session_events_fallback(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
+    cutoff_before_seq: Option<u64>,
 ) -> Result<Vec<EventRecord>, HandlerError> {
     let store = OrchestratorCtx::current_session_store();
+    let range = EventRange {
+        to_seq: cutoff_before_seq.map(|sequence_num| sequence_num.saturating_sub(1)),
+        ..EventRange::all()
+    };
     Ok(ctx
         .run(move || {
             let store = store.clone();
+            let range = range.clone();
             async move {
                 store
-                    .get_events(session_id, EventRange::all())
+                    .get_events(session_id, range)
                     .await
                     .map(Json::from)
                     .map_err(HandlerError::from)

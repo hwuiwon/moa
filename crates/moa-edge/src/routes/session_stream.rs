@@ -5,7 +5,7 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use futures_util::stream;
-use moa_core::wire::turn::SessionProgress;
+use moa_core::wire::turn::{SessionProgress, TurnPhase, TurnProgress};
 use moa_core::{
     ContactSessionMessageRequest, ContactSessionMessageResponse, ContactSessionProgressRequest,
     Event, EventRange, EventRecord, SequenceNum, SessionId, TenantId, WorkerId,
@@ -70,6 +70,7 @@ pub(super) fn session_message_stream_response(
         closed: false,
         last_frame_at: Instant::now(),
         unchanged_polls: 0,
+        last_transient_progress: None,
     };
     Sse::new(stream::unfold(stream_state, next_session_message_event))
         .keep_alive(KeepAlive::default())
@@ -123,6 +124,8 @@ struct SessionMessageStreamState {
     /// Consecutive progress polls that produced no durable event, used to grow
     /// the poll interval during quiet periods. Reset when a new event arrives.
     unchanged_polls: u32,
+    /// Last transient active-turn progress frame emitted by this stream.
+    last_transient_progress: Option<TransientProgressCursor>,
 }
 
 #[derive(Debug, Serialize)]
@@ -155,6 +158,30 @@ struct SessionMessageWorking {
     message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransientProgressCursor {
+    turn_id: String,
+    phase: TurnPhase,
+    iteration: u32,
+    tool_calls: u32,
+    last_progress_summary: Option<String>,
+    cancel_requested: bool,
+}
+
+/// Transient active-turn progress frame payload (never a persisted event).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct SessionMessageProgress {
+    session_id: SessionId,
+    turn_id: String,
+    phase: TurnPhase,
+    iteration: u32,
+    tool_calls: u32,
+    elapsed_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    cancel_requested: bool,
+}
+
 async fn next_session_message_event(
     mut state: SessionMessageStreamState,
 ) -> Option<(Result<SseEvent, Infallible>, SessionMessageStreamState)> {
@@ -181,6 +208,12 @@ async fn next_session_message_event(
                 if let Some(event) = done_event {
                     state.closed = true;
                     return Some((Ok(event), state));
+                }
+                if let Some(frame) =
+                    transient_progress_frame(&mut state, progress.active_turn_progress.as_ref())
+                {
+                    state.last_frame_at = Instant::now();
+                    return Some((Ok(frame), state));
                 }
                 // No new durable events and the task tree is still active: keep
                 // the screen visibly alive with a templated `working` frame after
@@ -382,6 +415,49 @@ fn working_frame_payload(
     }
 }
 
+fn transient_progress_frame(
+    state: &mut SessionMessageStreamState,
+    progress: Option<&TurnProgress>,
+) -> Option<SseEvent> {
+    let progress = progress?;
+    let cursor = transient_progress_cursor(progress);
+    if state.last_transient_progress.as_ref() == Some(&cursor) {
+        return None;
+    }
+    state.last_transient_progress = Some(cursor);
+    Some(json_sse_event(
+        "progress",
+        &transient_progress_payload(state.session_id, progress),
+    ))
+}
+
+fn transient_progress_cursor(progress: &TurnProgress) -> TransientProgressCursor {
+    TransientProgressCursor {
+        turn_id: progress.turn_id.clone(),
+        phase: progress.phase.clone(),
+        iteration: progress.iteration,
+        tool_calls: progress.tool_calls,
+        last_progress_summary: progress.last_progress_summary.clone(),
+        cancel_requested: progress.cancel_requested,
+    }
+}
+
+fn transient_progress_payload(
+    session_id: SessionId,
+    progress: &TurnProgress,
+) -> SessionMessageProgress {
+    SessionMessageProgress {
+        session_id,
+        turn_id: progress.turn_id.clone(),
+        phase: progress.phase.clone(),
+        iteration: progress.iteration,
+        tool_calls: progress.tool_calls,
+        elapsed_ms: progress.elapsed_ms,
+        summary: progress.last_progress_summary.clone(),
+        cancel_requested: progress.cancel_requested,
+    }
+}
+
 /// SSE frame name a durable session event maps to. Child progress, signals, and
 /// liveness events get distinct names; everything else falls back to the generic
 /// `session_event` frame, which clients can ignore when unknown.
@@ -429,7 +505,9 @@ fn error_sse_event(message: String) -> SseEvent {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::wire::turn::{SessionSnapshot, TurnOutcome, TurnOutcomeKind};
+    use moa_core::wire::turn::{
+        SessionSnapshot, TurnComplexityClass, TurnOutcome, TurnOutcomeKind,
+    };
     use moa_core::{EventRecord, EventType};
     use uuid::Uuid;
 
@@ -644,6 +722,35 @@ mod tests {
     }
 
     #[test]
+    fn transient_progress_cursor_ignores_elapsed_time_only_changes() {
+        // Pins: projection-derived progress does not emit one SSE frame per poll just because elapsed_ms changed.
+        let first = turn_progress(TurnPhase::Streaming, Some("Calling the model"), 8_000);
+        let second = turn_progress(TurnPhase::Streaming, Some("Calling the model"), 9_000);
+        let changed = turn_progress(TurnPhase::Tooling, Some("Running tool: search"), 9_000);
+
+        assert_eq!(
+            transient_progress_cursor(&first),
+            transient_progress_cursor(&second)
+        );
+        assert_ne!(
+            transient_progress_cursor(&first),
+            transient_progress_cursor(&changed)
+        );
+    }
+
+    #[test]
+    fn transient_progress_payload_preserves_renderable_fields() {
+        // Pins: transient `progress` frames carry active-turn fields without a durable event id.
+        let progress = turn_progress(TurnPhase::Tooling, Some("Running tool: search"), 12_000);
+        let payload = transient_progress_payload(SessionId(Uuid::nil()), &progress);
+
+        assert_eq!(payload.turn_id, "turn-1");
+        assert_eq!(payload.phase, TurnPhase::Tooling);
+        assert_eq!(payload.elapsed_ms, 12_000);
+        assert_eq!(payload.summary.as_deref(), Some("Running tool: search"));
+    }
+
+    #[test]
     fn session_progress_round_trips_child_progress_and_tolerates_missing_field() {
         // Pins: child_progress round-trips, and a payload that omits it decodes to an empty list.
         let mut progress = session_progress(Some("turn-1".to_string()), 0, None);
@@ -824,6 +931,26 @@ mod tests {
             last_heartbeat_at: None,
             stale: false,
             awaiting_input: false,
+        }
+    }
+
+    fn turn_progress(
+        phase: TurnPhase,
+        last_progress_summary: Option<&str>,
+        elapsed_ms: u64,
+    ) -> TurnProgress {
+        TurnProgress {
+            turn_id: "turn-1".to_string(),
+            phase,
+            complexity_class: TurnComplexityClass::Standard,
+            iteration: 1,
+            max_turns: Some(4),
+            tool_calls: 1,
+            max_tool_calls: Some(8),
+            elapsed_ms,
+            last_progress_summary: last_progress_summary.map(str::to_string),
+            cancel_requested: false,
+            cancel_reason: None,
         }
     }
 }

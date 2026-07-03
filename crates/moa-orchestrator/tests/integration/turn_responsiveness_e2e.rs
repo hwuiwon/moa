@@ -59,8 +59,8 @@ async fn turn_responsiveness_vague_fix_this_clarifies_before_main_loop() -> Resu
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
-async fn turn_progress_persisted_update_replays_after_fresh_read() -> Result<()> {
-    // Pins: durable ProgressUpdate events and TurnExecution/progress survive a reconnect-style fresh read.
+async fn turn_progress_projection_survives_without_persisted_updates() -> Result<()> {
+    // Pins: ProgressUpdate is transient workflow projection state, not durable event-log history.
     let fixture = OrchestratorTestFixture::with_script_and_env(
         progress_script(),
         vec![
@@ -76,7 +76,7 @@ async fn turn_progress_persisted_update_replays_after_fresh_read() -> Result<()>
     )
     .await?;
     let test = fixture.isolated().await;
-    let session_id = test.create_session("turn-progress-replay").await?;
+    let session_id = test.create_session("turn-progress-projection").await?;
 
     let (turn_id, outcome, events) = run_scripted_turn(
         &fixture.client,
@@ -89,11 +89,8 @@ async fn turn_progress_persisted_update_replays_after_fresh_read() -> Result<()>
     assert_eq!(outcome.kind, TurnOutcomeKind::Completed);
     assert_eq!(
         progress_updates(&events, &turn_id),
-        vec![
-            ("Compiling".to_string(), "Working on it".to_string()),
-            ("Streaming".to_string(), "Calling the model".to_string()),
-        ],
-        "initial read should include deterministic progress updates: {}",
+        Vec::<(String, String)>::new(),
+        "initial event read should not include durable ProgressUpdate rows: {}",
         event_summary(&events)
     );
 
@@ -108,14 +105,11 @@ async fn turn_progress_persisted_update_replays_after_fresh_read() -> Result<()>
             },
         )
         .await
-        .context("fresh event-log read should recover progress updates")?;
+        .context("fresh event-log read should query progress update rows")?;
     assert_eq!(
         progress_updates(&replayed, &turn_id),
-        vec![
-            ("Compiling".to_string(), "Working on it".to_string()),
-            ("Streaming".to_string(), "Calling the model".to_string()),
-        ],
-        "fresh event read should replay persisted progress updates: {}",
+        Vec::<(String, String)>::new(),
+        "fresh event read should not replay transient progress as durable rows: {}",
         event_summary(&replayed)
     );
 

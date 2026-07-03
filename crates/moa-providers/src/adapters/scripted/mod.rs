@@ -3,16 +3,117 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, LLMProvider,
-    MessageRole, ModelCapabilities, Result, StopReason, TokenUsage, ToolCallContent,
+    MessageRole, MoaError, ModelCapabilities, Result, StopReason, TokenUsage, ToolCallContent,
     ToolInvocation,
 };
 use serde_json::Value;
 const DEFAULT_INPUT_TOKENS: usize = 64;
 const DEFAULT_DURATION_MS: u64 = 1;
+
+/// Wall-clock pacing simulated by a scripted response.
+///
+/// `ttft` delays the first streamed block; the remaining budget up to `total`
+/// elapses before the stream completes. This makes `llm_ttft` and `llm_call`
+/// turn-step metrics meaningful under scripted load instead of ~0ms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScriptedTiming {
+    /// Delay before the first content block is emitted.
+    pub ttft: Duration,
+    /// Total simulated call duration (must be >= `ttft`).
+    pub total: Duration,
+}
+
+/// Deterministic fault plan attached to one scripted response.
+///
+/// The first `fail_first_n` requests that resolve to this response fail with
+/// a provider error modeled on `status`; subsequent requests succeed. Keyed
+/// entries share one attempt counter across clones, so "fail twice then
+/// recover" behaves the same no matter how many concurrent callers match.
+#[derive(Debug, Clone)]
+pub struct ScriptedFault {
+    /// Number of leading requests to fail.
+    pub fail_first_n: u32,
+    /// Modeled provider status: 429 maps to a rate-limit error, everything
+    /// else to a generic provider error.
+    pub status: u16,
+    /// Optional retry-after hint carried in the error message.
+    pub retry_after: Option<Duration>,
+    /// Emit the first block, then abort the stream with an error instead of
+    /// completing. Applies to the first `fail_first_n` matching requests, or
+    /// to every request when `fail_first_n` is zero.
+    pub abort_mid_stream: bool,
+    attempts: Arc<AtomicU32>,
+}
+
+impl ScriptedFault {
+    /// Creates a fault plan that fails the first `fail_first_n` requests.
+    pub fn fail_first(fail_first_n: u32, status: u16, retry_after: Option<Duration>) -> Self {
+        Self {
+            fail_first_n,
+            status,
+            retry_after,
+            abort_mid_stream: false,
+            attempts: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    /// Creates a fault plan that aborts every stream after the first block.
+    pub fn abort_mid_stream() -> Self {
+        Self {
+            fail_first_n: 0,
+            status: 500,
+            retry_after: None,
+            abort_mid_stream: true,
+            attempts: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    fn take_failure(&self) -> Option<MoaError> {
+        if self.abort_mid_stream || self.fail_first_n == 0 {
+            return None;
+        }
+        let attempt = self.attempts.fetch_add(1, Ordering::Relaxed);
+        if attempt >= self.fail_first_n {
+            return None;
+        }
+        Some(self.to_error())
+    }
+
+    /// Whether this request's stream should abort mid-response.
+    fn take_abort(&self) -> bool {
+        if !self.abort_mid_stream {
+            return false;
+        }
+        if self.fail_first_n == 0 {
+            return true;
+        }
+        self.attempts.fetch_add(1, Ordering::Relaxed) < self.fail_first_n
+    }
+
+    fn to_error(&self) -> MoaError {
+        let retry_hint = self
+            .retry_after
+            .map(|delay| format!("; retry after {}ms", delay.as_millis()))
+            .unwrap_or_default();
+        if self.status == 429 {
+            MoaError::RateLimited {
+                retries: 0,
+                message: format!("scripted rate limit (429){retry_hint}"),
+            }
+        } else {
+            MoaError::ProviderError(format!(
+                "scripted provider fault (status {}){retry_hint}",
+                self.status
+            ))
+        }
+    }
+}
 
 /// One scripted response block emitted by [`ScriptedProvider`].
 #[derive(Debug, Clone, PartialEq)]
@@ -79,7 +180,7 @@ impl ScriptedBlock {
 }
 
 /// One buffered scripted response returned by [`ScriptedProvider`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ScriptedResponse {
     /// Response content blocks.
     pub content: Vec<CompletionContent>,
@@ -91,8 +192,13 @@ pub struct ScriptedResponse {
     pub cached_input_tokens: usize,
     /// Synthetic cache-write token usage.
     pub cache_write_input_tokens: usize,
-    /// Synthetic duration.
+    /// Synthetic duration reported in the response.
     pub duration_ms: u64,
+    /// Optional simulated wall-clock pacing. `None` keeps the historical
+    /// return-immediately behavior for existing tests.
+    pub timing: Option<ScriptedTiming>,
+    /// Optional deterministic fault plan.
+    pub fault: Option<ScriptedFault>,
 }
 
 impl ScriptedResponse {
@@ -115,6 +221,8 @@ impl ScriptedResponse {
             cached_input_tokens: 0,
             cache_write_input_tokens: 0,
             duration_ms: DEFAULT_DURATION_MS,
+            timing: None,
+            fault: None,
         }
     }
 
@@ -133,6 +241,20 @@ impl ScriptedResponse {
         self.input_tokens = usage.total_input_tokens();
         self.cached_input_tokens = usage.input_tokens_cache_read;
         self.cache_write_input_tokens = usage.input_tokens_cache_write;
+        self
+    }
+
+    /// Attaches simulated wall-clock pacing and reports it as the duration.
+    pub fn with_timing(mut self, ttft: Duration, total: Duration) -> Self {
+        let total = total.max(ttft);
+        self.timing = Some(ScriptedTiming { ttft, total });
+        self.duration_ms = total.as_millis() as u64;
+        self
+    }
+
+    /// Attaches a deterministic fault plan.
+    pub fn with_fault(mut self, fault: ScriptedFault) -> Self {
+        self.fault = Some(fault);
         self
     }
 }
@@ -339,7 +461,18 @@ impl LLMProvider for ScriptedProvider {
             })
             .sum();
 
-        Ok(CompletionStream::from_response(CompletionResponse {
+        if let Some(fault) = &response.fault
+            && let Some(error) = fault.take_failure()
+        {
+            return Err(error);
+        }
+        let abort_mid_stream = response
+            .fault
+            .as_ref()
+            .is_some_and(|fault| fault.take_abort());
+        let timing = response.timing;
+
+        let completion_response = CompletionResponse {
             text,
             content: response.content,
             stop_reason: response.stop_reason,
@@ -355,7 +488,50 @@ impl LLMProvider for ScriptedProvider {
             },
             duration_ms: response.duration_ms,
             thought_signature: None,
-        }))
+        };
+
+        if timing.is_none() && !abort_mid_stream {
+            // Historical fast path: fully buffered, returns immediately.
+            return Ok(CompletionStream::from_response(completion_response));
+        }
+
+        // Simulated streaming: honor TTFT before the first block, pace the
+        // remaining blocks across the rest of the budget, and optionally
+        // abort after the first block instead of completing.
+        let (tx, rx) = tokio::sync::mpsc::channel(completion_response.content.len().max(1));
+        let completion = tokio::spawn(async move {
+            let timing = timing.unwrap_or(ScriptedTiming {
+                ttft: Duration::ZERO,
+                total: Duration::ZERO,
+            });
+            tokio::time::sleep(timing.ttft).await;
+            let mut blocks = completion_response.content.clone().into_iter();
+            if let Some(first) = blocks.next() {
+                let _ = tx.send(Ok(first)).await;
+            }
+            if abort_mid_stream {
+                let make_error = || {
+                    MoaError::ProviderError(
+                        "scripted provider aborted the stream mid-response".to_string(),
+                    )
+                };
+                let _ = tx.send(Err(make_error())).await;
+                return Err(make_error());
+            }
+            let rest: Vec<_> = blocks.collect();
+            let remaining = timing.total.saturating_sub(timing.ttft);
+            if rest.is_empty() {
+                tokio::time::sleep(remaining).await;
+            } else {
+                let per_block = remaining / rest.len() as u32;
+                for block in rest {
+                    tokio::time::sleep(per_block).await;
+                    let _ = tx.send(Ok(block)).await;
+                }
+            }
+            Ok(completion_response)
+        });
+        Ok(CompletionStream::new(rx, completion))
     }
 }
 
@@ -454,5 +630,83 @@ mod tests {
             ..CompletionRequest::new("ignored")
         };
         assert_eq!(complete_text(&provider, request).await, "observed");
+    }
+
+    #[tokio::test]
+    async fn fault_fails_first_n_requests_then_recovers() {
+        // Pins: a fail_first_n fault plan errors deterministically (429 maps to
+        // RateLimited) and then recovers, sharing one counter across keyed reuse.
+        let provider = ScriptedProvider::new(ModelCapabilities::default()).push_keyed(
+            "flaky",
+            ScriptedResponse::text("recovered").with_fault(ScriptedFault::fail_first(
+                2,
+                429,
+                Some(Duration::from_millis(250)),
+            )),
+        );
+
+        for attempt in 0..2 {
+            let error = provider
+                .complete(user_request("flaky prompt"))
+                .await
+                .expect_err("first two attempts should fail");
+            assert!(
+                matches!(error, MoaError::RateLimited { .. }),
+                "attempt {attempt} should be rate limited, got {error:?}"
+            );
+        }
+        let text = complete_text(&provider, user_request("flaky prompt")).await;
+        assert_eq!(text, "recovered");
+    }
+
+    #[tokio::test]
+    async fn mid_stream_abort_emits_first_block_then_errors() {
+        // Pins: abort_mid_stream yields partial content and then a stream
+        // error, never a completed response.
+        let provider = ScriptedProvider::new(ModelCapabilities::default()).push_keyed(
+            "abort",
+            ScriptedResponse::text("partial").with_fault(ScriptedFault::abort_mid_stream()),
+        );
+
+        let mut stream = provider
+            .complete(user_request("abort now"))
+            .await
+            .expect("stream opens before the abort");
+        let first = stream.next().await.expect("first block present");
+        assert!(first.is_ok(), "first block should be content: {first:?}");
+        let second = stream.next().await.expect("second frame present");
+        assert!(second.is_err(), "stream should abort after first block");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timing_delays_first_block_by_ttft_and_completion_by_total() {
+        // Pins: latency simulation sleeps ttft before the first block and the
+        // rest of the budget before completion, so llm_ttft/llm_call step
+        // metrics are meaningful under scripted load.
+        let provider = ScriptedProvider::new(ModelCapabilities::default()).push_keyed(
+            "timed",
+            ScriptedResponse::text("slow")
+                .with_timing(Duration::from_millis(200), Duration::from_millis(800)),
+        );
+
+        let started = tokio::time::Instant::now();
+        let mut stream = provider
+            .complete(user_request("timed prompt"))
+            .await
+            .expect("stream opens");
+        let first = stream.next().await.expect("first block");
+        assert!(first.is_ok());
+        let ttft_elapsed = started.elapsed();
+        assert!(
+            ttft_elapsed >= Duration::from_millis(200),
+            "first block arrived before ttft: {ttft_elapsed:?}"
+        );
+        let response = stream.collect().await.expect("completion");
+        let total_elapsed = started.elapsed();
+        assert!(
+            total_elapsed >= Duration::from_millis(800),
+            "completion arrived before total budget: {total_elapsed:?}"
+        );
+        assert_eq!(response.duration_ms, 800);
     }
 }

@@ -1,296 +1,641 @@
-//! Concurrent session runner and turn observation logic.
+//! Open-loop dispatcher, session pool, and result collection.
+//!
+//! The dispatcher walks a pre-computed arrival schedule and starts one turn
+//! per arrival on an idle session from the pool. It never skips or delays
+//! schedule entries because the target is slow: when every session is busy,
+//! the arrival waits for the first idle session and the wait is charged to
+//! coordinated-omission-corrected latency. Sessions that finish their plan
+//! are finalized and replaced so the pool keeps its size while the schedule
+//! is running.
+
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use futures_util::StreamExt as _;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 
 use crate::*;
 
+/// Length of one report window.
+const WINDOW_LEN: Duration = Duration::from_secs(10);
+/// Concurrency for session-pool setup and end-of-run finalization. These are
+/// lightweight store RPCs (create/meta reads), so a wide fan-out keeps a
+/// multi-thousand-session pool's setup and drain in the seconds range.
+const SETUP_CONCURRENCY: usize = 64;
+/// How long one scheduled arrival may wait for an idle session before it is
+/// dropped. Without this bound, a pool that decays to zero (every failed
+/// replacement shrinks it) deadlocks the dispatcher on `idle_rx.recv()`,
+/// because the context's own sender keeps the channel open forever.
+const POOL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long to wait for the first pool session before aborting the run.
+const FIRST_SESSION_DEADLINE: Duration = Duration::from_secs(60);
+/// Arrivals already this far past their intended start are shed outright.
+/// At saturation, slots trickle back just often enough that per-arrival
+/// waits never time out — without a staleness cutoff the dispatcher would
+/// run the whole remaining schedule in slow motion (duration times the
+/// overload factor) instead of ending on time.
+const ARRIVAL_STALENESS_BUDGET: Duration = Duration::from_secs(30);
+
 #[derive(Debug)]
 pub(crate) struct TurnObservation {
-    pub(crate) latency: Duration,
     pub(crate) ttft: Option<Duration>,
+    pub(crate) edge_observation_wait: Option<Duration>,
     pub(crate) auto_denied_approvals: usize,
 }
 
+/// One session occupying a pool slot.
+struct SessionSlot {
+    target_index: usize,
+    session_id: SessionId,
+    plan: SessionPlan,
+    next_turn: usize,
+    last_seq: u64,
+}
+
+/// Messages funneled into the single-owner collector task.
+enum CollectorMessage {
+    SessionStarted,
+    SessionSetupFailed,
+    TurnCompleted {
+        intended: Duration,
+        dispatched: Duration,
+        completed: Duration,
+        ttft: Option<Duration>,
+        edge_observation_wait: Option<Duration>,
+        tool_calls: u64,
+        event_error_events: u64,
+        tool_error_events: u64,
+        auto_denied_approvals: usize,
+        event_load_failed: bool,
+    },
+    TurnFailed {
+        completed: Duration,
+        kind: TurnFailureKind,
+    },
+    ArrivalDropped {
+        at: Duration,
+    },
+    SessionFinished(SessionReport),
+}
+
+/// Aggregates owned by the collector task.
+struct CollectorState {
+    recorder: LatencyRecorder,
+    errors: ErrorTaxonomy,
+    turns_completed: u64,
+    post_warmup_completions: u64,
+    total_tool_calls: u64,
+    auto_denied_approvals: usize,
+    sessions_started: usize,
+    sessions: Vec<SessionReport>,
+}
+
+/// Shared context captured by dispatcher-spawned turn tasks.
+struct DispatchCtx {
+    targets: Vec<Arc<dyn SessionTarget>>,
+    pool: TenancyPool,
+    collector_tx: mpsc::UnboundedSender<CollectorMessage>,
+    idle_tx: mpsc::UnboundedSender<SessionSlot>,
+    generating: AtomicBool,
+    /// Live sessions (created minus finalized); zero means the dispatcher can
+    /// never receive another idle slot.
+    pool_size: AtomicUsize,
+    think_time: Duration,
+    turn_timeout: Duration,
+    run_start: tokio::time::Instant,
+    session_ordinal: AtomicUsize,
+    inspection_files: InspectionFiles,
+    profile: SessionProfileKind,
+    seed: u64,
+}
+
+impl DispatchCtx {
+    fn elapsed(&self) -> Duration {
+        self.run_start.elapsed()
+    }
+
+    /// Creates one new session on a Zipf-picked identity. Returns `None` and
+    /// reports the setup failure when creation fails.
+    async fn create_session(self: &Arc<Self>) -> Option<SessionSlot> {
+        let ordinal = self.session_ordinal.fetch_add(1, Ordering::Relaxed);
+        let mut rng = StdRng::seed_from_u64(self.seed ^ (ordinal as u64).wrapping_mul(0x9E37_79B9));
+        let target_index = self.pool.pick_index(&mut rng);
+        let plan = sampled_session_plan(ordinal, self.profile, &self.inspection_files, &mut rng);
+        match self.targets[target_index].start_session(&plan).await {
+            Ok(session_id) => {
+                let _ = self.collector_tx.send(CollectorMessage::SessionStarted);
+                self.pool_size.fetch_add(1, Ordering::Relaxed);
+                Some(SessionSlot {
+                    target_index,
+                    session_id,
+                    plan,
+                    next_turn: 0,
+                    last_seq: 0,
+                })
+            }
+            Err(error) => {
+                tracing::warn!(%error, "loadtest session setup failed");
+                let _ = self.collector_tx.send(CollectorMessage::SessionSetupFailed);
+                None
+            }
+        }
+    }
+
+    /// Finalizes a session into a `SessionReport`. `end_of_run` marks pool
+    /// drain at schedule end, where an incomplete plan is expected and not a
+    /// failure.
+    async fn finalize_session(&self, slot: SessionSlot, failure: Option<String>, end_of_run: bool) {
+        self.pool_size.fetch_sub(1, Ordering::Relaxed);
+        let target = &self.targets[slot.target_index];
+        let completed_turns = slot.next_turn;
+        let report = match target.session_meta(slot.session_id).await {
+            Ok(meta) => {
+                let status_failure = if end_of_run {
+                    end_of_run_status_failure(&meta.status)
+                } else {
+                    session_status_failure_reason(
+                        &meta.status,
+                        completed_turns,
+                        slot.plan.turns.len(),
+                    )
+                };
+                let note = if failure.is_some() || status_failure.is_some() {
+                    target
+                        .recent_events(slot.session_id)
+                        .await
+                        .ok()
+                        .and_then(|events| latest_session_note(&events))
+                } else {
+                    None
+                };
+                SessionReport {
+                    session_id: slot.session_id,
+                    profile: slot.plan.profile,
+                    status: meta.status.clone(),
+                    planned_turns: slot.plan.turns.len(),
+                    completed_turns,
+                    cache_hit_rate: meta.cache_hit_rate(),
+                    total_cost_cents: meta.total_cost_cents as u64,
+                    failure_reason: merge_failure_reason(failure, status_failure, note),
+                }
+            }
+            Err(error) => SessionReport {
+                session_id: slot.session_id,
+                profile: slot.plan.profile,
+                status: SessionStatus::Failed,
+                planned_turns: slot.plan.turns.len(),
+                completed_turns,
+                cache_hit_rate: 0.0,
+                total_cost_cents: 0,
+                failure_reason: merge_failure_reason(
+                    failure,
+                    Some(format!("failed to load session metadata: {error}")),
+                    None,
+                ),
+            },
+        };
+        let _ = self
+            .collector_tx
+            .send(CollectorMessage::SessionFinished(report));
+    }
+
+    /// Creates a replacement session and parks it in the idle queue while the
+    /// schedule is still generating arrivals.
+    async fn replace_session(self: &Arc<Self>) {
+        if !self.generating.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(slot) = self.create_session().await {
+            let _ = self.idle_tx.send(slot);
+        }
+    }
+}
+
+/// Runs the schedule against the target pool and returns the final report.
 pub(crate) async fn run_sessions(
-    backend: Arc<dyn SessionTarget>,
+    targets: Vec<Arc<dyn SessionTarget>>,
+    pool: TenancyPool,
     options: &LoadTestOptions,
-    plans: Vec<SessionPlan>,
     started: Instant,
 ) -> Result<LoadTestReport> {
-    let (results_tx, mut results_rx) = mpsc::channel(plans.len());
-    let rate_limiter = options.target_qps.map(start_turn_rate_limiter);
-    for plan in plans {
-        let backend = backend.clone();
-        let results_tx = results_tx.clone();
-        let inter_message_delay = options.inter_message_delay;
-        let turn_rate_limiter = rate_limiter
-            .as_ref()
-            .map(|limiter| limiter.semaphore.clone());
-        let turn_timeout = options.turn_timeout;
-        tokio::spawn(async move {
-            let report = simulate_session(
-                backend,
-                plan,
-                inter_message_delay,
-                turn_rate_limiter,
-                turn_timeout,
+    let schedule = build_arrival_offsets(
+        options.rate_plan(),
+        options.duration,
+        options.arrival,
+        options.seed,
+    )?;
+    let warmup = options.resolved_warmup();
+    let recorder = LatencyRecorder::new(WINDOW_LEN, warmup)?;
+    let inspection_files = inspectable_files(None).await?;
+    let mut tenant_ids: Vec<Uuid> = pool
+        .entries()
+        .iter()
+        .map(|entry| entry.tenant_id.0)
+        .collect();
+    tenant_ids.dedup();
+
+    let (collector_tx, collector_rx) = mpsc::unbounded_channel();
+    let (idle_tx, mut idle_rx) = mpsc::unbounded_channel();
+    let collector = tokio::spawn(run_collector(collector_rx, recorder));
+
+    let ctx = Arc::new(DispatchCtx {
+        targets,
+        pool,
+        collector_tx,
+        idle_tx,
+        generating: AtomicBool::new(true),
+        pool_size: AtomicUsize::new(0),
+        think_time: options.think_time,
+        turn_timeout: options.turn_timeout,
+        run_start: tokio::time::Instant::now(),
+        session_ordinal: AtomicUsize::new(0),
+        inspection_files,
+        profile: options.profile,
+        seed: options.seed,
+    });
+
+    // Build the pool in the background: sessions enter the idle queue as they
+    // are created, so a slow or backlogged store cannot wedge the run inside
+    // setup. The schedule anchors on the first ready session and late
+    // creations simply join the pool mid-run.
+    let requested_sessions = options.sessions;
+    let setup_ctx = ctx.clone();
+    let setup = tokio::spawn(async move {
+        let outcomes = futures_util::stream::iter((0..requested_sessions).map(|_| {
+            let ctx = setup_ctx.clone();
+            async move {
+                if !ctx.generating.load(Ordering::Relaxed) {
+                    return false;
+                }
+                if let Some(slot) = ctx.create_session().await {
+                    let _ = ctx.idle_tx.send(slot);
+                    true
+                } else {
+                    false
+                }
+            }
+        }))
+        .buffer_unordered(SETUP_CONCURRENCY)
+        .collect::<Vec<bool>>()
+        .await;
+        let ready = outcomes.iter().filter(|ok| **ok).count();
+        if ready < requested_sessions {
+            tracing::warn!(
+                requested = requested_sessions,
+                ready,
+                "loadtest pool finished setup degraded"
+            );
+        }
+    });
+    let first_slot_deadline = tokio::time::Instant::now() + FIRST_SESSION_DEADLINE;
+    while ctx.pool_size.load(Ordering::Relaxed) == 0 {
+        if tokio::time::Instant::now() >= first_slot_deadline {
+            setup.abort();
+            return Err(MoaError::ProviderError(format!(
+                "no session became ready within {FIRST_SESSION_DEADLINE:?}; aborting"
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // The schedule clock starts after setup: reset run_start-relative offsets
+    // by re-anchoring the deadline base here.
+    let schedule_base = tokio::time::Instant::now();
+    let mut turn_tasks = tokio::task::JoinSet::new();
+    'schedule: for offset in &schedule {
+        tokio::time::sleep_until(schedule_base + *offset).await;
+        let intended = *offset + (schedule_base - ctx.run_start);
+        // Shed hopelessly late arrivals so a saturated run still ends on
+        // schedule; each shed is reported as a dropped arrival.
+        if ctx.elapsed() > intended + ARRIVAL_STALENESS_BUDGET {
+            let _ = ctx
+                .collector_tx
+                .send(CollectorMessage::ArrivalDropped { at: ctx.elapsed() });
+            continue 'schedule;
+        }
+        let slot = tokio::select! {
+            received = idle_rx.recv() => match received {
+                Some(slot) => slot,
+                None => break 'schedule,
+            },
+            _ = tokio::time::sleep(POOL_WAIT_TIMEOUT) => {
+                // No slot freed within the budget: drop this arrival so the
+                // schedule (and the run) always terminates, and give the
+                // pool one recovery attempt.
+                let _ = ctx.collector_tx.send(CollectorMessage::ArrivalDropped {
+                    at: ctx.elapsed(),
+                });
+                if ctx.pool_size.load(Ordering::Relaxed) == 0 {
+                    tracing::warn!("session pool decayed to zero; replenishing one session");
+                    ctx.replace_session().await;
+                    if ctx.pool_size.load(Ordering::Relaxed) == 0 {
+                        tracing::error!(
+                            "session pool empty and replenishment failed; aborting schedule"
+                        );
+                        break 'schedule;
+                    }
+                }
+                continue 'schedule;
+            }
+        };
+        let ctx = ctx.clone();
+        turn_tasks.spawn(run_one_turn(ctx, slot, intended));
+    }
+    ctx.generating.store(false, Ordering::Relaxed);
+    while turn_tasks.join_next().await.is_some() {}
+    // Stop any setup still in flight; a create cancelled mid-await can leave
+    // pool_size slightly high, which only ever costs one 30s pool wait.
+    setup.abort();
+    let _ = setup.await;
+
+    // Drain sessions still parked in the pool; their plans were cut short by
+    // the end of the schedule, which is expected. Finalization fetches one
+    // session_meta per slot, so run it pool-setup-wide instead of serially —
+    // a large pool would otherwise add minutes of post-measurement tail.
+    let mut parked = Vec::new();
+    while let Ok(slot) = idle_rx.try_recv() {
+        parked.push(slot);
+    }
+    futures_util::stream::iter(parked.into_iter().map(|slot| {
+        let ctx = ctx.clone();
+        async move { ctx.finalize_session(slot, None, true).await }
+    }))
+    .buffer_unordered(SETUP_CONCURRENCY)
+    .collect::<Vec<()>>()
+    .await;
+    drop(ctx);
+
+    let state = collector
+        .await
+        .map_err(|error| MoaError::ProviderError(format!("collector task panicked: {error}")))?;
+
+    Ok(build_report(
+        options, started, &schedule, warmup, tenant_ids, state,
+    ))
+}
+
+/// Executes one scheduled turn on one session slot.
+async fn run_one_turn(ctx: Arc<DispatchCtx>, mut slot: SessionSlot, intended: Duration) {
+    let dispatched = ctx.elapsed();
+    let target = ctx.targets[slot.target_index].clone();
+    let prompt = slot.plan.turns[slot.next_turn].prompt.clone();
+    match target
+        .run_turn(slot.session_id, &prompt, ctx.turn_timeout)
+        .await
+    {
+        Ok(observation) => {
+            // The turn is complete the moment the target reports it; the
+            // event fetch below is harness bookkeeping and must not count
+            // toward measured latency.
+            let completed = ctx.elapsed();
+            let mut tool_calls = 0u64;
+            let mut event_error_events = 0u64;
+            let mut tool_error_events = 0u64;
+            let mut event_load_failed = false;
+            match target
+                .session_events_since(slot.session_id, slot.last_seq)
+                .await
+            {
+                Ok(events) => {
+                    for record in events {
+                        slot.last_seq = slot.last_seq.max(record.sequence_num);
+                        match &record.event {
+                            Event::ToolCall { .. } => tool_calls += 1,
+                            Event::ToolError { error, .. }
+                                if !is_expected_harness_denial(error) =>
+                            {
+                                tool_error_events += 1;
+                            }
+                            Event::Error { .. } => event_error_events += 1,
+                            _ => {}
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, session = %slot.session_id, "event load failed");
+                    event_load_failed = true;
+                }
+            }
+            let _ = ctx.collector_tx.send(CollectorMessage::TurnCompleted {
+                intended,
+                dispatched,
+                completed,
+                ttft: observation.ttft,
+                edge_observation_wait: observation.edge_observation_wait,
+                tool_calls,
+                event_error_events,
+                tool_error_events,
+                auto_denied_approvals: observation.auto_denied_approvals,
+                event_load_failed,
+            });
+            slot.next_turn += 1;
+            if slot.next_turn < slot.plan.turns.len() {
+                let think =
+                    sampled_think_time(ctx.think_time, ctx.seed, slot.session_id, slot.next_turn);
+                if !think.is_zero() {
+                    tokio::time::sleep(think).await;
+                }
+                let _ = ctx.idle_tx.send(slot);
+            } else {
+                ctx.finalize_session(slot, None, false).await;
+                ctx.replace_session().await;
+            }
+        }
+        Err(failure) => {
+            let completed = ctx.elapsed();
+            let _ = ctx.collector_tx.send(CollectorMessage::TurnFailed {
+                completed,
+                kind: failure.kind,
+            });
+            let turn_number = slot.next_turn + 1;
+            ctx.finalize_session(
+                slot,
+                Some(format!("turn {turn_number} failed: {failure}")),
+                false,
             )
             .await;
-            let _ = results_tx.send(report).await;
-        });
+            ctx.replace_session().await;
+        }
     }
-    drop(results_tx);
+}
 
-    let mut sessions = Vec::new();
-    while let Some(report) = results_rx.recv().await {
-        sessions.push(report);
+/// Single-owner aggregation loop.
+async fn run_collector(
+    mut collector_rx: mpsc::UnboundedReceiver<CollectorMessage>,
+    recorder: LatencyRecorder,
+) -> CollectorState {
+    let mut state = CollectorState {
+        recorder,
+        errors: ErrorTaxonomy::default(),
+        turns_completed: 0,
+        post_warmup_completions: 0,
+        total_tool_calls: 0,
+        auto_denied_approvals: 0,
+        sessions_started: 0,
+        sessions: Vec::new(),
+    };
+    let warmup = state.recorder_warmup();
+    while let Some(message) = collector_rx.recv().await {
+        match message {
+            CollectorMessage::SessionStarted => state.sessions_started += 1,
+            CollectorMessage::SessionSetupFailed => state.errors.session_setup_failures += 1,
+            CollectorMessage::TurnCompleted {
+                intended,
+                dispatched,
+                completed,
+                ttft,
+                edge_observation_wait,
+                tool_calls,
+                event_error_events,
+                tool_error_events,
+                auto_denied_approvals,
+                event_load_failed,
+            } => {
+                state.turns_completed += 1;
+                if completed >= warmup {
+                    state.post_warmup_completions += 1;
+                }
+                state.total_tool_calls += tool_calls;
+                state.errors.event_error_events += event_error_events;
+                state.errors.tool_error_events += tool_error_events;
+                state.auto_denied_approvals += auto_denied_approvals;
+                if event_load_failed {
+                    state.errors.event_load_failures += 1;
+                }
+                if let Err(error) = state.recorder.record_turn(
+                    intended,
+                    dispatched,
+                    completed,
+                    ttft,
+                    edge_observation_wait,
+                ) {
+                    tracing::warn!(%error, "latency recording failed");
+                }
+            }
+            CollectorMessage::ArrivalDropped { at } => {
+                state.errors.arrivals_dropped += 1;
+                if let Err(error) = state.recorder.record_turn_error(at) {
+                    tracing::warn!(%error, "error recording failed");
+                }
+            }
+            CollectorMessage::TurnFailed { completed, kind } => {
+                match kind {
+                    TurnFailureKind::StartFailed => state.errors.turn_start_failures += 1,
+                    TurnFailureKind::Timeout => state.errors.turn_timeouts += 1,
+                    TurnFailureKind::Failed | TurnFailureKind::Transport => {
+                        state.errors.turn_failures += 1;
+                    }
+                    TurnFailureKind::Cancelled => state.errors.turn_cancellations += 1,
+                }
+                if let Err(error) = state.recorder.record_turn_error(completed) {
+                    tracing::warn!(%error, "error recording failed");
+                }
+            }
+            CollectorMessage::SessionFinished(report) => state.sessions.push(report),
+        }
     }
-    if let Some(limiter) = rate_limiter {
-        limiter.task.abort();
-    }
+    state
+}
 
-    sessions.sort_by_key(|session| session.session_id.to_string());
-    let sessions_completed = sessions
+impl CollectorState {
+    fn recorder_warmup(&self) -> Duration {
+        self.recorder.warmup()
+    }
+}
+
+/// Assembles the final report from collector state.
+fn build_report(
+    options: &LoadTestOptions,
+    started: Instant,
+    schedule: &[Duration],
+    warmup: Duration,
+    tenant_ids: Vec<Uuid>,
+    mut state: CollectorState,
+) -> LoadTestReport {
+    state
+        .sessions
+        .sort_by_key(|session| session.session_id.to_string());
+    let sessions_failed = state
+        .sessions
         .iter()
-        .filter(|session| session.failure_reason.is_none())
+        .filter(|session| session.failure_reason.is_some())
         .count();
-    let sessions_failed = sessions.len().saturating_sub(sessions_completed);
-    let error_count = sessions.iter().map(|session| session.error_count).sum();
-    let total_tool_calls = sessions.iter().map(|session| session.tool_calls).sum();
-    let auto_denied_approvals = sessions
-        .iter()
-        .map(|session| session.auto_denied_approvals)
-        .sum();
-    let total_cost_cents = sessions
-        .iter()
-        .map(|session| session.total_cost_cents)
-        .sum();
-    let latency_samples = sessions
-        .iter()
-        .flat_map(|session| session.turn_latency_ms.iter().copied())
-        .collect::<Vec<_>>();
-    let ttft_samples = sessions
-        .iter()
-        .flat_map(|session| session.ttft_ms.iter().copied())
-        .collect::<Vec<_>>();
-    let cache_samples = sessions
+    let sessions_completed = state.sessions.len().saturating_sub(sessions_failed);
+    let cache_samples = state
+        .sessions
         .iter()
         .map(|session| session.cache_hit_rate)
         .collect::<Vec<_>>();
+    let total_cost_cents = state
+        .sessions
+        .iter()
+        .map(|session| session.total_cost_cents)
+        .sum();
+    let measure_window = options
+        .duration
+        .saturating_sub(warmup)
+        .as_secs_f64()
+        .max(f64::MIN_POSITIVE);
 
-    Ok(LoadTestReport {
+    LoadTestReport {
         mode: options.mode,
         endpoint: options.endpoint.clone(),
         profile: options.profile,
-        sessions_requested: options.sessions,
+        requested_rate_qps: options.rate,
+        achieved_rate_qps: state.post_warmup_completions as f64 / measure_window,
+        sessions_started: state.sessions_started,
         sessions_completed,
         sessions_failed,
-        error_count,
-        total_tool_calls,
-        auto_denied_approvals,
+        turns_scheduled: schedule.len() as u64,
+        turns_completed: state.turns_completed,
+        errors: state.errors,
+        total_tool_calls: state.total_tool_calls as usize,
+        auto_denied_approvals: state.auto_denied_approvals,
         duration_ms: started.elapsed().as_secs_f64() * 1_000.0,
-        latency_ms: summarize_percentiles(&latency_samples),
-        ttft_ms: summarize_percentiles(&ttft_samples),
+        warmup_ms: warmup.as_secs_f64() * 1_000.0,
+        turn_latency_corrected_ms: state.recorder.corrected_summary(),
+        turn_latency_ms: state.recorder.uncorrected_summary(),
+        dispatch_delay_ms: state.recorder.dispatch_delay_summary(),
+        ttft_ms: state.recorder.ttft_summary(),
+        edge_observation_wait_ms: state.recorder.edge_observation_wait_summary(),
         step_latency_ms: Vec::new(),
+        event_append_phase_latency_ms: Vec::new(),
+        resource_bill: ResourceBillReport::default(),
         cache_hit_rate: summarize_percentiles(&cache_samples),
         total_cost_cents,
-        sessions,
-    })
-}
-
-pub(crate) async fn simulate_session(
-    backend: Arc<dyn SessionTarget>,
-    plan: SessionPlan,
-    inter_message_delay: Duration,
-    turn_rate_limiter: Option<Arc<Semaphore>>,
-    turn_timeout: Duration,
-) -> SessionReport {
-    let started = Instant::now();
-    let session_id = match backend.start_session(&plan).await {
-        Ok(session_id) => session_id,
-        Err(error) => {
-            return SessionReport {
-                session_id: SessionId::new(),
-                profile: plan.profile,
-                status: SessionStatus::Failed,
-                planned_turns: plan.turns.len(),
-                completed_turns: 0,
-                duration_ms: started.elapsed().as_secs_f64() * 1_000.0,
-                cache_hit_rate: 0.0,
-                total_cost_cents: 0,
-                tool_calls: 0,
-                error_count: 1,
-                auto_denied_approvals: 0,
-                turn_latency_ms: Vec::new(),
-                ttft_ms: Vec::new(),
-                failure_reason: Some(error.to_string()),
-            };
-        }
-    };
-
-    let mut completed_turns = 0usize;
-    let mut turn_latency_ms = Vec::new();
-    let mut ttft_ms = Vec::new();
-    let mut tool_calls = 0usize;
-    let mut error_count = 0usize;
-    let mut auto_denied_approvals = 0usize;
-    let mut last_sequence_num = 0u64;
-    let mut failure_reason = None;
-
-    for (turn_index, turn) in plan.turns.iter().enumerate() {
-        if let Err(error) = await_turn_start_permit(turn_rate_limiter.as_ref()).await {
-            failure_reason = Some(format!(
-                "turn {} could not be paced: {error}",
-                turn_index + 1
-            ));
-            break;
-        }
-        match backend
-            .run_turn(session_id, &turn.prompt, turn_timeout)
-            .await
-        {
-            Ok(observation) => {
-                completed_turns += 1;
-                turn_latency_ms.push(observation.latency.as_secs_f64() * 1_000.0);
-                if let Some(ttft) = observation.ttft {
-                    ttft_ms.push(ttft.as_secs_f64() * 1_000.0);
-                }
-                auto_denied_approvals += observation.auto_denied_approvals;
-
-                match backend.session_events(session_id).await {
-                    Ok(events) => {
-                        let previous_sequence_num = last_sequence_num;
-                        let new_events = events
-                            .into_iter()
-                            .filter(|record| record.sequence_num > previous_sequence_num)
-                            .collect::<Vec<_>>();
-                        for record in new_events {
-                            last_sequence_num = record.sequence_num;
-                            match &record.event {
-                                Event::ToolCall { .. } => tool_calls += 1,
-                                Event::ToolError { error, .. }
-                                    if !is_expected_harness_denial(error) =>
-                                {
-                                    error_count += 1;
-                                }
-                                Event::Error { .. } => error_count += 1,
-                                _ => {}
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        failure_reason = Some(format!(
-                            "turn {} completed but events could not be loaded: {error}",
-                            turn_index + 1
-                        ));
-                        break;
-                    }
-                }
-
-                if turn_index + 1 < plan.turns.len() && !inter_message_delay.is_zero() {
-                    tokio::time::sleep(inter_message_delay).await;
-                }
-            }
-            Err(error) => {
-                failure_reason = Some(format!("turn {} failed: {error}", turn_index + 1));
-                break;
-            }
-        }
-    }
-
-    let final_session_note = backend
-        .session_events(session_id)
-        .await
-        .ok()
-        .and_then(|events| latest_session_note(&events));
-
-    match backend.session_meta(session_id).await {
-        Ok(meta) => {
-            let status_failure =
-                session_status_failure_reason(&meta.status, completed_turns, plan.turns.len());
-            let include_session_note = failure_reason.is_some() || status_failure.is_some();
-            SessionReport {
-                session_id,
-                profile: plan.profile,
-                status: meta.status.clone(),
-                planned_turns: plan.turns.len(),
-                completed_turns,
-                duration_ms: started.elapsed().as_secs_f64() * 1_000.0,
-                cache_hit_rate: meta.cache_hit_rate(),
-                total_cost_cents: meta.total_cost_cents as u64,
-                tool_calls,
-                error_count,
-                auto_denied_approvals,
-                turn_latency_ms,
-                ttft_ms,
-                failure_reason: merge_failure_reason(
-                    failure_reason,
-                    status_failure,
-                    if include_session_note {
-                        final_session_note
-                    } else {
-                        None
-                    },
-                ),
-            }
-        }
-        Err(error) => SessionReport {
-            session_id,
-            profile: plan.profile,
-            status: SessionStatus::Failed,
-            planned_turns: plan.turns.len(),
-            completed_turns,
-            duration_ms: started.elapsed().as_secs_f64() * 1_000.0,
-            cache_hit_rate: 0.0,
-            total_cost_cents: 0,
-            tool_calls,
-            error_count: error_count + 1,
-            auto_denied_approvals,
-            turn_latency_ms,
-            ttft_ms,
-            failure_reason: Some(
-                merge_failure_reason(
-                    failure_reason,
-                    Some(format!("failed to load session metadata: {error}")),
-                    final_session_note,
-                )
-                .unwrap_or_else(|| format!("failed to load session metadata: {error}")),
-            ),
-        },
+        windows: state.recorder.window_reports(),
+        tenant_ids,
+        hdr: state
+            .recorder
+            .serialized()
+            .map_err(|error| tracing::warn!(%error, "histogram serialization failed"))
+            .ok(),
+        sessions: state.sessions,
     }
 }
 
-struct TurnRateLimiter {
-    semaphore: Arc<Semaphore>,
-    task: tokio::task::JoinHandle<()>,
+/// Samples an exponentially distributed think time with the configured mean,
+/// capped at 5x to bound stragglers. Deterministic per (seed, session, turn).
+fn sampled_think_time(mean: Duration, seed: u64, session_id: SessionId, turn: usize) -> Duration {
+    use rand::Rng as _;
+
+    if mean.is_zero() {
+        return mean;
+    }
+    let session_bits = session_id.0.as_u128() as u64;
+    let mut rng = StdRng::seed_from_u64(seed ^ session_bits ^ ((turn as u64) << 48));
+    let uniform: f64 = rng.gen_range(f64::MIN_POSITIVE..1.0);
+    mean.mul_f64(-uniform.ln()).min(mean * 5)
 }
 
-fn start_turn_rate_limiter(target_qps: u32) -> TurnRateLimiter {
-    let semaphore = Arc::new(Semaphore::new(0));
-    let permits = semaphore.clone();
-    let period = Duration::from_secs_f64(1.0 / f64::from(target_qps));
-    let task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(period);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        tokio::time::sleep(period).await;
-        loop {
-            interval.tick().await;
-            if permits.available_permits() == 0 {
-                permits.add_permits(1);
-            }
+/// Failure classification for sessions cut short by the end of the schedule.
+fn end_of_run_status_failure(status: &SessionStatus) -> Option<String> {
+    match status {
+        SessionStatus::Failed | SessionStatus::Cancelled => {
+            Some(format!("session ended in status {status:?}"))
         }
-    });
-    TurnRateLimiter { semaphore, task }
-}
-
-async fn await_turn_start_permit(limiter: Option<&Arc<Semaphore>>) -> Result<()> {
-    let Some(limiter) = limiter else {
-        return Ok(());
-    };
-    let permit = limiter
-        .acquire()
-        .await
-        .map_err(|error| MoaError::ProviderError(format!("turn rate limiter closed: {error}")))?;
-    permit.forget();
-    Ok(())
+        _ => None,
+    }
 }
 
 fn session_status_failure_reason(
@@ -385,6 +730,16 @@ mod tests {
             session_status_failure_reason(&SessionStatus::Cancelled, 5, 5),
             Some("session ended in status Cancelled".to_string())
         );
+    }
+
+    #[test]
+    fn end_of_run_drain_treats_incomplete_paused_sessions_as_healthy() {
+        // Pins: sessions cut short because the schedule ended are not failures;
+        // only Failed/Cancelled statuses count during pool drain.
+        assert_eq!(end_of_run_status_failure(&SessionStatus::Paused), None);
+        assert_eq!(end_of_run_status_failure(&SessionStatus::Running), None);
+        assert!(end_of_run_status_failure(&SessionStatus::Failed).is_some());
+        assert!(end_of_run_status_failure(&SessionStatus::Cancelled).is_some());
     }
 
     #[test]

@@ -5,44 +5,29 @@ use crate::*;
 /// Runs one load-test scenario and returns the final report.
 pub async fn run_loadtest(options: LoadTestOptions) -> Result<LoadTestReport> {
     options.validate()?;
-    let mut config = load_config()?;
-    config.observability.enabled = false;
-    config.metrics.enabled = false;
-    config.memory.auto_bootstrap = false;
-    if matches!(options.mode, LoadMode::Mock) {
-        config.compaction.enabled = false;
-        config.session_limits.max_turns = 0;
-        config.session_limits.loop_detection_threshold = 0;
-    }
+    let config = load_config()?;
 
-    let inspection_files = inspectable_files(None).await?;
-    let plans = build_session_plans(options.sessions, options.profile, &inspection_files);
-    let backend = build_backend(&options, &config).await?;
-    let before_step_latency =
-        scrape_step_latency_snapshot(options.metrics_endpoint.as_deref()).await?;
-    let started = Instant::now();
-    let run_result = run_sessions(backend.clone(), &options, plans, started).await;
-    let run_result = match run_result {
-        Ok(mut report) => {
-            match scrape_step_latency_snapshot(options.metrics_endpoint.as_deref()).await {
-                Ok(after_step_latency) => {
-                    report.step_latency_ms = step_latency_delta_reports(
-                        before_step_latency.as_ref(),
-                        after_step_latency.as_ref(),
-                    );
-                    Ok(report)
-                }
-                Err(error) => Err(error),
-            }
+    let pool = TenancyPool::generate(options.tenants, options.identities_per_tenant)?;
+    let targets = match options.edge_endpoint.as_deref() {
+        Some(edge_endpoint) => {
+            build_edge_backend_pool(&options, &config, &pool, edge_endpoint).await?
         }
-        Err(error) => Err(error),
+        None => build_backend_pool(&options, &config, &pool).await?,
     };
-    let cleanup_result = backend.cleanup().await;
-
-    match (run_result, cleanup_result) {
-        (Ok(report), Ok(())) => Ok(report),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
-        (Err(error), Err(_cleanup_error)) => Err(error),
-    }
+    let before_metrics =
+        scrape_runtime_metrics_snapshot(options.metrics_endpoint.as_deref()).await?;
+    let started = Instant::now();
+    let mut report = run_sessions(targets, pool, &options, started).await?;
+    let after_metrics =
+        scrape_runtime_metrics_snapshot(options.metrics_endpoint.as_deref()).await?;
+    report.step_latency_ms =
+        step_latency_delta_reports(before_metrics.as_ref(), after_metrics.as_ref());
+    report.event_append_phase_latency_ms =
+        event_append_phase_latency_delta_reports(before_metrics.as_ref(), after_metrics.as_ref());
+    report.resource_bill = resource_bill_delta_report(
+        before_metrics.as_ref(),
+        after_metrics.as_ref(),
+        report.turns_completed,
+    );
+    Ok(report)
 }

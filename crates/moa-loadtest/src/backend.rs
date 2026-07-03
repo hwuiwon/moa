@@ -9,6 +9,34 @@ use serde::Serialize;
 
 const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// Classification of a failed turn attempt, used by the error taxonomy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnFailureKind {
+    /// The start_turn request itself failed.
+    StartFailed,
+    /// The turn did not reach an outcome within the per-turn timeout.
+    Timeout,
+    /// The turn reached a Failed outcome.
+    Failed,
+    /// The turn reached a Cancelled outcome.
+    Cancelled,
+    /// Transport-level failure while awaiting the outcome.
+    Transport,
+}
+
+/// A failed turn attempt with its classification.
+#[derive(Debug, Clone)]
+pub(crate) struct TurnFailure {
+    pub(crate) kind: TurnFailureKind,
+    pub(crate) message: String,
+}
+
+impl std::fmt::Display for TurnFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{:?}: {}", self.kind, self.message)
+    }
+}
+
 #[async_trait]
 pub(crate) trait SessionTarget: Send + Sync {
     async fn start_session(&self, plan: &SessionPlan) -> Result<SessionId>;
@@ -17,10 +45,16 @@ pub(crate) trait SessionTarget: Send + Sync {
         session_id: SessionId,
         prompt: &str,
         timeout: Duration,
-    ) -> Result<TurnObservation>;
+    ) -> std::result::Result<TurnObservation, TurnFailure>;
     async fn session_meta(&self, session_id: SessionId) -> Result<SessionMeta>;
-    async fn session_events(&self, session_id: SessionId) -> Result<Vec<EventRecord>>;
-    async fn cleanup(&self) -> Result<()>;
+    /// Events with `sequence_num` strictly greater than `after_seq`.
+    async fn session_events_since(
+        &self,
+        session_id: SessionId,
+        after_seq: u64,
+    ) -> Result<Vec<EventRecord>>;
+    /// A recent suffix of the event log, for failure-note extraction.
+    async fn recent_events(&self, session_id: SessionId) -> Result<Vec<EventRecord>>;
 }
 
 #[derive(Clone)]
@@ -35,7 +69,6 @@ pub(crate) struct RemoteTarget {
 #[async_trait]
 impl SessionTarget for RemoteTarget {
     async fn start_session(&self, plan: &SessionPlan) -> Result<SessionId> {
-        self.grant_tenant_operator().await?;
         let session_id = SessionId::new();
         let now = chrono::Utc::now();
         let meta = SessionMeta {
@@ -99,8 +132,7 @@ impl SessionTarget for RemoteTarget {
         session_id: SessionId,
         prompt: &str,
         timeout: Duration,
-    ) -> Result<TurnObservation> {
-        let started = Instant::now();
+    ) -> std::result::Result<TurnObservation, TurnFailure> {
         let handle = self.client.session(session_id.to_string());
         let response = handle
             .start_turn(
@@ -114,27 +146,39 @@ impl SessionTarget for RemoteTarget {
                 Some(&format!("loadtest-turn-{session_id}-{}", Uuid::now_v7())),
             )
             .await
-            .map_err(client_error)?;
-        let turn_id = response.turn_id.ok_or_else(|| {
-            MoaError::ProviderError(format!(
-                "loadtest turn for session {session_id} queued unexpectedly"
-            ))
+            .map_err(|error| TurnFailure {
+                kind: TurnFailureKind::StartFailed,
+                message: error.to_string(),
+            })?;
+        let turn_id = response.turn_id.ok_or_else(|| TurnFailure {
+            kind: TurnFailureKind::StartFailed,
+            message: format!("loadtest turn for session {session_id} queued unexpectedly"),
         })?;
         let outcome = handle
             .await_turn_outcome(&turn_id, timeout, SNAPSHOT_POLL_INTERVAL)
             .await
-            .map_err(client_error)?;
+            .map_err(|error| TurnFailure {
+                kind: match error {
+                    RemoteHttpError::Timeout(_) => TurnFailureKind::Timeout,
+                    _ => TurnFailureKind::Transport,
+                },
+                message: error.to_string(),
+            })?;
 
         match outcome.kind {
             moa_core::wire::turn::TurnOutcomeKind::Completed => Ok(TurnObservation {
-                latency: started.elapsed(),
                 ttft: None,
+                edge_observation_wait: None,
                 auto_denied_approvals: 0,
             }),
-            moa_core::wire::turn::TurnOutcomeKind::Cancelled => Err(MoaError::Cancelled),
-            moa_core::wire::turn::TurnOutcomeKind::Failed => {
-                Err(MoaError::ProviderError(outcome.message))
-            }
+            moa_core::wire::turn::TurnOutcomeKind::Cancelled => Err(TurnFailure {
+                kind: TurnFailureKind::Cancelled,
+                message: outcome.message,
+            }),
+            moa_core::wire::turn::TurnOutcomeKind::Failed => Err(TurnFailure {
+                kind: TurnFailureKind::Failed,
+                message: outcome.message,
+            }),
         }
     }
 
@@ -145,87 +189,108 @@ impl SessionTarget for RemoteTarget {
             .map_err(client_error)
     }
 
-    async fn session_events(&self, session_id: SessionId) -> Result<Vec<EventRecord>> {
+    async fn session_events_since(
+        &self,
+        session_id: SessionId,
+        after_seq: u64,
+    ) -> Result<Vec<EventRecord>> {
         self.client
-            .get_events(session_id, moa_core::EventRange::all())
+            .get_events(
+                session_id,
+                moa_core::EventRange {
+                    from_seq: Some(after_seq + 1),
+                    ..moa_core::EventRange::default()
+                },
+            )
             .await
             .map_err(client_error)
     }
 
-    async fn cleanup(&self) -> Result<()> {
-        Ok(())
+    async fn recent_events(&self, session_id: SessionId) -> Result<Vec<EventRecord>> {
+        self.client
+            .get_events(session_id, moa_core::EventRange::recent(50))
+            .await
+            .map_err(client_error)
     }
 }
 
 impl RemoteTarget {
-    async fn grant_tenant_operator(&self) -> Result<()> {
-        self.grant_raw_tuple(
-            format!("user:{}", self.identity.id),
-            "operator",
-            format!("tenant:{}", self.tenant_id),
-        )
-        .await
+    /// Builds an ingress-backed target for one identity.
+    pub(crate) fn new(
+        endpoint: &str,
+        http: reqwest::Client,
+        fga: FgaClient,
+        identity: Identity,
+        tenant_id: TenantId,
+        model: ModelId,
+    ) -> std::result::Result<Self, String> {
+        let client = RemoteHttpClient::new_with_http(endpoint, http)
+            .map_err(|error| error.to_string())?
+            .with_identity(identity.clone());
+        Ok(Self {
+            client,
+            fga,
+            identity,
+            tenant_id,
+            model,
+        })
     }
 
     async fn grant_session_participant(&self, session_id: SessionId) -> Result<()> {
-        self.grant_raw_tuple(
+        grant_raw_tuple(
+            &self.fga,
             format!("user:{}", self.identity.id),
             "participant",
             format!("session:{session_id}"),
         )
         .await
     }
-
-    async fn grant_raw_tuple(&self, user: String, relation: &str, object: String) -> Result<()> {
-        self.fga
-            .apply_raw(serde_json::json!({
-                "authorization_model_id": self.fga.model_id(),
-                "writes": {
-                    "tuple_keys": [{
-                        "user": user,
-                        "relation": relation,
-                        "object": object,
-                    }],
-                },
-            }))
-            .await
-            .map_err(|error| {
-                MoaError::ProviderError(format!("loadtest OpenFGA grant failed: {error}"))
-            })
-    }
 }
 
-pub(crate) async fn build_backend(
+/// Builds one target per pool identity, sharing HTTP and FGA clients, and
+/// grants tenant-operator tuples exactly once.
+pub(crate) async fn build_backend_pool(
     options: &LoadTestOptions,
     config: &MoaConfig,
-) -> Result<Arc<dyn SessionTarget>> {
-    let tenant_id = TenantId::new();
-    let identity = Identity {
-        identity_type: IdentityType::User,
-        id: Uuid::now_v7(),
-        tenant_id,
-        api_key_id: None,
-        acting_on_behalf_of: None,
-    };
-    let client = RemoteHttpClient::new(&options.endpoint)
-        .map_err(client_error)?
-        .with_identity(identity.clone());
+    pool: &TenancyPool,
+) -> Result<Vec<Arc<dyn SessionTarget>>> {
     let fga = live_fga_client()?;
+    pool.grant_operators(&fga).await?;
+    let http = build_http_client(options)?;
     let model = options
         .model
         .clone()
         .unwrap_or_else(|| config.model_for_task(ModelTask::MainLoop).to_string());
-    Ok(Arc::new(RemoteTarget {
-        client,
-        fga,
-        identity,
-        tenant_id,
-        model: ModelId::new(model),
-    }))
+
+    pool.entries()
+        .iter()
+        .map(|entry| {
+            let client = RemoteHttpClient::new_with_http(&options.endpoint, http.clone())?
+                .with_identity(entry.identity.clone());
+            Ok(Arc::new(RemoteTarget {
+                client,
+                fga: fga.clone(),
+                identity: entry.identity.clone(),
+                tenant_id: entry.tenant_id,
+                model: ModelId::new(model.clone()),
+            }) as Arc<dyn SessionTarget>)
+        })
+        .collect::<std::result::Result<Vec<_>, RemoteHttpError>>()
+        .map_err(client_error)
 }
 
 fn client_error(error: RemoteHttpError) -> MoaError {
     MoaError::ProviderError(format!("orchestrator client error: {error}"))
+}
+
+/// Shared HTTP client with a hard request deadline slightly above the turn
+/// timeout, so a hung connection can never wedge a generator slot.
+pub(crate) fn build_http_client(options: &LoadTestOptions) -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(options.turn_timeout.saturating_add(Duration::from_secs(30)))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| MoaError::ProviderError(format!("loadtest HTTP client: {error}")))
 }
 
 #[derive(Clone)]
@@ -236,13 +301,16 @@ struct RemoteHttpClient {
 }
 
 impl RemoteHttpClient {
-    fn new(endpoint: &str) -> std::result::Result<Self, RemoteHttpError> {
+    fn new_with_http(
+        endpoint: &str,
+        http: reqwest::Client,
+    ) -> std::result::Result<Self, RemoteHttpError> {
         let endpoint = endpoint.trim_end_matches('/').to_string();
         url::Url::parse(&endpoint)
             .map_err(|error| RemoteHttpError::InvalidEndpoint(format!("{endpoint}: {error}")))?;
         Ok(Self {
             endpoint,
-            http: reqwest::Client::new(),
+            http,
             identity: None,
         })
     }
@@ -489,7 +557,7 @@ where
     Ok(serde_json::from_str(&body)?)
 }
 
-fn live_fga_client() -> Result<FgaClient> {
+pub(crate) fn live_fga_client() -> Result<FgaClient> {
     FgaClient::new(FgaConfig {
         url: std::env::var("MOA_AUTHZ_OPENFGA_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:10030".to_string()),

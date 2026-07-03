@@ -39,6 +39,58 @@ First green run on CI hardware floor:
 Update the baseline only for intentional architectural shifts. Do not update it
 to absorb regressions.
 
+## Turn-Path Capacity Baseline (T2) - 2026-07-03
+
+First single-replica capacity characterization with the open-loop harness
+(`docs/22-load-and-chaos-testing.md`), on a developer laptop running the full
+compose stack plus the generator (directional; below the CI hardware floor).
+Workload: mixed profile, scripted providers with realistic pacing
+(`scripts/realistic.json`, 0.9-2.0s simulated model latency), 8 tenants,
+Poisson think time (mean 1s), text-only turns (the SessionStore-path default
+agent context allows zero tool calls, so sandbox execution is excluded).
+
+Steady-rate brackets (90s each, corrected = from intended arrival):
+
+| Offered rate | Achieved | p50 | p95 | p99 | Dispatch-delay p95 |
+|---|---:|---:|---:|---:|---:|
+| 20 turns/s | 20.7/s | 2.58 s | 8.16 s | 10.0 s | 3 ms |
+| 26 turns/s | 26.9/s | 4.32 s | 5.94 s | 6.5 s | 3 ms |
+| 32 turns/s | 34.3/s | 7.25 s | 9.27 s | 10.1 s | 3 ms |
+
+Pure-orchestration ceiling (1 ms provider script, short profile, no think
+time): ~60 turns/s sustained; at 100 turns/s offered, achieved 58/s with half
+the arrivals shed. Under that load `pipeline_compile` p50 rose from 10 ms to
+~1 s and `event_persist` p95 to ~2.5 s — context compilation and the Postgres
+event append are the first two optimization targets.
+
+Ramp knee (5->120 turns/s over 4 min): latency departs baseline at ~25-30
+turns/s offered; beyond it queueing grows linearly while throughput holds to
+~34/s. Multi-worker merge (3 generators, 27 turns/s aggregate) reproduces the
+same profile with exact merged histograms.
+
+Scale-out arithmetic for the 10k turns/s question: at ~30 turns/s per
+laptop-grade replica, 10k turns/s requires ~330 replicas of THIS box — but the
+per-replica number on prod hardware (CI floor or better, Postgres not
+co-located, no generator contention) must be re-measured via the same T2
+procedure before extrapolating; the HPA cap is 50 replicas, so closing the gap
+is primarily a per-replica capacity and Postgres write-path question, not a
+fan-out question.
+
+Phase A optimization reruns on the same developer-laptop compose profile:
+
+| Run | Achieved | Durable rows/turn | `ProgressUpdate` rows/turn | `event_persist` p50 | `event_persist` p95 | Append tail |
+|---|---:|---:|---:|---:|---:|---|
+| Transient progress + early outcome | 24.6/s | 2.45 | 0.00 | 2.5 s | 10.0 s | not yet split |
+| Direct workflow append, default pool | 23.85/s | 2.39 | 0.00 | 500 ms | 2.5 s | `begin_transaction` p95 2.5 s |
+| Direct workflow append, pool 64 | 22.72/s | 2.40 | 0.00 | 250 ms | 2.5 s | `begin_transaction` p95 2.5 s |
+
+Append phase instrumentation showed `lock_session`, `insert_events`, and
+`update_session_aggregates` stayed at single-digit-millisecond p95/p99 in the
+post-fix runs. A larger orchestrator database pool did not move the remaining
+tail, so the next optimization target is DB acquisition/saturation around
+`pipeline_compile`, snapshot load/write, and append transaction start rather
+than asynchronous progress persistence or aggregate rollups.
+
 ## Memory Retrieval Baseline - 2026-06-29
 
 Task 0 of the final low-latency RAG plan refreshed the hermetic PR memory eval

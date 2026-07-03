@@ -287,6 +287,109 @@ async fn pgvector_round_trip_returns_identical_seed_first() {
 }
 
 #[tokio::test]
+async fn knn_on_unprovisioned_partition_returns_no_hits_instead_of_erroring() {
+    // Pins: a partition with no embedder state row (a brand-new tenant that
+    // has never ingested memory) answers reads with zero hits instead of the
+    // turn-fatal StoragePartitionEmbedderStateMissing error.
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = Uuid::now_v7().to_string();
+
+    let store = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(storage_partition_id.clone()),
+    );
+    let matches = store
+        .knn(&VectorQuery {
+            embedding: basis_vector(0),
+            k: 10,
+            label_filter: None,
+            max_pii_class: "restricted".to_string(),
+            include_global: false,
+            as_of: None,
+        })
+        .await
+        .expect("unprovisioned partition read must not error");
+    assert!(
+        matches.is_empty(),
+        "expected zero hits from an unprovisioned partition, got {}",
+        matches.len()
+    );
+
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn first_write_provisions_partition_embedder_and_pins_the_model() {
+    // Pins: with no production tenant-provisioning step, the FIRST vector
+    // write establishes the partition's embedder identity (model, version,
+    // dimension); later writes with a different model are rejected against
+    // the pinned identity instead of silently mixing vector spaces.
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = Uuid::now_v7().to_string();
+    let item = vector_item(
+        Uuid::now_v7(),
+        &storage_partition_id,
+        "Fact",
+        basis_vector(1),
+    );
+    insert_node_index_rows(
+        session_store.pool(),
+        &storage_partition_id,
+        std::slice::from_ref(&item),
+    )
+    .await;
+
+    let store = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(storage_partition_id.clone()),
+    );
+    store
+        .upsert(std::slice::from_ref(&item))
+        .await
+        .expect("first write provisions the partition and succeeds");
+
+    let pinned: (String, i32) = sqlx::query_as(
+        "SELECT embedding_model, embedding_dimension FROM moa.storage_partition_state \
+         WHERE storage_partition_id = $1",
+    )
+    .bind(&storage_partition_id)
+    .fetch_one(session_store.pool())
+    .await
+    .expect("embedder state row exists after first write");
+    assert_eq!(pinned.0, "test-model");
+    assert_eq!(pinned.1, 1024);
+
+    let mut foreign = vector_item(
+        Uuid::now_v7(),
+        &storage_partition_id,
+        "Fact",
+        basis_vector(2),
+    );
+    foreign.embedding_model = "other-model".to_string();
+    let mismatch = store.upsert(&[foreign]).await;
+    assert!(
+        matches!(
+            mismatch,
+            Err(moa_memory_vector::Error::EmbedderModelMismatch { .. })
+        ),
+        "a different model must be rejected against the pinned identity: {mismatch:?}"
+    );
+
+    delete_node_index_rows(session_store.pool(), &[item.uid]).await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
 async fn cross_tenant_knn_cannot_see_other_workspace_vectors() {
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await

@@ -52,6 +52,8 @@ pub(crate) struct MockSessionStore {
     session: Arc<Mutex<SessionMeta>>,
     events: Arc<Mutex<Vec<EventRecord>>>,
     snapshot: Arc<Mutex<Option<ContextSnapshot>>>,
+    snapshot_writes: Arc<Mutex<usize>>,
+    snapshot_deletes: Arc<Mutex<usize>>,
 }
 
 impl MockSessionStore {
@@ -68,7 +70,17 @@ impl MockSessionStore {
             session: Arc::new(Mutex::new(session)),
             events: Arc::new(Mutex::new(events)),
             snapshot: Arc::new(Mutex::new(None)),
+            snapshot_writes: Arc::new(Mutex::new(0)),
+            snapshot_deletes: Arc::new(Mutex::new(0)),
         }
+    }
+
+    pub(crate) async fn snapshot_write_count(&self) -> usize {
+        *self.snapshot_writes.lock().await
+    }
+
+    pub(crate) async fn snapshot_delete_count(&self) -> usize {
+        *self.snapshot_deletes.lock().await
     }
 }
 
@@ -109,9 +121,33 @@ impl SessionStore for MockSessionStore {
     async fn get_events(
         &self,
         _session_id: SessionId,
-        _range: EventRange,
+        range: EventRange,
     ) -> Result<Vec<EventRecord>> {
-        Ok(self.events.lock().await.clone())
+        let mut events = self
+            .events
+            .lock()
+            .await
+            .iter()
+            .filter(|record| {
+                range
+                    .from_seq
+                    .is_none_or(|from_seq| record.sequence_num >= from_seq)
+                    && range
+                        .to_seq
+                        .is_none_or(|to_seq| record.sequence_num <= to_seq)
+                    && range
+                        .event_types
+                        .as_ref()
+                        .is_none_or(|event_types| event_types.contains(&record.event_type))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(limit) = range.limit
+            && events.len() > limit
+        {
+            events = events.split_off(events.len() - limit);
+        }
+        Ok(events)
     }
 
     async fn get_session(&self, _session_id: SessionId) -> Result<SessionMeta> {
@@ -124,6 +160,7 @@ impl SessionStore for MockSessionStore {
     }
 
     async fn put_snapshot(&self, _session_id: SessionId, snapshot: ContextSnapshot) -> Result<()> {
+        *self.snapshot_writes.lock().await += 1;
         *self.snapshot.lock().await = Some(snapshot);
         Ok(())
     }
@@ -133,6 +170,7 @@ impl SessionStore for MockSessionStore {
     }
 
     async fn delete_snapshot(&self, _session_id: SessionId) -> Result<()> {
+        *self.snapshot_deletes.lock().await += 1;
         *self.snapshot.lock().await = None;
         Ok(())
     }

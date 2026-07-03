@@ -1,0 +1,12 @@
+# Edge-mode overlay: wires contact-token signing keys into the orchestrator
+# so `moa-loadtest --edge-endpoint ...` can mint contact tokens.
+#
+# Usage:
+#   make loadtest-edge-keys        # prints the two exports below
+#   eval "$(make -s loadtest-edge-keys)"
+#   docker compose -f docker-compose.yml -f docker-compose.edge.yml up -d
+services:
+  moa-orchestrator:
+    environment:
+      MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM: ${MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM:?run make loadtest-edge-keys and export the printed env}
+      MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM: ${MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM:?run make loadtest-edge-keys and export the printed env}

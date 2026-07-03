@@ -141,8 +141,10 @@ services:
       RUSTFS_CONSOLE_ENABLE: "true"
     command: ["/data"]
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      # Host ports are configurable because 9000/9001 are popular (minio,
+      # k3d node ports); in-network consumers always use rustfs:9000.
+      - "${MOA_RUSTFS_PORT:-9000}:9000"
+      - "${MOA_RUSTFS_CONSOLE_PORT:-9001}:9001"
     volumes:
       - moa-rustfs-data:/data
 
@@ -239,17 +241,25 @@ services:
       MOA_PROVIDERS_OVERRIDE: ${MOA_PROVIDERS_OVERRIDE:-}
       MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS: "false"
       MOA_DEREGISTER_ON_SHUTDOWN: "false"
+      MOA_METRICS_ENABLED: ${MOA_METRICS_ENABLED:-true}
+      MOA_METRICS_LISTEN: 0.0.0.0:9090
       RUST_LOG: "info,moa_orchestrator=debug"
       MOA_ANTHROPIC_API_KEY: ${MOA_ANTHROPIC_API_KEY:-}
       MOA_OPENAI_API_KEY: ${MOA_OPENAI_API_KEY:-}
       MOA_GOOGLE_API_KEY: ${MOA_GOOGLE_API_KEY:-}
       MOA_COHERE_API_KEY: ${MOA_COHERE_API_KEY:-}
       MOA_ZEROENTROPY_API_KEY: ${MOA_ZEROENTROPY_API_KEY:-}
+      # Contact-token signing keys are opt-in via docker-compose.edge.yml:
+      # an empty MOA_AUTH_CONTACT_TOKENS_* value counts as "section
+      # configured" and hard-fails config loading, so they must not be
+      # passed through unconditionally here.
     ports:
       # Restate handler port 9080 is internal-only. Use moa-edge on 8080.
       - "10021:9081"
       # SCIM v2 provisioning endpoint.
       - "10022:10022"
+      # Prometheus metrics; scraped by moa-loadtest step-latency reports.
+      - "10023:9090"
     volumes:
       - ./crates/moa-loadtest/scripts:/loadtest-scripts:ro
 
@@ -276,9 +286,13 @@ services:
       MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY: ${MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY:-moa-local-dev-secret}
       MOA_SESSION_ATTACHMENT_ALLOW_HTTP: "true"
       MOA_SESSION_ATTACHMENT_VIRTUAL_HOSTED_STYLE: "false"
+      MOA_METRICS_ENABLED: ${MOA_METRICS_ENABLED:-true}
+      MOA_METRICS_LISTEN: 0.0.0.0:9090
       RUST_LOG: info,moa_edge=debug
     ports:
       - "10000:8080"
+      # Prometheus metrics for the edge layer.
+      - "10001:9090"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
       interval: 5s

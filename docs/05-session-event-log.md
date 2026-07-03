@@ -176,7 +176,7 @@ updates the session to the verified contact and records the prior contact in
 | Action review | `ActionReviewRequested`, `ActionReviewDecided` |
 | Memory | `MemoryRead`, `MemoryWrite`, `MemoryIngest` |
 | Hands | `HandProvisioned`, `HandDestroyed`, `HandError` |
-| Worker coordination | `WorkerSpawned`, `WorkerMessageSent`, `WorkerStatusChanged`, `WorkerNotificationDelivered`, `WorkerSignalReceived`, `WorkerParentResumeRequested`, `WorkerHeartbeatStale`, `ProgressUpdate`, `ProgressNarrated` |
+| Worker coordination | `WorkerSpawned`, `WorkerMessageSent`, `WorkerStatusChanged`, `WorkerNotificationDelivered`, `WorkerSignalReceived`, `WorkerParentResumeRequested`, `WorkerHeartbeatStale`, `ProgressNarrated` |
 | Compaction | `Checkpoint` |
 | Diagnostics | `Error`, `Warning` |
 
@@ -202,9 +202,10 @@ The durable main-agent/worker coordination feature adds four:
   `model`, `tokens_used`). It is the one intentional low-rate telemetry event;
   `model = "none"`/`tokens_used = 0` marks the no-LLM N=1 short-circuit.
 
-`ProgressUpdate` (the per-tick child progress already emitted to the parent log)
-is unchanged; heartbeats stay in `Worker` VO state and append an event only on
-the stale transition above.
+`ProgressUpdate` remains a decodable event variant for old rows, but new turn
+progress is projection state surfaced through `TurnExecution/progress` and
+`Session/progress`; it is not appended as a per-tick event-log row. Heartbeats
+stay in `Worker` VO state and append an event only on the stale transition above.
 
 ## Idempotent Append
 

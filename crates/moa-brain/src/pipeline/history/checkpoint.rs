@@ -29,14 +29,22 @@ use super::{CompiledHistory, FILE_READ_DEDUP_PLACEHOLDER, HistoryCompiler};
 
 const MAX_INCREMENTAL_DELTA_EVENTS: usize = 50;
 
+pub(super) struct SnapshotLoad {
+    pub(super) snapshot: Option<ContextSnapshot>,
+    pub(super) stored_snapshot_present: bool,
+}
+
 impl HistoryCompiler {
     pub(super) async fn load_snapshot(
         &self,
         ctx: &WorkingContext,
         stage_inputs_hash: u64,
-    ) -> Result<Option<ContextSnapshot>> {
+    ) -> Result<SnapshotLoad> {
         if !self.snapshot_config.enabled {
-            return Ok(None);
+            return Ok(SnapshotLoad {
+                snapshot: None,
+                stored_snapshot_present: false,
+            });
         }
 
         let started_at = Instant::now();
@@ -47,7 +55,10 @@ impl HistoryCompiler {
                     && snapshot.stage_inputs_hash == stage_inputs_hash =>
             {
                 record_turn_snapshot_load(started_at.elapsed(), true);
-                Ok(Some(snapshot))
+                Ok(SnapshotLoad {
+                    snapshot: Some(snapshot),
+                    stored_snapshot_present: true,
+                })
             }
             Ok(Some(snapshot)) => {
                 record_turn_snapshot_load(started_at.elapsed(), false);
@@ -59,11 +70,17 @@ impl HistoryCompiler {
                     expected_hash = stage_inputs_hash,
                     "context snapshot drift detected; falling back to full replay"
                 );
-                Ok(None)
+                Ok(SnapshotLoad {
+                    snapshot: None,
+                    stored_snapshot_present: true,
+                })
             }
             Ok(None) => {
                 record_turn_snapshot_load(started_at.elapsed(), false);
-                Ok(None)
+                Ok(SnapshotLoad {
+                    snapshot: None,
+                    stored_snapshot_present: false,
+                })
             }
             Err(error) => {
                 record_turn_snapshot_load(started_at.elapsed(), false);
@@ -72,7 +89,10 @@ impl HistoryCompiler {
                     error = %error,
                     "context snapshot load failed; falling back to full replay"
                 );
-                Ok(None)
+                Ok(SnapshotLoad {
+                    snapshot: None,
+                    stored_snapshot_present: false,
+                })
             }
         }
     }

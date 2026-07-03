@@ -111,3 +111,55 @@ loadtest-mock:
 
 loadtest-live:
 	cargo run -p moa-loadtest --release --bin moa-loadtest -- --mode live --endpoint http://localhost:10010
+
+# T2 capacity run: realistic scripted workload, ramp to the knee, windowed
+# report written to target/perf-gate/capacity.json.
+loadtest-capacity:
+	@echo "restarting orchestrator with realistic scripted providers..."
+	@MOA_PROVIDERS_OVERRIDE=scripted:/loadtest-scripts/realistic.json \
+	  docker compose up -d --build --force-recreate moa-orchestrator restate-register
+	@$(MAKE) dev-status
+	@mkdir -p target/perf-gate
+	cargo run -p moa-loadtest --release --bin moa-loadtest -- \
+	  --mode mock --endpoint http://localhost:10010 \
+	  --shape ramp --rate 5 --rate-end 200 --duration 10m \
+	  --profile mixed --think-time-ms 2000 --sessions 800 --tenants 8 \
+	  --metrics-endpoint http://localhost:10023/metrics \
+	  --output json | tee target/perf-gate/capacity.json >/dev/null
+	@echo "capacity report: target/perf-gate/capacity.json"
+
+# Long steady soak at ~70% of measured capacity; watch the window series for
+# drift (leaks, compaction pressure, partition growth).
+loadtest-soak:
+	@mkdir -p target/perf-gate
+	cargo run -p moa-loadtest --release --bin moa-loadtest -- \
+	  --mode mock --endpoint http://localhost:10010 \
+	  --shape soak --rate $${SOAK_RATE:-50} --duration $${SOAK_DURATION:-2h} \
+	  --profile mixed --think-time-ms 2000 --sessions 800 --tenants 8 \
+	  --metrics-endpoint http://localhost:10023/metrics \
+	  --output json | tee target/perf-gate/soak.json >/dev/null
+	@echo "soak report: target/perf-gate/soak.json"
+
+# One fast chaos experiment (provider 429 storm) against the compose stack.
+chaos-smoke:
+	@: $${MOA_AUTHZ_OPENFGA_STORE_ID:?run make fga-bootstrap and export the OpenFGA env first}
+	MOA_RUN_CHAOS_TESTS=1 cargo nextest run -p moa-loadtest --test chaos_docker \
+	  --run-ignored all --no-capture --test-threads 1 \
+	  -E 'test(chaos_provider_429_storm_degrades_then_recovers_docker)'
+
+# The full chaos experiment matrix. Experiments recreate the orchestrator and
+# stop/kill stack services; run only against a disposable dev stack.
+chaos-matrix:
+	@: $${MOA_AUTHZ_OPENFGA_STORE_ID:?run make fga-bootstrap and export the OpenFGA env first}
+	MOA_RUN_CHAOS_TESTS=1 cargo nextest run -p moa-loadtest --test chaos_docker \
+	  --run-ignored all --no-capture --test-threads 1 --no-fail-fast
+
+# Generates a local-dev RSA keypair for contact-token signing and prints the
+# env exports the compose stack needs for edge-mode load tests.
+loadtest-edge-keys:
+	@mkdir -p target/loadtest-keys
+	@[ -f target/loadtest-keys/contact-tokens.pem ] || \
+	  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out target/loadtest-keys/contact-tokens.pem 2>/dev/null
+	@openssl rsa -in target/loadtest-keys/contact-tokens.pem -pubout -out target/loadtest-keys/contact-tokens.pub.pem 2>/dev/null
+	@echo "export MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM=\"$$(cat target/loadtest-keys/contact-tokens.pem)\""
+	@echo "export MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM=\"$$(cat target/loadtest-keys/contact-tokens.pub.pem)\""

@@ -143,7 +143,21 @@ pub(super) async fn append_zero_cost_assistant_response(
     meta: &SessionMeta,
     text: String,
 ) -> Result<String, HandlerError> {
-    append_session_event(
+    append_zero_cost_assistant_response_with_sequence(ctx, session_id, meta, text)
+        .await
+        .map(|(text, _sequence_num)| text)
+}
+
+/// Persists a zero-cost auxiliary assistant response and returns its text plus sequence number.
+///
+/// Root turn execution uses the sequence number to bound post-outcome segment assessment.
+pub(super) async fn append_zero_cost_assistant_response_with_sequence(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    meta: &SessionMeta,
+    text: String,
+) -> Result<(String, u64), HandlerError> {
+    let sequence_num = append_session_event(
         ctx,
         session_id,
         Event::BrainResponse {
@@ -160,7 +174,7 @@ pub(super) async fn append_zero_cost_assistant_response(
         },
     )
     .await?;
-    Ok(text)
+    Ok((text, sequence_num))
 }
 
 /// Maps a turn outcome kind to its stable label for tracing and metrics.

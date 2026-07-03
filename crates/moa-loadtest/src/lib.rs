@@ -4,12 +4,17 @@ pub mod scenarios;
 
 mod backend;
 mod config;
+mod edge_backend;
 mod harness;
+mod hist;
+mod merge;
 mod metrics;
 mod options;
 mod plan;
 mod report;
 mod runner;
+mod schedule;
+mod tenancy;
 
 #[cfg(test)]
 mod tests;
@@ -26,18 +31,26 @@ use moa_core::{
     SessionId, SessionMeta, SessionStatus, TenantId,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 pub use harness::run_loadtest;
+pub use hist::SerializedHistograms;
+pub use merge::{MergedSummary, merge_report_files, render_merged_summary};
 pub use options::{LoadMode, LoadTestOptions, OutputFormat, SessionProfileKind};
 pub use report::{
-    LoadTestReport, PercentileSummary, SessionReport, StepLatencyReport, render_human_report,
-    render_json_report,
+    ErrorTaxonomy, EventAppendPhaseLatencyReport, EventAppendTypeReport, LoadTestReport,
+    PercentileSummary, ResourceBillReport, SessionReport, StepLatencyReport, WindowReport,
+    render_human_report, render_json_report,
 };
+pub use schedule::{ArrivalProcess, LoadShape};
 
 pub(crate) use backend::*;
 pub(crate) use config::*;
+pub(crate) use edge_backend::*;
+pub(crate) use hist::*;
 pub(crate) use metrics::*;
 pub(crate) use plan::*;
 pub(crate) use runner::*;
+pub(crate) use schedule::*;
+pub(crate) use tenancy::*;
