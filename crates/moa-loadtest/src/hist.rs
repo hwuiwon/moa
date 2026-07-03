@@ -163,6 +163,57 @@ impl LatencyRecorder {
     }
 }
 
+/// Base64 V2-serialized aggregate histograms, embedded in JSON reports so
+/// multi-worker runs can merge losslessly (HdrHistogram addition is exact).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializedHistograms {
+    /// Corrected turn latency (from intended arrival).
+    pub corrected: String,
+    /// Uncorrected service time (from dispatch).
+    pub uncorrected: String,
+    /// Dispatch delay (intended arrival to dispatch).
+    pub dispatch_delay: String,
+    /// TTFT samples.
+    pub ttft: String,
+}
+
+/// Serializes one histogram to base64 V2 wire format.
+fn serialize_histogram(histogram: &Histogram<u64>) -> Result<String> {
+    use base64::Engine as _;
+    use hdrhistogram::serialization::{Serializer as _, V2Serializer};
+
+    let mut buffer = Vec::new();
+    V2Serializer::new()
+        .serialize(histogram, &mut buffer)
+        .map_err(|error| MoaError::SerializationError(format!("hdr serialize: {error}")))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(buffer))
+}
+
+/// Deserializes one histogram from base64 V2 wire format.
+pub(crate) fn deserialize_histogram(encoded: &str) -> Result<Histogram<u64>> {
+    use base64::Engine as _;
+    use hdrhistogram::serialization::Deserializer;
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| MoaError::SerializationError(format!("hdr base64: {error}")))?;
+    Deserializer::new()
+        .deserialize(&mut bytes.as_slice())
+        .map_err(|error| MoaError::SerializationError(format!("hdr deserialize: {error}")))
+}
+
+impl LatencyRecorder {
+    /// Serializes the aggregate histograms for the report artifact.
+    pub(crate) fn serialized(&self) -> Result<SerializedHistograms> {
+        Ok(SerializedHistograms {
+            corrected: serialize_histogram(&self.corrected)?,
+            uncorrected: serialize_histogram(&self.uncorrected)?,
+            dispatch_delay: serialize_histogram(&self.dispatch_delay)?,
+            ttft: serialize_histogram(&self.ttft)?,
+        })
+    }
+}
+
 /// Converts a microsecond histogram into a millisecond percentile summary.
 pub(crate) fn histogram_summary(histogram: &Histogram<u64>) -> PercentileSummary {
     if histogram.is_empty() {

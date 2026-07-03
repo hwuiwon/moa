@@ -507,6 +507,11 @@ fn build_report(
         total_cost_cents,
         windows: state.recorder.window_reports(),
         tenant_ids,
+        hdr: state
+            .recorder
+            .serialized()
+            .map_err(|error| tracing::warn!(%error, "histogram serialization failed"))
+            .ok(),
         sessions: state.sessions,
     }
 }

@@ -7,6 +7,7 @@ mod config;
 mod edge_backend;
 mod harness;
 mod hist;
+mod merge;
 mod metrics;
 mod options;
 mod plan;
@@ -34,6 +35,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 pub use harness::run_loadtest;
+pub use hist::SerializedHistograms;
+pub use merge::{MergedSummary, merge_report_files, render_merged_summary};
 pub use options::{LoadMode, LoadTestOptions, OutputFormat, SessionProfileKind};
 pub use report::{
     ErrorTaxonomy, LoadTestReport, PercentileSummary, SessionReport, StepLatencyReport,

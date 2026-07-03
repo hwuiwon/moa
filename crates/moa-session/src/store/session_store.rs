@@ -453,6 +453,10 @@ impl PostgresSessionStore {
         if appends.is_empty() {
             return Ok(Vec::new());
         }
+        #[cfg(feature = "failpoints")]
+        if let Some(error) = crate::failpoints::hit("event_append_pre") {
+            return Err(error);
+        }
 
         // Offload blobs before opening the transaction (uses a second pooled
         // connection) so the append transaction only does index-friendly work.
@@ -670,6 +674,12 @@ impl PostgresSessionStore {
         }
 
         transaction.commit().await.map_err(map_sqlx_error)?;
+        // Models an ack lost after commit: the row is durable but the caller
+        // sees an error and will retry, exercising dedupe-key idempotency.
+        #[cfg(feature = "failpoints")]
+        if let Some(error) = crate::failpoints::hit("event_append_post_commit") {
+            return Err(error);
+        }
 
         // Build results in input order and record metrics for newly inserted events.
         let mut records = Vec::with_capacity(prepared.len());

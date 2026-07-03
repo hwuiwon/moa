@@ -141,8 +141,10 @@ services:
       RUSTFS_CONSOLE_ENABLE: "true"
     command: ["/data"]
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      # Host ports are configurable because 9000/9001 are popular (minio,
+      # k3d node ports); in-network consumers always use rustfs:9000.
+      - "${MOA_RUSTFS_PORT:-9000}:9000"
+      - "${MOA_RUSTFS_CONSOLE_PORT:-9001}:9001"
     volumes:
       - moa-rustfs-data:/data
 
@@ -247,10 +249,10 @@ services:
       MOA_GOOGLE_API_KEY: ${MOA_GOOGLE_API_KEY:-}
       MOA_COHERE_API_KEY: ${MOA_COHERE_API_KEY:-}
       MOA_ZEROENTROPY_API_KEY: ${MOA_ZEROENTROPY_API_KEY:-}
-      # Contact-token signing keys; required for edge-mode loadtest and any
-      # contact session flow. Generate dev keys with `make loadtest-edge-keys`.
-      MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM: ${MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM:-}
-      MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM: ${MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM:-}
+      # Contact-token signing keys are opt-in via docker-compose.edge.yml:
+      # an empty MOA_AUTH_CONTACT_TOKENS_* value counts as "section
+      # configured" and hard-fails config loading, so they must not be
+      # passed through unconditionally here.
     ports:
       # Restate handler port 9080 is internal-only. Use moa-edge on 8080.
       - "10021:9081"

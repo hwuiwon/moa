@@ -9,6 +9,7 @@
 //! against the tenants recorded in the returned report.
 
 mod experiments;
+mod toxiproxy;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -18,6 +19,7 @@ use anyhow::{Context, Result, bail};
 use crate::*;
 
 pub use experiments::*;
+pub use toxiproxy::Toxiproxy;
 
 /// How long to wait for the orchestrator to report ready after a recreate.
 const ORCHESTRATOR_READY_TIMEOUT: Duration = Duration::from_secs(180);
@@ -31,6 +33,8 @@ pub struct ChaosStackConfig {
     pub project_dir: PathBuf,
     /// Restate ingress endpoint fronting the orchestrator.
     pub endpoint: String,
+    /// Toxiproxy control API (chaos overlay), for network faults.
+    pub toxiproxy_url: String,
 }
 
 impl Default for ChaosStackConfig {
@@ -38,12 +42,13 @@ impl Default for ChaosStackConfig {
         Self {
             project_dir: PathBuf::from("."),
             endpoint: "http://localhost:10010".to_string(),
+            toxiproxy_url: "http://localhost:10060".to_string(),
         }
     }
 }
 
 /// One injected fault.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fault {
     /// SIGKILL a compose service; heal restarts it.
     KillService(&'static str),
@@ -53,6 +58,23 @@ pub enum Fault {
     RestartService(&'static str),
     /// No container fault; the fault lives in the provider script.
     ProviderScript,
+    /// Downstream latency on a toxiproxy route (chaos overlay required).
+    ToxiLatency {
+        /// Proxy name from toxiproxy.json (`postgres`, `openfga`).
+        proxy: &'static str,
+        /// Added latency per read.
+        latency: Duration,
+        /// Latency jitter.
+        jitter: Duration,
+    },
+    /// Full partition of a toxiproxy route (listener disabled).
+    ToxiPartition {
+        /// Proxy name from toxiproxy.json.
+        proxy: &'static str,
+    },
+    /// Several simultaneous faults, injected in order and healed in reverse
+    /// order. Must not nest another `Multi`.
+    Multi(Vec<Fault>),
 }
 
 /// One chaos experiment definition.
@@ -110,6 +132,44 @@ impl ExperimentOutcome {
             bail!("{}: no turns completed at all", self.name);
         }
         Ok(())
+    }
+
+    /// Ratio of the worst window p95 to the final active window p95.
+    /// Faults that the system absorbs through retries never fail a turn but
+    /// leave a latency bulge; a ratio well above 1 proves the fault landed
+    /// and that the tail recovered by the end of the run.
+    pub fn degradation_ratio(&self) -> f64 {
+        let active: Vec<&WindowReport> = self
+            .report
+            .windows
+            .iter()
+            .filter(|window| !window.warmup && window.turns_completed > 0)
+            .collect();
+        let Some(last) = active.last() else {
+            return 0.0;
+        };
+        let peak = active
+            .iter()
+            .map(|window| window.latency_corrected_ms.p95)
+            .fold(0.0, f64::max);
+        if last.latency_corrected_ms.p95 <= 0.0 {
+            return 0.0;
+        }
+        peak / last.latency_corrected_ms.p95
+    }
+
+    /// Worst corrected-latency p95 across windows overlapping `[from, to)`.
+    /// Latency faults that never fail turns still show up here.
+    pub fn phase_p95_ms(&self, from: Duration, to: Duration) -> f64 {
+        let from_ms = from.as_secs_f64() * 1_000.0;
+        let to_ms = to.as_secs_f64() * 1_000.0;
+        self.report
+            .windows
+            .iter()
+            .filter(|window| window.end_ms > from_ms && window.start_ms < to_ms)
+            .filter(|window| window.turns_completed > 0)
+            .map(|window| window.latency_corrected_ms.p95)
+            .fold(0.0, f64::max)
     }
 
     /// True when any window overlapping the fault phase saw turn errors or a
@@ -211,36 +271,87 @@ async fn wait_postgres_ready(cfg: &ChaosStackConfig) -> Result<()> {
     }
 }
 
+/// Toxic name used for driver-added latency toxics.
+const CHAOS_TOXIC_NAME: &str = "chaos_latency";
+
 impl Fault {
-    async fn inject(&self, cfg: &ChaosStackConfig) -> Result<()> {
+    /// Flattens `Multi` into its parts; every other fault is a single part.
+    fn parts(&self) -> Vec<&Fault> {
         match self {
-            Fault::KillService(service) => compose(cfg, &["kill", "-s", "SIGKILL", service]).await,
-            Fault::StopService(service) => compose(cfg, &["stop", service]).await,
-            Fault::RestartService(service) => {
-                compose(cfg, &["restart", service]).await?;
-                if *service == "postgres" {
-                    wait_postgres_ready(cfg).await?;
-                }
-                Ok(())
-            }
-            Fault::ProviderScript => Ok(()),
+            Fault::Multi(parts) => parts.iter().collect(),
+            other => vec![other],
         }
     }
 
-    async fn heal(&self, cfg: &ChaosStackConfig) -> Result<()> {
-        match self {
-            Fault::KillService(service) | Fault::StopService(service) => {
-                compose(cfg, &["start", service]).await?;
-                if *service == "moa-orchestrator" {
-                    wait_orchestrator_ready().await?;
-                }
-                if *service == "postgres" {
-                    wait_postgres_ready(cfg).await?;
-                }
-                Ok(())
-            }
-            Fault::RestartService(_) | Fault::ProviderScript => Ok(()),
+    async fn inject(&self, cfg: &ChaosStackConfig) -> Result<()> {
+        for part in self.parts() {
+            inject_part(part, cfg).await?;
         }
+        Ok(())
+    }
+
+    async fn heal(&self, cfg: &ChaosStackConfig) -> Result<()> {
+        for part in self.parts().into_iter().rev() {
+            heal_part(part, cfg).await?;
+        }
+        Ok(())
+    }
+}
+
+async fn inject_part(fault: &Fault, cfg: &ChaosStackConfig) -> Result<()> {
+    match fault {
+        Fault::KillService(service) => compose(cfg, &["kill", "-s", "SIGKILL", service]).await,
+        Fault::StopService(service) => compose(cfg, &["stop", service]).await,
+        Fault::RestartService(service) => {
+            compose(cfg, &["restart", service]).await?;
+            if *service == "postgres" {
+                wait_postgres_ready(cfg).await?;
+            }
+            Ok(())
+        }
+        Fault::ProviderScript => Ok(()),
+        Fault::ToxiLatency {
+            proxy,
+            latency,
+            jitter,
+        } => {
+            Toxiproxy::new(&cfg.toxiproxy_url)?
+                .add_latency(proxy, CHAOS_TOXIC_NAME, *latency, *jitter)
+                .await
+        }
+        Fault::ToxiPartition { proxy } => {
+            Toxiproxy::new(&cfg.toxiproxy_url)?
+                .set_enabled(proxy, false)
+                .await
+        }
+        Fault::Multi(_) => bail!("nested Multi faults are not supported"),
+    }
+}
+
+async fn heal_part(fault: &Fault, cfg: &ChaosStackConfig) -> Result<()> {
+    match fault {
+        Fault::KillService(service) | Fault::StopService(service) => {
+            compose(cfg, &["start", service]).await?;
+            if *service == "moa-orchestrator" {
+                wait_orchestrator_ready().await?;
+            }
+            if *service == "postgres" {
+                wait_postgres_ready(cfg).await?;
+            }
+            Ok(())
+        }
+        Fault::RestartService(_) | Fault::ProviderScript => Ok(()),
+        Fault::ToxiLatency { proxy, .. } => {
+            Toxiproxy::new(&cfg.toxiproxy_url)?
+                .remove_toxic(proxy, CHAOS_TOXIC_NAME)
+                .await
+        }
+        Fault::ToxiPartition { proxy } => {
+            Toxiproxy::new(&cfg.toxiproxy_url)?
+                .set_enabled(proxy, true)
+                .await
+        }
+        Fault::Multi(_) => bail!("nested Multi faults are not supported"),
     }
 }
 

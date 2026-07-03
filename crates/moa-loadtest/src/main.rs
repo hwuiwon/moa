@@ -93,11 +93,21 @@ struct Args {
     /// RNG seed for schedules, tenant sampling, and plan generation.
     #[arg(long, default_value_t = 42)]
     seed: u64,
+
+    /// Merge worker report JSON files instead of running load. Reports must
+    /// come from `--output json` runs (they embed HdrHistograms).
+    #[arg(long, num_args = 1.., value_name = "REPORT_JSON")]
+    merge: Vec<std::path::PathBuf>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if !args.merge.is_empty() {
+        let merged = moa_loadtest::merge_report_files(&args.merge)?;
+        println!("{}", moa_loadtest::render_merged_summary(&merged));
+        return Ok(());
+    }
     let sessions = args.sessions.unwrap_or(match args.mode {
         LoadMode::Mock => 100,
         LoadMode::Live => 5,

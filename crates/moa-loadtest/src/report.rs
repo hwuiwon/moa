@@ -151,6 +151,9 @@ pub struct LoadTestReport {
     pub windows: Vec<WindowReport>,
     /// Tenants generated for this run; scopes post-run invariant checks.
     pub tenant_ids: Vec<Uuid>,
+    /// Embedded base64 HdrHistograms for lossless multi-worker merging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdr: Option<SerializedHistograms>,
     /// Per-session results.
     pub sessions: Vec<SessionReport>,
 }

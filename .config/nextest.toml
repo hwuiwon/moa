@@ -140,6 +140,12 @@ test-group = "service-e2e"
 threads-required = "num-test-threads"
 
 [[profile.default.overrides]]
+# Chaos experiments recreate containers and run multi-minute steady/fault/
+# recovery windows; give them a long leash before nextest terminates them.
+filter = 'binary(/^chaos_docker$/)'
+slow-timeout = { period = "120s", terminate-after = 8 }
+
+[[profile.default.overrides]]
 filter = 'binary(/(_provider_e2e|_live|_docker)$/)'
 test-group = "live-external"
 threads-required = "num-test-threads"

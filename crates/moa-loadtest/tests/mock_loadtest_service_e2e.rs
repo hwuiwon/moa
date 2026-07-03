@@ -108,15 +108,24 @@ fn mock_short_profile_reports_runtime_step_latency() {
 
     let snapshot =
         std::fs::read_to_string(&prom_out).expect("mock smoke step latency prometheus snapshot");
-    let expected_turns = metric_value(&snapshot, "perf_gate_requests_total");
-    assert_eq!(expected_turns, 25.0);
+    // Open-loop schedules derive turn counts from rate x duration, so pin the
+    // relationship (steps sampled for every completed turn) instead of a
+    // fixed count.
+    let scheduled = metric_value(&snapshot, "perf_gate_requests_total");
+    let completed = metric_value(&snapshot, "perf_gate_turns_completed");
+    assert!(completed > 0.0, "no turns completed:\n{snapshot}");
+    assert!(
+        completed <= scheduled,
+        "completed {completed} exceeds scheduled {scheduled}"
+    );
     for step in
         moa_observability::TURN_LATENCY_REPORT_STEPS.map(moa_observability::TurnLatencyStep::as_str)
     {
-        assert_eq!(
-            metric_value_with_step(&snapshot, "perf_gate_step_latency_samples", step),
-            expected_turns,
-            "expected one {step} sample per completed turn"
+        let samples = metric_value_with_step(&snapshot, "perf_gate_step_latency_samples", step);
+        assert!(
+            samples >= completed,
+            "expected at least one {step} sample per completed turn; \
+             samples={samples}, completed={completed}"
         );
         let p50 = metric_value_with_step(&snapshot, "perf_gate_step_latency_p50_ms", step);
         let p95 = metric_value_with_step(&snapshot, "perf_gate_step_latency_p95_ms", step);

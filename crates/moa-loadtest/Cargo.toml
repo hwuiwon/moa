@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
 eventsource-stream.workspace = true

@@ -6,6 +6,8 @@
 pub mod analytics;
 mod attachment_storage;
 pub mod blob;
+#[cfg(feature = "failpoints")]
+pub mod failpoints;
 pub mod neon;
 pub mod queries;
 pub mod store;

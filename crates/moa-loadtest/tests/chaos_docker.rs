@@ -8,10 +8,18 @@
 
 mod chaos_docker_support;
 
+#[path = "chaos_docker/combo_kill_fga_down_docker.rs"]
+mod combo_kill_fga_down_docker;
+#[path = "chaos_docker/combo_storm_pg_restart_docker.rs"]
+mod combo_storm_pg_restart_docker;
 #[path = "chaos_docker/openfga_outage_docker.rs"]
 mod openfga_outage_docker;
 #[path = "chaos_docker/orchestrator_kill_docker.rs"]
 mod orchestrator_kill_docker;
+#[path = "chaos_docker/postgres_latency_docker.rs"]
+mod postgres_latency_docker;
+#[path = "chaos_docker/postgres_partition_docker.rs"]
+mod postgres_partition_docker;
 #[path = "chaos_docker/postgres_restart_docker.rs"]
 mod postgres_restart_docker;
 #[path = "chaos_docker/provider_mid_stream_abort_docker.rs"]

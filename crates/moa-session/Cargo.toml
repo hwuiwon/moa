@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Deterministic storage failpoints for chaos tests; never enable in prod.
+failpoints = []
+
 [dependencies]
 async-trait.workspace = true
 backon.workspace = true

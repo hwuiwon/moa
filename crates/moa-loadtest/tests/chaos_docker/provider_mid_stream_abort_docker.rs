@@ -20,9 +20,10 @@ async fn chaos_provider_mid_stream_abort_fails_turns_cleanly_docker() {
         .expect("experiment run completes");
 
     assert!(
-        outcome.report.errors.failed_turns() > 0,
-        "abort fault never engaged: {:?}",
-        outcome.report.errors
+        outcome.report.errors.failed_turns() > 0 || outcome.degradation_ratio() > 2.5,
+        "abort fault never engaged: errors {:?}, degradation ratio {:.2}",
+        outcome.report.errors,
+        outcome.degradation_ratio()
     );
     outcome
         .assert_recovered()

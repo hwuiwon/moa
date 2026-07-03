@@ -1,0 +1,29 @@
+# Toxiproxy chaos overlay: routes the orchestrator's Postgres and OpenFGA
+# connections through toxiproxy so network faults (latency, partitions,
+# resets) can be injected via its HTTP API on host port 10060.
+#
+# Usage: docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d
+services:
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.11.0
+    container_name: moa-toxiproxy
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    restart: unless-stopped
+    volumes:
+      - ./crates/moa-loadtest/scripts/toxiproxy.json:/config/toxiproxy.json:ro
+    ports:
+      # Toxiproxy control API used by the chaos driver.
+      - "10060:8474"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      openfga:
+        condition: service_started
+
+  moa-orchestrator:
+    environment:
+      MOA_DATABASE_URL: postgres://moa_owner:dev@toxiproxy:15432/moa
+      MOA_AUTHZ_OPENFGA_URL: http://toxiproxy:18080
+    depends_on:
+      toxiproxy:
+        condition: service_started

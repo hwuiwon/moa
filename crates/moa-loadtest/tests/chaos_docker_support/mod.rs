@@ -27,6 +27,8 @@ pub fn stack_config() -> ChaosStackConfig {
         project_dir: workspace_root,
         endpoint: std::env::var("MOA_RESTATE_INGRESS_URL")
             .unwrap_or_else(|_| "http://localhost:10010".to_string()),
+        toxiproxy_url: std::env::var("MOA_TOXIPROXY_URL")
+            .unwrap_or_else(|_| "http://localhost:10060".to_string()),
     }
 }
 

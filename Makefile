@@ -144,7 +144,8 @@ loadtest-soak:
 chaos-smoke:
 	@: $${MOA_AUTHZ_OPENFGA_STORE_ID:?run make fga-bootstrap and export the OpenFGA env first}
 	MOA_RUN_CHAOS_TESTS=1 cargo nextest run -p moa-loadtest --test chaos_docker \
-	  --run-ignored all --no-capture -E 'test(provider_storm)'
+	  --run-ignored all --no-capture --test-threads 1 \
+	  -E 'test(chaos_provider_429_storm_degrades_then_recovers_docker)'
 
 # The full chaos experiment matrix. Experiments recreate the orchestrator and
 # stop/kill stack services; run only against a disposable dev stack.

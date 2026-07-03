@@ -303,6 +303,107 @@ async fn distinct_dedupe_keys_append_separate_events_db() {
     assert_eq!(events.len(), 2);
 }
 
+#[cfg(feature = "failpoints")]
+mod failpoint_db {
+    //! Failpoint chaos coverage: transient storage failures around the append
+    //! commit must never lose or duplicate events. Run with
+    //! `cargo nextest run -p moa-session --features failpoints`.
+
+    use super::*;
+    use moa_session::failpoints;
+
+    #[tokio::test]
+    async fn append_pre_write_failure_then_retry_appends_exactly_once_db() {
+        // Pins: a failure injected before any write surfaces as StorageError,
+        // and the retried append persists exactly one event.
+        let test_db = test_db().await;
+        let session_id = new_session(&test_db).await;
+        failpoints::arm("event_append_pre", 1);
+
+        let first = test_db
+            .store()
+            .emit_event_record(
+                session_id,
+                user_message("pre-write-fault"),
+                Some("failpoint-pre".to_string()),
+            )
+            .await;
+        assert!(
+            matches!(first, Err(MoaError::StorageError(_))),
+            "armed pre-write failpoint must fail the first append: {first:?}"
+        );
+
+        let retried = test_db
+            .store()
+            .emit_event_record(
+                session_id,
+                user_message("pre-write-fault"),
+                Some("failpoint-pre".to_string()),
+            )
+            .await
+            .expect("retry after pre-write fault succeeds");
+        assert_eq!(retried.sequence_num, 0);
+
+        let events = test_db
+            .store()
+            .get_events(session_id, EventRange::all())
+            .await
+            .expect("read events after pre-write fault retry");
+        assert_eq!(events.len(), 1, "exactly one event after retry");
+        failpoints::reset("event_append_pre");
+    }
+
+    #[tokio::test]
+    async fn append_post_commit_ack_loss_then_retry_dedupes_to_one_event_db() {
+        // Pins: an ack lost AFTER commit (the ambiguous failure containers
+        // rarely reproduce) leaves the row durable; the caller's retry with
+        // the same dedupe key returns the original sequence instead of
+        // appending a duplicate.
+        let test_db = test_db().await;
+        let session_id = new_session(&test_db).await;
+        failpoints::arm("event_append_post_commit", 1);
+
+        let first = test_db
+            .store()
+            .emit_event_record(
+                session_id,
+                user_message("post-commit-fault"),
+                Some("failpoint-post".to_string()),
+            )
+            .await;
+        assert!(
+            matches!(first, Err(MoaError::StorageError(_))),
+            "armed post-commit failpoint must fail the ack: {first:?}"
+        );
+
+        let retried = test_db
+            .store()
+            .emit_event_record(
+                session_id,
+                user_message("post-commit-fault"),
+                Some("failpoint-post".to_string()),
+            )
+            .await
+            .expect("retry after post-commit ack loss succeeds");
+        assert_eq!(
+            retried.sequence_num, 0,
+            "retry must resolve to the already-committed event"
+        );
+
+        let events = test_db
+            .store()
+            .get_events(session_id, EventRange::all())
+            .await
+            .expect("read events after post-commit retry");
+        assert_eq!(
+            events.len(),
+            1,
+            "the committed-but-unacked event must not be duplicated"
+        );
+        failpoints::reset("event_append_post_commit");
+    }
+}
+
 #[tokio::test]
 async fn none_dedupe_key_always_appends_db() {
     // Pins: appends without a dedupe key keep inserting every time (today's behavior).

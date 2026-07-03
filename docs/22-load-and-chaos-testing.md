@@ -106,6 +106,52 @@ Prometheus metrics — never traces, because Restate replay suppresses spans.
 | No duplicate events after orchestrator kill + Restate replay | dedupe scan |
 | Recovery SLO: p99 under budget and backlog drained within deadline | windowed client histograms |
 
+## Runbooks
+
+**T1 smoke (PR gate).** `cargo run --release -p moa-loadtest --bin perf_gate --
+--profile mock-short --duration 30s` against a stack started by
+`make loadtest-mock`. Gates: corrected p95, turn error rate, session failures.
+
+**T2 capacity (nightly).** `make loadtest-capacity` — recreates the
+orchestrator with `scripts/realistic.json` (real latency/TTFT pacing, tool
+loop) and ramps 5→200 turns/s over 10 minutes across 8 tenants. Read the
+window series in `target/perf-gate/capacity.json`: the knee is where
+dispatch-delay p95 starts climbing monotonically. Record the per-replica
+sustainable rate and per-turn step latencies in `docs/18-performance.md`.
+
+**Soak.** `make loadtest-soak SOAK_RATE=<70% of knee> SOAK_DURATION=8h`;
+watch the window series for drift (leaks, compaction pressure, event
+partition growth).
+
+**T3 scale-out (multi-worker).** Shard the schedule across worker processes
+or hosts — each runs `moa-loadtest ... --seed <distinct> --output json >
+worker-N.json` — then merge losslessly: `moa-loadtest --merge worker-*.json`
+(reports embed HdrHistograms; merged percentiles are exact). Certify
+10k+ QPS by driving `sum(worker rates) >= 10_000 / replicas` per replica
+count and confirming merged corrected p99 stays in budget with zero
+invariant violations.
+
+**Edge mode.** `make loadtest-edge-keys`, export the printed env, recreate
+the compose stack, then add `--edge-endpoint http://localhost:10000` — turns
+run through the production SSE path with real API keys and contact tokens,
+and TTFT is measured from the first `response` frame.
+
+**Chaos.** `make chaos-smoke` (provider 429 storm) or `make chaos-matrix`
+(all experiments, serialized). Network-fault experiments need the overlay:
+`docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d`.
+Deterministic storage failpoints: `cargo nextest run -p moa-session
+--features failpoints --test events_append_only_db`. Every experiment ends
+with the invariant sweep from `moa_test_support::invariants`.
+
+## Certification checklist (per release)
+
+1. T1 gates green on the release candidate.
+2. T2 knee within 10% of the recorded baseline; step-latency p95s attributed.
+3. Chaos matrix green (all experiments recover, zero invariant violations).
+4. Failpoint `_db` lane green.
+5. For a 10k+ QPS claim: T3 merged report at the target rate with corrected
+   p99 in budget and invariant sweep clean.
+
 ## Metrics wiring
 
 - Orchestrator and edge expose Prometheus at `:9090` (compose hosts
