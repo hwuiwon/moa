@@ -287,6 +287,60 @@ async fn pgvector_round_trip_returns_identical_seed_first() {
 }
 
 #[tokio::test]
+async fn knn_on_unprovisioned_partition_returns_no_hits_instead_of_erroring() {
+    // Pins: a partition with no embedder state row (a brand-new tenant that
+    // has never ingested memory) answers reads with zero hits; the turn-fatal
+    // StoragePartitionEmbedderStateMissing error is reserved for writes.
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = Uuid::now_v7().to_string();
+
+    let store = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(storage_partition_id.clone()),
+    );
+    let matches = store
+        .knn(&VectorQuery {
+            embedding: basis_vector(0),
+            k: 10,
+            label_filter: None,
+            max_pii_class: "restricted".to_string(),
+            include_global: false,
+            as_of: None,
+        })
+        .await
+        .expect("unprovisioned partition read must not error");
+    assert!(
+        matches.is_empty(),
+        "expected zero hits from an unprovisioned partition, got {}",
+        matches.len()
+    );
+
+    // Writes stay guarded: upserting into the unprovisioned partition is a
+    // hard error so dimension/model safety is never silently skipped.
+    let item = vector_item(
+        Uuid::now_v7(),
+        &storage_partition_id,
+        "Fact",
+        basis_vector(1),
+    );
+    let write = store.upsert(&[item]).await;
+    assert!(
+        matches!(
+            write,
+            Err(moa_memory_vector::Error::StoragePartitionEmbedderStateMissing { .. })
+        ),
+        "write to unprovisioned partition must fail: {write:?}"
+    );
+
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
 async fn cross_tenant_knn_cannot_see_other_workspace_vectors() {
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await

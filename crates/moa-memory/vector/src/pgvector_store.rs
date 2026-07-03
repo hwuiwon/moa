@@ -154,7 +154,22 @@ impl VectorStore for PgvectorStore {
             .execute(conn.as_mut())
             .await?;
         }
-        guard_storage_partition_embedder(conn.as_mut(), &storage_partition_id).await?;
+        // An unprovisioned partition (no embedder state row) holds no vectors,
+        // so a read truthfully returns zero hits instead of failing the turn;
+        // writes still hard-fail so dimension safety is preserved. A brand-new
+        // tenant's first turns run before any memory exists — that must not be
+        // a terminal error.
+        match guard_storage_partition_embedder(conn.as_mut(), &storage_partition_id).await {
+            Ok(()) => {}
+            Err(Error::StoragePartitionEmbedderStateMissing { .. }) => {
+                tracing::debug!(
+                    storage_partition_id,
+                    "vector search on unprovisioned partition; returning no hits"
+                );
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error),
+        }
         validate_dimension(&query.embedding)?;
         let halfvec = HalfVector::from_f32_slice(&query.embedding);
 
