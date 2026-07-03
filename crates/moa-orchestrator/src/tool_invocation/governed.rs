@@ -3,18 +3,21 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequest};
+use moa_core::wire::session_store::RecordSegmentToolUseRequest;
 use moa_core::wire::turn::TurnPhase;
 use moa_core::{
-    ActionPolicyEffect, Event, ProcedureTool, SessionId, SessionMeta, ToolCallContent, ToolCallId,
-    ToolCallRequest, ToolInvocation, ToolOutput, TrustedSandboxFileManifestRef, WorkerId,
-    is_delegation_tool_name, is_procedure_tool_name,
+    ActionPolicyEffect, Event, ProcedureTool, SessionId, SessionMeta, SessionStore as _,
+    ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput,
+    TrustedSandboxFileManifestRef, WorkerId, is_delegation_tool_name, is_procedure_tool_name,
 };
 use moa_observability::restate_observability::{event_persist_span, tool_dispatch_span};
-use moa_observability::{record_turn_event_persist_duration, record_turn_tool_dispatch_duration};
+use moa_observability::{
+    record_session_error, record_turn_event_persist_duration, record_turn_tool_dispatch_duration,
+};
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
+use crate::ctx::OrchestratorCtx;
 use crate::delegation::storage_user_id;
 use crate::services::{
     action_policy::{ActionPolicyClient, PrepareActionReviewRequest, PreparedActionReview},
@@ -594,14 +597,19 @@ async fn append_session_event(
 ) -> Result<u64, HandlerError> {
     let persist_span = event_persist_span(1);
     let persist_started = Instant::now();
+    let store = OrchestratorCtx::current().session_store_backend();
     let sequence_num = ctx
-        .service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event,
-            dedupe_key: None,
-        }))
-        .call()
+        .run(|| async move {
+            if matches!(&event, Event::Error { .. }) {
+                record_session_error("event_log");
+            }
+            store
+                .emit_event_record(session_id, event, None)
+                .await
+                .map(|record| record.sequence_num)
+                .map_err(HandlerError::from)
+        })
+        .name("append_session_event")
         .instrument(persist_span)
         .await?;
     record_turn_event_persist_duration(persist_started.elapsed(), 1);

@@ -14,13 +14,20 @@ pub async fn run_loadtest(options: LoadTestOptions) -> Result<LoadTestReport> {
         }
         None => build_backend_pool(&options, &config, &pool).await?,
     };
-    let before_step_latency =
-        scrape_step_latency_snapshot(options.metrics_endpoint.as_deref()).await?;
+    let before_metrics =
+        scrape_runtime_metrics_snapshot(options.metrics_endpoint.as_deref()).await?;
     let started = Instant::now();
     let mut report = run_sessions(targets, pool, &options, started).await?;
-    let after_step_latency =
-        scrape_step_latency_snapshot(options.metrics_endpoint.as_deref()).await?;
+    let after_metrics =
+        scrape_runtime_metrics_snapshot(options.metrics_endpoint.as_deref()).await?;
     report.step_latency_ms =
-        step_latency_delta_reports(before_step_latency.as_ref(), after_step_latency.as_ref());
+        step_latency_delta_reports(before_metrics.as_ref(), after_metrics.as_ref());
+    report.event_append_phase_latency_ms =
+        event_append_phase_latency_delta_reports(before_metrics.as_ref(), after_metrics.as_ref());
+    report.resource_bill = resource_bill_delta_report(
+        before_metrics.as_ref(),
+        after_metrics.as_ref(),
+        report.turns_completed,
+    );
     Ok(report)
 }

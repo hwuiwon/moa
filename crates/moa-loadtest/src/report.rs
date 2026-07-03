@@ -51,6 +51,45 @@ pub struct StepLatencyReport {
     pub latency_ms: PercentileSummary,
 }
 
+/// Aggregate latency summary for one session event append phase.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventAppendPhaseLatencyReport {
+    /// Stable low-cardinality append phase label.
+    pub phase: String,
+    /// Number of samples observed for this phase.
+    pub sample_count: u64,
+    /// Approximate phase latency summary in milliseconds.
+    pub latency_ms: PercentileSummary,
+}
+
+/// Durable event append counts for one event type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventAppendTypeReport {
+    /// Stable event type label as exported by `moa_session_events_appended_total`.
+    pub event_type: String,
+    /// Number of rows appended for this event type during the measured run.
+    pub rows: u64,
+}
+
+/// Durable event-log resource bill derived from runtime metrics.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResourceBillReport {
+    /// Total durable session-event rows appended during the measured run.
+    pub durable_event_rows: u64,
+    /// Durable event rows per completed turn.
+    pub durable_event_rows_per_turn: f64,
+    /// Durable `ProgressUpdate` rows appended during the measured run.
+    pub progress_update_rows: u64,
+    /// Durable `ProgressUpdate` rows per completed turn.
+    pub progress_update_rows_per_turn: f64,
+    /// Durable `ProgressNarrated` rows appended during the measured run.
+    pub progress_narrated_rows: u64,
+    /// Durable `ProgressNarrated` rows per completed turn.
+    pub progress_narrated_rows_per_turn: f64,
+    /// Durable event rows split by event type.
+    pub event_rows_by_type: Vec<EventAppendTypeReport>,
+}
+
 /// Failure counts split by kind so gates can budget each class separately.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ErrorTaxonomy {
@@ -149,8 +188,18 @@ pub struct LoadTestReport {
     pub dispatch_delay_ms: PercentileSummary,
     /// Aggregate TTFT summary (measured from dispatch).
     pub ttft_ms: PercentileSummary,
+    /// Edge-mode observation lag for the first durable response frame, measured
+    /// from the event timestamp to client receipt when the SSE payload carries
+    /// a server timestamp. Zero when unavailable.
+    pub edge_observation_wait_ms: PercentileSummary,
     /// Aggregate per-step latency summaries from runtime metrics.
     pub step_latency_ms: Vec<StepLatencyReport>,
+    /// Session event append transaction phase latency summaries from runtime metrics.
+    #[serde(default)]
+    pub event_append_phase_latency_ms: Vec<EventAppendPhaseLatencyReport>,
+    /// Durable event-log resource bill from runtime metrics.
+    #[serde(default)]
+    pub resource_bill: ResourceBillReport,
     /// Aggregate cache-hit summary across sessions.
     pub cache_hit_rate: PercentileSummary,
     /// Total spend in cents.
@@ -234,6 +283,15 @@ pub fn render_human_report(report: &LoadTestReport) -> String {
         format_millis(report.ttft_ms.p95),
         format_millis(report.ttft_ms.p99)
     );
+    if report.edge_observation_wait_ms.max > 0.0 {
+        let _ = writeln!(
+            &mut output,
+            "Edge Observation Wait:\n  p50: {}  p95: {}  p99: {}",
+            format_millis(report.edge_observation_wait_ms.p50),
+            format_millis(report.edge_observation_wait_ms.p95),
+            format_millis(report.edge_observation_wait_ms.p99)
+        );
+    }
     if !report.step_latency_ms.is_empty() {
         let _ = writeln!(&mut output, "Step Latency:");
         for step in &report.step_latency_ms {
@@ -247,6 +305,32 @@ pub fn render_human_report(report: &LoadTestReport) -> String {
                 format_millis(step.latency_ms.p99)
             );
         }
+    }
+    if !report.event_append_phase_latency_ms.is_empty() {
+        let _ = writeln!(&mut output, "Event Append Phase Latency:");
+        for phase in &report.event_append_phase_latency_ms {
+            let _ = writeln!(
+                &mut output,
+                "  {} (n={}): p50 {}  p95 {}  p99 {}",
+                phase.phase,
+                phase.sample_count,
+                format_millis(phase.latency_ms.p50),
+                format_millis(phase.latency_ms.p95),
+                format_millis(phase.latency_ms.p99)
+            );
+        }
+    }
+    if report.resource_bill.durable_event_rows > 0 {
+        let _ = writeln!(
+            &mut output,
+            "Resource Bill:\n  durable event rows: {} ({:.2}/turn) | ProgressUpdate: {} ({:.2}/turn) | ProgressNarrated: {} ({:.2}/turn)",
+            report.resource_bill.durable_event_rows,
+            report.resource_bill.durable_event_rows_per_turn,
+            report.resource_bill.progress_update_rows,
+            report.resource_bill.progress_update_rows_per_turn,
+            report.resource_bill.progress_narrated_rows,
+            report.resource_bill.progress_narrated_rows_per_turn
+        );
     }
     let _ = writeln!(
         &mut output,

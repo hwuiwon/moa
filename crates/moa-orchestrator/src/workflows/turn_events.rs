@@ -7,17 +7,18 @@
 
 use std::time::Instant;
 
-use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequest};
+use moa_core::wire::session_store::RecordSegmentToolUseRequest;
 use moa_core::wire::turn::TurnOutcomeKind;
 use moa_core::{
-    Event, ModelTier, SessionId, SessionMeta, ToolCallContent, ToolCallId, ToolInvocation,
-    ToolOutput,
+    Event, ModelTier, SessionId, SessionMeta, SessionStore as _, ToolCallContent, ToolCallId,
+    ToolInvocation, ToolOutput,
 };
 use moa_observability::restate_observability::event_persist_span;
 use moa_observability::{record_session_error, record_turn_event_persist_duration};
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
+use crate::ctx::OrchestratorCtx;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::workflows::turn_responsiveness::ToolBudgetExhausted;
 
@@ -33,14 +34,19 @@ pub(super) async fn append_session_event(
     let persist_span = event_persist_span(1);
     let persist_started = Instant::now();
     moa_core::record_durable_append();
+    let store = OrchestratorCtx::current().session_store_backend();
     let sequence_num = ctx
-        .service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event,
-            dedupe_key: None,
-        }))
-        .call()
+        .run(|| async move {
+            if matches!(&event, Event::Error { .. }) {
+                record_session_error("event_log");
+            }
+            store
+                .emit_event_record(session_id, event, None)
+                .await
+                .map(|record| record.sequence_num)
+                .map_err(HandlerError::from)
+        })
+        .name("append_session_event")
         .instrument(persist_span)
         .await?;
     record_turn_event_persist_duration(persist_started.elapsed(), 1);
@@ -143,7 +149,21 @@ pub(super) async fn append_zero_cost_assistant_response(
     meta: &SessionMeta,
     text: String,
 ) -> Result<String, HandlerError> {
-    append_session_event(
+    append_zero_cost_assistant_response_with_sequence(ctx, session_id, meta, text)
+        .await
+        .map(|(text, _sequence_num)| text)
+}
+
+/// Persists a zero-cost auxiliary assistant response and returns its text plus sequence number.
+///
+/// Root turn execution uses the sequence number to bound post-outcome segment assessment.
+pub(super) async fn append_zero_cost_assistant_response_with_sequence(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    meta: &SessionMeta,
+    text: String,
+) -> Result<(String, u64), HandlerError> {
+    let sequence_num = append_session_event(
         ctx,
         session_id,
         Event::BrainResponse {
@@ -160,7 +180,7 @@ pub(super) async fn append_zero_cost_assistant_response(
         },
     )
     .await?;
-    Ok(text)
+    Ok((text, sequence_num))
 }
 
 /// Maps a turn outcome kind to its stable label for tracing and metrics.

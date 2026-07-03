@@ -39,8 +39,9 @@ pub use hist::SerializedHistograms;
 pub use merge::{MergedSummary, merge_report_files, render_merged_summary};
 pub use options::{LoadMode, LoadTestOptions, OutputFormat, SessionProfileKind};
 pub use report::{
-    ErrorTaxonomy, LoadTestReport, PercentileSummary, SessionReport, StepLatencyReport,
-    WindowReport, render_human_report, render_json_report,
+    ErrorTaxonomy, EventAppendPhaseLatencyReport, EventAppendTypeReport, LoadTestReport,
+    PercentileSummary, ResourceBillReport, SessionReport, StepLatencyReport, WindowReport,
+    render_human_report, render_json_report,
 };
 pub use schedule::{ArrivalProcess, LoadShape};
 

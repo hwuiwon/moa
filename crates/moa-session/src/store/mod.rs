@@ -23,7 +23,8 @@ use moa_core::{
     record_session_event_replay,
 };
 use moa_observability::{
-    record_session_created, record_session_event_append, record_session_event_decoded_bytes,
+    SessionEventAppendPhase, record_session_created, record_session_event_append,
+    record_session_event_append_phase_duration, record_session_event_decoded_bytes,
     record_session_event_load, record_sessions_active, record_turn_completed,
 };
 use moa_security::ActionPolicyRuleStore;

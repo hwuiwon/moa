@@ -2,9 +2,10 @@
 //!
 //! All histograms store microseconds. The recorder keeps three aggregate
 //! views (coordinated-omission-corrected latency measured from the intended
-//! arrival time, uncorrected service time measured from actual dispatch, and
-//! dispatch delay) plus rotating per-window histograms so reports can show
-//! degradation and recovery over time instead of one flat aggregate.
+//! arrival time, uncorrected service time measured from actual dispatch,
+//! dispatch delay, TTFT, and optional edge observation lag) plus rotating
+//! per-window histograms so reports can show degradation and recovery over
+//! time instead of one flat aggregate.
 
 use std::time::Duration;
 
@@ -47,6 +48,7 @@ pub(crate) struct LatencyRecorder {
     uncorrected: Histogram<u64>,
     dispatch_delay: Histogram<u64>,
     ttft: Histogram<u64>,
+    edge_observation_wait: Histogram<u64>,
     windows: Vec<Window>,
     window_len: Duration,
     warmup: Duration,
@@ -60,6 +62,7 @@ impl LatencyRecorder {
             uncorrected: new_histogram()?,
             dispatch_delay: new_histogram()?,
             ttft: new_histogram()?,
+            edge_observation_wait: new_histogram()?,
             windows: Vec::new(),
             window_len: window_len.max(Duration::from_secs(1)),
             warmup,
@@ -87,6 +90,7 @@ impl LatencyRecorder {
         dispatched: Duration,
         completed: Duration,
         ttft: Option<Duration>,
+        edge_observation_wait: Option<Duration>,
     ) -> Result<()> {
         let corrected = completed.saturating_sub(intended);
         let uncorrected = completed.saturating_sub(dispatched);
@@ -97,6 +101,9 @@ impl LatencyRecorder {
             record(&mut self.dispatch_delay, delay);
             if let Some(ttft) = ttft {
                 record(&mut self.ttft, ttft);
+            }
+            if let Some(edge_observation_wait) = edge_observation_wait {
+                record(&mut self.edge_observation_wait, edge_observation_wait);
             }
         }
         let window = self.window_at(completed)?;
@@ -129,6 +136,11 @@ impl LatencyRecorder {
     /// Summarizes TTFT samples.
     pub(crate) fn ttft_summary(&self) -> PercentileSummary {
         histogram_summary(&self.ttft)
+    }
+
+    /// Summarizes edge-mode event timestamp to client-observation lag samples.
+    pub(crate) fn edge_observation_wait_summary(&self) -> PercentileSummary {
+        histogram_summary(&self.edge_observation_wait)
     }
 
     /// Renders the per-window series for the final report.
@@ -175,6 +187,9 @@ pub struct SerializedHistograms {
     pub dispatch_delay: String,
     /// TTFT samples.
     pub ttft: String,
+    /// Edge observation lag samples.
+    #[serde(default)]
+    pub edge_observation_wait: String,
 }
 
 /// Serializes one histogram to base64 V2 wire format.
@@ -210,6 +225,7 @@ impl LatencyRecorder {
             uncorrected: serialize_histogram(&self.uncorrected)?,
             dispatch_delay: serialize_histogram(&self.dispatch_delay)?,
             ttft: serialize_histogram(&self.ttft)?,
+            edge_observation_wait: serialize_histogram(&self.edge_observation_wait)?,
         })
     }
 }
@@ -254,6 +270,7 @@ mod tests {
                 Duration::from_millis(1_900),
                 Duration::from_secs(2),
                 None,
+                None,
             )
             .expect("record");
 
@@ -284,6 +301,7 @@ mod tests {
                 Duration::from_secs(1),
                 Duration::from_secs(2),
                 None,
+                None,
             )
             .expect("warmup turn");
         recorder
@@ -291,6 +309,7 @@ mod tests {
                 Duration::from_secs(6),
                 Duration::from_secs(6),
                 Duration::from_secs(7),
+                None,
                 None,
             )
             .expect("measured turn");
@@ -302,6 +321,43 @@ mod tests {
         assert_eq!(windows[0].turns_completed, 1);
         assert!(!windows[1].warmup);
         assert_eq!(windows[1].turns_completed, 1);
+    }
+
+    #[test]
+    fn edge_observation_wait_records_only_post_warmup_samples() {
+        // Pins: edge observation lag is a separate optional percentile stream,
+        // not blended into service-time or TTFT latency.
+        let mut recorder =
+            LatencyRecorder::new(Duration::from_secs(5), Duration::from_secs(5)).expect("recorder");
+        recorder
+            .record_turn(
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Some(Duration::from_millis(100)),
+                Some(Duration::from_millis(900)),
+            )
+            .expect("warmup turn");
+        recorder
+            .record_turn(
+                Duration::from_secs(6),
+                Duration::from_secs(6),
+                Duration::from_secs(7),
+                Some(Duration::from_millis(120)),
+                Some(Duration::from_millis(250)),
+            )
+            .expect("measured turn");
+
+        assert!(
+            (recorder.edge_observation_wait_summary().p50 - 250.0).abs() < 1.0,
+            "edge observation wait {:?}",
+            recorder.edge_observation_wait_summary()
+        );
+        assert!(
+            (recorder.ttft_summary().p50 - 120.0).abs() < 1.0,
+            "ttft {:?}",
+            recorder.ttft_summary()
+        );
     }
 
     #[test]

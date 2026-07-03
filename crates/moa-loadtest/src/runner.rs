@@ -39,6 +39,7 @@ const ARRIVAL_STALENESS_BUDGET: Duration = Duration::from_secs(30);
 #[derive(Debug)]
 pub(crate) struct TurnObservation {
     pub(crate) ttft: Option<Duration>,
+    pub(crate) edge_observation_wait: Option<Duration>,
     pub(crate) auto_denied_approvals: usize,
 }
 
@@ -60,6 +61,7 @@ enum CollectorMessage {
         dispatched: Duration,
         completed: Duration,
         ttft: Option<Duration>,
+        edge_observation_wait: Option<Duration>,
         tool_calls: u64,
         event_error_events: u64,
         tool_error_events: u64,
@@ -306,9 +308,9 @@ pub(crate) async fn run_sessions(
         // Shed hopelessly late arrivals so a saturated run still ends on
         // schedule; each shed is reported as a dropped arrival.
         if ctx.elapsed() > intended + ARRIVAL_STALENESS_BUDGET {
-            let _ = ctx.collector_tx.send(CollectorMessage::ArrivalDropped {
-                at: ctx.elapsed(),
-            });
+            let _ = ctx
+                .collector_tx
+                .send(CollectorMessage::ArrivalDropped { at: ctx.elapsed() });
             continue 'schedule;
         }
         let slot = tokio::select! {
@@ -419,6 +421,7 @@ async fn run_one_turn(ctx: Arc<DispatchCtx>, mut slot: SessionSlot, intended: Du
                 dispatched,
                 completed,
                 ttft: observation.ttft,
+                edge_observation_wait: observation.edge_observation_wait,
                 tool_calls,
                 event_error_events,
                 tool_error_events,
@@ -481,6 +484,7 @@ async fn run_collector(
                 dispatched,
                 completed,
                 ttft,
+                edge_observation_wait,
                 tool_calls,
                 event_error_events,
                 tool_error_events,
@@ -498,10 +502,13 @@ async fn run_collector(
                 if event_load_failed {
                     state.errors.event_load_failures += 1;
                 }
-                if let Err(error) = state
-                    .recorder
-                    .record_turn(intended, dispatched, completed, ttft)
-                {
+                if let Err(error) = state.recorder.record_turn(
+                    intended,
+                    dispatched,
+                    completed,
+                    ttft,
+                    edge_observation_wait,
+                ) {
                     tracing::warn!(%error, "latency recording failed");
                 }
             }
@@ -590,7 +597,10 @@ fn build_report(
         turn_latency_ms: state.recorder.uncorrected_summary(),
         dispatch_delay_ms: state.recorder.dispatch_delay_summary(),
         ttft_ms: state.recorder.ttft_summary(),
+        edge_observation_wait_ms: state.recorder.edge_observation_wait_summary(),
         step_latency_ms: Vec::new(),
+        event_append_phase_latency_ms: Vec::new(),
+        resource_bill: ResourceBillReport::default(),
         cache_hit_rate: summarize_percentiles(&cache_samples),
         total_cost_cents,
         windows: state.recorder.window_reports(),

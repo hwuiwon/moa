@@ -16,6 +16,7 @@
 //! public edge surface; they go through the ingress client and stay off the
 //! measured hot path.
 
+use chrono::Utc;
 use eventsource_stream::Eventsource as _;
 use futures_util::StreamExt as _;
 use moa_auth_providers::api_keys::{self, Env as ApiKeyEnv, KeyOwner, NewApiKey};
@@ -120,6 +121,7 @@ impl SessionTarget for EdgeTarget {
         }
 
         let mut ttft = None;
+        let mut edge_observation_wait = None;
         let mut stream = response.bytes_stream().eventsource();
         loop {
             let next = tokio::time::timeout_at(deadline, stream.next())
@@ -141,6 +143,7 @@ impl SessionTarget for EdgeTarget {
             match frame.event.as_str() {
                 "response" if ttft.is_none() => {
                     ttft = Some(started.elapsed());
+                    edge_observation_wait = response_frame_observation_wait(&frame.data);
                 }
                 "done" => {
                     let status = serde_json::from_str::<serde_json::Value>(&frame.data)
@@ -157,6 +160,7 @@ impl SessionTarget for EdgeTarget {
                         // fresh turn; the work still finished.
                         "completed" | "idle" => Ok(TurnObservation {
                             ttft,
+                            edge_observation_wait,
                             auto_denied_approvals: 0,
                         }),
                         "cancelled" => Err(TurnFailure {
@@ -195,6 +199,14 @@ impl SessionTarget for EdgeTarget {
     async fn recent_events(&self, session_id: SessionId) -> Result<Vec<EventRecord>> {
         self.reads.recent_events(session_id).await
     }
+}
+
+fn response_frame_observation_wait(data: &str) -> Option<Duration> {
+    let record = serde_json::from_str::<EventRecord>(data).ok()?;
+    Utc::now()
+        .signed_duration_since(record.timestamp)
+        .to_std()
+        .ok()
 }
 
 /// Builds one edge target per pool identity: API key row, FGA grants, and a
@@ -295,4 +307,49 @@ pub(crate) async fn build_edge_backend_pool(
         }));
     }
     Ok(targets)
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Duration as ChronoDuration;
+    use moa_core::{EventType, SessionId};
+
+    use super::*;
+
+    #[test]
+    fn response_frame_observation_wait_uses_event_timestamp() {
+        // Pins: edge-mode observation lag is estimated from the durable response event timestamp,
+        // not from the terminal done frame.
+        let record = EventRecord {
+            id: Uuid::now_v7(),
+            session_id: SessionId(Uuid::now_v7()),
+            sequence_num: 7,
+            event_type: EventType::BrainResponse,
+            event: Event::BrainResponse {
+                text: "hello".to_string(),
+                thought_signature: None,
+                model: ModelId::new("test-model"),
+                model_tier: moa_core::ModelTier::Main,
+                input_tokens_uncached: 1,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens: 1,
+                cost_cents: 0,
+                duration_ms: 1,
+            },
+            timestamp: Utc::now() - ChronoDuration::milliseconds(250),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        };
+        let data = serde_json::to_string(&record).expect("serialize event record");
+
+        let wait = response_frame_observation_wait(&data)
+            .expect("event timestamp should produce an observation wait");
+
+        assert!(
+            wait >= Duration::from_millis(200),
+            "wait should reflect event timestamp age: {wait:?}"
+        );
+    }
 }

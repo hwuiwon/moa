@@ -286,7 +286,15 @@ async fn guard_storage_partition_embedder_for_write(
         return Ok(());
     }
 
-    let state = load_storage_partition_embedder_state(conn, storage_partition_id).await?;
+    let state = match load_storage_partition_embedder_state(conn, storage_partition_id).await {
+        Ok(state) => state,
+        Err(Error::StoragePartitionEmbedderStateMissing { .. }) => {
+            initialize_storage_partition_embedder_state(conn, storage_partition_id, &items[0])
+                .await?;
+            load_storage_partition_embedder_state(conn, storage_partition_id).await?
+        }
+        Err(error) => return Err(error),
+    };
     guard_storage_partition_dimension(storage_partition_id, &state)?;
     for item in items {
         if state.embedding_model != item.embedding_model {
@@ -339,6 +347,41 @@ async fn load_storage_partition_embedder_state(
         embedding_dimension,
         reembed_state: row.try_get("reembed_state")?,
     })
+}
+
+/// Provisions a fresh partition's embedder identity from its first write.
+///
+/// There is no earlier provisioning step in production — tenants are implicit
+/// and the state row only appears once lifecycle jobs touch the partition —
+/// so the first vector write establishes `(model, version, dimension)`.
+/// `ON CONFLICT DO NOTHING` keeps this race-safe: concurrent first-writers
+/// never overwrite an established identity, and the caller reloads and
+/// validates against whichever writer won.
+async fn initialize_storage_partition_embedder_state(
+    conn: &mut PgConnection,
+    storage_partition_id: &str,
+    item: &VectorItem,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO moa.storage_partition_state
+            (storage_partition_id, embedding_model, embedding_model_version, embedding_dimension)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (storage_partition_id) DO NOTHING
+        "#,
+    )
+    .bind(storage_partition_id)
+    .bind(&item.embedding_model)
+    .bind(item.embedding_model_version)
+    .bind(VECTOR_DIMENSION as i32)
+    .execute(&mut *conn)
+    .await?;
+    tracing::info!(
+        storage_partition_id,
+        embedding_model = %item.embedding_model,
+        "provisioned partition embedder state from first vector write"
+    );
+    Ok(())
 }
 
 fn guard_storage_partition_dimension(

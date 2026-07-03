@@ -168,6 +168,7 @@ impl SessionTarget for RemoteTarget {
         match outcome.kind {
             moa_core::wire::turn::TurnOutcomeKind::Completed => Ok(TurnObservation {
                 ttft: None,
+                edge_observation_wait: None,
                 auto_denied_approvals: 0,
             }),
             moa_core::wire::turn::TurnOutcomeKind::Cancelled => Err(TurnFailure {

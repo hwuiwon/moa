@@ -5,6 +5,7 @@
 //! V2-serialized HdrHistograms. Merging adds the histograms (exact, unlike
 //! merging percentiles) and sums the counters.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::*;
@@ -38,6 +39,10 @@ pub struct MergedSummary {
     pub dispatch_delay_ms: PercentileSummary,
     /// Merged TTFT.
     pub ttft_ms: PercentileSummary,
+    /// Merged edge observation lag.
+    pub edge_observation_wait_ms: PercentileSummary,
+    /// Summed durable event-log resource bill.
+    pub resource_bill: ResourceBillReport,
 }
 
 fn add_errors(total: &mut ErrorTaxonomy, part: &ErrorTaxonomy) {
@@ -63,6 +68,8 @@ pub fn merge_report_files(paths: &[impl AsRef<Path>]) -> Result<MergedSummary> {
     let mut uncorrected: Option<hdrhistogram::Histogram<u64>> = None;
     let mut dispatch: Option<hdrhistogram::Histogram<u64>> = None;
     let mut ttft: Option<hdrhistogram::Histogram<u64>> = None;
+    let mut edge_observation_wait: Option<hdrhistogram::Histogram<u64>> = None;
+    let mut event_rows_by_type = BTreeMap::new();
     let mut merged = MergedSummary {
         workers: 0,
         requested_rate_qps: 0.0,
@@ -77,6 +84,8 @@ pub fn merge_report_files(paths: &[impl AsRef<Path>]) -> Result<MergedSummary> {
         turn_latency_ms: histogram_summary(&empty_histogram()?),
         dispatch_delay_ms: histogram_summary(&empty_histogram()?),
         ttft_ms: histogram_summary(&empty_histogram()?),
+        edge_observation_wait_ms: histogram_summary(&empty_histogram()?),
+        resource_bill: ResourceBillReport::default(),
     };
 
     for path in paths {
@@ -97,6 +106,9 @@ pub fn merge_report_files(paths: &[impl AsRef<Path>]) -> Result<MergedSummary> {
         merge_into(&mut uncorrected, &hdr.uncorrected)?;
         merge_into(&mut dispatch, &hdr.dispatch_delay)?;
         merge_into(&mut ttft, &hdr.ttft)?;
+        if !hdr.edge_observation_wait.is_empty() {
+            merge_into(&mut edge_observation_wait, &hdr.edge_observation_wait)?;
+        }
 
         merged.workers += 1;
         merged.requested_rate_qps += report.requested_rate_qps;
@@ -107,6 +119,9 @@ pub fn merge_report_files(paths: &[impl AsRef<Path>]) -> Result<MergedSummary> {
         merged.sessions_started += report.sessions_started;
         merged.sessions_completed += report.sessions_completed;
         merged.sessions_failed += report.sessions_failed;
+        for item in report.resource_bill.event_rows_by_type {
+            *event_rows_by_type.entry(item.event_type).or_insert(0) += item.rows;
+        }
     }
 
     if let Some(histogram) = &corrected {
@@ -121,7 +136,49 @@ pub fn merge_report_files(paths: &[impl AsRef<Path>]) -> Result<MergedSummary> {
     if let Some(histogram) = &ttft {
         merged.ttft_ms = histogram_summary(histogram);
     }
+    if let Some(histogram) = &edge_observation_wait {
+        merged.edge_observation_wait_ms = histogram_summary(histogram);
+    }
+    merged.resource_bill = resource_bill_from_rows(event_rows_by_type, merged.turns_completed);
     Ok(merged)
+}
+
+fn resource_bill_from_rows(
+    event_rows_by_type: BTreeMap<String, u64>,
+    turns_completed: u64,
+) -> ResourceBillReport {
+    let event_rows_by_type = event_rows_by_type
+        .into_iter()
+        .filter(|(_, rows)| *rows > 0)
+        .map(|(event_type, rows)| EventAppendTypeReport { event_type, rows })
+        .collect::<Vec<_>>();
+    let durable_event_rows = event_rows_by_type.iter().map(|item| item.rows).sum();
+    let progress_update_rows = rows_for_event_type(&event_rows_by_type, "ProgressUpdate");
+    let progress_narrated_rows = rows_for_event_type(&event_rows_by_type, "ProgressNarrated");
+    ResourceBillReport {
+        durable_event_rows,
+        durable_event_rows_per_turn: merged_per_turn(durable_event_rows, turns_completed),
+        progress_update_rows,
+        progress_update_rows_per_turn: merged_per_turn(progress_update_rows, turns_completed),
+        progress_narrated_rows,
+        progress_narrated_rows_per_turn: merged_per_turn(progress_narrated_rows, turns_completed),
+        event_rows_by_type,
+    }
+}
+
+fn rows_for_event_type(event_rows_by_type: &[EventAppendTypeReport], event_type: &str) -> u64 {
+    event_rows_by_type
+        .iter()
+        .find(|item| item.event_type == event_type)
+        .map(|item| item.rows)
+        .unwrap_or_default()
+}
+
+fn merged_per_turn(rows: u64, turns_completed: u64) -> f64 {
+    if turns_completed == 0 {
+        return 0.0;
+    }
+    rows as f64 / turns_completed as f64
 }
 
 fn empty_histogram() -> Result<hdrhistogram::Histogram<u64>> {
@@ -186,6 +243,27 @@ pub fn render_merged_summary(summary: &MergedSummary) -> String {
         format_millis(summary.ttft_ms.p95),
         format_millis(summary.ttft_ms.p99)
     );
+    if summary.edge_observation_wait_ms.max > 0.0 {
+        let _ = writeln!(
+            &mut output,
+            "Edge Observation Wait:\n  p50: {}  p95: {}  p99: {}",
+            format_millis(summary.edge_observation_wait_ms.p50),
+            format_millis(summary.edge_observation_wait_ms.p95),
+            format_millis(summary.edge_observation_wait_ms.p99)
+        );
+    }
+    if summary.resource_bill.durable_event_rows > 0 {
+        let _ = writeln!(
+            &mut output,
+            "Resource Bill:\n  durable event rows: {} ({:.2}/turn) | ProgressUpdate: {} ({:.2}/turn) | ProgressNarrated: {} ({:.2}/turn)",
+            summary.resource_bill.durable_event_rows,
+            summary.resource_bill.durable_event_rows_per_turn,
+            summary.resource_bill.progress_update_rows,
+            summary.resource_bill.progress_update_rows_per_turn,
+            summary.resource_bill.progress_narrated_rows,
+            summary.resource_bill.progress_narrated_rows_per_turn
+        );
+    }
     let _ = writeln!(
         &mut output,
         "Sessions: {} started, {} completed, {} failed",
@@ -211,6 +289,7 @@ mod tests {
                 Duration::from_secs(1),
                 Duration::from_millis(1_010),
                 None,
+                None,
             )
             .expect("fast turn");
         }
@@ -221,6 +300,7 @@ mod tests {
                 Duration::from_secs(1),
                 Duration::from_secs(1),
                 Duration::from_secs(3),
+                None,
                 None,
             )
             .expect("slow turn");
@@ -251,6 +331,8 @@ mod tests {
             "merged p95 must still reflect the fast majority: {:?}",
             merged.turn_latency_corrected_ms
         );
+        assert_eq!(merged.resource_bill.durable_event_rows, 100);
+        assert_eq!(merged.resource_bill.durable_event_rows_per_turn, 1.0);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -275,7 +357,21 @@ mod tests {
             turn_latency_ms: recorder.uncorrected_summary(),
             dispatch_delay_ms: recorder.dispatch_delay_summary(),
             ttft_ms: recorder.ttft_summary(),
+            edge_observation_wait_ms: recorder.edge_observation_wait_summary(),
             step_latency_ms: Vec::new(),
+            event_append_phase_latency_ms: Vec::new(),
+            resource_bill: ResourceBillReport {
+                durable_event_rows: recorder.corrected_len(),
+                durable_event_rows_per_turn: 1.0,
+                progress_update_rows: 0,
+                progress_update_rows_per_turn: 0.0,
+                progress_narrated_rows: 0,
+                progress_narrated_rows_per_turn: 0.0,
+                event_rows_by_type: vec![EventAppendTypeReport {
+                    event_type: "BrainResponse".to_string(),
+                    rows: recorder.corrected_len(),
+                }],
+            },
             cache_hit_rate: recorder.corrected_summary(),
             total_cost_cents: 0,
             windows: Vec::new(),

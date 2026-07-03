@@ -1,4 +1,4 @@
-//! Live channel delivery for durable turn progress updates.
+//! Live channel delivery for transient turn progress updates.
 
 use moa_core::wire::turn::TurnPhase;
 use moa_core::{
@@ -37,7 +37,7 @@ pub(crate) fn enable_live_delivery(ctx: &WorkflowContext<'_>) {
     ctx.set(K_PROGRESS_LIVE_DELIVERY_ENABLED, Json::from(true));
 }
 
-/// Attempts to deliver a user-visible status update for a durable progress event.
+/// Attempts to deliver a user-visible status update for transient turn progress.
 pub(crate) async fn maybe_deliver(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,

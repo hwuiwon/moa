@@ -36,6 +36,8 @@ impl RootTurnStateKey {
     pub(crate) const USER_MESSAGE_SEQUENCE: &'static str = "user_message_sequence";
     /// Cached query-rewrite result from the last context compilation pass.
     pub(crate) const QUERY_REWRITE_CACHE: &'static str = "query_rewrite_cache";
+    /// Sequence number of the latest assistant response appended by this root turn.
+    pub(crate) const LAST_RESPONSE_SEQUENCE: &'static str = "last_response_sequence";
     /// User-message sequence for which deterministic ready delegation nodes were spawned.
     pub(crate) const AUTO_DELEGATION_SEQUENCE: &'static str = "auto_delegation_sequence";
     /// Worker ids spawned by deterministic auto-delegation for the admitted user message.

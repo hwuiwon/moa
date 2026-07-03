@@ -130,11 +130,35 @@ fn human_report_renders_endpoint_error_taxonomy_and_windows() {
         turn_latency_ms: summary(10.0),
         dispatch_delay_ms: summary(2.0),
         ttft_ms: summary(0.0),
+        edge_observation_wait_ms: summary(250.0),
         step_latency_ms: vec![StepLatencyReport {
             step: "pipeline_compile".to_string(),
             sample_count: 1,
             latency_ms: summary(4.0),
         }],
+        event_append_phase_latency_ms: vec![EventAppendPhaseLatencyReport {
+            phase: "lock_session".to_string(),
+            sample_count: 2,
+            latency_ms: summary(7.0),
+        }],
+        resource_bill: ResourceBillReport {
+            durable_event_rows: 6,
+            durable_event_rows_per_turn: 1.5,
+            progress_update_rows: 0,
+            progress_update_rows_per_turn: 0.0,
+            progress_narrated_rows: 2,
+            progress_narrated_rows_per_turn: 0.5,
+            event_rows_by_type: vec![
+                EventAppendTypeReport {
+                    event_type: "BrainResponse".to_string(),
+                    rows: 4,
+                },
+                EventAppendTypeReport {
+                    event_type: "ProgressNarrated".to_string(),
+                    rows: 2,
+                },
+            ],
+        },
         cache_hit_rate: summary(0.0),
         total_cost_cents: 0,
         windows: vec![WindowReport {
@@ -154,6 +178,11 @@ fn human_report_renders_endpoint_error_taxonomy_and_windows() {
 
     assert!(rendered.contains("Endpoint: http://localhost:10010"));
     assert!(rendered.contains("pipeline_compile (n=1): p50 4ms  p95 4ms  p99 4ms"));
+    assert!(rendered.contains("lock_session (n=2): p50 7ms  p95 7ms  p99 7ms"));
+    assert!(rendered.contains("Edge Observation Wait:"));
+    assert!(rendered.contains(
+        "durable event rows: 6 (1.50/turn) | ProgressUpdate: 0 (0.00/turn) | ProgressNarrated: 2 (0.50/turn)"
+    ));
     assert!(rendered.contains("Turn Latency (corrected, from intended arrival):"));
     assert!(rendered.contains("timeout 1"));
     assert!(rendered.contains("Windows (corrected p95 per 10s):"));

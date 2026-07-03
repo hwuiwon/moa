@@ -152,7 +152,7 @@ chaos-smoke:
 chaos-matrix:
 	@: $${MOA_AUTHZ_OPENFGA_STORE_ID:?run make fga-bootstrap and export the OpenFGA env first}
 	MOA_RUN_CHAOS_TESTS=1 cargo nextest run -p moa-loadtest --test chaos_docker \
-	  --run-ignored all --no-capture --test-threads 1
+	  --run-ignored all --no-capture --test-threads 1 --no-fail-fast
 
 # Generates a local-dev RSA keypair for contact-token signing and prints the
 # env exports the compose stack needs for edge-mode load tests.

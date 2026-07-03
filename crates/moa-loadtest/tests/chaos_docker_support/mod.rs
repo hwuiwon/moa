@@ -52,12 +52,28 @@ pub async fn sweep_invariants(outcome: &ExperimentOutcome) -> Vec<InvariantViola
     .expect("invariant sweep queries succeed")
 }
 
+/// True when the fault left evidence: window errors, a throughput hole, or a
+/// clear fault-phase latency bulge. Healthy systems absorb short partitions
+/// and kills through retries/replay, so latency is often the only trace.
+pub fn fault_visibly_landed(experiment: &ChaosExperiment, outcome: &ExperimentOutcome) -> bool {
+    if outcome.fault_phase_disrupted(experiment.steady, experiment.fault_window) {
+        return true;
+    }
+    let steady_p95 = outcome.phase_p95_ms(Duration::ZERO, experiment.steady);
+    // Include one window of slack: stalled turns complete just after heal.
+    let fault_p95 = outcome.phase_p95_ms(
+        experiment.steady,
+        experiment.steady + experiment.fault_window + Duration::from_secs(10),
+    );
+    fault_p95 > steady_p95 * 1.5 + 2_000.0
+}
+
 /// Standard post-experiment assertions shared by every scenario: the fault
 /// actually landed, the system recovered, and no durability invariant broke.
 pub async fn assert_experiment_clean(experiment: &ChaosExperiment, outcome: &ExperimentOutcome) {
     assert!(
-        outcome.fault_phase_disrupted(experiment.steady, experiment.fault_window),
-        "{}: fault did not visibly disrupt the fault phase; experiment is vacuous",
+        fault_visibly_landed(experiment, outcome),
+        "{}: fault left no error, throughput, or latency evidence; experiment is vacuous",
         outcome.name
     );
     outcome

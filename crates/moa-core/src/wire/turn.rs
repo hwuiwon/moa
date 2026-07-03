@@ -155,7 +155,7 @@ pub struct TurnProgress {
     pub max_tool_calls: Option<u32>,
     /// Elapsed turn runtime in milliseconds.
     pub elapsed_ms: u64,
-    /// Last durable progress summary emitted for this turn.
+    /// Last transient progress summary emitted for this turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_progress_summary: Option<String>,
     /// Whether a cancel signal has been recorded.

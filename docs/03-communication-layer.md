@@ -114,7 +114,8 @@ Browser chat clients send user text and their contact token through
 and forwards admission/progress reads through the `Contacts` service, which
 verifies the token, `contact:session:message:send` scope, and session
 allowlist. The response is an SSE stream over the same HTTP request: it first
-emits an `accepted` frame, then durable `progress`, `response`, `tool`, or
+emits an `accepted` frame, then transient `progress` frames from
+`Session/progress.active_turn_progress` plus durable `response`, `tool`, or
 generic `session_event` frames keyed by event sequence number, and finally a
 `done` frame. This lets the browser render the turn without holding a second
 live progress connection. `Session/progress` remains the compact
@@ -124,8 +125,9 @@ When a coordinator turn delegates to workers, the stream stays open across the
 **detached window**. `session_message_terminal_done` closes only when the started
 turn has completed **and** `Session/progress.child_progress` shows no non-terminal
 child; with no children it collapses to the previous turn-completion-only close.
-While children run, the stream keeps emitting durable coordination frames mapped
-from the new `Event` variants: `progress_narration` (`ProgressNarrated`, the
+While children run, the stream keeps emitting transient active-turn progress and
+durable coordination frames mapped from the new `Event` variants:
+`progress_narration` (`ProgressNarrated`, the
 primary user-facing liveness, rendered in the assistant's voice), `worker_signal`
 (`WorkerSignalReceived`), `worker_resume` (`WorkerParentResumeRequested`),
 and `worker_stale` (`WorkerHeartbeatStale`); terminal

@@ -221,11 +221,12 @@ Coordinator turns can return while detached children keep running. Coordination
 is split so the high-frequency path never serializes through the single-writer
 parent VO. `docs/12-restate-architecture.md` is the detailed reference.
 
-- **Telemetry plane (high-frequency, off the `Session` VO).** Child progress
-  still flows to the parent event log via `turn_progress` (`ProgressUpdate`);
-  heartbeats update `Worker` state only; `Session/progress` reads compact
-  per-child summaries (`WorkerProgressSummary`) by bounded fan-in on demand
-  through `Worker/progress_summary`.
+- **Telemetry plane (high-frequency, off the `Session` VO).** Turn progress is
+  cadence-limited workflow state surfaced through `TurnExecution/progress` and
+  `Session/progress`, not a per-tick event-log append. Heartbeats update
+  `Worker` state only; `Session/progress` reads compact per-child summaries
+  (`WorkerProgressSummary`) by bounded fan-in on demand through
+  `Worker/progress_summary`.
 - **Control plane (low-frequency, through the coordinator VO).** A narrow
   child→parent attention signal (`ChildSignalKind` =
   `Finding`/`Blocked`/`NeedsInput`/`Failed`/`HeartbeatStale`) is routed to the
@@ -244,7 +245,7 @@ window. The `Session` VO schedules a generation-guarded narration tick
 (`objects/session/narration.rs`) that never calls the model inline; when its gate
 opens it `.send()`s a detached `LLMGateway::narrate_session` job. That job reads
 the fan-in summaries and makes **one** cheapest-chat-model call covering all
-active workers plus the active coordinator step, appending one
+active workers plus the active coordinator step, appending one durable
 `ProgressNarrated` event per period — O(1) LLM cost regardless of fan-out. With a
 single active source it short-circuits with no LLM call (`model = "none"`).
 Narration is default-on (`progress_narration_enabled`), gated by a coarse cadence

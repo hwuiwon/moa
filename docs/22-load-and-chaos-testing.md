@@ -27,7 +27,18 @@ recorded to HdrHistograms. Reports include both coordinated-omission
 corrected and uncorrected percentiles; the corrected number is the SLO
 number. Client-side HDR percentiles are the source of truth for end-to-end
 latency; server-side Prometheus histograms (`moa_turn_step_duration_seconds`)
-attribute that latency to pipeline steps.
+attribute that latency to pipeline steps. When a metrics endpoint is supplied,
+reports also include a `resource_bill` block from
+`moa_session_events_appended_total`: total durable event rows per completed
+turn, `ProgressUpdate` rows per turn, `ProgressNarrated` rows per turn, and
+the per-event-type row split. They also include
+`event_append_phase_latency_ms` from
+`moa_session_event_append_phase_seconds{phase=...}` so `event_persist` can be
+split into bounded append-store phases such as row-lock acquisition, event
+insert, aggregate update, and commit wait. Edge-mode reports include
+`edge_observation_wait_ms` when the first `response` SSE frame carries a
+durable event timestamp, estimating post-persist observation lag that
+server-side turn metrics do not see.
 
 ## Capacity model
 
@@ -114,10 +125,13 @@ Prometheus metrics — never traces, because Restate replay suppresses spans.
 
 **T2 capacity (nightly).** `make loadtest-capacity` — recreates the
 orchestrator with `scripts/realistic.json` (real latency/TTFT pacing, tool
-loop) and ramps 5→200 turns/s over 10 minutes across 8 tenants. Read the
-window series in `target/perf-gate/capacity.json`: the knee is where
-dispatch-delay p95 starts climbing monotonically. Record the per-replica
-sustainable rate and per-turn step latencies in `docs/18-performance.md`.
+loop) and ramps 5→200 turns/s over 10 minutes across 8 tenants. To test a
+specific database pool profile, run
+`MOA_DATABASE_MAX_CONNECTIONS=<n> make loadtest-capacity` and record that
+profile with the result. Read the window series in
+`target/perf-gate/capacity.json`: the knee is where dispatch-delay p95 starts
+climbing monotonically. Record the per-replica sustainable rate, database pool
+profile, and per-turn step latencies in `docs/18-performance.md`.
 
 **Soak.** `make loadtest-soak SOAK_RATE=<70% of knee> SOAK_DURATION=8h`;
 watch the window series for drift (leaks, compaction pressure, event
@@ -134,14 +148,36 @@ invariant violations.
 **Edge mode.** `make loadtest-edge-keys`, export the printed env, recreate
 the compose stack, then add `--edge-endpoint http://localhost:10000` — turns
 run through the production SSE path with real API keys and contact tokens,
-and TTFT is measured from the first `response` frame.
+TTFT is measured from the first `response` frame, and
+`edge_observation_wait_ms` captures response event timestamp-to-client receipt
+lag when available.
 
 **Chaos.** `make chaos-smoke` (provider 429 storm) or `make chaos-matrix`
-(all experiments, serialized). Network-fault experiments need the overlay:
-`docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d`.
+(all experiments, serialized). Network-fault experiments need the overlay —
+export `COMPOSE_FILE="docker-compose.yml:docker-compose.chaos.yml"` for the
+whole run so the driver's orchestrator recreates keep the toxiproxy routes,
+then `docker compose up -d`.
 Deterministic storage failpoints: `cargo nextest run -p moa-session
 --features failpoints --test events_append_only_db`. Every experiment ends
 with the invariant sweep from `moa_test_support::invariants`.
+
+## Operational rules learned from live runs
+
+- **Never swap orchestrator code under a Restate that holds journaled
+  invocations.** Rebuilding the image mid-campaign poisons replay (RT0016
+  journal mismatch) and the infinite retries starve fresh traffic. Wipe
+  `moa-restate-data` and re-register between code changes, exactly like the
+  e2e scripts' ephemeral Restate.
+- **Mock capacity runs exclude sandbox tool execution.** Sessions created via
+  the SessionStore path carry the system-default agent context, which allows
+  zero tool calls; scripted tool invocations only exercise the policy-denial
+  and loop-guardrail paths. `scripts/realistic.json` therefore uses text-only
+  completions paced like tool round-trips.
+- **The generator is wedge-proof by design** (staleness shedding, bounded
+  pool waits, pool self-healing, overlapped setup). If a run ever exceeds
+  `duration + ~2 min`, treat it as a bug in the harness, not the system.
+- Host ports 9000/9001 frequently collide (minio, k3d node ports); export
+  `MOA_RUSTFS_PORT`/`MOA_RUSTFS_CONSOLE_PORT` to relocate rustfs.
 
 ## Certification checklist (per release)
 
@@ -160,6 +196,9 @@ with the invariant sweep from `moa_test_support::invariants`.
   `k8s/base/20-orchestrator-deployment.yaml`.
 - Turn-step attribution: `moa_turn_step_duration_seconds{step=...}` with
   sub-10ms buckets (see `moa-observability/src/runtime_metrics.rs`).
+- Event append phase attribution:
+  `moa_session_event_append_phase_seconds{phase=...}` splits the durable
+  append path into bounded phases for load reports.
 - Tokio runtime gauges require a `tokio_unstable` build
   (`RUSTFLAGS="--cfg tokio_unstable"`); perf images should enable it.
 - Baselines live in `docs/18-performance.md` and are updated from T2 runs.

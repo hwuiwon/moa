@@ -39,6 +39,9 @@ const TOKIO_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
 /// Prometheus metric name for aggregate turn-step duration samples.
 pub const TURN_STEP_DURATION_METRIC: &str = "moa_turn_step_duration_seconds";
 
+/// Prometheus metric name for session event append transaction phase timings.
+pub const SESSION_EVENT_APPEND_PHASE_METRIC: &str = "moa_session_event_append_phase_seconds";
+
 /// Turn steps reported by the loadtest step-latency view.
 pub const TURN_LATENCY_REPORT_STEPS: [TurnLatencyStep; 6] = [
     TurnLatencyStep::SnapshotLoad,
@@ -104,6 +107,80 @@ impl TurnLatencyStep {
             Self::ToolDispatch => 4,
             Self::EventPersist => 5,
             Self::LlmTtft => 6,
+        }
+    }
+}
+
+/// Low-cardinality phases inside one session event append operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEventAppendPhase {
+    /// Pre-transaction payload encoding and claim-check preparation.
+    Prepare,
+    /// Pool acquire plus `BEGIN`.
+    BeginTransaction,
+    /// `sessions ... FOR UPDATE` lock acquisition and session metadata load.
+    LockSession,
+    /// Lookup of previously persisted idempotency keys.
+    DedupeLookup,
+    /// Fetch of original event rows for dedupe hits.
+    DedupeFetchRecords,
+    /// Local construction of multi-row insert arrays.
+    BuildInsertPayloads,
+    /// Multi-row insert into the append-only event table.
+    InsertEvents,
+    /// Multi-row insert into the dedupe table.
+    InsertDedupeRows,
+    /// Session aggregate counter update.
+    UpdateSessionAggregates,
+    /// Transaction commit, including Postgres commit wait.
+    Commit,
+}
+
+impl SessionEventAppendPhase {
+    /// All session event append phases in a stable order for cached metric handles.
+    const ALL: [SessionEventAppendPhase; 10] = [
+        Self::Prepare,
+        Self::BeginTransaction,
+        Self::LockSession,
+        Self::DedupeLookup,
+        Self::DedupeFetchRecords,
+        Self::BuildInsertPayloads,
+        Self::InsertEvents,
+        Self::InsertDedupeRows,
+        Self::UpdateSessionAggregates,
+        Self::Commit,
+    ];
+
+    /// Returns the stable Prometheus label for this append phase.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepare => "prepare",
+            Self::BeginTransaction => "begin_transaction",
+            Self::LockSession => "lock_session",
+            Self::DedupeLookup => "dedupe_lookup",
+            Self::DedupeFetchRecords => "dedupe_fetch_records",
+            Self::BuildInsertPayloads => "build_insert_payloads",
+            Self::InsertEvents => "insert_events",
+            Self::InsertDedupeRows => "insert_dedupe_rows",
+            Self::UpdateSessionAggregates => "update_session_aggregates",
+            Self::Commit => "commit",
+        }
+    }
+
+    /// Returns the dense index of this phase into [`SessionEventAppendPhase::ALL`].
+    const fn index(self) -> usize {
+        match self {
+            Self::Prepare => 0,
+            Self::BeginTransaction => 1,
+            Self::LockSession => 2,
+            Self::DedupeLookup => 3,
+            Self::DedupeFetchRecords => 4,
+            Self::BuildInsertPayloads => 5,
+            Self::InsertEvents => 6,
+            Self::InsertDedupeRows => 7,
+            Self::UpdateSessionAggregates => 8,
+            Self::Commit => 9,
         }
     }
 }
@@ -480,6 +557,19 @@ pub fn record_session_event_append(event_type: &str) {
         "event_type" => event_type.to_string()
     )
     .increment(1);
+}
+
+/// Records one duration sample for a bounded session event append phase.
+pub fn record_session_event_append_phase_duration(
+    phase: SessionEventAppendPhase,
+    duration: Duration,
+) {
+    static APPEND_PHASE_HISTOGRAMS: OnceLock<[metrics::Histogram; 10]> = OnceLock::new();
+    let histograms = APPEND_PHASE_HISTOGRAMS.get_or_init(|| {
+        SessionEventAppendPhase::ALL
+            .map(|phase| histogram!(SESSION_EVENT_APPEND_PHASE_METRIC, "phase" => phase.as_str()))
+    });
+    histograms[phase.index()].record(duration.as_secs_f64());
 }
 
 /// Records one session event load operation and the number of events returned.
@@ -1089,6 +1179,10 @@ fn register_metric_descriptions() {
         "moa_session_events_appended_total",
         "Session events appended to the durable event log, labeled by event type."
     );
+    describe_histogram!(
+        SESSION_EVENT_APPEND_PHASE_METRIC,
+        "Session event append duration in seconds, labeled by bounded transaction phase."
+    );
     describe_counter!(
         "moa_session_event_loads_total",
         "Session event load operations executed against the durable event log."
@@ -1328,6 +1422,10 @@ mod tests {
         record_scoped_transaction_begin_duration(Duration::from_millis(1));
         record_scoped_guc_application_duration(Duration::from_millis(2));
         record_session_event_append("ToolCall");
+        record_session_event_append_phase_duration(
+            SessionEventAppendPhase::LockSession,
+            Duration::from_millis(3),
+        );
         record_session_event_load(2);
         record_session_event_decoded_bytes(128);
         record_context_pipeline_construction(Duration::from_millis(3));
@@ -1373,6 +1471,7 @@ mod tests {
         assert!(scrape.contains("moa_scoped_transaction_begin_seconds"));
         assert!(scrape.contains("moa_scoped_guc_application_seconds"));
         assert!(scrape.contains("moa_session_events_appended_total"));
+        assert!(scrape.contains("moa_session_event_append_phase_seconds"));
         assert!(scrape.contains("moa_session_event_loads_total"));
         assert!(scrape.contains("moa_session_event_load_events"));
         assert!(scrape.contains("moa_session_event_decoded_bytes_total"));

@@ -1,6 +1,7 @@
 //! `moa_core::SessionStore` implementation for `PostgresSessionStore`.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use super::*;
 
@@ -76,6 +77,10 @@ impl SessionAggregateDelta {
             _ => {}
         }
     }
+}
+
+fn record_append_phase(phase: SessionEventAppendPhase, started: Instant) {
+    record_session_event_append_phase_duration(phase, started.elapsed());
 }
 
 fn validate_session_create_meta(meta: &SessionMeta) -> Result<()> {
@@ -461,16 +466,24 @@ impl PostgresSessionStore {
         // Offload blobs before opening the transaction (uses a second pooled
         // connection) so the append transaction only does index-friendly work.
         let now = Utc::now();
+        let phase_started = Instant::now();
         let mut prepared = Vec::with_capacity(appends.len());
         for append in appends {
             let event = append.event;
-            let payload = encode_event_for_storage(
+            let payload = match encode_event_for_storage(
                 self.blob_store.as_ref(),
                 &session_id,
                 &event,
                 self.blob_threshold_bytes,
             )
-            .await?;
+            .await
+            {
+                Ok(payload) => payload,
+                Err(error) => {
+                    record_append_phase(SessionEventAppendPhase::Prepare, phase_started);
+                    return Err(error);
+                }
+            };
             prepared.push(PreparedAppend {
                 id: Uuid::now_v7(),
                 event_type: event.type_name(),
@@ -482,22 +495,36 @@ impl PostgresSessionStore {
                 event,
             });
         }
+        record_append_phase(SessionEventAppendPhase::Prepare, phase_started);
 
         let sessions = self.table_name("sessions");
         let events = self.table_name("events");
         let dedupe = self.table_name("session_event_dedupe");
 
-        let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let phase_started = Instant::now();
+        let mut transaction = match self.pool.begin().await {
+            Ok(transaction) => {
+                record_append_phase(SessionEventAppendPhase::BeginTransaction, phase_started);
+                transaction
+            }
+            Err(error) => {
+                record_append_phase(SessionEventAppendPhase::BeginTransaction, phase_started);
+                return Err(map_sqlx_error(error));
+            }
+        };
 
+        let phase_started = Instant::now();
         let locked_session = sqlx::query(&format!(
             "SELECT event_count, tenant_id, storage_partition_id, user_id, contact_id \
              FROM {sessions} WHERE id = $1 FOR UPDATE"
         ))
         .bind(session_id.0)
         .fetch_optional(&mut *transaction)
-        .await
-        .map_err(map_sqlx_error)?
-        .ok_or(MoaError::SessionNotFound(session_id))?;
+        .await;
+        record_append_phase(SessionEventAppendPhase::LockSession, phase_started);
+        let locked_session = locked_session
+            .map_err(map_sqlx_error)?
+            .ok_or(MoaError::SessionNotFound(session_id))?;
         let base_sequence = locked_session.col::<i64>("event_count")? as u64;
         let tenant_id = locked_session.col::<Uuid>("tenant_id")?;
         let storage_partition_id = locked_session.col::<String>("storage_partition_id")?;
@@ -511,6 +538,7 @@ impl PostgresSessionStore {
             .collect();
         let mut existing_by_key: HashMap<String, u64> = HashMap::new();
         if !lookup_keys.is_empty() {
+            let phase_started = Instant::now();
             let rows = sqlx::query(&format!(
                 "SELECT dedupe_key, sequence_num FROM {dedupe} \
                  WHERE session_id = $1 AND dedupe_key = ANY($2)"
@@ -518,8 +546,9 @@ impl PostgresSessionStore {
             .bind(session_id.0)
             .bind(&lookup_keys)
             .fetch_all(&mut *transaction)
-            .await
-            .map_err(map_sqlx_error)?;
+            .await;
+            record_append_phase(SessionEventAppendPhase::DedupeLookup, phase_started);
+            let rows = rows.map_err(map_sqlx_error)?;
             for row in &rows {
                 existing_by_key.insert(
                     row.col::<String>("dedupe_key")?,
@@ -559,6 +588,7 @@ impl PostgresSessionStore {
         let mut db_records: HashMap<u64, EventRecord> = HashMap::new();
         if !db_hit_seqs.is_empty() {
             let seqs: Vec<i64> = db_hit_seqs.iter().map(|seq| *seq as i64).collect();
+            let phase_started = Instant::now();
             let rows = sqlx::query(&format!(
                 "SELECT id, session_id, sequence_num, event_type, payload, timestamp, brain_id, \
                         hand_id, token_count \
@@ -568,8 +598,9 @@ impl PostgresSessionStore {
             .bind(session_id.0)
             .bind(&seqs)
             .fetch_all(&mut *transaction)
-            .await
-            .map_err(map_sqlx_error)?;
+            .await;
+            record_append_phase(SessionEventAppendPhase::DedupeFetchRecords, phase_started);
+            let rows = rows.map_err(map_sqlx_error)?;
             for row in &rows {
                 let record = self.event_record_from_row(row).await?;
                 db_records.insert(record.sequence_num, record);
@@ -578,6 +609,7 @@ impl PostgresSessionStore {
 
         // Insert survivors with one multi-row statement and fold aggregate deltas.
         if !insert_entries.is_empty() {
+            let phase_started = Instant::now();
             let count = insert_entries.len();
             let mut ids = Vec::with_capacity(count);
             let mut sequence_nums = Vec::with_capacity(count);
@@ -602,8 +634,10 @@ impl PostgresSessionStore {
                 }
                 delta.add_event(&entry.event, sequence_num);
             }
+            record_append_phase(SessionEventAppendPhase::BuildInsertPayloads, phase_started);
 
-            sqlx::query(&format!(
+            let phase_started = Instant::now();
+            let insert_result = sqlx::query(&format!(
                 "INSERT INTO {events} \
                  (id, session_id, tenant_id, contact_id, storage_partition_id, user_id, \
                   sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
@@ -625,12 +659,14 @@ impl PostgresSessionStore {
             .bind(&hand_ids)
             .bind(&token_counts)
             .execute(&mut *transaction)
-            .await
-            .map_err(map_sqlx_error)?;
+            .await;
+            record_append_phase(SessionEventAppendPhase::InsertEvents, phase_started);
+            insert_result.map_err(map_sqlx_error)?;
 
             if !dedupe_rows.is_empty() {
                 let (keys, seqs): (Vec<String>, Vec<i64>) = dedupe_rows.into_iter().unzip();
-                sqlx::query(&format!(
+                let phase_started = Instant::now();
+                let insert_result = sqlx::query(&format!(
                     "INSERT INTO {dedupe} (session_id, dedupe_key, sequence_num) \
                      SELECT $1, u.dedupe_key, u.sequence_num \
                      FROM UNNEST($2::text[], $3::bigint[]) AS u(dedupe_key, sequence_num)"
@@ -639,13 +675,15 @@ impl PostgresSessionStore {
                 .bind(&keys)
                 .bind(&seqs)
                 .execute(&mut *transaction)
-                .await
-                .map_err(map_sqlx_error)?;
+                .await;
+                record_append_phase(SessionEventAppendPhase::InsertDedupeRows, phase_started);
+                insert_result.map_err(map_sqlx_error)?;
             }
 
             // One aggregate UPDATE for the whole batch, replacing the retired
             // per-row AFTER INSERT trigger.
-            sqlx::query(&format!(
+            let phase_started = Instant::now();
+            let update_result = sqlx::query(&format!(
                 "UPDATE {sessions} SET \
                      event_count = event_count + $2, \
                      turn_count = turn_count + $3, \
@@ -669,11 +707,18 @@ impl PostgresSessionStore {
             .bind(delta.last_checkpoint_seq)
             .bind(now)
             .execute(&mut *transaction)
-            .await
-            .map_err(map_sqlx_error)?;
+            .await;
+            record_append_phase(
+                SessionEventAppendPhase::UpdateSessionAggregates,
+                phase_started,
+            );
+            update_result.map_err(map_sqlx_error)?;
         }
 
-        transaction.commit().await.map_err(map_sqlx_error)?;
+        let phase_started = Instant::now();
+        let commit_result = transaction.commit().await;
+        record_append_phase(SessionEventAppendPhase::Commit, phase_started);
+        commit_result.map_err(map_sqlx_error)?;
         // Models an ack lost after commit: the row is durable but the caller
         // sees an error and will retry, exercising dedupe-key idempotency.
         #[cfg(feature = "failpoints")]
