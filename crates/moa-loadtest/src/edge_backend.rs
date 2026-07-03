@@ -1,0 +1,298 @@
+//! moa-edge SSE backend: drives MOA through the production entry path.
+//!
+//! Unlike the ingress backend (trusted headers straight to Restate), this
+//! target authenticates like a real integration: an Argon2-hashed API key row
+//! per caller, a contact token minted through `POST /v1/contacts/tokens`, a
+//! session created through `POST /v1/sessions`, and turns driven through the
+//! `POST /v1/sessions/{id}/messages` SSE stream. TTFT is the time to the
+//! first `response` frame; completion is the terminal `done` frame.
+//!
+//! Measurement caveat: the edge synthesizes SSE frames by polling
+//! `/Contacts/progress` at a 1-3s adaptive interval, so observed latency has
+//! a polling-granularity floor. That is the real production entry behavior,
+//! which is exactly what this target certifies.
+//!
+//! Verification reads (session meta, event ranges) are not part of the
+//! public edge surface; they go through the ingress client and stay off the
+//! measured hot path.
+
+use eventsource_stream::Eventsource as _;
+use futures_util::StreamExt as _;
+use moa_auth_providers::api_keys::{self, Env as ApiKeyEnv, KeyOwner, NewApiKey};
+use moa_core::types::SYSTEM_DEFAULT_AGENT_REVISION_UID;
+use moa_core::{
+    AgentSessionSelection, ChannelRef, ContactSessionChannelRequest, ContactSessionInitRequest,
+    ContactSessionInitResponse, ContactTokenIssueRequest, ContactTokenIssueResponse,
+};
+use secrecy::ExposeSecret as _;
+use sqlx::postgres::PgPoolOptions;
+
+use crate::*;
+
+/// One edge-authenticated caller driving sessions over SSE.
+pub(crate) struct EdgeTarget {
+    http: reqwest::Client,
+    edge_endpoint: String,
+    tenant_id: TenantId,
+    contact_token: String,
+    model: String,
+    /// Ingress-side reader for meta/event verification, off the hot path.
+    reads: RemoteTarget,
+}
+
+#[async_trait]
+impl SessionTarget for EdgeTarget {
+    async fn start_session(&self, plan: &SessionPlan) -> Result<SessionId> {
+        let request = ContactSessionInitRequest {
+            tenant_id: self.tenant_id,
+            contact_token: self.contact_token.clone(),
+            title: Some(plan.title.clone()),
+            channel: ContactSessionChannelRequest {
+                channel_ref: ChannelRef::Chat {
+                    conversation_id: format!("loadtest-{}", Uuid::now_v7()),
+                    user_id: None,
+                    client_session_id: None,
+                },
+                reason: None,
+            },
+            model: self.model.clone(),
+            agent: AgentSessionSelection {
+                installation_uid: None,
+                revision_uid: Some(SYSTEM_DEFAULT_AGENT_REVISION_UID),
+            },
+        };
+        let response = self
+            .http
+            .post(format!("{}/v1/sessions", self.edge_endpoint))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| {
+                MoaError::ProviderError(format!("edge session init failed: {error}"))
+            })?;
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(MoaError::ProviderError(format!(
+                "edge session init returned {status}: {body}"
+            )));
+        }
+        let parsed: ContactSessionInitResponse = serde_json::from_str(&body)
+            .map_err(|error| MoaError::SerializationError(error.to_string()))?;
+        Ok(parsed.session_id)
+    }
+
+    async fn run_turn(
+        &self,
+        session_id: SessionId,
+        prompt: &str,
+        timeout: Duration,
+    ) -> std::result::Result<TurnObservation, TurnFailure> {
+        let started = Instant::now();
+        let deadline = tokio::time::Instant::now() + timeout;
+        let response = self
+            .http
+            .post(format!(
+                "{}/v1/sessions/{session_id}/messages",
+                self.edge_endpoint
+            ))
+            .header("accept", "text/event-stream")
+            .json(&serde_json::json!({
+                "tenant_id": self.tenant_id,
+                "contact_token": self.contact_token,
+                "user_message": prompt,
+                "model": self.model,
+                "attachments": [],
+            }))
+            .send()
+            .await
+            .map_err(|error| TurnFailure {
+                kind: TurnFailureKind::StartFailed,
+                message: format!("edge message post failed: {error}"),
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(TurnFailure {
+                kind: TurnFailureKind::StartFailed,
+                message: format!("edge message post returned {status}: {body}"),
+            });
+        }
+
+        let mut ttft = None;
+        let mut stream = response.bytes_stream().eventsource();
+        loop {
+            let next = tokio::time::timeout_at(deadline, stream.next())
+                .await
+                .map_err(|_| TurnFailure {
+                    kind: TurnFailureKind::Timeout,
+                    message: format!("no terminal done frame within {timeout:?}"),
+                })?;
+            let Some(frame) = next else {
+                return Err(TurnFailure {
+                    kind: TurnFailureKind::Transport,
+                    message: "SSE stream ended without a done frame".to_string(),
+                });
+            };
+            let frame = frame.map_err(|error| TurnFailure {
+                kind: TurnFailureKind::Transport,
+                message: format!("SSE stream error: {error}"),
+            })?;
+            match frame.event.as_str() {
+                "response" if ttft.is_none() => {
+                    ttft = Some(started.elapsed());
+                }
+                "done" => {
+                    let status = serde_json::from_str::<serde_json::Value>(&frame.data)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("status")
+                                .and_then(|status| status.as_str())
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_else(|| "completed".to_string());
+                    return match status.as_str() {
+                        // `idle` means the queued message resolved without a
+                        // fresh turn; the work still finished.
+                        "completed" | "idle" => Ok(TurnObservation {
+                            ttft,
+                            auto_denied_approvals: 0,
+                        }),
+                        "cancelled" => Err(TurnFailure {
+                            kind: TurnFailureKind::Cancelled,
+                            message: "turn cancelled".to_string(),
+                        }),
+                        other => Err(TurnFailure {
+                            kind: TurnFailureKind::Failed,
+                            message: format!("turn ended with status {other}"),
+                        }),
+                    };
+                }
+                "error" => {
+                    return Err(TurnFailure {
+                        kind: TurnFailureKind::Transport,
+                        message: format!("edge stream error frame: {}", frame.data),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    async fn session_meta(&self, session_id: SessionId) -> Result<SessionMeta> {
+        self.reads.session_meta(session_id).await
+    }
+
+    async fn session_events_since(
+        &self,
+        session_id: SessionId,
+        after_seq: u64,
+    ) -> Result<Vec<EventRecord>> {
+        self.reads.session_events_since(session_id, after_seq).await
+    }
+
+    async fn recent_events(&self, session_id: SessionId) -> Result<Vec<EventRecord>> {
+        self.reads.recent_events(session_id).await
+    }
+}
+
+/// Builds one edge target per pool identity: API key row, FGA grants, and a
+/// contact token per caller. Requires `MOA_DATABASE_URL` for key minting.
+pub(crate) async fn build_edge_backend_pool(
+    options: &LoadTestOptions,
+    config: &MoaConfig,
+    pool: &TenancyPool,
+    edge_endpoint: &str,
+) -> Result<Vec<Arc<dyn SessionTarget>>> {
+    let database_url = std::env::var("MOA_DATABASE_URL").map_err(|_| {
+        MoaError::MissingEnvironmentVariable(
+            "MOA_DATABASE_URL is required for edge-mode API key minting".to_string(),
+        )
+    })?;
+    let db = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await
+        .map_err(|error| MoaError::ProviderError(format!("edge-mode postgres connect: {error}")))?;
+    let fga = live_fga_client()?;
+    pool.grant_operators(&fga).await?;
+    let http = build_http_client(options)?;
+    let model = options
+        .model
+        .clone()
+        .unwrap_or_else(|| config.model_for_task(ModelTask::MainLoop).to_string());
+    let edge_endpoint = edge_endpoint.trim_end_matches('/').to_string();
+
+    let mut targets: Vec<Arc<dyn SessionTarget>> = Vec::with_capacity(pool.entries().len());
+    for entry in pool.entries() {
+        let issued = api_keys::create(
+            &db,
+            NewApiKey {
+                tenant_id: entry.tenant_id.0,
+                owner: KeyOwner::User(entry.identity.id),
+                env: ApiKeyEnv::Dev,
+                name: "moa-loadtest",
+                description: Some("ephemeral load-test caller"),
+            },
+        )
+        .await
+        .map_err(|error| MoaError::ProviderError(format!("edge api key mint: {error}")))?;
+        // With api_key_id set, FGA checks run as api_key:<id>; the token-issue
+        // route requires tenant operator on that subject.
+        grant_raw_tuple(
+            &fga,
+            format!("api_key:{}", issued.id),
+            "operator",
+            format!("tenant:{}", entry.tenant_id),
+        )
+        .await?;
+
+        let token_response = http
+            .post(format!("{edge_endpoint}/v1/contacts/tokens"))
+            .bearer_auth(issued.key.expose_secret())
+            .json(&ContactTokenIssueRequest {
+                tenant_id: entry.tenant_id,
+                contact_points: Vec::new(),
+                display_name: Some("moa-loadtest".to_string()),
+                profile: serde_json::Value::Null,
+                metadata: serde_json::Value::Null,
+                requested_scopes: Vec::new(),
+                permissions: serde_json::Value::Null,
+                agent_ids: Vec::new(),
+            })
+            .send()
+            .await
+            .map_err(|error| {
+                MoaError::ProviderError(format!("edge contact token mint failed: {error}"))
+            })?;
+        let status = token_response.status();
+        let body = token_response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(MoaError::ProviderError(format!(
+                "edge contact token mint returned {status}: {body}"
+            )));
+        }
+        let token: ContactTokenIssueResponse = serde_json::from_str(&body)
+            .map_err(|error| MoaError::SerializationError(error.to_string()))?;
+
+        let reads = RemoteTarget::new(
+            &options.endpoint,
+            http.clone(),
+            fga.clone(),
+            entry.identity.clone(),
+            entry.tenant_id,
+            ModelId::new(model.clone()),
+        )
+        .map_err(|error| MoaError::ProviderError(format!("edge reads client: {error}")))?;
+        targets.push(Arc::new(EdgeTarget {
+            http: http.clone(),
+            edge_endpoint: edge_endpoint.clone(),
+            tenant_id: entry.tenant_id,
+            contact_token: token.token,
+            model: model.clone(),
+            reads,
+        }));
+    }
+    Ok(targets)
+}

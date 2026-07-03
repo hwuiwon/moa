@@ -10,11 +10,11 @@ use crate::*;
 
 const DEFAULT_VIRTUAL_USERS: usize = 5;
 const DEFAULT_DURATION: Duration = Duration::from_secs(30);
+const DEFAULT_RATE_QPS: f64 = 10.0;
 const DEFAULT_MAX_P95_MS: u64 = 5_000;
 const DEFAULT_MAX_ERROR_RATE: f64 = 0.01;
-const DEFAULT_TTFT: Duration = Duration::from_millis(50);
-const DEFAULT_TURN_DURATION: Duration = Duration::from_millis(200);
 const DEFAULT_ENDPOINT: &str = "http://localhost:10010";
+const TURN_TIMEOUT: Duration = Duration::from_secs(60);
 const STEP_LATENCY_PROM_METRICS: &[&str] = &[
     "perf_gate_step_latency_p50_ms",
     "perf_gate_step_latency_p95_ms",
@@ -25,20 +25,18 @@ const STEP_LATENCY_PROM_METRICS: &[&str] = &[
 /// Mock smoke performance gate configuration.
 #[derive(Debug, Clone)]
 pub struct MockSmokeConfig {
-    /// Number of concurrent virtual users.
+    /// Concurrent session pool size.
     pub virtual_users: usize,
     /// Load window duration.
     pub duration: Duration,
-    /// Hard aggregate P95 turn-latency budget in milliseconds.
+    /// Offered turn-start rate in turns/second.
+    pub rate: f64,
+    /// Hard aggregate corrected-P95 turn-latency budget in milliseconds.
     pub max_p95_ms: u64,
-    /// Maximum allowed turn error rate.
+    /// Maximum allowed turn error rate over scheduled arrivals.
     pub max_error_rate: f64,
     /// Prometheus textfile output path.
     pub prom_out: PathBuf,
-    /// Synthetic delay before the first streamed provider block.
-    pub ttft: Duration,
-    /// Synthetic delay before one provider response completes.
-    pub turn_duration: Duration,
     /// Restate ingress endpoint fronting `moa-orchestrator`.
     pub endpoint: String,
     /// Optional Prometheus metrics endpoint for per-step latency collection.
@@ -50,11 +48,10 @@ impl Default for MockSmokeConfig {
         Self {
             virtual_users: DEFAULT_VIRTUAL_USERS,
             duration: DEFAULT_DURATION,
+            rate: DEFAULT_RATE_QPS,
             max_p95_ms: DEFAULT_MAX_P95_MS,
             max_error_rate: DEFAULT_MAX_ERROR_RATE,
             prom_out: PathBuf::from("target/perf-gate/snapshot.prom"),
-            ttft: DEFAULT_TTFT,
-            turn_duration: DEFAULT_TURN_DURATION,
             endpoint: DEFAULT_ENDPOINT.to_string(),
             metrics_endpoint: None,
         }
@@ -68,14 +65,21 @@ pub async fn run_mock_smoke_gate(cfg: MockSmokeConfig) -> Result<()> {
     let report = match run_loadtest(LoadTestOptions {
         mode: LoadMode::Mock,
         endpoint: cfg.endpoint.clone(),
+        edge_endpoint: None,
         sessions: cfg.virtual_users,
+        tenants: 2,
+        identities_per_tenant: 1,
         profile: SessionProfileKind::Short,
-        inter_message_delay: Duration::ZERO,
-        target_qps: None,
-        turn_timeout: cfg.duration.max(Duration::from_secs(1)),
+        think_time: Duration::ZERO,
+        rate: cfg.rate,
+        arrival: ArrivalProcess::Constant,
+        duration: cfg.duration,
+        warmup: None,
+        turn_timeout: TURN_TIMEOUT,
         output: OutputFormat::Json,
         model: None,
         metrics_endpoint: cfg.metrics_endpoint.clone(),
+        seed: 42,
     })
     .await
     {
@@ -90,11 +94,10 @@ pub async fn run_mock_smoke_gate(cfg: MockSmokeConfig) -> Result<()> {
         }
     };
 
-    let error_rate = error_rate(&report);
-    let snapshot = render_prometheus(&report, error_rate);
+    let snapshot = render_prometheus(&report);
     write_snapshot(&cfg.prom_out, &snapshot).await?;
-    write_stdout(&print_summary_table(&cfg, &report, error_rate))?;
-    enforce_gates(&cfg, &report, error_rate)
+    write_stdout(&print_summary_table(&cfg, &report))?;
+    enforce_gates(&cfg, &report)
 }
 
 fn validate_config(cfg: &MockSmokeConfig) -> Result<()> {
@@ -107,47 +110,33 @@ fn validate_config(cfg: &MockSmokeConfig) -> Result<()> {
     if cfg.duration.is_zero() {
         bail!("mock-short duration must be greater than zero");
     }
+    if cfg.rate <= 0.0 || !cfg.rate.is_finite() {
+        bail!("mock-short rate must be a positive finite number");
+    }
     if !(0.0..=1.0).contains(&cfg.max_error_rate) {
         bail!(
             "mock-short max error rate must be between 0 and 1; got {}",
             cfg.max_error_rate
         );
     }
-    if cfg.turn_duration < cfg.ttft {
-        bail!(
-            "mock-short total turn duration {:?} must be greater than or equal to TTFT {:?}",
-            cfg.turn_duration,
-            cfg.ttft
-        );
-    }
     Ok(())
 }
 
-fn error_rate(report: &LoadTestReport) -> f64 {
-    let planned_turns = report
-        .sessions
-        .iter()
-        .map(|session| session.planned_turns)
-        .sum::<usize>()
-        .max(1);
-    let failures = report.error_count + report.sessions_failed;
-    failures as f64 / planned_turns as f64
-}
-
-fn enforce_gates(cfg: &MockSmokeConfig, report: &LoadTestReport, error_rate: f64) -> Result<()> {
+fn enforce_gates(cfg: &MockSmokeConfig, report: &LoadTestReport) -> Result<()> {
     let mut breaches = Vec::new();
     if report.sessions_failed > 0 {
         breaches.push(format!("{} sessions failed", report.sessions_failed));
     }
-    if report.latency_ms.p95 > cfg.max_p95_ms as f64 {
+    if report.turn_latency_corrected_ms.p95 > cfg.max_p95_ms as f64 {
         breaches.push(format!(
-            "P95 {:.1} ms > budget {} ms",
-            report.latency_ms.p95, cfg.max_p95_ms
+            "corrected P95 {:.1} ms > budget {} ms",
+            report.turn_latency_corrected_ms.p95, cfg.max_p95_ms
         ));
     }
+    let error_rate = report.turn_error_rate();
     if error_rate > cfg.max_error_rate {
         breaches.push(format!(
-            "error rate {:.4} > budget {:.4}",
+            "turn error rate {:.4} > budget {:.4}",
             error_rate, cfg.max_error_rate
         ));
     }
@@ -163,7 +152,7 @@ fn enforce_gates(cfg: &MockSmokeConfig, report: &LoadTestReport, error_rate: f64
     }
 }
 
-fn print_summary_table(cfg: &MockSmokeConfig, report: &LoadTestReport, error_rate: f64) -> String {
+fn print_summary_table(cfg: &MockSmokeConfig, report: &LoadTestReport) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "perf_gate mock-short summary");
     let _ = writeln!(out, "| Metric | Value |");
@@ -176,11 +165,30 @@ fn print_summary_table(cfg: &MockSmokeConfig, report: &LoadTestReport, error_rat
     );
     let _ = writeln!(
         out,
+        "| Rate | {:.1}/s requested, {:.1}/s achieved |",
+        report.requested_rate_qps, report.achieved_rate_qps
+    );
+    let _ = writeln!(
+        out,
         "| Sessions completed | {} |",
         report.sessions_completed
     );
     let _ = writeln!(out, "| Sessions failed | {} |", report.sessions_failed);
-    let _ = writeln!(out, "| Turn P95 | {:.1} ms |", report.latency_ms.p95);
+    let _ = writeln!(
+        out,
+        "| Turn P95 (corrected) | {:.1} ms |",
+        report.turn_latency_corrected_ms.p95
+    );
+    let _ = writeln!(
+        out,
+        "| Turn P95 (service) | {:.1} ms |",
+        report.turn_latency_ms.p95
+    );
+    let _ = writeln!(
+        out,
+        "| Dispatch delay P95 | {:.1} ms |",
+        report.dispatch_delay_ms.p95
+    );
     let _ = writeln!(out, "| TTFT P95 | {:.1} ms |", report.ttft_ms.p95);
     for step in &report.step_latency_ms {
         let _ = writeln!(
@@ -189,19 +197,30 @@ fn print_summary_table(cfg: &MockSmokeConfig, report: &LoadTestReport, error_rat
             step.step, step.latency_ms.p95
         );
     }
-    let _ = writeln!(out, "| Error rate | {:.4} |", error_rate);
+    let _ = writeln!(out, "| Turn error rate | {:.4} |", report.turn_error_rate());
     out
 }
 
-fn render_prometheus(report: &LoadTestReport, error_rate: f64) -> String {
-    let total_turns = report
-        .sessions
-        .iter()
-        .map(|session| session.planned_turns)
-        .sum::<usize>();
+fn render_prometheus(report: &LoadTestReport) -> String {
     let mut snapshot = String::new();
     let _ = writeln!(snapshot, "# TYPE perf_gate_total_p95_ms gauge");
-    let _ = writeln!(snapshot, "perf_gate_total_p95_ms {}", report.latency_ms.p95);
+    let _ = writeln!(
+        snapshot,
+        "perf_gate_total_p95_ms {}",
+        report.turn_latency_corrected_ms.p95
+    );
+    let _ = writeln!(snapshot, "# TYPE perf_gate_service_p95_ms gauge");
+    let _ = writeln!(
+        snapshot,
+        "perf_gate_service_p95_ms {}",
+        report.turn_latency_ms.p95
+    );
+    let _ = writeln!(snapshot, "# TYPE perf_gate_dispatch_delay_p95_ms gauge");
+    let _ = writeln!(
+        snapshot,
+        "perf_gate_dispatch_delay_p95_ms {}",
+        report.dispatch_delay_ms.p95
+    );
     let _ = writeln!(snapshot, "# TYPE perf_gate_mock_ttft_p95_ms gauge");
     let _ = writeln!(
         snapshot,
@@ -209,9 +228,23 @@ fn render_prometheus(report: &LoadTestReport, error_rate: f64) -> String {
         report.ttft_ms.p95
     );
     let _ = writeln!(snapshot, "# TYPE perf_gate_error_rate gauge");
-    let _ = writeln!(snapshot, "perf_gate_error_rate {error_rate}");
+    let _ = writeln!(
+        snapshot,
+        "perf_gate_error_rate {}",
+        report.turn_error_rate()
+    );
     let _ = writeln!(snapshot, "# TYPE perf_gate_requests_total gauge");
-    let _ = writeln!(snapshot, "perf_gate_requests_total {total_turns}");
+    let _ = writeln!(
+        snapshot,
+        "perf_gate_requests_total {}",
+        report.turns_scheduled
+    );
+    let _ = writeln!(snapshot, "# TYPE perf_gate_turns_completed gauge");
+    let _ = writeln!(
+        snapshot,
+        "perf_gate_turns_completed {}",
+        report.turns_completed
+    );
     let _ = writeln!(snapshot, "# TYPE perf_gate_mock_sessions_failed gauge");
     let _ = writeln!(
         snapshot,

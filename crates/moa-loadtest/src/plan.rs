@@ -64,35 +64,33 @@ pub(crate) async fn first_existing_relative_path(
     Ok(None)
 }
 
-pub(crate) fn build_session_plans(
-    sessions: usize,
+/// Builds the plan for the `index`-th session of a run. Mixed traffic keeps
+/// one long tool-heavy session per four sessions.
+pub(crate) fn session_plan(
+    index: usize,
     requested_profile: SessionProfileKind,
     inspection_files: &InspectionFiles,
-) -> Vec<SessionPlan> {
-    (0..sessions)
-        .map(|index| {
-            let profile = match requested_profile {
-                SessionProfileKind::Short => SessionProfileKind::Short,
-                SessionProfileKind::Long => SessionProfileKind::Long,
-                SessionProfileKind::Mixed => {
-                    if index % 4 == 0 {
-                        SessionProfileKind::Long
-                    } else {
-                        SessionProfileKind::Short
-                    }
-                }
-            };
-            SessionPlan {
-                profile,
-                title: format!("loadtest-{profile:?}-{index:04}"),
-                turns: match profile {
-                    SessionProfileKind::Short => short_profile_turns(inspection_files),
-                    SessionProfileKind::Long => long_profile_turns(inspection_files),
-                    SessionProfileKind::Mixed => unreachable!("mixed is resolved above"),
-                },
+) -> SessionPlan {
+    let profile = match requested_profile {
+        SessionProfileKind::Short => SessionProfileKind::Short,
+        SessionProfileKind::Long => SessionProfileKind::Long,
+        SessionProfileKind::Mixed => {
+            if index.is_multiple_of(4) {
+                SessionProfileKind::Long
+            } else {
+                SessionProfileKind::Short
             }
-        })
-        .collect()
+        }
+    };
+    SessionPlan {
+        profile,
+        title: format!("loadtest-{profile:?}-{index:04}"),
+        turns: match profile {
+            SessionProfileKind::Short => short_profile_turns(inspection_files),
+            SessionProfileKind::Long => long_profile_turns(inspection_files),
+            SessionProfileKind::Mixed => unreachable!("mixed is resolved above"),
+        },
+    }
 }
 
 pub(crate) fn short_profile_turns(inspection_files: &InspectionFiles) -> Vec<TurnPlan> {

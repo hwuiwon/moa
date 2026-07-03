@@ -5,8 +5,8 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::Parser;
 use moa_loadtest::{
-    LoadMode, LoadTestOptions, OutputFormat, SessionProfileKind, render_human_report,
-    render_json_report, run_loadtest,
+    ArrivalProcess, LoadMode, LoadTestOptions, OutputFormat, SessionProfileKind,
+    render_human_report, render_json_report, run_loadtest,
 };
 
 /// Runs a synthetic MOA workload against a Restate-backed orchestrator.
@@ -21,21 +21,46 @@ struct Args {
     #[arg(long, default_value = "http://localhost:10010")]
     endpoint: String,
 
-    /// Number of concurrent sessions to simulate.
+    /// Optional moa-edge endpoint. When set, turns run through the production
+    /// edge SSE path (contact tokens + API keys) instead of trusted headers.
+    #[arg(long)]
+    edge_endpoint: Option<String>,
+
+    /// Concurrent session pool size.
     #[arg(long)]
     sessions: Option<usize>,
+
+    /// Number of synthetic tenants in the caller pool.
+    #[arg(long, default_value_t = 4)]
+    tenants: usize,
+
+    /// Identities created per tenant.
+    #[arg(long, default_value_t = 2)]
+    identities_per_tenant: usize,
 
     /// Session profile family to generate.
     #[arg(long, value_enum, default_value_t = SessionProfileKind::Short)]
     profile: SessionProfileKind,
 
-    /// Delay in milliseconds between turns inside one session.
+    /// Think time in milliseconds before a session takes its next turn.
     #[arg(long, default_value_t = 0)]
-    inter_message_delay_ms: u64,
+    think_time_ms: u64,
 
-    /// Optional global target rate for starting turns.
+    /// Offered turn-start rate in turns/second (open loop). Defaults per mode.
     #[arg(long)]
-    target_qps: Option<u32>,
+    rate: Option<f64>,
+
+    /// Inter-arrival process for the schedule.
+    #[arg(long, value_enum, default_value_t = ArrivalProcess::Constant)]
+    arrival: ArrivalProcess,
+
+    /// Load window duration.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "60s")]
+    duration: Duration,
+
+    /// Warmup prefix excluded from aggregate percentiles.
+    #[arg(long, value_parser = humantime::parse_duration)]
+    warmup: Option<Duration>,
 
     /// Per-turn timeout in seconds.
     #[arg(long, default_value_t = 60)]
@@ -52,6 +77,10 @@ struct Args {
     /// Optional Prometheus metrics endpoint for per-step latency collection.
     #[arg(long)]
     metrics_endpoint: Option<String>,
+
+    /// RNG seed for schedules, tenant sampling, and plan generation.
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
 }
 
 #[tokio::main]
@@ -64,14 +93,21 @@ async fn main() -> Result<()> {
     let options = LoadTestOptions {
         mode: args.mode,
         endpoint: args.endpoint,
+        edge_endpoint: args.edge_endpoint,
         sessions,
+        tenants: args.tenants,
+        identities_per_tenant: args.identities_per_tenant,
         profile: args.profile,
-        inter_message_delay: Duration::from_millis(args.inter_message_delay_ms),
-        target_qps: args.target_qps,
+        think_time: Duration::from_millis(args.think_time_ms),
+        rate: args.rate.unwrap_or_else(|| args.mode.default_rate()),
+        arrival: args.arrival,
+        duration: args.duration,
+        warmup: args.warmup,
         turn_timeout: Duration::from_secs(args.turn_timeout_seconds),
         output: args.output,
         model: args.model,
         metrics_endpoint: args.metrics_endpoint,
+        seed: args.seed,
     };
 
     let report = run_loadtest(options.clone()).await?;

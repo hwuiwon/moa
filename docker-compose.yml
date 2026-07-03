@@ -247,6 +247,10 @@ services:
       MOA_GOOGLE_API_KEY: ${MOA_GOOGLE_API_KEY:-}
       MOA_COHERE_API_KEY: ${MOA_COHERE_API_KEY:-}
       MOA_ZEROENTROPY_API_KEY: ${MOA_ZEROENTROPY_API_KEY:-}
+      # Contact-token signing keys; required for edge-mode loadtest and any
+      # contact session flow. Generate dev keys with `make loadtest-edge-keys`.
+      MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM: ${MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM:-}
+      MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM: ${MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM:-}
     ports:
       # Restate handler port 9080 is internal-only. Use moa-edge on 8080.
       - "10021:9081"

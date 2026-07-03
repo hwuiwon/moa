@@ -40,6 +40,9 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Maximum concurrent session pool size.
+const MAX_SESSIONS: usize = 100_000;
+
 /// User-configurable load-test options.
 #[derive(Debug, Clone)]
 pub struct LoadTestOptions {
@@ -47,14 +50,30 @@ pub struct LoadTestOptions {
     pub mode: LoadMode,
     /// Restate ingress endpoint fronting `moa-orchestrator`.
     pub endpoint: String,
-    /// Number of concurrent sessions to simulate.
+    /// Optional moa-edge endpoint. When set, turns are driven through the
+    /// production edge SSE path; the ingress endpoint is still used for
+    /// verification reads.
+    pub edge_endpoint: Option<String>,
+    /// Concurrent session pool size (finished sessions are replaced while the
+    /// schedule is still running).
     pub sessions: usize,
+    /// Number of synthetic tenants in the caller pool.
+    pub tenants: usize,
+    /// Identities created per tenant.
+    pub identities_per_tenant: usize,
     /// Session profile family.
     pub profile: SessionProfileKind,
-    /// Delay inserted between turns inside one session.
-    pub inter_message_delay: Duration,
-    /// Optional global target rate for starting turns.
-    pub target_qps: Option<u32>,
+    /// Think time before a session becomes eligible for its next turn.
+    pub think_time: Duration,
+    /// Offered turn-start rate in turns/second (open loop).
+    pub rate: f64,
+    /// Inter-arrival process for the schedule.
+    pub arrival: ArrivalProcess,
+    /// Load window duration (schedule length).
+    pub duration: Duration,
+    /// Warmup prefix excluded from aggregate percentiles. Defaults to 10% of
+    /// the duration capped at 30s when unset.
+    pub warmup: Option<Duration>,
     /// Per-turn timeout.
     pub turn_timeout: Duration,
     /// Final output format.
@@ -63,15 +82,28 @@ pub struct LoadTestOptions {
     pub model: Option<String>,
     /// Optional Prometheus metrics endpoint used to collect step latency.
     pub metrics_endpoint: Option<String>,
+    /// RNG seed for schedules, tenant sampling, and plan generation.
+    pub seed: u64,
 }
 
 impl LoadTestOptions {
+    /// Resolved warmup duration.
+    pub(crate) fn resolved_warmup(&self) -> Duration {
+        self.warmup
+            .unwrap_or_else(|| (self.duration / 10).min(Duration::from_secs(30)))
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
-        if !(1..=1_000).contains(&self.sessions) {
+        if !(1..=MAX_SESSIONS).contains(&self.sessions) {
             return Err(MoaError::ValidationError(format!(
-                "sessions must be between 1 and 1000; got {}",
+                "sessions must be between 1 and {MAX_SESSIONS}; got {}",
                 self.sessions
             )));
+        }
+        if self.tenants == 0 || self.identities_per_tenant == 0 {
+            return Err(MoaError::ValidationError(
+                "tenants and identities_per_tenant must be greater than zero".to_string(),
+            ));
         }
         if self.endpoint.trim().is_empty() {
             return Err(MoaError::ValidationError(
@@ -81,6 +113,11 @@ impl LoadTestOptions {
         url::Url::parse(self.endpoint.trim()).map_err(|error| {
             MoaError::ValidationError(format!("endpoint is not a valid URL: {error}"))
         })?;
+        if let Some(edge_endpoint) = self.edge_endpoint.as_deref() {
+            url::Url::parse(edge_endpoint.trim()).map_err(|error| {
+                MoaError::ValidationError(format!("edge_endpoint is not a valid URL: {error}"))
+            })?;
+        }
         if let Some(metrics_endpoint) = self.metrics_endpoint.as_deref() {
             if metrics_endpoint.trim().is_empty() {
                 return Err(MoaError::ValidationError(
@@ -96,9 +133,22 @@ impl LoadTestOptions {
                 "turn_timeout must be greater than zero".to_string(),
             ));
         }
-        if self.target_qps == Some(0) {
+        if self.rate <= 0.0 || !self.rate.is_finite() {
+            return Err(MoaError::ValidationError(format!(
+                "rate must be a positive finite number; got {}",
+                self.rate
+            )));
+        }
+        if self.duration.is_zero() {
             return Err(MoaError::ValidationError(
-                "target_qps must be greater than zero when set".to_string(),
+                "duration must be greater than zero".to_string(),
+            ));
+        }
+        if let Some(warmup) = self.warmup
+            && warmup >= self.duration
+        {
+            return Err(MoaError::ValidationError(
+                "warmup must be shorter than duration".to_string(),
             ));
         }
         Ok(())
@@ -108,6 +158,14 @@ impl LoadTestOptions {
 impl LoadMode {
     pub(crate) fn as_str(self) -> &'static str {
         self.into()
+    }
+
+    /// Default offered rate when the CLI does not pass one.
+    pub fn default_rate(self) -> f64 {
+        match self {
+            LoadMode::Mock => 50.0,
+            LoadMode::Live => 1.0,
+        }
     }
 }
 
@@ -141,18 +199,25 @@ mod tests {
         }
     }
 
-    fn valid_options() -> LoadTestOptions {
+    pub(crate) fn valid_options() -> LoadTestOptions {
         LoadTestOptions {
             mode: LoadMode::Mock,
             endpoint: "http://localhost:8080".to_string(),
+            edge_endpoint: None,
             sessions: 4,
+            tenants: 2,
+            identities_per_tenant: 1,
             profile: SessionProfileKind::Short,
-            inter_message_delay: Duration::from_millis(0),
-            target_qps: None,
+            think_time: Duration::from_millis(0),
+            rate: 10.0,
+            arrival: ArrivalProcess::Constant,
+            duration: Duration::from_secs(5),
+            warmup: Some(Duration::from_secs(1)),
             turn_timeout: Duration::from_secs(30),
             output: OutputFormat::Json,
             model: None,
             metrics_endpoint: None,
+            seed: 42,
         }
     }
 
@@ -178,14 +243,14 @@ mod tests {
 
     #[test]
     fn validate_rejects_sessions_outside_supported_range() {
-        // Pins: the harness refuses zero sessions and counts above the 1000 ceiling.
+        // Pins: the harness refuses zero sessions and counts above the ceiling.
         let mut zero = valid_options();
         zero.sessions = 0;
-        assert_validation_error(zero.validate(), "sessions must be between 1 and 1000");
+        assert_validation_error(zero.validate(), "sessions must be between 1 and");
 
         let mut too_many = valid_options();
-        too_many.sessions = 1_001;
-        assert_validation_error(too_many.validate(), "sessions must be between 1 and 1000");
+        too_many.sessions = MAX_SESSIONS + 1;
+        assert_validation_error(too_many.validate(), "sessions must be between 1 and");
     }
 
     #[test]
@@ -213,5 +278,31 @@ mod tests {
         let mut options = valid_options();
         options.turn_timeout = Duration::ZERO;
         assert_validation_error(options.validate(), "turn_timeout must be greater than zero");
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_rate_and_warmup_at_or_past_duration() {
+        // Pins: open-loop pacing needs a positive finite rate, and warmup must
+        // leave a measurement window.
+        let mut zero_rate = valid_options();
+        zero_rate.rate = 0.0;
+        assert_validation_error(zero_rate.validate(), "rate must be a positive finite");
+
+        let mut long_warmup = valid_options();
+        long_warmup.warmup = Some(Duration::from_secs(5));
+        assert_validation_error(long_warmup.validate(), "warmup must be shorter");
+    }
+
+    #[test]
+    fn default_warmup_is_ten_percent_capped_at_thirty_seconds() {
+        // Pins: unset warmup derives from duration so short smoke runs are not
+        // fully swallowed by warmup exclusion.
+        let mut options = valid_options();
+        options.warmup = None;
+        options.duration = Duration::from_secs(100);
+        assert_eq!(options.resolved_warmup(), Duration::from_secs(10));
+
+        options.duration = Duration::from_secs(3_600);
+        assert_eq!(options.resolved_warmup(), Duration::from_secs(30));
     }
 }

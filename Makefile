@@ -111,3 +111,13 @@ loadtest-mock:
 
 loadtest-live:
 	cargo run -p moa-loadtest --release --bin moa-loadtest -- --mode live --endpoint http://localhost:10010
+
+# Generates a local-dev RSA keypair for contact-token signing and prints the
+# env exports the compose stack needs for edge-mode load tests.
+loadtest-edge-keys:
+	@mkdir -p target/loadtest-keys
+	@[ -f target/loadtest-keys/contact-tokens.pem ] || \
+	  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out target/loadtest-keys/contact-tokens.pem 2>/dev/null
+	@openssl rsa -in target/loadtest-keys/contact-tokens.pem -pubout -out target/loadtest-keys/contact-tokens.pub.pem 2>/dev/null
+	@echo "export MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM=\"$$(cat target/loadtest-keys/contact-tokens.pem)\""
+	@echo "export MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM=\"$$(cat target/loadtest-keys/contact-tokens.pub.pem)\""
