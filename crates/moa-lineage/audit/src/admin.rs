@@ -7,9 +7,10 @@ use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use crate::signing::verify_audit_root_signature;
 use crate::{
-    AuditError, AuditRootSignaturePayload, DsarBundle, DsarExporter, PiiVault, Result, SigningKey,
-    blake3_merkle_root,
+    AuditError, AuditRootSignaturePayload, AuditRootSigner, DsarBundle, DsarExporter, PiiVault,
+    Result, SigningKey, blake3_merkle_root,
 };
 use moa_lineage_core::chain::{HashChain, hash_from_slice};
 
@@ -272,16 +273,16 @@ pub fn verify_compliance_rows(
 }
 
 /// Verifies compliance rows against a stored audit root and its signature.
-pub fn verify_audit_root_window(
+pub async fn verify_audit_root_window(
     rows: Vec<ComplianceRow>,
     root: &AuditRootRow,
-    signing: &SigningKey,
+    signing: &dyn AuditRootSigner,
 ) -> Result<VerificationReport> {
-    if root.signing_key_label != signing.label() {
+    if root.signing_key_label != signing.key_id() {
         return Err(AuditError::Invalid(format!(
             "audit root signing key label mismatch: stored={}, configured={}",
             root.signing_key_label,
-            signing.label()
+            signing.key_id()
         )));
     }
     if root.object_lock_mode.trim().is_empty() {
@@ -304,7 +305,10 @@ pub fn verify_audit_root_window(
             root.record_count
         )));
     }
-    signing.verify_audit_root(&root.signature_payload(), &root.signature)?;
+    let payload = root.signature_payload();
+    let signed = signing.sign_root(&payload).await?;
+    signed.verify_payload(&payload)?;
+    verify_audit_root_signature(&payload, &root.signature, &signed.verifying_key)?;
     Ok(report)
 }
 
@@ -360,8 +364,8 @@ fn load_compliance_rows(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<Complian
 #[cfg(test)]
 mod tests {
     use super::{AuditRootRow, ComplianceRow, verify_audit_root_window, verify_compliance_rows};
-    use crate::AuditError;
     use crate::blake3_merkle_root;
+    use crate::{AuditError, LocalAuditRootSigner};
     use chrono::Utc;
     use moa_lineage_core::chain::HashChain;
     use serde_json::json;
@@ -440,8 +444,8 @@ mod tests {
         assert!(matches!(error, AuditError::ChainMismatch { index: 1, .. }));
     }
 
-    #[test]
-    fn verify_audit_root_window_rejects_record_count_mismatch() {
+    #[tokio::test]
+    async fn verify_audit_root_window_rejects_record_count_mismatch() {
         // Pins: audit-root verification checks the signed/stored record count, not just Merkle bytes.
         let key = crate::SigningKey::from_seed("audit-root", [5_u8; 32]);
         let payload = json!({"record": {"kind": "only"}});
@@ -475,7 +479,9 @@ mod tests {
             prev_hash: prev_hash.map(|hash| hash.as_bytes().to_vec()),
         }];
 
-        let error = verify_audit_root_window(rows, &root, &key)
+        let signer = LocalAuditRootSigner::new(key);
+        let error = verify_audit_root_window(rows, &root, &signer)
+            .await
             .expect_err("record-count mismatch should fail");
 
         assert!(
@@ -483,8 +489,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn verify_audit_root_window_rejects_metadata_signature_tampering() {
+    #[tokio::test]
+    async fn verify_audit_root_window_rejects_metadata_signature_tampering() {
         // Pins: audit-root signature verification covers object-lock metadata.
         let key = crate::SigningKey::from_seed("audit-root", [6_u8; 32]);
         let payload = json!({"record": {"kind": "only"}});
@@ -519,7 +525,9 @@ mod tests {
             prev_hash: prev_hash.map(|hash| hash.as_bytes().to_vec()),
         }];
 
-        let error = verify_audit_root_window(rows, &root, &key)
+        let signer = LocalAuditRootSigner::new(key);
+        let error = verify_audit_root_window(rows, &root, &signer)
+            .await
             .expect_err("metadata tampering should fail");
 
         assert!(matches!(error, crate::AuditError::Signature));

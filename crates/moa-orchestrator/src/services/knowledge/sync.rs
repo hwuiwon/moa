@@ -260,12 +260,20 @@ impl KnowledgeService {
         &self,
         request: KnowledgeConnectionListRequest,
     ) -> Result<KnowledgeConnectionListResponse, KnowledgeServiceError> {
+        let credential_refs = self
+            .credentials
+            .list_linked_account_refs(request.tenant_id)
+            .await?;
         let connections = self
             .repository(request.tenant_id)
             .list_connections(request.tenant_id, request.provider.as_deref())
             .await?
             .into_iter()
             .map(|projection| KnowledgeConnectionSummary {
+                credential_status: credential_status(
+                    &projection.connection.credential_ref,
+                    &credential_refs,
+                ),
                 connection_uid: projection.connection.connection_uid,
                 provider: projection.connection.provider,
                 connector: projection.connection.connector,
@@ -334,6 +342,20 @@ impl KnowledgeService {
             integrations,
             unavailable_providers,
         })
+    }
+}
+
+fn credential_status(
+    credential_ref: &str,
+    credential_refs: &std::collections::BTreeSet<String>,
+) -> Option<String> {
+    if !credential_ref.starts_with("vault://") {
+        return None;
+    }
+    if credential_refs.contains(credential_ref) {
+        Some("present".to_string())
+    } else {
+        Some("missing".to_string())
     }
 }
 

@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::{
     ExtractedFact, ExtractedFactScopeHint, FactExtractor, IngestError, Result, TurnChunk,
     fact_hash, fact_uid_from_hash,
-    llm_extractor::{
+    model_fact_extractor::{
         EXTRACTION_PROMPT_VERSION, normalize_extracted_fact, should_keep_extracted_fact,
     },
 };
@@ -18,7 +18,7 @@ use crate::{
 pub struct ExtractionFixtureRecord {
     /// SHA-256 hex hash of the raw chunk text sent to the extractor.
     pub chunk_hash: String,
-    /// Chat model that produced this fixture.
+    /// Provider model that produced this fixture.
     pub model: String,
     /// Extraction prompt version that produced this fixture.
     pub prompt_version: String,
@@ -258,8 +258,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recorded_extractor_applies_llm_durability_filter() {
-        // Pins: recorded replay follows the same ingestion filter as live LLM extraction.
+    async fn recorded_extractor_applies_model_durability_filter() {
+        // Pins: recorded replay follows the same ingestion filter as live model extraction.
         let chunk = TurnChunk {
             index: 0,
             text: "Busy week here, lots of meetings about nothing in particular.".to_string(),

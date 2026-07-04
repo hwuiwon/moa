@@ -95,6 +95,13 @@ pub trait KnowledgeRepository: Send + Sync {
         source_selection: serde_json::Value,
     ) -> Result<KnowledgeConnection>;
 
+    /// Disables a linked connection for one tenant.
+    async fn disable_connection(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Uuid,
+    ) -> Result<KnowledgeConnection>;
+
     /// Lists linked-connection projections for a tenant.
     async fn list_connections(
         &self,
@@ -514,6 +521,38 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .map_err(map_sqlx_error)?;
         conn.commit().await.map_err(map_moa_error)?;
         rows.iter().map(connection_projection_from_row).collect()
+    }
+
+    async fn disable_connection(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Uuid,
+    ) -> Result<KnowledgeConnection> {
+        let mut conn = self.begin().await?;
+        let row = sqlx::query(
+            r#"
+            UPDATE moa.knowledge_connections
+            SET status = 'disabled',
+                updated_at = now()
+            WHERE tenant_id = $1
+              AND connection_uid = $2
+            RETURNING connection_uid, tenant_id, provider, connector, provider_connection_id,
+                      credential_ref, status, metadata, source_selection, created_at, updated_at,
+                      last_synced_at
+            "#,
+        )
+        .bind(tenant_id.0)
+        .bind(connection_uid)
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        let Some(row) = row else {
+            return Err(Error::Repository(
+                "knowledge connection was not visible for disable".to_string(),
+            ));
+        };
+        conn.commit().await.map_err(map_moa_error)?;
+        connection_from_row(&row)
     }
 
     async fn lookup_connection_by_provider_account(

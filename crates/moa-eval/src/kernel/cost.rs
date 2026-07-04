@@ -2,17 +2,17 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Date when the Cohere pricing constants in this module were last checked.
-pub const PRICING_AS_OF: &str = "2026-06-11";
+/// Date when the live eval pricing constants in this module were last checked.
+pub const PRICING_AS_OF: &str = "2026-07-02";
 
 /// Estimated Cohere Embed v4 text input price in USD per million tokens.
 pub const COHERE_EMBED_V4_INPUT_USD_PER_MILLION_TOKENS: f64 = 0.12;
 
-/// Estimated Cohere Command A input price in USD per million tokens.
-pub const COHERE_COMMAND_A_INPUT_USD_PER_MILLION_TOKENS: f64 = 2.50;
+/// Estimated GPT-5.4 mini input price in USD per million tokens.
+pub const GPT_5_4_MINI_INPUT_USD_PER_MILLION_TOKENS: f64 = 0.75;
 
-/// Estimated Cohere Command A output price in USD per million tokens.
-pub const COHERE_COMMAND_A_OUTPUT_USD_PER_MILLION_TOKENS: f64 = 10.00;
+/// Estimated GPT-5.4 mini output price in USD per million tokens.
+pub const GPT_5_4_MINI_OUTPUT_USD_PER_MILLION_TOKENS: f64 = 4.50;
 
 /// Estimated Cohere Rerank v4 Fast price in USD per search.
 pub const COHERE_RERANK_V4_FAST_USD_PER_SEARCH: f64 = 0.002;
@@ -87,10 +87,10 @@ impl CostLedger {
             COHERE_EMBED_V4_INPUT_USD_PER_MILLION_TOKENS,
         ) + usd_per_million(
             self.chat_input_tokens,
-            COHERE_COMMAND_A_INPUT_USD_PER_MILLION_TOKENS,
+            GPT_5_4_MINI_INPUT_USD_PER_MILLION_TOKENS,
         ) + usd_per_million(
             self.chat_output_tokens,
-            COHERE_COMMAND_A_OUTPUT_USD_PER_MILLION_TOKENS,
+            GPT_5_4_MINI_OUTPUT_USD_PER_MILLION_TOKENS,
         ) + self.rerank_calls as f64 * COHERE_RERANK_V4_FAST_USD_PER_SEARCH;
     }
 }
@@ -175,8 +175,8 @@ mod tests {
         assert_eq!(
             ledger.est_usd,
             COHERE_EMBED_V4_INPUT_USD_PER_MILLION_TOKENS
-                + COHERE_COMMAND_A_INPUT_USD_PER_MILLION_TOKENS
-                + COHERE_COMMAND_A_OUTPUT_USD_PER_MILLION_TOKENS
+                + GPT_5_4_MINI_INPUT_USD_PER_MILLION_TOKENS
+                + GPT_5_4_MINI_OUTPUT_USD_PER_MILLION_TOKENS
                 + (2.0 * COHERE_RERANK_V4_FAST_USD_PER_SEARCH)
         );
     }

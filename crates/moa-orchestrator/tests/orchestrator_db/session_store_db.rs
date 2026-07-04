@@ -45,6 +45,43 @@ async fn cleanup(database_url: &str, schema_name: &str) -> Result<()> {
         .map_err(Into::into)
 }
 
+async fn insert_verified_contact(
+    store: &PostgresSessionStore,
+    tenant_id: TenantId,
+    contact_id: ContactId,
+    storage_partition_id: &StoragePartitionId,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO contacts (id, tenant_id, storage_partition_id, contact_id, state) VALUES ($1, $2, $3, $4, 'verified')",
+    )
+    .bind(contact_id.0)
+    .bind(tenant_id.0)
+    .bind(storage_partition_id.as_str())
+    .bind(contact_id.0)
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
+async fn create_contact_session(
+    store: &PostgresSessionStore,
+    tenant_id: TenantId,
+    contact_id: ContactId,
+) -> Result<(StoragePartitionId, moa_core::SessionId)> {
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
+    let session_id = store
+        .create_session(SessionMeta {
+            tenant_id,
+            contact: Some(contact_ref(tenant_id, contact_id)),
+            created_by: Some(SessionActorRef::Contact { id: contact_id }),
+            model: ModelId::new("test-model"),
+            ..SessionMeta::default()
+        })
+        .await?;
+    insert_verified_contact(store, tenant_id, contact_id, &storage_partition_id).await?;
+    Ok((storage_partition_id, session_id))
+}
+
 #[tokio::test]
 async fn create_session_persists_requested_metadata() -> Result<()> {
     // Pins: the core Postgres session-store create path remains a metadata-row write.
@@ -70,25 +107,8 @@ async fn active_session_channel_binding_returns_resolved_route_db() -> Result<()
     let (store, database_url, schema_name) = test_store().await?;
     let tenant_id = TenantId::new();
     let contact_id = ContactId::new();
-    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
-    let session_id = store
-        .create_session(SessionMeta {
-            tenant_id,
-            contact: Some(contact_ref(tenant_id, contact_id)),
-            created_by: Some(SessionActorRef::Contact { id: contact_id }),
-            model: ModelId::new("test-model"),
-            ..SessionMeta::default()
-        })
-        .await?;
-    sqlx::query(
-        "INSERT INTO contacts (id, tenant_id, storage_partition_id, contact_id, state) VALUES ($1, $2, $3, $4, 'verified')",
-    )
-    .bind(contact_id.0)
-    .bind(tenant_id.0)
-    .bind(storage_partition_id.as_str())
-    .bind(contact_id.0)
-    .execute(store.pool())
-    .await?;
+    let (storage_partition_id, session_id) =
+        create_contact_session(&store, tenant_id, contact_id).await?;
 
     let channel_ref = ChannelRef::Slack {
         team_id: Some("T123".to_string()),
@@ -116,6 +136,105 @@ async fn active_session_channel_binding_returns_resolved_route_db() -> Result<()
 
     assert_eq!(active.binding_id, binding_id);
     assert_eq!(active.channel_ref, channel_ref);
+
+    cleanup(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+async fn active_channel_binding_reverse_lookup_finds_bound_session() -> Result<()> {
+    // Pins: channel command ingress can resolve a Slack thread to the active session.
+    let (store, database_url, schema_name) = test_store().await?;
+    let tenant_id = TenantId::new();
+    let contact_id = ContactId::new();
+    let (storage_partition_id, session_id) =
+        create_contact_session(&store, tenant_id, contact_id).await?;
+    let channel_ref = ChannelRef::Slack {
+        team_id: Some("T123".to_string()),
+        slack_channel_id: Some("C123".to_string()),
+        thread_ts: Some("1712668800.000100".to_string()),
+        user_id: Some("U123".to_string()),
+    };
+    let binding_id = store
+        .replace_session_channel_binding(SessionChannelBindingReplacement {
+            tenant_id,
+            storage_partition_id: &storage_partition_id,
+            session_id,
+            contact_id,
+            channel_account_id: None,
+            contact_point_id: None,
+            channel_ref: &channel_ref,
+            reason: Some("test"),
+        })
+        .await?;
+
+    let resolution = store
+        .get_active_session_binding_for_channel(&channel_ref)
+        .await?
+        .expect("active route should resolve");
+
+    assert_eq!(resolution.tenant_id, tenant_id);
+    assert_eq!(resolution.session_id, session_id);
+    assert_eq!(resolution.contact_id, contact_id);
+    assert_eq!(resolution.binding.binding_id, binding_id);
+    assert_eq!(resolution.binding.channel_ref, channel_ref);
+
+    cleanup(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+async fn active_channel_binding_reverse_lookup_rejects_ambiguous_cross_tenant_route() -> Result<()>
+{
+    // Pins: channel command ingress fails closed when a provider route is active in multiple tenants.
+    let (store, database_url, schema_name) = test_store().await?;
+    let tenant_id = TenantId::new();
+    let other_tenant_id = TenantId::new();
+    let contact_id = ContactId::new();
+    let other_contact_id = ContactId::new();
+    let (storage_partition_id, session_id) =
+        create_contact_session(&store, tenant_id, contact_id).await?;
+    let (other_storage_partition_id, other_session_id) =
+        create_contact_session(&store, other_tenant_id, other_contact_id).await?;
+    let channel_ref = ChannelRef::Slack {
+        team_id: Some("T-shared".to_string()),
+        slack_channel_id: Some("C-shared".to_string()),
+        thread_ts: Some("1712668800.000100".to_string()),
+        user_id: Some("U123".to_string()),
+    };
+    store
+        .replace_session_channel_binding(SessionChannelBindingReplacement {
+            tenant_id,
+            storage_partition_id: &storage_partition_id,
+            session_id,
+            contact_id,
+            channel_account_id: None,
+            contact_point_id: None,
+            channel_ref: &channel_ref,
+            reason: Some("tenant"),
+        })
+        .await?;
+    store
+        .replace_session_channel_binding(SessionChannelBindingReplacement {
+            tenant_id: other_tenant_id,
+            storage_partition_id: &other_storage_partition_id,
+            session_id: other_session_id,
+            contact_id: other_contact_id,
+            channel_account_id: None,
+            contact_point_id: None,
+            channel_ref: &channel_ref,
+            reason: Some("other-tenant"),
+        })
+        .await?;
+
+    let error = store
+        .get_active_session_binding_for_channel(&channel_ref)
+        .await
+        .expect_err("ambiguous route should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("channel route is active in multiple tenants")
+    );
 
     cleanup(&database_url, &schema_name).await
 }

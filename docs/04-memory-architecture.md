@@ -133,7 +133,7 @@ must not synthesize session turns or overload `Memory.ingest_documents`.
 These identities let ingestion diff changed documents, reuse embeddings,
 tombstone deleted source content, and keep citations stable across re-syncs.
 
-Slow-path fact extraction is behind the `FactExtractor` seam. The heuristic extractor remains the default and journal-safe fallback. Environments can opt into the Cohere-backed `LlmFactExtractor` with `memory.extraction.enabled` plus the configured API-key env var; eval replay uses recorded extraction fixtures so the natural transcript lane stays hermetic after live recording.
+Slow-path fact extraction is behind the `FactExtractor` seam. The heuristic extractor remains the default and journal-safe fallback. Environments can opt into provider-backed `ModelFactExtractor` with `memory.extraction.enabled`; model selection, credentials, and configured chat-model failover come from the shared `moa-providers` config path, while memory prompts, parsing, and prompt versions stay in `moa-memory-ingest`. Eval replay uses recorded extraction fixtures so the natural transcript lane stays hermetic after live recording.
 
 PII classification runs before durable memory writes. Sensitive text is either filtered, redacted, or tagged according to the privacy class and policy.
 

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use moa_eval::memory_eval::{MemoryExtractionRecordingOptions, record_memory_extractions};
 
-/// Records live LLM extraction fixtures for a memory eval corpus.
+/// Records live model extraction fixtures for a memory eval corpus.
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     let options = Options::parse(args)?;
     let mut recording = MemoryExtractionRecordingOptions::new(&options.corpus);
@@ -128,7 +128,7 @@ impl Options {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- record-memory-extractions --corpus <path> [--output <path>] [--api-key-env MOA_COHERE_API_KEY] [--model command-a-plus-05-2026] [--max-facts-per-chunk N] [--timeout-ms N] [--delay-ms N]"
+    "usage: cargo run -p xtask -- record-memory-extractions --corpus <path> [--output <path>] [--api-key-env MOA_OPENAI_API_KEY] [--model gpt-5.4-mini] [--max-facts-per-chunk N] [--timeout-ms N] [--delay-ms N]"
 }
 
 fn parse_usize(value: &str, flag: &str) -> Result<usize> {

@@ -44,8 +44,9 @@ pub use agent::{
 };
 pub use channel::{
     ActionButton, Attachment, ButtonStyle, Channel, ChannelAccountId, ChannelAccountRef,
-    ChannelActor, ChannelCapabilities, ChannelRef, DiffHunk, InboundMessage, MessageContent,
-    MessageId, OutboundMessage, SessionChannelBinding, SessionChannelBindingId, ToolStatus,
+    ChannelActor, ChannelCapabilities, ChannelEvent, ChannelRef, ChannelSessionCommand, DiffHunk,
+    InboundMessage, MessageContent, MessageId, OutboundMessage, SessionChannelBinding,
+    SessionChannelBindingId, SessionChannelBindingResolution, ToolStatus,
     render_user_message_with_attachments,
 };
 pub use completion::{

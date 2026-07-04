@@ -2,11 +2,15 @@
 
 use anyhow::Result;
 use chrono::Utc;
+use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
+use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, StoredArtifactRevision};
 use moa_artifacts::simulation::ExperimentTargetKind;
+use moa_artifacts::validation::validate_for_status;
 use moa_core::RlsContext;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::experiments::{
-    AgentRevisionSimulationCompareRequest, AgentRevisionSimulationVariant,
+    AgentRevisionSimulationCompareRequest, AgentRevisionSimulationRunRequest,
+    AgentRevisionSimulationVariant, ExperimentPlanListRequest,
 };
 use moa_core::{ActionRuleScope, ModelId, StoragePartitionId, TenantId};
 use moa_db::ScopedConn;
@@ -16,8 +20,10 @@ use moa_experiments::model::{
     NewExperimentTrial,
 };
 use moa_experiments::store::ExperimentStore;
-use moa_orchestrator::services::experiments::compare_agent_revision_simulation_inner;
-use serde_json::json;
+use moa_orchestrator::services::experiments::{
+    compare_agent_revision_simulation_inner, list_plans_inner, run_agent_revision_simulation_inner,
+};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -116,6 +122,148 @@ async fn compare_agent_revision_simulation_groups_trials_by_exact_revision_db_me
     assert_eq!(candidate.failed_count, 1);
     assert_eq!(candidate.stop_reason_counts.get("error"), Some(&1));
     assert_eq!(candidate.errors, vec!["candidate policy blocked tool"]);
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn list_plans_returns_only_visible_experiment_plan_artifacts_db_memory() -> Result<()> {
+    // Pins: Behavior Lab plan catalog lists stored experiment_plan artifacts, not eval files or other artifacts.
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let pool = store.pool().clone();
+    let registry = ArtifactRegistry::new(pool.clone());
+    let tenant_id = TenantId::new();
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    let suffix = Uuid::now_v7();
+    let published_name = format!("support-plan-{suffix}");
+    let draft_name = format!("draft-plan-{suffix}");
+    let skill_name = format!("non-plan-{suffix}");
+    let other_tenant_name = format!("other-tenant-plan-{suffix}");
+
+    let published =
+        publish_artifact(&registry, &scope, experiment_plan_doc(&published_name)).await?;
+    create_draft_artifact(&registry, &scope, experiment_plan_doc(&draft_name)).await?;
+    publish_artifact(&registry, &scope, skill_doc(&skill_name)).await?;
+    publish_artifact(
+        &registry,
+        &ActionRuleScope::Tenant {
+            tenant_id: TenantId::new(),
+        },
+        experiment_plan_doc(&other_tenant_name),
+    )
+    .await?;
+
+    let response = map_handler_error(
+        list_plans_inner(
+            pool,
+            ExperimentPlanListRequest {
+                tenant_id,
+                scope: None,
+                status: Some("published".to_string()),
+            },
+        )
+        .await,
+    )?;
+
+    assert_eq!(response.tenant_id, tenant_id);
+    assert_eq!(response.plans.len(), 1);
+    assert_eq!(response.plans[0].revision_uid, published.revision_uid);
+    assert_eq!(response.plans[0].name, published_name);
+    assert_eq!(response.plans[0].kind, "experiment_plan");
+    assert_eq!(response.plans[0].status, "published");
+    assert!(response.plans.iter().all(|plan| plan.name != draft_name
+        && plan.name != skill_name
+        && plan.name != other_tenant_name));
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn run_preserves_agent_revision_variants_for_workflow_db_memory() -> Result<()> {
+    // Pins: agent-revision simulation admission preserves exact revision variants for workflow fanout.
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let pool = store.pool().clone();
+    let registry = ArtifactRegistry::new(pool.clone());
+    let experiment_store = ExperimentStore::new(pool.clone());
+    let tenant_id = TenantId::new();
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    let suffix = Uuid::now_v7();
+    let plan = publish_artifact(
+        &registry,
+        &scope,
+        experiment_plan_doc(&format!("agent-revision-plan-{suffix}")),
+    )
+    .await?;
+    let base_agent = publish_artifact(
+        &registry,
+        &scope,
+        agent_doc(&format!("base-agent-{suffix}"), "Base Agent", "file_read"),
+    )
+    .await?;
+    let candidate_agent = publish_artifact(
+        &registry,
+        &scope,
+        agent_doc(
+            &format!("candidate-agent-{suffix}"),
+            "Candidate Agent",
+            "memory_search",
+        ),
+    )
+    .await?;
+    let base = AgentRevisionSimulationVariant {
+        variant_key: "base".to_string(),
+        revision_uid: base_agent.revision_uid,
+    };
+    let candidate = AgentRevisionSimulationVariant {
+        variant_key: "candidate".to_string(),
+        revision_uid: candidate_agent.revision_uid,
+    };
+
+    let accepted = map_handler_error(
+        run_agent_revision_simulation_inner(
+            pool,
+            AgentRevisionSimulationRunRequest {
+                tenant_id,
+                name: format!("agent revision simulation {suffix}"),
+                plan_revision_uid: plan.revision_uid,
+                base: base.clone(),
+                candidates: vec![candidate.clone()],
+                idempotency_key: Some(format!("simulation-{suffix}")),
+            },
+            identity_for_tenant(tenant_id),
+        )
+        .await,
+    )?;
+    let workflow_request = accepted.workflow_request();
+    let variants = vec![base, candidate];
+
+    assert_eq!(workflow_request.tenant_id, tenant_id);
+    assert_eq!(workflow_request.plan_revision_uid, Some(plan.revision_uid));
+    assert_eq!(workflow_request.agent_revision_variants, variants);
+
+    let run = experiment_store
+        .load_run(&scope, workflow_request.run_uid)
+        .await?
+        .expect("accepted simulation run should be persisted");
+    assert_eq!(
+        run.variant.metadata["agent_revision_variants"],
+        serde_json::to_value(&workflow_request.agent_revision_variants)?
+    );
+    let mut expected_revisions = vec![
+        plan.revision_uid,
+        base_agent.revision_uid,
+        candidate_agent.revision_uid,
+    ];
+    expected_revisions.sort_unstable();
+    let mut actual_revisions = run.artifact_revision_uids.clone();
+    actual_revisions.sort_unstable();
+    assert_eq!(actual_revisions, expected_revisions);
 
     moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await?;
     Ok(())
@@ -250,6 +398,138 @@ async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) 
     Ok(revision_uid)
 }
 
+async fn create_draft_artifact(
+    registry: &ArtifactRegistry,
+    scope: &ActionRuleScope,
+    document: ArtifactDocument,
+) -> Result<StoredArtifactRevision> {
+    let source = document.to_json()?;
+    Ok(registry
+        .create_draft(
+            scope,
+            NewArtifactDraft {
+                document: &document,
+                source_format: "json",
+                source_text: source.as_bytes(),
+                files: &[],
+            },
+        )
+        .await?)
+}
+
+async fn publish_artifact(
+    registry: &ArtifactRegistry,
+    scope: &ActionRuleScope,
+    document: ArtifactDocument,
+) -> Result<StoredArtifactRevision> {
+    let draft = create_draft_artifact(registry, scope, document.clone()).await?;
+    Ok(registry
+        .publish_revision(
+            scope,
+            draft.revision_uid,
+            &validate_for_status(&document, ArtifactStatus::Published),
+        )
+        .await?)
+}
+
+fn experiment_plan_doc(name: &str) -> ArtifactDocument {
+    serde_json::from_value(json!({
+        "api_version": "moa.artifact/v1",
+        "kind": "experiment_plan",
+        "metadata": {
+            "name": name,
+            "description": "Support behavior-lab plan",
+            "tags": ["behavior-lab"]
+        },
+        "definition": {
+            "type": "experiment_plan",
+            "spec": {
+                "simulation": {
+                    "scenarios": [{
+                        "id": "support-followup",
+                        "initial_situation": "The user asks for help with a delayed order.",
+                        "goals": ["Get a concrete next step."],
+                        "success_criteria": ["The target gives a concrete next step."],
+                        "max_turns": 3
+                    }],
+                    "personas": [{
+                        "id": "careful-customer",
+                        "voice": "Concise and specific.",
+                        "goals": ["Resolve the order issue."],
+                        "stop_behavior": "Stop after a concrete next step."
+                    }],
+                    "profiles": [{
+                        "id": "standard-account",
+                        "facts": { "account_tier": "standard" }
+                    }]
+                },
+                "target_variants": [{
+                    "key": "agent-loop",
+                    "kind": "agent_loop",
+                    "config": { "prompt": "Start the support simulation." }
+                }],
+                "simulator_model": "gpt-5.1-mini",
+                "target_model": "gpt-5.1",
+                "parallelism": 1,
+                "trials_per_combination": 1,
+                "budget": { "max_total_cents": 1000 }
+            }
+        }
+    }))
+    .expect("experiment plan artifact fixture is valid")
+}
+
+fn skill_doc(name: &str) -> ArtifactDocument {
+    serde_json::from_value(json!({
+        "api_version": "moa.artifact/v1",
+        "kind": "skill",
+        "metadata": {
+            "name": name,
+            "description": "Non-plan artifact fixture"
+        },
+        "definition": {
+            "type": "skill",
+            "spec": {
+                "instructions": { "path": "SKILL.md" },
+                "inputs": { "type": "object" },
+                "outputs": { "type": "object" }
+            }
+        }
+    }))
+    .expect("skill artifact fixture is valid")
+}
+
+fn agent_doc(name: &str, display_name: &str, allowed_tool: &str) -> ArtifactDocument {
+    serde_json::from_value(json!({
+        "api_version": "moa.artifact/v1",
+        "kind": "agent",
+        "metadata": {
+            "name": name,
+            "description": "Agent revision fixture"
+        },
+        "definition": {
+            "type": "agent",
+            "spec": {
+                "display_name": display_name,
+                "purpose": {
+                    "summary": "Triage support requests.",
+                    "default_task": "Classify support requests.",
+                    "expected_outputs": ["classification", "next action"]
+                },
+                "instruction_policy": {
+                    "system_prompt": format!("You are {display_name}.")
+                },
+                "tool_policy": {
+                    "mode": "allowlist",
+                    "tools": [allowed_tool]
+                },
+                "metadata": Value::Null
+            }
+        }
+    }))
+    .expect("agent artifact fixture is valid")
+}
+
 fn identity_json() -> serde_json::Value {
     let identity = Identity {
         identity_type: IdentityType::User,
@@ -263,6 +543,16 @@ fn identity_json() -> serde_json::Value {
         "id": identity.id,
         "tenant_id": identity.tenant_id
     })
+}
+
+fn identity_for_tenant(tenant_id: TenantId) -> Identity {
+    Identity {
+        identity_type: IdentityType::User,
+        id: Uuid::now_v7(),
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    }
 }
 
 fn map_handler_error<T>(

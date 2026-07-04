@@ -1,5 +1,6 @@
 //! Experiment and agent-revision simulation wire DTOs.
 
+use crate::wire::artifacts::ArtifactSummary;
 use crate::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -139,6 +140,29 @@ pub struct ExperimentListResponse {
     /// Experiment run summaries ordered for API display.
     #[serde(default)]
     pub runs: Vec<Value>,
+}
+
+/// Request payload for listing visible behavior-lab experiment plan artifacts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentPlanListRequest {
+    /// Tenant used for authorization and artifact visibility.
+    pub tenant_id: TenantId,
+    /// Optional scope to list from, defaulting to the tenant tier.
+    #[serde(default)]
+    pub scope: Option<ActionRuleScope>,
+    /// Optional artifact lifecycle status filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+/// Response payload containing visible behavior-lab experiment plan artifacts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentPlanListResponse {
+    /// Tenant used for artifact filtering.
+    pub tenant_id: TenantId,
+    /// Visible experiment plan artifacts ordered for API display.
+    #[serde(default)]
+    pub plans: Vec<ArtifactSummary>,
 }
 
 /// Request payload for listing experiment trials under a run.

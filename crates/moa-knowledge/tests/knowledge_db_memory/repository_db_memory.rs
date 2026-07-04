@@ -289,6 +289,64 @@ async fn scoped_repository_hides_other_tenant_rows_and_returns_redacted_timeline
     );
 }
 
+#[tokio::test]
+async fn disable_connection_updates_only_requested_tenant_connection() {
+    // Pins: disconnect flows can disable one tenant knowledge connection without crossing RLS tenants.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated knowledge DB");
+    let tenant_a = TenantId::from(Uuid::now_v7());
+    let tenant_b = TenantId::from(Uuid::now_v7());
+    let repo_a = repository(&db, tenant_a);
+    let repo_b = repository(&db, tenant_b);
+
+    let connection_a = connection(tenant_a, "disable-a");
+    let connection_b = connection(tenant_b, "disable-b");
+    repo_a
+        .upsert_connection(connection_a.clone())
+        .await
+        .expect("insert tenant A connection");
+    repo_b
+        .upsert_connection(connection_b.clone())
+        .await
+        .expect("insert tenant B connection");
+
+    let disabled = repo_a
+        .disable_connection(tenant_a, connection_a.connection_uid)
+        .await
+        .expect("tenant A should disable its own connection");
+    assert_eq!(disabled.connection_uid, connection_a.connection_uid);
+    assert_eq!(disabled.status, ConnectionStatus::Disabled);
+
+    let tenant_a_connections = repo_a
+        .list_connections(tenant_a, Some("nango"))
+        .await
+        .expect("tenant A should list its own disabled connection");
+    assert_eq!(tenant_a_connections.len(), 1);
+    assert_eq!(
+        tenant_a_connections[0].connection.status,
+        ConnectionStatus::Disabled
+    );
+
+    let tenant_b_connections = repo_b
+        .list_connections(tenant_b, Some("nango"))
+        .await
+        .expect("tenant B should list its unchanged connection");
+    assert_eq!(tenant_b_connections.len(), 1);
+    assert_eq!(
+        tenant_b_connections[0].connection.status,
+        ConnectionStatus::Active
+    );
+
+    assert!(
+        repo_a
+            .disable_connection(tenant_a, connection_b.connection_uid)
+            .await
+            .is_err(),
+        "tenant A must not disable tenant B's connection"
+    );
+}
+
 fn document_version(object_uid: Uuid, label: &str) -> DocumentVersion {
     DocumentVersion {
         version_uid: Uuid::now_v7(),

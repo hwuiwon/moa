@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
     Credential, CredentialVault, McpCredentialConfig, McpServerConfig, MoaError, Result, SessionId,
+    StoredCredentialMetadata,
 };
 use moka::future::Cache;
 use tokio::sync::RwLock;
@@ -167,6 +168,44 @@ impl CredentialVault for EnvironmentCredentialVault {
             .insert((service.to_string(), scope.to_string()), cred);
         Ok(())
     }
+
+    async fn delete(&self, service: &str, scope: &str) -> Result<bool> {
+        Ok(self
+            .credentials
+            .write()
+            .await
+            .remove(&(service.to_string(), scope.to_string()))
+            .is_some())
+    }
+
+    async fn list(&self, service_prefix: &str) -> Result<Vec<StoredCredentialMetadata>> {
+        let mut entries = self
+            .credentials
+            .read()
+            .await
+            .iter()
+            .filter(|((service, _), _)| service.starts_with(service_prefix))
+            .map(|((service, scope), credential)| StoredCredentialMetadata {
+                service: service.clone(),
+                scope: scope.clone(),
+                kind: credential_kind(credential).to_string(),
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            left.service
+                .cmp(&right.service)
+                .then_with(|| left.scope.cmp(&right.scope))
+        });
+        Ok(entries)
+    }
+}
+
+fn credential_kind(credential: &Credential) -> &'static str {
+    match credential {
+        Credential::Bearer(_) => "bearer",
+        Credential::OAuth { .. } => "oauth",
+        Credential::ApiKey { .. } => "api_key",
+    }
 }
 
 fn credential_from_env(config: &McpCredentialConfig) -> Result<Credential> {
@@ -220,7 +259,10 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use moa_core::{Credential, CredentialVault, McpCredentialConfig, McpServerConfig, SessionId};
+    use moa_core::{
+        Credential, CredentialVault, McpCredentialConfig, McpServerConfig, SessionId,
+        StoredCredentialMetadata,
+    };
     use tokio::time::sleep;
     use uuid::Uuid;
 
@@ -246,6 +288,17 @@ mod tests {
             _cred: Credential,
         ) -> moa_core::Result<()> {
             Ok(())
+        }
+
+        async fn delete(&self, _service: &str, _scope: &str) -> moa_core::Result<bool> {
+            Ok(false)
+        }
+
+        async fn list(
+            &self,
+            _service_prefix: &str,
+        ) -> moa_core::Result<Vec<StoredCredentialMetadata>> {
+            Ok(Vec::new())
         }
     }
 
@@ -469,6 +522,67 @@ mod tests {
 
         assert!(
             matches!(error, moa_core::MoaError::MissingEnvironmentVariable(message) if message.contains("credential not configured for service unknown-service"))
+        );
+    }
+
+    #[tokio::test]
+    async fn environment_vault_lists_metadata_without_secret_and_delete_removes_entry() {
+        // Pins: knowledge disconnect can enumerate and revoke managed vault refs without exposing token material.
+        let vault = EnvironmentCredentialVault::from_mcp_servers(&[])
+            .expect("an empty server list builds an empty vault");
+        vault
+            .set(
+                "knowledge:nango",
+                "tenant-a:account-1",
+                Credential::Bearer("secret-token".to_string()),
+            )
+            .await
+            .expect("setup should store a managed knowledge credential");
+        vault
+            .set(
+                "messaging:postmark",
+                "tenant-a",
+                Credential::ApiKey {
+                    header: "X-Api-Key".to_string(),
+                    value: "postmark-secret".to_string(),
+                },
+            )
+            .await
+            .expect("setup should store an unrelated credential");
+
+        let metadata = vault
+            .list("knowledge:")
+            .await
+            .expect("metadata listing should succeed");
+        assert_eq!(
+            metadata,
+            vec![StoredCredentialMetadata {
+                service: "knowledge:nango".to_string(),
+                scope: "tenant-a:account-1".to_string(),
+                kind: "bearer".to_string(),
+            }]
+        );
+        assert!(!format!("{metadata:?}").contains("secret-token"));
+        assert!(!format!("{metadata:?}").contains("postmark-secret"));
+
+        assert!(
+            vault
+                .delete("knowledge:nango", "tenant-a:account-1")
+                .await
+                .expect("delete should succeed for existing credential")
+        );
+        assert!(
+            !vault
+                .delete("knowledge:nango", "tenant-a:account-1")
+                .await
+                .expect("second delete should be idempotent")
+        );
+        assert!(
+            vault
+                .get("knowledge:nango", "tenant-a:account-1")
+                .await
+                .is_err(),
+            "deleted credential must no longer resolve"
         );
     }
 

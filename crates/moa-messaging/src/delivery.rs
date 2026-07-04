@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
     Channel, ContactId, Credential, CredentialVault, MessagingConfig, MoaError, Result,
+    StoredCredentialMetadata,
 };
 use tracing::Instrument;
 use uuid::Uuid;
@@ -339,6 +340,18 @@ impl CredentialVault for EnvironmentDeliveryCredentialVault {
     async fn set(&self, _service: &str, _scope: &str, _cred: Credential) -> Result<()> {
         Err(MoaError::StorageError(
             "environment delivery credential vault is read-only".to_string(),
+        ))
+    }
+
+    async fn delete(&self, _service: &str, _scope: &str) -> Result<bool> {
+        Err(MoaError::StorageError(
+            "environment delivery credential vault is read-only".to_string(),
+        ))
+    }
+
+    async fn list(&self, _service_prefix: &str) -> Result<Vec<StoredCredentialMetadata>> {
+        Err(MoaError::StorageError(
+            "environment delivery credential vault does not support listing".to_string(),
         ))
     }
 }

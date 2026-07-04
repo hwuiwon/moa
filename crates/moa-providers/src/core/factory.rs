@@ -26,6 +26,22 @@ pub fn build_provider_from_config(config: &MoaConfig) -> Result<Arc<dyn LLMProvi
     registry.apply_main_failover(config, model_id.as_str(), primary)
 }
 
+/// Builds a provider for an explicit model override and returns the canonical model id.
+///
+/// The result is wrapped with the configured LLM failover chain
+/// (`models.fallback_models`), matching the main-loop router path while letting
+/// auxiliary model users keep their own model selector.
+pub fn build_provider_from_model(
+    config: &MoaConfig,
+    model_override: Option<&str>,
+) -> Result<(Arc<dyn LLMProvider>, ModelId)> {
+    let registry = ProviderRegistry::from_config(config);
+    let (provider_id, model_id) = resolve_provider_selection(config, model_override)?;
+    let primary = registry.provider_for_id(provider_id, &model_id)?.provider;
+    let provider = registry.apply_main_failover(config, model_id.as_str(), primary)?;
+    Ok((provider, model_id))
+}
+
 /// Builds one provider instance from an explicit provider/model selection.
 pub fn build_provider_from_selection(
     config: &MoaConfig,

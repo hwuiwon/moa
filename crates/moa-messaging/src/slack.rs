@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::traits::{ChannelAdapter, RuntimeCacheStore};
 use moa_core::{
-    Channel, ChannelActor, ChannelCapabilities, ChannelRef, InboundMessage, MessageId, MoaConfig,
-    MoaError, OutboundMessage, Result,
+    Channel, ChannelActor, ChannelCapabilities, ChannelEvent, ChannelRef, ChannelSessionCommand,
+    InboundMessage, MessageId, MoaConfig, MoaError, OutboundMessage, Result,
 };
 use moka::future::Cache;
 use serde::{Deserialize, Serialize};
@@ -46,7 +46,7 @@ const SLACK_LAST_EDIT_TTL: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Clone)]
 struct SlackListenerState {
-    event_tx: mpsc::Sender<InboundMessage>,
+    event_tx: mpsc::Sender<ChannelEvent>,
     inbound_contexts: Cache<String, SlackMessageRef>,
 }
 
@@ -496,17 +496,19 @@ impl SlackAdapter {
     }
 }
 
-/// Normalizes one Slack Events API callback JSON payload into MOA's canonical inbound shape.
-pub fn normalize_event_json(payload: &str) -> Result<InboundMessage> {
+/// Normalizes one Slack Events API callback JSON payload into MOA's canonical channel event shape.
+pub fn normalize_event_json(payload: &str) -> Result<ChannelEvent> {
     let event: SlackPushEventCallback = serde_json::from_str(payload)?;
     normalize_push_event(&event)
 }
 
-/// Normalizes one parsed Slack push event into MOA's canonical inbound shape.
-pub fn normalize_push_event(event: &SlackPushEventCallback) -> Result<InboundMessage> {
-    inbound_from_push_event(event).ok_or_else(|| {
-        MoaError::ValidationError("slack event is not a supported user message".to_string())
-    })
+/// Normalizes one parsed Slack push event into MOA's canonical channel event shape.
+pub fn normalize_push_event(event: &SlackPushEventCallback) -> Result<ChannelEvent> {
+    inbound_from_push_event(event)
+        .ok_or_else(|| {
+            MoaError::ValidationError("slack event is not a supported user message".to_string())
+        })
+        .map(channel_event_from_inbound)
 }
 
 #[async_trait]
@@ -522,7 +524,7 @@ impl ChannelAdapter for SlackAdapter {
     }
 
     /// Starts the Slack Socket Mode listener and forwards normalized updates.
-    async fn start(&self, event_tx: mpsc::Sender<InboundMessage>) -> Result<()> {
+    async fn start(&self, event_tx: mpsc::Sender<ChannelEvent>) -> Result<()> {
         let client = self.client.clone();
         let callbacks = SlackSocketModeListenerCallbacks::new().with_push_events(handle_push_event);
 
@@ -903,15 +905,15 @@ async fn handle_push_event(
     };
 
     if let Some(inbound) = inbound_from_push_event(&event) {
-        let messaging_span = messaging_receive_span(&inbound);
-        async {
+        let channel_event = channel_event_from_inbound(inbound);
+        let inbound = inbound_for_event(&channel_event);
+        let channel_msg_id = inbound.channel_msg_id.clone();
+        let messaging_span = messaging_receive_span(inbound);
+        async move {
             if let Some(origin) = push_event_origin(&event) {
-                shared
-                    .inbound_contexts
-                    .insert(inbound.channel_msg_id.clone(), origin)
-                    .await;
+                shared.inbound_contexts.insert(channel_msg_id, origin).await;
             }
-            if shared.event_tx.send(inbound).await.is_err() {
+            if shared.event_tx.send(channel_event).await.is_err() {
                 warn!("slack inbound receiver dropped");
             }
         }
@@ -1033,6 +1035,40 @@ fn inbound_from_push_event(event: &SlackPushEventCallback) -> Option<InboundMess
     match &event.event {
         SlackEventCallbackBody::AppMention(message) => inbound_from_app_mention(message, team_id),
         SlackEventCallbackBody::Message(message) => inbound_from_message_event(message, team_id),
+        _ => None,
+    }
+}
+
+fn channel_event_from_inbound(inbound: InboundMessage) -> ChannelEvent {
+    match parse_session_command(&inbound.text) {
+        Some(SlackSessionCommand::Status) => {
+            ChannelEvent::SessionCommand(ChannelSessionCommand::Status(inbound))
+        }
+        Some(SlackSessionCommand::Stop) => {
+            ChannelEvent::SessionCommand(ChannelSessionCommand::Stop(inbound))
+        }
+        None => ChannelEvent::Message(inbound),
+    }
+}
+
+fn inbound_for_event(event: &ChannelEvent) -> &InboundMessage {
+    match event {
+        ChannelEvent::Message(inbound) => inbound,
+        ChannelEvent::SessionCommand(ChannelSessionCommand::Status(inbound))
+        | ChannelEvent::SessionCommand(ChannelSessionCommand::Stop(inbound)) => inbound,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlackSessionCommand {
+    Status,
+    Stop,
+}
+
+fn parse_session_command(text: &str) -> Option<SlackSessionCommand> {
+    match text.trim() {
+        "/moa status" => Some(SlackSessionCommand::Status),
+        "/moa stop" => Some(SlackSessionCommand::Stop),
         _ => None,
     }
 }

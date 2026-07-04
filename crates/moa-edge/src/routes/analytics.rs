@@ -423,6 +423,9 @@ pub(super) fn translate(
         "/v1/experiments/list" => {
             translate_json_object_with_tenant_id(body, "/Experiments/list", tenant_id)
         }
+        "/v1/experiments/plans/list" => {
+            translate_json_object_with_tenant_id(body, "/Experiments/list_plans", tenant_id)
+        }
         "/v1/experiments/trials" => {
             translate_json_object_with_tenant_id(body, "/Experiments/trials", tenant_id)
         }
@@ -798,6 +801,7 @@ mod tests {
             ("/v1/experiments/run-plan", "/Experiments/run"),
             ("/v1/experiments/status", "/Experiments/status"),
             ("/v1/experiments/list", "/Experiments/list"),
+            ("/v1/experiments/plans/list", "/Experiments/list_plans"),
             ("/v1/experiments/trials", "/Experiments/trials"),
             ("/v1/experiments/trial-status", "/Experiments/trial_status"),
             ("/v1/experiments/cancel", "/Experiments/cancel"),

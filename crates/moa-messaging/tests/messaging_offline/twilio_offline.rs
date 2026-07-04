@@ -410,4 +410,19 @@ impl CredentialVault for MockVault {
             "mock vault is read-only".to_string(),
         ))
     }
+
+    async fn delete(&self, _service: &str, _scope: &str) -> moa_core::Result<bool> {
+        Err(MoaError::StorageError(
+            "mock vault is read-only".to_string(),
+        ))
+    }
+
+    async fn list(
+        &self,
+        _service_prefix: &str,
+    ) -> moa_core::Result<Vec<moa_core::StoredCredentialMetadata>> {
+        Err(MoaError::StorageError(
+            "mock vault does not support listing".to_string(),
+        ))
+    }
 }

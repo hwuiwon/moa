@@ -905,13 +905,11 @@ async fn fast_remember_real_detector_flags_restated_fact_as_duplicate_db_memory(
     // seeded rows. The embedding matches the seeded node's stored vector (same
     // deterministic embedder over identical, unredacted text), so vector KNN and
     // lexical FTS both surface the candidate and the heuristic judge restates it.
-    let detector =
-        RrfPlusJudgeDetector::from_cohere_api_key_model_or_heuristic("", "heuristic-judge", 1_000)
-            .with_budgets(
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-            );
+    let detector = RrfPlusJudgeDetector::default().with_budgets(
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
     let scope = RlsContext::tenant(TenantId::from(tenant_id));
     let vector = Arc::new(PgvectorStore::new_for_app_role(
         session_store.pool().clone(),

@@ -61,13 +61,11 @@ impl Default for MemoryDigestConfig {
 pub struct MemoryExtractionConfig {
     /// Whether model-backed fact extraction is enabled.
     pub enabled: bool,
-    /// Cohere API key value loaded from runtime configuration.
-    pub api_key: String,
-    /// Cohere chat model used for extraction and memory-ingest chat judging.
+    /// Provider model selector used for extraction and memory-ingest judging.
     pub model: String,
     /// Maximum facts accepted from one chunk.
     pub max_facts_per_chunk: usize,
-    /// Chat request timeout in milliseconds.
+    /// Provider request timeout in milliseconds.
     pub timeout_ms: u64,
 }
 
@@ -75,8 +73,7 @@ impl Default for MemoryExtractionConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            api_key: String::new(),
-            model: "command-a-plus-05-2026".to_string(),
+            model: "gpt-5.4-mini".to_string(),
             max_facts_per_chunk: 12,
             timeout_ms: 10_000,
         }

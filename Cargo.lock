@@ -3656,6 +3656,7 @@ name = "moa-lineage-audit"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "async-trait",
  "base64 0.22.1",
  "blake3",
  "chrono",
@@ -3666,6 +3667,7 @@ dependencies = [
  "moa-memory-pii",
  "object_store",
  "rand 0.8.5",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3676,6 +3678,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "wiremock",
  "workspace-hack",
  "zip",
 ]
@@ -4118,7 +4121,6 @@ dependencies = [
  "moa-observability",
  "moa-test-support",
  "opentelemetry",
- "rand 0.8.5",
  "reqwest 0.13.4",
  "secrecy",
  "serde",

@@ -1,7 +1,10 @@
 //! Restate service for authorized live behavior experiment run metadata.
 
 use moa_agents::{AgentResolver, AgentRuntimePolicy};
+use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
+use moa_artifacts::registry::ArtifactRegistry;
 use moa_core::traits::{Identity, LearningCandidateStore};
+use moa_core::wire::artifacts::ArtifactSummary as WireArtifactSummary;
 use moa_core::wire::experiments::{
     AgentArtifactDependencyDelta, AgentDependencyChange, AgentRevisionCompareRequest,
     AgentRevisionCompareResponse, AgentRevisionSimulationCompareRequest,
@@ -10,11 +13,12 @@ use moa_core::wire::experiments::{
     AgentRevisionSimulationVariantResult, AgentToolDependencyDelta, ExperimentCancelRequest,
     ExperimentCancelResponse, ExperimentCompareRequest, ExperimentCompareResponse,
     ExperimentGeneratePlanRequest, ExperimentGeneratePlanResponse, ExperimentListRequest,
-    ExperimentListResponse, ExperimentProposeImprovementsRequest,
-    ExperimentProposeImprovementsResponse, ExperimentRunRequest, ExperimentRunResponse,
-    ExperimentRunStatusRequest, ExperimentRunStatusResponse, ExperimentScoresRequest,
-    ExperimentScoresResponse, ExperimentTrialStatusRequest, ExperimentTrialStatusResponse,
-    ExperimentTrialsRequest, ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
+    ExperimentListResponse, ExperimentPlanListRequest, ExperimentPlanListResponse,
+    ExperimentProposeImprovementsRequest, ExperimentProposeImprovementsResponse,
+    ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
+    ExperimentRunStatusResponse, ExperimentScoresRequest, ExperimentScoresResponse,
+    ExperimentTrialStatusRequest, ExperimentTrialStatusResponse, ExperimentTrialsRequest,
+    ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
 };
 use moa_core::{ActionRuleScope, TenantId};
 use moa_experiments::app::{
@@ -62,6 +66,11 @@ pub trait Experiments {
     async fn list(
         request: Json<ExperimentListRequest>,
     ) -> Result<Json<ExperimentListResponse>, HandlerError>;
+
+    /// Lists visible behavior-lab plan artifacts after a tenant operator/admin check.
+    async fn list_plans(
+        request: Json<ExperimentPlanListRequest>,
+    ) -> Result<Json<ExperimentPlanListResponse>, HandlerError>;
 
     /// Lists live behavior experiment trials after a tenant operator/admin check.
     async fn trials(
@@ -204,6 +213,23 @@ impl Experiments for ExperimentsImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
+    async fn list_plans(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ExperimentPlanListRequest>,
+    ) -> Result<Json<ExperimentPlanListResponse>, HandlerError> {
+        annotate_restate_handler_span("Experiments", "list_plans");
+        let request = request.into_inner();
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        let pool = OrchestratorCtx::current_graph_pool();
+
+        Ok(ctx
+            .run(|| async move { list_plans_inner(pool, request).await.map(Json::from) })
+            .name("experiments_list_plans")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
     async fn trials(
         &self,
         ctx: Context<'_>,
@@ -332,16 +358,7 @@ impl Experiments for ExperimentsImpl {
             .await?
             .into_inner();
         ctx.workflow_client::<ExperimentRunClient>(accepted.run_uid.to_string())
-            .run(Json::from(ExperimentRunWorkflowRequest {
-                tenant_id: accepted.tenant_id,
-                run_uid: accepted.run_uid,
-                target: serde_json::json!({}),
-                variant: serde_json::json!({}),
-                plan_revision_uid: Some(accepted.plan_revision_uid),
-                identity: accepted.identity,
-                score_run_id: accepted.score_run_id,
-                agent_revision_variants: accepted.variants.clone(),
-            }))
+            .run(Json::from(accepted.workflow_request()))
             .send();
         Ok(Json::from(accepted.response))
     }
@@ -425,6 +442,52 @@ async fn list_inner(
         .map_err(experiment_app_error_to_handler_error)
 }
 
+/// Lists visible behavior-lab plan artifacts after caller authorization has passed.
+pub async fn list_plans_inner(
+    pool: sqlx::PgPool,
+    request: ExperimentPlanListRequest,
+) -> Result<ExperimentPlanListResponse, HandlerError> {
+    let scope = request.scope.unwrap_or(ActionRuleScope::Tenant {
+        tenant_id: request.tenant_id,
+    });
+    if scope.tenant_id() != request.tenant_id {
+        return Err(TerminalError::new_with_code(
+            400,
+            "plan list scope tenant_id must match request tenant_id",
+        )
+        .into());
+    }
+    let status = request
+        .status
+        .as_deref()
+        .map(str::parse::<ArtifactStatus>)
+        .transpose()
+        .map_err(|error| TerminalError::new_with_code(400, error.to_string()))?;
+    let plans = ArtifactRegistry::new(pool)
+        .list_visible(&scope, Some(ArtifactKind::ExperimentPlan), status)
+        .await
+        .map_err(moa_error_to_handler_error)?
+        .into_iter()
+        .map(|summary| WireArtifactSummary {
+            artifact_uid: summary.artifact_uid,
+            revision_uid: summary.revision_uid,
+            scope: summary.scope,
+            kind: summary.kind.to_string(),
+            name: summary.name,
+            description: summary.description,
+            tags: summary.tags,
+            status: summary.status.to_string(),
+            version: summary.version,
+            updated_at: summary.updated_at,
+        })
+        .collect();
+
+    Ok(ExperimentPlanListResponse {
+        tenant_id: request.tenant_id,
+        plans,
+    })
+}
+
 async fn trials_inner(
     pool: sqlx::PgPool,
     request: ExperimentTrialsRequest,
@@ -504,6 +567,23 @@ pub struct AgentRevisionSimulationAccepted {
     variants: Vec<AgentRevisionSimulationVariant>,
     /// Public response payload returned by the Restate handler.
     response: AgentRevisionSimulationRunResponse,
+}
+
+impl AgentRevisionSimulationAccepted {
+    /// Builds the workflow dispatch request for the accepted simulation run.
+    #[must_use]
+    pub fn workflow_request(&self) -> ExperimentRunWorkflowRequest {
+        ExperimentRunWorkflowRequest {
+            tenant_id: self.tenant_id,
+            run_uid: self.run_uid,
+            target: serde_json::json!({}),
+            variant: serde_json::json!({}),
+            plan_revision_uid: Some(self.plan_revision_uid),
+            identity: self.identity.clone(),
+            score_run_id: self.score_run_id,
+            agent_revision_variants: self.variants.clone(),
+        }
+    }
 }
 
 /// Admits an agent-revision simulation run after caller authorization has passed.

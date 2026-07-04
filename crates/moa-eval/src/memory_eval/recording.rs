@@ -6,14 +6,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use moa_core::MoaConfig;
 use moa_core::config::MemoryExtractionConfig;
 use moa_memory_graph::NodeIndexRow;
 use moa_memory_ingest::{
     EXTRACTION_PROMPT_VERSION, EntityMergeFixtureRecord, EntityMergeVerifier,
-    ExtractionFixtureRecord, FactExtractor, LlmEntityMergeVerifier, LlmFactExtractor,
-    MERGE_PROMPT_VERSION, RecordedFact, RecordedFactExtractor, chunk_hash, chunk_turn,
+    ExtractionFixtureRecord, FactExtractor, MERGE_PROMPT_VERSION, ModelEntityMergeVerifier,
+    ModelFactExtractor, RecordedFact, RecordedFactExtractor, chunk_hash, chunk_turn,
     merge_fixture_key,
 };
+use moa_providers::{ProviderId, resolve_provider_selection};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
@@ -26,6 +28,9 @@ use super::{
     read_ledger_jsonl, read_manifest_json, read_probes_jsonl, read_sessions_jsonl, validate_corpus,
 };
 use crate::kernel::FixtureStore;
+use crate::kernel::cost::{
+    GPT_5_4_MINI_INPUT_USD_PER_MILLION_TOKENS, GPT_5_4_MINI_OUTPUT_USD_PER_MILLION_TOKENS,
+};
 use moa_eval_core::{EvalError, Result};
 
 const CHUNK_TARGET_TOKENS: usize = 700;
@@ -41,6 +46,31 @@ fn load_api_key(api_key_env: &str) -> Result<String> {
         )));
     }
     Ok(api_key)
+}
+
+fn memory_recording_config(
+    extraction_config: &MemoryExtractionConfig,
+    api_key_env: &str,
+) -> Result<MoaConfig> {
+    let api_key = load_api_key(api_key_env)?;
+    let mut config = MoaConfig::default();
+    config.memory.extraction = extraction_config.clone();
+    config.memory.extraction.enabled = true;
+    let (provider_id, _) =
+        resolve_provider_selection(&config, Some(&config.memory.extraction.model)).map_err(
+            |error| {
+                EvalError::InvalidConfig(format!(
+                    "memory extraction model '{}' could not resolve a provider: {error}",
+                    config.memory.extraction.model
+                ))
+            },
+        )?;
+    match provider_id {
+        ProviderId::Anthropic => config.providers.anthropic.api_key = api_key,
+        ProviderId::OpenAI => config.providers.openai.api_key = api_key,
+        ProviderId::Google => config.providers.google.api_key = api_key,
+    }
+    Ok(config)
 }
 
 /// Options for recording live extraction fixtures for one corpus.
@@ -72,7 +102,7 @@ impl MemoryMergeRecordingOptions {
             output_path: None,
             extraction_path: None,
             extraction_config: MemoryExtractionConfig::default(),
-            api_key_env: "MOA_COHERE_API_KEY".to_string(),
+            api_key_env: "MOA_OPENAI_API_KEY".to_string(),
         }
     }
 
@@ -90,14 +120,14 @@ impl MemoryMergeRecordingOptions {
         self
     }
 
-    /// Overrides the Cohere API-key environment variable used for live merge verification.
+    /// Overrides the provider API-key environment variable used for live merge verification.
     #[must_use]
     pub fn with_api_key_env(mut self, api_key_env: impl Into<String>) -> Self {
         self.api_key_env = api_key_env.into();
         self
     }
 
-    /// Overrides the Cohere chat model used for live merge verification.
+    /// Overrides the provider model used for live merge verification.
     #[must_use]
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.extraction_config.model = model.into();
@@ -120,7 +150,7 @@ impl MemoryExtractionRecordingOptions {
             corpus_dir: corpus_dir.into(),
             output_path: None,
             extraction_config: MemoryExtractionConfig::default(),
-            api_key_env: "MOA_COHERE_API_KEY".to_string(),
+            api_key_env: "MOA_OPENAI_API_KEY".to_string(),
             request_delay_ms: 0,
         }
     }
@@ -132,14 +162,14 @@ impl MemoryExtractionRecordingOptions {
         self
     }
 
-    /// Overrides the Cohere API-key environment variable.
+    /// Overrides the provider API-key environment variable.
     #[must_use]
     pub fn with_api_key_env(mut self, api_key_env: impl Into<String>) -> Self {
         self.api_key_env = api_key_env.into();
         self
     }
 
-    /// Overrides the Cohere chat model.
+    /// Overrides the provider model.
     #[must_use]
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.extraction_config.model = model.into();
@@ -217,10 +247,12 @@ pub async fn record_memory_extractions(
     let output_path = options
         .output_path
         .unwrap_or_else(|| default_extractions_path(&manifest.corpus_id));
-    let mut extraction_config = options.extraction_config.clone();
-    extraction_config.api_key = load_api_key(&options.api_key_env)?;
-    let extractor = LlmFactExtractor::from_config(&extraction_config).map_err(|error| {
-        EvalError::InvalidConfig(format!("failed to initialize LLM fact extractor: {error}"))
+    let config = memory_recording_config(&options.extraction_config, &options.api_key_env)?;
+    let extraction_config = config.memory.extraction.clone();
+    let extractor = ModelFactExtractor::from_config(&config).map_err(|error| {
+        EvalError::InvalidConfig(format!(
+            "failed to initialize model fact extractor: {error}"
+        ))
     })?;
     let facts = super::gold::facts_by_id(&ledger)?;
     let mut records = existing_records(&output_path)?;
@@ -318,13 +350,10 @@ pub async fn record_memory_merges(
         extraction_store,
         extraction_remediation,
     ));
-    let mut extraction_config = options.extraction_config.clone();
-    extraction_config.api_key = load_api_key(&options.api_key_env)?;
-    let live = LlmEntityMergeVerifier::from_api_key(
-        extraction_config.api_key.clone(),
-        &extraction_config.model,
-        extraction_config.timeout_ms,
-    );
+    let config = memory_recording_config(&options.extraction_config, &options.api_key_env)?;
+    let live = ModelEntityMergeVerifier::from_config(&config).map_err(|error| {
+        EvalError::InvalidConfig(format!("failed to initialize live merge verifier: {error}"))
+    })?;
     let recorder = Arc::new(RecordingEntityMergeVerifier::new(
         live,
         existing_merge_records(&output_path)?,
@@ -368,13 +397,13 @@ pub async fn record_memory_merges(
 }
 
 struct RecordingEntityMergeVerifier {
-    inner: LlmEntityMergeVerifier,
+    inner: ModelEntityMergeVerifier,
     records: Mutex<BTreeMap<String, EntityMergeFixtureRecord>>,
 }
 
 impl RecordingEntityMergeVerifier {
     fn new(
-        inner: LlmEntityMergeVerifier,
+        inner: ModelEntityMergeVerifier,
         records: BTreeMap<String, EntityMergeFixtureRecord>,
     ) -> Self {
         Self {
@@ -455,7 +484,7 @@ fn estimate_tokens(text: &str) -> usize {
 }
 
 fn estimate_cost_usd(input_tokens: usize, output_tokens: usize) -> f64 {
-    let input = input_tokens as f64 / 1_000_000.0 * 2.50;
-    let output = output_tokens as f64 / 1_000_000.0 * 10.00;
+    let input = input_tokens as f64 / 1_000_000.0 * GPT_5_4_MINI_INPUT_USD_PER_MILLION_TOKENS;
+    let output = output_tokens as f64 / 1_000_000.0 * GPT_5_4_MINI_OUTPUT_USD_PER_MILLION_TOKENS;
     input + output
 }

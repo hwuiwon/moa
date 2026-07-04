@@ -1,5 +1,6 @@
 //! Runtime composition helpers for the Restate-backed orchestrator binary.
 
+pub mod channel_ingress;
 pub mod database;
 pub mod deps;
 pub mod endpoint;

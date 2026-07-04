@@ -13,6 +13,7 @@ use moa_core::{
     ContactId, SessionId, StoragePartitionId, TenantId, UserId,
     traits::EmbeddingProvider,
     wire::knowledge::{
+        KnowledgeConnectionListRequest, KnowledgeDisconnectConnectionRequest,
         KnowledgeExchangeTokenRequest, KnowledgeIntegrationListRequest,
         KnowledgeObjectInspectRequest, KnowledgeObjectListRequest, KnowledgeProviderWebhookRequest,
         KnowledgeQueryTraceRequest, KnowledgeSyncEventsRequest, KnowledgeSyncRequest,
@@ -1022,6 +1023,110 @@ async fn exchange_stores_only_credential_reference_on_connection() {
     );
     assert_eq!(response.provider, PROVIDER);
     assert_eq!(response.connector, CONNECTOR);
+}
+
+#[tokio::test]
+async fn disconnect_connection_deletes_vault_ref_and_disables_connection() {
+    // Pins: disconnecting a linked knowledge connection revokes MOA-managed credential material.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    let provider = Arc::new(FakeLinkedIntegrationProvider::default());
+    let credentials = Arc::new(FakeKnowledgeCredentialStore::default());
+    let service = KnowledgeService::new(
+        repository.clone(),
+        Arc::new(StaticKnowledgeProviders::new().with_provider(PROVIDER, provider)),
+        credentials.clone(),
+        fake_ingestion_runner(),
+        80,
+    );
+    let exchange = service
+        .exchange_public_token(KnowledgeExchangeTokenRequest {
+            tenant_id,
+            provider: PROVIDER.to_string(),
+            exchange_token: "public-token".to_string(),
+            source_selection: json!({}),
+        })
+        .await
+        .expect("token exchange should persist a linked connection");
+
+    let listed_before = service
+        .list_connections(KnowledgeConnectionListRequest {
+            tenant_id,
+            provider: Some(PROVIDER.to_string()),
+        })
+        .await
+        .expect("listed connection should resolve credential metadata before disconnect");
+    assert_eq!(listed_before.connections.len(), 1);
+    assert_eq!(
+        listed_before.connections[0].credential_status.as_deref(),
+        Some("present")
+    );
+
+    let response = service
+        .disconnect_connection(KnowledgeDisconnectConnectionRequest {
+            tenant_id,
+            connection_uid: exchange.connection_uid,
+        })
+        .await
+        .expect("disconnect should disable the connection and revoke credential material");
+    let connection = repository
+        .connection(exchange.connection_uid)
+        .expect("connection should still be stored for audit/history");
+
+    assert_eq!(response.connection_uid, exchange.connection_uid);
+    assert_eq!(response.status, "disabled");
+    assert!(response.credential_revoked);
+    assert_eq!(connection.status, ConnectionStatus::Disabled);
+    assert_eq!(credentials.stored_account_count(), 0);
+    assert_eq!(repository.op_count("disable_connection"), 1);
+
+    let listed_after = service
+        .list_connections(KnowledgeConnectionListRequest {
+            tenant_id,
+            provider: Some(PROVIDER.to_string()),
+        })
+        .await
+        .expect("listed connection should expose missing managed credential after disconnect");
+    assert_eq!(listed_after.connections.len(), 1);
+    assert_eq!(
+        listed_after.connections[0].credential_status.as_deref(),
+        Some("missing")
+    );
+}
+
+#[tokio::test]
+async fn disconnect_connection_leaves_external_credential_ref_and_disables_connection() {
+    // Pins: disconnecting a connection with provider-owned credential refs does not invent vault deletes.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let mut connection = fixture_connection(tenant_id);
+    connection.credential_ref = "provider-owned-credential-ref".to_string();
+    let connection_uid = connection.connection_uid;
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    repository
+        .insert_connection(connection)
+        .expect("fixture connection should be inserted");
+    let service = fixture_service(
+        repository.clone(),
+        Arc::new(FakeLinkedIntegrationProvider::default()),
+        80,
+    );
+
+    let response = service
+        .disconnect_connection(KnowledgeDisconnectConnectionRequest {
+            tenant_id,
+            connection_uid,
+        })
+        .await
+        .expect("disconnect should still disable an external-ref connection");
+    let connection = repository
+        .connection(connection_uid)
+        .expect("connection should still be stored for audit/history");
+
+    assert_eq!(response.connection_uid, connection_uid);
+    assert_eq!(response.status, "disabled");
+    assert!(!response.credential_revoked);
+    assert_eq!(connection.status, ConnectionStatus::Disabled);
+    assert_eq!(repository.op_count("disable_connection"), 1);
 }
 
 #[tokio::test]
@@ -4209,7 +4314,7 @@ impl LinkedIntegrationProvider for FakeLinkedIntegrationProvider {
 
 #[derive(Debug, Clone, Default)]
 struct FakeKnowledgeCredentialStore {
-    accounts: Arc<Mutex<Vec<LinkedAccount>>>,
+    accounts: Arc<Mutex<Vec<(TenantId, LinkedAccount)>>>,
 }
 
 impl FakeKnowledgeCredentialStore {
@@ -4221,7 +4326,11 @@ impl FakeKnowledgeCredentialStore {
     }
 
     fn vault_ref_for(&self, tenant_id: TenantId) -> String {
-        format!("vault://tenant/{tenant_id}/knowledge/{PROVIDER}/provider-account-1")
+        self.vault_ref_for_account(tenant_id, "provider-account-1")
+    }
+
+    fn vault_ref_for_account(&self, tenant_id: TenantId, provider_account_id: &str) -> String {
+        format!("vault://tenant/{tenant_id}/knowledge/{PROVIDER}/{provider_account_id}")
     }
 }
 
@@ -4235,8 +4344,8 @@ impl KnowledgeCredentialStore for FakeKnowledgeCredentialStore {
         self.accounts
             .lock()
             .expect("fake credential store should not be poisoned")
-            .push(account.clone());
-        Ok(self.vault_ref_for(tenant_id))
+            .push((tenant_id, account.clone()));
+        Ok(self.vault_ref_for_account(tenant_id, &account.provider_account_id))
     }
 
     async fn resolve_linked_account(
@@ -4250,14 +4359,51 @@ impl KnowledgeCredentialStore for FakeKnowledgeCredentialStore {
             .expect("fake credential store should not be poisoned");
         accounts
             .iter()
-            .find(|account| account.provider_account_id == connection.provider_account_id)
-            .and_then(|account| account.credential_material.clone())
+            .find(|(tenant_id, account)| {
+                *tenant_id == connection.tenant_id
+                    && account.provider_account_id == connection.provider_account_id
+            })
+            .and_then(|(_, account)| account.credential_material.clone())
             .or_else(|| Some(connection.credential_ref.clone()))
             .ok_or_else(|| {
                 moa_orchestrator::services::knowledge::KnowledgeServiceError::Credential(
                     "fake credential not found".to_string(),
                 )
             })
+    }
+
+    async fn delete_linked_account(
+        &self,
+        tenant_id: TenantId,
+        connection: &KnowledgeConnection,
+    ) -> Result<bool, moa_orchestrator::services::knowledge::KnowledgeServiceError> {
+        let mut accounts = self
+            .accounts
+            .lock()
+            .expect("fake credential store should not be poisoned");
+        let before = accounts.len();
+        accounts.retain(|(account_tenant_id, account)| {
+            !(*account_tenant_id == tenant_id
+                && account.provider_account_id == connection.provider_account_id)
+        });
+        Ok(accounts.len() != before)
+    }
+
+    async fn list_linked_account_refs(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<
+        std::collections::BTreeSet<String>,
+        moa_orchestrator::services::knowledge::KnowledgeServiceError,
+    > {
+        Ok(self
+            .accounts
+            .lock()
+            .expect("fake credential store should not be poisoned")
+            .iter()
+            .filter(|(account_tenant_id, _)| *account_tenant_id == tenant_id)
+            .map(|(_, account)| self.vault_ref_for_account(tenant_id, &account.provider_account_id))
+            .collect())
     }
 }
 
@@ -4442,6 +4588,29 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
             })?;
             connection.source_selection = source_selection;
             connection.last_synced_at = None;
+            connection.updated_at = Utc::now();
+            Ok(connection.clone())
+        })?
+    }
+
+    async fn disable_connection(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Uuid,
+    ) -> moa_knowledge::Result<KnowledgeConnection> {
+        self.record_op("disable_connection")?;
+        self.with_state(|state| {
+            let connection = state.connections.get_mut(&connection_uid).ok_or_else(|| {
+                KnowledgeError::Repository(
+                    "connection should exist for fixture disable".to_string(),
+                )
+            })?;
+            if connection.tenant_id != tenant_id {
+                return Err(KnowledgeError::Repository(
+                    "connection should be tenant-visible for fixture disable".to_string(),
+                ));
+            }
+            connection.status = ConnectionStatus::Disabled;
             connection.updated_at = Utc::now();
             Ok(connection.clone())
         })?

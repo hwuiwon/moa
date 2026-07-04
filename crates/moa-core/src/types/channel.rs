@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ActionEnvelope, ActionReviewPreview, ContactPointId, SessionAttachmentId, SessionId,
-    SessionStatus, UserId,
+    ActionEnvelope, ActionReviewPreview, ContactId, ContactPointId, SessionAttachmentId, SessionId,
+    SessionStatus, TenantId, UserId,
 };
 
 uuid_id!(
@@ -152,6 +152,19 @@ pub struct SessionChannelBinding {
     pub channel_ref: ChannelRef,
 }
 
+/// Tenant-scoped active channel binding resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionChannelBindingResolution {
+    /// Tenant that owns the active binding.
+    pub tenant_id: TenantId,
+    /// Session bound to the route.
+    pub session_id: SessionId,
+    /// Contact that owns the channel route.
+    pub contact_id: ContactId,
+    /// Active binding projection for outbound replies.
+    pub binding: SessionChannelBinding,
+}
+
 /// File or rich attachment metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
@@ -228,6 +241,26 @@ pub struct InboundMessage {
     pub reply_to: Option<String>,
     /// Event timestamp.
     pub timestamp: DateTime<Utc>,
+}
+
+/// Inbound event emitted by a channel adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelEvent {
+    /// Ordinary user-authored message.
+    Message(InboundMessage),
+    /// Narrow session command typed in a conversation channel.
+    SessionCommand(ChannelSessionCommand),
+}
+
+/// Session command recognized from a channel message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelSessionCommand {
+    /// Request the current session status.
+    Status(InboundMessage),
+    /// Request cancellation of the current session turn.
+    Stop(InboundMessage),
 }
 
 string_id!(

@@ -559,9 +559,9 @@ fn report_serializes_cost_and_providers_sections() -> TestResult {
         lane: "live".to_string(),
         embedding_model: "embed-v4.0".to_string(),
         embedding_model_version: 1,
-        extractor_model: "command-a-plus-05-2026".to_string(),
+        extractor_model: "gpt-5.4-mini".to_string(),
         extraction_prompt_version: Some("v2".to_string()),
-        merge_verifier_model: "command-a-plus-05-2026".to_string(),
+        merge_verifier_model: "gpt-5.4-mini".to_string(),
         merge_prompt_version: Some("v1".to_string()),
         reranker_model: "rerank-v4.0-fast".to_string(),
     });

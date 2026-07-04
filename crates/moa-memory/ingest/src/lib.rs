@@ -8,8 +8,9 @@ pub mod error;
 pub mod extract;
 pub mod extractor;
 pub mod fast_path;
-pub mod llm_extractor;
-pub mod llm_merge;
+mod model_client;
+pub mod model_entity_merge;
+pub mod model_fact_extractor;
 pub mod recorded;
 pub mod slow_path;
 
@@ -37,11 +38,11 @@ pub use fast_path::{
     FastError, FastMemoryToolExecutor, FastPathCtx, FastRememberRequest, ForgetPattern,
     execute_memory_tool, fast_forget, fast_remember, fast_supersede, is_fast_memory_tool,
 };
-pub use llm_extractor::{EXTRACTION_PROMPT_VERSION, LlmFactExtractor};
-pub use llm_merge::{
-    EntityMergeFixtureRecord, LlmEntityMergeVerifier, MERGE_PROMPT_VERSION,
+pub use model_entity_merge::{
+    EntityMergeFixtureRecord, MERGE_PROMPT_VERSION, ModelEntityMergeVerifier,
     RecordedEntityMergeStore, RecordedEntityMergeVerifier, merge_fixture_key,
 };
+pub use model_fact_extractor::{EXTRACTION_PROMPT_VERSION, ModelFactExtractor};
 pub use recorded::{
     ExtractionFixtureRecord, RecordedExtractionStore, RecordedFact, RecordedFactExtractor,
     chunk_hash,

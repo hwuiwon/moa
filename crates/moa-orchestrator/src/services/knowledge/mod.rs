@@ -11,7 +11,7 @@ pub use ingest::{KnowledgeIngestionRunner, ProductionKnowledgeIngestionRunner};
 pub use webhook_verifier::{KnowledgeWebhookVerifier, ParserWebhookVerifier};
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     sync::{Arc, OnceLock},
 };
 
@@ -23,6 +23,7 @@ use moa_core::{
     wire::knowledge::{
         KnowledgeConnectionListRequest, KnowledgeConnectionListResponse,
         KnowledgeCreateLinkTokenRequest, KnowledgeCreateLinkTokenResponse,
+        KnowledgeDisconnectConnectionRequest, KnowledgeDisconnectConnectionResponse,
         KnowledgeExchangeTokenRequest, KnowledgeExchangeTokenResponse,
         KnowledgeIntegrationListRequest, KnowledgeIntegrationListResponse,
         KnowledgeObjectInspectRequest, KnowledgeObjectInspectResponse, KnowledgeObjectListRequest,
@@ -96,6 +97,11 @@ pub trait Knowledge {
     async fn update_connection_source_selection(
         request: Json<KnowledgeUpdateConnectionSourceSelectionRequest>,
     ) -> Result<Json<KnowledgeUpdateConnectionSourceSelectionResponse>, HandlerError>;
+
+    /// Disconnects one linked tenant knowledge connection and revokes managed credentials.
+    async fn disconnect_connection(
+        request: Json<KnowledgeDisconnectConnectionRequest>,
+    ) -> Result<Json<KnowledgeDisconnectConnectionResponse>, HandlerError>;
 
     /// Lists tenant knowledge source objects.
     async fn list_objects(
@@ -322,6 +328,28 @@ impl Knowledge for KnowledgeImpl {
             Self::dispatch_knowledge_sync_ingestion(&ctx, sync_run_uid);
         }
         Ok(Json::from(response))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn disconnect_connection(
+        &self,
+        ctx: Context<'_>,
+        request: Json<KnowledgeDisconnectConnectionRequest>,
+    ) -> Result<Json<KnowledgeDisconnectConnectionResponse>, HandlerError> {
+        annotate_restate_handler_span("Knowledge", "disconnect_connection");
+        let request = request.into_inner();
+        authorize_tenant(&ctx, request.tenant_id).await?;
+        let service = production_service(request.tenant_id);
+        Ok(ctx
+            .run(|| async move {
+                service
+                    .disconnect_connection(request)
+                    .await
+                    .map(Json::from)
+                    .map_err(knowledge_handler_error)
+            })
+            .name("knowledge_disconnect_connection")
+            .await?)
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -658,6 +686,19 @@ pub trait KnowledgeCredentialStore: Send + Sync {
         tenant_id: TenantId,
         connection: &KnowledgeConnection,
     ) -> Result<String, KnowledgeServiceError>;
+
+    /// Deletes MOA-managed credentials for a linked account.
+    async fn delete_linked_account(
+        &self,
+        tenant_id: TenantId,
+        connection: &KnowledgeConnection,
+    ) -> Result<bool, KnowledgeServiceError>;
+
+    /// Lists MOA-managed credential references for one tenant.
+    async fn list_linked_account_refs(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<BTreeSet<String>, KnowledgeServiceError>;
 }
 
 /// Credential store backed by MOA's host-side credential vault.
@@ -712,6 +753,37 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
             Credential::OAuth { access_token, .. } => Ok(access_token),
         }
     }
+
+    async fn delete_linked_account(
+        &self,
+        _tenant_id: TenantId,
+        connection: &KnowledgeConnection,
+    ) -> Result<bool, KnowledgeServiceError> {
+        let Some((service, scope)) = parse_credential_ref(&connection.credential_ref) else {
+            return Ok(false);
+        };
+        self.vault
+            .delete(&service, &scope)
+            .await
+            .map_err(|error| KnowledgeServiceError::Credential(error.to_string()))
+    }
+
+    async fn list_linked_account_refs(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<BTreeSet<String>, KnowledgeServiceError> {
+        let tenant_scope_prefix = format!("{tenant_id}:");
+        let metadata = self
+            .vault
+            .list("knowledge:")
+            .await
+            .map_err(|error| KnowledgeServiceError::Credential(error.to_string()))?;
+        Ok(metadata
+            .into_iter()
+            .filter(|entry| entry.scope.starts_with(&tenant_scope_prefix))
+            .map(|entry| credential_ref(&entry.service, &entry.scope))
+            .collect())
+    }
 }
 
 /// Credential store used by tests that do not exercise provider credential resolution.
@@ -737,6 +809,21 @@ impl KnowledgeCredentialStore for DeterministicKnowledgeCredentialStore {
         connection: &KnowledgeConnection,
     ) -> Result<String, KnowledgeServiceError> {
         Ok(connection.credential_ref.clone())
+    }
+
+    async fn delete_linked_account(
+        &self,
+        _tenant_id: TenantId,
+        _connection: &KnowledgeConnection,
+    ) -> Result<bool, KnowledgeServiceError> {
+        Ok(false)
+    }
+
+    async fn list_linked_account_refs(
+        &self,
+        _tenant_id: TenantId,
+    ) -> Result<BTreeSet<String>, KnowledgeServiceError> {
+        Ok(BTreeSet::new())
     }
 }
 
