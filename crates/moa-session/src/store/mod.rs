@@ -240,21 +240,6 @@ impl PostgresSessionStore {
         crate::analytics::get_tenant_stats(&self.pool, self.schema_name(), tenant_id, days).await
     }
 
-    /// Loads aggregated tenant analytics over a recent day window through control-plane RLS.
-    pub async fn get_tenant_stats_control_plane(
-        &self,
-        tenant_id: &TenantId,
-        days: u32,
-    ) -> Result<TenantAnalyticsSummary> {
-        crate::analytics::get_tenant_stats_control_plane(
-            &self.pool,
-            self.schema_name(),
-            tenant_id,
-            days,
-        )
-        .await
-    }
-
     /// Lists daily cache trend rows for one tenant.
     pub async fn list_cache_daily_metrics(
         &self,
@@ -263,21 +248,6 @@ impl PostgresSessionStore {
     ) -> Result<Vec<CacheDailyMetric>> {
         crate::analytics::list_cache_daily_metrics(&self.pool, self.schema_name(), tenant_id, days)
             .await
-    }
-
-    /// Lists daily cache trend rows for one tenant through control-plane RLS.
-    pub async fn list_cache_daily_metrics_control_plane(
-        &self,
-        tenant_id: &TenantId,
-        days: u32,
-    ) -> Result<Vec<CacheDailyMetric>> {
-        crate::analytics::list_cache_daily_metrics_control_plane(
-            &self.pool,
-            self.schema_name(),
-            tenant_id,
-            days,
-        )
-        .await
     }
 
     /// Lists redacted learning-candidate summaries for one tenant.
@@ -503,28 +473,12 @@ impl SessionAnalyticsStore for PostgresSessionStore {
         PostgresSessionStore::get_tenant_stats(self, tenant_id, days).await
     }
 
-    async fn get_tenant_stats_control_plane(
-        &self,
-        tenant_id: &TenantId,
-        days: u32,
-    ) -> Result<TenantAnalyticsSummary> {
-        PostgresSessionStore::get_tenant_stats_control_plane(self, tenant_id, days).await
-    }
-
     async fn list_cache_daily_metrics(
         &self,
         tenant_id: &TenantId,
         days: u32,
     ) -> Result<Vec<CacheDailyMetric>> {
         PostgresSessionStore::list_cache_daily_metrics(self, tenant_id, days).await
-    }
-
-    async fn list_cache_daily_metrics_control_plane(
-        &self,
-        tenant_id: &TenantId,
-        days: u32,
-    ) -> Result<Vec<CacheDailyMetric>> {
-        PostgresSessionStore::list_cache_daily_metrics_control_plane(self, tenant_id, days).await
     }
 
     async fn list_learning_candidate_summaries(

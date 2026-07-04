@@ -203,8 +203,6 @@ pub struct MoaEnvOverlay {
     pub memory_vector_embedder_name: Option<String>,
     /// `MOA_MEMORY_VECTOR_EMBEDDER_OUTPUT_DIM`.
     pub memory_vector_embedder_output_dim: Option<usize>,
-    /// `MOA_MEMORY_VECTOR_EMBEDDER_GEMINI_DEFAULT_ROLE`.
-    pub memory_vector_embedder_gemini_default_role: Option<String>,
     /// `MOA_KNOWLEDGE_PROVIDERS_ENABLED`.
     #[serde(deserialize_with = "deserialize_optional_list")]
     pub knowledge_providers_enabled: Option<Vec<String>>,
@@ -918,21 +916,9 @@ mod tests {
         assert_eq!(config.memory.vector.embedder.output_dim, 1536);
         assert_eq!(config.providers.cohere.api_key, "CUSTOM_COHERE_KEY");
         assert_eq!(config.memory.extraction.api_key, "CUSTOM_COHERE_KEY");
-        assert_eq!(
-            config.memory.vector.embedder.cohere.api_key,
-            "CUSTOM_COHERE_KEY"
-        );
         assert_eq!(config.providers.google.api_key, "CUSTOM_GOOGLE_KEY");
         assert_eq!(
-            config.memory.vector.embedder.gemini.api_key,
-            "CUSTOM_GOOGLE_KEY"
-        );
-        assert_eq!(
             config.providers.zeroentropy.api_key,
-            "CUSTOM_ZEROENTROPY_KEY"
-        );
-        assert_eq!(
-            config.memory.vector.embedder.zeroentropy.api_key,
             "CUSTOM_ZEROENTROPY_KEY"
         );
         assert_eq!(

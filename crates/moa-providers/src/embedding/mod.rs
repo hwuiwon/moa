@@ -10,7 +10,7 @@ mod zeroentropy;
 
 pub use cohere::{CohereEmbedding, CohereV4Embedder};
 pub use factory::{build_embedder_from_config, build_embedding_provider_from_config};
-pub use gemini::{EmbedRole, EmbedderConstructionRole, GeminiEmbeddingEmbedder};
+pub use gemini::{EmbedderConstructionRole, GeminiEmbeddingEmbedder};
 #[cfg(any(test, feature = "mock-embedding"))]
 pub use mock::MockEmbedding;
 pub use openai::OpenAIEmbedding;

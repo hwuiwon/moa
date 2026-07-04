@@ -96,12 +96,6 @@ impl TestCase {
                     )));
                 }
             }
-            LongConversationMode::Live => {
-                return Err(crate::EvalError::InvalidConfig(format!(
-                    "long test case '{}' uses live mode, which is not implemented",
-                    self.name
-                )));
-            }
         }
         if long.expectations.as_os_str().is_empty() {
             return Err(crate::EvalError::InvalidConfig(format!(
@@ -152,16 +146,6 @@ pub enum LongConversationMode {
     Recorded,
     /// Simulates a user from a goal card.
     ScriptedUser,
-    /// Uses a live provider.
-    Live,
-}
-
-impl LongConversationMode {
-    /// Returns true when the mode is implemented by the foundation runner.
-    #[must_use]
-    pub const fn is_recorded(&self) -> bool {
-        matches!(self, Self::Recorded)
-    }
 }
 
 /// TOML-loadable long-conversation test-case details.

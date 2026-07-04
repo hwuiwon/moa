@@ -55,14 +55,14 @@ Do these after the small deletes or when already touching the owning crate.
 - #9 `ProviderSelection` string round-trip. **done:** removed the wrapper and kept the provider/model selection typed.
 - #14 hands normalization fallback duplication. **done:** descriptor-less fallbacks are generic, and constant command preview metadata is collapsed.
 - #15 dead session constructors/blob enum surface. **done:** removed unused constructors and the unimplemented `object_store` blob backend.
-- #38 duplicate analytics read paths.
+- #38 duplicate analytics read paths. **done:** collapsed tenant/cache analytics reads to the unsuffixed control-plane-backed functions and replaced local enum parsers with `queries::from_db`.
 - #42 `ProcedureCondition::Expression`. **done:** removed the unsupported expression condition and schema branch; kept live `EdgeNotFound`.
 - #45 unused `CredentialVault` methods except live `set`. **done:** removed dead `delete`/`list` from the vault trait and impls.
 - #58 `MemoryScope::ancestors()` identity chain. **done:** deleted the identity helper, `PlannedQuery::scope_ancestors`, and duplicate cache-key `layers=`.
 - #59 `PiiSpan.replacement` compatibility field. **done:** removed the per-span replacement override and slow-path identity helper.
 - #65 embedding provider alias methods. **done:** kept only `model_id()` and `dimensions()` on `EmbeddingProvider`.
 - #73 eval reporter subsystem. **done:** deleted the unused reporter trait/module/reexports and self-test.
-- #74 unwired pairwise LLM judge.
+- #74 unwired pairwise LLM judge. **kept:** user chose to retain pairwise judging; added an offline pairwise eval set that exercises swapped-order candidate win, baseline win, and no-agreement cases.
 
 ### Group C: Medium Refactors
 
@@ -83,7 +83,7 @@ Batch these with focused crate checks and less frequent live/perf gates because 
 - #48 endpoint function-pointer registry.
 - #49 session-store inner delegates.
 - #50 mandatory Redis feature cleanup.
-- #76 eval-core dead API.
+- #76 eval-core dead API. **done:** removed dead discovery helpers/reexports, unused error variants, unused single-case provider injection method, and unsupported live long-conversation mode.
 
 ### Group D: Product-Scope Or High-Risk Cleanup
 
@@ -176,7 +176,7 @@ Keep these out of opportunistic small-delete batches. They need one explicit pro
 | 71 | 🟡 | auth / agents / contacts / scoring / experiments | API-key validation uses two global caches plus per-entry mutexed revocation-recheck timestamps where one short-TTL cache gives the same guarantees |
 | 72 | ✅ | auth / agents / contacts / scoring / experiments | AsyncAuthzProvider::poll_decision is a trait method with zero production callers; approvals resolve exclusively via awakeables |
 | 73 | ✅ | eval crates | Entire Reporter subsystem (trait, TerminalReporter, ReporterOptions, build_reporters) has no production consumer |
-| 74 | ✅ | eval crates | PairwiseLlmJudge and the AnswerJudge trait are fully unwired — the production runner only ever calls DeterministicJudge::judge_sync directly |
+| 74 | ✅ | eval crates | PairwiseLlmJudge and the AnswerJudge trait were unwired; retained by product choice and covered by an offline pairwise eval set |
 | 75 | 🟡 | eval crates | MemoryOverride config knobs are pure speculative surface: two knobs hard-error 'not implemented' and the third is a no-op with a dead helper |
 | 76 | 🟡 | eval crates | Dead API surface in moa-eval-core and EvalEngine: unused discovery helpers, never-constructed error variants, an uncalled engine method, and an errors-only enum variant |
 | 77 | ✅ | eval crates | Pentest support is library code for exactly one test binary, with drifted env knobs that CI sets under names the code no longer reads |
@@ -404,6 +404,8 @@ Load-bearing constraints: none apply. This is a stateless HTTP provider adapter 
 Simpler alternative viability: works and is genuinely simpler. The factory already maps the two-variant EmbedderConstructionRole 1:1 onto the two used EmbedRole values, so collapsing to two roles (or formatting directly off EmbedderConstructionRole) removes parse_embed_role, the config field, the env-overlay field, and seven format arms without moving complexity anywhere. Consumers (moa-orchestrator/src/runtime/deps.rs:295, services/memory/retrieval.rs:207, services/knowledge/ingest.rs:156, moa-brain/src/pipeline/builder.rs:118) all go through build_embedder_from_config with EmbedderConstructionRole and are untouched. Fits repo philosophy: pre-prod, no backwards compat, delete speculative surface.
 
 Side effects: the claimant's stated side effect (losing env-switchable query role) is accurate and correctly scoped — the knob never touched the ingestion side, so a populated index's document space was always pinned anyway. Minor additional cleanup the claimant missed (all in the same direction): (a) embed_as at gemini.rs:142 is uncalled and should go too, (b) Document's title field is Option<String> but is only ever None, so the field can be dropped, (c) the two offline tests and one live test that pass EmbedRole::SearchQuery/Document{title: None} need a mechanical constructor update, and (d) EmbedRole is re-exported from moa_providers lib.rs:38 and embedding/mod.rs:13, so the public export shrinks or disappears — no external consumers exist.
+
+**Implementation status: ✅ DONE.** Current code has no public `EmbedRole`, `parse_embed_role`, `embed_as`, `memory.vector.embedder.gemini.default_role`, or `MOA_MEMORY_VECTOR_EMBEDDER_GEMINI_DEFAULT_ROLE` path. `GeminiEmbeddingEmbedder::new` now takes the existing two-variant `EmbedderConstructionRole` directly, and the same patch deleted the dead nested vector-embedder API-key mirror structs (`cohere`, `gemini`, `zeroentropy`) because provider construction reads the canonical `providers.*.api_key` fields. Verification passed with `cargo test -p moa-providers --lib role_prefixes_match_documented_shapes --locked`, `cargo test -p moa-providers --test providers_offline --locked gemini_embedding_offline -- --nocapture`, `cargo test -p moa-core --lib env_only_loads_memory_extraction_and_provider_config --locked`, `cargo test -p moa-core --lib from_iter_applies_flat_single_underscore_env --locked`, and `cargo check -p moa-core -p moa-providers -p moa-memory-ingest -p moa-brain -p moa-orchestrator --all-targets --locked`.
 
 ---
 
@@ -1157,6 +1159,8 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~420**
 **Value of simplifying.** ~420 lines deleted (judge.rs shrinks by ~300, plus ~120 lines of self-referential tests), one trait and one dormant LLM-call path removed, and the judge module stops implying a capability the eval pipeline does not have.
 
 **Adversarial verifier: ✅ CONFIRMED.** `AnswerJudge` and `PairwiseLlmJudge` are implemented and re-exported, but the runner calls `DeterministicJudge::new().judge_sync(...)` directly and returns `Ok(None)` for open-ended probes. Delete the unwired trait/LLM judge path unless a concrete runner integration is added first.
+
+**Implementation status: superseded by coverage.** User chose to keep pairwise judging. The code now retains `PairwiseLlmJudge` and `AnswerJudge`, and `crates/moa-eval/tests/eval_offline/memory_eval_judge.rs` includes a `PAIRWISE_JUDGE_EVAL_SET` that exercises swapped-order candidate win, baseline win, no-agreement, invalid verdict, and closed-form rejection paths. Mutation verification temporarily broke the B/A verdict mapping and the eval set failed on the candidate-wins case as expected.
 
 ---
 
@@ -1963,6 +1967,8 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~100**
 
 > **Revised side effects:** Only two call sites are affected, both in crates/moa-session/tests/postgres_store_db.rs (lines 1740 and 1751), and after the rename they need no source change at all — the method names they call stay the same and now route through the control-plane-scoped transaction, which is behaviorally identical for these reads (the target is a materialized view exempt from RLS, and tests connect as the owning role anyway). There is no moa-brain caller, contrary to the original claim. No dyn SessionAnalyticsStore consumers or mocks exist beyond PostgresSessionStore, so the trait-method removal breaks nothing else.
 
+**Implementation status: ✅ DONE.** Current code keeps only `get_tenant_stats` and `list_cache_daily_metrics`; both now open a control-plane scoped transaction internally. The `_control_plane` free functions, `PostgresSessionStore` methods, and `SessionAnalyticsStore` trait methods are gone, and `analytics.rs` uses `queries::from_db` for session and learning-candidate enum parsing. Verification passed with `cargo check -p moa-core -p moa-session -p moa-edge -p moa-orchestrator --all-targets --locked`; DB route/session tests were blocked by local Postgres maintenance-pool timeouts and recorded as REG-008 in `docs/simplification-deferred-regressions.md`.
+
 ---
 
 ### 39. moa-lineage-sink ships four dead or test-only parallel surfaces, including a backwards-compat decode shim
@@ -2693,6 +2699,8 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~90**
 **Value of simplifying.** ~90 lines deleted and a visibly smaller eval-core API; removes three separate 'why does this exist?' traps for readers.
 
 **Adversarial verifier: 🟡 ADJUSTED.** Discovery helpers, unused error variants, and `run_single_with_provider` are unused outside tests/public surface. Correction: `LongConversationMode::Live` is rejected in both `long_case()` and transcript execution, so cleanup must update both branches.
+
+**Implementation status: ✅ DONE.** Deleted the discovery helper API and its discovery-only test, removed `EvalError::SerializeToml` / `ApprovalRequired`, removed `EvalEngine::run_single_with_provider`, and removed `LongConversationMode::Live` plus both rejection branches. Verification passed with `cargo test -p moa-eval --test eval_offline --locked loader` and `cargo check -p moa-eval-core -p moa-eval --all-targets --locked`.
 
 ---
 

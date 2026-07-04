@@ -269,22 +269,8 @@ pub trait SessionAnalyticsStore: Send + Sync {
         days: u32,
     ) -> Result<TenantAnalyticsSummary>;
 
-    /// Loads aggregated tenant analytics over a recent day window through control-plane RLS.
-    async fn get_tenant_stats_control_plane(
-        &self,
-        tenant_id: &TenantId,
-        days: u32,
-    ) -> Result<TenantAnalyticsSummary>;
-
     /// Lists daily cache trend rows for one tenant.
     async fn list_cache_daily_metrics(
-        &self,
-        tenant_id: &TenantId,
-        days: u32,
-    ) -> Result<Vec<CacheDailyMetric>>;
-
-    /// Lists daily cache trend rows for one tenant through control-plane RLS.
-    async fn list_cache_daily_metrics_control_plane(
         &self,
         tenant_id: &TenantId,
         days: u32,

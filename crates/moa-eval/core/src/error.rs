@@ -32,9 +32,6 @@ pub enum EvalError {
         /// Underlying JSON parsing error.
         source: serde_json::Error,
     },
-    /// Serializing a TOML document failed.
-    #[error("failed to serialize TOML: {0}")]
-    SerializeToml(#[from] toml::ser::Error),
     /// A MOA runtime component returned an error.
     #[error(transparent)]
     Moa(#[from] moa_core::MoaError),
@@ -53,10 +50,4 @@ pub enum EvalError {
     /// A config or fixture path was invalid for eval execution.
     #[error("invalid eval configuration: {0}")]
     InvalidConfig(String),
-    /// A run could not complete because it was waiting on a human approval decision.
-    #[error("eval run blocked on approval for tool {tool}")]
-    ApprovalRequired {
-        /// Tool name that required approval.
-        tool: String,
-    },
 }

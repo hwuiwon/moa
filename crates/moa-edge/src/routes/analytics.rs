@@ -106,7 +106,7 @@ pub async fn handle_tenant_stats(
         return response;
     }
     maybe_refresh_analytics_materialized_views(&state);
-    match moa_session::analytics::get_tenant_stats_control_plane(
+    match moa_session::analytics::get_tenant_stats(
         &state.pool,
         state.config.database.schema.as_deref(),
         &request.tenant_id,
@@ -215,7 +215,7 @@ pub async fn handle_cache_stats(
         return response;
     }
     maybe_refresh_analytics_materialized_views(&state);
-    let summary = match moa_session::analytics::get_tenant_stats_control_plane(
+    let summary = match moa_session::analytics::get_tenant_stats(
         &state.pool,
         state.config.database.schema.as_deref(),
         &request.tenant_id,
@@ -226,7 +226,7 @@ pub async fn handle_cache_stats(
         Ok(summary) => summary,
         Err(error) => return moa_error_response(error),
     };
-    match moa_session::analytics::list_cache_daily_metrics_control_plane(
+    match moa_session::analytics::list_cache_daily_metrics(
         &state.pool,
         state.config.database.schema.as_deref(),
         &request.tenant_id,

@@ -142,9 +142,6 @@ pub async fn run_scenario_with_provider(
             )
             .await
         }
-        LongConversationMode::Live => Err(EvalError::InvalidConfig(
-            "long conversation live mode is not implemented".to_string(),
-        )),
     }
 }
 

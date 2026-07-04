@@ -35,8 +35,8 @@ pub use core::router::ModelRouter;
 #[cfg(any(test, feature = "mock-embedding"))]
 pub use embedding::MockEmbedding;
 pub use embedding::{
-    CohereEmbedding, CohereV4Embedder, EmbedRole, EmbedderConstructionRole,
-    GeminiEmbeddingEmbedder, OpenAIEmbedding, ZeroEntropyEmbedding, build_embedder_from_config,
+    CohereEmbedding, CohereV4Embedder, EmbedderConstructionRole, GeminiEmbeddingEmbedder,
+    OpenAIEmbedding, ZeroEntropyEmbedding, build_embedder_from_config,
     build_embedding_provider_from_config,
 };
 pub use failover::FailoverLLMProvider;

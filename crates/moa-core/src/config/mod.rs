@@ -48,9 +48,9 @@ pub use knowledge::{
 pub use learning::{LearningConfig, SkillLearningConfig};
 pub use lineage::LineageConfig;
 pub use memory::{
-    CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryDigestConfig,
-    MemoryExtractionConfig, MemoryRankingConfig, MemoryRankingWeights, MemoryRetrievalConfig,
-    MemoryVectorConfig, TurbopufferVectorConfig, VectorEmbedderConfig, ZeroEntropyEmbedderConfig,
+    MemoryConfig, MemoryDigestConfig, MemoryExtractionConfig, MemoryRankingConfig,
+    MemoryRankingWeights, MemoryRetrievalConfig, MemoryVectorConfig, TurbopufferVectorConfig,
+    VectorEmbedderConfig,
 };
 pub use messaging::MessagingConfig;
 pub use orchestrator::OrchestratorConfig;
@@ -376,8 +376,8 @@ mod tests {
     }
 
     #[test]
-    fn env_only_loads_memory_extraction_and_embedder_config() {
-        // Pins: model-backed memory extraction and vector embedder keys use flat MOA env names.
+    fn env_only_loads_memory_extraction_and_provider_config() {
+        // Pins: model-backed memory extraction and provider keys use flat MOA env names.
         let _guard = ENV_LOCK.lock().expect("env test lock");
         let _env = EnvRestore::clear(CONFIG_ENV_KEYS);
         unsafe {
@@ -399,10 +399,6 @@ mod tests {
         assert_eq!(config.memory.extraction.timeout_ms, 2500);
         assert_eq!(
             config.providers.zeroentropy.api_key,
-            "MOA_TEST_ZEROENTROPY_KEY"
-        );
-        assert_eq!(
-            config.memory.vector.embedder.zeroentropy.api_key,
             "MOA_TEST_ZEROENTROPY_KEY"
         );
     }

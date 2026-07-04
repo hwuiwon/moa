@@ -1,7 +1,7 @@
-//! File loaders and discovery helpers for evaluation suites and agent configs.
+//! File loaders for evaluation suites and agent configs.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::error::{EvalError, Result};
 use crate::types::{AgentConfig, TestSuite};
@@ -30,47 +30,6 @@ pub fn load_agent_config(path: &Path) -> Result<AgentConfig> {
         source,
     })?;
     validate_agent_config(path, config)
-}
-
-/// Discovers suite TOML files in a directory.
-pub fn discover_suites(dir: &Path) -> Result<Vec<PathBuf>> {
-    discover_matching_toml_files(dir, load_suite)
-}
-
-/// Discovers agent-config TOML files in a directory.
-pub fn discover_configs(dir: &Path) -> Result<Vec<PathBuf>> {
-    discover_matching_toml_files(dir, load_agent_config)
-}
-
-fn discover_toml_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let entries = fs::read_dir(dir).map_err(|source| EvalError::Io {
-        path: dir.to_path_buf(),
-        source,
-    })?;
-    let mut paths = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|source| EvalError::Io {
-            path: dir.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        if path.is_file() && path.extension().is_some_and(|ext| ext == "toml") {
-            paths.push(path);
-        }
-    }
-    paths.sort();
-    Ok(paths)
-}
-
-fn discover_matching_toml_files<T>(
-    dir: &Path,
-    loader: fn(&Path) -> Result<T>,
-) -> Result<Vec<PathBuf>> {
-    let candidates = discover_toml_files(dir)?;
-    Ok(candidates
-        .into_iter()
-        .filter(|path| loader(path).is_ok())
-        .collect())
 }
 
 fn validate_suite(path: &Path, suite: TestSuite) -> Result<TestSuite> {

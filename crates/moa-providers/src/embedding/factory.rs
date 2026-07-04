@@ -23,7 +23,7 @@ use super::gemini::GEMINI_V2_MODEL;
 #[cfg(test)]
 use super::zeroentropy::ZEROENTROPY_DEFAULT_MODEL;
 use super::{
-    CohereEmbedding, EmbedRole, EmbedderConstructionRole, GeminiEmbeddingEmbedder, OpenAIEmbedding,
+    CohereEmbedding, EmbedderConstructionRole, GeminiEmbeddingEmbedder, OpenAIEmbedding,
     ZeroEntropyEmbedding,
 };
 use crate::core::pacer::PacerConfig;
@@ -243,10 +243,6 @@ fn build_gemini_embedder(
 ) -> Result<GeminiEmbeddingEmbedder> {
     let cfg = &config.memory.vector.embedder;
     let api_key = read_api_key("MOA_GOOGLE_API_KEY", &config.providers.google.api_key)?;
-    let role = match role {
-        EmbedderConstructionRole::Ingestion => EmbedRole::Document { title: None },
-        EmbedderConstructionRole::Retrieval => parse_embed_role(&cfg.gemini.default_role)?,
-    };
     let mut embedder = GeminiEmbeddingEmbedder::new(api_key, cfg.output_dim, role)?;
     if let Some(pacer) = embed_pacer_override(config.providers.google.max_inputs_per_min) {
         embedder = embedder.with_rate_limits(pacer);
@@ -259,27 +255,6 @@ fn build_gemini_embedder(
 
 fn read_api_key(env_name: &'static str, value: &str) -> Result<String> {
     moa_core::config::required_config_secret(env_name, value)
-}
-
-fn parse_embed_role(value: &str) -> Result<EmbedRole> {
-    match normalize_config_key(value).as_str() {
-        "search_query" => Ok(EmbedRole::SearchQuery),
-        "document" => Ok(EmbedRole::Document { title: None }),
-        "question_answering" => Ok(EmbedRole::QuestionAnsweringQuery),
-        "fact_checking" => Ok(EmbedRole::FactCheckingQuery),
-        "code_retrieval" => Ok(EmbedRole::CodeRetrievalQuery),
-        "classification" => Ok(EmbedRole::Classification),
-        "clustering" => Ok(EmbedRole::Clustering),
-        "sentence_similarity" => Ok(EmbedRole::SentenceSimilarity),
-        "raw" => Ok(EmbedRole::Raw),
-        other => Err(MoaError::ConfigError(format!(
-            "unknown gemini v2 embed role `{other}`"
-        ))),
-    }
-}
-
-fn normalize_config_key(value: &str) -> String {
-    value.trim().to_ascii_lowercase().replace('-', "_")
 }
 
 /// Builds the configured embedding provider for semantic memory search.

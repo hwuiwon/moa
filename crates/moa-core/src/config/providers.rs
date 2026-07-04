@@ -163,18 +163,6 @@ impl super::MoaEnvOverlay {
         self.apply_provider_rate_limit_overlay(config);
 
         set_if_some(&mut config.memory.extraction.api_key, &self.cohere_api_key);
-        set_if_some(
-            &mut config.memory.vector.embedder.cohere.api_key,
-            &self.cohere_api_key,
-        );
-        set_if_some(
-            &mut config.memory.vector.embedder.gemini.api_key,
-            &self.google_api_key,
-        );
-        set_if_some(
-            &mut config.memory.vector.embedder.zeroentropy.api_key,
-            &self.zeroentropy_api_key,
-        );
     }
 
     /// Applies per-provider rate and concurrency cap environment overrides.

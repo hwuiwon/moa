@@ -8,10 +8,12 @@ use uuid::Uuid;
 use moa_core::wire::analytics::LearningCandidateSummary;
 use moa_core::{
     CacheDailyMetric, ContactId, LearningCandidateStatus, LearningCandidateType, LearningRiskClass,
-    MoaError, Result, SessionAnalyticsSummary, SessionId, SessionStatus, SessionTurnMetric,
+    MoaError, Result, SessionAnalyticsSummary, SessionId, SessionTurnMetric,
     TenantAnalyticsSummary, TenantId, ToolCallSummary,
 };
 use moa_db::ScopedConn;
+
+use crate::queries::from_db;
 
 /// Loads one session summary row by session id.
 pub async fn get_session_summary(
@@ -119,17 +121,6 @@ pub async fn get_tenant_stats(
     tenant_id: &TenantId,
     days: u32,
 ) -> Result<TenantAnalyticsSummary> {
-    let mut conn = pool.acquire().await.map_err(map_sqlx_error)?;
-    get_tenant_stats_with_conn(&mut conn, schema_name, tenant_id, days).await
-}
-
-/// Loads a recent tenant rollup through an explicit control-plane RLS scope.
-pub async fn get_tenant_stats_control_plane(
-    pool: &PgPool,
-    schema_name: Option<&str>,
-    tenant_id: &TenantId,
-    days: u32,
-) -> Result<TenantAnalyticsSummary> {
     let mut conn = ScopedConn::begin_control_plane(pool).await?;
     let summary = get_tenant_stats_with_conn(conn.as_mut(), schema_name, tenant_id, days).await?;
     conn.commit().await?;
@@ -196,17 +187,6 @@ async fn get_tenant_stats_with_conn(
 
 /// Lists daily cache metrics for one tenant over a recent window.
 pub async fn list_cache_daily_metrics(
-    pool: &PgPool,
-    schema_name: Option<&str>,
-    tenant_id: &TenantId,
-    days: u32,
-) -> Result<Vec<CacheDailyMetric>> {
-    let mut conn = pool.acquire().await.map_err(map_sqlx_error)?;
-    list_cache_daily_metrics_with_conn(&mut conn, schema_name, tenant_id, days).await
-}
-
-/// Lists daily cache metrics through an explicit control-plane RLS scope.
-pub async fn list_cache_daily_metrics_control_plane(
     pool: &PgPool,
     schema_name: Option<&str>,
     tenant_id: &TenantId,
@@ -299,7 +279,8 @@ fn session_analytics_from_row(row: &PgRow) -> Result<SessionAnalyticsSummary> {
             .try_get::<Option<Uuid>, _>("contact_id")
             .map_err(map_sqlx_error)?
             .map(ContactId),
-        status: session_status_from_db(
+        status: from_db(
+            "session status",
             &row.try_get::<String, _>("status").map_err(map_sqlx_error)?,
         )?,
         turn_count: row
@@ -453,17 +434,19 @@ fn cache_daily_metric_from_row(row: &PgRow) -> Result<CacheDailyMetric> {
 }
 
 fn learning_candidate_summary_from_row(row: &PgRow) -> Result<LearningCandidateSummary> {
-    let candidate_type = parse_db_enum::<LearningCandidateType>(
+    let candidate_type = from_db::<LearningCandidateType>(
         "learning candidate type",
-        row.try_get("candidate_type").map_err(map_sqlx_error)?,
+        &row.try_get::<String, _>("candidate_type")
+            .map_err(map_sqlx_error)?,
     )?;
-    let status = parse_db_enum::<LearningCandidateStatus>(
+    let status = from_db::<LearningCandidateStatus>(
         "learning candidate status",
-        row.try_get("status").map_err(map_sqlx_error)?,
+        &row.try_get::<String, _>("status").map_err(map_sqlx_error)?,
     )?;
-    let risk_class = parse_db_enum::<LearningRiskClass>(
+    let risk_class = from_db::<LearningRiskClass>(
         "learning risk class",
-        row.try_get("risk_class").map_err(map_sqlx_error)?,
+        &row.try_get::<String, _>("risk_class")
+            .map_err(map_sqlx_error)?,
     )?;
     let payload: Value = row.try_get("payload").map_err(map_sqlx_error)?;
 
@@ -482,15 +465,6 @@ fn learning_candidate_summary_from_row(row: &PgRow) -> Result<LearningCandidateS
         created_at: row.try_get("created_at").map_err(map_sqlx_error)?,
         updated_at: row.try_get("updated_at").map_err(map_sqlx_error)?,
     })
-}
-
-fn parse_db_enum<T>(field: &'static str, value: String) -> Result<T>
-where
-    T: std::str::FromStr,
-{
-    value
-        .parse()
-        .map_err(|_| MoaError::StorageError(format!("invalid {field} `{value}`")))
 }
 
 fn redacted_payload_preview(value: &Value) -> String {
@@ -538,20 +512,6 @@ fn truncate_preview(text: &str, limit: usize) -> String {
         end = index;
     }
     format!("{}...", &text[..end])
-}
-
-fn session_status_from_db(value: &str) -> Result<SessionStatus> {
-    match value {
-        "created" => Ok(SessionStatus::Created),
-        "running" => Ok(SessionStatus::Running),
-        "paused" => Ok(SessionStatus::Paused),
-        "completed" => Ok(SessionStatus::Completed),
-        "cancelled" => Ok(SessionStatus::Cancelled),
-        "failed" => Ok(SessionStatus::Failed),
-        other => Err(MoaError::StorageError(format!(
-            "unknown session status value `{other}`"
-        ))),
-    }
 }
 
 fn qualified_relation(schema_name: Option<&str>, relation_name: &str) -> String {

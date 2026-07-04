@@ -194,12 +194,6 @@ pub struct VectorEmbedderConfig {
     pub name: String,
     /// Requested output dimensionality.
     pub output_dim: usize,
-    /// Cohere-specific settings.
-    pub cohere: CohereEmbedderConfig,
-    /// ZeroEntropy-specific settings.
-    pub zeroentropy: ZeroEntropyEmbedderConfig,
-    /// Gemini-specific settings.
-    pub gemini: GeminiEmbedderConfig,
 }
 
 impl Default for VectorEmbedderConfig {
@@ -207,44 +201,6 @@ impl Default for VectorEmbedderConfig {
         Self {
             name: "gemini:gemini-embedding-2".to_string(),
             output_dim: 1024,
-            cohere: CohereEmbedderConfig::default(),
-            zeroentropy: ZeroEntropyEmbedderConfig::default(),
-            gemini: GeminiEmbedderConfig::default(),
-        }
-    }
-}
-
-/// Cohere embedder credentials.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CohereEmbedderConfig {
-    /// Cohere API key value loaded from runtime configuration.
-    pub api_key: String,
-}
-
-/// ZeroEntropy embedder credentials.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ZeroEntropyEmbedderConfig {
-    /// ZeroEntropy API key value loaded from runtime configuration.
-    pub api_key: String,
-}
-
-/// Gemini embedder credentials and task encoding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct GeminiEmbedderConfig {
-    /// Gemini API key value loaded from runtime configuration.
-    pub api_key: String,
-    /// Default Gemini v2 role for retrieval-side embedders.
-    pub default_role: String,
-}
-
-impl Default for GeminiEmbedderConfig {
-    fn default() -> Self {
-        Self {
-            api_key: String::new(),
-            default_role: "search_query".to_string(),
         }
     }
 }
@@ -305,10 +261,6 @@ impl super::MoaEnvOverlay {
         set_copy_if_some(
             &mut config.memory.vector.embedder.output_dim,
             self.memory_vector_embedder_output_dim,
-        );
-        set_if_some(
-            &mut config.memory.vector.embedder.gemini.default_role,
-            &self.memory_vector_embedder_gemini_default_role,
         );
         set_option_if_some(&mut config.memory.pii_service_url, &self.pii_service_url);
         set_if_some(
