@@ -4,10 +4,9 @@ _Product boundary for behavior-lab artifacts, experiments, analytics, and live s
 
 Behavior Lab is the product surface for testing how target agents or skill
 procedures behave under simulated users, profiles, data bundles, and scenarios.
-It is not
-the regression-eval system. Regression evals remain in `moa-eval`; the `Eval`
-service is internal-only and compiled behind `internal-eval-runner`, with
-hosted run status persisted in Postgres.
+It is not the regression-eval system. Regression evals remain in `moa-eval`;
+the `Eval` service is compiled into the orchestrator as an internal-only
+control-plane surface, with hosted run status persisted in Postgres.
 
 ## Product Boundary
 
@@ -37,6 +36,14 @@ The public edge routes are:
 
 There is no default public `/v1/evals/*` product route and no public
 `/v1/experiments/run` alias.
+
+Experiment execution is gated by the tenant operator/admin relation. In the
+current OpenFGA model, workspace-admin product access is represented as tenant
+admin on the target tenant; the tenant `operator` relation includes tenant
+admins. Internal hosted eval execution uses the same tenant operator/admin
+admission check for `Eval/run`, and the detached `Eval/execute_run` worker
+entrypoint additionally requires the server-issued dispatch token created during
+that admission step.
 
 ## Artifact Model
 
@@ -106,7 +113,7 @@ Product/default MCP should be a thin adapter over `Artifacts`, `Experiments`,
 direct edge analytics reads, `Skills`, and other typed services. It must not
 own Behavior Lab domain logic, bypass service authorization, or publish public
 `/v1/evals/*` semantics. If internal eval is exposed at all, it remains
-`internal-eval-runner` gated.
+explicitly internal and operator/admin-authorized.
 
 ## Verification Commands
 

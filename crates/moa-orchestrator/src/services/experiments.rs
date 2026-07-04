@@ -1,7 +1,6 @@
 //! Restate service for authorized live behavior experiment run metadata.
 
 use moa_agents::{AgentResolver, AgentRuntimePolicy};
-use moa_authz_schema::Relation;
 use moa_core::traits::{Identity, LearningCandidateStore};
 use moa_core::wire::experiments::{
     AgentArtifactDependencyDelta, AgentDependencyChange, AgentRevisionCompareRequest,
@@ -35,7 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::OrchestratorCtx;
-use crate::handlers::authz_shim::authorize_tenant;
+use crate::handlers::authz_shim::authorize_tenant_operator_or_admin;
 use crate::services::llm_gateway::LLMGatewayImpl;
 use crate::workflows::errors::moa_error_to_handler_error;
 use crate::workflows::experiment_run::{ExperimentRunClient, ExperimentRunWorkflowRequest};
@@ -44,37 +43,37 @@ use crate::workflows::experiment_run::{ExperimentRunClient, ExperimentRunWorkflo
 #[restate_sdk::service]
 #[name = "Experiments"]
 pub trait Experiments {
-    /// Generates and stores a draft experiment plan artifact after a tenant operator check.
+    /// Generates and stores a draft experiment plan artifact after a tenant operator/admin check.
     async fn generate_plan(
         request: Json<ExperimentGeneratePlanRequest>,
     ) -> Result<Json<ExperimentGeneratePlanResponse>, HandlerError>;
 
-    /// Accepts and stores a live behavior experiment run after a tenant operator check.
+    /// Accepts and stores a live behavior experiment run after a tenant operator/admin check.
     async fn run(
         request: Json<ExperimentRunRequest>,
     ) -> Result<Json<ExperimentRunResponse>, HandlerError>;
 
-    /// Loads one live behavior experiment run status after a tenant operator check.
+    /// Loads one live behavior experiment run status after a tenant operator/admin check.
     async fn status(
         request: Json<ExperimentRunStatusRequest>,
     ) -> Result<Json<ExperimentRunStatusResponse>, HandlerError>;
 
-    /// Lists live behavior experiment runs after a tenant operator check.
+    /// Lists live behavior experiment runs after a tenant operator/admin check.
     async fn list(
         request: Json<ExperimentListRequest>,
     ) -> Result<Json<ExperimentListResponse>, HandlerError>;
 
-    /// Lists live behavior experiment trials after a tenant operator check.
+    /// Lists live behavior experiment trials after a tenant operator/admin check.
     async fn trials(
         request: Json<ExperimentTrialsRequest>,
     ) -> Result<Json<ExperimentTrialsResponse>, HandlerError>;
 
-    /// Loads one live behavior experiment trial status after a tenant operator check.
+    /// Loads one live behavior experiment trial status after a tenant operator/admin check.
     async fn trial_status(
         request: Json<ExperimentTrialStatusRequest>,
     ) -> Result<Json<ExperimentTrialStatusResponse>, HandlerError>;
 
-    /// Cancels a live behavior experiment run after a tenant operator check.
+    /// Cancels a live behavior experiment run after a tenant operator/admin check.
     async fn cancel(
         request: Json<ExperimentCancelRequest>,
     ) -> Result<Json<ExperimentCancelResponse>, HandlerError>;
@@ -84,12 +83,12 @@ pub trait Experiments {
         request: Json<ExperimentProposeImprovementsRequest>,
     ) -> Result<Json<ExperimentProposeImprovementsResponse>, HandlerError>;
 
-    /// Reads score summaries for an experiment run after a tenant operator check.
+    /// Reads score summaries for an experiment run after a tenant operator/admin check.
     async fn scores(
         request: Json<ExperimentScoresRequest>,
     ) -> Result<Json<ExperimentScoresResponse>, HandlerError>;
 
-    /// Compares score summaries for two experiment runs after a tenant operator check.
+    /// Compares score summaries for two experiment runs after a tenant operator/admin check.
     async fn compare(
         request: Json<ExperimentCompareRequest>,
     ) -> Result<Json<ExperimentCompareResponse>, HandlerError>;
@@ -123,7 +122,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentGeneratePlanResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "generate_plan");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let runtime = OrchestratorCtx::current();
         let pool = runtime.graph_pool();
         let gateway = LLMGatewayImpl::new(runtime.provider_registry());
@@ -146,7 +145,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentRunResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "run");
         let request = request.into_inner();
-        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let identity = authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         let accepted = ctx
@@ -178,7 +177,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentRunStatusResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "status");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
 
         ctx.workflow_client::<ExperimentRunClient>(request.run_uid.to_string())
             .status(Json::from(request))
@@ -195,7 +194,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentListResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "list");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -212,7 +211,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentTrialsResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "trials");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -229,7 +228,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentTrialStatusResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "trial_status");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -246,7 +245,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentCancelResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "cancel");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -263,7 +262,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentProposeImprovementsResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "propose_improvements");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let runtime = OrchestratorCtx::current();
         let pool = runtime.graph_pool();
         let session_store = runtime.learning_candidate_store();
@@ -286,7 +285,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentScoresResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "scores");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -303,7 +302,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentCompareResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "compare");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -320,7 +319,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<AgentRevisionSimulationRunResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "run_agent_revision_simulation");
         let request = request.into_inner();
-        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let identity = authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         let accepted = ctx
@@ -355,7 +354,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<AgentRevisionSimulationCompareResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "compare_agent_revision_simulation");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -376,7 +375,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<AgentRevisionCompareResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "compare_agent_revisions");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -1008,12 +1007,12 @@ mod tests {
 
         let artifact_deltas = compare_artifact_dependencies(&base, &new);
         assert_eq!(artifact_deltas.len(), 2);
-        assert_eq!(artifact_deltas[0].reference, "skill://support");
-        assert_eq!(artifact_deltas[0].base_revision_uid, Some(base_skill));
-        assert_eq!(artifact_deltas[0].new_revision_uid, Some(new_skill));
-        assert_eq!(artifact_deltas[0].change, AgentDependencyChange::Changed);
-        assert_eq!(artifact_deltas[1].reference, "skill://refund");
-        assert_eq!(artifact_deltas[1].change, AgentDependencyChange::Added);
+        assert_eq!(artifact_deltas[0].reference, "skill://refund");
+        assert_eq!(artifact_deltas[0].change, AgentDependencyChange::Added);
+        assert_eq!(artifact_deltas[1].reference, "skill://support");
+        assert_eq!(artifact_deltas[1].base_revision_uid, Some(base_skill));
+        assert_eq!(artifact_deltas[1].new_revision_uid, Some(new_skill));
+        assert_eq!(artifact_deltas[1].change, AgentDependencyChange::Changed);
 
         let tool_deltas = compare_tool_dependencies(&base, &new);
         assert_eq!(tool_deltas.len(), 1);

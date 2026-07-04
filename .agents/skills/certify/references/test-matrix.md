@@ -108,8 +108,8 @@ When sandbox provider behavior changed, scope to the affected adapter:
 
 ```bash
 cargo test -p moa-hands --test local_provider
-cargo test -p moa-hands --test daytona_provider
-cargo test -p moa-hands --test e2b_provider
+MOA_RUN_LIVE_DAYTONA_TESTS=1 cargo test -p moa-hands --test daytona_live -- --ignored --nocapture
+MOA_RUN_LIVE_E2B_TESTS=1 cargo test -p moa-hands --test e2b_live -- --ignored --nocapture
 cargo test -p moa-hands --test mcp
 ```
 

@@ -75,7 +75,6 @@ mod skill_learning_review {
             store.clone(),
             store.pool().clone(),
             config,
-            #[cfg(feature = "internal-eval-runner")]
             review_providers(),
             LearningCandidateReviewRequest {
                 tenant_id: tenant_id_from_storage_partition_id(&storage_partition_id),
@@ -128,22 +127,11 @@ mod skill_learning_review {
             draft.revision_uid.to_string()
         );
         assert!(evaluation.get("skill_uid").is_none());
-        #[cfg(feature = "internal-eval-runner")]
-        {
-            assert_eq!(evaluation["regression_execution"], "skipped");
-            assert_eq!(
-                evaluation["regression_report"]["reason"],
-                "no previous active skill exists for comparison"
-            );
-        }
-        #[cfg(not(feature = "internal-eval-runner"))]
-        {
-            assert_eq!(evaluation["regression_execution"], "unavailable");
-            assert_eq!(
-                evaluation["regression_report"]["reason"],
-                "internal-eval-runner feature disabled"
-            );
-        }
+        assert_eq!(evaluation["regression_execution"], "skipped");
+        assert_eq!(
+            evaluation["regression_report"]["reason"],
+            "no previous active skill exists for comparison"
+        );
         assert_eq!(
             evaluation["regression_report"]["runner"], "moa-eval",
             "review payload should identify the orchestrator-owned eval runner"
@@ -365,7 +353,6 @@ mod skill_learning_review {
                 store.clone(),
                 pool.clone(),
                 config.clone(),
-                #[cfg(feature = "internal-eval-runner")]
                 review_providers(),
                 review_request(
                     &storage_partition_id,
@@ -393,7 +380,6 @@ mod skill_learning_review {
                 store.clone(),
                 pool,
                 config,
-                #[cfg(feature = "internal-eval-runner")]
                 review_providers(),
                 review_request(
                     &storage_partition_id,
@@ -495,7 +481,6 @@ mod skill_learning_review {
         Arc::new(config)
     }
 
-    #[cfg(feature = "internal-eval-runner")]
     fn review_providers() -> Arc<moa_providers::ProviderRegistry> {
         Arc::new(moa_providers::ProviderRegistry::default())
     }

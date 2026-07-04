@@ -7,8 +7,9 @@ use moa_core::{
     wire::knowledge::{KnowledgeProviderWebhookRequest, KnowledgeProviderWebhookResponse},
 };
 use moa_knowledge::domain::{
-    IngestionStepStatus, KnowledgeConnection, KnowledgeIngestionStep, KnowledgeProviderEventRecord,
-    KnowledgeSyncRun, SyncRunStatus,
+    IngestionStepStatus, KnowledgeConnection, KnowledgeIngestionStep, KnowledgeObject,
+    KnowledgeProviderEventRecord, KnowledgeSyncCounters, KnowledgeSyncRun, ObjectStatus,
+    SyncRunStatus,
 };
 use moa_knowledge::repository::{ProviderAccountConnectionLookup, SyncRunClaim};
 use moa_observability::record_knowledge_sync_run;
@@ -73,6 +74,18 @@ impl KnowledgeService {
             tracing::field::display(binding.connection_uid),
         );
         let repository = self.repository(binding.tenant_id);
+        let parser_completion = if is_parser_completion_event(
+            &verified.provider,
+            &verified.event_type,
+            &verified.metadata,
+        ) {
+            Some(
+                resolve_parser_completion_context(&*repository, &binding, &verified.metadata)
+                    .await?,
+            )
+        } else {
+            None
+        };
         let recorded = repository
             .record_provider_event(KnowledgeProviderEventRecord {
                 provider_event_uid: Uuid::now_v7(),
@@ -100,9 +113,8 @@ impl KnowledgeService {
                 repository.update_sync_run(run.clone()).await?;
                 verify_span.record("sync_run_id", tracing::field::display(run.sync_run_uid));
                 record_knowledge_sync_run(&recorded.provider, run.status.as_str());
-                record_ingestion_enqueue_step(&*repository, &run).await?;
+                ingestion_enqueued = record_ingestion_enqueue_step(&*repository, &run).await?;
                 sync_run_uid = Some(run.sync_run_uid);
-                ingestion_enqueued = true;
             } else if let Some(run) = repository
                 .latest_sync_run_for_connection(connection_uid, non_terminal_sync_run_statuses())
                 .await?
@@ -135,9 +147,9 @@ impl KnowledgeService {
                         verify_span
                             .record("sync_run_id", tracing::field::display(run.sync_run_uid));
                         record_knowledge_sync_run(&recorded.provider, run.status.as_str());
-                        record_ingestion_enqueue_step(&*repository, &run).await?;
+                        ingestion_enqueued =
+                            record_ingestion_enqueue_step(&*repository, &run).await?;
                         sync_run_uid = Some(run.sync_run_uid);
-                        ingestion_enqueued = true;
                     }
                     SyncRunClaim::AlreadyRunning(run) => {
                         verify_span
@@ -146,6 +158,19 @@ impl KnowledgeService {
                     }
                 }
             }
+        } else if !recorded.duplicate
+            && let Some(parser_completion) = parser_completion
+        {
+            let signal = record_parser_completion_signal(
+                &*repository,
+                parser_completion,
+                &recorded.provider,
+                &recorded.payload,
+            )
+            .await?;
+            verify_span.record("sync_run_id", tracing::field::display(signal.sync_run_uid));
+            sync_run_uid = Some(signal.sync_run_uid);
+            ingestion_enqueued = signal.ingestion_enqueued;
         }
 
         Ok(KnowledgeProviderWebhookResponse {
@@ -220,23 +245,151 @@ impl KnowledgeService {
 pub(super) async fn record_ingestion_enqueue_step(
     repository: &dyn moa_knowledge::repository::KnowledgeRepository,
     run: &KnowledgeSyncRun,
-) -> Result<(), KnowledgeServiceError> {
+) -> Result<bool, KnowledgeServiceError> {
     repository
-        .record_ingestion_step(KnowledgeIngestionStep {
-            step_uid: Uuid::now_v7(),
-            sync_run_uid: run.sync_run_uid,
-            object_uid: None,
-            step: "ingestion_enqueued".to_string(),
-            status: IngestionStepStatus::Started,
-            started_at: run.started_at,
-            ended_at: None,
-            duration_ms: None,
-            counters: json!({}),
-            summary: Some("Provider completed sync; ingestion accepted".to_string()),
-            retry_count: 0,
-            error_code: None,
-        })
+        .record_ingestion_step_once(
+            KnowledgeIngestionStep {
+                step_uid: Uuid::now_v7(),
+                sync_run_uid: run.sync_run_uid,
+                object_uid: None,
+                step: "ingestion_enqueued".to_string(),
+                status: IngestionStepStatus::Started,
+                started_at: run.started_at,
+                ended_at: None,
+                duration_ms: None,
+                counters: json!({}),
+                summary: Some("Provider completed sync; ingestion accepted".to_string()),
+                retry_count: 0,
+                error_code: None,
+            },
+            KnowledgeSyncCounters::default(),
+        )
+        .await
+        .map_err(KnowledgeServiceError::from)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParserCompletionSignal {
+    sync_run_uid: Uuid,
+    ingestion_enqueued: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ParserCompletionContext {
+    object: KnowledgeObject,
+    run: KnowledgeSyncRun,
+}
+
+async fn resolve_parser_completion_context(
+    repository: &dyn moa_knowledge::repository::KnowledgeRepository,
+    binding: &VerifiedWebhookBinding,
+    metadata: &Value,
+) -> Result<ParserCompletionContext, KnowledgeServiceError> {
+    let object = resolve_parser_webhook_object(repository, binding, metadata).await?;
+    let Some(run) = repository
+        .latest_sync_run_for_connection(binding.connection_uid, non_terminal_sync_run_statuses())
+        .await?
+    else {
+        return Err(KnowledgeServiceError::NotFound("knowledge sync run"));
+    };
+    if run.tenant_id != binding.tenant_id || run.connection_uid != binding.connection_uid {
+        return Err(KnowledgeServiceError::NotFound("knowledge sync run"));
+    }
+    Ok(ParserCompletionContext { object, run })
+}
+
+async fn record_parser_completion_signal(
+    repository: &dyn moa_knowledge::repository::KnowledgeRepository,
+    mut context: ParserCompletionContext,
+    provider: &str,
+    metadata: &Value,
+) -> Result<ParserCompletionSignal, KnowledgeServiceError> {
+    let run = &mut context.run;
+    let previous_status = run.status;
+    if run.status != SyncRunStatus::Ingesting {
+        run.status = SyncRunStatus::ProviderSynced;
+        repository.update_sync_run(run.clone()).await?;
+        record_knowledge_sync_run(provider, run.status.as_str());
+    }
+    record_parser_completion_step(repository, run, &context.object, provider, metadata).await?;
+    let ingestion_enqueued = if previous_status == SyncRunStatus::Ingesting {
+        false
+    } else {
+        record_ingestion_enqueue_step(repository, run).await?
+    };
+    Ok(ParserCompletionSignal {
+        sync_run_uid: run.sync_run_uid,
+        ingestion_enqueued,
+    })
+}
+
+async fn resolve_parser_webhook_object(
+    repository: &dyn moa_knowledge::repository::KnowledgeRepository,
+    binding: &VerifiedWebhookBinding,
+    metadata: &Value,
+) -> Result<KnowledgeObject, KnowledgeServiceError> {
+    let object = if let Some(object_uid) = uuid_from_metadata(metadata, &["object_uid"]) {
+        repository
+            .get_object(object_uid)
+            .await?
+            .ok_or(KnowledgeServiceError::NotFound("knowledge object"))?
+    } else if let Some(source_id) = string_from_metadata(metadata, &["source_id"]) {
+        repository
+            .get_object_by_source(binding.connection_uid, &source_id)
+            .await?
+            .ok_or(KnowledgeServiceError::NotFound("knowledge object"))?
+    } else {
+        return Err(KnowledgeServiceError::InvalidRequest(
+            "verified parser webhook did not include object_uid or source_id".to_string(),
+        ));
+    };
+    if object.tenant_id != binding.tenant_id
+        || object.connection_uid != binding.connection_uid
+        || object.status == ObjectStatus::Deleted
+    {
+        return Err(KnowledgeServiceError::NotFound("knowledge object"));
+    }
+    Ok(object)
+}
+
+async fn record_parser_completion_step(
+    repository: &dyn moa_knowledge::repository::KnowledgeRepository,
+    run: &KnowledgeSyncRun,
+    object: &KnowledgeObject,
+    provider: &str,
+    metadata: &Value,
+) -> Result<(), KnowledgeServiceError> {
+    let inserted = repository
+        .record_ingestion_step_once(
+            KnowledgeIngestionStep {
+                step_uid: Uuid::now_v7(),
+                sync_run_uid: run.sync_run_uid,
+                object_uid: Some(object.object_uid),
+                step: "parser_completion_received".to_string(),
+                status: IngestionStepStatus::Completed,
+                started_at: Utc::now(),
+                ended_at: Some(Utc::now()),
+                duration_ms: None,
+                counters: json!({ "parser_webhooks_completed": 1 }),
+                summary: Some("Parser completed document; ingestion accepted".to_string()),
+                retry_count: 0,
+                error_code: None,
+            },
+            KnowledgeSyncCounters::default(),
+        )
         .await?;
+    if inserted {
+        tracing::info!(
+            provider = %provider,
+            sync_run_id = %run.sync_run_uid,
+            object_id = %object.object_uid,
+            parser_job_id = metadata
+                .get("parser_job_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown"),
+            "knowledge parser completion webhook accepted"
+        );
+    }
     Ok(())
 }
 
@@ -358,6 +511,35 @@ fn should_enqueue_ingestion(provider: &str, event_type: &str) -> bool {
         "merge" => matches!(event_type, "linked_account.synced"),
         _ => false,
     }
+}
+
+fn is_parser_completion_event(provider: &str, event_type: &str, metadata: &Value) -> bool {
+    if !is_parser_origin_provider(provider) {
+        return false;
+    }
+    let event_type = event_type.to_ascii_lowercase();
+    let status = metadata
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
+    matches!(
+        event_type.as_str(),
+        "completed"
+            | "complete"
+            | "done"
+            | "success"
+            | "succeeded"
+            | "job.completed"
+            | "parse.completed"
+            | "parser.completed"
+            | "document.completed"
+            | "sync.completed"
+    ) || status.as_deref().is_some_and(|status| {
+        matches!(
+            status,
+            "completed" | "complete" | "done" | "success" | "succeeded"
+        )
+    })
 }
 
 fn is_parser_origin_provider(provider: &str) -> bool {

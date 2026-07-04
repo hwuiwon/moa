@@ -198,21 +198,30 @@ fn new_trial(
 }
 
 async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) -> Result<Uuid> {
-    let ActionRuleScope::Tenant { tenant_id } = scope;
-    let storage_partition_id = StoragePartitionId::for_tenant(*tenant_id).to_string();
+    let tenant_id = scope.tenant_id();
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
+    let user_id = scope.contact_id().map(|contact_id| contact_id.to_string());
     let artifact_uid = Uuid::now_v7();
     let revision_uid = Uuid::now_v7();
-    let mut conn = ScopedConn::begin(pool, &RlsContext::tenant(*tenant_id)).await?;
+    let rls_context = match scope {
+        ActionRuleScope::Tenant { tenant_id } => RlsContext::tenant(*tenant_id),
+        ActionRuleScope::Contact {
+            tenant_id,
+            contact_id,
+        } => RlsContext::contact(*tenant_id, *contact_id),
+    };
+    let mut conn = ScopedConn::begin(pool, &rls_context).await?;
     sqlx::query(
         r#"
         INSERT INTO moa.artifact (
-            artifact_uid, storage_partition_id, kind, name, description
+            artifact_uid, storage_partition_id, user_id, kind, name, description
         )
-        VALUES ($1, $2, 'experiment_plan', $3, 'simulation fixture')
+        VALUES ($1, $2, $3, 'experiment_plan', $4, 'simulation fixture')
         "#,
     )
     .bind(artifact_uid)
     .bind(&storage_partition_id)
+    .bind(&user_id)
     .bind(format!("simulation-fixture-{artifact_uid}"))
     .execute(conn.as_mut())
     .await
@@ -220,15 +229,16 @@ async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) 
     sqlx::query(
         r#"
         INSERT INTO moa.artifact_revision (
-            revision_uid, artifact_uid, storage_partition_id, definition, canonical_hash,
+            revision_uid, artifact_uid, storage_partition_id, user_id, definition, canonical_hash,
             source_format, source_text, status, validation_report, version, published_at
         )
-        VALUES ($1, $2, $3, $4, $5, 'json', $6, 'published', $7, 1, now())
+        VALUES ($1, $2, $3, $4, $5, $6, 'json', $7, 'published', $8, 1, now())
         "#,
     )
     .bind(revision_uid)
     .bind(artifact_uid)
     .bind(&storage_partition_id)
+    .bind(&user_id)
     .bind(json!({ "kind": "experiment_plan", "name": "simulation fixture" }))
     .bind(vec![2_u8; 32])
     .bind(br#"{"kind":"experiment_plan","name":"simulation fixture"}"#.to_vec())

@@ -37,11 +37,6 @@ fn build_no_memory_test_pipeline_with_tools(
             as Box<dyn moa_core::ContextProcessor>,
         Box::new(moa_brain::pipeline::runtime_context::RuntimeContextProcessor::default())
             as Box<dyn moa_core::ContextProcessor>,
-        Box::new(moa_brain::pipeline::compactor::Compactor::new(
-            config.compaction.clone(),
-            session_store,
-            None,
-        )) as Box<dyn moa_core::ContextProcessor>,
     ]);
 
     moa_brain::pipeline::ContextPipeline::with_runtime_limits(

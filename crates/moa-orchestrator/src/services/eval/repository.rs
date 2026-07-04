@@ -205,18 +205,15 @@ pub(super) async fn list_datasets_for_tenant(
     })
 }
 
-#[cfg(any(feature = "internal-eval-runner", test))]
 #[derive(Clone, Debug)]
 pub(crate) struct ScopedDatasetItem {
     pub(crate) item_id: Uuid,
     pub(crate) tenant_id: TenantId,
-    #[cfg(feature = "internal-eval-runner")]
     pub(crate) query: String,
     pub(crate) expected_answer: Option<String>,
     pub(crate) expected_chunk_ids: Vec<Uuid>,
 }
 
-#[cfg(feature = "internal-eval-runner")]
 pub(super) async fn load_dataset_items_for_tenant(
     pool: &PgPool,
     tenant_id: &TenantId,

@@ -13,7 +13,6 @@ use moa_observability::{
 use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
 
 use super::agent_instructions::AgentInstructionProcessor;
-use super::compactor::Compactor;
 use super::delegation_planning::DelegationPlanningProcessor;
 use super::digest::DigestProcessor;
 use super::history::HistoryCompiler;
@@ -204,11 +203,6 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
         history,
         Box::new(DelegationPlanningProcessor::new()) as Box<dyn ContextProcessor>,
         Box::new(RuntimeContextProcessor::default()) as Box<dyn ContextProcessor>,
-        Box::new(Compactor::new(
-            config.compaction.clone(),
-            session_store,
-            compaction_llm_provider,
-        )) as Box<dyn ContextProcessor>,
     ]);
 
     let pipeline = ContextPipeline::with_runtime_limits(

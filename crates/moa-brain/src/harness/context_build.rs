@@ -79,10 +79,7 @@ pub(super) async fn build_turn_context(
         "compiled context for streamed brain turn"
     );
 
-    if let Some(report) = stage_reports
-        .iter()
-        .find(|report| report.name == "compactor")
-    {
+    if let Some(report) = stage_reports.iter().find(|report| report.name == "history") {
         let tier1 = report
             .output
             .metadata

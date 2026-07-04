@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::RlsContext;
 use moa_core::{
-    ActionRuleScope, MoaError, ModelId, Result as MoaResult, SessionId, StoragePartitionId,
-    TenantId,
+    ActionRuleScope, ContactId, MoaError, ModelId, Result as MoaResult, SessionId,
+    StoragePartitionId, TenantId,
 };
 use moa_db::ScopedConn;
 use moa_scoring::{
@@ -698,6 +698,14 @@ impl ScopeParts {
                 storage_partition_id: Some(StoragePartitionId::for_tenant(*tenant_id).to_string()),
                 user_id: None,
             },
+            ActionRuleScope::Contact {
+                tenant_id,
+                contact_id,
+            } => Self {
+                scope: "contact",
+                storage_partition_id: Some(StoragePartitionId::for_tenant(*tenant_id).to_string()),
+                user_id: Some(contact_id.to_string()),
+            },
         }
     }
 }
@@ -872,14 +880,14 @@ async fn ensure_artifact_revisions_visible(
         SELECT revision_uid
         FROM moa.artifact_revision
         WHERE revision_uid = ANY($1)
-          AND scope = 'tenant'
+          AND scope IN ('tenant', 'contact')
           AND storage_partition_id IS NOT DISTINCT FROM $2
-          AND user_id IS NULL
+          AND (user_id IS NULL OR user_id IS NOT DISTINCT FROM $3)
         "#,
     )
     .bind(revision_uids)
     .bind(ScopeParts::from_scope(scope).storage_partition_id)
-    .bind(Option::<String>::None)
+    .bind(ScopeParts::from_scope(scope).user_id)
     .fetch_all(conn)
     .await
     .map_err(map_sqlx_error)?;
@@ -1060,6 +1068,10 @@ fn scope_from_parts(
         ("tenant", Some(tenant_id), None) => Ok(ActionRuleScope::Tenant {
             tenant_id: parse_tenant_storage_key(&tenant_id)?,
         }),
+        ("contact", Some(tenant_id), Some(contact_id)) => Ok(ActionRuleScope::Contact {
+            tenant_id: parse_tenant_storage_key(&tenant_id)?,
+            contact_id: parse_contact_storage_key(&contact_id)?,
+        }),
         _ => Err(MoaError::StorageError(format!(
             "invalid experiment scope columns for `{scope}`"
         ))),
@@ -1069,6 +1081,10 @@ fn scope_from_parts(
 fn experiment_scope_context(scope: &ActionRuleScope) -> RlsContext {
     match scope {
         ActionRuleScope::Tenant { tenant_id } => RlsContext::tenant(*tenant_id),
+        ActionRuleScope::Contact {
+            tenant_id,
+            contact_id,
+        } => RlsContext::contact(*tenant_id, *contact_id),
     }
 }
 
@@ -1076,6 +1092,14 @@ fn parse_tenant_storage_key(value: &str) -> MoaResult<TenantId> {
     uuid::Uuid::parse_str(value)
         .map(TenantId)
         .map_err(|error| MoaError::StorageError(format!("invalid tenant scope `{value}`: {error}")))
+}
+
+fn parse_contact_storage_key(value: &str) -> MoaResult<ContactId> {
+    uuid::Uuid::parse_str(value)
+        .map(ContactId)
+        .map_err(|error| {
+            MoaError::StorageError(format!("invalid contact scope `{value}`: {error}"))
+        })
 }
 
 fn to_json<T: serde::Serialize>(value: T) -> MoaResult<Value> {

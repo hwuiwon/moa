@@ -9,7 +9,6 @@ use regex::Regex;
 use serde::Deserialize;
 
 use crate::tools::file_read::resolve_sandbox_path;
-#[cfg(any(feature = "daytona", feature = "e2b"))]
 use crate::tools::file_search::default_skipped_dirs;
 use crate::tools::file_search::should_skip_search_path_static;
 
@@ -54,7 +53,6 @@ pub async fn execute(
 }
 
 /// Builds a shell command for cloud sandboxes to execute the `grep` input shape.
-#[cfg(any(feature = "daytona", feature = "e2b"))]
 pub(crate) fn remote_shell_command(input: &str, search_root: &str) -> Result<String> {
     let params: GrepInput = serde_json::from_str(input)?;
     let search_path = params
@@ -88,7 +86,6 @@ pub(crate) fn remote_shell_command(input: &str, search_root: &str) -> Result<Str
     ))
 }
 
-#[cfg(any(feature = "daytona", feature = "e2b"))]
 fn remote_search_path(search_root: &str, path: &str) -> String {
     if path.starts_with('/') {
         return path.to_string();
@@ -101,7 +98,6 @@ fn remote_search_path(search_root: &str, path: &str) -> String {
     }
 }
 
-#[cfg(any(feature = "daytona", feature = "e2b"))]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }

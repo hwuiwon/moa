@@ -2,7 +2,7 @@
 
 ## What It Tests
 
-This scenario forces real history compaction through the long-conversation runner and checks that sticky errors remain observable after compaction. The smoke test uses a low test-only compaction threshold so the fixture stays small instead of carrying multi-megabyte tool outputs.
+This scenario forces real history-owned checkpoint compaction through the long-conversation runner and checks that sticky errors remain observable after compaction. The smoke test uses a low test-only compaction threshold so the fixture stays small instead of carrying multi-megabyte tool outputs.
 
 ## Key Invariants
 

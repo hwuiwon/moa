@@ -17,6 +17,45 @@ async fn response_json_or_error(
     serde_json::from_str(&body).with_context(|| format!("decode OpenFGA {operation} response"))
 }
 
+pub(super) struct FixtureFgaEndpoint {
+    pub(super) url: String,
+    pub(super) preshared_key: String,
+}
+
+pub(super) fn fixture_fga_endpoint_from_env() -> Option<FixtureFgaEndpoint> {
+    let values = [
+        (
+            "MOA_FIXTURE_OPENFGA_URL",
+            std::env::var("MOA_FIXTURE_OPENFGA_URL").ok(),
+        ),
+        (
+            "MOA_FIXTURE_OPENFGA_PRESHARED_KEY",
+            std::env::var("MOA_FIXTURE_OPENFGA_PRESHARED_KEY").ok(),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| value.map(|value| (key.to_string(), value)))
+    .collect();
+    fixture_fga_endpoint_from_values(&values)
+}
+
+fn fixture_fga_endpoint_from_values(
+    values: &HashMap<String, String>,
+) -> Option<FixtureFgaEndpoint> {
+    let url = values
+        .get("MOA_FIXTURE_OPENFGA_URL")
+        .filter(|value| !value.trim().is_empty())?
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    let preshared_key = values
+        .get("MOA_FIXTURE_OPENFGA_PRESHARED_KEY")
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_string())
+        .unwrap_or_else(|| OPENFGA_PRESHARED_KEY.to_string());
+    Some(FixtureFgaEndpoint { url, preshared_key })
+}
+
 pub(super) async fn start_openfga_container() -> Result<ContainerAsync<GenericImage>> {
     GenericImage::new(OPENFGA_IMAGE, OPENFGA_TAG)
         .with_exposed_port(8080.tcp())
@@ -161,4 +200,30 @@ fn fga_value(values: &HashMap<String, String>, key: &str) -> Option<String> {
         .get(key)
         .filter(|value| !value.trim().is_empty())
         .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixture_endpoint_uses_explicit_openfga_service_and_trims_url() {
+        // Pins: clean E2E fixture tests can reuse the already-bootstrapped compose OpenFGA service.
+        let values = HashMap::from([
+            (
+                "MOA_FIXTURE_OPENFGA_URL".to_string(),
+                " http://127.0.0.1:10030/ ".to_string(),
+            ),
+            (
+                "MOA_FIXTURE_OPENFGA_PRESHARED_KEY".to_string(),
+                " local-key ".to_string(),
+            ),
+        ]);
+
+        let endpoint = fixture_fga_endpoint_from_values(&values)
+            .expect("explicit fixture OpenFGA endpoint should be accepted");
+
+        assert_eq!(endpoint.url, "http://127.0.0.1:10030");
+        assert_eq!(endpoint.preshared_key, "local-key");
+    }
 }

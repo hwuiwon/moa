@@ -5,8 +5,6 @@
 //! These tests are ignored by default because they provision real Daytona
 //! sandboxes and require valid credentials in the environment.
 
-#![cfg(feature = "daytona")]
-
 use std::time::{Duration, Instant};
 use std::{panic::AssertUnwindSafe, panic::resume_unwind};
 

@@ -20,31 +20,6 @@ async fn flatten_tool_result_aggregates_text_items() {
 }
 
 #[tokio::test]
-async fn stdio_client_lists_and_calls_tools() {
-    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/mock_mcp_stdio_server.py");
-    let client = MCPClient::connect(&McpServerConfig {
-        name: "mock".to_string(),
-        transport: McpTransportConfig::Stdio,
-        command: Some("python3".to_string()),
-        args: vec![server.display().to_string()],
-        ..McpServerConfig::default()
-    })
-    .await
-    .unwrap();
-
-    let tools = client.list_tools().await.unwrap();
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].name, "echo");
-
-    let output = client
-        .call_tool("echo", json!({ "text": "hello" }), HashMap::new())
-        .await
-        .unwrap();
-    assert_eq!(output.to_text(), "hello");
-}
-
-#[tokio::test]
 async fn http_client_sends_headers_and_parses_jsonrpc() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

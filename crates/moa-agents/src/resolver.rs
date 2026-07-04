@@ -320,6 +320,10 @@ async fn scoped_conn_for_artifact_scope<'p>(
 ) -> Result<ScopedConn<'p>> {
     match scope {
         ActionRuleScope::Tenant { tenant_id } => ScopedConn::begin_tenant(pool, *tenant_id).await,
+        ActionRuleScope::Contact {
+            tenant_id,
+            contact_id,
+        } => ScopedConn::begin_contact(pool, *tenant_id, *contact_id).await,
     }
 }
 

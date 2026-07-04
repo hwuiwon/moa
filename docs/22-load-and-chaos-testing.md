@@ -131,8 +131,11 @@ rate, session failures.
 --profile retrieval-smoke --tenants 2 --facts-per-tenant 50 --qps 5 \
 --duration 15s --max-p95-ms 1000 --p99-soft-target-ms 2000 \
 --cache-hit-floor 0.50`. This profile is for developer machines and skips the
-strict AVX2 hardware floor. The release `retrieval` profile remains strict and
-is the only source for baseline updates.
+strict AVX2 hardware floor. It uses the local pgvector path unless the test
+database explicitly configures a storage partition for Turbopuffer; such cloud
+vector runs must set `MOA_TURBOPUFFER_API_KEY` and should fail closed if the
+client is missing. The release `retrieval` profile remains strict and is the
+only source for baseline updates.
 
 **T2 capacity (nightly).** `make loadtest-capacity` — recreates the
 orchestrator with `scripts/realistic.json` (real latency/TTFT pacing, tool

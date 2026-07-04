@@ -52,11 +52,11 @@ Slack rendering is intentionally minimal. Upgrading it requires a proper channel
 
 These caveats are deliberate security trade-offs where the current implementation is good enough for the current threat model but has a known upgrade path for stricter requirements.
 
-### MCP remote auth applies only to HTTP/SSE transports
+### MCP credential proxy assumes HTTP/SSE transports
 
-- `crates/moa-security/src/mcp_proxy.rs` issues session-scoped opaque tokens and injects real credentials only when a remote MCP call is dispatched. `crates/moa-hands/src/adapters/mcp/mod.rs` supports stdio and remote JSON-RPC transports, with SSE response parsing for remote endpoints.
+- `crates/moa-security/src/mcp_proxy.rs` issues session-scoped opaque tokens and injects real credentials when an HTTP/SSE MCP call is dispatched. `crates/moa-hands/src/adapters/mcp/mod.rs` supports remote JSON-RPC transports, with SSE response parsing for remote endpoints.
 - Remote MCP servers receive credentials without exposing them to the brain or to serialized tool arguments. Session-scoped auth is enforced at the router/proxy seam.
-- Stdio MCP auth is still process/env based; the proxy does not inject credentials into subprocess transports. The credential flow is strongest for HTTP/SSE MCP servers and weaker for stdio servers that need secrets at startup.
+- MCP servers that need credentials at process startup are not supported; expose them through HTTP/SSE so the host-side proxy can inject per-request credentials.
 
 ### Local Docker hardening disables container network access entirely
 
@@ -75,6 +75,18 @@ These caveats are deliberate security trade-offs where the current implementatio
 ## Deployment and boot configuration
 
 These caveats relate to the gap between "cloud build succeeds" and "cloud deployment is fully self-service."
+
+### Turbopuffer cloud vectors still depend on pgvector as the source
+
+- Cloud storage partitions that select `vector_backend = 'turbopuffer'` require
+  `MOA_TURBOPUFFER_API_KEY`; retrieval and tenant-knowledge BM25 fail closed if
+  the client is missing instead of degrading to pgvector.
+- pgvector remains the transaction-capable source for graph writes and local
+  development. The outbox drain copies committed pgvector rows into
+  Turbopuffer after commit because Turbopuffer cannot join the Postgres graph
+  transaction.
+- Historical/as-of vector reads still use the Postgres source path because the
+  Turbopuffer KNN API does not carry MOA's bitemporal filter.
 
 ### LLM fact extraction is journal-safe but still rollout-gated
 

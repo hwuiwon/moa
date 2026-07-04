@@ -17,7 +17,7 @@ use super::lifecycle::hand_id;
 use super::telemetry::{
     record_tool_execution_result, record_tool_invocation_metadata, tool_execution_span,
 };
-use super::{DEFAULT_PROVIDER_NAME, ToolExecution, ToolRouter};
+use super::{DEFAULT_PROVIDER_NAME, HandRoute, ToolExecution, ToolRouter};
 
 impl ToolRouter {
     /// Executes a tool invocation that has already cleared action policy.
@@ -133,7 +133,8 @@ impl ToolRouter {
                 )
                 .await
             }
-            ToolExecution::Hand { provider, tier } => {
+            ToolExecution::Hand { routes } => {
+                let route = primary_hand_route(routes)?;
                 self.execute_hand_once(
                     session,
                     // The local (non-durable) dispatch path has no worker
@@ -141,8 +142,8 @@ impl ToolRouter {
                     None,
                     invocation,
                     &registered_tool.definition,
-                    provider,
-                    tier,
+                    &route.provider,
+                    &route.tier,
                     hard_cancel_token,
                 )
                 .await
@@ -332,4 +333,10 @@ impl ToolRouter {
             .insert(server_name.to_string(), client);
         Ok(())
     }
+}
+
+pub(super) fn primary_hand_route(routes: &[HandRoute]) -> Result<&HandRoute> {
+    routes
+        .first()
+        .ok_or_else(|| MoaError::ConfigError("hand tool has no configured provider route".into()))
 }

@@ -5,8 +5,6 @@
 //! These tests are ignored by default because they provision real E2B sandboxes
 //! and require valid credentials in the environment.
 
-#![cfg(feature = "e2b")]
-
 use std::time::Duration;
 use std::{panic::AssertUnwindSafe, panic::resume_unwind};
 

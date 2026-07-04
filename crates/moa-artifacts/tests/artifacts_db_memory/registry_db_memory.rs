@@ -6,7 +6,7 @@ use moa_artifacts::registry::{
     NewArtifactNodeRun, NewArtifactRun,
 };
 use moa_artifacts::validation::validate_for_status;
-use moa_core::{ActionRuleScope, MoaError, Result, SessionId, TenantId};
+use moa_core::{ActionRuleScope, ContactId, MoaError, Result, SessionId, TenantId};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -262,6 +262,112 @@ async fn registry_preserves_tenant_published_revision_history() -> Result<()> {
         .load_files(&tenant_scope, tenant_v1.revision_uid)
         .await?;
     assert_eq!(files[0].path, "SKILL.md");
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn registry_contact_scope_overrides_tenant_without_leaking_to_peers() -> Result<()> {
+    // Pins: contact-scoped artifacts are visible only to that contact, while tenant artifacts remain the fallback.
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let registry = ArtifactRegistry::new(store.pool().clone());
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let contact_id = ContactId(Uuid::now_v7());
+    let peer_contact_id = ContactId(Uuid::now_v7());
+    let tenant_scope = ActionRuleScope::Tenant { tenant_id };
+    let contact_scope = ActionRuleScope::Contact {
+        tenant_id,
+        contact_id,
+    };
+    let peer_scope = ActionRuleScope::Contact {
+        tenant_id,
+        contact_id: peer_contact_id,
+    };
+    let name = format!("artifact-contact-scope-{}", Uuid::now_v7());
+
+    let tenant_doc = skill_doc(&name, "tenant fallback");
+    let tenant_source = tenant_doc.to_yaml().expect("serialize tenant doc");
+    let tenant_revision = registry
+        .create_draft(
+            &tenant_scope,
+            NewArtifactDraft {
+                document: &tenant_doc,
+                source_format: "yaml",
+                source_text: tenant_source.as_bytes(),
+                files: &[NewArtifactFile::new("SKILL.md", b"# Tenant\n".to_vec())],
+            },
+        )
+        .await?;
+    registry
+        .publish_revision(
+            &tenant_scope,
+            tenant_revision.revision_uid,
+            &validate_for_status(&tenant_doc, ArtifactStatus::Published),
+        )
+        .await?;
+
+    let contact_before_override = registry
+        .load_visible_published(&contact_scope, ArtifactKind::Skill, &name)
+        .await?
+        .expect("contact should inherit tenant artifact before override");
+    assert_eq!(contact_before_override.scope, "tenant");
+    assert_eq!(contact_before_override.description, "tenant fallback");
+
+    let contact_doc = skill_doc(&name, "contact override");
+    let contact_source = contact_doc.to_yaml().expect("serialize contact doc");
+    let contact_revision = registry
+        .create_draft(
+            &contact_scope,
+            NewArtifactDraft {
+                document: &contact_doc,
+                source_format: "yaml",
+                source_text: contact_source.as_bytes(),
+                files: &[NewArtifactFile::new("SKILL.md", b"# Contact\n".to_vec())],
+            },
+        )
+        .await?;
+    registry
+        .publish_revision(
+            &contact_scope,
+            contact_revision.revision_uid,
+            &validate_for_status(&contact_doc, ArtifactStatus::Published),
+        )
+        .await?;
+
+    let visible_contact = registry
+        .load_visible_published(&contact_scope, ArtifactKind::Skill, &name)
+        .await?
+        .expect("contact artifact should be visible to owning contact");
+    assert_eq!(visible_contact.scope, "contact");
+    assert_eq!(
+        visible_contact.user_id.as_ref().map(ToString::to_string),
+        Some(contact_id.to_string())
+    );
+    assert_eq!(visible_contact.description, "contact override");
+
+    let visible_peer = registry
+        .load_visible_published(&peer_scope, ArtifactKind::Skill, &name)
+        .await?
+        .expect("peer contact should still see tenant fallback");
+    assert_eq!(visible_peer.scope, "tenant");
+    assert_eq!(visible_peer.description, "tenant fallback");
+
+    let visible_tenant = registry
+        .load_visible_published(&tenant_scope, ArtifactKind::Skill, &name)
+        .await?
+        .expect("tenant scope should still see tenant artifact");
+    assert_eq!(visible_tenant.scope, "tenant");
+    assert_eq!(visible_tenant.description, "tenant fallback");
+
+    let contact_files = registry
+        .load_files(&contact_scope, contact_revision.revision_uid)
+        .await?;
+    assert_eq!(
+        file_by_path(&contact_files, "SKILL.md").content,
+        b"# Contact\n"
+    );
 
     moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
 }

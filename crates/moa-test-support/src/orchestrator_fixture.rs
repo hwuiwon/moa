@@ -61,7 +61,10 @@ mod scripted_provider;
 pub use client::{TestApiClient, TestSessionHandle};
 pub use conversation::{ConversationOptions, drive_conversation};
 
-use openfga::{bootstrap_openfga, external_fga_client, start_openfga_container, wait_for_openfga};
+use openfga::{
+    bootstrap_openfga, external_fga_client, fixture_fga_endpoint_from_env, start_openfga_container,
+    wait_for_openfga,
+};
 use postgres::{ensure_postgres_image, start_postgres_container, wait_for_postgres};
 use process::{
     OrchestratorSpawnConfig, locate_orchestrator_binary, pick_free_port, repo_root,
@@ -197,11 +200,22 @@ impl OrchestratorTestFixture {
         let admin_url = format!("http://127.0.0.1:{admin_port}");
         wait_for_restate_admin(&admin_url).await?;
 
-        let openfga = start_openfga_container().await?;
-        let openfga_port = fixture_host_port_ipv4(&openfga, "openfga api", 8080.tcp()).await?;
-        let openfga_url = format!("http://127.0.0.1:{openfga_port}");
+        let (openfga_url, openfga_container, openfga_preshared_key) =
+            match fixture_fga_endpoint_from_env() {
+                Some(endpoint) => (endpoint.url, None, endpoint.preshared_key),
+                None => {
+                    let openfga = start_openfga_container().await?;
+                    let openfga_port =
+                        fixture_host_port_ipv4(&openfga, "openfga api", 8080.tcp()).await?;
+                    (
+                        format!("http://127.0.0.1:{openfga_port}"),
+                        Some(openfga),
+                        OPENFGA_PRESHARED_KEY.to_string(),
+                    )
+                }
+            };
         wait_for_openfga(&openfga_url).await?;
-        let fga_config = bootstrap_openfga(&openfga_url, OPENFGA_PRESHARED_KEY).await?;
+        let fga_config = bootstrap_openfga(&openfga_url, &openfga_preshared_key).await?;
         let fga_client =
             FgaClient::new(fga_config.clone()).context("build fixture OpenFGA client")?;
 
@@ -274,7 +288,7 @@ impl OrchestratorTestFixture {
             _script_dir: Some(script_dir),
             _postgres: Some(postgres),
             _restate: Some(restate),
-            _openfga: Some(openfga),
+            _openfga: openfga_container,
             _redis: redis_container,
             orchestrator: Mutex::new(Some(orchestrator)),
         })

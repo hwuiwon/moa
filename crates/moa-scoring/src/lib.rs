@@ -667,6 +667,14 @@ impl ScopeParts {
                 storage_partition_id: Some(StoragePartitionId::for_tenant(*tenant_id).to_string()),
                 user_id: None,
             },
+            ActionRuleScope::Contact {
+                tenant_id,
+                contact_id,
+            } => Self {
+                scope: "contact",
+                storage_partition_id: Some(StoragePartitionId::for_tenant(*tenant_id).to_string()),
+                user_id: Some(contact_id.to_string()),
+            },
         }
     }
 }

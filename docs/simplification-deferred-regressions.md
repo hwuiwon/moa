@@ -4,6 +4,10 @@ This file tracks regressions, degradations, and validation blockers found while
 simplifying the codebase. The items below were repaired on 2026-07-04 as part of
 the deferred-regression fix plan.
 
+## Open Items
+
+No open deferred regressions are currently tracked.
+
 ## Resolved Items
 
 | ID | Surface | Status | Original Evidence | Resolution Evidence |
@@ -17,6 +21,7 @@ the deferred-regression fix plan.
 | REG-007 | Live E2E fixture-service container port discovery | Resolved | A live gate intermittently failed in fixture-service E2E with `container ... does not expose port 8080/tcp`. | Fixture port discovery now uses labeled retries and richer diagnostics. The full clean live gate passed, including fixture-service E2E 5/5. |
 | REG-008 | Analytics/session-store DB verification pool | Resolved | Edge analytics, session analytics, and orchestrator session-store DB tests failed during isolated-store setup with maintenance pool timeouts. | Isolated maintenance setup was repaired and the affected DB lanes passed: edge direct-read routes 4/4, session materialized analytics refresh, orchestrator session-store library DB cases 11/11, plus the full clean live gate DB lanes. |
 | REG-009 | Fixture-service E2E compile-budget timeout | Resolved | Fixture-service E2E timed out at 240s because the action-policy test spent its timeout budget cold-compiling the spawned orchestrator dependency graph. | `run-clean-e2e.sh` prebuilds `moa-orchestrator-bin`, exports `MOA_ORCHESTRATOR_BIN`, and reuses the binary for fixture/shared orchestrator lanes. Fixture-service E2E passed 5/5 in the full clean live gate. |
+| REG-010 | Clean E2E timing and local runner contention | Resolved | The Group D clean-E2E rerun was interrupted during setup because the Rust `moa-fga-bootstrap` helper and several Rust test/build-script binaries stalled at process startup while macOS `syspolicyd` was active and rust-analyzer held a workspace `cargo check --workspace --all-targets` artifact lock. A follow-up run showed the broader runner regression: `cargo test -p moa-orchestrator --tests` launched ignored or feature-disabled `*_service_e2e` binaries such as `long_conversation_cost_service_e2e` and `procedure_memory_nodes_service_e2e`; sampling showed they were stalled at `_dyld_start` while running zero/ignored tests. The old timing report also mislabeled interrupted runs as `passed`. | `scripts/run-clean-e2e.sh` now records interrupted phases, bootstraps OpenFGA through `curl`/`jq` using `schema_v1.json`, replaces the broad cargo orchestrator preflight with nextest `fast-pr`, `db-session`, and `db-memory` phases, and runs feature-gated skill-learning binaries with the configured test thread count. A fresh patched `MOA_CLEAN_E2E_TEST_THREADS=4 ./scripts/run-clean-e2e.sh` passed in 06:26; the old broad cargo phase took 22:49 in the comparison run, while the replacement fast-pr/db-session/db-memory lanes took 00:02/02:28/01:01. |
 
 ## Validation Summary
 
@@ -29,6 +34,7 @@ the deferred-regression fix plan.
 - `make loadtest-mock` passed the gated mock-short profile with 16 completed sessions, 0 failures, corrected P95 632.3ms, and turn error rate 0.0000.
 - `make chaos-smoke` passed the provider 429 storm lane with 1/1 test passing after the chaos target inherited the safe RustFS port defaults.
 - `MOA_RUN_LIVE_E2E=1 make e2e-clean-live` passed end-to-end in 108:16.
+- `MOA_CLEAN_E2E_TEST_THREADS=4 ./scripts/run-clean-e2e.sh` passed after the clean-E2E runner optimization in 06:26.
 
 ## Notes
 

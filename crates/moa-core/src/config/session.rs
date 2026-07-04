@@ -163,68 +163,6 @@ impl SessionConfig {
     }
 }
 
-impl super::MoaEnvOverlay {
-    /// Applies session storage environment overrides.
-    pub(in crate::config) fn apply_session_overlay(&self, config: &mut super::MoaConfig) {
-        use super::env_overlay::{set_copy_if_some, set_if_some, set_option_if_some};
-
-        set_copy_if_some(
-            &mut config.session.blob_threshold_bytes,
-            self.session_blob_threshold_bytes,
-        );
-        set_copy_if_some(&mut config.session.blob_backend, self.session_blob_backend);
-        set_option_if_some(&mut config.session.blob_dir, &self.session_blob_dir);
-        set_copy_if_some(
-            &mut config.session.attachments.backend,
-            self.session_attachment_backend,
-        );
-        set_if_some(
-            &mut config.session.attachments.bucket,
-            &self.session_attachment_bucket,
-        );
-        set_if_some(
-            &mut config.session.attachments.prefix,
-            &self.session_attachment_prefix,
-        );
-        set_option_if_some(
-            &mut config.session.attachments.region,
-            &self.session_attachment_region,
-        );
-        set_option_if_some(
-            &mut config.session.attachments.endpoint,
-            &self.session_attachment_endpoint,
-        );
-        set_option_if_some(
-            &mut config.session.attachments.access_key_id,
-            &self.session_attachment_access_key_id,
-        );
-        set_option_if_some(
-            &mut config.session.attachments.secret_access_key,
-            &self.session_attachment_secret_access_key,
-        );
-        set_copy_if_some(
-            &mut config.session.attachments.allow_http,
-            self.session_attachment_allow_http,
-        );
-        set_copy_if_some(
-            &mut config.session.attachments.virtual_hosted_style,
-            self.session_attachment_virtual_hosted_style,
-        );
-        set_option_if_some(
-            &mut config.session.attachments.gcp_service_account_path,
-            &self.session_attachment_gcp_service_account_path,
-        );
-        set_option_if_some(
-            &mut config.session.attachments.gcp_service_account_key,
-            &self.session_attachment_gcp_service_account_key,
-        );
-        set_option_if_some(
-            &mut config.session.attachments.gcp_application_credentials_path,
-            &self.session_attachment_gcp_application_credentials_path,
-        );
-    }
-}
-
 fn is_local_attachment_endpoint(endpoint: &str) -> bool {
     url::Url::parse(endpoint)
         .ok()

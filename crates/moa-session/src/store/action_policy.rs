@@ -17,10 +17,9 @@ impl PostgresSessionStore {
             "SELECT id, storage_partition_id, user_id, tool, pattern, effect, scope, reason, created_by, created_at \
              FROM {action_policy_rules} \
              WHERE tenant_id = $1 \
-               AND scope = 'tenant' \
-               AND (user_id IS NULL OR user_id = $2) \
+               AND ((scope = 'tenant' AND user_id IS NULL) OR (scope = 'contact' AND user_id = $2)) \
                AND tool = $3 \
-             ORDER BY created_at ASC"
+             ORDER BY CASE WHEN scope = 'contact' THEN 0 ELSE 1 END, created_at ASC"
         ))
         .bind(tenant_id.0)
         .bind(user_id.to_string())
@@ -39,6 +38,7 @@ impl PostgresSessionStore {
         let action_policy_rules = self.table_name("action_policy_rules");
         let storage_partition_id = stored_storage_partition_id_for_rule(&rule);
         let tenant_id = stored_tenant_id_for_rule(&rule);
+        let user_id = stored_user_id_for_rule(&rule);
         sqlx::query(&format!(
             "INSERT INTO {action_policy_rules} (id, tenant_id, storage_partition_id, user_id, tool, pattern, effect, scope, reason, created_by, created_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
@@ -53,7 +53,7 @@ impl PostgresSessionStore {
         .bind(rule.id)
         .bind(tenant_id)
         .bind(storage_partition_id.to_string())
-        .bind(Option::<String>::None)
+        .bind(user_id.as_deref())
         .bind(rule.tool)
         .bind(rule.pattern)
         .bind(rule.effect.as_str())
@@ -80,8 +80,8 @@ impl PostgresSessionStore {
         sqlx::query(&format!(
             "DELETE FROM {action_policy_rules} \
              WHERE tenant_id = $1 \
-               AND scope = 'tenant' \
-               AND ((user_id IS NULL AND $2::text IS NULL) OR user_id = $2) \
+               AND ((scope = 'tenant' AND user_id IS NULL AND $2::text IS NULL) \
+                    OR (scope = 'contact' AND user_id = $2)) \
                AND tool = $3 \
                AND pattern = $4"
         ))
@@ -99,13 +99,24 @@ impl PostgresSessionStore {
 
 fn stored_storage_partition_id_for_rule(rule: &ActionPolicyRule) -> StoragePartitionId {
     match rule.scope {
-        ActionRuleScope::Tenant { tenant_id } => StoragePartitionId::for_tenant(tenant_id),
+        ActionRuleScope::Tenant { tenant_id } | ActionRuleScope::Contact { tenant_id, .. } => {
+            StoragePartitionId::for_tenant(tenant_id)
+        }
     }
 }
 
 fn stored_tenant_id_for_rule(rule: &ActionPolicyRule) -> uuid::Uuid {
     match rule.scope {
-        ActionRuleScope::Tenant { tenant_id } => tenant_id.0,
+        ActionRuleScope::Tenant { tenant_id } | ActionRuleScope::Contact { tenant_id, .. } => {
+            tenant_id.0
+        }
+    }
+}
+
+fn stored_user_id_for_rule(rule: &ActionPolicyRule) -> Option<String> {
+    match rule.scope {
+        ActionRuleScope::Tenant { .. } => None,
+        ActionRuleScope::Contact { contact_id, .. } => Some(contact_id.to_string()),
     }
 }
 

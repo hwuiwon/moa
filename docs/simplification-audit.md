@@ -87,17 +87,33 @@ Batch these with focused crate checks and less frequent live/perf gates because 
 
 ### Group D: Product-Scope Or High-Risk Cleanup
 
-Keep these out of opportunistic small-delete batches. They need one explicit product/runtime decision or broader validation gate.
+Keep these out of opportunistic small-delete batches. The product decisions were
+settled on 2026-07-04; implementation should now remove misleading gates and
+dead branches while keeping the chosen product capabilities.
 
-- #10/#30 parser webhook and vendor adapter deletion should be planned together.
-- #31/#92 Daytona/E2B needs one runtime/build story before deletion or ungating.
-- #32 stdio MCP transport conflicts with local-dev docs and needs a product decision.
-- #37 migration source consolidation requires accepting a DB wipe/refinery-history simplification.
-- #52 dual compaction owners changes context pipeline behavior and needs eval/performance baselines.
-- #55 Turbopuffer/outbox/promotion removal is a product architecture decision.
-- #61 env overlay rewrite should follow smaller env-surface deletions.
-- #67 single-variant action rule scope is valid but wide.
-- #89 experiments/internal-eval feature cleanup needs delete-vs-always-compile direction.
+- #10/#30 parser webhooks and Merge/Nango/parser adapters stay. **done:** made
+  webhooks load-bearing CDC/completion ingestion signals rather than verified
+  dead-letter rows.
+- #31/#92 Daytona and E2B cloud hands stay. **done:** removed compile feature
+  gates, made runtime config decide provider registration, and added
+  cloud-hand fallback so work can continue if one cloud provider is unavailable.
+- #32 stdio MCP is not supported. **done:** deleted stdio transport/config/docs;
+  HTTP/SSE are now the only supported MCP transports.
+- #37 migration source consolidation is skipped for now.
+- #52 dual compaction owners should be collapsed into one owner, with eval and
+  performance baselines before and after. **done:** history compilation is the
+  single compaction owner and the compaction eval/perf checks passed.
+- #55 Turbopuffer is always used in cloud. **done:** hardened the external
+  vector backend path instead of deleting outbox/promotion support; credentialed
+  live Turbopuffer validation remains environment-gated.
+- #61 env overlay rewrite should proceed, but keep the single-underscore
+  `MOA_DATABASE_MAX_CONNECTIONS` style rather than moving to double underscores.
+  **done:** typed sparse overlay preserves the single-underscore names.
+- #67 contact/user action-rule scope is required. **done:** added contact scope
+  instead of collapsing `ActionRuleScope` to tenant only.
+- #89 experiments and internal eval are product capability. **done:** removed
+  dead compile gating and protected operator/admin execution with runtime
+  authorization.
 
 ## Index
 
@@ -134,7 +150,7 @@ Keep these out of opportunistic small-delete batches. They need one explicit pro
 | 29 | 🟡 | moa-providers | Backwards-compat catalog entry gemini-3.1-flash-lite-preview is fully redundant |
 | 30 | 🟡 | moa-knowledge | Five external vendor adapters pre-production: Merge provider and Unstructured/Reducto parsers are parallel paths to the one live stack (Nango + native + LlamaParse) |
 | 31 | 🟡 | moa-hands (tools/sandboxes/MCP) | Daytona and E2B cloud sandbox adapters are dead code behind feature flags no consumer enables |
-| 32 | 🟡 | moa-hands (tools/sandboxes/MCP) | Stdio MCP transport (~450 LOC incl. concurrent demux machinery and a background reader task) is unreachable from any production path |
+| 32 | ✅ | moa-hands (tools/sandboxes/MCP) | Stdio MCP transport (~450 LOC incl. concurrent demux machinery and a background reader task) is unreachable from any production path |
 | 33 | 🟡 | moa-hands (tools/sandboxes/MCP) | Three of five public ToolRouter execute entry points (plus eager install_files) have no production callers and duplicate ~50 lines of span/policy boilerplate each |
 | 34 | 🟡 | moa-hands (tools/sandboxes/MCP) | recovery.rs duplicates the entire retry/reprovision state machine for hand vs MCP execution, including a 12-line counter-update block copy-pasted four times |
 | 35 | 🟡 | moa-hands (tools/sandboxes/MCP) | ToolRouter carries a concrete LocalHandProvider side-channel next to the dyn HandProvider map, special-cased by provider-name string comparison |
@@ -1790,6 +1806,17 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~450**
 
 **Value of simplifying.** Deletes ~450 LOC including the most intricate concurrency code in the crate (RAII drop guard with runtime-handle fallback and a spin loop), a background task, a subprocess integration, and a config surface — all serving zero reachable functionality.
 
+**Implementation status: ✅ DONE.** `McpTransportConfig::Stdio` plus stdio
+`command`/`args`/`env` config fields are gone, so config can no longer express
+stdio MCP. `MCPClient` now owns the remote HTTP/SSE client directly; the
+stdio child-process transport, pending-response map, drop guard, reader task,
+framing helpers, stdio-only tests, and `mock_mcp_stdio_server.py` fixture were
+deleted. The remote HTTP/SSE tests and router credential/fail-closed/collision
+coverage remain. Docs now state that MCP supports only HTTP/SSE transports.
+Focused verification passed with `cargo test -p moa-hands --test hands_offline
+--locked mcp_router` and `cargo check -p moa-core -p moa-hands --all-targets
+--locked`.
+
 **Adversarial verifier: 🟡 ADJUSTED.** Core claim verified against the code. (1) crates/moa-hands/src/core/construction.rs:72-73: ToolRouter::from_config calls validate_mcp_transports_for_deployment first, which (L293-306) unconditionally errors on McpTransportConfig::Stdio — no deployment-mode flag or local-dev bypass exists (checked moa-core/src/config/sandbox.rs env overlays and MoaConfig). (2) Only production construction site is crates/moa-orchestrator/src/runtime/deps.rs:114 (from_config); ToolRouter::new_local (moa-eval/src/setup.rs:237, moa-brain tests) never loads MCP servers; reconnect_mcp_client (crates/moa-hands/src/core/dispatch.rs:435-446) reads self.mcp_servers populated only post-validation in load_mcp_servers (construction.rs:280); MCPClient is pub-exported (moa-hands/src/lib.rs:12) but workspace grep shows no external MCPClient::connect caller. So StdioTransport, PendingMap/PendingGuard (three-tier Drop at mod.rs:325-350), run_reader, and the framing helpers (mod.rs:489-525) are reachable only from the crate's own tests — dead in production, exactly as claimed. docs/06-hands-and-mcp.md:182-183 says stdio is 'allowed only for local development' but no code path allows it; the test comment in tests/hands_offline/mcp_router.rs:25-26 claiming local-dev stdio 'lives on new_local' is aspirational (new_local has no MCP loading). No Restate-determinism, performance, security, or test-lane constraint forces the complexity; docs/08 treats stdio as the weaker isolation boundary. However the claimant's proposal/side-effects have errors: mcp/tests.rs is mostly remote-transport coverage (only 1 of 4 tests is stdio — the HTTP header-injection, SSE-parsing, and flatten tests must stay); tests/hands_offline/mcp_router.rs keeps its credential-proxy and fail-closed tests; McpTransportConfig carries #[default] Stdio (sandbox.rs:73) so deleting the variant forces a new default or a required field; MCPClient::classify_error/reconnect machinery in recovery.rs must survive (remote ReProvision via gateway-failure escalation at recovery.rs:316-323 uses it); docs/06 and docs/implementation-caveats.md:55-59 need updating.
 
 > **Revised simpler alternative:** Delete only the stdio-specific machinery: StdioTransport, PendingMap, PendingGuard, run_reader, write_framed_message/read_framed_message, the McpTransport enum (make RemoteClient the client's transport directly), the stdio arms of health_check (health_check then becomes always-true and can be removed along with its recovery preflight call) and the stdio message-matching in classify_error (which then reduces to moa_core::classify_tool_error — delete the wrapper and call classify_tool_error directly in recovery.rs, keeping the ReProvision/reconnect path intact since remote gateway failures still use it). In moa-core, delete McpTransportConfig::Stdio plus command/args/env fields, and either move #[default] to Http or make `transport` a required field so configs omitting it fail loudly instead of silently changing meaning. Delete validate_mcp_transports_for_deployment and its two unit tests, the from_config_rejects_stdio_mcp_transport_for_deployment test in tests/hands_offline/mcp_router.rs, the stdio_client_lists_and_calls_tools test only (keep the other three tests in src/adapters/mcp/tests.rs), and tests/fixtures/mock_mcp_stdio_server.py. Update docs/06-hands-and-mcp.md (supported transports, stdio paragraphs at L179-200) and docs/implementation-caveats.md (L55-59) to say only HTTP/SSE are supported.
@@ -2421,6 +2448,8 @@ effort: **large** · finder confidence: **medium** · ~LOC removable: **~2200**
 **Value of simplifying.** Removes ~2,200 lines of production code, one Postgres table, three state columns, two Restate services, a background drain, and one SQL statement from every transactional vector write; eliminates the largest untested-in-production failure surface in the memory subsystem.
 
 **Adversarial verifier: 🟡 ADJUSTED.** The Turbopuffer outbox/promotion/dual-read machinery is real, but it is wired into edge routes, Restate cron/bindings, docs, and a runbook (`moa-edge/src/routes/analytics.rs:460`, `moa-orchestrator/src/runtime/jobs.rs:152`, `docs/04-memory-architecture.md:71`). Delete only if product direction drops the documented opt-in external vector backend, and do not remove unrelated admin/graph-maintenance responsibilities.
+
+**Product decision (2026-07-04): KEEP/HARDEN.** Turbopuffer is the intended cloud vector backend, so the external-vector backend, sync outbox, promotion flow, and dual-read validation stay. The simplification is not deletion; it is making cloud configuration fail clearly when a Turbopuffer-selected partition has no client while preserving pgvector as the local/test backend and transactional graph-write source.
 
 ---
 

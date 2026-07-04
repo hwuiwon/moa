@@ -173,6 +173,18 @@ impl ToolRouter {
             .await
             .retain(|key, _| !key.starts_with(&match_prefix));
         match scope {
+            Some(worker_id) => {
+                let scope_key = format!("{session_prefix}{worker_id}");
+                self.preferred_hand_routes.write().await.remove(&scope_key);
+            }
+            None => {
+                self.preferred_hand_routes
+                    .write()
+                    .await
+                    .retain(|key, _| !key.starts_with(&session_prefix));
+            }
+        }
+        match scope {
             // `trusted_sandbox_files` is keyed by the bare scope key
             // `"{session_id}:{worker_id}"`, so a worker clears its own entry
             // exactly rather than by prefix; whole-session teardown clears every
@@ -803,7 +815,7 @@ impl ToolRouter {
 /// `"{session_id}:"` (an empty worker segment). A worker scope yields
 /// `"{session_id}:{worker_id}"`. All scope keys share the `"{session_id}:"`
 /// prefix so session teardown can match every worker scope at once.
-fn scope_key(session: &SessionMeta, worker_id: Option<&str>) -> String {
+pub(super) fn scope_key(session: &SessionMeta, worker_id: Option<&str>) -> String {
     format!("{}:{}", session.id, worker_id.unwrap_or_default())
 }
 
@@ -879,7 +891,7 @@ mod tests {
     use serde_json::json;
 
     use crate::core::leases::{HandLeaseStore, MemoryHandLeaseStore};
-    use crate::core::{ToolRegistry, ToolRouter};
+    use crate::core::{HandRoute, ToolRegistry, ToolRouter};
 
     use super::*;
 
@@ -1012,7 +1024,10 @@ mod tests {
             },
             IdempotencyClass::Idempotent,
         );
-        registry.retarget_hand_tools(provider.provider_name(), SandboxTier::Container);
+        registry.retarget_hand_tools(vec![HandRoute {
+            provider: provider.provider_name().to_string(),
+            tier: SandboxTier::Container,
+        }]);
         registry.retain_only(["bash"]);
         let provider_trait: Arc<dyn HandProvider> = provider;
         let mut providers = HashMap::new();

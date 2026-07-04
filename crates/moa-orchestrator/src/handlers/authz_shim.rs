@@ -45,6 +45,18 @@ pub async fn authorize_tenant(
     Ok(identity)
 }
 
+/// Authorize tenant operators and admins for product control-plane work.
+///
+/// The OpenFGA tenant model defines `operator` as the union of direct operators
+/// and tenant admins, so one `Operator` check admits tenant operators, tenant
+/// admins, and deployment/workspace admins that are represented as tenant admins.
+pub async fn authorize_tenant_operator_or_admin(
+    ctx: &impl RequestHeaders,
+    tenant_id: TenantId,
+) -> Result<Identity, HandlerError> {
+    authorize_tenant(ctx, tenant_id, Relation::Operator).await
+}
+
 /// Translate identity-header failures into handler errors.
 pub fn translate_identity_error(error: IdentityHeaderError) -> HandlerError {
     tracing::info!(error = %error, "invalid identity headers");

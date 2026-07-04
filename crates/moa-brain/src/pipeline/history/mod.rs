@@ -1,4 +1,4 @@
-//! Stage 7: compiles session history into context messages.
+//! Stage 8: compiles session history into context messages and owns checkpoint compaction.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -202,6 +202,7 @@ impl HistoryCompiler {
             tokens_used,
             deduplication,
             snapshot,
+            compaction: Default::default(),
         })
     }
 }
@@ -319,6 +320,33 @@ impl ContextProcessor for HistoryCompiler {
             "tokens_saved_by_dedup".to_string(),
             json!(compiled.deduplication.tokens_saved),
         );
+        metadata.insert(
+            "checkpoint_emitted".to_string(),
+            json!(compiled.compaction.checkpoint_emitted),
+        );
+        metadata.insert("tier1_applied".to_string(), json!(false));
+        metadata.insert("tier2_applied".to_string(), json!(false));
+        metadata.insert(
+            "tier3_applied".to_string(),
+            json!(compiled.compaction.checkpoint_emitted),
+        );
+        metadata.insert("tokens_reclaimed".to_string(), json!(0));
+        metadata.insert(
+            "messages_elided".to_string(),
+            json!(compiled.compaction.events_summarized_delta.unwrap_or(0)),
+        );
+        if let Some(events_summarized) = compiled.compaction.events_summarized {
+            metadata.insert("events_summarized".to_string(), json!(events_summarized));
+        }
+        if let Some(events_summarized_delta) = compiled.compaction.events_summarized_delta {
+            metadata.insert(
+                "events_summarized_delta".to_string(),
+                json!(events_summarized_delta),
+            );
+        }
+        if let Some(summary_tokens) = compiled.compaction.summary_tokens {
+            metadata.insert("summary_tokens".to_string(), json!(summary_tokens));
+        }
 
         Ok(ProcessorOutput {
             tokens_added,
@@ -344,6 +372,15 @@ struct CompiledHistory {
     tokens_used: usize,
     deduplication: DeduplicationStats,
     snapshot: Option<SnapshotHistory>,
+    compaction: HistoryCompactionStats,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct HistoryCompactionStats {
+    checkpoint_emitted: bool,
+    events_summarized: Option<u64>,
+    events_summarized_delta: Option<u64>,
+    summary_tokens: Option<u64>,
 }
 
 #[cfg(test)]

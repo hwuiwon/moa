@@ -88,25 +88,11 @@ impl LearningReview for LearningReviewImpl {
         let store = runtime.session_store_backend();
         let pool = runtime.graph_pool();
         let config = runtime.config();
-        #[cfg(feature = "internal-eval-runner")]
         let providers = runtime.provider_registry();
 
-        #[cfg(feature = "internal-eval-runner")]
         let response = ctx
             .run(move || async move {
-                accept_skill_candidate_after_authz_on_runtime(
-                    store, pool, config, providers, request,
-                )
-                .await
-                .map(Json::from)
-            })
-            .name("learning_review_accept_skill")
-            .await?;
-
-        #[cfg(not(feature = "internal-eval-runner"))]
-        let response = ctx
-            .run(move || async move {
-                accept_skill_candidate_after_authz(store, pool, config, request)
+                accept_skill_candidate_after_authz(store, pool, config, providers, request)
                     .await
                     .map(Json::from)
             })
@@ -219,7 +205,7 @@ pub async fn accept_skill_candidate_after_authz(
     store: Arc<PostgresSessionStore>,
     pool: sqlx::PgPool,
     config: Arc<moa_core::MoaConfig>,
-    #[cfg(feature = "internal-eval-runner")] providers: Arc<moa_providers::ProviderRegistry>,
+    providers: Arc<moa_providers::ProviderRegistry>,
     request: LearningCandidateReviewRequest,
 ) -> Result<LearningCandidateReviewResponse, HandlerError> {
     ensure_requested_action(request.action, LearningCandidateReviewAction::Accept)?;
@@ -230,7 +216,6 @@ pub async fn accept_skill_candidate_after_authz(
         .map_err(skill_review_error_to_handler_error)?;
     let regression_gate = skill_acceptance_regression_report(
         config.as_ref().clone(),
-        #[cfg(feature = "internal-eval-runner")]
         providers,
         SkillRegistry::new(pool.clone()),
         prepared.scope,
@@ -264,17 +249,6 @@ pub async fn accept_skill_candidate_after_authz(
     .map_err(skill_review_error_to_handler_error)?;
 
     Ok(review_response_from_outcome(outcome))
-}
-
-#[cfg(feature = "internal-eval-runner")]
-async fn accept_skill_candidate_after_authz_on_runtime(
-    store: Arc<PostgresSessionStore>,
-    pool: sqlx::PgPool,
-    config: Arc<moa_core::MoaConfig>,
-    providers: Arc<moa_providers::ProviderRegistry>,
-    request: LearningCandidateReviewRequest,
-) -> Result<LearningCandidateReviewResponse, HandlerError> {
-    accept_skill_candidate_after_authz(store, pool, config, providers, request).await
 }
 
 /// Rejects one candidate after the caller has authorized tenant operator access.

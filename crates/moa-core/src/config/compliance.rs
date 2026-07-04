@@ -38,35 +38,3 @@ impl Default for ComplianceConfig {
         }
     }
 }
-
-impl super::MoaEnvOverlay {
-    /// Applies compliance, privacy, and lineage signing environment overrides.
-    pub(in crate::config) fn apply_compliance_overlay(&self, config: &mut super::MoaConfig) {
-        use super::env_overlay::{set_if_some, set_option_if_some};
-
-        set_option_if_some(
-            &mut config.compliance.privacy_approval_public_key_hex,
-            &self.privacy_approval_public_key_hex,
-        );
-        set_option_if_some(
-            &mut config.compliance.privacy_export_signing_key_hex,
-            &self.privacy_export_signing_key_hex,
-        );
-        set_if_some(
-            &mut config.compliance.privacy_export_signing_key_id,
-            &self.privacy_export_signing_key_id,
-        );
-        set_option_if_some(
-            &mut config.compliance.lineage_audit_signing_key_hex,
-            &self.lineage_audit_signing_key_hex,
-        );
-        set_if_some(
-            &mut config.compliance.lineage_audit_signing_key_id,
-            &self.lineage_audit_signing_key_id,
-        );
-        set_option_if_some(
-            &mut config.compliance.pii_vault_secret_hex,
-            &self.pii_vault_secret_hex,
-        );
-    }
-}

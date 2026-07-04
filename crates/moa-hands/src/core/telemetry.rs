@@ -42,7 +42,13 @@ pub(super) fn record_tool_invocation_metadata(
 
     let (category, sandbox_tier) = match execution {
         ToolExecution::BuiltIn(_) => ("builtin", "none"),
-        ToolExecution::Hand { tier, .. } => ("hand", sandbox_tier_label(tier)),
+        ToolExecution::Hand { routes } => (
+            "hand",
+            routes
+                .first()
+                .map(|route| sandbox_tier_label(&route.tier))
+                .unwrap_or("unknown"),
+        ),
         ToolExecution::Mcp { .. } => ("mcp", "external"),
     };
 

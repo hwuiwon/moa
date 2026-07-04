@@ -381,8 +381,9 @@ fn experiment_compare_response_serializes_scenario_and_variant_deltas() {
 // Authorization for the Experiments service is exercised behaviorally, not by source-grep:
 // `experiment_procedure_e2e::experiments_run_denies_caller_without_tenant_operator` calls
 // `Experiments/run` over the real Restate + OpenFGA stack as a caller with no Tenant:Operator
-// grant and asserts a 403 denial. Every Experiments handler authorizes Tenant:Operator as its
-// first statement, so that e2e is the template for the remaining read/mutate handlers.
+// grant and asserts a 403 denial. Every Experiments handler authorizes tenant
+// operator/admin access as its first statement, so that e2e is the template for
+// the remaining read/mutate handlers.
 
 #[test]
 fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {

@@ -18,43 +18,6 @@ fn session() -> SessionMeta {
 }
 
 #[tokio::test]
-async fn from_config_rejects_stdio_mcp_transport_for_deployment() {
-    // stdio MCP requires a pod-local child process, which a cloud/Kubernetes
-    // deployment must not depend on. `ToolRouter::from_config` (the deployment
-    // entry point) therefore fails closed on a stdio MCP server before
-    // constructing the router. Local-dev stdio support, if any, lives on
-    // `new_local`, which bypasses this validation. HTTP/SSE MCP discovery +
-    // execution through `from_config` is covered by the sibling tests below.
-    let dir = tempdir().unwrap();
-    let mut config = MoaConfig::default();
-    config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
-    config.mcp_servers = vec![McpServerConfig {
-        name: "mock".to_string(),
-        transport: McpTransportConfig::Stdio,
-        command: Some("python3".to_string()),
-        args: vec![
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/mock_mcp_stdio_server.py")
-                .display()
-                .to_string(),
-        ],
-        ..McpServerConfig::default()
-    }];
-
-    let error = match ToolRouter::from_config(&config).await {
-        Ok(_) => panic!("from_config must reject a stdio MCP server in a deployment"),
-        Err(error) => error,
-    };
-    match error {
-        moa_core::MoaError::ConfigError(message) => assert!(
-            message.contains("stdio transport") && message.contains("local development"),
-            "expected the stdio-rejection ConfigError, got: {message}"
-        ),
-        other => panic!("expected ConfigError rejecting stdio transport, got {other:?}"),
-    }
-}
-
-#[tokio::test]
 async fn router_injects_mcp_credentials_via_proxy() {
     let token_env = format!("MOA_TEST_MCP_TOKEN_{}", Uuid::now_v7().simple());
     unsafe { std::env::set_var(&token_env, "proxy-secret") };

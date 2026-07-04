@@ -22,8 +22,8 @@ tool-call arguments.
 |---|---|---|
 | Local | Zero-setup tests and development | Uses a workspace directory and optional Docker support. |
 | Docker | Local/containerized execution | Hardened by `moa-hands` and `moa-security` policies. |
-| Daytona | Default cloud workspace provider | Supports pause/resume/destroy around idle sessions. |
-| E2B | MicroVM isolation | Use for untrusted or security-sensitive execution. |
+| Daytona | Cloud workspace provider | Compiled into the normal build; enabled by runtime cloud-hands config. Supports pause/resume/destroy around idle sessions. |
+| E2B | MicroVM isolation | Compiled into the normal build; enabled by runtime cloud-hands config. Use for untrusted or security-sensitive execution. |
 | MCP | External tools and SaaS integrations | Routed through `MCPClient` and the credential proxy. |
 
 All providers implement the `HandProvider` trait from `moa-core`. Tool routing
@@ -53,6 +53,17 @@ MCP clients, action-policy rule stores, session store hooks, and optional
 memory executor hooks live behind async locks so the router can be shared
 across handlers. These maps are process-local caches or transport internals;
 they must not be the source of cross-request correctness in Kubernetes.
+
+Cloud hand routing is runtime-configured, not feature-gated. Set
+`cloud.hands.default_provider` (or `MOA_CLOUD_HANDS_DEFAULT_PROVIDER`) to the
+first cloud provider, then set `cloud.hands.fallback_providers` (or
+`MOA_CLOUD_HANDS_FALLBACK_PROVIDERS`) to an ordered comma-separated fallback
+list such as `e2b`. The router tries the next provider when provisioning or
+health-check fails before a tool runs. After a tool has started, it only moves
+to a fallback provider for tools declared `Idempotent`; non-idempotent tools
+still return an error instead of risking duplicate side effects. Once a fallback
+provider succeeds for a session or worker scope, that scope uses the successful
+provider first until the hand scope is reclaimed.
 
 `ActionEnvelope` is the durable policy-facing record for one tool invocation.
 It includes the review id, tenant, user, session or worker origin, tool
@@ -166,7 +177,9 @@ Hand providers classify failures into:
 | Fatal | Input, policy, or non-recoverable provider error | Return failure to the turn loop |
 
 `health_check(handle)` lets the router replace dead sandboxes before a user
-tool call discovers the failure.
+tool call discovers the failure. When multiple cloud hand routes are configured,
+the router prefers provider fallback before same-provider reprovision for these
+pre-execution failures.
 
 Tool calls must also declare their idempotency behavior:
 
@@ -177,12 +190,10 @@ Tool calls must also declare their idempotency behavior:
 ## MCP
 
 MCP is the primary protocol for external integrations. Supported transports are
-stdio, SSE, and streamable HTTP. Startup discovers tool definitions through
-MCP, then the router exposes the selected tools exactly like built-ins and hand
-tools. Stdio MCP launches a child process in the current pod and is allowed
-only for local development; cloud startup rejects stdio MCP servers. Kubernetes
-deployments must use HTTP/SSE MCP transports so any replica can handle a
-request without depending on a pod-local process.
+SSE and streamable HTTP. Startup discovers tool definitions through MCP, then
+the router exposes the selected tools exactly like built-ins and hand tools.
+MCP servers must be reachable over HTTP/SSE so any Kubernetes replica can handle
+a request without depending on a pod-local process.
 
 Credential handling is host-side:
 
@@ -192,12 +203,9 @@ Credential handling is host-side:
 4. The remote MCP request is enriched.
 5. The result is returned with credentials stripped.
 
-HTTP/SSE MCP servers get the strongest credential isolation because the proxy
-can inject headers per request. Stdio MCP servers may still need startup
-environment variables, so treat them as a weaker local-development-only
-isolation boundary. The stdio pending-call map is only JSON-RPC response
-demultiplexing state inside one transport and never session or request
-correctness state.
+HTTP/SSE MCP servers get host-side credential isolation because the proxy can
+inject headers per request. The MCP client does not launch local subprocesses or
+store credential-bearing environment variables for server startup.
 
 ## Security Rules
 

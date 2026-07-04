@@ -18,7 +18,7 @@ The root workspace currently contains:
 | `moa-memory/graph` (`moa-memory-graph`) | Relational graph-memory node and edge tables, sidecar indexes, RLS, and changelog |
 | `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path graph-memory ingestion DTOs and deterministic helpers |
 | `moa-memory/pii` (`moa-memory-pii`) | PII classification client and privacy-class aggregation helpers |
-| `moa-memory/vector` (`moa-memory-vector`) | VectorStore trait, Gemini/Cohere embedders, pgvector halfvec backend, and Turbopuffer opt-in backend |
+| `moa-memory/vector` (`moa-memory-vector`) | VectorStore trait, Gemini/Cohere embedders, pgvector halfvec backend, and Turbopuffer cloud backend |
 | `moa-lineage/core` (`moa-lineage-core`) | Lineage record and score record types |
 | `moa-lineage/citation` (`moa-lineage-citation`) | Provider citation normalization and answer-source verification |
 | `moa-lineage/sink` (`moa-lineage-sink`) | Async lineage sink writers |
@@ -79,11 +79,12 @@ Docker is used by the dev stack and optionally by local hand providers.
 | Service | Purpose |
 |---|---|
 | Restate | Durable orchestration engine |
-| Postgres/Neon | Product data store and relational graph storage; pgvector is required when using the pgvector vector backend |
+| Postgres/Neon | Product data store, relational graph storage, and pgvector transactional vector source |
 | Redis or Valkey | Shared runtime cache for orchestrator replicas |
 | AWS S3 or GCS | Session attachment byte storage in cloud |
+| Turbopuffer | Cloud vector backend for storage partitions configured away from local pgvector |
 | LLM provider | Model calls and optional embeddings |
-| Hand provider | Daytona, E2B, or configured local/container execution |
+| Hand provider | Runtime-configured local, Daytona, or E2B execution |
 | Kubernetes or equivalent | Hosting Restate and MOA services |
 | Debezium + Kafka-compatible broker | Optional graph changelog CDC for audit shipping, bridge sync, and cache invalidation |
 
@@ -124,7 +125,7 @@ and deployment setup. Key groups:
 | `MOA_MODELS_*` and `MOA_<PROVIDER>_API_KEY` | model routing and provider API keys |
 | `MOA_DATABASE_*` | Postgres URL, admin URL, pool settings, Neon branching |
 | `MOA_RUNTIME_CACHE_*` | runtime cache backend selection and Redis URL for shared transient coordination |
-| `MOA_MEMORY_*`, `MOA_PII_SERVICE_URL`, and `MOA_TURBOPUFFER_*` | memory directory, embedding and reranker `provider:model` selectors, PII service, and vector backend |
+| `MOA_MEMORY_*`, `MOA_PII_SERVICE_URL`, and `MOA_TURBOPUFFER_*` | memory directory, embedding and reranker `provider:model` selectors, PII service, and Turbopuffer cloud vector backend credentials |
 | `MOA_KNOWLEDGE_*` | tenant knowledge provider enablement, parser selection, sync limits, and chunking limits |
 | `MOA_QUERY_REWRITE_*` | fail-open, retrieval-scoped query rewrite gating and timeout behavior |
 | `MOA_RESOLUTION_*` | automated segment assessment weights and thresholds |
@@ -203,8 +204,10 @@ MOA_SESSION_ATTACHMENT_GCP_APPLICATION_CREDENTIALS_PATH=/var/run/secrets/gcp/app
 Optional hand and messaging settings depend on the chosen deployment:
 
 ```bash
-DAYTONA_API_KEY=...
-E2B_API_KEY=...
+MOA_CLOUD_HANDS_DEFAULT_PROVIDER=daytona
+MOA_CLOUD_HANDS_FALLBACK_PROVIDERS=e2b
+MOA_CLOUD_HANDS_DAYTONA_API_KEY=...
+MOA_CLOUD_HANDS_E2B_API_KEY=...
 SLACK_BOT_TOKEN=...
 SLACK_APP_TOKEN=...
 MOA_MESSAGING_EMAIL_FROM="MOA <no-reply@example.com>"

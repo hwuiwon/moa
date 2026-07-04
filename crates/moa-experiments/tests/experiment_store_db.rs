@@ -1,6 +1,8 @@
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::RlsContext;
-use moa_core::{ActionRuleScope, ModelId, Result, SessionId, StoragePartitionId, TenantId, UserId};
+use moa_core::{
+    ActionRuleScope, ContactId, ModelId, Result, SessionId, StoragePartitionId, TenantId, UserId,
+};
 use moa_db::ScopedConn;
 use moa_experiments::{
     model::{
@@ -107,6 +109,61 @@ async fn workspace_a_cannot_load_workspace_b_run_db() -> Result<()> {
             .expect("workspace b should load its run")
             .run_uid,
         inserted.run_uid
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn contact_scoped_run_insert_load_round_trip_db() -> Result<()> {
+    // Pins: contact-scoped experiment metadata persists with a personal scope and does not leak to the tenant or peer contacts.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let store = ExperimentStore::new(test_db.store().pool().clone());
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let contact_id = ContactId(Uuid::now_v7());
+    let peer_contact_id = ContactId(Uuid::now_v7());
+    let personal_scope = contact_scope(tenant_id, contact_id);
+    let peer_scope = contact_scope(tenant_id, peer_contact_id);
+    let tenant_scope = ActionRuleScope::Tenant { tenant_id };
+
+    let inserted = store
+        .insert_run(
+            &personal_scope,
+            new_experiment("contact-round-trip", Some("contact-key"), Vec::new()),
+        )
+        .await?;
+    let loaded = store
+        .load_run(&personal_scope, inserted.run_uid)
+        .await?
+        .expect("inserted contact experiment should load in the same contact scope");
+
+    assert_eq!(loaded.scope, personal_scope);
+    assert_eq!(loaded.name, "contact-round-trip");
+    assert_eq!(loaded.idempotency_key.as_deref(), Some("contact-key"));
+    assert_score_run_exists(test_db.store().pool(), &personal_scope, loaded.score_run_id).await?;
+    assert!(
+        store
+            .load_run(&tenant_scope, inserted.run_uid)
+            .await?
+            .is_none(),
+        "tenant-scope reads must not collapse contact experiments into tenant rows"
+    );
+    assert!(
+        store
+            .load_run(&peer_scope, inserted.run_uid)
+            .await?
+            .is_none(),
+        "peer contacts must not load another contact's experiment row"
+    );
+    assert_eq!(
+        store
+            .list_runs(&personal_scope, Some(ExperimentRunStatus::Accepted), 10)
+            .await?
+            .into_iter()
+            .filter(|run| run.run_uid == inserted.run_uid)
+            .count(),
+        1
     );
     Ok(())
 }
@@ -755,6 +812,13 @@ fn tenant_scope(_label: &str) -> ActionRuleScope {
     }
 }
 
+fn contact_scope(tenant_id: TenantId, contact_id: ContactId) -> ActionRuleScope {
+    ActionRuleScope::Contact {
+        tenant_id,
+        contact_id,
+    }
+}
+
 fn new_experiment(
     name: &str,
     idempotency_key: Option<&str>,
@@ -859,18 +923,20 @@ async fn insert_procedure_run(
     session_id: SessionId,
 ) -> Result<Uuid> {
     let storage_partition_id = scope_storage_partition_id(scope);
+    let user_id = scope_user_id(scope);
     let run_uid = Uuid::now_v7();
     let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
     sqlx::query(
         r#"
         INSERT INTO moa.artifact_run (
-            run_uid, storage_partition_id, session_id, procedure_ref, status, input, state
+            run_uid, storage_partition_id, user_id, session_id, procedure_ref, status, input, state
         )
-        VALUES ($1, $2, $3, $4, 'queued', $5, $6)
+        VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7)
         "#,
     )
     .bind(run_uid)
     .bind(storage_partition_id)
+    .bind(user_id.as_deref())
     .bind(session_id.0)
     .bind("skill://experiment-link")
     .bind(json!({ "case": "link" }))
@@ -884,19 +950,21 @@ async fn insert_procedure_run(
 
 async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) -> Result<Uuid> {
     let storage_partition_id = scope_storage_partition_id(scope);
+    let user_id = scope_user_id(scope);
     let artifact_uid = Uuid::now_v7();
     let revision_uid = Uuid::now_v7();
     let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
     sqlx::query(
         r#"
         INSERT INTO moa.artifact (
-            artifact_uid, storage_partition_id, kind, name, description
+            artifact_uid, storage_partition_id, user_id, kind, name, description
         )
-        VALUES ($1, $2, 'skill', $3, 'experiment fixture')
+        VALUES ($1, $2, $3, 'skill', $4, 'experiment fixture')
         "#,
     )
     .bind(artifact_uid)
     .bind(&storage_partition_id)
+    .bind(user_id.as_deref())
     .bind(format!("experiment-fixture-{artifact_uid}"))
     .execute(conn.as_mut())
     .await
@@ -904,15 +972,16 @@ async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) 
     sqlx::query(
         r#"
         INSERT INTO moa.artifact_revision (
-            revision_uid, artifact_uid, storage_partition_id, definition, canonical_hash,
+            revision_uid, artifact_uid, storage_partition_id, user_id, definition, canonical_hash,
             source_format, source_text, status, validation_report, version, published_at
         )
-        VALUES ($1, $2, $3, $4, $5, 'json', $6, 'published', $7, 1, now())
+        VALUES ($1, $2, $3, $4, $5, $6, 'json', $7, 'published', $8, 1, now())
         "#,
     )
     .bind(revision_uid)
     .bind(artifact_uid)
     .bind(&storage_partition_id)
+    .bind(user_id.as_deref())
     .bind(json!({ "kind": "skill", "name": "experiment fixture" }))
     .bind(vec![1_u8; 32])
     .bind(br#"{"kind":"skill","name":"experiment fixture"}"#.to_vec())
@@ -1158,17 +1227,37 @@ async fn insert_session_for_experiment_fk(
 fn scope_parts(scope: &ActionRuleScope) -> (&'static str, Option<String>, Option<String>) {
     match scope {
         ActionRuleScope::Tenant { tenant_id } => ("tenant", Some(tenant_id.to_string()), None),
+        ActionRuleScope::Contact {
+            tenant_id,
+            contact_id,
+        } => (
+            "contact",
+            Some(tenant_id.to_string()),
+            Some(contact_id.to_string()),
+        ),
     }
 }
 
 fn scope_storage_partition_id(scope: &ActionRuleScope) -> String {
     match scope {
         ActionRuleScope::Tenant { tenant_id } => tenant_id.to_string(),
+        ActionRuleScope::Contact { tenant_id, .. } => tenant_id.to_string(),
+    }
+}
+
+fn scope_user_id(scope: &ActionRuleScope) -> Option<String> {
+    match scope {
+        ActionRuleScope::Tenant { .. } => None,
+        ActionRuleScope::Contact { contact_id, .. } => Some(contact_id.to_string()),
     }
 }
 
 fn scope_context(scope: &ActionRuleScope) -> RlsContext {
     match scope {
         ActionRuleScope::Tenant { tenant_id } => RlsContext::tenant(*tenant_id),
+        ActionRuleScope::Contact {
+            tenant_id,
+            contact_id,
+        } => RlsContext::contact(*tenant_id, *contact_id),
     }
 }

@@ -241,6 +241,7 @@ impl HistoryCompiler {
             tokens_used,
             deduplication,
             snapshot,
+            compaction: Default::default(),
         }))
     }
 }

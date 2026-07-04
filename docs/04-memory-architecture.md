@@ -70,10 +70,15 @@ and source hydration.
 
 `moa-memory-vector` owns vector storage for semantic retrieval. Embeddings are
 written for graph nodes that should participate in retrieval, and hybrid
-retrieval fuses graph/sidecar candidates with vector hits. The default backend
-is pgvector; large or isolation-sensitive tenants can opt into Turbopuffer
-namespaces through the tenant vector backend setting. Turbopuffer is a vector
-backend only; graph storage stays in relational Postgres nodes and edges.
+retrieval fuses graph/sidecar candidates with vector hits. Local development
+and tests default to pgvector. Cloud storage partitions that select the external
+vector backend use Turbopuffer and must provide `MOA_TURBOPUFFER_API_KEY`;
+missing credentials are treated as configuration errors rather than silently
+falling back at retrieval time. Turbopuffer is a vector backend only: graph
+storage, privacy state, historical/as-of reads, and the transactional write
+source stay in relational Postgres nodes, edges, and pgvector rows. The
+`vector_sync_outbox` projects committed pgvector writes into Turbopuffer after
+the graph transaction commits.
 
 `moa.node_index` also carries derived ranking metadata. `quality_score` is a
 neutral-by-default `0.5` prior that FeatureV1 centers to zero contribution; a

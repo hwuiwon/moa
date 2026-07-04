@@ -17,12 +17,30 @@ use crate::tools::sandbox_descriptor::{
 
 use super::DEFAULT_PROVIDER_NAME;
 
+/// One provider route for a hand-routed tool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandRoute {
+    /// Registered provider name.
+    pub provider: String,
+    /// Sandbox tier requested from the provider.
+    pub tier: SandboxTier,
+}
+
+impl HandRoute {
+    fn local() -> Self {
+        Self {
+            provider: DEFAULT_PROVIDER_NAME.to_string(),
+            tier: SandboxTier::Local,
+        }
+    }
+}
+
 /// Tool execution routing target.
 pub enum ToolExecution {
     /// Built-in Rust implementation.
     BuiltIn(Arc<dyn BuiltInTool>),
     /// Routed to a provisioned hand.
-    Hand { provider: String, tier: SandboxTier },
+    Hand { routes: Vec<HandRoute> },
     /// Reserved for MCP-backed tools.
     Mcp { server_name: String },
 }
@@ -57,8 +75,7 @@ impl RegisteredTool {
                 max_output_tokens: default_budget_for_tool(name),
             },
             execution: ToolExecution::Hand {
-                provider: DEFAULT_PROVIDER_NAME.to_string(),
-                tier: SandboxTier::Local,
+                routes: vec![HandRoute::local()],
             },
         }
     }
@@ -67,8 +84,7 @@ impl RegisteredTool {
         Self {
             definition: descriptor.definition(default_budget_for_tool(descriptor.name)),
             execution: ToolExecution::Hand {
-                provider: DEFAULT_PROVIDER_NAME.to_string(),
-                tier: SandboxTier::Local,
+                routes: vec![HandRoute::local()],
             },
         }
     }
@@ -190,16 +206,14 @@ impl ToolRegistry {
         Ok(())
     }
 
-    /// Retargets all hand-based tools to a different provider and sandbox tier.
-    pub fn retarget_hand_tools(&mut self, provider: &str, tier: SandboxTier) {
+    /// Retargets all hand-based tools to a different provider route list.
+    pub fn retarget_hand_tools(&mut self, routes: Vec<HandRoute>) {
         for tool in self.tools.values_mut() {
             if let ToolExecution::Hand {
-                provider: current_provider,
-                tier: current_tier,
+                routes: current_routes,
             } = &mut tool.execution
             {
-                *current_provider = provider.to_string();
-                *current_tier = tier.clone();
+                *current_routes = routes.clone();
             }
         }
     }

@@ -361,7 +361,7 @@ async fn authorized_write_scope(
     scope: ActionRuleScope,
 ) -> Result<ActionRuleScope, HandlerError> {
     match scope {
-        ActionRuleScope::Tenant { tenant_id } => {
+        ActionRuleScope::Tenant { tenant_id } | ActionRuleScope::Contact { tenant_id, .. } => {
             authorize_tenant(ctx, tenant_id, Relation::Operator).await?;
         }
     }
@@ -373,7 +373,7 @@ async fn authorize_read_scope(
     scope: &ActionRuleScope,
 ) -> Result<(), HandlerError> {
     match scope {
-        ActionRuleScope::Tenant { tenant_id } => {
+        ActionRuleScope::Tenant { tenant_id } | ActionRuleScope::Contact { tenant_id, .. } => {
             authorize_tenant(ctx, *tenant_id, Relation::Operator).await?;
         }
     }
