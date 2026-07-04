@@ -5,19 +5,15 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use moa_core::{
     ContactId, ContactVerificationState, Event, EventFilter, EventRange, ModelId, SessionActorRef,
-    SessionMeta, SessionStatus, TenantId,
+    SessionMeta, SessionStatus, SessionStore, TenantId,
     traits::{Identity, IdentityType},
 };
 use moa_session::testing;
 use moa_test_support::fixtures::{contact_ref_fixture, session_meta_fixture};
-use restate_sdk::prelude::HandlerError;
 use uuid::Uuid;
 
+use super::SessionStoreImpl;
 use super::inner::create_session_for_identity;
-use super::{
-    AppendEventRequest, GetEventsRequest, SearchEventsRequest, SessionStoreImpl,
-    UpdateStatusRequest,
-};
 
 #[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
 struct AuthzOutboxTuple {
@@ -47,7 +43,7 @@ async fn cleanup(database_url: &str, schema_name: &str) -> Result<()> {
     Ok(())
 }
 
-fn into_anyhow(error: HandlerError) -> anyhow::Error {
+fn into_anyhow(error: impl std::fmt::Debug) -> anyhow::Error {
     anyhow!("{error:?}")
 }
 
@@ -194,37 +190,43 @@ async fn append_event_db_increments_sequence() -> Result<()> {
         .map_err(into_anyhow)?;
 
     let seq0 = service
-        .append_event_inner(AppendEventRequest {
+        .store
+        .emit_event_record(
             session_id,
-            event: Event::UserMessage {
+            Event::UserMessage {
                 text: "first".to_string(),
                 attachments: vec![],
             },
-            dedupe_key: None,
-        })
+            None,
+        )
         .await
+        .map(|record| record.sequence_num)
         .map_err(into_anyhow)?;
     let seq1 = service
-        .append_event_inner(AppendEventRequest {
+        .store
+        .emit_event_record(
             session_id,
-            event: Event::UserMessage {
+            Event::UserMessage {
                 text: "second".to_string(),
                 attachments: vec![],
             },
-            dedupe_key: None,
-        })
+            None,
+        )
         .await
+        .map(|record| record.sequence_num)
         .map_err(into_anyhow)?;
     let seq2 = service
-        .append_event_inner(AppendEventRequest {
+        .store
+        .emit_event_record(
             session_id,
-            event: Event::UserMessage {
+            Event::UserMessage {
                 text: "third".to_string(),
                 attachments: vec![],
             },
-            dedupe_key: None,
-        })
+            None,
+        )
         .await
+        .map(|record| record.sequence_num)
         .map_err(into_anyhow)?;
 
     assert_eq!((seq0, seq1, seq2), (0, 1, 2));
@@ -242,28 +244,30 @@ async fn get_events_db_respects_range() -> Result<()> {
 
     for index in 0..10 {
         service
-            .append_event_inner(AppendEventRequest {
+            .store
+            .emit_event_record(
                 session_id,
-                event: Event::UserMessage {
+                Event::UserMessage {
                     text: format!("message {index}"),
                     attachments: vec![],
                 },
-                dedupe_key: None,
-            })
+                None,
+            )
             .await
             .map_err(into_anyhow)?;
     }
 
     let events = service
-        .get_events_inner(GetEventsRequest {
+        .store
+        .get_events(
             session_id,
-            range: EventRange {
+            EventRange {
                 from_seq: Some(3),
                 to_seq: Some(7),
                 event_types: None,
                 limit: None,
             },
-        })
+        )
         .await
         .map_err(into_anyhow)?;
 
@@ -283,14 +287,13 @@ async fn update_status_db_affects_get_session() -> Result<()> {
         .map_err(into_anyhow)?;
 
     service
-        .update_status_inner(UpdateStatusRequest {
-            session_id,
-            status: SessionStatus::Completed,
-        })
+        .store
+        .update_status(session_id, SessionStatus::Completed)
         .await
         .map_err(into_anyhow)?;
     let session = service
-        .get_session_inner(session_id)
+        .store
+        .get_session(session_id)
         .await
         .map_err(into_anyhow)?;
 
@@ -309,33 +312,33 @@ async fn search_events_db_finds_by_payload() -> Result<()> {
         .map_err(into_anyhow)?;
 
     service
-        .append_event_inner(AppendEventRequest {
+        .store
+        .emit_event_record(
             session_id,
-            event: Event::UserMessage {
+            Event::UserMessage {
                 text: "Fix the OAuth refresh token bug".to_string(),
                 attachments: vec![],
             },
-            dedupe_key: None,
-        })
+            None,
+        )
         .await
         .map_err(into_anyhow)?;
     service
-        .append_event_inner(AppendEventRequest {
+        .store
+        .emit_event_record(
             session_id,
-            event: Event::UserMessage {
+            Event::UserMessage {
                 text: "Debug the refresh-token rotation failure".to_string(),
                 attachments: vec![],
             },
-            dedupe_key: None,
-        })
+            None,
+        )
         .await
         .map_err(into_anyhow)?;
 
     let events = service
-        .search_events_inner(SearchEventsRequest {
-            query: "refresh-token".to_string(),
-            filter: EventFilter::default(),
-        })
+        .store
+        .search_events("refresh-token", EventFilter::default())
         .await
         .map_err(into_anyhow)?;
 

@@ -125,7 +125,7 @@ and deployment setup. Key groups:
 | `MOA_DATABASE_*` | Postgres URL, admin URL, pool settings, Neon branching |
 | `MOA_RUNTIME_CACHE_*` | runtime cache backend selection and Redis URL for shared transient coordination |
 | `MOA_MEMORY_*`, `MOA_PII_SERVICE_URL`, and `MOA_TURBOPUFFER_*` | memory directory, embedding and reranker `provider:model` selectors, PII service, and vector backend |
-| `MOA_KNOWLEDGE_*` | tenant knowledge provider enablement, parser selection, sync limits, chunking limits, query trace enablement, and ingestion-step observability |
+| `MOA_KNOWLEDGE_*` | tenant knowledge provider enablement, parser selection, sync limits, and chunking limits |
 | `MOA_QUERY_REWRITE_*` | fail-open, retrieval-scoped query rewrite gating and timeout behavior |
 | `MOA_RESOLUTION_*` | automated segment assessment weights and thresholds |
 | `MOA_SKILL_BUDGET_*` | skill manifest budget controls |

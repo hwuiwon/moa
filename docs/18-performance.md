@@ -4,8 +4,9 @@ _Performance gate hardware floor and current baseline._
 
 ## Hardware Floor
 
-The `perf_gate` is calibrated against this floor. Weaker hardware causes
-spurious failures; stronger hardware can hide regressions.
+The strict `perf_gate --profile retrieval` release gate is calibrated against
+this floor. Weaker hardware causes spurious failures; stronger hardware can hide
+regressions.
 
 | Component | Floor |
 |---|---|
@@ -18,6 +19,12 @@ spurious failures; stronger hardware can hide regressions.
 
 CI nightly runs on `ubuntu-latest-8-core`, which matches this floor. Laptop
 results are directional only; expect P95 to be 1.5-3x higher than CI.
+
+`perf_gate --profile retrieval-smoke` is the developer retrieval signal. It uses
+smaller defaults (`2` tenants, `50` facts per tenant, `5` QPS, `15s`) and skips
+the strict CPU/memory/AVX2 floor while keeping retrieval correctness, RLS,
+cache-hit, and broad latency gates. Use it after local RAG/retrieval changes;
+use the strict `retrieval` profile for CI, release, and baseline updates.
 
 ## Baseline - 2026-04
 

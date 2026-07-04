@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use futures_util::future::try_join_all;
 use moa_core::traits::EmbeddingProvider;
-use moa_core::{MoaConfig, MoaError, Result};
+use moa_core::{MoaError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -51,15 +51,6 @@ impl CohereEmbedding {
             pacer: RatePacer::new(PacerConfig::inputs_per_min(COHERE_EMBED_INPUTS_PER_MIN)),
             limiter: ConcurrencyLimiter::new(DEFAULT_EMBEDDING_CONCURRENCY),
         })
-    }
-
-    /// Creates a Cohere embedding client from config using an explicit model id.
-    pub(super) fn from_config_with_model(config: &MoaConfig, model: String) -> Result<Self> {
-        let api_key = moa_core::config::required_config_secret(
-            "MOA_COHERE_API_KEY",
-            &config.providers.cohere.api_key,
-        )?;
-        Self::new(api_key, model)
     }
 
     /// Overrides the embeddings URL, primarily for HTTP-level tests.

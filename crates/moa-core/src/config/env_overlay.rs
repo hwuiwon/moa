@@ -261,8 +261,6 @@ pub struct MoaEnvOverlay {
     pub reducto_async_enabled: Option<bool>,
     /// `MOA_REDUCTO_CHUNK_MODE`.
     pub reducto_chunk_mode: Option<String>,
-    /// `MOA_KNOWLEDGE_QUERY_TRACE_ENABLED`.
-    pub knowledge_query_trace_enabled: Option<bool>,
     /// `MOA_PII_SERVICE_URL`.
     pub pii_service_url: Option<String>,
     /// `MOA_TURBOPUFFER_API_KEY`.
@@ -1055,7 +1053,6 @@ mod tests {
             ("MOA_REDUCTO_PARSE_MODE", "ocr"),
             ("MOA_REDUCTO_ASYNC_ENABLED", "false"),
             ("MOA_REDUCTO_CHUNK_MODE", "page"),
-            ("MOA_KNOWLEDGE_QUERY_TRACE_ENABLED", "true"),
         ]))
         .expect("knowledge overlay should parse");
         let mut config = MoaConfig::default();
@@ -1125,7 +1122,6 @@ mod tests {
         assert_eq!(config.knowledge.reducto.parse_mode, "ocr");
         assert!(!config.knowledge.reducto.async_enabled);
         assert_eq!(config.knowledge.reducto.chunk_mode, "page");
-        assert!(config.knowledge.observability.query_trace_enabled);
     }
 
     #[test]

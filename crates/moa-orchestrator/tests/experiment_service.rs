@@ -430,7 +430,7 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
 
     assert_eq!(candidate.status.as_str(), "proposed");
     assert_eq!(candidate.tenant_id, tenant_id);
-    assert_eq!(candidate.candidate_type.as_str(), "workflow");
+    assert_eq!(candidate.candidate_type.as_str(), "skill");
     assert_eq!(candidate.payload["kind"], "experiment_learning_proposal");
     assert_eq!(
         candidate.promotion_requirements,

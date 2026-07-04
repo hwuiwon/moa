@@ -5,9 +5,11 @@ mod offline_session_store;
 #[path = "support/openai_wiremock.rs"]
 mod openai_wiremock;
 
+include!("brain_turn_support/pipeline.rs");
+
 use std::sync::Arc;
 
-use moa_brain::{TurnResult, build_default_pipeline, run_brain_turn};
+use moa_brain::{TurnResult, run_brain_turn};
 use moa_core::{Event, EventRange, LLMProvider, MoaConfig, SessionStore};
 use moa_providers::OpenAIProvider;
 use wiremock::MockServer;
@@ -34,7 +36,7 @@ async fn cache_audit_offline_tracks_stable_prefix_reuse_and_cached_usage() -> mo
     let session = session_meta("offline-cache-audit", "gpt-5.4");
     let session_id = session.id;
     let store = Arc::new(MockSessionStore::new(session, Vec::new()));
-    let pipeline = build_default_pipeline(&config, store.clone());
+    let pipeline = build_no_memory_test_pipeline(&config, store.clone());
 
     for prompt in [
         "Reply with READY and nothing else.",

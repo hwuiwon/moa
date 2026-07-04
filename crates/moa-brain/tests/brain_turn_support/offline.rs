@@ -5,8 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_brain::{
-    TurnResult, build_default_pipeline, build_default_pipeline_with_tools,
-    pipeline::history::HistoryCompiler, run_brain_turn, run_streamed_turn,
+    TurnResult, pipeline::history::HistoryCompiler, run_brain_turn, run_streamed_turn,
 };
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, Event, EventRange,
@@ -172,6 +171,85 @@ impl LLMProvider for ToolLoopLlmProvider {
                 model: moa_core::ModelId::new("claude-sonnet-4-6"),
                 usage: token_usage(20, 7),
                 duration_ms: 12,
+                thought_signature: None,
+            }
+        };
+        requests.push(request);
+        Ok(CompletionStream::from_response(response))
+    }
+}
+
+struct PolicyBlockedToolLlmProvider {
+    tool_id: &'static str,
+    expected_error_fragment: &'static str,
+    final_text: &'static str,
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+impl PolicyBlockedToolLlmProvider {
+    fn new(
+        tool_id: &'static str,
+        expected_error_fragment: &'static str,
+        final_text: &'static str,
+    ) -> Self {
+        Self {
+            tool_id,
+            expected_error_fragment,
+            final_text,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl LLMProvider for PolicyBlockedToolLlmProvider {
+    fn name(&self) -> &str {
+        "mock-policy-blocked-tool"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        MockLlmProvider.capabilities()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+        let mut requests = self.requests.lock().await;
+        let response = if requests.is_empty() {
+            CompletionResponse {
+                text: String::new(),
+                content: vec![CompletionContent::ToolCall(ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some(self.tool_id.to_string()),
+                        name: "file_write".to_string(),
+                        input: json!({
+                            "path": "blocked-policy-write.txt",
+                            "content": "must-not-be-written"
+                        }),
+                    },
+                    provider_metadata: None,
+                })],
+                stop_reason: StopReason::ToolUse,
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                usage: token_usage(12, 5),
+                duration_ms: 10,
+                thought_signature: None,
+            }
+        } else {
+            assert!(
+                request.messages.iter().any(|message| {
+                    message.tool_use_id.as_deref() == Some(self.tool_id)
+                        && message.content.contains(self.expected_error_fragment)
+                }),
+                "expected follow-up request to include blocked tool error `{}`; messages were: {:#?}",
+                self.expected_error_fragment,
+                request.messages
+            );
+            CompletionResponse {
+                text: self.final_text.to_string(),
+                content: vec![CompletionContent::Text(self.final_text.to_string())],
+                stop_reason: StopReason::EndTurn,
+                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                usage: token_usage(16, 6),
+                duration_ms: 10,
                 thought_signature: None,
             }
         };

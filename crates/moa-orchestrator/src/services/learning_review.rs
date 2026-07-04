@@ -15,10 +15,9 @@ use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_session::PostgresSessionStore;
 use moa_skills::registry::SkillRegistry;
 use moa_skills::review::{
-    LearningReviewStore, LearningReviewStoreFuture, SkillReviewAction, SkillReviewError,
-    SkillReviewOutcome, SkillReviewRequest, get_learning_candidate_for_review,
-    prepare_skill_acceptance, promote_claimed_skill_candidate, reject_claimed_skill_candidate,
-    reject_learning_candidate,
+    LearningReviewStore, SkillReviewAction, SkillReviewError, SkillReviewOutcome,
+    SkillReviewRequest, get_learning_candidate_for_review, prepare_skill_acceptance,
+    promote_claimed_skill_candidate, reject_claimed_skill_candidate, reject_learning_candidate,
 };
 use restate_sdk::prelude::*;
 use uuid::Uuid;
@@ -156,24 +155,28 @@ impl LearningReviewStore for SessionLearningReviewStore {
         &'a self,
         tenant_id: &'a TenantId,
         candidate_id: Uuid,
-    ) -> LearningReviewStoreFuture<'a, Option<LearningCandidate>> {
-        Box::pin(async move {
+    ) -> impl std::future::Future<
+        Output = std::result::Result<Option<LearningCandidate>, moa_core::MoaError>,
+    > + Send
+    + 'a {
+        async move {
             self.store
                 .get_learning_candidate(tenant_id, candidate_id)
                 .await
-        })
+        }
     }
 
     fn update_learning_candidate_status_from<'a>(
         &'a self,
         update: &'a LearningCandidateStatusUpdate,
         expected_status: LearningCandidateStatus,
-    ) -> LearningReviewStoreFuture<'a, bool> {
-        Box::pin(async move {
+    ) -> impl std::future::Future<Output = std::result::Result<bool, moa_core::MoaError>> + Send + 'a
+    {
+        async move {
             self.store
                 .update_learning_candidate_status_from(update, expected_status)
                 .await
-        })
+        }
     }
 
     fn update_learning_candidate_status_from_in_tx<'a>(
@@ -181,27 +184,22 @@ impl LearningReviewStore for SessionLearningReviewStore {
         conn: &'a mut sqlx::PgConnection,
         update: &'a LearningCandidateStatusUpdate,
         expected_status: LearningCandidateStatus,
-    ) -> LearningReviewStoreFuture<'a, bool> {
-        Box::pin(async move {
+    ) -> impl std::future::Future<Output = std::result::Result<bool, moa_core::MoaError>> + Send + 'a
+    {
+        async move {
             self.store
                 .update_learning_candidate_status_from_in_tx(conn, update, expected_status)
                 .await
-        })
-    }
-
-    fn append_learning<'a>(
-        &'a self,
-        entry: &'a moa_core::LearningEntry,
-    ) -> LearningReviewStoreFuture<'a, ()> {
-        Box::pin(async move { self.store.append_learning(entry).await })
+        }
     }
 
     fn append_learning_in_tx<'a>(
         &'a self,
         conn: &'a mut sqlx::PgConnection,
         entry: &'a moa_core::LearningEntry,
-    ) -> LearningReviewStoreFuture<'a, ()> {
-        Box::pin(async move { self.store.append_learning_in_tx(conn, entry).await })
+    ) -> impl std::future::Future<Output = std::result::Result<(), moa_core::MoaError>> + Send + 'a
+    {
+        async move { self.store.append_learning_in_tx(conn, entry).await }
     }
 }
 

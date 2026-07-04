@@ -1,4 +1,4 @@
-.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status test-fast test-affected test-ci test-db-session test-db-memory test-authz-pentest test-service-e2e test-provider-e2e build-timings e2e-clean e2e-clean-live loadtest-mock loadtest-live codegraph
+.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status test-fast test-affected test-ci test-db-session test-db-memory test-authz-pentest test-service-e2e test-provider-e2e build-timings e2e-clean e2e-clean-live loadtest-mock loadtest-live chaos-smoke chaos-matrix codegraph
 
 codegraph:
 	@./scripts/codegraph init
@@ -100,11 +100,29 @@ e2e-clean-live:
 	./scripts/run-clean-e2e.sh --live
 
 loadtest-mock:
+	@echo "starting loadtest dependencies with OpenFGA and safe RustFS host ports..."
+	@MOA_RUSTFS_PORT=$${MOA_RUSTFS_PORT:-10090} \
+	  MOA_RUSTFS_CONSOLE_PORT=$${MOA_RUSTFS_CONSOLE_PORT:-10091} \
+	  docker compose up -d --build postgres restate openfga valkey rustfs rustfs-init moa-pii-service moa-audit-shipper
+	@$(MAKE) fga-bootstrap
 	@echo "restarting orchestrator with scripted providers..."
-	@MOA_PROVIDERS_OVERRIDE=scripted:/loadtest-scripts/perf-gate.json \
+	@set -a; . ./.env.fga; set +a; \
+	  MOA_RUSTFS_PORT=$${MOA_RUSTFS_PORT:-10090} \
+	  MOA_RUSTFS_CONSOLE_PORT=$${MOA_RUSTFS_CONSOLE_PORT:-10091} \
+	  MOA_PROVIDERS_OVERRIDE=scripted:/loadtest-scripts/perf-gate.json \
 	  docker compose up -d --build --force-recreate moa-orchestrator restate-register
 	@$(MAKE) dev-status
-	cargo run -p moa-loadtest --release --bin moa-loadtest -- --mode mock --endpoint http://localhost:10010
+	@mkdir -p target/perf-gate
+	@set -a; . ./.env.fga; set +a; \
+	  cargo run -p moa-loadtest --release --bin perf_gate -- \
+	  --profile mock-short --endpoint http://localhost:10010 \
+	  --duration $${MOA_LOADTEST_MOCK_DURATION:-30s} \
+	  --vus $${MOA_LOADTEST_MOCK_VUS:-2} \
+	  --qps $${MOA_LOADTEST_MOCK_QPS:-2} \
+	  --max-p95-ms $${MOA_LOADTEST_MOCK_MAX_P95_MS:-5000} \
+	  --max-error-rate $${MOA_LOADTEST_MOCK_MAX_ERROR_RATE:-0.01} \
+	  --metrics-endpoint http://localhost:10023/metrics \
+	  --prom-out target/perf-gate/mock-short.prom
 
 loadtest-live:
 	cargo run -p moa-loadtest --release --bin moa-loadtest -- --mode live --endpoint http://localhost:10010
@@ -140,7 +158,9 @@ loadtest-soak:
 # One fast chaos experiment (provider 429 storm) against the compose stack.
 chaos-smoke:
 	@: $${MOA_AUTHZ_OPENFGA_STORE_ID:?run make fga-bootstrap and export the OpenFGA env first}
-	MOA_RUN_CHAOS_TESTS=1 cargo nextest run -p moa-loadtest --test chaos_docker \
+	MOA_RUSTFS_PORT=$${MOA_RUSTFS_PORT:-10090} \
+	  MOA_RUSTFS_CONSOLE_PORT=$${MOA_RUSTFS_CONSOLE_PORT:-10091} \
+	  MOA_RUN_CHAOS_TESTS=1 cargo nextest run -p moa-loadtest --test chaos_docker \
 	  --run-ignored all --no-capture --test-threads 1 \
 	  -E 'test(chaos_provider_429_storm_degrades_then_recovers_docker)'
 
@@ -148,7 +168,9 @@ chaos-smoke:
 # stop/kill stack services; run only against a disposable dev stack.
 chaos-matrix:
 	@: $${MOA_AUTHZ_OPENFGA_STORE_ID:?run make fga-bootstrap and export the OpenFGA env first}
-	MOA_RUN_CHAOS_TESTS=1 cargo nextest run -p moa-loadtest --test chaos_docker \
+	MOA_RUSTFS_PORT=$${MOA_RUSTFS_PORT:-10090} \
+	  MOA_RUSTFS_CONSOLE_PORT=$${MOA_RUSTFS_CONSOLE_PORT:-10091} \
+	  MOA_RUN_CHAOS_TESTS=1 cargo nextest run -p moa-loadtest --test chaos_docker \
 	  --run-ignored all --no-capture --test-threads 1 --no-fail-fast
 
 # Generates a local-dev RSA keypair for contact-token signing and prints the

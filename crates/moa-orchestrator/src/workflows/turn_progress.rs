@@ -4,13 +4,11 @@ use chrono::{DateTime, Utc};
 use moa_core::SessionId;
 use moa_core::wire::turn::TurnPhase;
 use restate_sdk::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::workflows::progress_delivery;
 
-const K_PROGRESS_STARTED_AT: &str = "progress_started_at";
-const K_PROGRESS_LAST_EMITTED_AT: &str = "progress_last_emitted_at";
-const K_PROGRESS_ELAPSED_MS: &str = "progress_elapsed_ms";
-const K_PROGRESS_LAST_SUMMARY: &str = "progress_last_summary";
+const K_PROGRESS_STATE: &str = "progress_state";
 
 /// Generic progress summary used before context or request compilation waits.
 pub(crate) const SUMMARY_WORKING: &str = "Working on it";
@@ -28,7 +26,7 @@ pub(crate) struct ProgressSnapshot {
     pub(crate) last_summary: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 struct ProgressState {
     started_at: Option<DateTime<Utc>>,
     last_emitted_at: Option<DateTime<Utc>>,
@@ -177,63 +175,23 @@ pub(crate) fn running_tool_summary(tool_name: &str) -> String {
 }
 
 async fn load_workflow_state(ctx: &WorkflowContext<'_>) -> Result<ProgressState, HandlerError> {
-    Ok(ProgressState {
-        started_at: ctx
-            .get::<Json<DateTime<Utc>>>(K_PROGRESS_STARTED_AT)
-            .await?
-            .map(Json::into_inner),
-        last_emitted_at: ctx
-            .get::<Json<DateTime<Utc>>>(K_PROGRESS_LAST_EMITTED_AT)
-            .await?
-            .map(Json::into_inner),
-        elapsed_ms: ctx
-            .get::<Json<u64>>(K_PROGRESS_ELAPSED_MS)
-            .await?
-            .map(Json::into_inner)
-            .unwrap_or_default(),
-        last_summary: ctx
-            .get::<Json<Option<String>>>(K_PROGRESS_LAST_SUMMARY)
-            .await?
-            .map(Json::into_inner)
-            .unwrap_or(None),
-    })
+    Ok(ctx
+        .get::<Json<ProgressState>>(K_PROGRESS_STATE)
+        .await?
+        .map(Json::into_inner)
+        .unwrap_or_default())
 }
 
 async fn load_shared_state(ctx: &SharedWorkflowContext<'_>) -> Result<ProgressState, HandlerError> {
-    Ok(ProgressState {
-        started_at: ctx
-            .get::<Json<DateTime<Utc>>>(K_PROGRESS_STARTED_AT)
-            .await?
-            .map(Json::into_inner),
-        last_emitted_at: ctx
-            .get::<Json<DateTime<Utc>>>(K_PROGRESS_LAST_EMITTED_AT)
-            .await?
-            .map(Json::into_inner),
-        elapsed_ms: ctx
-            .get::<Json<u64>>(K_PROGRESS_ELAPSED_MS)
-            .await?
-            .map(Json::into_inner)
-            .unwrap_or_default(),
-        last_summary: ctx
-            .get::<Json<Option<String>>>(K_PROGRESS_LAST_SUMMARY)
-            .await?
-            .map(Json::into_inner)
-            .unwrap_or(None),
-    })
+    Ok(ctx
+        .get::<Json<ProgressState>>(K_PROGRESS_STATE)
+        .await?
+        .map(Json::into_inner)
+        .unwrap_or_default())
 }
 
 fn store_state(ctx: &WorkflowContext<'_>, state: &ProgressState) {
-    if let Some(started_at) = state.started_at {
-        ctx.set(K_PROGRESS_STARTED_AT, Json::from(started_at));
-    }
-    if let Some(last_emitted_at) = state.last_emitted_at {
-        ctx.set(K_PROGRESS_LAST_EMITTED_AT, Json::from(last_emitted_at));
-    }
-    ctx.set(K_PROGRESS_ELAPSED_MS, Json::from(state.elapsed_ms));
-    ctx.set(
-        K_PROGRESS_LAST_SUMMARY,
-        Json::from(state.last_summary.clone()),
-    );
+    ctx.set(K_PROGRESS_STATE, Json::from(state.clone()));
 }
 
 async fn workflow_utc_now(ctx: &WorkflowContext<'_>) -> Result<DateTime<Utc>, HandlerError> {

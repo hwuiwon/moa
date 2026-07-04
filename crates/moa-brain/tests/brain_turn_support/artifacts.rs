@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use moa_brain::{TurnResult, build_default_pipeline_with_tools, run_brain_turn};
+use moa_brain::{TurnResult, run_brain_turn};
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, Event, EventRange,
     LLMProvider, MoaConfig, ModelCapabilities, Result, SessionActorRef, SessionId, SessionMeta,

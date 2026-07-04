@@ -39,11 +39,11 @@ use moa_knowledge::{
         KnowledgeIngestionPipeline, KnowledgeIngestionPipelineConfig, MemoryKnowledgeGraphWriter,
         PageIngestionReport,
     },
-    observability::MetricsIngestionObserver,
     parser::DocumentParser,
     providers::LinkedIntegrationProvider,
     repository::{
-        KnowledgeRepository, PostgresKnowledgeRepository, ProviderAccountConnectionLookup,
+        DocumentVersionIngestionClaim, KnowledgeRepository, PostgresKnowledgeRepository,
+        ProviderAccountConnectionLookup, SyncRunClaim,
     },
 };
 use moa_lineage_core::{
@@ -100,14 +100,13 @@ async fn knowledge_auto_sync_manual_sync_triggers_provider_and_does_not_ingest_i
     assert_eq!(response.status, "provider_syncing");
     assert_eq!(provider.trigger_sync_count(), 1);
     assert_eq!(provider.list_changed_records_count(), 0);
-    assert_eq!(repository.op_count("create_sync_run"), 1);
+    assert_eq!(repository.op_count("claim_sync_run"), 1);
     assert_eq!(repository.op_count("update_sync_run"), 1);
     assert_eq!(repository.op_count("record_ingestion_step"), 1);
     assert_eq!(repository.op_count("upsert_object"), 0);
     assert_eq!(repository.op_count("insert_document_version"), 0);
     assert_eq!(repository.op_count("replace_blocks"), 0);
     assert_eq!(repository.op_count("replace_chunks"), 0);
-    assert_eq!(repository.op_count("set_chunk_graph_uid"), 0);
     assert_eq!(repository.op_count("add_sync_counters"), 0);
     assert_eq!(repository.sync_run_count(), 1);
     assert_eq!(repository.step_count(), 1);
@@ -141,7 +140,7 @@ async fn knowledge_auto_sync_manual_sync_immediate_provider_completion_marks_run
     assert_eq!(response.status, "provider_synced");
     assert_eq!(provider.trigger_sync_count(), 1);
     assert_eq!(provider.list_changed_records_count(), 0);
-    assert_eq!(repository.op_count("create_sync_run"), 1);
+    assert_eq!(repository.op_count("claim_sync_run"), 1);
     assert_eq!(repository.op_count("update_sync_run"), 1);
     assert_eq!(repository.op_count("record_ingestion_step"), 2);
     assert_eq!(repository.sync_run_count(), 1);
@@ -261,7 +260,7 @@ async fn knowledge_auto_sync_distinct_events_reuse_active_connection_run() {
     assert_eq!(repository.provider_event_count(), 2);
     assert_eq!(repository.sync_run_count(), 1);
     assert_eq!(repository.step_count(), 1);
-    assert_eq!(repository.op_count("create_sync_run"), 1);
+    assert_eq!(repository.op_count("claim_sync_run"), 1);
 }
 
 #[tokio::test]
@@ -1252,7 +1251,6 @@ async fn mock_connector_end_to_end_db_memory() {
         Arc::new(Task14Parser),
         Arc::new(Task14Embedder),
         graph_writer,
-        Arc::new(MetricsIngestionObserver),
         KnowledgeIngestionPipelineConfig {
             chunking: ChunkingConfig {
                 target_tokens: 128,
@@ -2495,7 +2493,6 @@ type Task14KnowledgeIngestionPipeline = KnowledgeIngestionPipeline<
     Task14Parser,
     Task14Embedder,
     MemoryKnowledgeGraphWriter<PostgresGraphStore>,
-    MetricsIngestionObserver,
 >;
 
 struct DbKnowledgeAutoSyncSteps {
@@ -2748,7 +2745,6 @@ fn task14_ingestion_pipeline(
         Arc::new(Task14Parser),
         Arc::new(Task14Embedder),
         graph_writer,
-        Arc::new(MetricsIngestionObserver),
         KnowledgeIngestionPipelineConfig {
             chunking: ChunkingConfig {
                 target_tokens: 128,
@@ -4123,9 +4119,36 @@ struct RepositoryState {
     steps: Vec<KnowledgeIngestionStep>,
     objects: HashMap<Uuid, KnowledgeObject>,
     versions: HashMap<Uuid, DocumentVersion>,
+    ingestion_claims: HashMap<(Uuid, String), InMemoryDocumentIngestionClaim>,
     chunks: HashMap<Uuid, Vec<KnowledgeChunk>>,
     provider_events: HashMap<(TenantId, String, String), KnowledgeProviderEventRecord>,
     op_counts: HashMap<&'static str, usize>,
+}
+
+#[derive(Debug, Clone)]
+struct InMemoryDocumentIngestionClaim {
+    version: DocumentVersion,
+    sync_run_uid: Uuid,
+    claim_token: Uuid,
+    status: InMemoryDocumentIngestionClaimStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InMemoryDocumentIngestionClaimStatus {
+    Started,
+    Completed,
+    Failed,
+}
+
+fn sync_run_is_active(status: SyncRunStatus) -> bool {
+    matches!(
+        status,
+        SyncRunStatus::Queued
+            | SyncRunStatus::ProviderSyncing
+            | SyncRunStatus::ProviderSynced
+            | SyncRunStatus::ParsePending
+            | SyncRunStatus::Ingesting
+    )
 }
 
 #[async_trait]
@@ -4232,6 +4255,24 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
         self.record_op("create_sync_run")?;
         self.with_state(|state| {
             state.sync_runs.insert(run.sync_run_uid, run);
+        })
+    }
+
+    async fn claim_sync_run(&self, run: KnowledgeSyncRun) -> moa_knowledge::Result<SyncRunClaim> {
+        self.record_op("claim_sync_run")?;
+        self.with_state(|state| {
+            if let Some(active) = state
+                .sync_runs
+                .values()
+                .filter(|existing| existing.connection_uid == run.connection_uid)
+                .filter(|existing| sync_run_is_active(existing.status))
+                .max_by_key(|existing| (existing.started_at, existing.sync_run_uid))
+                .cloned()
+            {
+                return SyncRunClaim::AlreadyRunning(active);
+            }
+            state.sync_runs.insert(run.sync_run_uid, run.clone());
+            SyncRunClaim::Claimed(run)
         })
     }
 
@@ -4428,19 +4469,43 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
         })
     }
 
-    async fn active_objects_for_connection(
+    async fn unseen_active_objects_for_connection(
         &self,
         connection_uid: Uuid,
+        tenant_id: TenantId,
+        seen_source_ids: &[String],
+        after: Option<(String, Uuid)>,
+        limit: i64,
     ) -> moa_knowledge::Result<Vec<KnowledgeObject>> {
-        self.record_op("active_objects_for_connection")?;
+        self.record_op("unseen_active_objects_for_connection")?;
         self.with_state(|state| {
-            state
+            let seen = seen_source_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>();
+            let mut objects = state
                 .objects
                 .values()
                 .filter(|object| object.connection_uid == connection_uid)
+                .filter(|object| object.tenant_id == tenant_id)
                 .filter(|object| object.status != ObjectStatus::Deleted)
+                .filter(|object| !seen.contains(object.source_id.as_str()))
+                .filter(|object| match &after {
+                    Some((source_id, object_uid)) => {
+                        (object.source_id.as_str(), object.object_uid)
+                            > (source_id.as_str(), *object_uid)
+                    }
+                    None => true,
+                })
                 .cloned()
-                .collect()
+                .collect::<Vec<_>>();
+            objects.sort_by(|left, right| {
+                left.source_id
+                    .cmp(&right.source_id)
+                    .then_with(|| left.object_uid.cmp(&right.object_uid))
+            });
+            objects.truncate(usize::try_from(limit).unwrap_or(0));
+            objects
         })
     }
 
@@ -4516,6 +4581,108 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
         })
     }
 
+    async fn claim_document_version_ingestion(
+        &self,
+        sync_run_uid: Uuid,
+        version: DocumentVersion,
+    ) -> moa_knowledge::Result<DocumentVersionIngestionClaim> {
+        self.record_op("claim_document_version_ingestion")?;
+        self.with_state(|state| {
+            let key = (version.object_uid, version.content_hash.clone());
+            if let Some(existing) = state.ingestion_claims.get(&key) {
+                match existing.status {
+                    InMemoryDocumentIngestionClaimStatus::Started => {
+                        return DocumentVersionIngestionClaim::AlreadyInProgress(
+                            existing.version.clone(),
+                        );
+                    }
+                    InMemoryDocumentIngestionClaimStatus::Completed => {
+                        return DocumentVersionIngestionClaim::AlreadyCompleted(
+                            existing.version.clone(),
+                        );
+                    }
+                    InMemoryDocumentIngestionClaimStatus::Failed => {}
+                }
+            }
+
+            let claim_token = Uuid::now_v7();
+            state.versions.insert(version.object_uid, version.clone());
+            state.ingestion_claims.insert(
+                key,
+                InMemoryDocumentIngestionClaim {
+                    version: version.clone(),
+                    sync_run_uid,
+                    claim_token,
+                    status: InMemoryDocumentIngestionClaimStatus::Started,
+                },
+            );
+            DocumentVersionIngestionClaim::Claimed {
+                version,
+                claim_token,
+            }
+        })
+    }
+
+    async fn complete_document_version_ingestion(
+        &self,
+        sync_run_uid: Uuid,
+        version_uid: Uuid,
+        claim_token: Uuid,
+    ) -> moa_knowledge::Result<()> {
+        self.record_op("complete_document_version_ingestion")?;
+        self.with_state(|state| {
+            let Some(claim) = state
+                .ingestion_claims
+                .values_mut()
+                .find(|claim| claim.version.version_uid == version_uid)
+            else {
+                return Err(KnowledgeError::Repository(
+                    "document version ingestion claim not found".to_string(),
+                ));
+            };
+            if claim.sync_run_uid != sync_run_uid
+                || claim.claim_token != claim_token
+                || claim.status != InMemoryDocumentIngestionClaimStatus::Started
+            {
+                return Err(KnowledgeError::Repository(
+                    "document version ingestion claim token mismatch".to_string(),
+                ));
+            }
+            claim.status = InMemoryDocumentIngestionClaimStatus::Completed;
+            Ok(())
+        })?
+    }
+
+    async fn fail_document_version_ingestion(
+        &self,
+        sync_run_uid: Uuid,
+        version_uid: Uuid,
+        claim_token: Uuid,
+    ) -> moa_knowledge::Result<()> {
+        self.record_op("fail_document_version_ingestion")?;
+        self.with_state(|state| {
+            let Some(claim) = state
+                .ingestion_claims
+                .values_mut()
+                .find(|claim| claim.version.version_uid == version_uid)
+            else {
+                return Err(KnowledgeError::Repository(
+                    "document version ingestion claim not found".to_string(),
+                ));
+            };
+            if claim.sync_run_uid != sync_run_uid
+                || claim.claim_token != claim_token
+                || claim.status != InMemoryDocumentIngestionClaimStatus::Started
+            {
+                return Err(KnowledgeError::Repository(
+                    "document version ingestion claim token mismatch".to_string(),
+                ));
+            }
+            claim.status = InMemoryDocumentIngestionClaimStatus::Failed;
+            Ok(())
+        })?
+    }
+
     async fn replace_blocks(
         &self,
         _version_uid: Uuid,
@@ -4532,21 +4699,6 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
         self.record_op("replace_chunks")?;
         self.with_state(|state| {
             state.chunks.insert(version_uid, chunks);
-        })
-    }
-
-    async fn set_chunk_graph_uid(
-        &self,
-        chunk_uid: Uuid,
-        graph_node_uid: Uuid,
-    ) -> moa_knowledge::Result<()> {
-        self.record_op("set_chunk_graph_uid")?;
-        self.with_state(|state| {
-            for chunks in state.chunks.values_mut() {
-                if let Some(chunk) = chunks.iter_mut().find(|chunk| chunk.chunk_uid == chunk_uid) {
-                    chunk.graph_node_uid = Some(graph_node_uid);
-                }
-            }
         })
     }
 

@@ -1,16 +1,15 @@
 //! Redacted observability helpers for tenant knowledge ingestion.
 
-use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
     domain::{IngestionStepStatus, KnowledgeIngestionStep},
-    error::{Error, Result},
+    error::Error,
 };
 
-/// Safe step outcome recorded by ingestion observers.
+/// Safe step outcome recorded by the ingestion pipeline.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StepOutcome {
     /// Step status.
@@ -187,64 +186,38 @@ pub struct StepLabels<'a> {
     pub error_code: &'a str,
 }
 
-/// Sink for redacted ingestion progress.
-#[async_trait]
-pub trait IngestionObserver: Send + Sync {
-    /// Records one ingestion step.
-    async fn record_step(
-        &self,
-        sync_run_uid: Uuid,
-        object_uid: Option<Uuid>,
-        labels: StepLabels<'_>,
-        outcome: StepOutcome,
-    ) -> Result<()>;
-}
-
-/// Metrics and tracing observer that does not persist payloads.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MetricsIngestionObserver;
-
-#[async_trait]
-impl IngestionObserver for MetricsIngestionObserver {
-    async fn record_step(
-        &self,
-        _sync_run_uid: Uuid,
-        _object_uid: Option<Uuid>,
-        labels: StepLabels<'_>,
-        outcome: StepOutcome,
-    ) -> Result<()> {
-        let status: &'static str = match outcome.status {
-            IngestionStepStatus::Started => "started",
-            IngestionStepStatus::Completed => "completed",
-            IngestionStepStatus::Failed => "failed",
-            IngestionStepStatus::Skipped => "skipped",
-        };
-        tracing::Span::current().record("status", status);
-        tracing::Span::current().record(
-            "error_code",
-            outcome.error_code.as_deref().unwrap_or("none"),
-        );
-        metrics::histogram!(
-            "moa_knowledge_ingestion_step_duration_seconds",
-            "provider" => labels.provider.to_string(),
-            "parser" => labels.parser.to_string(),
-            "stage" => labels.stage,
-            "status" => status
-        )
-        .record(outcome.duration_seconds());
-        emit_counter_metrics(labels, status, &outcome.counters);
-        tracing::info!(
-            provider = labels.provider,
-            parser = labels.parser,
-            stage = labels.stage,
-            status,
-            retry_count = outcome.retry_count,
-            retryable = labels.retryable,
-            error_code = labels.error_code,
-            "knowledge ingestion step recorded"
-        );
-        Ok(())
-    }
+/// Records redacted ingestion progress to metrics and tracing.
+pub fn record_step_observability(labels: StepLabels<'_>, outcome: &StepOutcome) {
+    let status: &'static str = match outcome.status {
+        IngestionStepStatus::Started => "started",
+        IngestionStepStatus::Completed => "completed",
+        IngestionStepStatus::Failed => "failed",
+        IngestionStepStatus::Skipped => "skipped",
+    };
+    tracing::Span::current().record("status", status);
+    tracing::Span::current().record(
+        "error_code",
+        outcome.error_code.as_deref().unwrap_or("none"),
+    );
+    metrics::histogram!(
+        "moa_knowledge_ingestion_step_duration_seconds",
+        "provider" => labels.provider.to_string(),
+        "parser" => labels.parser.to_string(),
+        "stage" => labels.stage,
+        "status" => status
+    )
+    .record(outcome.duration_seconds());
+    emit_counter_metrics(labels, status, &outcome.counters);
+    tracing::info!(
+        provider = labels.provider,
+        parser = labels.parser,
+        stage = labels.stage,
+        status,
+        retry_count = outcome.retry_count,
+        retryable = labels.retryable,
+        error_code = labels.error_code,
+        "knowledge ingestion step recorded"
+    );
 }
 
 impl StepOutcome {

@@ -67,7 +67,70 @@ require_cmd() {
 elapsed_since() {
   local start="$1"
   local elapsed=$((SECONDS - start))
+  format_elapsed_seconds "${elapsed}"
+}
+
+format_elapsed_seconds() {
+  local elapsed="$1"
   printf '%02d:%02d' $((elapsed / 60)) $((elapsed % 60))
+}
+
+markdown_cell() {
+  local value="${1//$'\n'/ }"
+  value="${value//|/\\|}"
+  printf '%s' "${value}"
+}
+
+record_timing() {
+  local phase="$1"
+  local status="$2"
+  local elapsed="$3"
+  local command="$4"
+
+  TIMING_PHASES+=("${phase}")
+  TIMING_STATUSES+=("${status}")
+  TIMING_SECONDS+=("${elapsed}")
+  TIMING_COMMANDS+=("${command}")
+}
+
+write_timing_report() {
+  local status="$1"
+  local status_label="failed"
+  if [[ "${TIMING_REPORT_WRITTEN}" -eq 1 ]]; then
+    return 0
+  fi
+  if [[ "${status}" -eq 0 ]]; then
+    status_label="passed"
+  fi
+
+  mkdir -p "${TIMING_DIR}"
+  {
+    printf '# Clean E2E Timing Report\n\n'
+    printf -- '- run_id: `%s`\n' "${RUN_ID}"
+    printf -- '- status: `%s`\n' "${status_label}"
+    printf -- '- total_elapsed: `%s`\n' "$(format_elapsed_seconds "$((SECONDS - RUNNER_STARTED_AT))")"
+    printf -- '- target_database: `%s`\n\n' "${DB_NAME}"
+    printf '> Durations are wall-clock timings captured by `scripts/run-clean-e2e.sh` around each phase wrapper.\n\n'
+    printf '| # | Status | Duration | Seconds | Phase |\n'
+    printf '|---:|---|---:|---:|---|\n'
+    local i
+    for i in "${!TIMING_PHASES[@]}"; do
+      printf '| %s | `%s` | `%s` | %s | %s |\n' \
+        "$((i + 1))" \
+        "${TIMING_STATUSES[$i]}" \
+        "$(format_elapsed_seconds "${TIMING_SECONDS[$i]}")" \
+        "${TIMING_SECONDS[$i]}" \
+        "$(markdown_cell "${TIMING_PHASES[$i]}")"
+    done
+
+    printf '\n## Commands\n\n'
+    for i in "${!TIMING_COMMANDS[@]}"; do
+      printf '%s. `%s`\n' "$((i + 1))" "$(markdown_cell "${TIMING_COMMANDS[$i]}")"
+    done
+  } >"${TIMING_REPORT}"
+  cp "${TIMING_REPORT}" "${TIMING_LATEST_REPORT}" 2>/dev/null || true
+  TIMING_REPORT_WRITTEN=1
+  echo "clean E2E timing report: ${TIMING_REPORT}"
 }
 
 run() {
@@ -79,6 +142,7 @@ run() {
   "$@"
   status=$?
   set -e
+  record_timing "$*" "${status}" "$((SECONDS - start))" "$*"
   if [[ "${status}" -eq 0 ]]; then
     echo "<< completed in $(elapsed_since "${start}"): $*"
   else
@@ -101,6 +165,7 @@ run_without_provider_keys() {
     "$@"
   status=$?
   set -e
+  record_timing "env -u provider keys $*" "${status}" "$((SECONDS - start))" "env -u provider keys $*"
   if [[ "${status}" -eq 0 ]]; then
     echo "<< completed in $(elapsed_since "${start}"): env -u provider keys $*"
   else
@@ -123,10 +188,32 @@ run_without_external_orchestrator() {
     "$@"
   status=$?
   set -e
+  record_timing "env -u external orchestrator $*" "${status}" "$((SECONDS - start))" "env -u external orchestrator $*"
   if [[ "${status}" -eq 0 ]]; then
     echo "<< completed in $(elapsed_since "${start}"): env -u external orchestrator $*"
   else
     echo "<< failed after $(elapsed_since "${start}"): env -u external orchestrator $*" >&2
+  fi
+  return "${status}"
+}
+
+run_phase() {
+  local label="$1"
+  shift
+  local command="$*"
+  echo
+  echo ">> ${label}"
+  local start=$SECONDS
+  local status=0
+  set +e
+  "$@"
+  status=$?
+  set -e
+  record_timing "${label}" "${status}" "$((SECONDS - start))" "${command}"
+  if [[ "${status}" -eq 0 ]]; then
+    echo "<< completed in $(elapsed_since "${start}"): ${label}"
+  else
+    echo "<< failed after $(elapsed_since "${start}"): ${label}" >&2
   fi
   return "${status}"
 }
@@ -195,6 +282,15 @@ wait_for_restate_ports() {
   return 1
 }
 
+orchestrator_binary_path() {
+  local target_dir="${CARGO_TARGET_DIR:-${REPO_ROOT}/target}"
+  case "${target_dir}" in
+    /*) ;;
+    *) target_dir="${REPO_ROOT}/${target_dir}" ;;
+  esac
+  printf '%s/debug/moa-orchestrator-bin\n' "${target_dir%/}"
+}
+
 if [[ "${LIVE}" -eq 1 ]] && ! truthy "${MOA_RUN_LIVE_E2E:-}"; then
   echo "refusing to run live E2E without MOA_RUN_LIVE_E2E=1" >&2
   exit 2
@@ -222,7 +318,7 @@ RUNNER_STARTED_AT=$SECONDS
 RUN_ID="${MOA_CLEAN_E2E_RUN_ID:-$(date +%Y%m%d%H%M%S)-$$}"
 RUN_SAFE_ID="$(printf '%s' "${RUN_ID}" | tr -c 'A-Za-z0-9_' '_')"
 RUN_SHORT_ID="$(printf '%s' "${RUN_SAFE_ID}" | cut -c1-20)"
-ORCH_FEATURES="provider-overrides,skill-learning,redis"
+ORCH_FEATURES="provider-overrides,skill-learning"
 ORCH_E2E_FEATURES="${ORCH_FEATURES},integration"
 TMP_PARENT="${MOA_CLEAN_E2E_TMPDIR:-/tmp}"
 TMP_ROOT="$(mktemp -d "${TMP_PARENT%/}/me2e.XXXXXX")"
@@ -230,15 +326,25 @@ RESTATE_DIR="${TMP_ROOT}/restate"
 RESTATE_LOG="${TMP_ROOT}/restate.log"
 FGA_ENV="${TMP_ROOT}/fga.env"
 ORCH_LOG="${TMP_ROOT}/orchestrator.log"
+TIMING_DIR="${REPO_ROOT}/target/e2e"
+TIMING_REPORT="${TIMING_DIR}/clean-e2e-${RUN_SAFE_ID}-timings.md"
+TIMING_LATEST_REPORT="${TIMING_DIR}/clean-e2e-latest-timings.md"
 DB_NAME="moa_e2e_${RUN_SAFE_ID}"
 DB_URL="postgres://moa_owner:dev@127.0.0.1:10040/${DB_NAME}"
 RESTATE_PID=""
 ORCH_PID=""
 STARTED_COMPOSE=0
 DB_CREATED=0
+TIMING_REPORT_WRITTEN=0
+TIMING_PHASES=()
+TIMING_STATUSES=()
+TIMING_SECONDS=()
+TIMING_COMMANDS=()
 
 cleanup() {
   local status=$?
+
+  write_timing_report "${status}" || true
 
   if [[ -n "${ORCH_PID}" ]] && kill -0 "${ORCH_PID}" 2>/dev/null; then
     kill "${ORCH_PID}" 2>/dev/null || true
@@ -273,10 +379,10 @@ if [[ -z "$(docker compose ps -q 2>/dev/null)" ]]; then
 fi
 
 run docker compose up -d --build postgres valkey openfga moa-pii-service
-wait_for_postgres
-wait_for_valkey
+run_phase "wait for compose Postgres" wait_for_postgres
+run_phase "wait for compose Valkey" wait_for_valkey
 run "${REPO_ROOT}/scripts/wait-for-fga.sh"
-wait_for_http "http://127.0.0.1:10050/healthz" "PII sidecar"
+run_phase "wait for PII sidecar" wait_for_http "http://127.0.0.1:10050/healthz" "PII sidecar"
 
 run docker compose exec -T postgres psql -U moa_owner -d postgres \
   -v ON_ERROR_STOP=1 \
@@ -312,7 +418,7 @@ RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true restate-server \
   --log-disable-ansi-codes true \
   >"${RESTATE_LOG}" 2>&1 &
 RESTATE_PID=$!
-wait_for_restate_ports "${RESTATE_LOG}"
+run_phase "wait for ephemeral restate-server ports" wait_for_restate_ports "${RESTATE_LOG}"
 
 export MOA_DATABASE_URL="${DB_URL}"
 export MOA_RESTATE_INGRESS_URL="${RESTATE_INGRESS_URL}"
@@ -331,9 +437,16 @@ run cargo test -p moa-eval --test golden_eval --locked
 
 if [[ "${LIVE}" -eq 1 ]]; then
   run cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile restate-service-e2e --run-ignored ignored-only
-  run_without_external_orchestrator cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile fixture-service-e2e --run-ignored ignored-only
 
   run cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features "${ORCH_FEATURES}" --locked
+  MOA_ORCHESTRATOR_BIN="$(orchestrator_binary_path)"
+  if [[ ! -f "${MOA_ORCHESTRATOR_BIN}" ]]; then
+    echo "expected orchestrator binary was not built: ${MOA_ORCHESTRATOR_BIN}" >&2
+    exit 1
+  fi
+  export MOA_ORCHESTRATOR_BIN
+
+  run_without_external_orchestrator cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile fixture-service-e2e --run-ignored ignored-only
 
   ORCH_PORT="${MOA_CLEAN_E2E_ORCH_PORT:-19180}"
   ORCH_HEALTH_PORT="${MOA_CLEAN_E2E_ORCH_HEALTH_PORT:-19181}"
@@ -351,13 +464,13 @@ if [[ "${LIVE}" -eq 1 ]]; then
     MOA_LOCAL_MEMORY_DIR="${TMP_ROOT}/memory" \
     MOA_LOCAL_SANDBOX_DIR="${TMP_ROOT}/sandbox" \
     MOA_LOCAL_DOCKER_ENABLED=false \
-    target/debug/moa-orchestrator-bin \
+    "${MOA_ORCHESTRATOR_BIN}" \
       --port "${ORCH_PORT}" \
       --health-port "${ORCH_HEALTH_PORT}" \
       --scim-port "${ORCH_SCIM_PORT}" \
       >"${ORCH_LOG}" 2>&1 &
   ORCH_PID=$!
-  wait_for_http "http://127.0.0.1:${ORCH_HEALTH_PORT}/_health/live" "shared orchestrator"
+  run_phase "wait for shared orchestrator" wait_for_http "http://127.0.0.1:${ORCH_HEALTH_PORT}/_health/live" "shared orchestrator"
 
   run curl -fsS \
     -X POST "${RESTATE_ADMIN_URL}/deployments" \
@@ -384,3 +497,4 @@ fi
 echo
 echo "clean E2E run completed"
 echo "clean E2E elapsed: $(elapsed_since "${RUNNER_STARTED_AT}")"
+write_timing_report 0

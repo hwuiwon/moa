@@ -6,9 +6,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use moa_brain::pipeline::memory::GraphMemoryRetriever;
 use moa_brain::planning::{PlannedQuery, Strategy};
-use moa_brain::retrieval::{
-    CachedHybridRetriever, CachedHybridRetrieverConfig, HybridRetriever, RetrievalRequest,
-};
+use moa_brain::retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalRequest};
 use moa_core::RlsContext;
 use moa_core::{
     Channel, ContactId, ContactRef, ContactVerificationState, ContextMessage, ContextProcessor,
@@ -858,16 +856,7 @@ fn cached_retriever(
         HybridRetriever::new(pool.clone(), Arc::new(graph.clone()), vector)
             .with_assume_app_role(true),
     );
-    // Disable the version-read TTL so invalidation assertions observe changelog
-    // bumps immediately rather than within the caching window.
-    CachedHybridRetriever::with_config_for_app_role(
-        hybrid,
-        pool.clone(),
-        CachedHybridRetrieverConfig {
-            version_ttl: std::time::Duration::ZERO,
-            ..CachedHybridRetrieverConfig::default()
-        },
-    )
+    CachedHybridRetriever::new_for_app_role(hybrid, pool.clone())
 }
 
 fn planned_chunk_query(tenant_id: TenantId, _query: &str) -> PlannedQuery {

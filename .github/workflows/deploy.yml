@@ -129,54 +129,6 @@ jobs:
       - name: Run doctests
         run: cargo test --locked --doc
 
-  loadtest-mock-smoke:
-    runs-on: ubuntu-latest
-    needs: test
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    env:
-      MOA_DATABASE_URL: postgres://moa_owner:dev@127.0.0.1:5432/moa
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: sccache
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-
-      - name: Start Postgres test stack
-        run: docker compose up -d postgres
-
-      - name: Wait for Postgres
-        run: |
-          for i in {1..60}; do
-            if docker compose exec -T postgres pg_isready -U moa_owner -d moa; then
-              exit 0
-            fi
-            sleep 2
-          done
-          docker compose logs postgres
-          exit 1
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - name: Run mock loadtest smoke profile
-        run: cargo run --release -p moa-loadtest --bin perf_gate -- --profile mock-short --duration 30s --max-p95-ms 5000 --max-error-rate 0.01 --prom-out target/perf-gate/mock-smoke.prom
-
-      - name: Upload loadtest mock smoke snapshot
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: loadtest-mock-smoke-${{ github.sha }}
-          path: target/perf-gate/mock-smoke.prom
-          if-no-files-found: error
-
   long-conversation-eval-recorded:
     name: long-conv recorded
     runs-on: ubuntu-latest
@@ -234,9 +186,8 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - test
-      - loadtest-mock-smoke
       - long-conversation-eval-recorded
-    if: always() && needs.test.result == 'success' && (needs.loadtest-mock-smoke.result == 'success' || needs.loadtest-mock-smoke.result == 'skipped') && (needs.long-conversation-eval-recorded.result == 'success' || needs.long-conversation-eval-recorded.result == 'skipped') && github.event_name != 'pull_request' && github.event_name != 'schedule'
+    if: always() && needs.test.result == 'success' && (needs.long-conversation-eval-recorded.result == 'success' || needs.long-conversation-eval-recorded.result == 'skipped') && github.event_name != 'pull_request' && github.event_name != 'schedule'
     outputs:
       image: ${{ steps.image.outputs.image }}
     steps:
@@ -264,8 +215,6 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: ${{ steps.image.outputs.image }}
-          build-args: |
-            MOA_ORCHESTRATOR_FEATURES=redis
 
   deploy:
     runs-on: ubuntu-latest

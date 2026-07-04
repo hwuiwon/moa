@@ -1,17 +1,19 @@
 //! Typed analytics read-model DTOs shared by session storage and API surfaces.
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::{ContactId, SessionId, SessionStatus, TenantId};
 
 /// One session-level analytics row sourced from the `session_summary` view.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionAnalyticsSummary {
     /// Session identifier.
     pub session_id: SessionId,
     /// Tenant identifier.
     pub tenant_id: TenantId,
     /// Contact identifier, when the session is contact-backed.
+    #[serde(default)]
     pub contact_id: Option<ContactId>,
     /// Current persisted session status.
     pub status: SessionStatus,
@@ -40,7 +42,7 @@ pub struct SessionAnalyticsSummary {
 }
 
 /// One per-tool analytics row sourced from `tool_call_summary` or `tool_call_analytics`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCallSummary {
     /// Stable tool name.
     pub tool_name: String,
@@ -57,7 +59,7 @@ pub struct ToolCallSummary {
 }
 
 /// One per-turn analytics row sourced from the `session_turn_metrics` materialized view.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionTurnMetric {
     /// Session identifier.
     pub session_id: SessionId,
@@ -94,7 +96,7 @@ pub struct SessionTurnMetric {
 }
 
 /// Aggregate tenant metrics over a bounded recent time window.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TenantAnalyticsSummary {
     /// Tenant identifier.
     pub tenant_id: TenantId,
@@ -117,7 +119,7 @@ pub struct TenantAnalyticsSummary {
 }
 
 /// One daily cache trend point sourced from `daily_storage_partition_metrics`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheDailyMetric {
     /// Tenant identifier.
     pub tenant_id: TenantId,

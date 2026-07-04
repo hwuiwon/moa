@@ -3,7 +3,6 @@
 use moa_hands::ToolRouter;
 use moa_memory_ingest::{IngestionVO, IngestionVOImpl};
 use moa_providers::ProviderRegistry;
-use restate_sdk::endpoint::Builder as EndpointBuilder;
 use restate_sdk::prelude::*;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -57,110 +56,43 @@ use crate::{
     },
 };
 
-type BindEndpointFn = fn(EndpointBuilder, &EndpointBindingContext<'_>) -> EndpointBuilder;
-
-#[derive(Clone, Copy)]
-struct RestateBinding {
-    name: &'static str,
-    bind: Option<BindEndpointFn>,
-}
-
-impl RestateBinding {
-    const fn enabled(name: &'static str, bind: BindEndpointFn) -> Self {
-        Self {
-            name,
-            bind: Some(bind),
-        }
-    }
-
-    #[cfg(any(
-        not(feature = "experiments"),
-        not(feature = "internal-eval-runner"),
-        not(feature = "skill-learning")
-    ))]
-    const fn name_only(name: &'static str) -> Self {
-        Self { name, bind: None }
-    }
-}
-
-struct EndpointBindingContext<'a> {
-    session_store: &'a Arc<moa_session::PostgresSessionStore>,
-    pool: &'a sqlx::PgPool,
-    providers: &'a Arc<ProviderRegistry>,
-    tool_router: &'a Arc<ToolRouter>,
-}
-
-const CORE_HEAD_BINDINGS: &[RestateBinding] = &[
-    RestateBinding::enabled("SessionStore", bind_session_store),
-    RestateBinding::enabled("LLMGateway", bind_llm_gateway),
-    RestateBinding::enabled("AgentDefinitions", bind_agent_definitions),
-    RestateBinding::enabled("Agents", bind_agents),
-    RestateBinding::enabled("AdminMaintenance", bind_admin_maintenance),
-    RestateBinding::enabled("Artifacts", bind_artifacts),
-    RestateBinding::enabled("ActionReviews", bind_action_reviews),
-    RestateBinding::enabled("ApiKeys", bind_api_keys),
-    RestateBinding::enabled("Authz", bind_authz),
-    RestateBinding::enabled("AuthzChallenges", bind_authz_challenges),
-    RestateBinding::enabled("Contacts", bind_contacts),
+const CORE_HEAD_SERVICE_NAMES: &[&str] = &[
+    "SessionStore",
+    "LLMGateway",
+    "AgentDefinitions",
+    "Agents",
+    "AdminMaintenance",
+    "Artifacts",
+    "ActionReviews",
+    "ApiKeys",
+    "Authz",
+    "AuthzChallenges",
+    "Contacts",
 ];
 
-const CORE_BODY_BINDINGS: &[RestateBinding] = &[
-    RestateBinding::enabled("IngestionVO", bind_ingestion_vo),
-    RestateBinding::enabled("ToolExecutor", bind_tool_executor),
-    RestateBinding::enabled("ActionPolicy", bind_action_policy),
-    RestateBinding::enabled("GraphMemoryMaint", bind_graph_memory_maint),
-    RestateBinding::enabled("Knowledge", bind_knowledge),
-    RestateBinding::enabled("LearningReview", bind_learning_review),
-    RestateBinding::enabled("Memory", bind_memory),
-    RestateBinding::enabled("NeonMaint", bind_neon_maint),
-    RestateBinding::enabled("Privacy", bind_privacy),
-    RestateBinding::enabled("Skills", bind_skills),
-    RestateBinding::enabled("CronJob", bind_cron_job),
-    RestateBinding::enabled("Session", bind_session),
-    RestateBinding::enabled("Worker", bind_worker),
-    RestateBinding::enabled("Tenants", bind_tenants),
-    RestateBinding::enabled("Tenant", bind_tenant),
-    RestateBinding::enabled("ProcedureExecution", bind_procedure_execution),
-    RestateBinding::enabled("KnowledgeSyncIngestion", bind_knowledge_sync_ingestion),
-    RestateBinding::enabled("Consolidate", bind_consolidate),
+const CORE_BODY_SERVICE_NAMES: &[&str] = &[
+    "IngestionVO",
+    "ToolExecutor",
+    "ActionPolicy",
+    "GraphMemoryMaint",
+    "Knowledge",
+    "LearningReview",
+    "Memory",
+    "NeonMaint",
+    "Privacy",
+    "Skills",
+    "CronJob",
+    "Session",
+    "Worker",
+    "Tenants",
+    "Tenant",
+    "ProcedureExecution",
+    "KnowledgeSyncIngestion",
+    "Consolidate",
 ];
 
-const CORE_TAIL_BINDINGS: &[RestateBinding] = &[
-    RestateBinding::enabled("WorkerTurnExecution", bind_worker_turn_execution),
-    RestateBinding::enabled("TurnExecution", bind_turn_execution),
-];
-
-#[cfg(feature = "experiments")]
-const EXPERIMENT_SERVICE_BINDINGS: &[RestateBinding] =
-    &[RestateBinding::enabled("Experiments", bind_experiments)];
-#[cfg(not(feature = "experiments"))]
-const EXPERIMENT_SERVICE_BINDINGS: &[RestateBinding] = &[RestateBinding::name_only("Experiments")];
-
-#[cfg(feature = "experiments")]
-const EXPERIMENT_WORKFLOW_BINDINGS: &[RestateBinding] = &[
-    RestateBinding::enabled("ExperimentRun", bind_experiment_run),
-    RestateBinding::enabled("ExperimentTrialRun", bind_experiment_trial_run),
-];
-#[cfg(not(feature = "experiments"))]
-const EXPERIMENT_WORKFLOW_BINDINGS: &[RestateBinding] = &[
-    RestateBinding::name_only("ExperimentRun"),
-    RestateBinding::name_only("ExperimentTrialRun"),
-];
-
-#[cfg(feature = "internal-eval-runner")]
-const INTERNAL_EVAL_SERVICE_BINDINGS: &[RestateBinding] =
-    &[RestateBinding::enabled("Eval", bind_eval)];
-#[cfg(not(feature = "internal-eval-runner"))]
-const INTERNAL_EVAL_SERVICE_BINDINGS: &[RestateBinding] = &[RestateBinding::name_only("Eval")];
-
-#[cfg(feature = "skill-learning")]
-const SKILL_LEARNING_WORKFLOW_BINDINGS: &[RestateBinding] = &[RestateBinding::enabled(
-    "SkillLearning",
-    bind_skill_learning,
-)];
-#[cfg(not(feature = "skill-learning"))]
-const SKILL_LEARNING_WORKFLOW_BINDINGS: &[RestateBinding] =
-    &[RestateBinding::name_only("SkillLearning")];
+const CORE_TAIL_SERVICE_NAMES: &[&str] = &["WorkerTurnExecution", "TurnExecution"];
+const EXPERIMENT_WORKFLOW_SERVICE_NAMES: &[&str] = &["ExperimentRun", "ExperimentTrialRun"];
 
 /// Restate admin deployment-list response.
 #[derive(Debug, Deserialize)]
@@ -194,26 +126,65 @@ pub fn build_endpoint(
     providers: Arc<ProviderRegistry>,
     tool_router: Arc<ToolRouter>,
 ) -> Endpoint {
-    let context = EndpointBindingContext {
-        session_store: &session_store,
-        pool: &pool,
-        providers: &providers,
-        tool_router: &tool_router,
-    };
+    let mut builder = Endpoint::builder()
+        .bind(SessionStoreImpl::new(session_store.clone(), pool.clone()).serve())
+        .bind(LLMGatewayImpl::new(providers.clone()).serve())
+        .bind(AgentDefinitionsImpl.serve())
+        .bind(AgentsImpl.serve())
+        .bind(AdminMaintenanceImpl.serve())
+        .bind(ArtifactsImpl.serve())
+        .bind(ActionReviewsImpl.serve())
+        .bind(ApiKeysImpl.serve())
+        .bind(AuthzImpl.serve())
+        .bind(AuthzChallengesImpl.serve())
+        .bind(ContactsImpl.serve());
 
-    restate_bindings_for_features(
-        cfg!(feature = "experiments"),
-        cfg!(feature = "internal-eval-runner"),
-        cfg!(feature = "skill-learning"),
-    )
-    .into_iter()
-    .fold(Endpoint::builder(), |builder, binding| {
-        let bind = binding
-            .bind
-            .expect("compiled feature bindings must include a bind function");
-        bind(builder, &context)
-    })
-    .build()
+    #[cfg(feature = "internal-eval-runner")]
+    {
+        builder = builder.bind(EvalImpl.serve());
+    }
+
+    #[cfg(feature = "experiments")]
+    {
+        builder = builder.bind(ExperimentsImpl.serve());
+    }
+
+    builder = builder
+        .bind(IngestionVOImpl.serve())
+        .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
+        .bind(ActionPolicyImpl::new(tool_router.clone(), session_store.clone()).serve())
+        .bind(GraphMemoryMaintImpl.serve())
+        .bind(KnowledgeImpl.serve())
+        .bind(LearningReviewImpl.serve())
+        .bind(MemoryImpl.serve())
+        .bind(NeonMaintImpl.serve())
+        .bind(PrivacyImpl.serve())
+        .bind(SkillsImpl.serve())
+        .bind(CronJobImpl.serve())
+        .bind(SessionImpl.serve())
+        .bind(WorkerImpl.serve())
+        .bind(TenantsImpl.serve())
+        .bind(TenantImpl.serve())
+        .bind(ProcedureExecutionImpl.serve())
+        .bind(KnowledgeSyncIngestionImpl.serve())
+        .bind(ConsolidateImpl.serve());
+
+    #[cfg(feature = "skill-learning")]
+    {
+        builder = builder.bind(SkillLearningImpl.serve());
+    }
+
+    #[cfg(feature = "experiments")]
+    {
+        builder = builder
+            .bind(ExperimentRunImpl.serve())
+            .bind(ExperimentTrialRunImpl.serve());
+    }
+
+    builder
+        .bind(WorkerTurnExecutionImpl.serve())
+        .bind(TurnExecutionImpl.serve())
+        .build()
 }
 
 /// Returns the service names expected for readiness in this build.
@@ -240,240 +211,23 @@ fn expected_service_names_for_features(
     internal_eval_enabled: bool,
     skill_learning_enabled: bool,
 ) -> Vec<&'static str> {
-    restate_bindings_for_features(
-        experiments_enabled,
-        internal_eval_enabled,
-        skill_learning_enabled,
-    )
-    .into_iter()
-    .map(|binding| binding.name)
-    .collect()
-}
-
-fn restate_bindings_for_features(
-    experiments_enabled: bool,
-    internal_eval_enabled: bool,
-    skill_learning_enabled: bool,
-) -> Vec<&'static RestateBinding> {
-    let mut bindings = Vec::new();
-    bindings.extend(CORE_HEAD_BINDINGS);
+    let mut names = Vec::new();
+    names.extend(CORE_HEAD_SERVICE_NAMES.iter().copied());
     if internal_eval_enabled {
-        bindings.extend(INTERNAL_EVAL_SERVICE_BINDINGS);
+        names.push("Eval");
     }
     if experiments_enabled {
-        bindings.extend(EXPERIMENT_SERVICE_BINDINGS);
+        names.push("Experiments");
     }
-    bindings.extend(CORE_BODY_BINDINGS);
+    names.extend(CORE_BODY_SERVICE_NAMES.iter().copied());
     if skill_learning_enabled {
-        bindings.extend(SKILL_LEARNING_WORKFLOW_BINDINGS);
+        names.push("SkillLearning");
     }
     if experiments_enabled {
-        bindings.extend(EXPERIMENT_WORKFLOW_BINDINGS);
+        names.extend(EXPERIMENT_WORKFLOW_SERVICE_NAMES.iter().copied());
     }
-    bindings.extend(CORE_TAIL_BINDINGS);
-    bindings
-}
-
-fn bind_session_store(
-    builder: EndpointBuilder,
-    context: &EndpointBindingContext<'_>,
-) -> EndpointBuilder {
-    builder.bind(SessionStoreImpl::new(context.session_store.clone(), context.pool.clone()).serve())
-}
-
-fn bind_llm_gateway(
-    builder: EndpointBuilder,
-    context: &EndpointBindingContext<'_>,
-) -> EndpointBuilder {
-    builder.bind(LLMGatewayImpl::new(context.providers.clone()).serve())
-}
-
-fn bind_agent_definitions(
-    builder: EndpointBuilder,
-    _: &EndpointBindingContext<'_>,
-) -> EndpointBuilder {
-    builder.bind(AgentDefinitionsImpl.serve())
-}
-
-fn bind_agents(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(AgentsImpl.serve())
-}
-
-fn bind_admin_maintenance(
-    builder: EndpointBuilder,
-    _: &EndpointBindingContext<'_>,
-) -> EndpointBuilder {
-    builder.bind(AdminMaintenanceImpl.serve())
-}
-
-fn bind_artifacts(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(ArtifactsImpl.serve())
-}
-
-fn bind_action_reviews(
-    builder: EndpointBuilder,
-    _: &EndpointBindingContext<'_>,
-) -> EndpointBuilder {
-    builder.bind(ActionReviewsImpl.serve())
-}
-
-fn bind_api_keys(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(ApiKeysImpl.serve())
-}
-
-fn bind_authz(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(AuthzImpl.serve())
-}
-
-fn bind_authz_challenges(
-    builder: EndpointBuilder,
-    _: &EndpointBindingContext<'_>,
-) -> EndpointBuilder {
-    builder.bind(AuthzChallengesImpl.serve())
-}
-
-fn bind_contacts(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(ContactsImpl.serve())
-}
-
-#[cfg(feature = "internal-eval-runner")]
-fn bind_eval(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(EvalImpl.serve())
-}
-
-#[cfg(feature = "experiments")]
-fn bind_experiments(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(ExperimentsImpl.serve())
-}
-
-fn bind_ingestion_vo(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(IngestionVOImpl.serve())
-}
-
-fn bind_tool_executor(
-    builder: EndpointBuilder,
-    context: &EndpointBindingContext<'_>,
-) -> EndpointBuilder {
-    builder.bind(ToolExecutorImpl::new(context.tool_router.clone()).serve())
-}
-
-fn bind_action_policy(
-    builder: EndpointBuilder,
-    context: &EndpointBindingContext<'_>,
-) -> EndpointBuilder {
-    builder.bind(
-        ActionPolicyImpl::new(context.tool_router.clone(), context.session_store.clone()).serve(),
-    )
-}
-
-fn bind_graph_memory_maint(
-    builder: EndpointBuilder,
-    _: &EndpointBindingContext<'_>,
-) -> EndpointBuilder {
-    builder.bind(GraphMemoryMaintImpl.serve())
-}
-
-fn bind_knowledge(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(KnowledgeImpl.serve())
-}
-
-fn bind_learning_review(
-    builder: EndpointBuilder,
-    _: &EndpointBindingContext<'_>,
-) -> EndpointBuilder {
-    builder.bind(LearningReviewImpl.serve())
-}
-
-fn bind_memory(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(MemoryImpl.serve())
-}
-
-fn bind_neon_maint(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(NeonMaintImpl.serve())
-}
-
-fn bind_privacy(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(PrivacyImpl.serve())
-}
-
-fn bind_skills(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(SkillsImpl.serve())
-}
-
-fn bind_cron_job(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(CronJobImpl.serve())
-}
-
-fn bind_session(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(SessionImpl.serve())
-}
-
-fn bind_worker(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(WorkerImpl.serve())
-}
-
-fn bind_tenants(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(TenantsImpl.serve())
-}
-
-fn bind_tenant(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(TenantImpl.serve())
-}
-
-fn bind_procedure_execution(
-    builder: EndpointBuilder,
-    _: &EndpointBindingContext<'_>,
-) -> EndpointBuilder {
-    builder.bind(ProcedureExecutionImpl.serve())
-}
-
-fn bind_knowledge_sync_ingestion(
-    builder: EndpointBuilder,
-    _: &EndpointBindingContext<'_>,
-) -> EndpointBuilder {
-    builder.bind(KnowledgeSyncIngestionImpl.serve())
-}
-
-fn bind_consolidate(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(ConsolidateImpl.serve())
-}
-
-#[cfg(feature = "skill-learning")]
-fn bind_skill_learning(
-    builder: EndpointBuilder,
-    _: &EndpointBindingContext<'_>,
-) -> EndpointBuilder {
-    builder.bind(SkillLearningImpl.serve())
-}
-
-#[cfg(feature = "experiments")]
-fn bind_experiment_run(
-    builder: EndpointBuilder,
-    _: &EndpointBindingContext<'_>,
-) -> EndpointBuilder {
-    builder.bind(ExperimentRunImpl.serve())
-}
-
-#[cfg(feature = "experiments")]
-fn bind_experiment_trial_run(
-    builder: EndpointBuilder,
-    _: &EndpointBindingContext<'_>,
-) -> EndpointBuilder {
-    builder.bind(ExperimentTrialRunImpl.serve())
-}
-
-fn bind_worker_turn_execution(
-    builder: EndpointBuilder,
-    _: &EndpointBindingContext<'_>,
-) -> EndpointBuilder {
-    builder.bind(WorkerTurnExecutionImpl.serve())
-}
-
-fn bind_turn_execution(
-    builder: EndpointBuilder,
-    _: &EndpointBindingContext<'_>,
-) -> EndpointBuilder {
-    builder.bind(TurnExecutionImpl.serve())
+    names.extend(CORE_TAIL_SERVICE_NAMES.iter().copied());
+    names
 }
 
 /// Returns true when any Restate deployment contains every expected service.
@@ -504,7 +258,7 @@ mod tests {
     use super::{
         RegisteredDeployment, RegisteredService, expected_service_names,
         expected_service_names_for_features, expected_service_names_for_internal_eval,
-        restate_bindings_for_features, services_registered, services_registered_with_expected,
+        services_registered, services_registered_with_expected,
     };
 
     fn deployment_with_services(services: &[&str]) -> RegisteredDeployment {
@@ -521,34 +275,21 @@ mod tests {
     }
 
     #[test]
-    fn compiled_bindings_are_the_expected_name_source_of_truth() {
-        let bindings = restate_bindings_for_features(
-            cfg!(feature = "experiments"),
-            cfg!(feature = "internal-eval-runner"),
-            cfg!(feature = "skill-learning"),
-        );
+    fn expected_service_names_are_unique_for_compiled_features() {
         let mut names = HashSet::new();
 
-        for binding in &bindings {
-            assert!(
-                binding.bind.is_some(),
-                "compiled binding {} must have a bind function",
-                binding.name
-            );
-            assert!(
-                names.insert(binding.name),
-                "duplicate Restate binding name {}",
-                binding.name
-            );
+        for name in expected_service_names() {
+            assert!(names.insert(name), "duplicate Restate binding name {name}");
         }
 
         assert_eq!(
             expected_service_names(),
-            bindings
-                .iter()
-                .map(|binding| binding.name)
-                .collect::<Vec<_>>(),
-            "readiness names must come from the compiled binding descriptors"
+            expected_service_names_for_features(
+                cfg!(feature = "experiments"),
+                cfg!(feature = "internal-eval-runner"),
+                cfg!(feature = "skill-learning"),
+            ),
+            "readiness names must match compiled feature flags"
         );
     }
 

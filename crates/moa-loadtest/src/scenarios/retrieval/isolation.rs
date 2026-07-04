@@ -1,6 +1,7 @@
 //! Cross-tenant isolation probes for the retrieval perf gate.
 
 use super::*;
+use moa_memory_vector::VectorMatch;
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct LeakReport {
@@ -99,10 +100,53 @@ pub(super) async fn attack_vector_oracle(stack: &Stack) -> Result<(), String> {
     )
     .await
     .map_err(display)?;
-    matches
-        .is_empty()
+    assert_vector_matches_scoped_to_tenant(&stack.pool, tenant_b, &matches).await
+}
+
+async fn assert_vector_matches_scoped_to_tenant(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    matches: &[VectorMatch],
+) -> Result<(), String> {
+    let uids = unique_match_uids(matches);
+    if uids.is_empty() {
+        return Ok(());
+    }
+
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
+    let mut conn = app_scoped_conn(pool, tenant_id).await.map_err(display)?;
+    let visible_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        WITH expected AS (SELECT unnest($1::uuid[]) AS uid)
+        SELECT count(*)
+        FROM expected
+        JOIN moa.node_index AS node
+          ON node.uid = expected.uid
+         AND node.storage_partition_id = $2
+        JOIN moa.embeddings AS embedding
+          ON embedding.uid = expected.uid
+         AND embedding.storage_partition_id = node.storage_partition_id
+        "#,
+    )
+    .bind(&uids)
+    .bind(&storage_partition_id)
+    .fetch_one(conn.as_mut())
+    .await
+    .map_err(display)?;
+    conn.commit().await.map_err(display)?;
+
+    (visible_count as usize == uids.len())
         .then_some(())
-        .ok_or_else(|| format!("vector oracle leaked matches: {matches:?}"))
+        .ok_or_else(|| {
+            format!("vector oracle returned off-scope matches for tenant {tenant_id}: {matches:?}")
+        })
+}
+
+fn unique_match_uids(matches: &[VectorMatch]) -> Vec<Uuid> {
+    let mut uids = matches.iter().map(|hit| hit.uid).collect::<Vec<_>>();
+    uids.sort_unstable();
+    uids.dedup();
+    uids
 }
 
 pub(super) async fn attack_changelog_leak(stack: &Stack) -> Result<(), String> {
@@ -216,4 +260,34 @@ pub(super) fn parse_vector_text(value: &str) -> Result<Vec<f32>> {
 
 pub(super) fn display(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unique_match_uids_collapses_duplicate_vector_hits() {
+        // Pins: RLS leak accounting compares distinct returned nodes, not duplicated ANN hits.
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
+
+        assert_eq!(
+            unique_match_uids(&[
+                VectorMatch {
+                    uid: second,
+                    score: 0.7
+                },
+                VectorMatch {
+                    uid: first,
+                    score: 0.9
+                },
+                VectorMatch {
+                    uid: second,
+                    score: 0.6
+                },
+            ]),
+            vec![first, second]
+        );
+    }
 }

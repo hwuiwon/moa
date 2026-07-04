@@ -5,10 +5,7 @@ pub mod hybrid;
 pub mod legs;
 pub mod ranking;
 
-pub use cache::{
-    CacheKey, CachedEntry, CachedHybridRetriever, CachedHybridRetrieverConfig, PlannedRetriever,
-    RetrievalBackend,
-};
+pub use cache::{CacheKey, CachedEntry, CachedHybridRetriever, PlannedRetriever, RetrievalBackend};
 pub use hybrid::{
     HybridRetriever, KnowledgeChunkHydration, LegSources, LexicalBackend, LineageContext, Result,
     RetrievalError, RetrievalHit, RetrievalRequest, SourceTier,

@@ -12,7 +12,6 @@ use moa_knowledge::{
         KnowledgeIngestionPipeline, KnowledgeIngestionPipelineConfig, MemoryKnowledgeGraphWriter,
         PageIngestionReport,
     },
-    observability::MetricsIngestionObserver,
     parser::{
         DocumentParser, llamaparse::LlamaParseParser, native::NativeDocumentParser,
         reducto::ReductoParser, unstructured::UnstructuredParser,
@@ -135,7 +134,6 @@ type ProductionKnowledgeIngestionPipeline = KnowledgeIngestionPipeline<
     ProductionDocumentParser,
     SharedEmbeddingProvider,
     MemoryKnowledgeGraphWriter<PostgresGraphStore>,
-    MetricsIngestionObserver,
 >;
 
 fn build_ingestion_pipeline(
@@ -171,14 +169,11 @@ fn build_ingestion_pipeline(
         MemoryScope::Tenant { tenant_id },
         "knowledge_sync_ingestion",
     ));
-    let observer = Arc::new(MetricsIngestionObserver);
-
     Ok(KnowledgeIngestionPipeline::new(
         repository,
         parser,
         embedder,
         graph,
-        observer,
         KnowledgeIngestionPipelineConfig {
             chunking: chunking_config(config.knowledge.chunking),
             provider,

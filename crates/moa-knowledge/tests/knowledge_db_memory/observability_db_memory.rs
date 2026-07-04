@@ -22,7 +22,6 @@ use moa_knowledge::{
         GraphWriteReport, KnowledgeGraphWriter, KnowledgeIngestionPipeline,
         KnowledgeIngestionPipelineConfig,
     },
-    observability::MetricsIngestionObserver,
     parser::DocumentParser,
     repository::{KnowledgeRepository, PostgresKnowledgeRepository},
 };
@@ -503,7 +502,6 @@ async fn run_failure_case(case: FailureCase) -> Uuid {
             mode: embedder_mode,
         }),
         Arc::new(TestGraphWriter::new(graph_mode)),
-        Arc::new(MetricsIngestionObserver),
         KnowledgeIngestionPipelineConfig {
             chunking: ChunkingConfig {
                 target_tokens: 4,

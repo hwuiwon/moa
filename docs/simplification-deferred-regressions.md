@@ -1,32 +1,42 @@
 # Simplification Deferred Regressions
 
 This file tracks regressions, degradations, and validation blockers found while
-simplifying the codebase. These are intentionally deferred so the simplification
-queue can continue without mixing unrelated loadtest/runtime repair work into
-small cleanup cuts.
+simplifying the codebase. The items below were repaired on 2026-07-04 as part of
+the deferred-regression fix plan.
 
-## Open Items
+## Resolved Items
 
-| ID | Surface | Status | Evidence | Impact | Later Fix Direction |
-|---|---|---|---|---|---|
-| REG-001 | Retrieval perf gate hardware floor | Deferred | `cargo run --release -p moa-loadtest --bin perf_gate -- --profile retrieval --tenants 2 --facts-per-tenant 50 --qps 5 --duration 15s ...` built successfully, then exited with `hardware floor unmet: x86_64 with AVX2 is required`. | Local developer machines that do not satisfy the x86 AVX2 floor cannot run the graph-memory retrieval perf gate after RAG/retrieval changes. | Keep the release gate strict, but add a documented local/dev retrieval smoke profile or CI-only path so non-x86 developers can still get a bounded regression signal. |
-| REG-002 | `make loadtest-mock` OpenFGA env handling | Deferred | After relocating RustFS ports, `make loadtest-mock` restarted the orchestrator, but readiness timed out. Logs showed `configuration error: MOA_AUTHZ_OPENFGA_STORE_ID is required when configuring this section`. Running `make fga-bootstrap` and exporting `.env.fga` fixed startup. | The target assumes the caller has sourced generated OpenFGA IDs, so a nominal loadtest target can fail after a costly Docker rebuild. | Make the target fail early with a clearer preflight or have it source `.env.fga`/run bootstrap the same way `make dev` does. |
-| REG-003 | RustFS host port collision during loadtest | Deferred | Initial `make loadtest-mock` failed on `Bind for 0.0.0.0:9000 failed: port is already allocated`. Rerun with `MOA_RUSTFS_PORT=10090 MOA_RUSTFS_CONSOLE_PORT=10091` got past networking. | Local loadtest is brittle when common host ports 9000/9001 are already in use. | Prefer non-conflicting local defaults for loadtest or add a preflight that suggests/export-safe alternate ports before compose starts. |
-| REG-004 | Fixed-rate mock loadtest overloads local stack | Deferred | `make loadtest-mock` completed with exit code 0 after setup fixes, but reported 2,553/2,999 turns completed, 446 dropped, 14.87% error rate, corrected p95 33.01s, service-time p95 3.58s, dispatch-delay p95 30.00s. | The target exits successfully while the report clearly indicates local capacity/backlog degradation. This is not useful as a pass/fail regression signal. | Split local smoke from capacity load, add pass/fail thresholds for the mock target, and reduce the default local rate or require an explicit capacity profile. |
-| REG-005 | Low-scale mock perf gate session setup/auth failures | Deferred | `perf_gate --profile mock-short --duration 20s --vus 1 ...` failed budget with corrected p95 30.67s and 31.66% turn error rate while service-time p95 was 564.7ms. Restate logs showed `403 forbidden ... not participant` during loadtest `SessionStore/create_session`. | Even a small local mock perf run can fail from loadtest tenancy/session setup rather than the product path under test. | Inspect the loadtest tenancy/session grant path and Restate cleanup expectations; make setup deterministic before treating mock perf failures as product regressions. |
-| REG-006 | PII DB-memory erasure test database pool | Deferred | `cargo test -p moa-memory-pii --locked` passed the PII unit tests, then `erasure_db_memory::hard_purge_contact_candidates_writes_summary_under_app_role_db_memory` failed while creating the isolated Postgres store: `connect to maintenance database: pool timed out while waiting for an open connection`. | The broad PII crate test cannot currently provide a clean regression signal on this machine, even though the offline PII suite and ingest compile check pass. | Inspect local Postgres/test-support pool cleanup and maintenance-database availability before relying on the DB-memory erasure lane as part of routine simplification verification. |
-| REG-007 | Live E2E fixture-service container port discovery | Intermittent; deferred | Periodic `MOA_RUN_LIVE_E2E=1 make e2e-clean-live` after #59/#65/#42/#45/#73 passed the orchestrator test sweep, knowledge service tests, Restate service E2E, brain cache replay, golden eval, and skill-learning checks, then failed in `fixture-service-e2e` on `action_policy_flow_covers_auto_review_decision_and_member_authz` with `container 'd524be09c748fe788fb0d8a187d9b823bb8e78d948312f8dabf41b47483820e6' does not expose port 8080/tcp`. A later periodic gate after #74/#38/#76/#7 passed end-to-end in 22:55; the same action-policy fixture test passed in 178.935s, so the port-discovery failure did not reproduce. | The live gate can fail from fixture/testcontainer port discovery after core product suites pass, blocking a clean end-to-end signal for simplification batches. | Inspect the fixture-service testcontainer image/configuration and port wait logic; keep watching this profile because one later pass does not explain the original port exposure failure. |
-| REG-008 | Analytics DB-route verification pool | Deferred | After #38, `cargo test -p moa-edge --test direct_read_routes_db --locked -- --nocapture` failed all four cases while creating isolated Postgres stores with `connect to maintenance database: pool timed out while waiting for an open connection`; `cargo test -p moa-session --test postgres_store_db --locked postgres_materialized_analytics_views_refresh -- --ignored --exact --nocapture` failed at the same setup step. | The direct analytics/session DB tests cannot currently provide a clean regression signal on this machine, even though `cargo check -p moa-core -p moa-session -p moa-edge -p moa-orchestrator --all-targets --locked` passed. | Inspect local Postgres maintenance-pool exhaustion and isolated test-store cleanup; rerun the two DB lanes after the pool issue is fixed. |
+| ID | Surface | Status | Original Evidence | Resolution Evidence |
+|---|---|---|---|---|
+| REG-001 | Retrieval perf gate hardware floor | Resolved | The strict `retrieval` profile built, then exited before running on this machine with `hardware floor unmet: x86_64 with AVX2 is required`. | Added `retrieval-smoke`, kept strict `retrieval` hardware-floor enforcement, and documented both paths. `retrieval-smoke` passed live against Postgres/pgvector/Cohere: 75/75 requests, P95 9.1ms, cache hit 1.000, 665 RLS attack attempts, 0 leaks. |
+| REG-002 | `make loadtest-mock` OpenFGA env handling | Resolved | `make loadtest-mock` timed out in readiness because the orchestrator started without generated `MOA_AUTHZ_OPENFGA_STORE_ID`/model env. | `make loadtest-mock` now bootstraps OpenFGA, sources `.env.fga`, starts the needed local services, and runs the gated `mock-short` profile. The target passed end-to-end. |
+| REG-003 | RustFS host port collision during loadtest | Resolved | The target initially failed on host ports `9000`/`9001` already being allocated. | The local mock loadtest and chaos paths now default RustFS to safer ports `10090`/`10091`; `make loadtest-mock` and `make chaos-smoke` passed with those defaults. |
+| REG-004 | Fixed-rate mock loadtest overloads local stack | Resolved | The raw mock loadtest exited successfully despite 14.87% turn error rate, 446 dropped turns, and corrected P95 33.01s. | `make loadtest-mock` now runs `perf_gate --profile mock-short` with thresholds. The repaired target passed with 16 completed sessions, 0 failed, turn error rate 0.0000, corrected P95 632.3ms. |
+| REG-005 | Low-scale mock perf gate session setup/auth failures | Resolved | Low-scale `mock-short` failed from session setup/authz (`403 forbidden ... not participant`) rather than product latency. | The mock target now performs deterministic local bootstrap before the measured gate. `make loadtest-mock` passed the low-rate gated path with no session failures. |
+| REG-006 | PII DB-memory erasure test database pool | Resolved | PII DB-memory erasure failed during isolated Postgres store creation with `pool timed out while waiting for an open connection`. | Isolated test maintenance work now uses a single admin connection with clearer compose hints. `hard_purge_contact_candidates_writes_summary_under_app_role_db_memory` passed against local compose Postgres. |
+| REG-007 | Live E2E fixture-service container port discovery | Resolved | A live gate intermittently failed in fixture-service E2E with `container ... does not expose port 8080/tcp`. | Fixture port discovery now uses labeled retries and richer diagnostics. The full clean live gate passed, including fixture-service E2E 5/5. |
+| REG-008 | Analytics/session-store DB verification pool | Resolved | Edge analytics, session analytics, and orchestrator session-store DB tests failed during isolated-store setup with maintenance pool timeouts. | Isolated maintenance setup was repaired and the affected DB lanes passed: edge direct-read routes 4/4, session materialized analytics refresh, orchestrator session-store library DB cases 11/11, plus the full clean live gate DB lanes. |
+| REG-009 | Fixture-service E2E compile-budget timeout | Resolved | Fixture-service E2E timed out at 240s because the action-policy test spent its timeout budget cold-compiling the spawned orchestrator dependency graph. | `run-clean-e2e.sh` prebuilds `moa-orchestrator-bin`, exports `MOA_ORCHESTRATOR_BIN`, and reuses the binary for fixture/shared orchestrator lanes. Fixture-service E2E passed 5/5 in the full clean live gate. |
+
+## Validation Summary
+
+- Repair plan: `docs/engineering-discipline/plans/2026-07-04-fix-simplification-deferred-regressions.md`.
+- `cargo test -p moa-loadtest --locked` passed before the RLS-oracle adjustment.
+- `cargo clippy -p moa-loadtest --all-targets --locked -- -D warnings` passed.
+- `cargo test -p moa-loadtest --locked unique_match_uids_collapses_duplicate_vector_hits` passed.
+- `cargo test -p moa-memory-vector --test memory_vector_db_memory --locked cross_tenant_knn_cannot_see_other_workspace_vectors -- --nocapture --test-threads=1` passed.
+- `retrieval-smoke` passed live with 75/75 requests, P95 9.1ms, P99 12.3ms, cache hit 1.000, 665 RLS attack attempts, and 0 leaks.
+- `make loadtest-mock` passed the gated mock-short profile with 16 completed sessions, 0 failures, corrected P95 632.3ms, and turn error rate 0.0000.
+- `make chaos-smoke` passed the provider 429 storm lane with 1/1 test passing after the chaos target inherited the safe RustFS port defaults.
+- `MOA_RUN_LIVE_E2E=1 make e2e-clean-live` passed end-to-end in 108:16.
 
 ## Notes
 
-- These items were observed while validating simplification finding #58, which
-  removed the identity-only `MemoryScope::ancestors()` chain and duplicate
-  retrieval cache-key `layers=` material.
-- The focused code checks for #58 passed. The retrieval/perf gates above are
-  deferred validation work, not blockers for continuing the simplification
-  queue.
-- REG-006 was observed while validating #59. REG-007 was observed during the
-  periodic live E2E gate after the #59/#65/#42/#45/#73 simplification batch and
-  did not reproduce during the later #74/#38/#76/#7 live gate. REG-008 was
-  observed while validating #38.
+- The strict `retrieval` profile still enforces the release hardware floor. Use
+  `retrieval-smoke` for local developer validation on machines that cannot run
+  the strict gate.
+- During repair validation, the initial `retrieval-smoke` run exposed a false
+  positive in the loadtest vector oracle: tenant B legitimately returned tenant
+  B `Fact` vectors for tenant A's query vector, but the oracle treated any hit
+  as a leak. The oracle now verifies returned UIDs are visible in the scoped
+  tenant graph/vector rows; tenant-B hits are accepted, off-scope hits still fail.

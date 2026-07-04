@@ -23,8 +23,8 @@ use moa_session::PostgresSessionStore;
 use moa_skills::artifact::skill_artifact_document_from_package;
 use moa_skills::package::{SkillPackage, ValidatedSkillPackage};
 use moa_skills::review::{
-    LearningReviewStore, LearningReviewStoreFuture, SkillReviewAction, SkillReviewRequest,
-    prepare_skill_acceptance, promote_claimed_skill_candidate,
+    LearningReviewStore, SkillReviewAction, SkillReviewRequest, prepare_skill_acceptance,
+    promote_claimed_skill_candidate,
 };
 use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::bootstrap_test_db;
@@ -436,24 +436,28 @@ mod skill_learning_review {
             &'a self,
             tenant_id: &'a TenantId,
             candidate_id: Uuid,
-        ) -> LearningReviewStoreFuture<'a, Option<LearningCandidate>> {
-            Box::pin(async move {
+        ) -> impl std::future::Future<
+            Output = std::result::Result<Option<LearningCandidate>, MoaError>,
+        > + Send
+        + 'a {
+            async move {
                 self.store
                     .get_learning_candidate(tenant_id, candidate_id)
                     .await
-            })
+            }
         }
 
         fn update_learning_candidate_status_from<'a>(
             &'a self,
             update: &'a LearningCandidateStatusUpdate,
             expected_status: LearningCandidateStatus,
-        ) -> LearningReviewStoreFuture<'a, bool> {
-            Box::pin(async move {
+        ) -> impl std::future::Future<Output = std::result::Result<bool, MoaError>> + Send + 'a
+        {
+            async move {
                 self.store
                     .update_learning_candidate_status_from(update, expected_status)
                     .await
-            })
+            }
         }
 
         fn update_learning_candidate_status_from_in_tx<'a>(
@@ -461,31 +465,26 @@ mod skill_learning_review {
             conn: &'a mut sqlx::PgConnection,
             update: &'a LearningCandidateStatusUpdate,
             expected_status: LearningCandidateStatus,
-        ) -> LearningReviewStoreFuture<'a, bool> {
-            Box::pin(async move {
+        ) -> impl std::future::Future<Output = std::result::Result<bool, MoaError>> + Send + 'a
+        {
+            async move {
                 self.store
                     .update_learning_candidate_status_from_in_tx(conn, update, expected_status)
                     .await
-            })
-        }
-
-        fn append_learning<'a>(
-            &'a self,
-            entry: &'a LearningEntry,
-        ) -> LearningReviewStoreFuture<'a, ()> {
-            Box::pin(async move { self.store.append_learning(entry).await })
+            }
         }
 
         fn append_learning_in_tx<'a>(
             &'a self,
             _conn: &'a mut sqlx::PgConnection,
             _entry: &'a LearningEntry,
-        ) -> LearningReviewStoreFuture<'a, ()> {
-            Box::pin(async move {
+        ) -> impl std::future::Future<Output = std::result::Result<(), MoaError>> + Send + 'a
+        {
+            async move {
                 Err(MoaError::StorageError(
                     "injected learning append failure".to_string(),
                 ))
-            })
+            }
         }
     }
 

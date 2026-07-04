@@ -28,8 +28,8 @@ use crate::{
     graph_delta::{GraphEdgeUpsert, KnowledgeGraphDelta, document_chunk_delta, stable_uid},
     normalize::{normalize_text, redact_provider_metadata},
     observability::{
-        FailureClassification, IngestionObserver, StepLabels, StepOutcome, build_step_row,
-        classify_failure, failed_outcome,
+        FailureClassification, StepLabels, StepOutcome, build_step_row, classify_failure,
+        failed_outcome, record_step_observability,
     },
     parser::DocumentParser,
     providers::RecordContentFetcher,
@@ -237,12 +237,11 @@ pub struct PageIngestionReport {
 }
 
 /// Dependency-injected ingestion service free of Restate service types.
-pub struct KnowledgeIngestionPipeline<R, P, E, G, O> {
+pub struct KnowledgeIngestionPipeline<R, P, E, G> {
     repository: Arc<R>,
     parser: Arc<P>,
     embedder: Arc<E>,
     graph: Arc<G>,
-    observer: Arc<O>,
     chunking: ChunkingConfig,
     provider: String,
     parser_label: String,
@@ -260,13 +259,12 @@ pub struct KnowledgeIngestionPipelineConfig {
     pub parser_label: String,
 }
 
-impl<R, P, E, G, O> KnowledgeIngestionPipeline<R, P, E, G, O>
+impl<R, P, E, G> KnowledgeIngestionPipeline<R, P, E, G>
 where
     R: KnowledgeRepository,
     P: DocumentParser,
     E: EmbeddingProvider,
     G: KnowledgeGraphWriter,
-    O: IngestionObserver,
 {
     /// Creates a knowledge ingestion pipeline from injected dependencies.
     #[must_use]
@@ -275,7 +273,6 @@ where
         parser: Arc<P>,
         embedder: Arc<E>,
         graph: Arc<G>,
-        observer: Arc<O>,
         config: KnowledgeIngestionPipelineConfig,
     ) -> Self {
         Self {
@@ -283,7 +280,6 @@ where
             parser,
             embedder,
             graph,
-            observer,
             chunking: config.chunking,
             provider: config.provider,
             parser_label: config.parser_label,
@@ -456,80 +452,6 @@ where
         }
     }
 
-    /// Parses, normalizes, chunks, persists, and writes graph/vector state for one object.
-    #[tracing::instrument(
-        name = "knowledge_object_ingest",
-        skip(self, input),
-        fields(
-            sync_run_id = %sync_run_uid,
-            tenant_id = %object.tenant_id,
-            connection_id = %object.connection_uid,
-            object_id = %object.object_uid,
-            provider = %self.provider,
-            parser = %self.parser_label,
-            status = tracing::field::Empty,
-            error_code = tracing::field::Empty
-        )
-    )]
-    pub async fn ingest_parsed_object(
-        &self,
-        sync_run_uid: Uuid,
-        object: KnowledgeObject,
-        input: crate::domain::ParseInput,
-    ) -> Result<KnowledgeGraphDelta> {
-        self.repository.upsert_object(object.clone()).await?;
-        self.record_step(
-            sync_run_uid,
-            Some(object.object_uid),
-            "parse_submitted",
-            StepOutcome::completed(),
-        )
-        .await?;
-        let parse_span = tracing::info_span!(
-            "knowledge_parse_job",
-            tenant_id = %object.tenant_id,
-            connection_id = %object.connection_uid,
-            sync_run_id = %sync_run_uid,
-            object_id = %object.object_uid,
-            provider = %self.provider,
-            parser = %self.parser_label,
-            status = tracing::field::Empty,
-            error_code = tracing::field::Empty
-        );
-        let parsed = match self.parse_document(input, &parse_span).await {
-            Ok(parsed) => {
-                record_span_outcome(&parse_span, "completed", None);
-                parsed
-            }
-            Err(error) => {
-                let classification = self
-                    .record_failure_step(
-                        sync_run_uid,
-                        Some(object.object_uid),
-                        "parse_completed",
-                        &error,
-                    )
-                    .await?;
-                record_span_outcome(&parse_span, "failed", Some(classification.error_code));
-                return Err(error);
-            }
-        };
-        self.record_counter_step(
-            sync_run_uid,
-            Some(object.object_uid),
-            "parse_completed",
-            StepOutcome::completed_with_counters(json!({ "objects_parsed": 1 })),
-            KnowledgeSyncCounters {
-                objects_parsed: 1,
-                ..KnowledgeSyncCounters::default()
-            },
-        )
-        .await?;
-        self.persist_parsed(sync_run_uid, object, parsed, Vec::new())
-            .await
-            .map(|outcome| outcome.delta)
-    }
-
     async fn ingest_record(
         &self,
         sync_run_uid: Uuid,
@@ -636,9 +558,7 @@ where
             },
         )
         .await?;
-        let outcome = self
-            .persist_parsed(sync_run_uid, object, parsed, Vec::new())
-            .await?;
+        let outcome = self.persist_parsed(sync_run_uid, object, parsed).await?;
         if outcome.ingested {
             Ok(RecordIngestionOutcome::Ingested {
                 embeddings_created: outcome.embeddings_created,
@@ -653,7 +573,6 @@ where
         sync_run_uid: Uuid,
         object: KnowledgeObject,
         parsed: ParsedDocument,
-        deleted_chunk_uids: Vec<Uuid>,
     ) -> Result<PersistedIngestion> {
         let content_hash = content_hash(&normalize_text(&parsed.text));
         let latest_version = self
@@ -761,14 +680,7 @@ where
         };
         let version_uid = version.version_uid;
         let persisted = self
-            .persist_claimed_version(
-                sync_run_uid,
-                object,
-                version,
-                parsed,
-                previous_chunks,
-                deleted_chunk_uids,
-            )
+            .persist_claimed_version(sync_run_uid, object, version, parsed, previous_chunks)
             .await;
         if persisted.is_ok() {
             self.repository
@@ -789,7 +701,6 @@ where
         version: DocumentVersion,
         parsed: ParsedDocument,
         previous_chunks: Vec<KnowledgeChunk>,
-        deleted_chunk_uids: Vec<Uuid>,
     ) -> Result<PersistedIngestion> {
         self.record_step(
             sync_run_uid,
@@ -827,8 +738,7 @@ where
         let delta = document_chunk_delta(&object, &version, &chunks);
         // Fold each chunk's graph node UID and the `active` retrieval marker into
         // the rows before the batch insert. Persisting them up front makes chunk
-        // storage a single multi-row write and removes the former per-chunk
-        // `set_chunk_graph_uid` round trip.
+        // storage a single multi-row write.
         for chunk in &mut chunks {
             let graph_uid = chunk_graph_uid(&delta, object.tenant_id, chunk)?;
             chunk.graph_node_uid = Some(graph_uid);
@@ -861,7 +771,7 @@ where
             StepOutcome::completed_with_counters(json!({
                     "chunks_total": chunks.len(),
                     "chunks_new": chunks_new,
-                    "chunks_deleted": orphan_chunks.len() + deleted_chunk_uids.len(),
+                    "chunks_deleted": orphan_chunks.len(),
             })),
         )
         .await?;
@@ -1022,7 +932,6 @@ where
         let tombstones = orphan_chunks
             .iter()
             .map(|chunk| chunk.chunk_uid)
-            .chain(deleted_chunk_uids)
             .collect::<Vec<_>>();
         self.repository.tombstone_chunks(&tombstones).await?;
         self.record_step(
@@ -1462,9 +1371,7 @@ where
                 .ok()
                 .map(|duration| duration.max(1))
         });
-        self.observer
-            .record_step(sync_run_uid, object_uid, labels, outcome.clone())
-            .await?;
+        record_step_observability(labels, &outcome);
         let step = build_step_row(sync_run_uid, object_uid, stage, outcome);
         if let Some(counter_delta) = counter_delta {
             self.repository
@@ -1539,9 +1446,9 @@ struct PersistedIngestion {
 
 /// Returns `metadata` as a JSON object with the `active` retrieval flag set.
 ///
-/// This mirrors the previous `set_chunk_graph_uid` marker write: non-object
-/// metadata is replaced with an empty object before the flag is inserted, so a
-/// freshly persisted chunk is always visible to active retrieval.
+/// Non-object metadata is replaced with an empty object before the flag is
+/// inserted, so a freshly persisted chunk is always visible to active
+/// retrieval.
 fn mark_metadata_active(metadata: Value) -> Value {
     let mut object = match metadata {
         Value::Object(map) => map,

@@ -26,59 +26,6 @@ use super::runtime_context::RuntimeContextProcessor;
 use super::skills::{SharedSkillInjector, SkillInjector};
 use super::tools::ToolDefinitionProcessor;
 
-/// Builds a context pipeline without a memory backend.
-///
-/// Production runtimes use
-/// [`build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions`].
-/// This helper remains useful for isolated pipeline and brain-loop tests that
-/// do not provision graph-memory storage.
-pub fn build_default_pipeline(
-    config: &MoaConfig,
-    session_store: Arc<dyn SessionStore>,
-) -> ContextPipeline {
-    build_default_pipeline_with_tools(config, session_store, Vec::new())
-}
-
-/// Builds a context pipeline without memory and with a fixed tool loadout.
-pub fn build_default_pipeline_with_tools(
-    config: &MoaConfig,
-    session_store: Arc<dyn SessionStore>,
-    tool_schemas: Vec<serde_json::Value>,
-) -> ContextPipeline {
-    let history: Box<dyn ContextProcessor> = Box::new(
-        HistoryCompiler::new(session_store.clone())
-            .with_compaction_config(config.compaction.clone())
-            .with_tool_output_config(config.tool_output.clone())
-            .with_snapshot_config(config.context_snapshot.clone()),
-    );
-    let mut stages: Vec<Box<dyn ContextProcessor>> = vec![
-        Box::new(IdentityProcessor::default()),
-        Box::new(AgentInstructionProcessor::new()),
-        Box::new(InstructionProcessor::new(
-            config.general.workspace_instructions.clone(),
-            config.general.user_instructions.clone(),
-            None,
-        )),
-        Box::new(ToolDefinitionProcessor::new(tool_schemas)),
-    ];
-    stages.extend([
-        history,
-        Box::new(DelegationPlanningProcessor::new()) as Box<dyn ContextProcessor>,
-        Box::new(RuntimeContextProcessor::default()) as Box<dyn ContextProcessor>,
-        Box::new(Compactor::new(
-            config.compaction.clone(),
-            session_store,
-            None,
-        )) as Box<dyn ContextProcessor>,
-    ]);
-
-    ContextPipeline::with_runtime_limits(
-        stages,
-        config.budgets.daily_tenant_cents,
-        config.context_snapshot.clone(),
-    )
-}
-
 /// Options for graph-backed default context pipeline assembly.
 pub struct GraphMemoryPipelineOptions {
     /// Postgres pool used by graph retrieval.

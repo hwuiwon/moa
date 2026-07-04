@@ -15,13 +15,8 @@ use sqlx::PgConnection;
 use std::future::Future;
 
 use crate::util::{artifact_scope_context, tenant_artifact_scope};
-use std::pin::Pin;
 use thiserror::Error;
 use uuid::Uuid;
-
-/// Boxed store operation future used to keep transaction-borrow lifetimes explicit.
-pub type LearningReviewStoreFuture<'a, T> =
-    Pin<Box<dyn Future<Output = std::result::Result<T, MoaError>> + Send + 'a>>;
 
 /// Store operations required by skill candidate review.
 pub trait LearningReviewStore: Send + Sync {
@@ -30,14 +25,14 @@ pub trait LearningReviewStore: Send + Sync {
         &'a self,
         tenant_id: &'a TenantId,
         candidate_id: Uuid,
-    ) -> LearningReviewStoreFuture<'a, Option<LearningCandidate>>;
+    ) -> impl Future<Output = std::result::Result<Option<LearningCandidate>, MoaError>> + Send + 'a;
 
     /// Applies a candidate status update only when the current status matches.
     fn update_learning_candidate_status_from<'a>(
         &'a self,
         update: &'a LearningCandidateStatusUpdate,
         expected_status: LearningCandidateStatus,
-    ) -> LearningReviewStoreFuture<'a, bool>;
+    ) -> impl Future<Output = std::result::Result<bool, MoaError>> + Send + 'a;
 
     /// Applies a candidate status update in the caller's open transaction.
     fn update_learning_candidate_status_from_in_tx<'a>(
@@ -45,18 +40,14 @@ pub trait LearningReviewStore: Send + Sync {
         conn: &'a mut PgConnection,
         update: &'a LearningCandidateStatusUpdate,
         expected_status: LearningCandidateStatus,
-    ) -> LearningReviewStoreFuture<'a, bool>;
-
-    /// Appends one promoted learning-log entry.
-    fn append_learning<'a>(&'a self, entry: &'a LearningEntry)
-    -> LearningReviewStoreFuture<'a, ()>;
+    ) -> impl Future<Output = std::result::Result<bool, MoaError>> + Send + 'a;
 
     /// Appends one promoted learning-log entry in the caller's open transaction.
     fn append_learning_in_tx<'a>(
         &'a self,
         conn: &'a mut PgConnection,
         entry: &'a LearningEntry,
-    ) -> LearningReviewStoreFuture<'a, ()>;
+    ) -> impl Future<Output = std::result::Result<(), MoaError>> + Send + 'a;
 }
 
 /// Request metadata supplied by the authenticated review service.
@@ -624,22 +615,23 @@ mod tests {
             &'a self,
             _tenant_id: &'a TenantId,
             _candidate_id: Uuid,
-        ) -> LearningReviewStoreFuture<'a, Option<LearningCandidate>> {
+        ) -> impl Future<Output = std::result::Result<Option<LearningCandidate>, MoaError>> + Send + 'a
+        {
             let candidate = self.candidate.clone();
-            Box::pin(async move { Ok(candidate) })
+            async move { Ok(candidate) }
         }
 
         fn update_learning_candidate_status_from<'a>(
             &'a self,
             update: &'a LearningCandidateStatusUpdate,
             expected_status: LearningCandidateStatus,
-        ) -> LearningReviewStoreFuture<'a, bool> {
+        ) -> impl Future<Output = std::result::Result<bool, MoaError>> + Send + 'a {
             let applies = self.status_change_applies;
             *self
                 .recorded_update
                 .lock()
                 .expect("record candidate status update") = Some((update.clone(), expected_status));
-            Box::pin(async move { Ok(applies) })
+            async move { Ok(applies) }
         }
 
         fn update_learning_candidate_status_from_in_tx<'a>(
@@ -647,29 +639,20 @@ mod tests {
             _conn: &'a mut PgConnection,
             _update: &'a LearningCandidateStatusUpdate,
             _expected_status: LearningCandidateStatus,
-        ) -> LearningReviewStoreFuture<'a, bool> {
-            Box::pin(async move {
+        ) -> impl Future<Output = std::result::Result<bool, MoaError>> + Send + 'a {
+            async move {
                 unreachable!("in-tx status update is only used by the pool-backed promote path")
-            })
-        }
-
-        fn append_learning<'a>(
-            &'a self,
-            _entry: &'a LearningEntry,
-        ) -> LearningReviewStoreFuture<'a, ()> {
-            Box::pin(async move {
-                unreachable!("append_learning is only used by the pool-backed promote path")
-            })
+            }
         }
 
         fn append_learning_in_tx<'a>(
             &'a self,
             _conn: &'a mut PgConnection,
             _entry: &'a LearningEntry,
-        ) -> LearningReviewStoreFuture<'a, ()> {
-            Box::pin(async move {
+        ) -> impl Future<Output = std::result::Result<(), MoaError>> + Send + 'a {
+            async move {
                 unreachable!("append_learning_in_tx is only used by the pool-backed promote path")
-            })
+            }
         }
     }
 

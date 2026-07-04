@@ -330,20 +330,14 @@ impl Default for KnowledgeChunkingConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KnowledgeObservabilityConfig {
-    /// Whether sync runs should persist per-step inspection rows.
-    pub store_step_rows: bool,
     /// Maximum object preview characters kept for inspection surfaces.
     pub max_object_preview_chars: usize,
-    /// Whether query trace capture is enabled.
-    pub query_trace_enabled: bool,
 }
 
 impl Default for KnowledgeObservabilityConfig {
     fn default() -> Self {
         Self {
-            store_step_rows: true,
             max_object_preview_chars: 4_000,
-            query_trace_enabled: false,
         }
     }
 }
@@ -473,10 +467,6 @@ impl super::MoaEnvOverlay {
         set_if_some(
             &mut config.knowledge.reducto.chunk_mode,
             &self.reducto_chunk_mode,
-        );
-        set_copy_if_some(
-            &mut config.knowledge.observability.query_trace_enabled,
-            self.knowledge_query_trace_enabled,
         );
     }
 }

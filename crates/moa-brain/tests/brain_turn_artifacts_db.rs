@@ -1,6 +1,8 @@
 #[cfg(feature = "eval-harness")]
 include!("brain_turn_support/common.rs");
 #[cfg(feature = "eval-harness")]
+include!("brain_turn_support/pipeline.rs");
+#[cfg(feature = "eval-harness")]
 include!("brain_turn_support/db.rs");
 #[cfg(feature = "eval-harness")]
 include!("brain_turn_support/artifacts.rs");
@@ -81,8 +83,11 @@ async fn run_brain_turn_uses_tool_result_search_for_artifact_backed_output() {
             )
             .with_session_store(store.clone()),
     );
-    let pipeline =
-        build_default_pipeline_with_tools(&config, store.clone(), tool_router.tool_schemas());
+    let pipeline = build_no_memory_test_pipeline_with_tools(
+        &config,
+        store.clone(),
+        tool_router.tool_schemas(),
+    );
     let llm = Arc::new(ArtifactRetrievalLlmProvider::default());
 
     let result = run_brain_turn(
@@ -181,8 +186,11 @@ async fn run_brain_turn_reads_stderr_stream_from_artifact_backed_output() {
             )
             .with_session_store(store.clone()),
     );
-    let pipeline =
-        build_default_pipeline_with_tools(&config, store.clone(), tool_router.tool_schemas());
+    let pipeline = build_no_memory_test_pipeline_with_tools(
+        &config,
+        store.clone(),
+        tool_router.tool_schemas(),
+    );
     let llm = Arc::new(ArtifactStderrLlmProvider::default());
 
     let result = run_brain_turn(

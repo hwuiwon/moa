@@ -26,7 +26,6 @@ use moa_knowledge::{
         KnowledgeIngestionPipelineConfig,
     },
     normalize::normalize_text,
-    observability::MetricsIngestionObserver,
     parser::DocumentParser,
     providers::RecordContentFetcher,
     repository::{KnowledgeRepository, PostgresKnowledgeRepository},
@@ -332,13 +331,11 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
     let parser = Arc::new(ParagraphParser);
     let embedder = Arc::new(CountingEmbedder::default());
     let graph = Arc::new(FakeGraphWriter::default());
-    let observer = Arc::new(MetricsIngestionObserver);
     let pipeline = KnowledgeIngestionPipeline::new(
         repository.clone(),
         parser,
         embedder.clone(),
         graph.clone(),
-        observer,
         KnowledgeIngestionPipelineConfig {
             chunking: ChunkingConfig {
                 target_tokens: 1,
@@ -532,13 +529,11 @@ async fn ingestion_preserves_chunk_structure_for_bounded_neighbor_context_db_mem
     let parser = Arc::new(ParagraphParser);
     let embedder = Arc::new(CountingEmbedder::default());
     let graph = Arc::new(FakeGraphWriter::default());
-    let observer = Arc::new(MetricsIngestionObserver);
     let pipeline = KnowledgeIngestionPipeline::new(
         repository.clone(),
         parser,
         embedder,
         graph,
-        observer,
         KnowledgeIngestionPipelineConfig {
             chunking: ChunkingConfig {
                 target_tokens: 1,
@@ -703,13 +698,11 @@ async fn ingestion_pipeline_replaying_same_page_keeps_counters_and_identities_on
     let parser = Arc::new(ParagraphParser);
     let embedder = Arc::new(CountingEmbedder::default());
     let graph = Arc::new(FakeGraphWriter::default());
-    let observer = Arc::new(MetricsIngestionObserver);
     let pipeline = KnowledgeIngestionPipeline::new(
         repository.clone(),
         parser,
         embedder.clone(),
         graph,
-        observer,
         KnowledgeIngestionPipelineConfig {
             chunking: ChunkingConfig {
                 target_tokens: 1,
@@ -843,13 +836,11 @@ async fn ingestion_pipeline_duplicate_workers_coalesce_object_version_before_gra
     });
     let embedder = Arc::new(CountingEmbedder::default());
     let graph = Arc::new(FakeGraphWriter::default());
-    let observer = Arc::new(MetricsIngestionObserver);
     let pipeline_a = KnowledgeIngestionPipeline::new(
         repository_a.clone(),
         parser.clone(),
         embedder.clone(),
         graph.clone(),
-        observer.clone(),
         KnowledgeIngestionPipelineConfig {
             chunking: ChunkingConfig {
                 target_tokens: 1,
@@ -865,7 +856,6 @@ async fn ingestion_pipeline_duplicate_workers_coalesce_object_version_before_gra
         parser,
         embedder.clone(),
         graph.clone(),
-        observer,
         KnowledgeIngestionPipelineConfig {
             chunking: ChunkingConfig {
                 target_tokens: 1,
@@ -944,13 +934,11 @@ async fn ingestion_pipeline_prunes_unseen_objects_after_full_selection_refresh()
     let parser = Arc::new(ParagraphParser);
     let embedder = Arc::new(CountingEmbedder::default());
     let graph = Arc::new(FakeGraphWriter::default());
-    let observer = Arc::new(MetricsIngestionObserver);
     let pipeline = KnowledgeIngestionPipeline::new(
         repository.clone(),
         parser,
         embedder,
         graph.clone(),
-        observer,
         KnowledgeIngestionPipelineConfig {
             chunking: ChunkingConfig {
                 target_tokens: 4,
@@ -1052,13 +1040,11 @@ async fn ingestion_pipeline_replay_after_change_token_only_progress_finishes_ing
     let parser = Arc::new(ParagraphParser);
     let embedder = Arc::new(CountingEmbedder::default());
     let graph = Arc::new(FakeGraphWriter::default());
-    let observer = Arc::new(MetricsIngestionObserver);
     let pipeline = KnowledgeIngestionPipeline::new(
         repository.clone(),
         parser,
         embedder.clone(),
         graph,
-        observer,
         KnowledgeIngestionPipelineConfig {
             chunking: ChunkingConfig {
                 target_tokens: 1,
@@ -1201,13 +1187,11 @@ async fn ingestion_pipeline_reclaims_stale_started_claim_after_crash_db_knowledg
     let parser = Arc::new(ParagraphParser);
     let embedder = Arc::new(CountingEmbedder::default());
     let graph = Arc::new(FakeGraphWriter::default());
-    let observer = Arc::new(MetricsIngestionObserver);
     let pipeline = KnowledgeIngestionPipeline::new(
         repository.clone(),
         parser,
         embedder.clone(),
         graph.clone(),
-        observer,
         KnowledgeIngestionPipelineConfig {
             chunking: ChunkingConfig {
                 target_tokens: 1,
@@ -1324,13 +1308,11 @@ async fn ingestion_pipeline_replay_after_graph_uid_midpoint_finishes_ingestion()
     let parser = Arc::new(ParagraphParser);
     let embedder = Arc::new(CountingEmbedder::default());
     let graph = Arc::new(FakeGraphWriter::default());
-    let observer = Arc::new(MetricsIngestionObserver);
     let pipeline = KnowledgeIngestionPipeline::new(
         repository.clone(),
         parser,
         embedder.clone(),
         graph,
-        observer,
         KnowledgeIngestionPipelineConfig {
             chunking: ChunkingConfig {
                 target_tokens: 1,
@@ -1466,7 +1448,6 @@ async fn ingestion_pipeline_fetches_content_for_metadata_only_records_db_memory(
         Arc::new(BytesOrTextParagraphParser),
         embedder.clone(),
         graph.clone(),
-        Arc::new(MetricsIngestionObserver),
         KnowledgeIngestionPipelineConfig {
             chunking: ChunkingConfig {
                 target_tokens: 1,
@@ -1557,7 +1538,6 @@ async fn ingestion_pipeline_falls_back_to_title_when_content_fetch_fails_db_memo
         Arc::new(BytesOrTextParagraphParser),
         Arc::new(CountingEmbedder::default()),
         Arc::new(FakeGraphWriter::default()),
-        Arc::new(MetricsIngestionObserver),
         KnowledgeIngestionPipelineConfig {
             chunking: ChunkingConfig {
                 target_tokens: 1,
@@ -1664,7 +1644,6 @@ async fn ingestion_pipeline_skips_unchanged_fetched_content_without_refetching_d
         Arc::new(BytesOrTextParagraphParser),
         Arc::new(CountingEmbedder::default()),
         Arc::new(FakeGraphWriter::default()),
-        Arc::new(MetricsIngestionObserver),
         KnowledgeIngestionPipelineConfig {
             chunking: ChunkingConfig {
                 target_tokens: 1,
@@ -1765,7 +1744,6 @@ async fn ingestion_pipeline_reingests_inline_edit_under_unchanged_token_db_memor
         Arc::new(ParagraphParser),
         Arc::new(CountingEmbedder::default()),
         Arc::new(FakeGraphWriter::default()),
-        Arc::new(MetricsIngestionObserver),
         KnowledgeIngestionPipelineConfig {
             chunking: ChunkingConfig {
                 target_tokens: 1,

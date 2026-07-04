@@ -7,8 +7,7 @@ mod support;
 
 use moa_skills::format::parse_skill_markdown;
 use moa_skills::regression::{
-    SkillRegressionDecision, SkillRegressionReport, SkillRegressionSummary, compare_scores,
-    generate_skill_test_suite_source,
+    SkillRegressionSummary, compare_scores, generate_skill_test_suite_source,
 };
 use support::{SESSION_WITH_5_TOOL_CALLS, load_session_fixture, skill_markdown};
 
@@ -52,19 +51,6 @@ fn regression_run_with_score_within_noise_band_commits_new_version_only_if_above
         compare_scores(&previous, &candidate),
         "current regression contract accepts any non-regressing score; there is no separate noise band"
     );
-}
-
-#[test]
-fn regression_report_acceptance_treats_missing_suite_as_non_blocking_generation_gate() {
-    let report = SkillRegressionReport {
-        decision: SkillRegressionDecision::MissingSuite,
-        suite_path: None,
-        previous: None,
-        candidate: None,
-        detail: "no suite exists yet".to_string(),
-    };
-
-    assert!(report.accepted());
 }
 
 fn summary(average_score: f64, failed_runs: usize) -> SkillRegressionSummary {

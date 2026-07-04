@@ -14,7 +14,6 @@ experiments = ["dep:moa-experiments", "dep:moa-scoring"]
 slack = ["moa-messaging/slack"]
 postmark = ["moa-messaging/postmark"]
 twilio = ["moa-messaging/twilio"]
-redis = ["moa-runtime-store/redis"]
 internal-eval-runner = [
     "dep:moa-eval-core",
     "dep:moa-eval",
@@ -107,7 +106,7 @@ moa-scoring = { workspace = true, optional = true }
 moa-memory-ingest = { workspace = true }
 moa-migrations = { workspace = true }
 moa-providers = { workspace = true }
-moa-runtime-store = { workspace = true }
+moa-runtime-store = { workspace = true, features = ["redis"] }
 moa-session = { workspace = true }
 moa-skills = { workspace = true }
 rand.workspace = true

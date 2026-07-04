@@ -37,26 +37,6 @@ impl ToolRouter {
         self.workspace_roots.read().await.get(tenant_id).cloned()
     }
 
-    /// Provisions a hand if needed and installs trusted files into its sandbox.
-    ///
-    /// `worker_id` selects the hand scope: `None` is the session-level
-    /// (coordinator) scope used today; `Some(id)` isolates a worker's sandbox.
-    pub async fn install_files(
-        &self,
-        session: &SessionMeta,
-        worker_id: Option<&str>,
-        provider: &str,
-        tier: SandboxTier,
-        files: &[SandboxFile],
-    ) -> Result<HandHandle> {
-        let handle = self
-            .get_or_provision_hand(provider, tier, session, worker_id)
-            .await?;
-        self.install_files_on_handle(session, worker_id, provider, &handle, files)
-            .await?;
-        Ok(handle)
-    }
-
     /// Stores trusted files that should be installed lazily before hand tool execution.
     ///
     /// `worker_id` scopes the manifest: `None` is the session-level scope used

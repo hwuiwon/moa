@@ -2,9 +2,8 @@
 
 use std::path::PathBuf;
 
-use moa_core::{Event, EventRecord, MoaConfig, MoaError, Result, SessionMeta, TenantId};
+use moa_core::{Event, EventRecord, MoaError, Result, TenantId};
 use moa_eval_core::{ExpectedOutput, TestCase, TestSuite};
-use tokio::fs;
 
 use crate::format::{SkillDocument, slugify_skill_name};
 
@@ -32,48 +31,6 @@ pub struct SkillRegressionSummary {
     pub total_cost_dollars: f64,
 }
 
-/// Final decision produced by a skill regression attempt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SkillRegressionDecision {
-    /// Candidate skill version matched or exceeded the baseline.
-    Accepted,
-    /// Candidate skill version regressed and should be rolled back.
-    Rejected,
-    /// The eval suite itself errored or timed out, so no quality decision was made.
-    EvalFailed,
-    /// Regression tests were skipped because their projected cost exceeded the budget.
-    SkippedBudget,
-    /// No regression suite exists for the skill yet.
-    MissingSuite,
-}
-
-/// Report emitted after comparing two skill versions.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SkillRegressionReport {
-    /// Decision for the candidate skill.
-    pub decision: SkillRegressionDecision,
-    /// Discovered suite path, when present.
-    pub suite_path: Option<PathBuf>,
-    /// Baseline run summary, when a suite executed.
-    pub previous: Option<SkillRegressionSummary>,
-    /// Candidate run summary, when a suite executed.
-    pub candidate: Option<SkillRegressionSummary>,
-    /// Human-readable detail for logs and callers.
-    pub detail: String,
-}
-
-impl SkillRegressionReport {
-    /// Returns whether the candidate skill should be kept.
-    pub fn accepted(&self) -> bool {
-        matches!(
-            self.decision,
-            SkillRegressionDecision::Accepted
-                | SkillRegressionDecision::SkippedBudget
-                | SkillRegressionDecision::MissingSuite
-        )
-    }
-}
-
 /// Generates regression suite TOML for a newly proposed skill without writing files.
 pub fn generate_skill_test_suite_source(
     tenant_id: TenantId,
@@ -87,22 +44,6 @@ pub fn generate_skill_test_suite_source(
         relative_path: skill_suite_relative_path(tenant_id, &skill.frontmatter.name),
         source_toml,
     })
-}
-
-/// Generates and writes a minimal regression suite for explicit eval/test paths.
-pub async fn generate_skill_test_suite(
-    config: &MoaConfig,
-    session: &SessionMeta,
-    skill: &SkillDocument,
-    events: &[EventRecord],
-) -> Result<PathBuf> {
-    let generated = generate_skill_test_suite_source(session.tenant_id, skill, events)?;
-    let suite_path = PathBuf::from(&config.local.memory_dir).join(&generated.relative_path);
-    if let Some(parent) = suite_path.parent() {
-        fs::create_dir_all(parent).await?;
-    }
-    fs::write(&suite_path, generated.source_toml).await?;
-    Ok(suite_path)
 }
 
 /// Compares baseline and candidate summaries and returns whether the candidate is acceptable.

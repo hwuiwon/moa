@@ -1,12 +1,7 @@
 //! Provider-record and text normalization helpers.
 
-use chrono::Utc;
 use serde_json::{Map, Value};
 use unicode_normalization::UnicodeNormalization;
-use uuid::Uuid;
-
-use crate::domain::{KnowledgeObject, ObjectStatus, ProviderRecord};
-use crate::graph_delta::stable_uid;
 
 /// Normalizes source text for deterministic block identities.
 #[must_use]
@@ -116,36 +111,6 @@ pub fn normalize_source_selection(value: Value) -> Value {
         Value::Object(Map::new())
     } else {
         value
-    }
-}
-
-/// Converts a provider record into a tenant knowledge object.
-#[must_use]
-pub fn normalize_provider_record(
-    tenant_object_seed: &str,
-    tenant_id: moa_core::TenantId,
-    connection_uid: Uuid,
-    record: ProviderRecord,
-) -> KnowledgeObject {
-    let object_uid = stable_uid(&format!("{tenant_object_seed}:{}", record.source_id));
-    KnowledgeObject {
-        object_uid,
-        tenant_id,
-        connection_uid,
-        object_type: record.object_type,
-        source_id: record.source_id,
-        parent_source_id: None,
-        source_uri: record.source_uri,
-        title: record.title,
-        change_token: record.change_token,
-        metadata: redact_provider_metadata(record.metadata),
-        status: if record.deleted {
-            ObjectStatus::Deleted
-        } else {
-            ObjectStatus::Pending
-        },
-        source_updated_at: record.source_updated_at,
-        deleted_at: record.deleted.then(Utc::now),
     }
 }
 

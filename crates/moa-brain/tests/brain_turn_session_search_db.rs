@@ -1,6 +1,8 @@
 #[cfg(feature = "eval-harness")]
 include!("brain_turn_support/common.rs");
 #[cfg(feature = "eval-harness")]
+include!("brain_turn_support/pipeline.rs");
+#[cfg(feature = "eval-harness")]
 include!("brain_turn_support/db.rs");
 #[cfg(feature = "eval-harness")]
 include!("brain_turn_support/session_search.rs");
@@ -221,7 +223,7 @@ async fn run_brain_turn_recovers_old_artifact_via_session_search() {
             .unwrap()
             .with_session_store(store.clone()),
     );
-    let pipeline = build_default_pipeline_with_tools(
+    let pipeline = build_no_memory_test_pipeline_with_tools(
         &MoaConfig::default(),
         store.clone(),
         tool_router.tool_schemas(),
@@ -321,7 +323,7 @@ async fn auto_mode_repeated_tool_runs_without_persisted_action_policy_rules() {
         .await
         .unwrap();
 
-    let pipeline = build_default_pipeline_with_tools(
+    let pipeline = build_no_memory_test_pipeline_with_tools(
         &MoaConfig::default(),
         store.clone(),
         tool_router.tool_schemas(),

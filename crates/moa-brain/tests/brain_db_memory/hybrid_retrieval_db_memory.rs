@@ -29,7 +29,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use moa_brain::planning::{PlanningCtx, QueryPlanner, QueryRetrievalCtx};
 use moa_brain::retrieval::{
-    CachedHybridRetriever, CachedHybridRetrieverConfig, HybridRetriever, RetrievalRequest,
+    CachedHybridRetriever, HybridRetriever, RetrievalRequest,
     legs::{lexical_leg, vector_leg},
 };
 
@@ -102,16 +102,7 @@ async fn query_retrieval_ctx_defaults_reranker_off_and_requires_explicit_opt_in(
     let hybrid = Arc::new(
         HybridRetriever::new(pool.clone(), graph.clone(), vector).with_assume_app_role(true),
     );
-    // Disable the version-read TTL so any write-then-retrieve in this lane
-    // observes changelog bumps immediately rather than within the caching window.
-    let cached = CachedHybridRetriever::with_config_for_app_role(
-        hybrid,
-        pool,
-        CachedHybridRetrieverConfig {
-            version_ttl: std::time::Duration::ZERO,
-            ..CachedHybridRetrieverConfig::default()
-        },
-    );
+    let cached = CachedHybridRetriever::new_for_app_role(hybrid, pool);
     let planner = QueryPlanner::new();
     let planning = PlanningCtx::new(scope, graph);
     let embedder = RerankerDefaultEmbedder;

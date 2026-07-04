@@ -10,7 +10,6 @@ use moa_core::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::adapters::mcp::MCPClient;
 
@@ -21,62 +20,6 @@ use super::telemetry::{
 use super::{DEFAULT_PROVIDER_NAME, ToolExecution, ToolRouter};
 
 impl ToolRouter {
-    /// Executes a single tool invocation for a session.
-    pub async fn execute(
-        &self,
-        session: &SessionMeta,
-        invocation: &ToolInvocation,
-    ) -> Result<(Option<String>, ToolOutput)> {
-        let tool_span = tool_execution_span(session, invocation);
-
-        let instrument_tool_span = tool_span.clone();
-        async move {
-            let started_at = Instant::now();
-            let prepared = self.prepare_invocation(session, invocation).await?;
-            let registered_tool =
-                self.registry.tools.get(&invocation.name).ok_or_else(|| {
-                    MoaError::ToolError(format!("unknown tool: {}", invocation.name))
-                })?;
-            record_tool_invocation_metadata(
-                &tool_span,
-                session,
-                &registered_tool.execution,
-                &prepared.policy().effect,
-            );
-            let result = match &prepared.policy().effect {
-                moa_core::ActionPolicyEffect::Allow => {
-                    self.execute_authorized_inner(session, invocation, None, None)
-                        .await
-                }
-                moa_core::ActionPolicyEffect::Deny => {
-                    tool_span.set_attribute("moa.tool.denied", true);
-                    Err(MoaError::PermissionDenied(format!(
-                        "tool {} denied by action policy: {}",
-                        invocation.name,
-                        prepared.policy().reason.as_deref().unwrap_or("no reason")
-                    )))
-                }
-                moa_core::ActionPolicyEffect::AdminReview => {
-                    Err(MoaError::PermissionDenied(format!(
-                        "tool {} requires tenant admin review: {}",
-                        invocation.name,
-                        prepared.input_summary()
-                    )))
-                }
-            };
-
-            record_tool_execution_result(
-                &tool_span,
-                &invocation.name,
-                started_at.elapsed(),
-                &result,
-            );
-            result
-        }
-        .instrument(instrument_tool_span)
-        .await
-    }
-
     /// Executes a tool invocation that has already cleared action policy.
     pub async fn execute_authorized(
         &self,
@@ -114,61 +57,6 @@ impl ToolRouter {
             let result = self
                 .execute_authorized_inner(session, invocation, cancel_token, hard_cancel_token)
                 .await;
-            record_tool_execution_result(
-                &tool_span,
-                &invocation.name,
-                started_at.elapsed(),
-                &result,
-            );
-            result
-        }
-        .instrument(instrument_tool_span)
-        .await
-    }
-
-    /// Executes a single tool invocation with retry and sandbox recovery enabled.
-    pub async fn execute_with_recovery(
-        &self,
-        session: &SessionMeta,
-        invocation: &ToolInvocation,
-    ) -> Result<(Option<String>, ToolOutput)> {
-        let tool_span = tool_execution_span(session, invocation);
-
-        let instrument_tool_span = tool_span.clone();
-        async move {
-            let started_at = Instant::now();
-            let prepared = self.prepare_invocation(session, invocation).await?;
-            let registered_tool =
-                self.registry.tools.get(&invocation.name).ok_or_else(|| {
-                    MoaError::ToolError(format!("unknown tool: {}", invocation.name))
-                })?;
-            record_tool_invocation_metadata(
-                &tool_span,
-                session,
-                &registered_tool.execution,
-                &prepared.policy().effect,
-            );
-            let result = match &prepared.policy().effect {
-                moa_core::ActionPolicyEffect::Allow => {
-                    self.execute_authorized_with_recovery_inner(session, None, invocation)
-                        .await
-                }
-                moa_core::ActionPolicyEffect::Deny => {
-                    tool_span.set_attribute("moa.tool.denied", true);
-                    Err(MoaError::PermissionDenied(format!(
-                        "tool {} denied by action policy: {}",
-                        invocation.name,
-                        prepared.policy().reason.as_deref().unwrap_or("no reason")
-                    )))
-                }
-                moa_core::ActionPolicyEffect::AdminReview => {
-                    Err(MoaError::PermissionDenied(format!(
-                        "tool {} requires tenant admin review: {}",
-                        invocation.name,
-                        prepared.input_summary()
-                    )))
-                }
-            };
             record_tool_execution_result(
                 &tool_span,
                 &invocation.name,

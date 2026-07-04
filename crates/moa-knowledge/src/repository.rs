@@ -114,10 +114,7 @@ pub trait KnowledgeRepository: Send + Sync {
     async fn create_sync_run(&self, run: KnowledgeSyncRun) -> Result<()>;
 
     /// Atomically claims the active sync slot for one tenant connection.
-    async fn claim_sync_run(&self, run: KnowledgeSyncRun) -> Result<SyncRunClaim> {
-        self.create_sync_run(run.clone()).await?;
-        Ok(SyncRunClaim::Claimed(run))
-    }
+    async fn claim_sync_run(&self, run: KnowledgeSyncRun) -> Result<SyncRunClaim>;
 
     /// Gets one sync run by identifier.
     async fn get_sync_run(&self, sync_run_uid: Uuid) -> Result<Option<KnowledgeSyncRun>>;
@@ -178,12 +175,6 @@ pub trait KnowledgeRepository: Send + Sync {
         source_id: &str,
     ) -> Result<Option<KnowledgeObject>>;
 
-    /// Lists active objects for one linked connection.
-    async fn active_objects_for_connection(
-        &self,
-        connection_uid: Uuid,
-    ) -> Result<Vec<KnowledgeObject>>;
-
     /// Lists active objects for one connection whose source id is absent from
     /// `seen_source_ids`, scoped to `tenant_id` and ordered by
     /// `(source_id, object_uid)` for stable keyset pagination.
@@ -192,9 +183,6 @@ pub trait KnowledgeRepository: Send + Sync {
     /// `(source_id, object_uid)` returned by a previous page; `None` starts from
     /// the beginning. At most `limit` objects are returned.
     ///
-    /// The default implementation loads every active object and filters in
-    /// memory; the Postgres implementation computes the prune set in SQL so a
-    /// large already-seen set is never materialized on the client.
     async fn unseen_active_objects_for_connection(
         &self,
         connection_uid: Uuid,
@@ -202,36 +190,7 @@ pub trait KnowledgeRepository: Send + Sync {
         seen_source_ids: &[String],
         after: Option<(String, Uuid)>,
         limit: i64,
-    ) -> Result<Vec<KnowledgeObject>> {
-        let seen = seen_source_ids
-            .iter()
-            .map(String::as_str)
-            .collect::<std::collections::HashSet<_>>();
-        let mut unseen = self
-            .active_objects_for_connection(connection_uid)
-            .await?
-            .into_iter()
-            .filter(|object| {
-                object.tenant_id == tenant_id && !seen.contains(object.source_id.as_str())
-            })
-            .filter(|object| match &after {
-                Some((source_id, object_uid)) => {
-                    (object.source_id.as_str(), object.object_uid)
-                        > (source_id.as_str(), *object_uid)
-                }
-                None => true,
-            })
-            .collect::<Vec<_>>();
-        unseen.sort_by(|left, right| {
-            left.source_id
-                .cmp(&right.source_id)
-                .then_with(|| left.object_uid.cmp(&right.object_uid))
-        });
-        if let Ok(limit) = usize::try_from(limit) {
-            unseen.truncate(limit);
-        }
-        Ok(unseen)
-    }
+    ) -> Result<Vec<KnowledgeObject>>;
 
     /// Gets the latest document version for an object.
     async fn latest_document_version(&self, object_uid: Uuid) -> Result<Option<DocumentVersion>>;
@@ -257,15 +216,7 @@ pub trait KnowledgeRepository: Send + Sync {
         &self,
         sync_run_uid: Uuid,
         version: DocumentVersion,
-    ) -> Result<DocumentVersionIngestionClaim> {
-        let _ = sync_run_uid;
-        let claim_token = Uuid::now_v7();
-        self.insert_document_version(version.clone()).await?;
-        Ok(DocumentVersionIngestionClaim::Claimed {
-            version,
-            claim_token,
-        })
-    }
+    ) -> Result<DocumentVersionIngestionClaim>;
 
     /// Marks a claimed document version ingestion as completed if the claim token still owns it.
     async fn complete_document_version_ingestion(
@@ -273,10 +224,7 @@ pub trait KnowledgeRepository: Send + Sync {
         sync_run_uid: Uuid,
         version_uid: Uuid,
         claim_token: Uuid,
-    ) -> Result<()> {
-        let _ = (sync_run_uid, version_uid, claim_token);
-        Ok(())
-    }
+    ) -> Result<()>;
 
     /// Marks a claimed document version ingestion as failed if the claim token still owns it.
     async fn fail_document_version_ingestion(
@@ -284,19 +232,13 @@ pub trait KnowledgeRepository: Send + Sync {
         sync_run_uid: Uuid,
         version_uid: Uuid,
         claim_token: Uuid,
-    ) -> Result<()> {
-        let _ = (sync_run_uid, version_uid, claim_token);
-        Ok(())
-    }
+    ) -> Result<()>;
 
     /// Saves normalized blocks for a document version.
     async fn replace_blocks(&self, version_uid: Uuid, blocks: Vec<KnowledgeBlock>) -> Result<()>;
 
     /// Saves normalized chunks for a document version.
     async fn replace_chunks(&self, version_uid: Uuid, chunks: Vec<KnowledgeChunk>) -> Result<()>;
-
-    /// Persists the graph node UID for one chunk row.
-    async fn set_chunk_graph_uid(&self, chunk_uid: Uuid, graph_node_uid: Uuid) -> Result<()>;
 
     /// Tombstones chunks in knowledge storage and removes them from active retrieval.
     async fn tombstone_chunks(&self, chunk_uids: &[Uuid]) -> Result<()>;
@@ -1197,30 +1139,6 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         row.as_ref().map(object_from_row).transpose()
     }
 
-    async fn active_objects_for_connection(
-        &self,
-        connection_uid: Uuid,
-    ) -> Result<Vec<KnowledgeObject>> {
-        let mut conn = self.begin().await?;
-        let rows = sqlx::query(
-            r#"
-            SELECT object_uid, tenant_id, connection_id, object_type, external_object_id,
-                   parent_external_object_id, source_uri, title, change_token, metadata,
-                   status, last_modified_at, deleted_at
-            FROM moa.knowledge_objects
-            WHERE connection_id = $1
-              AND status <> 'deleted'
-            ORDER BY external_object_id ASC, object_uid ASC
-            "#,
-        )
-        .bind(connection_uid)
-        .fetch_all(conn.as_mut())
-        .await
-        .map_err(map_sqlx_error)?;
-        conn.commit().await.map_err(map_moa_error)?;
-        rows.iter().map(object_from_row).collect()
-    }
-
     async fn unseen_active_objects_for_connection(
         &self,
         connection_uid: Uuid,
@@ -1724,33 +1642,6 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             expected,
             "replace chunks parent version",
         )?;
-        conn.commit().await.map_err(map_moa_error)
-    }
-
-    async fn set_chunk_graph_uid(&self, chunk_uid: Uuid, graph_node_uid: Uuid) -> Result<()> {
-        let mut conn = self.begin().await?;
-        sqlx::query(
-            r#"
-            UPDATE moa.knowledge_chunks
-            SET graph_node_uid = $2,
-                metadata = jsonb_set(
-                    CASE
-                        WHEN jsonb_typeof(metadata) = 'object' THEN metadata
-                        ELSE '{}'::jsonb
-                    END,
-                    '{active}',
-                    'true'::jsonb,
-                    true
-                ),
-                updated_at = now()
-            WHERE chunk_uid = $1
-            "#,
-        )
-        .bind(chunk_uid)
-        .bind(graph_node_uid)
-        .execute(conn.as_mut())
-        .await
-        .map_err(map_sqlx_error)?;
         conn.commit().await.map_err(map_moa_error)
     }
 

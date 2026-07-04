@@ -51,7 +51,7 @@ Start here. These remove dead state, redundant aliases, or single-use abstractio
 Do these after the small deletes or when already touching the owning crate.
 
 - #6 env-based provider registry path. **done:** deleted dead `ProviderRegistry::from_env` and descriptor env-factory fields.
-- #7 Gemini embedding role/config surface.
+- #7 Gemini embedding role/config surface. **done:** collapsed Gemini embedding construction to the two live roles and removed dead config/API-key mirror fields.
 - #9 `ProviderSelection` string round-trip. **done:** removed the wrapper and kept the provider/model selection typed.
 - #14 hands normalization fallback duplication. **done:** descriptor-less fallbacks are generic, and constant command preview metadata is collapsed.
 - #15 dead session constructors/blob enum surface. **done:** removed unused constructors and the unimplemented `object_store` blob backend.
@@ -68,21 +68,21 @@ Do these after the small deletes or when already touching the owning crate.
 
 Batch these with focused crate checks and less frequent live/perf gates because they touch hotter or broader code paths.
 
-- #2 `turn_progress` state-key consolidation.
-- #5 test-only default brain pipeline builder.
-- #11 weak default methods on `KnowledgeRepository`.
-- #12 knowledge dead code/config knobs.
-- #13/#85 single-impl `IngestionObserver`.
-- #20 `LearningReviewStore` boxed-future cleanup.
-- #21 skills regression report/file writer.
-- #22 dead messaging modules.
-- #23 analytics wire/domain DTO twins.
-- #27 retrieval cache TTL/version config.
-- #28 embedding builder duplication.
-- #33 dead `ToolRouter` execute wrappers.
-- #48 endpoint function-pointer registry.
-- #49 session-store inner delegates.
-- #50 mandatory Redis feature cleanup.
+- #2 `turn_progress` state-key consolidation. **done:** collapsed the four helper-owned workflow state keys into one serialized `ProgressState` key.
+- #5 test-only default brain pipeline builder. **done:** moved the no-memory default builder into brain test support and removed the public `build_default_pipeline*` exports.
+- #11 weak default methods on `KnowledgeRepository`. **done:** made claim/fencing/prune methods required, removed the dead active-object fallback loader, and gave the test fake explicit claim semantics.
+- #12 knowledge dead code/config knobs. **done:** deleted dead parsed-object ingestion entry, tombstone/setter leftovers, unused normalizer, dead graph-delta field, and no-op observability config knobs.
+- #13/#85 single-impl `IngestionObserver`. **done:** deleted the observer trait/zero-sized impl and called metrics/tracing directly from the ingestion pipeline.
+- #20 `LearningReviewStore` boxed-future cleanup. **done:** removed boxed future alias and dead non-transactional append method, and dropped unused `moa-skills` dependencies.
+- #21 skills regression report/file writer. **done:** removed the dead report/decision API and filesystem-writing suite generator; kept reviewable suite source generation.
+- #22 dead messaging modules. **done:** deleted the unwired slash-command parser and edit-window fallback modules plus their test-only coverage.
+- #23 analytics wire/domain DTO twins. **done:** domain analytics DTOs now derive serde and edge routes return them directly, keeping only thin envelopes where the API adds metadata.
+- #27 retrieval cache TTL/version config. **done:** removed the public cache config, dead version TTL cache, and user-scope cache toggle; cache probes now read changelog version directly.
+- #28 embedding builder duplication. **done:** merged semantic/vector construction into one private builder and one override helper.
+- #33 dead `ToolRouter` execute wrappers. **done:** deleted the unauthorised router entry points and moved policy-blocking coverage to the brain harness path.
+- #48 endpoint function-pointer registry. **done:** replaced the function-pointer registry with direct endpoint binding plus a plain expected-name list.
+- #49 session-store inner delegates. **done:** inlined pure store calls into Restate handlers and kept `inner.rs` only for session creation/authz outbox and agent-policy helpers.
+- #50 mandatory Redis feature cleanup. **done:** removed the orchestrator `redis` feature/stub and made Redis runtime-store support a normal orchestrator dependency; build scripts no longer pass the feature token.
 - #76 eval-core dead API. **done:** removed dead discovery helpers/reexports, unused error variants, unused single-case provider injection method, and unsupported live long-conversation mode.
 
 ### Group D: Product-Scope Or High-Risk Cleanup
@@ -334,6 +334,8 @@ effort: **small** · finder confidence: **medium** · ~LOC removable: **~50**
 
 **Adversarial verifier: ✅ CONFIRMED.** Factual accuracy: verified. crates/moa-brain/src/pipeline/builder.rs:29-80 contains build_default_pipeline/build_default_pipeline_with_tools whose own doc comment says production uses the graph-memory builder and these "remain useful for isolated pipeline and brain-loop tests". Both are re-exported at crate root (crates/moa-brain/src/lib.rs:22-27 and pipeline/mod.rs:20-25). Graphify caller traversal plus a workspace-wide grep (*.rs, *.md, *.toml, *.yml, *.sh) found zero non-test consumers: the only callers are crates/moa-brain/tests/{brain_turn_offline.rs, cache_audit_offline.rs, brain_turn_artifacts_db.rs, brain_turn_session_search_db.rs} and their include!-ed brain_turn_support/{common,offline,artifacts,session_search}.rs files (7 test files total). No orchestrator, edge, eval, loadtest, example, script, compose, or doc reference exists. The trimmed builder duplicates the shared stage prefix/suffix (Identity, AgentInstruction, Instruction, ToolDef / History, DelegationPlanning, RuntimeContext, Compactor) of the production builder at builder.rs:153-274 with no test pinning equivalence, so silent divergence is possible; it also skips the record_context_pipeline_construction metric the production path emits. Load-bearing constraints: none found. The orchestrator production path (crates/moa-orchestrator/src/brain_bridge.rs) uses only the graph builder, so Restate determinism (docs/02) is untouched; performance instrumentation (docs/18) lives only in the graph builder; AGENTS.md actually argues FOR the claim ("every test must exercise a real production path", rule 7 against path-preserving exports). Simpler alternative viability: both proposed options work. Option B (move trimmed assembly into tests/brain_turn_support and drop the lib.rs/pipeline exports) is the cheaper one and is confirmed feasible without expanding public surface: every ingredient is already public — all stage modules are `pub mod` in pipeline/mod.rs, constructors are pub (HistoryCompiler::new/with_compaction_config/with_tool_output_config/with_snapshot_config in pipeline/history/mod.rs, Compactor::new in pipeline/compactor/mod.rs, ToolDefinitionProcessor::new, IdentityProcessor, etc.), and ContextPipeline::with_runtime_limits is pub (pipeline/runner.rs:38). Option A (graph_pool: Option) also works — the pool-dependent legs (SharedGraphMemoryRetriever, SkillInjector, DigestProcessor) would become conditional, mirroring the already-optional query_rewrite leg — but its blast radius is larger than the claimant stated: besides brain_bridge.rs, the graph-builder signature change touches crates/moa-eval/src/setup.rs, crates/moa-brain/examples/chat_harness.rs, and ~5 moa-brain _db_memory/_live test files (cache_audit_live.rs, brain_turn_live.rs, brain_turn_cache_replay_db_memory.rs, stable_prefix_db_memory.rs, skill_package_materialization_db_memory.rs, brain_db_memory/pipeline_stages_db_memory.rs) — all mechanical Some(pool) wraps. One nit: no "eval-harness example" uses the trimmed builder (src/harness takes a pre-built pipeline), so option B's side effects are confined entirely to moa-brain test files. Recommend option B.
 
+**Status:** Implemented. The no-memory default builder now lives only in `crates/moa-brain/tests/brain_turn_support/pipeline.rs` as `build_no_memory_test_pipeline*`; `moa-brain` no longer exports `build_default_pipeline` or `build_default_pipeline_with_tools` from production modules.
+
 ---
 
 ### 6. Dead parallel env-based provider construction path in registry/descriptors
@@ -580,6 +582,8 @@ Two trivial extras the claimant did not list, neither of which is breakage: (a) 
 
 ### 13. IngestionObserver trait has exactly one implementation workspace-wide and exists only to add a fifth generic parameter to the pipeline
 
+**Status:** Implemented. The observer trait and `MetricsIngestionObserver` zero-sized implementation were deleted; `KnowledgeIngestionPipeline` now has four generic parameters and records metrics/tracing through a direct helper in `observability.rs`.
+
 **Area:** moa-knowledge
 effort: **small** · finder confidence: **high** · ~LOC removable: **~60**
 
@@ -605,6 +609,8 @@ Hidden consumers: a workspace-wide grep (crates/, docs/, scripts/, compose/confi
 Load-bearing constraints: none apply. Metrics/tracing are fire-and-forget side effects outside Restate journal determinism; the durable record is the knowledge_ingestion_steps row persisted right after via build_step_row + repository.record_ingestion_step[_once] (ingestion.rs:1468-1478), which is untouched. No feature flag gates the observer. AGENTS.md rule 7 (no abstraction shims to preserve paths) actively favors removal. Bonus: record_step_with_counters (lines 1455-1458) already records span "status" and "error_code" fields, which MetricsIngestionObserver::record_step duplicates (observability.rs:222-226) — inlining removes that duplication. The trait's Result return is a dead error path (the only impl never errs), and inlining as an infallible plain fn taking &StepOutcome also eliminates the outcome.clone() and the async dispatch for purely synchronous work.
 
 Side effects: the claimant slightly undercounted mechanical touch points but missed nothing structural. Actual sites to update: (a) orchestrator ingest.rs — constructor call plus the ProductionKnowledgeIngestionPipeline type alias losing its fifth type arg; (b) crates/moa-orchestrator/tests/knowledge_service.rs — 2 construction sites (lines ~1255, ~2751); (c) crates/moa-knowledge/tests/knowledge_db_memory/ingestion_pipeline_db_memory.rs — ~12 sites; (d) crates/moa-knowledge/tests/knowledge_db_memory/observability_db_memory.rs — 1 site; plus possibly an unused async_trait import in observability.rs. All are one-argument/one-type-arg deletions. The proposed fn record_step_metrics(labels, &outcome) called inside record_step_with_counters is strictly simpler and behavior-preserving; the persisted steps table already covers any future test capture need.
+
+**Implementation verification:** `cargo check -p moa-knowledge -p moa-orchestrator --all-targets --locked` passed. A full filtered ingestion db-memory run first failed before reaching code because no local MOA Postgres service was running (`connect to maintenance database: pool timed out while waiting for an open connection`); after starting `docker compose up -d postgres`, representative serial db-memory tests passed for `ingestion_pipeline_db_memory::ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_deletes` and `observability_db_memory::sync_failure_rows_status_error_codes_redaction_and_counter_order_db_knowledge`.
 
 ---
 
@@ -794,6 +800,8 @@ Proposed alternative works, with one route-choice caveat the claimant slightly m
 
 ### 21. Regression module ships report/decision types and a file-writing suite generator that production never uses
 
+**Status:** Implemented. `SkillRegressionDecision`, `SkillRegressionReport`, `SkillRegressionReport::accepted`, and the async filesystem-writing `generate_skill_test_suite` API were deleted; the module now only generates suite source and compares summaries.
+
 **Area:** skills / artifacts
 effort: **small** · finder confidence: **high** · ~LOC removable: **~120**
 
@@ -815,9 +823,13 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~120**
 
 **Adversarial verifier: ✅ CONFIRMED.** Every factual assertion in the claim checks out against the real code. (1) crates/moa-skills/src/regression.rs:36-75 defines the 5-variant SkillRegressionDecision enum and SkillRegressionReport with accepted(); lines 92-106 define async generate_skill_test_suite, which calls tokio::fs::create_dir_all/write under config.local.memory_dir. (2) Hidden consumers: a workspace-wide grep (*.rs, *.toml, *.md, *.sh, *.yml, scripts/) plus a graphify BFS query both show SkillRegressionDecision and SkillRegressionReport appear ONLY in crates/moa-skills/src/regression.rs and crates/moa-skills/tests/regression.rs:9-10,59-68; generate_skill_test_suite (the file-writing variant) has zero callers anywhere — not even a test. The orchestrator's executor imports exactly `regression::{SkillRegressionSummary, compare_scores}` (crates/moa-orchestrator/src/services/skill_regression.rs:33), and learning_review.rs consumes the orchestrator's own skill_acceptance_regression_report, not the moa-skills report type. (3) The surface the claim keeps is genuinely used: generate_skill_test_suite_source is called from crates/moa-skills/src/distiller.rs:205,290 and crates/moa-skills/src/improver.rs:169, and compare_scores/SkillRegressionSummary from the orchestrator. (4) No load-bearing constraint protects the dead code: docs/09-skills-and-learning.md:189-191 states "moa-skills only generates reviewable regression suite source" and lines 205-206 say the suite TOML is stored in the candidate payload "without writing or running the suite" — the async file-writer directly contradicts the documented architecture rather than implementing it. No Restate-determinism, performance, or security doc depends on these types. AGENTS.md's no-compat-shim/pre-prod stance supports a clean deletion. (5) Bonus simplification the claimant correctly anticipated: MoaConfig, SessionMeta (from the moa_core import at regression.rs:5) and the `use tokio::fs` at line 7 are used only by generate_skill_test_suite, so deletion also removes those imports from the module (PathBuf stays, used by skill_suite_relative_path and GeneratedSkillSuite path building — trivially adjustable). Deleting the report-shaped test at tests/regression.rs:57-68 is already in the proposal; the other two tests in that file exercise the kept surface and survive unchanged. No side effects were missed; the claim is confirmed as stated.
 
+**Implementation verification:** `cargo test -p moa-skills --test regression --features regression --locked` passed, `cargo test -p moa-skills --test draft_proposals_db_memory --features skill-learning --locked` passed after fixing its test helper to count skill artifact rows instead of revisions, and `cargo check -p moa-skills --all-targets --features regression,skill-learning --locked` passed.
+
 ---
 
 ### 22. control.rs and edit_window.rs are dead modules with test-only consumers
+
+**Status:** Implemented. The `control` and `edit_window` modules, their public reexports, offline test modules, and support fixtures were deleted.
 
 **Area:** edge / messaging / security
 effort: **small** · finder confidence: **high** · ~LOC removable: **~430**
@@ -842,6 +854,8 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~430**
 **Value of simplifying.** Pure deletion of two unwired features (~200 src + ~230 test lines); removes the misleading impression that slash commands and edit-window fallback are live product behavior.
 
 **Adversarial verifier: ✅ CONFIRMED.** Factual accuracy verified by reading both modules and tracing all consumers (graphify BFS depth-2 from both functions plus workspace-wide grep). (1) The only references to control_action_for_inbound, MessagingControlAction, edit_with_followup_fallback, MessagingEditOutcome, MessagingEditResponse, and is_fallback_edit_error outside the two source files are the re-exports in crates/moa-messaging/src/lib.rs (lines 7, 9, 23, 28-30), the crate's own offline tests (crates/moa-messaging/tests/messaging_offline/control_signals.rs, .../edit_window.rs, and their support files), and the generated graphify-out/COMMUNITY_LABELS.md. No orchestrator, edge, or contacts code routes inbound text through control.rs; the only InboundMessage use outside moa-messaging is a test mock in crates/moa-orchestrator/src/workflows/progress_delivery.rs (test module, line 328). (2) SlackAdapter's real edit path is independent: edit() at crates/moa-messaging/src/slack.rs:583 delegates to edit_locked (L600-651), a chunked update/append/delete implementation with zero references to edit_window symbols; the only message_not_found handling in slack.rs is delete_locked (L667) using the typed SlackClientError::ApiError code, not edit_window's body-substring matching — confirming the fallback logic in edit_window.rs is a parallel, unused design. (3) No load-bearing constraint: SessionSignal::SoftCancel/HardCancel/QueueMessage live in moa-core (types/session.rs:101-105) and are consumed by moa-brain streaming signals independently of control.rs, so deletion cannot affect Restate determinism or the brain loop. No architecture doc mandates /stop, /queue, or an edit-window followup fallback (grep of docs/*.md found nothing), and docs/implementation-caveats.md lines 11-17 explicitly flag text-control-message normalization as a design to be replaced with typed structured callback events — i.e., the deleted parser would be rebuilt differently anyway, exactly as the claimant argued. (4) The simpler alternative works cleanly: delete src/control.rs, src/edit_window.rs, the lib.rs mod/pub-use lines, the two mod declarations in tests/messaging_offline.rs (lines 4-11), the two test files, and the two support files (each support file is consumed only via its own test module's #[path = "../support/..."] mod support). Minor corrections that do not change the verdict: the lost test count is 6 (4 control_signals + 2 edit_window), not ~10; the harness file tests/messaging_offline.rs also needs its two mod declarations removed; and graphify-out should be refreshed after the deletion.
+
+**Implementation verification:** `cargo test -p moa-messaging --test messaging_offline --locked` passed with 28 tests, and `cargo check -p moa-messaging --all-targets --all-features --locked` passed.
 
 ---
 
@@ -868,6 +882,8 @@ effort: **medium** · finder confidence: **medium** · ~LOC removable: **~200**
 
 **Adversarial verifier: ✅ CONFIRMED.** Every cited location checks out. crates/moa-core/src/wire/analytics.rs (L17-49, L62-81, L105-118, L155-174) and crates/moa-core/src/analytics.rs (L9-40, L44-57, L98-117, L121-140) are field-for-field identical twins (same names, types, doc comments), and crates/moa-edge/src/routes/analytics.rs L506-588 contains the four pure copy mappers, with estimated_savings_cents hardcoded to None at L572. Consumer search: the four wire response structs are used ONLY by moa-edge/src/routes/analytics.rs (Json responses at L76, L117, L185, L237) and one integration test, crates/moa-edge/tests/direct_read_routes_db.rs (deserializes ToolStatsResponse) — no orchestrator, messaging, loadtest, script, compose, or doc consumer. These handlers are direct DB reads at the edge (the test file is literally named direct_read_routes_db), not forwarded to a Restate service, so no cross-service wire hop exists that would need an independent wire format; Restate replay determinism (docs/02) is untouched. No enforcement mechanism mandates the twin layer: xtask/src/check_architecture_boundaries.rs has no wire-vs-domain or serde rule (its L2188 analytics mention is a synthetic string inside a re-export-budget unit test), and docs/03-communication-layer.md says nothing about wire/domain twinning. Strongest refutation of any 'deliberate boundary' theory: the codebase already uses the proposed pattern — LearningCandidateSummary, a serde wire type from wire/analytics.rs, is returned directly by the SessionStore trait (crates/moa-core/src/traits/mod.rs L35) and constructed directly in crates/moa-session/src/analytics.rs; SessionTurnMetric (domain, no twin) shows the twin layer is not consistently applied either. Pre-prod no-backwards-compat policy removes the only rationale for the layer. The proposal works and is genuinely simpler; JSON field names are identical so the wire format is unchanged. Minor side effects the claimant understated: (1) carry over #[serde(default)] on Option/Vec fields (contact_id, daily, rows) when deriving serde on the domain DTOs; (2) the edge test's `use moa_core::wire::analytics::ToolStatsResponse` import must follow wherever the kept envelope moves; (3) moa-lineage/core/src/records.rs L396 defines an unrelated struct also named ToolCallSummary — different crate, already coexists, no conflict, but avoid glob imports. None of these change the verdict.
 
+**Implementation status: ✅ DONE.** `SessionAnalyticsSummary`, `TenantAnalyticsSummary`, `ToolCallSummary`, `SessionTurnMetric`, and `CacheDailyMetric` now derive `Serialize`/`Deserialize`, with `contact_id` preserving `#[serde(default)]`. The field-for-field wire twins and pure edge copy mappers are gone; session and tenant stats return the domain DTOs directly, while `ToolStatsResponse` and `CacheStatsResponse` keep their API-only envelope fields and hold `Vec<ToolCallSummary>` / `Vec<CacheDailyMetric>`. Verification passed with `cargo check -p moa-core -p moa-session -p moa-edge --all-targets --locked` and the broader orchestrator compile gate. The focused edge DB route check was blocked before route logic by the existing local Postgres maintenance-pool timeout, recorded as REG-008.
+
 ---
 
 ### 48. runtime/endpoint.rs builds a function-pointer service registry to express a static bind list
@@ -891,6 +907,8 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~380**
 **Value of simplifying.** Cuts the 696-line file roughly in half, removes a function-pointer indirection layer and a runtime panic path from binary startup, and makes adding a service a one-line diff instead of descriptor + wrapper fn + name entry.
 
 **Adversarial verifier: ✅ CONFIRMED.** `RestateBinding { name, bind: Option<fn> }`, descriptor arrays, `cfg!` booleans, and the registry fold exist in `crates/moa-orchestrator/src/runtime/endpoint.rs:60`, `:93`, and `:204`. Simplifying to a literal builder chain plus cfg-gated expected service names is viable, while preserving the `services_registered()` readiness contract used by startup/jobs.
+
+**Status:** Implemented. `crates/moa-orchestrator/src/runtime/endpoint.rs` now binds the Restate endpoint directly and keeps service readiness names in plain string slices; the descriptor struct, function-pointer wrappers, name-only descriptors, and feature-bool registry assembler are gone.
 
 ---
 
@@ -1272,6 +1290,8 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~55**
 
 ### 85. IngestionObserver trait + pipeline type parameter with one zero-sized impl used everywhere, including tests
 
+**Status:** Implemented as part of #13.
+
 **Area:** cross-cutting: single-impl abstractions
 effort: **small** · finder confidence: **high** · ~LOC removable: **~70**
 
@@ -1643,6 +1663,8 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~80**
 
 > **Revised side effects:** Preserve: (a) semantic OpenAI/Cohere/ZeroEntropy use provider-default dimensions while the vector path pins/validates output_dim — pinned by factory unit tests (semantic Cohere 1536 vs vector Cohere 1024); (b) semantic Gemini does NOT get provider-default dims — it already reads memory.vector.embedder.output_dim and gemini.default_role via build_gemini_embedder, so a merged fn treating dims=None as 'provider default' for Gemini would silently change the served embedding dimensionality; (c) the missing-API-key soft-disable (MissingEnvironmentVariable -> Ok(None) + warn) lives in build_embedding_provider_from_config, not the builders, so the merge must keep returning that error variant untouched; (d) the two Gemini model-mismatch error strings differ ('gemini embedding provider' vs 'gemini vector embedder') and will collapse to one — harmless pre-prod, no compat requirement. Public API surface and all four external call sites are unchanged.
 
+**Implementation status: ✅ DONE.** Current code has one private `EmbeddingProviderKind::build` path with optional vector output dimension pinning and one `apply_overrides` helper for per-provider input-rate and concurrency caps. `build_semantic`/`build_vector` and the Cohere/ZeroEntropy config-only helper constructors are gone. Verification passed with `cargo test -p moa-providers --lib factory --locked`, `cargo test -p moa-providers --test providers_offline --locked gemini_embedding_offline -- --nocapture`, and `cargo check -p moa-providers --all-targets --locked`.
+
 ---
 
 ### 29. Backwards-compat catalog entry gemini-3.1-flash-lite-preview is fully redundant
@@ -1778,6 +1800,8 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~450**
 
 ### 33. Three of five public ToolRouter execute entry points (plus eager install_files) have no production callers and duplicate ~50 lines of span/policy boilerplate each
 
+**Status:** Implemented. `ToolRouter::execute`, `ToolRouter::execute_with_recovery`, and the eager `ToolRouter::install_files` helper were deleted. The policy-enforcement pin moved from test-only router APIs to the real `moa-brain` turn harness path.
+
 **Area:** moa-hands (tools/sandboxes/MCP)
 effort: **small** · finder confidence: **high** · ~LOC removable: **~170**
 
@@ -1803,6 +1827,8 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~170**
 > **Revised simpler alternative:** Delete ToolRouter::execute, execute_with_recovery, and the eager install_files; keep execute_authorized as the thin test-facing wrapper (it already delegates to execute_authorized_with_cancel). Extract the shared span/prepare/metadata/result-recording wrapper into one private helper used by execute_authorized_with_cancel and execute_authorized_with_recovery. Do NOT port the deny/admin-review gate tests to a check_policy + execute_authorized_with_cancel sequence in moa-hands — that re-implements the caller's branching and pins nothing. Instead, move the enforcement pin to the real production gate: add moa-brain tests asserting dispatch_tool_call returns ToolCallOutcome::Skipped and emits the ToolError event for Deny and AdminReview effects without invoking the router execute path (the orchestrator side is already covered by tests/integration/action_policy_flow_e2e.rs). Port the two install_files tests to set_trusted_sandbox_files + a tool execution that triggers install_trusted_files_for_hand, which is the production lazy path.
 
 > **Revised side effects:** Smaller blast radius than claimed, plus one test-coverage transfer obligation. Only five call sites need changes, all in crates/moa-hands/tests/hands_offline/local_tools_offline.rs: execute at :808 and :901, execute_with_recovery at :856, install_files at :741 and :783. No changes to docker_hardening_docker.rs or local_tools_docker.rs (they call HandProvider::execute directly), and none to the ~40 execute_authorized sites in local_tools_offline.rs, mcp_router.rs, session_search_db.rs, daytona_live.rs, or e2b_live.rs since execute_authorized is kept. Real risk the claimant missed: the deleted offline tests are currently the ONLY sub-e2e tests pinning that a Deny policy prevents the tool body from running on the local/brain path (moa-brain has no ActionPolicyEffect tests; orchestrator coverage lives in action_policy_flow_e2e.rs). Deleting them without adding equivalent moa-brain coverage silently drops that enforcement pin.
+
+**Implementation verification:** Current code had no live `ToolRouter::install_files` call sites; the two old line references now call `HandProvider::install_files` directly and were left intact. `cargo test -p moa-brain --test brain_turn_offline --features eval-harness --locked action_policy_skips_tool_body_and_records_tool_error` passed, and mutation-checking the Deny branch by temporarily changing the production error text made the Deny test fail before passing again after revert. `cargo test -p moa-hands --test hands_offline --locked local_tools_offline -- --nocapture` passed with 22 selected tests, `cargo check -p moa-hands -p moa-brain -p moa-orchestrator --all-targets --features moa-brain/eval-harness --locked` passed, and `git diff --check` passed. Current code search found no remaining `ToolRouter::execute`, `execute_with_recovery`, or eager `ToolRouter::install_files` references.
 
 ---
 
@@ -2238,6 +2264,8 @@ effort: **medium** · finder confidence: **high** · ~LOC removable: **~400**
 
 **Adversarial verifier: 🟡 ADJUSTED.** The dependency pyramid is real (`crates/moa-orchestrator/src/ctx.rs:26`, `:314`, `:444`; `runtime/deps.rs:178`), but the proposal should not flatten all consumers to raw `Arc<PostgresSessionStore>`. Keep the `SessionRepository` seam (`ctx.rs:390`, `moa-core/src/traits/mod.rs:448`) and collapse redundant `PersistenceDeps` facet fields plus unused group getters.
 
+**Partial implementation status: ✅ DONE for `PersistenceDeps` fan-out.** `PersistenceDeps` now keeps only `session_repository`, the concrete `session_store_backend`, and `graph_pool`; the dead facet fields/accessors plus unused `persistence_deps()` and action-policy accessors are gone. The single live learning-candidate accessor remains, but is now derived from the one backend instead of storing a duplicate trait-object field. `xtask check-architecture-boundaries` no longer reports the temporary `services/experiments.rs` raw-store access introduced during exploration; the command still fails on pre-existing allowance/LOC budget items outside this cut.
+
 ---
 
 ### 49. SessionStore service '_inner' layer: ~28 one-line pass-through methods between handlers and the store
@@ -2261,6 +2289,8 @@ effort: **small** · finder confidence: **high** · ~LOC removable: **~300**
 **Value of simplifying.** Deletes ~300 lines of pure delegation and removes one of three names per operation, so tracing a session-store call is handler -> store instead of handler -> inner -> store.
 
 **Adversarial verifier: 🟡 ADJUSTED.** The `_inner` delegation layer is real (`handlers.rs:119`, `inner.rs:215`), but there are more exceptions than the raw note lists, including tenant-id string adaptation and 404 mapping (`inner.rs:341`, `:424`). Inline pure delegates, but keep session creation/authz outbox and agent-policy helpers (`inner.rs:13`, `:83`) and retarget tests that currently call multiple `_inner` methods.
+
+**Implementation status: ✅ DONE.** Restate handlers now clone `self.store` and call the production store methods directly inside `ctx.run`, keeping handler names and durability boundaries unchanged. `inner.rs` retains only the real helper logic for session creation/authz outbox tuples, configured-agent session creation, agent-policy resolution/application, and the test-only session creation helper. Session-store tests now call the store trait directly for event/status/search behavior instead of testing deleted pass-through methods. Verification passed with the broad orchestrator compile gate and `cargo test -p moa-orchestrator --test experiment_service --features experiments --locked`. The filtered session-store library test passed the five pure tests and failed only when DB-backed cases timed out creating isolated Postgres stores, recorded under REG-008.
 
 ---
 

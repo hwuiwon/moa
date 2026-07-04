@@ -256,13 +256,22 @@ pub async fn active_semantic_version(
         .version()
 }
 
-/// Counts artifact revisions for one tenant skill name.
+/// Counts skill artifact rows for one tenant skill name.
 pub async fn skill_row_count(
     test_db: &TestDb,
     storage_partition_id: &StoragePartitionId,
     skill_name: &str,
 ) -> i64 {
-    artifact_revision_count(test_db, storage_partition_id, skill_name).await
+    sqlx::query_scalar(
+        "SELECT count(*) \
+         FROM moa.artifact \
+         WHERE storage_partition_id = $1 AND kind = 'skill' AND name = $2",
+    )
+    .bind(storage_partition_id.as_str())
+    .bind(skill_name)
+    .fetch_one(test_db.store().pool())
+    .await
+    .expect("count skill artifacts")
 }
 
 /// Counts artifact revisions for one tenant skill artifact.
