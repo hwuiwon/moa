@@ -6,10 +6,11 @@ use crate::{headers, proxy::OrchestratorProxy};
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
-use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::{any, get, patch, post};
+use chrono::{DateTime, Utc};
 use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{AuthProvider, Credential, Identity};
@@ -28,18 +29,21 @@ use uuid::Uuid;
 
 const KNOWLEDGE_WEBHOOK_BODY_LIMIT_BYTES: usize = 256 * 1024;
 const SESSION_MESSAGE_BODY_LIMIT_BYTES: usize = 12 * 1024 * 1024;
+const USER_SESSION_COOKIE_NAME: &str = "__Host-user_session";
 
 mod agents;
 mod analytics;
 mod artifacts;
 mod audit;
 mod auth;
+mod auth_accounts;
 mod contact_messages;
 mod knowledge;
 mod lineage;
 mod memory;
 mod session;
 mod session_stream;
+mod tenant_accounts;
 mod tools;
 mod webhook_verification;
 mod whoami;
@@ -99,6 +103,41 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/v1/auth/login", post(auth_accounts::login))
+        .route("/v1/auth/logout", post(auth_accounts::logout))
+        .route(
+            "/v1/auth/password/reset-request",
+            post(auth_accounts::request_password_reset),
+        )
+        .route(
+            "/v1/auth/password/reset",
+            post(auth_accounts::reset_password),
+        )
+        .route("/v1/auth/password", post(auth_accounts::change_password))
+        .route(
+            "/v1/users/me",
+            get(auth_accounts::get_me).patch(auth_accounts::patch_me),
+        )
+        .route("/v1/tenants/signup", post(tenant_accounts::signup))
+        .route(
+            "/v1/tenant",
+            get(tenant_accounts::get_tenant)
+                .patch(tenant_accounts::patch_tenant)
+                .delete(tenant_accounts::delete_tenant),
+        )
+        .route(
+            "/v1/tenant/users",
+            get(tenant_accounts::list_users).post(tenant_accounts::create_user),
+        )
+        .route("/v1/tenant/invitations", post(tenant_accounts::invite_user))
+        .route(
+            "/v1/tenant/invitations/accept",
+            post(tenant_accounts::accept_invitation),
+        )
+        .route(
+            "/v1/tenant/users/{user_id}/password",
+            post(auth_accounts::set_user_password),
+        )
         .route("/v1/whoami", get(whoami::handle))
         .route(
             "/v1/analytics/session-stats",
@@ -414,6 +453,38 @@ fn authz_error_response(_state: &AppState, error: AuthzCheckError) -> Response {
 fn credential_for_request(auth: &dyn AuthProvider, headers: &HeaderMap) -> Option<Credential> {
     extract_credential(headers)
         .or_else(|| (!auth.requires_credentials()).then(|| Credential::ApiKey(String::new())))
+}
+
+/// Attach a session cookie to an already-built response.
+pub(super) fn attach_set_cookie(mut response: Response, cookie: HeaderValue) -> Response {
+    response.headers_mut().append(header::SET_COOKIE, cookie);
+    response
+}
+
+/// Build the HttpOnly browser session cookie value for an issued session token.
+pub(super) fn session_cookie_header(
+    token: &str,
+    expires_at: DateTime<Utc>,
+) -> Result<HeaderValue, String> {
+    let max_age_seconds = (expires_at - Utc::now()).num_seconds().max(0);
+    let value = format!(
+        "{USER_SESSION_COOKIE_NAME}={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={max_age_seconds}"
+    );
+    HeaderValue::from_str(&value).map_err(|error| format!("build session cookie: {error}"))
+}
+
+/// Build the cookie-clearing header for logout and invalidation flows.
+pub(super) fn clear_session_cookie_header() -> HeaderValue {
+    HeaderValue::from_static(
+        "__Host-user_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
+    )
+}
+
+/// Return the presented first-party user-session token from Authorization or the session cookie.
+pub(super) fn user_session_token_from_headers(headers: &HeaderMap) -> Option<String> {
+    authorization_bearer_token(headers)
+        .filter(|token| moa_auth_providers::looks_like_user_session_token(token))
+        .or_else(|| user_session_token_from_cookie(headers))
 }
 
 async fn handle_github_secret_scan() -> axum::response::Response {
@@ -1019,11 +1090,35 @@ async fn response_to_axum(response: reqwest::Response) -> axum::response::Respon
 }
 
 fn extract_credential(headers: &HeaderMap) -> Option<Credential> {
-    let token = authorization_bearer_token(headers)?;
-    if token.starts_with("moa_") {
-        return Some(Credential::ApiKey(token));
+    if let Some(token) = authorization_bearer_token(headers) {
+        return Some(credential_from_bearer_token(token));
     }
-    Some(Credential::BearerJwt(token))
+    user_session_token_from_cookie(headers).map(Credential::UserSessionToken)
+}
+
+fn credential_from_bearer_token(token: String) -> Credential {
+    if moa_auth_providers::looks_like_user_session_token(&token) {
+        return Credential::UserSessionToken(token);
+    }
+    if token.starts_with("moa_") {
+        return Credential::ApiKey(token);
+    }
+    Credential::BearerJwt(token)
+}
+
+fn user_session_token_from_cookie(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|header| header.split(';'))
+        .filter_map(|part| part.trim().split_once('='))
+        .find_map(|(name, value)| {
+            let value = value.trim();
+            (name.trim() == USER_SESSION_COOKIE_NAME
+                && moa_auth_providers::looks_like_user_session_token(value))
+            .then(|| value.to_string())
+        })
 }
 
 enum RouteTranslation {
@@ -1420,7 +1515,7 @@ pub(super) mod test_support {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use axum::http::header::AUTHORIZATION;
+    use axum::http::header::{AUTHORIZATION, COOKIE};
     use moa_core::TenantId;
     use moa_core::traits::{AuthError, Identity, IdentityType};
 
@@ -1494,6 +1589,67 @@ mod tests {
 
         assert_eq!(
             credential_for_request(&DisabledAuth, &headers),
+            Some(Credential::ApiKey("moa_dev_example".to_string()))
+        );
+    }
+
+    #[test]
+    fn user_session_bearer_token_is_not_treated_as_api_key_or_jwt() {
+        // Pins: dashboard login tokens route to the local user-session auth path, not API-key or OIDC auth.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            "Bearer user_session_example"
+                .parse()
+                .expect("test auth header should parse"),
+        );
+
+        assert_eq!(
+            credential_for_request(&StrictAuth, &headers),
+            Some(Credential::UserSessionToken(
+                "user_session_example".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn user_session_cookie_is_accepted_when_authorization_header_is_missing() {
+        // Pins: browser dashboard requests can authenticate with the HttpOnly session cookie alone.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            "__Host-user_session=user_session_example; other=value"
+                .parse()
+                .expect("test cookie header should parse"),
+        );
+
+        assert_eq!(
+            credential_for_request(&StrictAuth, &headers),
+            Some(Credential::UserSessionToken(
+                "user_session_example".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn authorization_header_wins_over_session_cookie() {
+        // Pins: API clients can still send explicit bearer credentials without being shadowed by a browser cookie.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            "Bearer moa_dev_example"
+                .parse()
+                .expect("test auth header should parse"),
+        );
+        headers.insert(
+            COOKIE,
+            "__Host-user_session=user_session_example"
+                .parse()
+                .expect("test cookie header should parse"),
+        );
+
+        assert_eq!(
+            credential_for_request(&StrictAuth, &headers),
             Some(Credential::ApiKey("moa_dev_example".to_string()))
         );
     }

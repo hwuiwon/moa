@@ -85,7 +85,9 @@ impl AuthProvider for Auth0AuthProvider {
     async fn authenticate(&self, credential: &Credential) -> Result<Identity, AuthError> {
         let token = match credential {
             Credential::BearerJwt(token) => token,
-            Credential::ApiKey(_) => return Err(AuthError::NotConfigured),
+            Credential::ApiKey(_) | Credential::UserSessionToken(_) => {
+                return Err(AuthError::NotConfigured);
+            }
         };
 
         let header = decode_header(token).map_err(|_| AuthError::InvalidFormat)?;

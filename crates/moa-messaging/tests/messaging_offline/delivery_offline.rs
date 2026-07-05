@@ -36,7 +36,7 @@ async fn delivery_offline_dispatches_email_through_postmark() {
         })))
         .mount(&server)
         .await;
-    let sink = ProviderDeliverySink::empty("MOA <moa@example.com>")
+    let sink = ProviderDeliverySink::empty("Team <no-reply@example.com>")
         .with_email_client(PostmarkEmailClient::new("test-token").with_base_url(server.uri()));
     let message = delivery_message(Channel::Email, "user@example.com")
         .with_subject("Verify")
@@ -56,7 +56,7 @@ async fn delivery_offline_dispatches_email_through_postmark() {
     let request = only_request(&server).await;
     let body: serde_json::Value =
         serde_json::from_slice(&request.body).expect("captured Postmark body should be JSON");
-    assert_eq!(body["From"], "MOA <moa@example.com>");
+    assert_eq!(body["From"], "Team <no-reply@example.com>");
     assert_eq!(body["To"], "user@example.com");
     assert_eq!(body["Subject"], "Verify");
     assert_eq!(body["TextBody"], "delivery body");
@@ -85,7 +85,7 @@ async fn delivery_offline_dispatches_sms_through_twilio() {
         })))
         .mount(&server)
         .await;
-    let sink = ProviderDeliverySink::empty("MOA <moa@example.com>").with_sms_client(
+    let sink = ProviderDeliverySink::empty("Team <no-reply@example.com>").with_sms_client(
         TwilioSmsClient::from_account_auth_token(ACCOUNT_SID, "auth-token")
             .with_base_url(server.uri())
             .with_default_from("+15551234567"),
@@ -114,7 +114,7 @@ async fn delivery_offline_dispatches_sms_through_twilio() {
 fn delivery_message(channel: Channel, to: &str) -> DeliveryMessage {
     DeliveryMessage {
         tenant_id: Uuid::now_v7(),
-        contact_id: ContactId::new(),
+        contact_id: Some(ContactId::new()),
         purpose: DeliveryPurpose::ContactVerification,
         channel,
         to: to.to_string(),
