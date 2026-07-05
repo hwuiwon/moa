@@ -34,6 +34,9 @@ pub(super) fn translate(
         "/v1/skills/status" => {
             translate_json_object_with_tenant_id(body, "/Skills/status", tenant_id)
         }
+        "/v1/skills/runs/list" => {
+            translate_json_object_with_tenant_id(body, "/Skills/list_runs", tenant_id)
+        }
         "/v1/skills/cancel" => {
             translate_json_object_with_tenant_id(body, "/Skills/cancel", tenant_id)
         }
@@ -168,6 +171,7 @@ mod tests {
         let cases = [
             ("/v1/skills/run", "/Skills/run"),
             ("/v1/skills/status", "/Skills/status"),
+            ("/v1/skills/runs/list", "/Skills/list_runs"),
             ("/v1/skills/cancel", "/Skills/cancel"),
             ("/v1/skills/signal", "/Skills/signal"),
             ("/v1/skills/decide-review", "/Skills/decide_review"),

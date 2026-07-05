@@ -2,8 +2,8 @@ use chrono::TimeDelta;
 use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{
     ArtifactFile, ArtifactNodeRunStatus, ArtifactNodeRunUpdate, ArtifactRegistry,
-    ArtifactRunStatus, ArtifactRunUpdate, MAX_FILE_SIZE_BYTES, NewArtifactDraft, NewArtifactFile,
-    NewArtifactNodeRun, NewArtifactRun,
+    ArtifactRunListRequest, ArtifactRunStatus, ArtifactRunUpdate, MAX_FILE_SIZE_BYTES,
+    NewArtifactDraft, NewArtifactFile, NewArtifactNodeRun, NewArtifactRun,
 };
 use moa_artifacts::validation::validate_for_status;
 use moa_core::{ActionRuleScope, ContactId, MoaError, Result, SessionId, TenantId};
@@ -683,6 +683,143 @@ async fn procedure_run_node_projection_db_memory() -> Result<()> {
     assert_eq!(reloaded.completed_at, Some(run_completed_at));
 
     moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn procedure_run_list_pages_by_latest_visible_runs_db_memory() -> Result<()> {
+    // Pins: dashboard procedure run lists are tenant-scoped, status-filtered,
+    // and keyset-paginated in newest-first order.
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let registry = ArtifactRegistry::new(store.pool().clone());
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: TenantId::from(Uuid::now_v7()),
+    };
+    let other_scope = ActionRuleScope::Tenant {
+        tenant_id: TenantId::from(Uuid::now_v7()),
+    };
+    let completed_run =
+        append_fixture_run(&registry, &scope, "completed", ArtifactRunStatus::Completed).await?;
+    let queued_run =
+        append_fixture_run(&registry, &scope, "queued", ArtifactRunStatus::Queued).await?;
+    let running_run =
+        append_fixture_run(&registry, &scope, "running", ArtifactRunStatus::Running).await?;
+    append_fixture_run(
+        &registry,
+        &other_scope,
+        "other-tenant",
+        ArtifactRunStatus::Running,
+    )
+    .await?;
+
+    let first_page = registry
+        .list_runs(
+            &scope,
+            ArtifactRunListRequest {
+                status: None,
+                limit: Some(2),
+                cursor: None,
+            },
+        )
+        .await?;
+    assert_eq!(first_page.runs.len(), 2);
+    assert_eq!(
+        first_page
+            .runs
+            .iter()
+            .map(|run| run.procedure_ref.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            running_run.procedure_ref.as_str(),
+            queued_run.procedure_ref.as_str()
+        ]
+    );
+    assert_eq!(
+        first_page.next_cursor,
+        Some(moa_artifacts::registry::ArtifactRunListCursor {
+            started_at: queued_run.started_at,
+            run_uid: queued_run.run_uid,
+        })
+    );
+
+    let second_page = registry
+        .list_runs(
+            &scope,
+            ArtifactRunListRequest {
+                status: None,
+                limit: Some(2),
+                cursor: first_page.next_cursor,
+            },
+        )
+        .await?;
+    assert_eq!(second_page.runs.len(), 1);
+    assert_eq!(second_page.runs[0].run_uid, completed_run.run_uid);
+    assert_eq!(second_page.next_cursor, None);
+
+    let running_page = registry
+        .list_runs(
+            &scope,
+            ArtifactRunListRequest {
+                status: Some(ArtifactRunStatus::Running),
+                limit: Some(10),
+                cursor: None,
+            },
+        )
+        .await?;
+    assert_eq!(running_page.runs.len(), 1);
+    assert_eq!(running_page.runs[0].run_uid, running_run.run_uid);
+    assert_eq!(running_page.runs[0].status, ArtifactRunStatus::Running);
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+async fn append_fixture_run(
+    registry: &ArtifactRegistry,
+    scope: &ActionRuleScope,
+    suffix: &str,
+    status: ArtifactRunStatus,
+) -> Result<moa_artifacts::registry::ArtifactRun> {
+    let name = format!("support-flow-{suffix}-{}", Uuid::now_v7());
+    let document = procedure_skill_doc(&name);
+    let source = document.to_json().expect("serialize procedure skill doc");
+    let draft = registry
+        .create_draft(
+            scope,
+            NewArtifactDraft {
+                document: &document,
+                source_format: "json",
+                source_text: source.as_bytes(),
+                files: &[],
+            },
+        )
+        .await?;
+    let published = registry
+        .publish_revision(
+            scope,
+            draft.revision_uid,
+            &validate_for_status(&document, ArtifactStatus::Published),
+        )
+        .await?;
+
+    registry
+        .append_run(
+            scope,
+            NewArtifactRun {
+                artifact_uid: Some(published.artifact_uid),
+                revision_uid: Some(published.revision_uid),
+                session_id: Some(SessionId::new()),
+                procedure_ref: format!("skill://{name}"),
+                status,
+                current_node_id: None,
+                input: json!({ "ticket_id": suffix }),
+                state: json!({}),
+                output: None,
+                error: None,
+                idempotency_key: None,
+            },
+        )
+        .await
 }
 
 fn skill_doc(name: &str, description: &str) -> ArtifactDocument {

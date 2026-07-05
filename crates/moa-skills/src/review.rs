@@ -634,25 +634,21 @@ mod tests {
             async move { Ok(applies) }
         }
 
-        fn update_learning_candidate_status_from_in_tx<'a>(
-            &'a self,
-            _conn: &'a mut PgConnection,
-            _update: &'a LearningCandidateStatusUpdate,
+        async fn update_learning_candidate_status_from_in_tx(
+            &self,
+            _conn: &mut PgConnection,
+            _update: &LearningCandidateStatusUpdate,
             _expected_status: LearningCandidateStatus,
-        ) -> impl Future<Output = std::result::Result<bool, MoaError>> + Send + 'a {
-            async move {
-                unreachable!("in-tx status update is only used by the pool-backed promote path")
-            }
+        ) -> std::result::Result<bool, MoaError> {
+            unreachable!("in-tx status update is only used by the pool-backed promote path")
         }
 
-        fn append_learning_in_tx<'a>(
-            &'a self,
-            _conn: &'a mut PgConnection,
-            _entry: &'a LearningEntry,
-        ) -> impl Future<Output = std::result::Result<(), MoaError>> + Send + 'a {
-            async move {
-                unreachable!("append_learning_in_tx is only used by the pool-backed promote path")
-            }
+        async fn append_learning_in_tx(
+            &self,
+            _conn: &mut PgConnection,
+            _entry: &LearningEntry,
+        ) -> std::result::Result<(), MoaError> {
+            unreachable!("append_learning_in_tx is only used by the pool-backed promote path")
         }
     }
 

@@ -12,8 +12,8 @@ use moa_core::traits::{AuthError, AuthProvider, Credential, Identity, IdentityTy
 use moa_core::wire::analytics::{AnalyticsCatalogResponse, AnalyticsCell, AnalyticsQueryResponse};
 use moa_core::wire::lineage::LineageQueryResponse;
 use moa_core::{
-    AgentContext, Event, MoaConfig, ModelId, SessionActorRef, SessionMeta, SessionStore, TenantId,
-    ToolCallId, ToolOutput,
+    AgentContext, Event, MoaConfig, ModelId, SessionActorRef, SessionId, SessionMeta, SessionStore,
+    TenantId, ToolCallId, ToolOutput,
 };
 use moa_edge::proxy::OrchestratorProxy;
 use moa_edge::routes::{self, AppState, KnowledgeWebhookEdgeConfig};
@@ -62,6 +62,11 @@ struct EdgeServer {
     base_url: String,
     server: JoinHandle<()>,
 }
+
+// The edge router configures moa-authz's process-global security audit sink.
+// Dashboard denial tests hold this narrow lock so one isolated pool is not
+// closed while another test's denied authz audit is still using it.
+static DASHBOARD_SESSIONS_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
 async fn fga_check(
     State(state): State<FgaMockState>,
@@ -161,6 +166,13 @@ fn session_meta(tenant_id: TenantId) -> SessionMeta {
     }
 }
 
+fn session_meta_with_id(tenant_id: TenantId, session_id: SessionId) -> SessionMeta {
+    SessionMeta {
+        id: session_id,
+        ..session_meta(tenant_id)
+    }
+}
+
 async fn create_test_store() -> (PostgresSessionStore, String, String) {
     testing::create_isolated_test_store()
         .await
@@ -223,6 +235,346 @@ async fn seed_tool_call(store: &PostgresSessionStore, tenant_id: TenantId, tool_
         )
         .await
         .expect("emit tool result");
+}
+
+async fn set_session_updated_at(
+    store: &PostgresSessionStore,
+    schema_name: &str,
+    session_id: SessionId,
+    updated_at: chrono::DateTime<Utc>,
+) {
+    let schema_name = schema_name.replace('"', "\"\"");
+    sqlx::query(&format!(
+        r#"UPDATE "{schema_name}".sessions SET updated_at = $1 WHERE id = $2"#
+    ))
+    .bind(updated_at)
+    .bind(session_id.0)
+    .execute(store.pool())
+    .await
+    .expect("set session updated_at fixture");
+}
+
+async fn emit_user_message(store: &PostgresSessionStore, session_id: SessionId, text: &str) {
+    store
+        .emit_event(
+            session_id,
+            Event::UserMessage {
+                text: text.to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .expect("emit dashboard user message");
+}
+
+fn json_uuid(value: &Value, field: &str) -> Uuid {
+    Uuid::parse_str(
+        value
+            .get(field)
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("{field} should be a UUID string in {value}")),
+    )
+    .expect("field should parse as UUID")
+}
+
+#[tokio::test]
+async fn dashboard_sessions_operator_reads_list_detail_and_redacted_events_db() {
+    // Pins: tenant operators can read session list/detail/events through HTTP with
+    // opaque cursors and without raw event payload leakage.
+    let _guard = DASHBOARD_SESSIONS_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = create_test_store().await;
+    let tenant_id = TenantId::new();
+    let latest_id = SessionId(Uuid::from_u128(0x00000000000000000000000000000202));
+    let older_id = SessionId(Uuid::from_u128(0x00000000000000000000000000000101));
+    let latest_time = chrono::DateTime::parse_from_rfc3339("2026-07-05T12:00:00Z")
+        .expect("fixture timestamp should parse")
+        .with_timezone(&Utc);
+    let older_time = chrono::DateTime::parse_from_rfc3339("2026-07-05T11:59:00Z")
+        .expect("fixture timestamp should parse")
+        .with_timezone(&Utc);
+
+    store
+        .create_session(session_meta_with_id(tenant_id, latest_id))
+        .await
+        .expect("create latest dashboard session");
+    store
+        .create_session(session_meta_with_id(tenant_id, older_id))
+        .await
+        .expect("create older dashboard session");
+    set_session_updated_at(&store, &schema_name, latest_id, latest_time).await;
+    set_session_updated_at(&store, &schema_name, older_id, older_time).await;
+    emit_user_message(&store, latest_id, "raw-dashboard-secret-one").await;
+    emit_user_message(&store, latest_id, "raw-dashboard-secret-two").await;
+
+    let fga = start_fga_mock(true).await;
+    let edge = start_edge(
+        &store,
+        &database_url,
+        &schema_name,
+        identity(IdentityType::User, tenant_id),
+        Some(fga.client.clone()),
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let first_list: Value = client
+        .get(format!("{}/v1/dashboard/sessions?limit=1", edge.base_url))
+        .send()
+        .await
+        .expect("send first dashboard list request")
+        .error_for_status()
+        .expect("first dashboard list should succeed")
+        .json()
+        .await
+        .expect("decode first dashboard list");
+    let first_sessions = first_list["sessions"]
+        .as_array()
+        .expect("sessions should be an array");
+    assert_eq!(first_sessions.len(), 1);
+    assert_eq!(json_uuid(&first_sessions[0], "session_id"), latest_id.0);
+    let list_cursor = first_list["next_cursor"]
+        .as_str()
+        .expect("first page should return an opaque cursor")
+        .to_string();
+    assert!(
+        !list_cursor.contains(&latest_id.to_string()),
+        "HTTP cursor should not expose the raw session id"
+    );
+
+    let second_list: Value = client
+        .get(format!(
+            "{}/v1/dashboard/sessions?limit=1&cursor={list_cursor}",
+            edge.base_url
+        ))
+        .send()
+        .await
+        .expect("send second dashboard list request")
+        .error_for_status()
+        .expect("second dashboard list should succeed")
+        .json()
+        .await
+        .expect("decode second dashboard list");
+    let second_sessions = second_list["sessions"]
+        .as_array()
+        .expect("sessions should be an array");
+    assert_eq!(second_sessions.len(), 1);
+    assert_eq!(json_uuid(&second_sessions[0], "session_id"), older_id.0);
+    assert_eq!(second_list["next_cursor"], Value::Null);
+
+    let detail: Value = client
+        .get(format!(
+            "{}/v1/dashboard/sessions/{}",
+            edge.base_url, latest_id
+        ))
+        .send()
+        .await
+        .expect("send dashboard detail request")
+        .error_for_status()
+        .expect("dashboard detail should succeed")
+        .json()
+        .await
+        .expect("decode dashboard detail");
+    assert_eq!(json_uuid(&detail, "session_id"), latest_id.0);
+    assert_eq!(json_uuid(&detail, "tenant_id"), tenant_id.0);
+    assert_eq!(detail["event_count"], json!(2));
+
+    let first_events: Value = client
+        .get(format!(
+            "{}/v1/dashboard/sessions/{}/events?limit=1",
+            edge.base_url, latest_id
+        ))
+        .send()
+        .await
+        .expect("send first dashboard events request")
+        .error_for_status()
+        .expect("first dashboard events page should succeed")
+        .json()
+        .await
+        .expect("decode first dashboard events page");
+    let first_events_array = first_events["events"]
+        .as_array()
+        .expect("events should be an array");
+    assert_eq!(first_events_array.len(), 1);
+    assert_eq!(first_events_array[0]["sequence_num"], json!(0));
+    assert_eq!(
+        first_events_array[0]["summary"],
+        json!("user message with 0 attachments")
+    );
+    let first_events_json =
+        serde_json::to_string(&first_events).expect("event page should serialize");
+    assert!(
+        !first_events_json.contains("raw-dashboard-secret"),
+        "dashboard event responses must not leak raw payload text: {first_events_json}"
+    );
+    let event_cursor = first_events["next_cursor"]
+        .as_str()
+        .expect("first event page should return an opaque cursor")
+        .to_string();
+
+    let second_events: Value = client
+        .get(format!(
+            "{}/v1/dashboard/sessions/{}/events?limit=1&cursor={event_cursor}",
+            edge.base_url, latest_id
+        ))
+        .send()
+        .await
+        .expect("send second dashboard events request")
+        .error_for_status()
+        .expect("second dashboard events page should succeed")
+        .json()
+        .await
+        .expect("decode second dashboard events page");
+    let second_events_array = second_events["events"]
+        .as_array()
+        .expect("events should be an array");
+    assert_eq!(second_events_array.len(), 1);
+    assert_eq!(second_events_array[0]["sequence_num"], json!(1));
+    assert_eq!(second_events["next_cursor"], Value::Null);
+
+    let checks = fga.checks.lock().await.clone();
+    assert_eq!(checks.len(), 1);
+    assert!(checks.iter().all(|check| {
+        check["tuple_key"]["object"] == json!(format!("tenant:{tenant_id}"))
+            && check["tuple_key"]["relation"] == json!("operator")
+    }));
+
+    stop_server(edge.server).await;
+    stop_fga_mock(fga.server).await;
+    cleanup_test_store(store, database_url, schema_name).await;
+}
+
+#[tokio::test]
+async fn dashboard_sessions_cross_tenant_read_is_denied_db() {
+    // Pins: passing another tenant_id does not bypass tenant operator authz.
+    let _guard = DASHBOARD_SESSIONS_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = create_test_store().await;
+    let caller_tenant = TenantId::new();
+    let target_tenant = TenantId::new();
+    let target_session = store
+        .create_session(session_meta(target_tenant))
+        .await
+        .expect("create target tenant session");
+    let fga = start_fga_mock(false).await;
+    let edge = start_edge(
+        &store,
+        &database_url,
+        &schema_name,
+        identity(IdentityType::User, caller_tenant),
+        Some(fga.client.clone()),
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/dashboard/sessions/{}?tenant_id={target_tenant}",
+            edge.base_url, target_session
+        ))
+        .send()
+        .await
+        .expect("send cross-tenant dashboard detail request");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let checks = fga.checks.lock().await.clone();
+    assert_eq!(checks.len(), 1);
+    assert!(checks.iter().all(|check| {
+        check["tuple_key"]["object"] == json!(format!("tenant:{target_tenant}"))
+            && check["tuple_key"]["relation"] == json!("operator")
+    }));
+
+    stop_server(edge.server).await;
+    stop_fga_mock(fga.server).await;
+    cleanup_test_store(store, database_url, schema_name).await;
+}
+
+#[tokio::test]
+async fn dashboard_sessions_workspace_admin_reads_explicit_tenant_db() {
+    // Pins: workspace-admin inheritance reaches cross-tenant dashboard reads only
+    // when the target tenant is supplied explicitly at the HTTP boundary.
+    let _guard = DASHBOARD_SESSIONS_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = create_test_store().await;
+    let caller_tenant = TenantId::new();
+    let target_tenant = TenantId::new();
+    let target_session = store
+        .create_session(session_meta(target_tenant))
+        .await
+        .expect("create target tenant session");
+    let fga = start_fga_mock(true).await;
+    let edge = start_edge(
+        &store,
+        &database_url,
+        &schema_name,
+        identity(IdentityType::User, caller_tenant),
+        Some(fga.client.clone()),
+    )
+    .await;
+
+    let response: Value = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/dashboard/sessions?tenant_id={target_tenant}",
+            edge.base_url
+        ))
+        .send()
+        .await
+        .expect("send explicit-tenant dashboard list request")
+        .error_for_status()
+        .expect("explicit tenant dashboard list should succeed")
+        .json()
+        .await
+        .expect("decode explicit tenant dashboard list");
+
+    let sessions = response["sessions"]
+        .as_array()
+        .expect("sessions should be an array");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(json_uuid(&sessions[0], "session_id"), target_session.0);
+    assert_eq!(json_uuid(&sessions[0], "tenant_id"), target_tenant.0);
+    let checks = fga.checks.lock().await.clone();
+    assert_eq!(checks.len(), 1);
+    assert!(checks.iter().all(|check| {
+        check["tuple_key"]["object"] == json!(format!("tenant:{target_tenant}"))
+            && check["tuple_key"]["relation"] == json!("operator")
+    }));
+
+    stop_server(edge.server).await;
+    stop_fga_mock(fga.server).await;
+    cleanup_test_store(store, database_url, schema_name).await;
+}
+
+#[tokio::test]
+async fn dashboard_sessions_malformed_cursor_is_rejected_db() {
+    // Pins: dashboard cursor strings are opaque HTTP tokens and malformed tokens
+    // are rejected before reaching the read model.
+    let _guard = DASHBOARD_SESSIONS_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = create_test_store().await;
+    let tenant_id = TenantId::new();
+    store
+        .create_session(session_meta(tenant_id))
+        .await
+        .expect("create dashboard session");
+    let fga = start_fga_mock(true).await;
+    let edge = start_edge(
+        &store,
+        &database_url,
+        &schema_name,
+        identity(IdentityType::User, tenant_id),
+        Some(fga.client.clone()),
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/dashboard/sessions?cursor=not-a-valid-cursor",
+            edge.base_url
+        ))
+        .send()
+        .await
+        .expect("send malformed cursor request");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    stop_server(edge.server).await;
+    stop_fga_mock(fga.server).await;
+    cleanup_test_store(store, database_url, schema_name).await;
 }
 
 fn string_cell(cell: &AnalyticsCell) -> &str {
@@ -312,8 +664,9 @@ async fn authz_gate_runs_before_analytics_query_db() {
 }
 
 #[tokio::test]
-async fn analytics_query_injects_user_tenant_and_scopes_tool_calls_db() {
-    // Pins: user analytics queries are forced to the authenticated tenant even if the body asks for another tenant.
+async fn analytics_query_uses_requested_tenant_when_authorized_db() {
+    // Pins: dashboard analytics queries can intentionally target another tenant,
+    // but only after an operator authz check against that target tenant.
     let (store, database_url, schema_name) = create_test_store().await;
     let tenant_a = TenantId::new();
     let tenant_b = TenantId::new();
@@ -352,16 +705,16 @@ async fn analytics_query_injects_user_tenant_and_scopes_tool_calls_db() {
         .await
         .expect("decode user analytics response");
 
-    assert_eq!(user_response.metadata.effective_tenant_id, Some(tenant_a));
+    assert_eq!(user_response.metadata.effective_tenant_id, Some(tenant_b));
     assert_eq!(user_response.rows.len(), 1);
-    assert_eq!(string_cell(&user_response.rows[0][0]), "tenant_a_tool");
+    assert_eq!(string_cell(&user_response.rows[0][0]), "tenant_b_tool");
     assert_eq!(i64_cell(&user_response.rows[0][1]), 1);
 
     let checks = fga.checks.lock().await.clone();
     assert_eq!(checks.len(), 1);
     assert_eq!(
         checks[0]["tuple_key"]["object"],
-        json!(format!("tenant:{tenant_a}"))
+        json!(format!("tenant:{tenant_b}"))
     );
     assert_eq!(checks[0]["tuple_key"]["relation"], json!("operator"));
 
@@ -371,22 +724,73 @@ async fn analytics_query_injects_user_tenant_and_scopes_tool_calls_db() {
 }
 
 #[tokio::test]
+async fn analytics_query_denies_unauthorized_requested_tenant_db() {
+    // Pins: a requested tenant_id does not bypass tenant operator authz.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let caller_tenant = TenantId::new();
+    let target_tenant = TenantId::new();
+    seed_tool_call(&store, target_tenant, "hidden_tool").await;
+    store
+        .refresh_analytics_materialized_views()
+        .await
+        .expect("refresh analytics views");
+
+    let fga = start_fga_mock(false).await;
+    let edge = start_edge(
+        &store,
+        &database_url,
+        &schema_name,
+        identity(IdentityType::User, caller_tenant),
+        Some(fga.client.clone()),
+    )
+    .await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/analytics/query", edge.base_url))
+        .json(&json!({
+            "dataset": "tool_calls",
+            "tenant_id": target_tenant,
+            "dimensions": [{ "field": "tool_name" }],
+            "measures": [{ "aggregation": "count", "alias": "calls" }]
+        }))
+        .send()
+        .await
+        .expect("send unauthorized target analytics query");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let checks = fga.checks.lock().await.clone();
+    assert_eq!(checks.len(), 1);
+    assert_eq!(
+        checks[0]["tuple_key"]["object"],
+        json!(format!("tenant:{target_tenant}"))
+    );
+    assert_eq!(checks[0]["tuple_key"]["relation"], json!("operator"));
+
+    stop_server(edge.server).await;
+    stop_fga_mock(fga.server).await;
+    cleanup_test_store(store, database_url, schema_name).await;
+}
+
+#[tokio::test]
 async fn analytics_catalog_requires_tenant_operator_db() {
     // Pins: catalog is part of the tenant operator surface and stays behind edge authz.
     let (store, database_url, schema_name) = create_test_store().await;
-    let tenant_id = TenantId::new();
+    let caller_tenant = TenantId::new();
+    let target_tenant = TenantId::new();
     let fga = start_fga_mock(true).await;
     let edge = start_edge(
         &store,
         &database_url,
         &schema_name,
-        identity(IdentityType::User, tenant_id),
+        identity(IdentityType::User, caller_tenant),
         Some(fga.client.clone()),
     )
     .await;
 
     let response: AnalyticsCatalogResponse = reqwest::Client::new()
-        .get(format!("{}/v1/analytics/catalog", edge.base_url))
+        .get(format!(
+            "{}/v1/analytics/catalog?tenant_id={target_tenant}",
+            edge.base_url
+        ))
         .send()
         .await
         .expect("send analytics catalog request")
@@ -413,7 +817,7 @@ async fn analytics_catalog_requires_tenant_operator_db() {
     assert_eq!(checks.len(), 1);
     assert_eq!(
         checks[0]["tuple_key"]["object"],
-        json!(format!("tenant:{tenant_id}"))
+        json!(format!("tenant:{target_tenant}"))
     );
     assert_eq!(checks[0]["tuple_key"]["relation"], json!("operator"));
 

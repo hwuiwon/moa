@@ -1,6 +1,6 @@
 //! Postgres-backed artifact registry with MOA three-tier visibility.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, str::FromStr};
 
 use chrono::{DateTime, Utc};
 use moa_core::RlsContext;
@@ -23,6 +23,8 @@ use crate::validation::{ValidationReport, validate_for_status};
 /// scripts), so a 10 MiB ceiling rejects abusive uploads long before the
 /// `i64` byte-count conversion could overflow.
 pub const MAX_FILE_SIZE_BYTES: usize = 10 * 1024 * 1024;
+const DEFAULT_RUN_PAGE_LIMIT: usize = 50;
+const MAX_RUN_PAGE_LIMIT: usize = 200;
 
 /// Artifact storage columns derived from artifact inheritance scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -242,6 +244,14 @@ impl ArtifactRunStatus {
     }
 }
 
+impl FromStr for ArtifactRunStatus {
+    type Err = MoaError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        run_status_from_str(value)
+    }
+}
+
 /// Procedure node-run status persisted for artifacts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArtifactNodeRunStatus {
@@ -333,6 +343,35 @@ pub struct ArtifactRun {
     pub started_at: DateTime<Utc>,
     /// Run completion timestamp.
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Keyset cursor for listing procedure runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ArtifactRunListCursor {
+    /// Last seen run start timestamp.
+    pub started_at: DateTime<Utc>,
+    /// Last seen run identifier at that timestamp.
+    pub run_uid: Uuid,
+}
+
+/// Request for listing visible procedure runs.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ArtifactRunListRequest {
+    /// Optional status filter.
+    pub status: Option<ArtifactRunStatus>,
+    /// Maximum number of rows to return.
+    pub limit: Option<usize>,
+    /// Cursor returned by a previous page.
+    pub cursor: Option<ArtifactRunListCursor>,
+}
+
+/// One page of visible procedure runs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArtifactRunPage {
+    /// Runs in descending start order.
+    pub runs: Vec<ArtifactRun>,
+    /// Cursor for the next page when more rows are available.
+    pub next_cursor: Option<ArtifactRunListCursor>,
 }
 
 /// Registry patch payload for mutable procedure run fields.
@@ -747,6 +786,60 @@ impl ArtifactRegistry {
         .map_err(map_sqlx_error)?;
         conn.commit().await?;
         row.as_ref().map(run_from_row).transpose()
+    }
+
+    /// Lists visible procedure runs in descending start order.
+    pub async fn list_runs(
+        &self,
+        scope: &ActionRuleScope,
+        request: ArtifactRunListRequest,
+    ) -> Result<ArtifactRunPage> {
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
+        let parts = ArtifactScopeParts::from_scope(scope);
+        let limit = page_limit(request.limit);
+        let fetch_limit = i64::try_from(limit.saturating_add(1))
+            .map_err(|error| MoaError::StorageError(error.to_string()))?;
+        let cursor_started_at = request.cursor.map(|cursor| cursor.started_at);
+        let cursor_run_uid = request.cursor.map(|cursor| cursor.run_uid);
+        let rows = sqlx::query(
+            r#"
+            SELECT run_uid, artifact_uid, revision_uid, session_id, procedure_ref, status,
+                   current_node_id, input, state, output, error, started_at, completed_at
+            FROM moa.artifact_run
+            WHERE storage_partition_id = $1
+              AND user_id IS NOT DISTINCT FROM $2
+              AND ($3::TEXT IS NULL OR status = $3)
+              AND (
+                    $4::TIMESTAMPTZ IS NULL
+                 OR started_at < $4
+                 OR (started_at = $4 AND run_uid < $5)
+              )
+            ORDER BY started_at DESC, run_uid DESC
+            LIMIT $6
+            "#,
+        )
+        .bind(parts.storage_partition_id.as_deref())
+        .bind(parts.user_id.as_deref())
+        .bind(request.status.as_ref().map(ArtifactRunStatus::as_str))
+        .bind(cursor_started_at)
+        .bind(cursor_run_uid)
+        .bind(fetch_limit)
+        .fetch_all(&mut *conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await?;
+
+        let mut runs = rows.iter().map(run_from_row).collect::<Result<Vec<_>>>()?;
+        let next_cursor = if runs.len() > limit {
+            let _ = runs.pop();
+            runs.last().map(|run| ArtifactRunListCursor {
+                started_at: run.started_at,
+                run_uid: run.run_uid,
+            })
+        } else {
+            None
+        };
+        Ok(ArtifactRunPage { runs, next_cursor })
     }
 
     /// Updates mutable fields for a visible procedure run and returns the full projection.
@@ -1497,6 +1590,12 @@ fn run_from_row(row: &sqlx::postgres::PgRow) -> Result<ArtifactRun> {
         started_at: row.try_get("started_at").map_err(map_sqlx_error)?,
         completed_at: row.try_get("completed_at").map_err(map_sqlx_error)?,
     })
+}
+
+fn page_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(DEFAULT_RUN_PAGE_LIMIT)
+        .clamp(1, MAX_RUN_PAGE_LIMIT)
 }
 
 fn node_run_from_row(row: &sqlx::postgres::PgRow) -> Result<ArtifactNodeRun> {
