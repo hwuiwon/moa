@@ -7,6 +7,8 @@ pub mod contact_tokens;
 pub mod disabled;
 pub mod local;
 pub mod null_vault;
+pub mod passwords;
+pub mod user_sessions;
 
 pub use api_keys::{
     ApiKeyError, CreateApiKeyRequest, CreateApiKeyResponse, Env, IssuedKey, KeyListItem, KeyOwner,
@@ -18,3 +20,8 @@ pub use contact_tokens::{ContactTokenError, ContactTokenIssuer, ContactTokenVeri
 pub use disabled::DisabledAuthProvider;
 pub use local::LocalAuthProvider;
 pub use null_vault::NullTokenVaultProvider;
+pub use passwords::{PasswordError, hash_password, verify_password};
+pub use user_sessions::{
+    IssuedUserSessionToken, NewUserSessionToken, ResolvedUserSessionToken, UserSessionTokenError,
+    looks_like_user_session_token,
+};

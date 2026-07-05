@@ -1,4 +1,4 @@
-//! Channel-neutral delivery helpers for contact-facing messages.
+//! Channel-neutral delivery helpers for account and contact-facing messages.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -31,6 +31,8 @@ use crate::twilio::{
 pub enum DeliveryPurpose {
     /// One-time contact-point verification code.
     ContactVerification,
+    /// One-time dashboard account password reset token.
+    PasswordReset,
 }
 
 impl DeliveryPurpose {
@@ -39,6 +41,7 @@ impl DeliveryPurpose {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ContactVerification => "contact_verification",
+            Self::PasswordReset => "password_reset",
         }
     }
 }
@@ -46,10 +49,10 @@ impl DeliveryPurpose {
 /// Outbound message after a caller has selected a delivery channel and recipient.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryMessage {
-    /// Tenant boundary that owns the recipient contact.
+    /// Tenant boundary that owns the recipient.
     pub tenant_id: Uuid,
-    /// Contact receiving the message.
-    pub contact_id: ContactId,
+    /// Contact receiving the message, when the recipient is contact-backed.
+    pub contact_id: Option<ContactId>,
     /// Delivery use case.
     pub purpose: DeliveryPurpose,
     /// Selected delivery channel.
@@ -79,11 +82,11 @@ impl DeliveryMessage {
     ) -> Self {
         let code = code.as_ref();
         let text_body = format!(
-            "Your MOA verification code is {code}. It expires at {}.",
+            "Your verification code is {code}. It expires at {}.",
             expires_at.to_rfc3339()
         );
         let html_body = format!(
-            "<p>Your MOA verification code is <strong>{code}</strong>.</p><p>It expires at {}.</p>",
+            "<p>Your verification code is <strong>{code}</strong>.</p><p>It expires at {}.</p>",
             expires_at.to_rfc3339()
         );
         let mut metadata = BTreeMap::new();
@@ -91,11 +94,44 @@ impl DeliveryMessage {
         metadata.insert("contact_id".to_string(), contact_id.to_string());
         Self {
             tenant_id,
-            contact_id,
+            contact_id: Some(contact_id),
             purpose: DeliveryPurpose::ContactVerification,
             channel,
             to: to.into(),
-            subject: Some("Your MOA verification code".to_string()),
+            subject: Some("Your verification code".to_string()),
+            text_body,
+            html_body: Some(html_body),
+            metadata,
+        }
+    }
+
+    /// Builds an email delivery message for dashboard account password reset.
+    #[must_use]
+    pub fn password_reset_email(
+        tenant_id: Uuid,
+        user_id: Uuid,
+        to: impl Into<String>,
+        token: impl AsRef<str>,
+        expires_at: DateTime<Utc>,
+    ) -> Self {
+        let token = token.as_ref();
+        let expires_at = expires_at.to_rfc3339();
+        let text_body = format!(
+            "We received a request to reset your password.\n\nReset token:\n{token}\n\nThis token expires at {expires_at}. If you did not request this, ignore this email."
+        );
+        let html_body = format!(
+            "<p>We received a request to reset your password.</p><p>Reset token:<br><code>{token}</code></p><p>This token expires at {expires_at}.</p><p>If you did not request this, ignore this email.</p>"
+        );
+        let mut metadata = BTreeMap::new();
+        metadata.insert("purpose".to_string(), "password_reset".to_string());
+        metadata.insert("user_id".to_string(), user_id.to_string());
+        Self {
+            tenant_id,
+            contact_id: None,
+            purpose: DeliveryPurpose::PasswordReset,
+            channel: Channel::Email,
+            to: to.into(),
+            subject: Some("Reset your password".to_string()),
             text_body,
             html_body: Some(html_body),
             metadata,
@@ -217,7 +253,7 @@ impl ProviderDeliverySink {
         })?;
         if self.email_from.trim().is_empty() {
             return Err(MoaError::ConfigError(
-                "MOA_MESSAGING_EMAIL_FROM is required for email delivery".to_string(),
+                "messaging email sender is required for email delivery".to_string(),
             ));
         }
         let mut email =
@@ -396,13 +432,18 @@ fn optional_env(name: &str) -> Option<String> {
 }
 
 fn delivery_span(message: &DeliveryMessage) -> tracing::Span {
+    let contact_id = message
+        .contact_id
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
     tracing::info_span!(
         "contact_delivery",
         otel.name = "contact_delivery_send",
         messaging.operation = "deliver",
         messaging.channel = message.channel.as_str(),
         moa.tenant.id = %message.tenant_id,
-        moa.contact.id = %message.contact_id,
+        moa.contact.id = %contact_id,
         moa.delivery.purpose = message.purpose.as_str(),
     )
 }
@@ -435,7 +476,7 @@ mod tests {
         );
 
         assert_eq!(message.tenant_id, tenant_id);
-        assert_eq!(message.contact_id, contact_id);
+        assert_eq!(message.contact_id, Some(contact_id));
         assert_eq!(message.purpose, DeliveryPurpose::ContactVerification);
         assert_eq!(message.channel, Channel::Sms);
         assert_eq!(message.to, "+15005550006");
@@ -450,6 +491,49 @@ mod tests {
                 .values()
                 .any(|value| value.contains("123456")),
             "verification code must not be copied into provider metadata"
+        );
+    }
+
+    #[test]
+    fn password_reset_email_builds_account_message_without_token_metadata() {
+        // Pins: reset delivery is account-scoped email and never copies the bearer token into provider metadata.
+        let tenant_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+        let expires_at = chrono::Utc
+            .with_ymd_and_hms(2026, 6, 21, 12, 0, 0)
+            .single()
+            .expect("fixed timestamp should be valid");
+
+        let message = DeliveryMessage::password_reset_email(
+            tenant_id,
+            user_id,
+            "admin@example.com",
+            "password_reset_secret",
+            expires_at,
+        );
+
+        assert_eq!(message.tenant_id, tenant_id);
+        assert_eq!(message.contact_id, None);
+        assert_eq!(message.purpose, DeliveryPurpose::PasswordReset);
+        assert_eq!(message.channel, Channel::Email);
+        assert_eq!(message.to, "admin@example.com");
+        assert_eq!(message.subject.as_deref(), Some("Reset your password"));
+        assert!(message.text_body.contains("password_reset_secret"));
+        assert_eq!(
+            message.metadata.get("purpose").map(String::as_str),
+            Some("password_reset")
+        );
+        let user_id = user_id.to_string();
+        assert_eq!(
+            message.metadata.get("user_id").map(String::as_str),
+            Some(user_id.as_str())
+        );
+        assert!(
+            !message
+                .metadata
+                .values()
+                .any(|value| value.contains("password_reset_secret")),
+            "reset token must not be copied into provider metadata"
         );
     }
 }

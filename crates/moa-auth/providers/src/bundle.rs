@@ -242,7 +242,9 @@ impl HybridAuthProvider {
 impl AuthProvider for HybridAuthProvider {
     async fn authenticate(&self, credential: &Credential) -> Result<Identity, AuthError> {
         match credential {
-            Credential::ApiKey(_) => self.local.authenticate(credential).await,
+            Credential::ApiKey(_) | Credential::UserSessionToken(_) => {
+                self.local.authenticate(credential).await
+            }
             Credential::BearerJwt(_) => self.bearer.authenticate(credential).await,
         }
     }

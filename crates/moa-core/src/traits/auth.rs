@@ -47,6 +47,8 @@ pub struct Identity {
 pub enum Credential {
     /// Local MOA API key.
     ApiKey(String),
+    /// Local first-party user login session token.
+    UserSessionToken(String),
     /// Bearer JWT from Auth0 or a generic OIDC provider.
     BearerJwt(String),
 }
