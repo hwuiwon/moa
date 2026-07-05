@@ -237,7 +237,6 @@ definition:
           max_turns: 1
           input:
             task: Inspect whether this procedure node respects existing delegation fan-out limits.
-            task_name: fanout-check
             tool_subset: []
             budget_tokens: 256
             timeout_ms: 0

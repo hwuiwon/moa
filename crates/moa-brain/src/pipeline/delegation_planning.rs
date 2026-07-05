@@ -431,10 +431,11 @@ The current task appears decomposable. Candidate ready DAG nodes:\n",
     }
     rendered.push_str(
         "If this still matches the active user request and there is enough context, \
-call spawn_worker for the ready nodes before final synthesis. Keep dependency \
-context and any relevant skill steps inside each spawn_worker.task. If the \
-ready nodes were already spawned in history, do not spawn duplicates; wait for \
-or synthesize from the worker results.\n\
+call spawn_worker for the ready nodes before final synthesis. Put the full \
+task envelope inside each spawn_worker.task: purpose, relevant context, \
+expected output, evidence needs, constraints, and any relevant skill steps. \
+If the ready nodes were already spawned in history, do not spawn duplicates; \
+wait for or synthesize from the worker results.\n\
 </delegation_plan_candidate>",
     );
     rendered
@@ -465,6 +466,101 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn delegation_plan_node_stays_minimal() {
+        // Pins: planner metadata remains a minimal ready-node hint, not a
+        // durable worker contract.
+        let node = DelegationPlanNode {
+            id: "node-1".to_string(),
+            title: "support readiness".to_string(),
+            depends_on: Vec::new(),
+        };
+        let value = serde_json::to_value(node).expect("delegation plan node should serialize");
+        let object = value
+            .as_object()
+            .expect("delegation plan node should serialize to an object");
+        let actual = object
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = ["depends_on", "id", "title"]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn rendered_hint_uses_task_envelope_not_contract_fields() {
+        // Pins: rich worker guidance belongs in spawn_worker.task rather than
+        // new planner metadata or worker DTO fields.
+        let plan = DelegationPlan {
+            reason: "explicit_multi_workstream_list".to_string(),
+            nodes: vec![DelegationPlanNode {
+                id: "node-1".to_string(),
+                title: "billing readiness".to_string(),
+                depends_on: Vec::new(),
+            }],
+        };
+
+        let hint = render_plan_hint(&plan);
+
+        assert!(hint.contains("spawn_worker.task"));
+        assert!(hint.contains("task envelope"));
+        assert!(hint.contains("expected output"));
+        assert!(hint.contains("evidence needs"));
+        assert!(hint.contains("constraints"));
+        assert!(hint.contains("relevant skill steps"));
+        assert!(!hint.contains("task_name"));
+        assert!(!hint.contains("capability_mode"));
+        assert!(!hint.contains("output_contract"));
+    }
+
+    #[test]
+    fn does_not_plan_for_single_generic_question() {
+        // Pins: a generic one-workstream request is left to the coordinator,
+        // even when it uses a work-like verb.
+        assert!(
+            plan_delegation_for_request(
+                "Can you review the onboarding flow and tell me what matters?"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn plans_ready_nodes_for_explicit_general_purpose_workstreams() {
+        // Pins: explicit, general-purpose workstream lists still produce ready
+        // nodes without adding classification metadata.
+        let plan = plan_delegation_for_request(
+            "Audit launch readiness across customer comms, billing readiness, \
+             support staffing, and incident response.",
+        )
+        .expect("explicit general-purpose workstreams should produce a plan");
+
+        assert_eq!(plan.reason, "explicit_multi_workstream_list");
+        assert_eq!(
+            plan.nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["node-1", "node-2", "node-3", "node-4"]
+        );
+        assert_eq!(
+            plan.nodes
+                .iter()
+                .map(|node| node.title.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "customer comms",
+                "billing readiness",
+                "support staffing",
+                "incident response"
+            ]
+        );
+        assert!(plan.nodes.iter().all(|node| node.depends_on.is_empty()));
+    }
 
     #[test]
     fn plans_ready_nodes_for_realistic_board_update() {

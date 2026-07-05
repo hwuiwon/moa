@@ -1332,7 +1332,7 @@ def main():
             "--bin",
             "moa-orchestrator-bin",
             "--features",
-            "provider-overrides,redis",
+            "provider-overrides",
             "--locked",
         ],
         timeout=600,

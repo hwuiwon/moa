@@ -97,31 +97,8 @@ pub(crate) fn remove_child_ref(children: &mut Vec<WorkerChildRef>, worker_id: &s
     children.retain(|child| child.id != worker_id);
 }
 
-pub(crate) fn child_agent_path(parent_key: &str, sub_id: &str, task_name: Option<&str>) -> String {
-    let segment = task_name
-        .map(sanitize_path_segment)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| sub_id.to_string());
-    format!("/{parent_key}/{segment}")
-}
-
-fn sanitize_path_segment(value: &str) -> String {
-    value
-        .chars()
-        .filter_map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                Some(ch.to_ascii_lowercase())
-            } else if ch == '-' || ch == '_' {
-                Some(ch)
-            } else if ch.is_whitespace() || ch == '/' {
-                Some('-')
-            } else {
-                None
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string()
+pub(crate) fn child_agent_path(parent_key: &str, sub_id: &str) -> String {
+    format!("/{parent_key}/{sub_id}")
 }
 
 #[cfg(test)]
@@ -271,18 +248,11 @@ mod tests {
     }
 
     #[test]
-    fn child_agent_path_uses_sanitized_task_name_when_available() {
-        // Pins: v2 spawn returns a stable model-visible path independent of raw UUID formatting.
+    fn child_agent_path_uses_durable_child_id() {
+        // Pins: v2 spawn path identity comes from the durable child id, not
+        // model-provided task wording.
         assert_eq!(
-            super::child_agent_path(
-                "session-1",
-                "session-1-child",
-                Some("Research Vendors/Cloud")
-            ),
-            "/session-1/research-vendors-cloud"
-        );
-        assert_eq!(
-            super::child_agent_path("session-1", "session-1-child", Some("!!!")),
+            super::child_agent_path("session-1", "session-1-child"),
             "/session-1/session-1-child"
         );
     }

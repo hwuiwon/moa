@@ -763,10 +763,6 @@ fn spawn_input_from_node(input: &Value) -> Result<SpawnWorkerInput, String> {
         .unwrap_or_else(moa_core::default_worker_budget_tokens);
     Ok(SpawnWorkerInput {
         task,
-        task_name: input
-            .get("task_name")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
         tool_subset,
         budget_tokens,
         max_turns: None,
@@ -1075,14 +1071,12 @@ mod tests {
         // Pins: worker procedure nodes feed the existing delegation validator shape.
         let input = spawn_input_from_node(&json!({
             "task": "Investigate refunds",
-            "task_name": "refunds",
             "tool_subset": ["file_read", "grep"],
             "budget_tokens": 12000
         }))
         .expect("spawn input should parse");
 
         assert_eq!(input.task, "Investigate refunds");
-        assert_eq!(input.task_name.as_deref(), Some("refunds"));
         assert_eq!(input.tool_subset, vec!["file_read", "grep"]);
         assert_eq!(input.budget_tokens, 12000);
     }

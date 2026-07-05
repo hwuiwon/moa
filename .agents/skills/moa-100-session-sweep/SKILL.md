@@ -74,7 +74,7 @@ The runner expects the same local live-test setup used by prior MOA sweeps:
 - `psql` and `cargo` available on PATH
 
 The runner creates an isolated database from the latest `moa_test_template_%`,
-builds `moa-orchestrator-bin` with `provider-overrides,redis`, imports the
+builds `moa-orchestrator-bin` with `provider-overrides`, imports the
 standard seven-skill tenant pack, runs all selected sessions, writes a report,
 and drops the isolated database unless `MOA_SWEEP_KEEP_DB=1` is set.
 
