@@ -180,22 +180,30 @@ Tenant action reviews are decided by tenant admins through `ActionReviews`; conv
 
 `Worker` admits conversational messages and starts at most one `WorkerTurnExecution` workflow per active child turn. Workflow callbacks carry the admitted `turn_id`; stale responses, tool results, approval clears, and outcomes are ignored rather than mutating a newer turn.
 
-Delegation is owned by the root coordinator. Workers do not spawn or manage
-other workers. Coordinator delegation is bounded by active fan-out, repeated
-active task detection, and inherited token budgets. `spawn_worker` returns
-immediately, and `wait_worker` first consumes any cached terminal worker result;
-otherwise it registers a worker-owned result waiter awakeable and removes that
-waiter on timeout. Terminal worker results are cached on the session until
-consumed so finished detached workers free active fan-out without losing the
-final result.
+Delegation is owned by the root coordinator. Workers are bounded
+general-purpose child agents: they run task-local turns with scoped tools and
+budgets, report results, and do not own decomposition or final synthesis.
+Workers do not spawn or manage other workers. Coordinator delegation is bounded
+by active fan-out, repeated active task detection, and inherited token budgets.
+`spawn_worker` returns immediately, and `wait_worker` first consumes any cached
+terminal worker result; otherwise it registers a worker-owned result waiter
+awakeable and removes that waiter on timeout. Terminal worker results are cached
+on the session until consumed so finished detached workers free active fan-out
+without losing the final result.
 
 The coordinator decomposes delegated work as a DAG of subtasks. It should spawn
 all ready nodes whose dependencies are already satisfied so independent work runs
 in parallel, wait only when downstream work needs a result, then use completed
 worker results as context for dependent nodes or the final answer. This DAG is a
 coordinator planning contract, not a worker wire schema: `spawn_worker.task`
-remains the generic envelope that carries the subtask, dependency context, and
-any selected skill steps the worker should follow.
+is the canonical instruction field and should carry purpose, relevant context,
+expected output, evidence requirements, constraints, and any relevant skill
+steps the worker should follow. The current structured controls are optional
+`tool_subset`, `budget_tokens`, and `max_turns`. `task_name` was intentionally
+removed because worker identity should be based on durable child ids; worker
+paths are identifiers, not semantic task titles. Additional durable worker
+contract fields are deferred until evals, traces, or incidents show they solve a
+real coordination failure.
 
 Before the coordinator model synthesizes a response, the context pipeline may
 append a conservative `delegation_plan` candidate for high-confidence

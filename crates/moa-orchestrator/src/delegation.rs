@@ -175,7 +175,6 @@ async fn spawn_child_detached(
     request: SpawnWorkerInput,
     trusted_sandbox_manifest: Option<&TrustedSandboxFileManifestRef>,
 ) -> Result<SpawnWorkerOutput, HandlerError> {
-    let task_name = request.task_name.clone();
     let max_turns = effective_child_max_turns(&request);
     let child_request = WorkerChildRequest {
         task: request.task,
@@ -185,7 +184,7 @@ async fn spawn_child_detached(
         trusted_sandbox_manifest: trusted_sandbox_manifest.cloned(),
     };
     let reservation =
-        reserve_and_start_child(ctx, parent, child_request, task_name, "spawn_worker_id").await?;
+        reserve_and_start_child(ctx, parent, child_request, "spawn_worker_id").await?;
 
     Ok(SpawnWorkerOutput {
         worker_id: reservation.child_ref.id,
@@ -208,21 +207,12 @@ async fn reserve_and_start_child(
     ctx: &WorkflowContext<'_>,
     parent: DelegationParent<'_>,
     request: WorkerChildRequest,
-    task_name: Option<String>,
     idempotency_step: &'static str,
 ) -> Result<ReservedWorker, HandlerError> {
     let task = request.task.clone();
     let budget_tokens = request.budget_tokens;
     let DelegationParent::RootSession { session_id, meta } = parent;
-    let reservation = reserve_root_child(
-        ctx,
-        session_id,
-        meta,
-        request,
-        task_name.clone(),
-        idempotency_step,
-    )
-    .await?;
+    let reservation = reserve_root_child(ctx, session_id, meta, request, idempotency_step).await?;
 
     moa_core::record_vo_send();
     ctx.object_client::<WorkerClient>(reservation.child_ref.id.clone())
@@ -238,7 +228,6 @@ async fn reserve_root_child(
     session_id: SessionId,
     meta: &SessionMeta,
     request: WorkerChildRequest,
-    task_name: Option<String>,
     idempotency_step: &'static str,
 ) -> Result<ReservedWorker, HandlerError> {
     let children = session_child_refs(ctx, session_id).await?;
@@ -258,7 +247,7 @@ async fn reserve_root_child(
     };
     register_session_child(ctx, session_id, child_ref.clone()).await?;
 
-    let path = child_agent_path(ctx.key(), &sub_id, task_name.as_deref());
+    let path = child_agent_path(ctx.key(), &sub_id);
     let task = request.task.clone();
     let budget_tokens = request.budget_tokens;
     let initial_message = request.into_initial_message(
@@ -745,7 +734,6 @@ mod tests {
         // to read the result; accepting max_turns=1 makes the delegated task fail.
         let mut request = SpawnWorkerInput {
             task: "compare three books".to_string(),
-            task_name: None,
             tool_subset: vec!["session_search".to_string()],
             budget_tokens: 600,
             max_turns: Some(1),

@@ -1560,22 +1560,25 @@ fn remaining_worker_capacity(children: &[WorkerChildRef]) -> usize {
 }
 
 fn auto_spawn_input(
-    plan: &DelegationPlan,
+    _plan: &DelegationPlan,
     node: &DelegationPlanNode,
     tool_subset: &[String],
 ) -> SpawnWorkerInput {
     SpawnWorkerInput {
         task: format!(
-            "Complete this coordinator-delegated subtask.\n\n\
-             Delegation reason: {}\n\
-             Subtask: {}\n\n\
-             Return the outcome, evidence, and any unresolved blocker to the coordinator. \
-             Use the available session context and return a best-effort partial result \
-             when source material is missing. Request user input only when no useful \
-             outcome, evidence, or next-check recommendation can be produced.",
-            plan.reason, node.title
+            concat!(
+                "Subtask: {}\n\n",
+                "Return a concise result for the coordinator to synthesize. Include:\n",
+                "- what you found or did;\n",
+                "- evidence, source ids, or tool outputs you relied on;\n",
+                "- open questions, blockers, or missing input;\n",
+                "- recommended next step if the subtask is not complete.\n\n",
+                "If required facts or inputs are missing, report the blocker or missing input ",
+                "instead of inventing facts.\n\n",
+                "Do not answer the user directly. Report back to the coordinator."
+            ),
+            node.title
         ),
-        task_name: Some(node.title.clone()),
         tool_subset: tool_subset.to_vec(),
         budget_tokens: default_worker_budget_tokens(),
         max_turns: Some(AUTO_DELEGATION_WORKER_MAX_TURNS),
@@ -2854,32 +2857,42 @@ mod tests {
         assert_eq!(ready, vec!["node-1", "node-2"]);
     }
 
-    #[test]
-    fn auto_delegation_worker_subset_keeps_hand_tools_and_filters_control_tools() {
-        // Pins: auto-spawned workers inherit the full configured execution
-        // surface — including sandbox tools like bash/file_write that the
-        // sandbox-free coordinator can never call — while delegation controls,
-        // child-report tools, and procedure tools stay excluded.
-        let schemas = vec![
-            serde_json::json!({"name": "bash"}),
-            serde_json::json!({"name": "cancel_worker"}),
-            serde_json::json!({"name": "file_read"}),
-            serde_json::json!({"name": "file_write"}),
-            serde_json::json!({"name": "report_to_parent"}),
-            serde_json::json!({"name": "run_procedure"}),
-            serde_json::json!({"name": "spawn_worker"}),
-            serde_json::json!({"name": "web_fetch"}),
-        ];
+    mod auto_delegation {
+        use super::*;
 
-        assert_eq!(
-            auto_worker_tool_subset(&schemas),
-            vec![
-                "bash".to_string(),
-                "file_read".to_string(),
-                "file_write".to_string(),
-                "web_fetch".to_string()
-            ]
-        );
+        #[test]
+        fn auto_worker_tool_subset_preserves_current_management_tool_exclusions() {
+            // Pins: auto-spawned workers inherit the full configured execution
+            // surface — including sandbox tools like bash/file_write that the
+            // sandbox-free coordinator can never call — while delegation controls,
+            // child-report tools, and procedure tools stay excluded.
+            let schemas = vec![
+                serde_json::json!({"name": "bash"}),
+                serde_json::json!({"name": "cancel_worker"}),
+                serde_json::json!({"name": "file_read"}),
+                serde_json::json!({"name": "file_write"}),
+                serde_json::json!({"name": "list_workers"}),
+                serde_json::json!({"name": "message_worker"}),
+                serde_json::json!({"name": "procedure_status"}),
+                serde_json::json!({"name": "provide_worker_input"}),
+                serde_json::json!({"name": "request_input"}),
+                serde_json::json!({"name": "report_to_parent"}),
+                serde_json::json!({"name": "run_procedure"}),
+                serde_json::json!({"name": "spawn_worker"}),
+                serde_json::json!({"name": "wait_worker"}),
+                serde_json::json!({"name": "web_fetch"}),
+            ];
+
+            assert_eq!(
+                auto_worker_tool_subset(&schemas),
+                vec![
+                    "bash".to_string(),
+                    "file_read".to_string(),
+                    "file_write".to_string(),
+                    "web_fetch".to_string()
+                ]
+            );
+        }
     }
 
     #[test]
@@ -2922,7 +2935,7 @@ mod tests {
     // the former child-registry readiness helper could not.
 
     #[test]
-    fn auto_delegation_spawn_input_is_generic_and_bounded() {
+    fn auto_delegation_spawn_input_uses_general_purpose_task_envelope() {
         // Pins: scheduling keeps `spawn_worker.task` as the generic envelope and applies child caps.
         let plan = DelegationPlan {
             reason: "explicit_comparison".to_string(),
@@ -2936,13 +2949,57 @@ mod tests {
 
         let input = auto_spawn_input(&plan, &node, &["file_read".to_string()]);
 
-        assert_eq!(input.task_name.as_deref(), Some("finance assumptions"));
         assert_eq!(input.tool_subset, vec!["file_read".to_string()]);
         assert_eq!(input.budget_tokens, default_worker_budget_tokens());
         assert_eq!(input.max_turns, Some(AUTO_DELEGATION_WORKER_MAX_TURNS));
-        assert!(input.task.contains("Subtask: finance assumptions"));
-        assert!(input.task.contains("best-effort partial result"));
-        assert!(input.task.contains("Request user input only"));
+        assert_eq!(
+            input.task,
+            "Subtask: finance assumptions\n\n\
+             Return a concise result for the coordinator to synthesize. Include:\n\
+             - what you found or did;\n\
+             - evidence, source ids, or tool outputs you relied on;\n\
+             - open questions, blockers, or missing input;\n\
+             - recommended next step if the subtask is not complete.\n\n\
+             If required facts or inputs are missing, report the blocker or missing input \
+             instead of inventing facts.\n\n\
+             Do not answer the user directly. Report back to the coordinator."
+        );
+    }
+
+    #[test]
+    fn auto_delegation_spawn_input_has_no_task_name() {
+        // Pins: serialized deterministic auto-spawns keep the smaller worker contract.
+        let plan = DelegationPlan {
+            reason: "explicit_comparison".to_string(),
+            nodes: Vec::new(),
+        };
+        let node = DelegationPlanNode {
+            id: "node-1".to_string(),
+            title: "finance assumptions".to_string(),
+            depends_on: Vec::new(),
+        };
+        let input = auto_spawn_input(&plan, &node, &["file_read".to_string()]);
+
+        let tool_call = auto_spawn_tool_call(42, 10_000, &node, &input)
+            .expect("spawn tool call should serialize");
+        let payload = tool_call
+            .invocation
+            .input
+            .as_object()
+            .expect("auto-spawn input should serialize as a JSON object");
+        let keys = payload
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected_keys = ["budget_tokens", "max_turns", "task", "tool_subset"]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(keys, expected_keys);
+        assert!(
+            payload.get("task_name").is_none(),
+            "auto-spawn input should not serialize removed task_name"
+        );
     }
 
     #[test]
@@ -2950,7 +3007,6 @@ mod tests {
         // Pins: deterministic auto-spawns are represented as ordinary spawn_worker tool calls.
         let input = SpawnWorkerInput {
             task: "Review support tickets.".to_string(),
-            task_name: Some("support tickets".to_string()),
             tool_subset: vec!["file_read".to_string()],
             budget_tokens: 512,
             max_turns: Some(2),
@@ -2984,6 +3040,10 @@ mod tests {
             tool_call.invocation.input["task"],
             json!("Review support tickets.")
         );
+        assert!(
+            tool_call.invocation.input.get("task_name").is_none(),
+            "auto-spawn input should not serialize removed task_name"
+        );
     }
 
     #[test]
@@ -2992,7 +3052,6 @@ mod tests {
         // letters, numbers, underscores, or dashes in call ids.
         let input = SpawnWorkerInput {
             task: "Review support tickets.".to_string(),
-            task_name: Some("support tickets".to_string()),
             tool_subset: vec!["file_read".to_string()],
             budget_tokens: 512,
             max_turns: Some(2),

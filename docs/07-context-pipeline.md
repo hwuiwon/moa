@@ -141,6 +141,14 @@ dynamic hint when the request has high-confidence independent workstreams, such
 as explicit reports from several inputs, readiness checks across named areas,
 reconciliations, incident investigations, audits, or option comparisons.
 
+The deterministic planner emits a minimal ready-node hint, not a durable worker
+contract. Node metadata is intentionally limited to the node id, title, and
+dependencies, and the planner does not create a separate task-name contract. The
+coordinator should place richer worker instructions inside `spawn_worker.task`:
+purpose, relevant context, expected output, evidence needs, constraints, and
+relevant skill steps. Additional durable worker contract fields stay deferred
+until evals, traces, or incidents show they solve a real coordination failure.
+
 The processor itself does not route procedures and does not add strict
 `selected_skill` or `selected_action` fields to the worker contract. Root
 `TurnExecution` consumes the metadata once per admitted user message: when

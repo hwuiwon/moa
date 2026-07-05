@@ -339,12 +339,10 @@ pub struct WorkerChildRequest {
 
 /// Spawn-tool input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SpawnWorkerInput {
     /// Task delegated to the child.
     pub task: String,
-    /// Optional model-visible task name/path segment.
-    #[serde(default)]
-    pub task_name: Option<String>,
     /// Tool names exposed to the child.
     #[serde(default)]
     pub tool_subset: Vec<String>,
@@ -586,16 +584,6 @@ pub struct WorkerTurnOutcomeRecord {
     pub outcome: TurnOutcome,
 }
 
-/// Request to reserve a child worker under another worker.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReserveWorkerInput {
-    /// Child request to reserve.
-    pub request: WorkerChildRequest,
-    /// Optional model-visible child task name for path generation.
-    #[serde(default)]
-    pub task_name: Option<String>,
-}
-
 /// Child reservation returned after a parent worker admits a child.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReservedWorker {
@@ -767,17 +755,13 @@ impl WorkerChildRequest {
 pub fn spawn_worker_tool_schema() -> serde_json::Value {
     serde_json::json!({
         "name": "spawn_worker",
-        "description": "Use this tool when the coordinator decides a non-trivial request has an independent subtask with enough context to execute, even if the user did not ask for delegation. Good fits include reports, comparisons, audits, incident investigations, multi-source research, option checks, and named workstreams or systems that can run in parallel. If a request names three or more independent areas and asks for synthesis, spawn ready worker nodes before the final synthesis. Start one ready node in the coordinator's subtask DAG, then wait only when another node depends on its result.",
+        "description": "Delegate bounded, general-purpose work to a child agent when the coordinator can give it enough context to run independently and return evidence for synthesis. Good fits include research, reports, comparisons, audits, incident investigations, option checks, or named workstreams that can run in parallel. Spawn ready work before final synthesis, and wait only when another step depends on a worker result.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "task": {
                     "type": "string",
-                    "description": "Clear delegated task for the child agent. Include relevant DAG node/dependency context and any skill steps to follow in this text."
-                },
-                "task_name": {
-                    "type": "string",
-                    "description": "Short optional model-visible DAG node name for the child task."
+                    "description": "Full delegated instruction for the child. Include the purpose, relevant context, expected output, evidence needs, constraints, and any relevant skill steps the child should follow."
                 },
                 "tool_subset": {
                     "type": "array",
@@ -1158,37 +1142,114 @@ mod tests {
     }
 
     #[test]
-    fn spawn_worker_schema_describes_dag_decomposition_without_extra_fields() {
-        // Pins: coordinator DAG planning stays in the task text, not strict selected
-        // skill/action fields on the worker wire contract.
+    fn spawn_worker_schema_describes_general_purpose_delegation() {
+        // Pins: the model-facing spawn tool presents workers as bounded,
+        // general-purpose delegation, not code-specific sidekick behavior.
         let schema = spawn_worker_tool_schema();
         let description = schema
             .get("description")
             .and_then(serde_json::Value::as_str)
             .expect("spawn_worker should have a description");
-        assert!(description.contains("subtask DAG"));
-        assert!(description.contains("even if the user did not ask for delegation"));
-        assert!(description.contains("reports, comparisons, audits"));
-        assert!(description.contains("named workstreams or systems"));
-        assert!(description.contains("three or more independent areas"));
-        assert!(description.contains("wait only when another node depends"));
+        assert!(description.contains("bounded, general-purpose work"));
+        assert!(description.contains("return evidence for synthesis"));
+        assert!(description.contains("research, reports, comparisons, audits"));
+        assert!(description.contains("named workstreams"));
+        assert!(description.contains("wait only when another step depends"));
 
         let properties = schema
             .pointer("/input_schema/properties")
             .and_then(serde_json::Value::as_object)
             .expect("spawn_worker should expose object properties");
-        assert!(properties.contains_key("task"));
-        assert!(properties.contains_key("task_name"));
-        assert!(!properties.contains_key("selected_skill"));
-        assert!(!properties.contains_key("selected_action"));
-
         let task_description = properties
             .get("task")
             .and_then(|property| property.get("description"))
             .and_then(serde_json::Value::as_str)
             .expect("task should have a description");
-        assert!(task_description.contains("DAG node/dependency context"));
-        assert!(task_description.contains("skill steps"));
+        assert!(task_description.contains("purpose"));
+        assert!(task_description.contains("relevant context"));
+        assert!(task_description.contains("expected output"));
+        assert!(task_description.contains("evidence needs"));
+        assert!(task_description.contains("constraints"));
+        assert!(task_description.contains("relevant skill steps"));
+    }
+
+    #[test]
+    fn spawn_worker_schema_uses_single_task_contract() {
+        // Pins: spawn_worker exposes one canonical task instruction plus bounded
+        // execution controls, without redundant or speculative contract fields.
+        let schema = spawn_worker_tool_schema();
+
+        let required = schema
+            .pointer("/input_schema/required")
+            .and_then(serde_json::Value::as_array)
+            .expect("spawn_worker should list required fields")
+            .iter()
+            .map(|field| {
+                field
+                    .as_str()
+                    .expect("required field names should be strings")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(required, vec!["task"]);
+
+        let properties = schema
+            .pointer("/input_schema/properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("spawn_worker should expose object properties");
+        let mut property_names = properties.keys().map(String::as_str).collect::<Vec<_>>();
+        property_names.sort_unstable();
+        assert_eq!(
+            property_names,
+            vec!["budget_tokens", "max_turns", "task", "tool_subset"]
+        );
+
+        for removed_field in [
+            "task_name",
+            "capability_mode",
+            "output_contract",
+            "knowledge_scope",
+            "details",
+        ] {
+            assert!(
+                !properties.contains_key(removed_field),
+                "{removed_field} should not be part of the spawn_worker contract"
+            );
+        }
+    }
+
+    #[test]
+    fn spawn_worker_schema_rejects_task_name() {
+        // Pins: task_name is not accepted as a compatibility field by the
+        // provider-facing schema or the typed spawn_worker parser.
+        let schema = spawn_worker_tool_schema();
+        let additional_properties = schema
+            .pointer("/input_schema/additionalProperties")
+            .and_then(serde_json::Value::as_bool)
+            .expect("spawn_worker should specify additionalProperties");
+        assert!(!additional_properties);
+
+        let properties = schema
+            .pointer("/input_schema/properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("spawn_worker should expose object properties");
+        assert!(!properties.contains_key("task_name"));
+
+        let invocation = ToolInvocation {
+            id: Some("spawn-worker-task-name".to_string()),
+            name: "spawn_worker".to_string(),
+            input: serde_json::json!({
+                "task": "research",
+                "task_name": "research-task"
+            }),
+        };
+
+        let error = parse_delegation_tool_input::<SpawnWorkerInput>(&invocation)
+            .expect_err("task_name should not be accepted by spawn_worker");
+        let message = error.to_string();
+        assert!(
+            message.contains("task_name"),
+            "error should name the rejected field, got: {message}"
+        );
     }
 
     #[test]
@@ -1222,7 +1283,6 @@ mod tests {
                 "spawn_worker",
                 serde_json::json!({
                     "task": "research",
-                    "task_name": "research-task",
                     "tool_subset": ["web_fetch"],
                     "budget_tokens": 123
                 }),
