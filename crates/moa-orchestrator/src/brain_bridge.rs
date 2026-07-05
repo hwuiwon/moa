@@ -130,7 +130,6 @@ pub(crate) async fn prepare_turn_request(
             compaction_llm_provider: None,
             query_rewrite_llm_provider: query_rewrite_provider,
             identity_prompt_override: None,
-            discovered_workspace_instructions: None,
             tool_schemas: root_tool_schemas,
             lineage: lineage.clone(),
         },

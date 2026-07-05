@@ -1,14 +1,9 @@
-//! Stage 2: injects workspace and user instructions from configuration and workspace discovery.
+//! Stage 2: injects configured workspace and user instructions.
 
 use async_trait::async_trait;
 use moa_core::{
     ContextProcessor, MoaConfig, ProcessorOutput, Result, WorkingContext, estimate_text_tokens,
 };
-
-const DISCOVERED_AGENTS_NOTICE: &str = "\
-The workspace root AGENTS.md has already been loaded for this session. \
-Do not spend turns searching for it again unless you have already narrowed work \
-to a specific subdirectory and intentionally need that local AGENTS.md.";
 
 /// Injects optional workspace and user instructions into the prompt.
 #[derive(Debug, Clone, Default)]
@@ -18,14 +13,8 @@ pub struct InstructionProcessor {
 }
 
 impl InstructionProcessor {
-    /// Creates an instruction processor from explicit workspace, user, and discovered sections.
-    pub fn new(
-        workspace_instructions: Option<String>,
-        user_instructions: Option<String>,
-        discovered_instructions: Option<String>,
-    ) -> Self {
-        let workspace_instructions =
-            combine_workspace_instructions(workspace_instructions, discovered_instructions);
+    /// Creates an instruction processor from explicit workspace and user sections.
+    pub fn new(workspace_instructions: Option<String>, user_instructions: Option<String>) -> Self {
         Self {
             workspace_instructions,
             user_instructions,
@@ -37,23 +26,7 @@ impl InstructionProcessor {
         Self::new(
             config.general.workspace_instructions.clone(),
             config.general.user_instructions.clone(),
-            None,
         )
-    }
-}
-
-fn combine_workspace_instructions(
-    workspace_instructions: Option<String>,
-    discovered_instructions: Option<String>,
-) -> Option<String> {
-    let discovered_instructions = discovered_instructions
-        .map(|instructions| format!("{DISCOVERED_AGENTS_NOTICE}\n\n{instructions}"));
-
-    match (workspace_instructions, discovered_instructions) {
-        (Some(config), Some(discovered)) => Some(format!("{config}\n\n---\n\n{discovered}")),
-        (Some(config), None) => Some(config),
-        (None, Some(discovered)) => Some(discovered),
-        (None, None) => None,
     }
 }
 
@@ -157,57 +130,5 @@ mod tests {
         assert!(ctx.messages[0].content.contains("<user_preferences>"));
         assert_eq!(output.items_included.len(), 2);
         assert!(output.tokens_added > 0);
-    }
-
-    #[tokio::test]
-    async fn instruction_processor_combines_config_and_discovered_workspace_instructions() {
-        let session = SessionMeta {
-            id: SessionId::new(),
-            tenant_id: TenantId::new(),
-            channel: Channel::Chat,
-            model: ModelId::new("claude-sonnet-4-6"),
-            ..SessionMeta::default()
-        };
-        let capabilities = ModelCapabilities {
-            model_id: ModelId::new("claude-sonnet-4-6"),
-            context_window: 200_000,
-            max_output: 8_192,
-            supports_tools: true,
-            supports_vision: true,
-            supports_prefix_caching: true,
-            cache_ttl: None,
-            tool_call_format: ToolCallFormat::Anthropic,
-            pricing: TokenPricing {
-                input_per_mtok: 3.0,
-                output_per_mtok: 15.0,
-                cached_input_per_mtok: Some(0.3),
-                cache_write_5m_per_mtok: None,
-                cache_write_1h_per_mtok: None,
-            },
-            native_tools: Vec::new(),
-        };
-        let mut ctx = WorkingContext::new(&session, capabilities);
-
-        let output = InstructionProcessor::new(
-            Some("Config guidance.".to_string()),
-            Some("Keep responses terse.".to_string()),
-            Some("Discovered project instructions.".to_string()),
-        )
-        .process(&mut ctx)
-        .await
-        .unwrap();
-
-        assert!(
-            ctx.messages[0]
-                .content
-                .contains("Config guidance.\n\n---\n\nThe workspace root AGENTS.md has already been loaded for this session.")
-        );
-        assert!(
-            ctx.messages[0]
-                .content
-                .contains("Discovered project instructions.")
-        );
-        assert!(ctx.messages[0].content.contains("<user_preferences>"));
-        assert_eq!(output.items_included.len(), 2);
     }
 }

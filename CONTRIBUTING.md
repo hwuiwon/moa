@@ -1,7 +1,5 @@
 # Contributing
 
-For test quality rules, read `AGENTS.md`'s `Testing standards` section before adding, weakening, or deleting tests.
-
 ## CodeGraph CLI
 
 This repo uses the CodeGraph code knowledge graph CLI for local code navigation.

@@ -294,7 +294,6 @@ async fn build_pipeline(
                 compaction_llm_provider: Some(deps.llm_provider),
                 query_rewrite_llm_provider: query_rewrite_provider,
                 identity_prompt_override: Some(compose_identity_prompt(&agent_config.instructions)),
-                discovered_workspace_instructions: None,
                 tool_schemas,
                 lineage: deps.lineage,
             },

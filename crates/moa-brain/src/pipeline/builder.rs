@@ -43,8 +43,6 @@ pub struct GraphMemoryPipelineOptions {
     pub query_rewrite_llm_provider: Option<Arc<dyn LLMProvider>>,
     /// Optional identity prompt override for eval and harness runs.
     pub identity_prompt_override: Option<String>,
-    /// Workspace instruction text discovered from the active repository.
-    pub discovered_workspace_instructions: Option<String>,
     /// Tool schemas to expose to the model.
     pub tool_schemas: Vec<serde_json::Value>,
     /// Durable lineage handle used by retrieval stages.
@@ -111,7 +109,6 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
         compaction_llm_provider,
         query_rewrite_llm_provider,
         identity_prompt_override,
-        discovered_workspace_instructions,
         tool_schemas,
         lineage,
     } = options;
@@ -173,7 +170,6 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
         Box::new(InstructionProcessor::new(
             config.general.workspace_instructions.clone(),
             config.general.user_instructions.clone(),
-            discovered_workspace_instructions,
         )),
         Box::new(ToolDefinitionProcessor::new(tool_schemas)),
     ];

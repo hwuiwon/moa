@@ -64,7 +64,6 @@ async fn digest_processor_registers_at_documented_position() {
             compaction_llm_provider: None,
             query_rewrite_llm_provider: None,
             identity_prompt_override: None,
-            discovered_workspace_instructions: None,
             tool_schemas: Vec::new(),
             lineage: Arc::new(NullLineageHandle),
         },
@@ -159,7 +158,6 @@ async fn instruction_stage_appends_workspace_instructions_when_present_and_skips
     let output = InstructionProcessor::new(
         Some("Follow repo conventions.".to_string()),
         Some("Keep responses terse.".to_string()),
-        Some("Discovered AGENTS guidance.".to_string()),
     )
     .process(&mut with_instructions)
     .await?;
@@ -178,10 +176,6 @@ async fn instruction_stage_appends_workspace_instructions_when_present_and_skips
     assert!(
         content.contains("<workspace_instructions>\nFollow repo conventions."),
         "InstructionProcessor: missing workspace instruction block"
-    );
-    assert!(
-        content.contains("Discovered AGENTS guidance."),
-        "InstructionProcessor: missing discovered workspace instructions"
     );
     assert!(
         content.contains("<user_preferences>\nKeep responses terse."),

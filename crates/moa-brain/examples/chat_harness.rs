@@ -45,7 +45,6 @@ async fn main() -> Result<()> {
             compaction_llm_provider: Some(provider.clone()),
             query_rewrite_llm_provider: Some(provider.clone()),
             identity_prompt_override: None,
-            discovered_workspace_instructions: None,
             tool_schemas: tool_router.tool_schemas(),
             lineage: Arc::new(moa_core::NullLineageHandle),
         },

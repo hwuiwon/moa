@@ -1,7 +1,7 @@
 //! Live integration test against a running OpenFGA instance.
 //!
 //! This is double-gated behind `#[ignore]` and
-//! `MOA_RUN_LIVE_OPENFGA_TESTS=1` per AGENTS.md.
+//! `MOA_RUN_LIVE_OPENFGA_TESTS=1`.
 
 use std::process::Command;
 

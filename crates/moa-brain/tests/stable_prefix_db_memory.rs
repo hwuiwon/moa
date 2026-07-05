@@ -23,11 +23,6 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
     let root = TempDir::new()?;
     let workspace = root.path().join("workspace");
     tokio::fs::create_dir_all(&workspace).await?;
-    tokio::fs::write(
-        workspace.join("AGENTS.md"),
-        "Follow the cached-prefix rules.\n",
-    )
-    .await?;
 
     let mut config = moa_core::MoaConfig::default();
     config.models.main = "claude-sonnet-4-6".to_string();
@@ -57,7 +52,6 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
             compaction_llm_provider: None,
             query_rewrite_llm_provider: None,
             identity_prompt_override: None,
-            discovered_workspace_instructions: None,
             tool_schemas: extend_tool_schemas(router.tool_schemas()),
             lineage: Arc::new(moa_core::NullLineageHandle),
         },

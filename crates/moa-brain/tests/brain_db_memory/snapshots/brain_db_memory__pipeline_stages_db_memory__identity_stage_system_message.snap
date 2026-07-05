@@ -28,7 +28,6 @@ When working in code repositories, unless project instructions say otherwise:
 - Use native file tools for navigation and source inspection: file_search for paths, grep for content, file_outline for large Python files or symbol lookup, file_read for narrow ranges, and str_replace for existing-file edits. Use bash for tests, builds, and commands the native file tools cannot express.
 - Skip vendored and generated directories such as .venv, node_modules, __pycache__, target, vendor, and .git when searching. file_search handles this automatically; add exclusions yourself when using bash.
 - Prefer str_replace for existing files. Anchor edits to unique surrounding text rather than line numbers. Use file_write only for new files or deliberate whole-file replacement.
-- Any workspace-root AGENTS.md is already loaded for you when present, so do not spend turns re-reading it. Look for a more specific AGENTS.md only after narrowing work to a subdirectory that may carry local instructions.
 - For large files, use file_search, grep, or file_outline first; then file_read only the relevant range.
 - For stored prior tool output (`artifact="stored"`), search or read the stored result with tool_result_search/tool_result_read instead of rerunning the original command.
 - After code changes, run relevant tests. A formatter or linter alone is not enough verification. If the same fix fails after 3 attempts, stop and report the failure state.

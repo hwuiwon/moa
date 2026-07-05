@@ -13,7 +13,6 @@ use moa_brain::{
     GraphMemoryPipelineOptions,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
-use moa_core::workspace::discover_workspace_instructions;
 use moa_core::{
     CompletionRequest, CompletionResponse, CompletionStream, ContactId, ContactRef,
     ContactVerificationState, ContextMessage, Event, EventRange, LLMProvider, MessageRole,
@@ -217,7 +216,6 @@ async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
 
     let storage_partition_id = StoragePartitionId::new("cache-audit-matrix");
     let user_id = UserId::new("cache-audit-user");
-    let discovered_instructions = discover_workspace_instructions(&repo_root);
 
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
     let store = Arc::new(store);
@@ -253,7 +251,6 @@ async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
                 compaction_llm_provider: Some(provider.clone()),
                 query_rewrite_llm_provider: Some(provider.clone()),
                 identity_prompt_override: None,
-                discovered_workspace_instructions: discovered_instructions.clone(),
                 tool_schemas: Vec::new(),
                 lineage: Arc::new(moa_core::NullLineageHandle),
             },
@@ -409,7 +406,6 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
 
     let storage_partition_id = StoragePartitionId::new("cache-audit");
     let user_id = UserId::new("cache-audit-user");
-    let discovered_instructions = discover_workspace_instructions(&repo_root);
 
     let mut sonnet_config = MoaConfig::default();
     sonnet_config.general.default_provider = "anthropic".to_string();
@@ -455,7 +451,6 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
                 compaction_llm_provider: Some(sonnet_provider.clone()),
                 query_rewrite_llm_provider: Some(sonnet_provider.clone()),
                 identity_prompt_override: None,
-                discovered_workspace_instructions: discovered_instructions.clone(),
                 tool_schemas: tool_router.tool_schemas(),
                 lineage: Arc::new(moa_core::NullLineageHandle),
             },
@@ -516,7 +511,6 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
                 compaction_llm_provider: Some(cross_session_provider.clone()),
                 query_rewrite_llm_provider: Some(cross_session_provider.clone()),
                 identity_prompt_override: None,
-                discovered_workspace_instructions: discovered_instructions.clone(),
                 tool_schemas: tool_router.tool_schemas(),
                 lineage: Arc::new(moa_core::NullLineageHandle),
             },
@@ -545,13 +539,14 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         vec!["salted_cold".to_string(), "salted_warm".to_string()],
         cold_session_audits.clone(),
     ));
-    let cold_instructions = salted_instructions(
-        discovered_instructions.clone(),
+    let mut cold_config = sonnet_config.clone();
+    cold_config.general.workspace_instructions = Some(salted_workspace_instructions(
+        cold_config.general.workspace_instructions.as_deref(),
         &format!("cache-audit-salt:{}", Uuid::now_v7()),
-    );
+    ));
     let cold_session_pipeline =
         build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
-            &sonnet_config,
+            &cold_config,
             store.clone(),
             GraphMemoryPipelineOptions {
                 graph_pool: store.pool().clone(),
@@ -562,7 +557,6 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
                 compaction_llm_provider: Some(cold_session_provider.clone()),
                 query_rewrite_llm_provider: Some(cold_session_provider.clone()),
                 identity_prompt_override: None,
-                discovered_workspace_instructions: cold_instructions,
                 tool_schemas: tool_router.tool_schemas(),
                 lineage: Arc::new(moa_core::NullLineageHandle),
             },
@@ -614,7 +608,6 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
             compaction_llm_provider: Some(opus_provider.clone()),
             query_rewrite_llm_provider: Some(opus_provider.clone()),
             identity_prompt_override: None,
-            discovered_workspace_instructions: discovered_instructions,
             tool_schemas: tool_router.tool_schemas(),
             lineage: Arc::new(moa_core::NullLineageHandle),
         },
@@ -802,11 +795,12 @@ fn is_repo_root(path: &Path) -> bool {
     path.join("Cargo.toml").exists() && path.join("crates/moa-brain").exists()
 }
 
-fn salted_instructions(base: Option<String>, salt: &str) -> Option<String> {
-    let salt_block = format!("\n\n<!-- {salt} -->\n");
+fn salted_workspace_instructions(base: Option<&str>, salt: &str) -> String {
     match base {
-        Some(existing) => Some(format!("{existing}{salt_block}")),
-        None => Some(salt_block),
+        Some(base) if !base.trim().is_empty() => {
+            format!("{base}\nCache audit workspace instruction salt: {salt}")
+        }
+        _ => format!("Cache audit workspace instruction salt: {salt}"),
     }
 }
 

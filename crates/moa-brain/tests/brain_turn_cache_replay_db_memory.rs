@@ -107,7 +107,6 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
             compaction_llm_provider: None,
             query_rewrite_llm_provider: None,
             identity_prompt_override: None,
-            discovered_workspace_instructions: None,
             tool_schemas: extend_tool_schemas(router.tool_schemas()),
             lineage: Arc::new(moa_core::NullLineageHandle),
         },

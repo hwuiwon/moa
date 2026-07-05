@@ -67,9 +67,6 @@ and .git when searching. file_search handles this automatically; add exclusions 
 bash.
 - Prefer str_replace for existing files. Anchor edits to unique surrounding text rather than line \
 numbers. Use file_write only for new files or deliberate whole-file replacement.
-- Any workspace-root AGENTS.md is already loaded for you when present, so do not spend turns \
-re-reading it. Look for a more specific AGENTS.md only after narrowing work to a subdirectory that \
-may carry local instructions.
 - For large files, use file_search, grep, or file_outline first; then file_read only the relevant \
 range.
 - For stored prior tool output (`artifact=\"stored\"`), search or read the stored result with \
@@ -240,9 +237,6 @@ mod tests {
         assert!(content.contains("file_search for paths, grep for content"));
         assert!(content.contains("Prefer str_replace for existing files"));
         assert!(content.contains("Anchor edits to unique surrounding text rather than line"));
-        assert!(
-            content.contains("Any workspace-root AGENTS.md is already loaded for you when present")
-        );
         assert!(content.contains("For large files, use file_search, grep, or file_outline first"));
         assert!(content.contains("artifact=\"stored\""));
         assert!(content.contains("tool_result_search"));

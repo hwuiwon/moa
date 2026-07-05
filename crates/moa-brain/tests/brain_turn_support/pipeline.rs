@@ -25,7 +25,6 @@ fn build_no_memory_test_pipeline_with_tools(
         Box::new(moa_brain::pipeline::instructions::InstructionProcessor::new(
             config.general.workspace_instructions.clone(),
             config.general.user_instructions.clone(),
-            None,
         )),
         Box::new(moa_brain::pipeline::tools::ToolDefinitionProcessor::new(
             tool_schemas,
