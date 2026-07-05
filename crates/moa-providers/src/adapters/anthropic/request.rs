@@ -1,6 +1,11 @@
 //! Anthropic Messages API request construction.
 
-use super::tools::{anthropic_message, anthropic_tool_from_schema, provider_native_tool_json};
+use std::collections::HashSet;
+
+use super::tools::{
+    anthropic_message, anthropic_text_replay_message, anthropic_tool_from_schema,
+    anthropic_tool_result_block, anthropic_tool_use_block, provider_native_tool_json,
+};
 use super::*;
 
 pub(super) fn build_request_body(
@@ -13,19 +18,35 @@ pub(super) fn build_request_body(
     let mut messages = Vec::new();
     let mut in_leading_system_prefix = true;
 
-    for message in &request.messages {
+    let mut index = 0;
+    while index < request.messages.len() {
+        let message = &request.messages[index];
         if in_leading_system_prefix && message.role == MessageRole::System {
             system_messages.push(anthropic_text_block(message.content.clone()));
+            index += 1;
             continue;
         }
         in_leading_system_prefix = false;
 
         if message.role == MessageRole::System {
             messages.push(anthropic_late_system_message(message));
+            index += 1;
+            continue;
+        }
+
+        if message.tool_invocation.is_some() {
+            index += append_tool_exchange_or_text(&mut messages, &request.messages[index..])?;
+            continue;
+        }
+
+        if message.role == MessageRole::Tool {
+            messages.push(anthropic_text_replay_message(message));
+            index += 1;
             continue;
         }
 
         messages.push(anthropic_message(message)?);
+        index += 1;
     }
 
     if messages.is_empty() {
@@ -84,6 +105,81 @@ pub(super) fn build_request_body(
     }
 
     Ok(Value::Object(body))
+}
+
+fn append_tool_exchange_or_text(
+    messages: &mut Vec<Value>,
+    window: &[ContextMessage],
+) -> Result<usize> {
+    let tool_call_count = window
+        .iter()
+        .take_while(|message| message.tool_invocation.is_some())
+        .count();
+    let tool_calls = &window[..tool_call_count];
+    let expected_ids = tool_calls
+        .iter()
+        .filter_map(|message| message.tool_invocation.as_ref())
+        .map(tool_invocation_id)
+        .collect::<Vec<_>>();
+    let unique_expected = expected_ids.iter().cloned().collect::<HashSet<_>>();
+
+    if unique_expected.len() == expected_ids.len() {
+        let mut matched_ids = HashSet::new();
+        let mut result_count = 0usize;
+        while let Some(message) = window.get(tool_call_count + result_count) {
+            if message.role != MessageRole::Tool {
+                break;
+            }
+            let tool_use_id = tool_result_id(message);
+            if !unique_expected.contains(&tool_use_id) || !matched_ids.insert(tool_use_id) {
+                break;
+            }
+            result_count += 1;
+            if matched_ids.len() == unique_expected.len() {
+                break;
+            }
+        }
+
+        if matched_ids.len() == unique_expected.len() {
+            let tool_use_blocks = tool_calls
+                .iter()
+                .filter_map(|message| message.tool_invocation.as_ref())
+                .map(anthropic_tool_use_block)
+                .collect::<Vec<_>>();
+            let tool_result_blocks = window[tool_call_count..tool_call_count + result_count]
+                .iter()
+                .map(anthropic_tool_result_block)
+                .collect::<Vec<_>>();
+            messages.push(json!({
+                "role": "assistant",
+                "content": tool_use_blocks,
+            }));
+            messages.push(json!({
+                "role": "user",
+                "content": tool_result_blocks,
+            }));
+            return Ok(tool_call_count + result_count);
+        }
+    }
+
+    for message in tool_calls {
+        messages.push(anthropic_text_replay_message(message));
+    }
+    Ok(tool_call_count)
+}
+
+fn tool_invocation_id(invocation: &ToolInvocation) -> String {
+    invocation
+        .id
+        .clone()
+        .unwrap_or_else(|| "unknown_tool_use".to_string())
+}
+
+fn tool_result_id(message: &ContextMessage) -> String {
+    message
+        .tool_use_id
+        .clone()
+        .unwrap_or_else(|| "unknown_tool_use".to_string())
 }
 
 /// Builds an Anthropic request body for inspection tests without sending it.

@@ -15,7 +15,7 @@ pub const DEFAULT_GOOGLE_MODEL: &str = "gemini-3-flash-preview";
 /// Default Anthropic model for query rewriting.
 pub const REWRITER_ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
 /// Default OpenAI model for query rewriting.
-pub const REWRITER_OPENAI_MODEL: &str = "gpt-5.4-mini";
+pub const REWRITER_OPENAI_MODEL: &str = "gpt-5.4-nano";
 /// Default Google model for query rewriting.
 pub const REWRITER_GOOGLE_MODEL: &str = "gemini-3-flash-preview";
 
@@ -95,7 +95,7 @@ const OPENAI_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     explicit_prefix: "openai",
     infer_model: is_openai_model,
     default_priority: 0,
-    rewriter_priority: 1,
+    rewriter_priority: 0,
     api_key: openai_api_key,
     build_from_config: build_openai_provider_from_config,
 };
@@ -107,7 +107,7 @@ const ANTHROPIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     explicit_prefix: "anthropic",
     infer_model: is_anthropic_model,
     default_priority: 1,
-    rewriter_priority: 0,
+    rewriter_priority: 1,
     api_key: anthropic_api_key,
     build_from_config: build_anthropic_provider_from_config,
 };

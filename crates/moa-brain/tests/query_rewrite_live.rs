@@ -89,8 +89,8 @@ async fn live_query_rewrite_gate_matrix() -> moa_core::Result<()> {
 
     let mut config = MoaConfig::default();
     MoaEnvOverlay::from_env()?.apply_to(&mut config)?;
-    config.models.auxiliary = Some("gpt-5.4-mini".to_string());
-    config.query_rewrite.model = Some("gpt-5.4-mini".to_string());
+    config.models.auxiliary = Some("gpt-5.4-nano".to_string());
+    config.query_rewrite.model = Some("gpt-5.4-nano".to_string());
     config.query_rewrite.timeout_ms = 5_000;
 
     let provider = Arc::new(CapturingProvider::new(resolve_rewriter_provider(&config)?));

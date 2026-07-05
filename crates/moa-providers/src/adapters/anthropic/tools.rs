@@ -73,35 +73,14 @@ pub(super) fn anthropic_message(message: &ContextMessage) -> Result<Value> {
     if let Some(invocation) = message.tool_invocation.as_ref() {
         return Ok(json!({
             "role": "assistant",
-            "content": [{
-                "type": "tool_use",
-                "id": invocation
-                    .id
-                    .clone()
-                    .unwrap_or_else(|| "unknown_tool_use".to_string()),
-                "name": invocation.name,
-                "input": invocation.input,
-            }]
+            "content": [anthropic_tool_use_block(invocation)]
         }));
     }
 
     if message.role == MessageRole::Tool {
-        let content = if let Some(blocks) = &message.content_blocks {
-            anthropic_content_blocks(blocks)
-        } else {
-            json!(message.content)
-        };
-
         return Ok(json!({
             "role": "user",
-            "content": [{
-                "type": "tool_result",
-                "tool_use_id": message
-                    .tool_use_id
-                    .clone()
-                    .unwrap_or_else(|| "unknown_tool_use".to_string()),
-                "content": content,
-            }]
+            "content": [anthropic_tool_result_block(message)]
         }));
     }
 
@@ -126,6 +105,46 @@ pub(super) fn anthropic_message(message: &ContextMessage) -> Result<Value> {
         "role": role,
         "content": message.content,
     }))
+}
+
+pub(super) fn anthropic_text_replay_message(message: &ContextMessage) -> Value {
+    let role = match message.role {
+        MessageRole::Assistant => "assistant",
+        MessageRole::User | MessageRole::System | MessageRole::Tool => "user",
+    };
+    json!({
+        "role": role,
+        "content": message.content,
+    })
+}
+
+pub(super) fn anthropic_tool_use_block(invocation: &ToolInvocation) -> Value {
+    json!({
+        "type": "tool_use",
+        "id": invocation
+            .id
+            .clone()
+            .unwrap_or_else(|| "unknown_tool_use".to_string()),
+        "name": invocation.name,
+        "input": invocation.input,
+    })
+}
+
+pub(super) fn anthropic_tool_result_block(message: &ContextMessage) -> Value {
+    let content = if let Some(blocks) = &message.content_blocks {
+        anthropic_content_blocks(blocks)
+    } else {
+        json!(message.content)
+    };
+
+    json!({
+        "type": "tool_result",
+        "tool_use_id": message
+            .tool_use_id
+            .clone()
+            .unwrap_or_else(|| "unknown_tool_use".to_string()),
+        "content": content,
+    })
 }
 
 pub(super) fn anthropic_content_blocks(blocks: &[ToolContent]) -> Value {

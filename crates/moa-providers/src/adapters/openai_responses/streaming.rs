@@ -1,5 +1,7 @@
 //! OpenAI Responses streaming and retry handling.
 
+use std::error::Error as StdError;
+
 use super::response::{ResponsesStreamError, token_usage_from_openai_usage};
 use super::tools::{
     parse_tool_arguments, response_content_from_output, response_stop_reason,
@@ -8,10 +10,13 @@ use super::tools::{
 use super::*;
 use crate::core::provider_tools::{web_search_completed_block, web_search_started_block};
 use crate::core::rate_guard::RateGuard;
+use eventsource_stream::Eventsource;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_responses_with_retry(
-    client: &OpenAiClient<OpenAIConfig>,
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
     request: &CreateResponse,
     tx: mpsc::Sender<Result<CompletionContent>>,
     fallback_model: ModelId,
@@ -20,11 +25,27 @@ pub(crate) async fn stream_responses_with_retry(
     guard: &RateGuard,
     mut span_recorder: LLMSpanRecorder,
 ) -> Result<CompletionResponse> {
+    if request.text.is_some() {
+        return create_response_with_retry(
+            client,
+            api_base,
+            api_key,
+            request,
+            tx,
+            fallback_model,
+            started_at,
+            retry_policy,
+            guard,
+            span_recorder,
+        )
+        .await;
+    }
+
     let mut attempt = 0usize;
 
     loop {
         span_recorder.set_phase("transport");
-        match client.responses().create_stream(request.clone()).await {
+        match create_response_stream(client, api_base, api_key, request).await {
             Ok(stream) => {
                 span_recorder.set_phase("stream");
                 match consume_responses_stream_once(
@@ -78,37 +99,270 @@ pub(crate) async fn stream_responses_with_retry(
                     }
                 }
             }
-            Err(error) if is_retryable_openai_error(&error) => {
-                if attempt >= retry_policy.max_retries || !guard.allow_retry() {
-                    let error = if is_rate_limit_error(&error) {
-                        guard.record_rate_limited(None);
-                        MoaError::RateLimited {
-                            retries: retry_policy.max_retries,
-                            message: error.to_string(),
-                        }
-                    } else {
-                        map_openai_error(error)
-                    };
-                    span_recorder.fail_at_stage("transport", &error);
-                    return Err(error);
-                }
-
+            Err(error)
+                if error.retryable
+                    && !error.emitted_content
+                    && attempt < retry_policy.max_retries
+                    && guard.allow_retry() =>
+            {
                 let delay = retry_policy.delay_for_attempt(attempt);
                 tracing::warn!(
                     attempt = attempt + 1,
                     max_retries = retry_policy.max_retries,
                     delay_ms = delay.as_millis(),
-                    "provider request hit a rate limit; retrying"
+                    "provider request hit a retryable transport error; retrying"
                 );
                 tokio::time::sleep(delay).await;
                 attempt += 1;
             }
             Err(error) => {
-                let error = map_openai_error(error);
-                span_recorder.fail_at_stage("transport", &error);
-                return Err(error);
+                span_recorder.fail_at_stage("transport", &error.error);
+                if error.rate_limited {
+                    guard.record_rate_limited(None);
+                    let message = match error.error {
+                        MoaError::RateLimited { message, .. }
+                        | MoaError::ProviderError(message) => message,
+                        other => other.to_string(),
+                    };
+                    return Err(MoaError::RateLimited {
+                        retries: retry_policy.max_retries,
+                        message,
+                    });
+                }
+                return Err(error.error);
             }
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_response_with_retry(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+    request: &CreateResponse,
+    tx: mpsc::Sender<Result<CompletionContent>>,
+    fallback_model: ModelId,
+    started_at: Instant,
+    retry_policy: RetryPolicy,
+    guard: &RateGuard,
+    mut span_recorder: LLMSpanRecorder,
+) -> Result<CompletionResponse> {
+    let mut request = request.clone();
+    request.stream = Some(false);
+    let mut attempt = 0usize;
+
+    loop {
+        span_recorder.set_phase("transport");
+        match create_response(client, api_base, api_key, &request).await {
+            Ok(response) => {
+                span_recorder.set_phase("stream");
+                let response = completion_response_from_response(
+                    response,
+                    fallback_model.clone(),
+                    started_at,
+                    &mut span_recorder,
+                )?;
+                if response.text.trim().is_empty()
+                    && response.content.is_empty()
+                    && attempt < retry_policy.max_retries
+                    && guard.allow_retry()
+                {
+                    let delay = retry_policy.delay_for_attempt(attempt);
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_retries = retry_policy.max_retries,
+                        delay_ms = delay.as_millis(),
+                        "provider structured response was empty; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                    continue;
+                }
+                for block in response.content.iter().cloned() {
+                    if tx.send(Ok(block)).await.is_err() {
+                        break;
+                    }
+                }
+                span_recorder.set_phase("finalize");
+                span_recorder.finish(&response);
+                return Ok(response);
+            }
+            Err(error)
+                if error.retryable
+                    && !error.emitted_content
+                    && attempt < retry_policy.max_retries
+                    && guard.allow_retry() =>
+            {
+                let delay = retry_policy.delay_for_attempt(attempt);
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    max_retries = retry_policy.max_retries,
+                    delay_ms = delay.as_millis(),
+                    "provider structured response hit a retryable transport error; retrying"
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+            }
+            Err(error) => {
+                span_recorder.fail_at_stage("transport", &error.error);
+                if error.rate_limited {
+                    guard.record_rate_limited(None);
+                    let message = match error.error {
+                        MoaError::RateLimited { message, .. }
+                        | MoaError::ProviderError(message) => message,
+                        other => other.to_string(),
+                    };
+                    return Err(MoaError::RateLimited {
+                        retries: retry_policy.max_retries,
+                        message,
+                    });
+                }
+                return Err(error.error);
+            }
+        }
+    }
+}
+
+async fn create_response_stream(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+    request: &CreateResponse,
+) -> std::result::Result<ResponseStream, ResponsesStreamError> {
+    let response = send_openai_request(client, api_base, api_key, request, true).await?;
+    let stream = response
+        .bytes_stream()
+        .eventsource()
+        .filter_map(|event| async {
+            match event {
+                Ok(event) if event.data == "[DONE]" || event.event == "keepalive" => None,
+                Ok(event) => Some(
+                    serde_json::from_str::<ResponseStreamEvent>(&event.data)
+                        .map_err(|error| OpenAIError::JSONDeserialize(error, event.data)),
+                ),
+                Err(error) => Some(Err(OpenAIError::StreamError(Box::new(
+                    async_openai::error::StreamError::EventStream(error_chain_message(&error)),
+                )))),
+            }
+        });
+    Ok(Box::pin(stream))
+}
+
+async fn create_response(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+    request: &CreateResponse,
+) -> std::result::Result<Response, ResponsesStreamError> {
+    let response = send_openai_request(client, api_base, api_key, request, false).await?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| ResponsesStreamError {
+            error: map_reqwest_error(error),
+            retryable: false,
+            emitted_content: false,
+            rate_limited: false,
+        })?;
+    serde_json::from_slice::<Response>(&bytes).map_err(|error| ResponsesStreamError {
+        error: MoaError::SerializationError(format!(
+            "failed to decode provider response: {error}; content: {}",
+            String::from_utf8_lossy(&bytes)
+        )),
+        retryable: false,
+        emitted_content: false,
+        rate_limited: false,
+    })
+}
+
+async fn send_openai_request(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+    request: &CreateResponse,
+    stream: bool,
+) -> std::result::Result<reqwest::Response, ResponsesStreamError> {
+    let url = format!("{}/responses", api_base.trim_end_matches('/'));
+    let mut builder = client.post(url).bearer_auth(api_key).json(request);
+    if stream {
+        builder = builder.header(reqwest::header::ACCEPT, "text/event-stream");
+    }
+
+    let response = builder.send().await.map_err(|error| ResponsesStreamError {
+        retryable: error.status().is_none(),
+        error: map_reqwest_error(error),
+        emitted_content: false,
+        rate_limited: false,
+    })?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+
+    Err(openai_status_error(response).await)
+}
+
+async fn openai_status_error(response: reqwest::Response) -> ResponsesStreamError {
+    let status = response.status();
+    let status_code = status.as_u16();
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| format!("failed to read error body: {error}"));
+    let message = openai_error_message(&body);
+    let rate_limited = status == StatusCode::TOO_MANY_REQUESTS || is_rate_limit_message(&message);
+    let retryable = rate_limited || status.is_server_error() || is_server_error_message(&message);
+    let error = if rate_limited {
+        MoaError::ProviderError(message)
+    } else {
+        MoaError::HttpStatus {
+            status: status_code,
+            retry_after: None,
+            message,
+        }
+    };
+    ResponsesStreamError {
+        error,
+        retryable,
+        emitted_content: false,
+        rate_limited,
+    }
+}
+
+fn openai_error_message(body: &str) -> String {
+    #[derive(serde::Deserialize)]
+    struct ErrorEnvelope {
+        error: ErrorBody,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ErrorBody {
+        message: String,
+        #[serde(default)]
+        r#type: Option<String>,
+        #[serde(default)]
+        param: Option<String>,
+        #[serde(default)]
+        code: Option<String>,
+    }
+
+    match serde_json::from_str::<ErrorEnvelope>(body) {
+        Ok(envelope) => {
+            let mut parts = Vec::new();
+            if let Some(kind) = envelope.error.r#type {
+                parts.push(format!("{kind}:"));
+            }
+            parts.push(envelope.error.message);
+            if let Some(param) = envelope.error.param {
+                parts.push(format!("(param: {param})"));
+            }
+            if let Some(code) = envelope.error.code {
+                parts.push(format!("(code: {code})"));
+            }
+            parts.join(" ")
+        }
+        Err(_) => body.to_string(),
     }
 }
 
@@ -310,6 +564,50 @@ async fn consume_responses_stream_once(
     })
 }
 
+fn completion_response_from_response(
+    response: Response,
+    fallback_model: ModelId,
+    started_at: Instant,
+    span_recorder: &mut LLMSpanRecorder,
+) -> Result<CompletionResponse> {
+    let mut text = response_text_from_output(&response.output);
+    let content = response_content_from_output(&response.output)?;
+    if text.is_empty() {
+        text = content
+            .iter()
+            .filter_map(|block| match block {
+                CompletionContent::Text(text) => Some(text.as_str()),
+                CompletionContent::ToolCall(_) | CompletionContent::ProviderToolResult { .. } => {
+                    None
+                }
+            })
+            .collect();
+    }
+    for block in &content {
+        span_recorder.observe_block(block);
+    }
+    let usage = response.usage.clone();
+    let token_usage = usage
+        .as_ref()
+        .map(token_usage_from_openai_usage)
+        .unwrap_or_default();
+    span_recorder.set_cached_input_tokens(token_usage.input_tokens_cache_read);
+
+    Ok(CompletionResponse {
+        text,
+        content,
+        stop_reason: response_stop_reason(&response),
+        model: if response.model.is_empty() {
+            fallback_model
+        } else {
+            ModelId::new(response.model)
+        },
+        usage: token_usage,
+        duration_ms: started_at.elapsed().as_millis() as u64,
+        thought_signature: None,
+    })
+}
+
 pub(super) fn openai_native_tools(native_tools: &[ProviderNativeTool]) -> Result<Vec<Tool>> {
     let mut tools = Vec::with_capacity(native_tools.len());
     for tool in native_tools {
@@ -337,11 +635,14 @@ fn map_openai_error(error: OpenAIError) -> MoaError {
                 return MoaError::HttpStatus {
                     status: status.as_u16(),
                     retry_after: None,
-                    message: error.to_string(),
+                    message: error_chain_message(&error),
                 };
             }
 
-            MoaError::ProviderError(format!("provider request failed: {error}"))
+            MoaError::ProviderError(format!(
+                "provider request failed: {}",
+                error_chain_message(&error)
+            ))
         }
         OpenAIError::ApiError(error) if is_server_error_api_error(&error) => MoaError::HttpStatus {
             status: 500,
@@ -355,9 +656,37 @@ fn map_openai_error(error: OpenAIError) -> MoaError {
         OpenAIError::FileSaveError(error) | OpenAIError::FileReadError(error) => {
             MoaError::StorageError(error)
         }
-        OpenAIError::StreamError(error) => MoaError::StreamError(error.to_string()),
+        OpenAIError::StreamError(error) => {
+            MoaError::StreamError(error_chain_message(error.as_ref()))
+        }
         OpenAIError::InvalidArgument(error) => MoaError::ValidationError(error),
     }
+}
+
+fn map_reqwest_error(error: reqwest::Error) -> MoaError {
+    if let Some(status) = error.status() {
+        return MoaError::HttpStatus {
+            status: status.as_u16(),
+            retry_after: None,
+            message: error_chain_message(&error),
+        };
+    }
+
+    MoaError::ProviderError(format!(
+        "provider request failed: {}",
+        error_chain_message(&error)
+    ))
+}
+
+fn error_chain_message(error: &(dyn StdError + 'static)) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(error) = source {
+        message.push_str("; caused by: ");
+        message.push_str(&error.to_string());
+        source = error.source();
+    }
+    message
 }
 
 fn is_retryable_openai_error(error: &OpenAIError) -> bool {
@@ -420,6 +749,16 @@ fn is_rate_limit_message(message: &str) -> bool {
     message.contains("rate limit")
         || message.contains("rate_limit")
         || message.contains("too many requests")
+}
+
+fn is_server_error_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("server_error")
+        || message.contains("upstream unavailable")
+        || message.contains("internal server error")
+        || message.contains("status 500")
+        || message.contains("http 500")
+        || message.contains("temporarily unavailable")
 }
 
 /// Field names that can appear in `OpenAI` streaming payloads with a type

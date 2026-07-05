@@ -862,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn rewriter_resolution_prefers_anthropic_small_model_when_available() {
+    fn rewriter_resolution_prefers_openai_nano_model_when_available() {
         // Pins: query rewrite selects by rewriter priority and builds the provider's
         // rewriter model, not the main-loop default model.
         let builds = Arc::new(AtomicUsize::new(0));
@@ -887,7 +887,7 @@ mod tests {
 
         assert_eq!(
             provider.capabilities().model_id,
-            ModelId::new("claude-haiku-4-5")
+            ModelId::new("gpt-5.4-nano")
         );
         assert_eq!(builds.load(Ordering::SeqCst), 1);
     }

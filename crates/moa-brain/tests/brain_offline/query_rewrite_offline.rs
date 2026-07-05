@@ -14,12 +14,12 @@ use moa_providers::OpenAIProvider;
 use serde_json::json;
 use wiremock::MockServer;
 
-use openai_wiremock::{captured_json_bodies, mount_openai_text};
+use openai_wiremock::{captured_json_bodies, mount_openai_json_text};
 
 #[tokio::test]
 async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> moa_core::Result<()> {
     let server = MockServer::start().await;
-    mount_openai_text(
+    mount_openai_json_text(
         &server,
         json!({
             "retrieval_query": "Fix the OAuth refresh token race condition in auth/refresh.rs and add regression tests.",
@@ -32,9 +32,9 @@ async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> mo
     .await;
 
     let mut config = MoaConfig::default();
-    config.query_rewrite.model = Some("gpt-5.4".to_string());
+    config.query_rewrite.model = Some("gpt-5.4-nano".to_string());
     let provider = Arc::new(
-        OpenAIProvider::new("test-key", "gpt-5.4")?
+        OpenAIProvider::new("test-key", "gpt-5.4-nano")?
             .with_api_base(format!("{}/v1", server.uri()))?,
     );
     let mut ctx = moa_core::WorkingContext::new(
@@ -90,7 +90,22 @@ async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> mo
 
     let bodies = captured_json_bodies(&server).await;
     assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["model"], "gpt-5.4-nano");
+    assert_eq!(bodies[0]["max_output_tokens"], 384);
+    assert_eq!(bodies[0]["reasoning"]["effort"], "none");
     assert_eq!(bodies[0]["text"]["format"]["name"], "query_rewrite_result");
+    assert!(
+        bodies[0]
+            .get("tools")
+            .is_none_or(serde_json::Value::is_null),
+        "query rewrite should not send tools: {:?}",
+        bodies[0].get("tools")
+    );
+    assert_eq!(bodies[0]["tool_choice"], "none");
+    assert!(
+        !bodies[0].to_string().contains("web_search"),
+        "query rewrite should not trigger provider-native web search"
+    );
     let instructions = bodies[0]["instructions"]
         .as_str()
         .expect("query rewrite request should include static instructions");

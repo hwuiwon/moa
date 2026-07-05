@@ -1,5 +1,7 @@
 //! Wiremock helpers for OpenAI Responses API offline tests.
 
+#![allow(dead_code)]
+
 use serde_json::json;
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -8,6 +10,18 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 pub async fn mount_openai_text(server: &MockServer, text: impl Into<String>, cached_tokens: usize) {
     Mock::given(any())
         .respond_with(openai_text_response(text.into(), cached_tokens))
+        .mount(server)
+        .await;
+}
+
+/// Mounts a wiremock OpenAI Responses JSON response that returns the supplied text.
+pub async fn mount_openai_json_text(
+    server: &MockServer,
+    text: impl Into<String>,
+    cached_tokens: usize,
+) {
+    Mock::given(any())
+        .respond_with(openai_json_response(text.into(), cached_tokens))
         .mount(server)
         .await;
 }
@@ -21,6 +35,37 @@ pub async fn captured_json_bodies(server: &MockServer) -> Vec<serde_json::Value>
         .into_iter()
         .filter_map(|request| serde_json::from_slice(&request.body).ok())
         .collect()
+}
+
+fn openai_json_response(text: String, cached_tokens: usize) -> ResponseTemplate {
+    ResponseTemplate::new(200)
+        .insert_header("content-type", "application/json")
+        .set_body_json(json!({
+            "id": "resp_offline",
+            "object": "response",
+            "created_at": 1,
+            "model": "gpt-5.4-nano",
+            "output": [{
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{
+                    "type": "output_text",
+                    "text": text,
+                    "annotations": [],
+                    "logprobs": null
+                }]
+            }],
+            "status": "completed",
+            "usage": {
+                "input_tokens": 16,
+                "input_tokens_details": { "cached_tokens": cached_tokens },
+                "output_tokens": 4,
+                "output_tokens_details": { "reasoning_tokens": 0 },
+                "total_tokens": 20
+            }
+        }))
 }
 
 fn openai_text_response(text: String, cached_tokens: usize) -> ResponseTemplate {

@@ -6,7 +6,7 @@ use eventsource_stream::Eventsource;
 use futures_util::stream;
 use moa_core::{
     CompletionContent, CompletionRequest, ContextMessage, JsonResponseFormat, LLMProvider, ModelId,
-    StopReason, ToolContent,
+    StopReason, ToolContent, ToolInvocation,
 };
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -305,7 +305,7 @@ fn anthropic_message_wraps_tool_results_with_tool_use_id() {
 #[test]
 fn anthropic_message_wraps_assistant_tool_calls_as_tool_use_blocks() {
     let message = anthropic_message(&ContextMessage::assistant_tool_call(
-        moa_core::ToolInvocation {
+        ToolInvocation {
             id: Some("toolu_234".to_string()),
             name: "file_write".to_string(),
             input: json!({ "path": "live/anthropic.txt" }),
@@ -319,6 +319,135 @@ fn anthropic_message_wraps_assistant_tool_calls_as_tool_use_blocks() {
     assert_eq!(message["content"][0]["id"], "toolu_234");
     assert_eq!(message["content"][0]["name"], "file_write");
     assert_eq!(message["content"][0]["input"]["path"], "live/anthropic.txt");
+}
+
+#[test]
+fn completion_request_groups_adjacent_tool_exchange_for_anthropic_protocol() {
+    // Pins: MOA records each tool call/result as separate history messages, but
+    // Anthropic requires one assistant tool_use message followed immediately by
+    // one user tool_result message for the whole exchange.
+    let request = CompletionRequest {
+        model: Some(ModelId::new(MODEL_SONNET_4_6)),
+        messages: vec![
+            ContextMessage::user("delegate both tasks"),
+            ContextMessage::assistant_tool_call(
+                ToolInvocation {
+                    id: Some("toolu_a".to_string()),
+                    name: "spawn_worker".to_string(),
+                    input: json!({ "task": "A" }),
+                },
+                "<tool_call name=\"spawn_worker\">{\"task\":\"A\"}</tool_call>",
+            ),
+            ContextMessage::assistant_tool_call(
+                ToolInvocation {
+                    id: Some("toolu_b".to_string()),
+                    name: "spawn_worker".to_string(),
+                    input: json!({ "task": "B" }),
+                },
+                "<tool_call name=\"spawn_worker\">{\"task\":\"B\"}</tool_call>",
+            ),
+            ContextMessage::tool_result("toolu_a", "worker A spawned", None),
+            ContextMessage::tool_result("toolu_b", "worker B spawned", None),
+        ],
+        tools: Vec::new(),
+        max_output_tokens: Some(512),
+        temperature: None,
+        response_format: None,
+        metadata: Default::default(),
+    };
+
+    let body = build_request_body(
+        &request,
+        &canonical_model_id(MODEL_SONNET_4_6).expect("valid model"),
+        &capabilities_for_model(MODEL_SONNET_4_6).expect("valid capabilities"),
+        false,
+    )
+    .expect("request should build");
+
+    let messages = body["messages"].as_array().expect("messages array");
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(
+        messages[1]["content"].as_array().expect("tool calls").len(),
+        2
+    );
+    assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+    assert_eq!(messages[1]["content"][0]["id"], "toolu_a");
+    assert_eq!(messages[1]["content"][1]["type"], "tool_use");
+    assert_eq!(messages[1]["content"][1]["id"], "toolu_b");
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(
+        messages[2]["content"]
+            .as_array()
+            .expect("tool results")
+            .len(),
+        2
+    );
+    assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+    assert_eq!(messages[2]["content"][0]["tool_use_id"], "toolu_a");
+    assert_eq!(messages[2]["content"][1]["type"], "tool_result");
+    assert_eq!(messages[2]["content"][1]["tool_use_id"], "toolu_b");
+}
+
+#[test]
+fn completion_request_replays_non_adjacent_tool_history_as_text() {
+    // Pins: if worker/control-plane events sit between a provider tool_use and
+    // its result, Anthropic native replay would be invalid. Keep the history as
+    // plain text instead of sending an orphaned native tool_use/tool_result pair.
+    let request = CompletionRequest {
+        model: Some(ModelId::new(MODEL_SONNET_4_6)),
+        messages: vec![
+            ContextMessage::user("delegate one task"),
+            ContextMessage::assistant_tool_call(
+                ToolInvocation {
+                    id: Some("toolu_worker".to_string()),
+                    name: "spawn_worker".to_string(),
+                    input: json!({ "task": "A" }),
+                },
+                "<tool_call name=\"spawn_worker\">{\"task\":\"A\"}</tool_call>",
+            ),
+            ContextMessage::system("<worker_status state=\"running\" />"),
+            ContextMessage::tool_result("toolu_worker", "<tool_result id=\"spawned\" />", None),
+        ],
+        tools: Vec::new(),
+        max_output_tokens: Some(512),
+        temperature: None,
+        response_format: None,
+        metadata: Default::default(),
+    };
+
+    let body = build_request_body(
+        &request,
+        &canonical_model_id(MODEL_SONNET_4_6).expect("valid model"),
+        &capabilities_for_model(MODEL_SONNET_4_6).expect("valid capabilities"),
+        false,
+    )
+    .expect("request should build");
+
+    let messages = body["messages"].as_array().expect("messages array");
+    assert_eq!(messages.len(), 4);
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(
+        messages[1]["content"],
+        "<tool_call name=\"spawn_worker\">{\"task\":\"A\"}</tool_call>"
+    );
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(
+        messages[2]["content"],
+        "<worker_status state=\"running\" />"
+    );
+    assert_eq!(messages[3]["role"], "user");
+    assert_eq!(messages[3]["content"], "<tool_result id=\"spawned\" />");
+    for message in messages {
+        if let Some(blocks) = message["content"].as_array() {
+            assert!(
+                blocks
+                    .iter()
+                    .all(|block| block["type"] != "tool_use" && block["type"] != "tool_result"),
+                "non-adjacent tool history must not emit native Anthropic tool blocks"
+            );
+        }
+    }
 }
 
 #[test]

@@ -9,11 +9,7 @@ use super::*;
 
 const PREVIOUS_RESPONSE_ID_METADATA_KEY: &str = "_moa.openai.previous_response_id";
 const TOOL_CHOICE_METADATA_KEY: &str = "_moa.openai.tool_choice";
-
-/// Builds an async-openai client around MOA's shared `OpenAI` configuration.
-pub(crate) fn build_openai_client(config: OpenAIConfig) -> OpenAiClient<OpenAIConfig> {
-    OpenAiClient::with_config(config)
-}
+const REASONING_EFFORT_METADATA_KEY: &str = "_moa.openai.reasoning_effort";
 
 /// Builds one stateless Responses API request from MOA completion inputs.
 pub(crate) fn build_responses_request(
@@ -83,13 +79,17 @@ pub(crate) fn build_responses_request(
         .iter()
         .map(openai_tool_from_schema)
         .collect::<Result<Vec<_>>>()?;
-    tools.extend(openai_native_tools(native_tools)?);
+    if request.response_format.is_none() {
+        tools.extend(openai_native_tools(native_tools)?);
+    }
     let has_tools = !tools.is_empty();
     let tools = if tools.is_empty() { None } else { Some(tools) };
     let uses_reasoning_controls = supports_reasoning(default_model);
+    let reasoning_effort = metadata_string(request, REASONING_EFFORT_METADATA_KEY)
+        .unwrap_or_else(|| default_reasoning_effort.to_string());
     let reasoning = if uses_reasoning_controls {
         Some(Reasoning {
-            effort: Some(parse_reasoning_effort(default_reasoning_effort)?),
+            effort: Some(parse_reasoning_effort(&reasoning_effort)?),
             summary: None,
         })
     } else {

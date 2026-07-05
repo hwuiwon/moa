@@ -6,7 +6,7 @@ use async_openai::error::OpenAIError;
 use async_openai::types::responses::{
     PromptCacheRetention, ResponseUsage, TextResponseFormatConfiguration,
 };
-use moa_core::{CompletionRequest, ContextMessage, JsonResponseFormat};
+use moa_core::{CompletionRequest, ContextMessage, JsonResponseFormat, ProviderNativeTool};
 use serde_json::json;
 
 use super::{
@@ -120,6 +120,22 @@ fn build_responses_request_omits_temperature_for_reasoning_models() {
 }
 
 #[test]
+fn build_responses_request_allows_reasoning_effort_metadata_override() {
+    let mut request = CompletionRequest::new("Rewrite this query");
+    request
+        .metadata
+        .insert("_moa.openai.reasoning_effort".to_string(), json!("minimal"));
+
+    let built = build_responses_request(&request, "gpt-5.4-mini", "medium", &[])
+        .expect("request should build");
+
+    assert_eq!(
+        serde_json::to_value(built.reasoning.expect("reasoning config")).unwrap()["effort"],
+        json!("minimal")
+    );
+}
+
+#[test]
 fn build_responses_request_sets_structured_output_schema() {
     let mut request = CompletionRequest::new("Return structured data.");
     request.response_format = Some(JsonResponseFormat::strict_json_schema(
@@ -149,6 +165,45 @@ fn build_responses_request_sets_structured_output_schema() {
             .schema
             .and_then(|schema| schema.get("required").cloned()),
         Some(json!(["answer"]))
+    );
+}
+
+#[test]
+fn build_responses_request_omits_native_tools_for_structured_output() {
+    // Pins: structured extraction calls must be direct model calls; provider-native
+    // tools such as web search add latency and can be incompatible with minimal reasoning.
+    let mut request = CompletionRequest::new("Return structured data.");
+    request.response_format = Some(JsonResponseFormat::strict_json_schema(
+        "test_payload",
+        "Test payload.",
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"]
+        }),
+    ));
+    let native_tools = vec![ProviderNativeTool {
+        tool_type: "web_search".to_string(),
+        name: "web_search".to_string(),
+        config: None,
+    }];
+
+    let built = build_responses_request(&request, "gpt-5.4-nano", "medium", &native_tools)
+        .expect("request should build");
+    let serialized = serde_json::to_value(&built).expect("request should serialize");
+
+    let tools_value = serialized.get("tools");
+    assert!(
+        tools_value.is_none() || tools_value.is_some_and(serde_json::Value::is_null),
+        "structured calls should not carry native tools: {serialized}"
+    );
+    assert_eq!(serialized["tool_choice"], json!("none"));
+    assert!(
+        !serialized.to_string().contains("web_search"),
+        "structured calls should not include web search: {serialized}"
     );
 }
 
