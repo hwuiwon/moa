@@ -92,16 +92,45 @@ async fn main() -> Result<()> {
 }
 
 async fn run_smoke_checks(client: &http::FgaClient, store_id: &str, model_id: &str) -> Result<()> {
+    let workspace_id = moa_core::WORKSPACE_ID;
     let tenant_id =
         Uuid::parse_str("00000000-0000-0000-0000-00000000ffff").context("parse smoke tenant id")?;
     let user_id =
         Uuid::parse_str("00000000-0000-0000-0000-00000000fffd").context("parse smoke user id")?;
+    let agent_id =
+        Uuid::parse_str("00000000-0000-0000-0000-00000000fffc").context("parse smoke agent id")?;
+    let session_id = Uuid::parse_str("00000000-0000-0000-0000-00000000fffb")
+        .context("parse smoke session id")?;
+    let contact_id = Uuid::parse_str("00000000-0000-0000-0000-00000000fffa")
+        .context("parse smoke contact id")?;
 
-    let smoke_tuples = [serde_json::json!({
-        "user": format!("user:{user_id}"),
-        "relation": "admin",
-        "object": format!("tenant:{tenant_id}"),
-    })];
+    let smoke_tuples = [
+        serde_json::json!({
+            "user": format!("user:{user_id}"),
+            "relation": "admin",
+            "object": format!("workspace:{workspace_id}"),
+        }),
+        serde_json::json!({
+            "user": format!("workspace:{workspace_id}"),
+            "relation": "workspace",
+            "object": format!("tenant:{tenant_id}"),
+        }),
+        serde_json::json!({
+            "user": format!("tenant:{tenant_id}"),
+            "relation": "tenant",
+            "object": format!("agent:{agent_id}"),
+        }),
+        serde_json::json!({
+            "user": format!("tenant:{tenant_id}"),
+            "relation": "tenant",
+            "object": format!("session:{session_id}"),
+        }),
+        serde_json::json!({
+            "user": format!("contact:{contact_id}"),
+            "relation": "contact",
+            "object": format!("session:{session_id}"),
+        }),
+    ];
 
     client
         .delete_tuples_raw_best_effort(store_id, model_id, &smoke_tuples)
@@ -112,7 +141,10 @@ async fn run_smoke_checks(client: &http::FgaClient, store_id: &str, model_id: &s
         .context("write smoke tuples")?;
 
     let tenant = format!("tenant:{tenant_id}");
+    let agent = format!("agent:{agent_id}");
+    let session = format!("session:{session_id}");
     let user = format!("user:{user_id}");
+    let contact = format!("contact:{contact_id}");
     let admin_check = client
         .check(store_id, model_id, &user, "admin", &tenant)
         .await?;
@@ -139,12 +171,15 @@ async fn run_smoke_checks(client: &http::FgaClient, store_id: &str, model_id: &s
             model_id,
             &[
                 (user.clone(), "admin".to_string(), tenant.clone()),
-                (user, "operator".to_string(), tenant),
+                (user.clone(), "operator".to_string(), tenant),
+                (user.clone(), "operator".to_string(), agent),
+                (user, "participant".to_string(), session.clone()),
+                (contact, "participant".to_string(), session),
             ],
         )
         .await?;
-    if batch != [true, true] {
-        bail!("smoke BatchCheck failed: expected [true, true], got {batch:?}");
+    if batch != [true, true, true, true, true] {
+        bail!("smoke BatchCheck failed: expected [true, true, true, true, true], got {batch:?}");
     }
     tracing::info!("smoke BatchCheck ok");
 

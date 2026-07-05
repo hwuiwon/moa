@@ -186,7 +186,7 @@ pub async fn authenticate_scim(
             "SCIM endpoints require an API key principal",
         ));
     }
-    auth::require_scim_admin(state, &identity).await?;
+    auth::require_tenant_admin(state, &identity).await?;
     Ok(identity)
 }
 

@@ -417,16 +417,6 @@ async fn enqueue_key_scope_tuples(
     )
     .await
     .map_err(|error| TerminalError::new(format!("api key tenant outbox: {error}")))?;
-    enqueue_raw(
-        &mut **transaction,
-        op,
-        &key_wire,
-        "member",
-        &tenant_wire,
-        Some(tenant_id),
-    )
-    .await
-    .map_err(|error| TerminalError::new(format!("api key tenant-member outbox: {error}")))?;
     Ok(())
 }
 

@@ -5,3 +5,4 @@ pub(crate) mod api_keys;
 pub(crate) mod groups;
 pub(crate) mod tenants;
 pub(crate) mod users;
+pub(crate) mod workspaces;

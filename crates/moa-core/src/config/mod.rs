@@ -219,7 +219,6 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     const CONFIG_ENV_KEYS: &[&str] = &[
         "HOME",

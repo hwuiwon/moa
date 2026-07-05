@@ -9,7 +9,7 @@ curl http://localhost:10022/scim/v2/ServiceProviderConfig
 ```
 
 SCIM clients authenticate with a MOA API key whose OpenFGA scope grants
-`scim_admin` on one tenant. Create and scope the key:
+`tenant#admin` on one tenant. Create and scope the key:
 
 ```sh
 curl -X POST http://localhost:10010/ApiKeys/create \
@@ -21,7 +21,7 @@ curl -X POST http://localhost:10010/ApiKeys/create \
 curl -X POST http://localhost:10000/v1/authz/tuple-write \
   -H "Authorization: Bearer <admin-key>" \
   -H "Content-Type: application/json" \
-  --data '{"user":"api_key:<scim-key-id>","relation":"scim_admin","object":"tenant:<tenant-id>"}'
+  --data '{"user":"api_key:<scim-key-id>","relation":"admin","object":"tenant:<tenant-id>"}'
 ```
 
 Configure the IdP SCIM base URL as `https://<edge-or-orchestrator>/scim/v2`
@@ -29,10 +29,11 @@ and present the SCIM API key as `Authorization: Bearer <key>`.
 
 SCIM users are MOA operator/admin identities: tenant admins and service users
 that need authenticated access to MOA control-plane APIs.
-Agent-facing contacts are not SCIM users and are not OpenFGA principals by
-default. Contacts are created, verified, linked, exported, and erased through
-the contact and privacy APIs; deleting or deactivating a SCIM user does not
-silently delete unrelated contacts.
+Agent-facing contacts are not SCIM users. Contact JWTs use separate bounded
+`contact:<id>` OpenFGA subjects for agent/session interaction and cannot become
+tenant or workspace control-plane identities. Contacts are created, verified,
+linked, exported, and erased through the contact and privacy APIs; deleting or
+deactivating a SCIM user does not silently delete unrelated contacts.
 
 ## Supported operations
 
@@ -78,16 +79,19 @@ users that are still active.
 
 ## Group mapping
 
-SCIM groups enqueue FGA tuples when members are added or removed. The default
-mapping is:
+SCIM groups enqueue FGA tuples when members are added or removed only for
+schema-backed tenant role groups. The mapping is:
 
-- any group name maps membership to `user:<U> member tenant:<T>`
-- `tenant:<T>:<relation>` maps to `user:<U> <relation> tenant:<T>`
+- ordinary group names persist membership as SCIM product data without OpenFGA tuples
+- `tenant:<T>:admin` maps to `user:<U> admin tenant:<T>`
+- `tenant:<T>:operator` maps to `user:<U> operator tenant:<T>`
+
+Other `tenant:<T>:<relation>` group names are rejected.
 
 ## Okta SCIM Compliance Tester
 
 1. Start the local stack and expose the SCIM listener to the tester.
-2. Create a SCIM API key and grant `scim_admin` as shown above.
+2. Create a SCIM API key and grant tenant admin as shown above.
 3. Open <https://oktadeveloper.github.io/scim-spec-test/>.
 4. Set the base URL to `http://localhost:10022/scim/v2` or your tunnel URL.
 5. Set the bearer token to the SCIM API key.

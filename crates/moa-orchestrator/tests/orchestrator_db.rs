@@ -8,3 +8,5 @@ mod eval_run_status_db;
 mod lineage_postgres_db;
 #[path = "orchestrator_db/session_store_db.rs"]
 mod session_store_db;
+#[path = "orchestrator_db/workspace_authz_db.rs"]
+mod workspace_authz_db;

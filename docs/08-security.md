@@ -26,6 +26,13 @@ OpenFGA is the default authorization engine. Handlers must call
 transactional outbox is the only supported way to synchronize product state and
 OpenFGA tuples.
 
+Workspace admins are first-class OpenFGA super-admin principals:
+`workspace#admin` inherits into `tenant#admin` for every tenant attached to the
+workspace, and `tenant#admin` inherits into `tenant#operator`. Handlers still
+authorize against the target tenant/resource; they do not implement local
+workspace-admin bypasses. Tenant remains the runtime, RLS, and data isolation
+boundary.
+
 The public edge injects trusted `X-Moa-*` identity headers after stripping any
 caller-provided values. The orchestrator trusts those headers, so production
 deployments must keep the Restate handler port internal-only. See
@@ -38,7 +45,7 @@ with explicit scopes, structured permissions, tenant id, contact id, and
 optional agent/session allowlists. Issuing a contact token is a tenant
 admin/operator or authorized integration operation protected by normal caller
 authz; presenting a contact JWT cannot call admin/operator APIs or become an
-admin/operator user principal.
+workspace, tenant-admin, or tenant-operator principal.
 
 Identity verification can be initiated by skills or their procedures, but the platform
 contact service enforces challenge creation, OTP-style completion, token

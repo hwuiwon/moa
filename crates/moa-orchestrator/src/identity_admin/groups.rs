@@ -570,7 +570,7 @@ async fn enqueue_group_mapping(
     display_name: &str,
     user_id: Uuid,
 ) -> Result<(), ScimResponseError> {
-    let targets = group_targets(tenant_id, display_name);
+    let targets = group_targets(tenant_id, display_name)?;
     for target in targets {
         enqueue_raw(
             &mut **tx,
@@ -586,24 +586,37 @@ async fn enqueue_group_mapping(
     Ok(())
 }
 
+#[derive(Debug)]
 struct GroupTarget {
     relation: String,
     object: String,
 }
 
-fn group_targets(tenant_id: Uuid, display_name: &str) -> Vec<GroupTarget> {
+fn group_targets(
+    tenant_id: Uuid,
+    display_name: &str,
+) -> Result<Vec<GroupTarget>, ScimResponseError> {
     let parts: Vec<&str> = display_name.split(':').collect();
     match parts.as_slice() {
         ["tenant", tenant, relation] if Uuid::parse_str(tenant).ok() == Some(tenant_id) => {
-            vec![GroupTarget {
+            if !matches!(*relation, "admin" | "operator") {
+                return Err(ScimResponseError::bad_request(
+                    "invalidValue",
+                    "group display name maps to unsupported tenant relation",
+                ));
+            }
+            Ok(vec![GroupTarget {
                 relation: (*relation).to_string(),
                 object: format!("tenant:{tenant}"),
-            }]
+            }])
         }
-        _ => vec![GroupTarget {
-            relation: "member".to_string(),
-            object: format!("tenant:{tenant_id}"),
-        }],
+        ["tenant", tenant, _] if Uuid::parse_str(tenant).is_ok() => {
+            Err(ScimResponseError::bad_request(
+                "invalidValue",
+                "group display name tenant does not match request tenant",
+            ))
+        }
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -615,4 +628,54 @@ fn map_outbox(error: moa_authz::AuthzError) -> ScimResponseError {
 fn map_audit(error: moa_ocsf::EmitError) -> ScimResponseError {
     tracing::error!(error = %error, "SCIM group security audit failed");
     ScimResponseError::internal("security audit failed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tenant_id() -> Uuid {
+        Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+            .expect("fixture tenant UUID should parse")
+    }
+
+    #[test]
+    fn tenant_admin_group_maps_to_schema_relation() {
+        // Pins: SCIM tenant:<id>:admin groups emit only schema-backed tenant relations.
+        let targets = group_targets(
+            tenant_id(),
+            "tenant:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:admin",
+        )
+        .expect("admin group should map");
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].relation.as_str(), "admin");
+        assert_eq!(
+            targets[0].object.as_str(),
+            "tenant:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn ordinary_group_does_not_emit_tenant_member_tuple() {
+        // Pins: ordinary SCIM groups remain local product data and do not emit
+        // undefined tenant#member OpenFGA tuples.
+        let targets = group_targets(tenant_id(), "support-team").expect("ordinary group maps");
+
+        assert_eq!(targets.len(), 0);
+    }
+
+    #[test]
+    fn unsupported_tenant_relation_is_rejected() {
+        // Pins: stale group names such as member do not survive as tuple aliases.
+        use axum::{http::StatusCode, response::IntoResponse};
+
+        let error = group_targets(
+            tenant_id(),
+            "tenant:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:member",
+        )
+        .expect_err("unsupported relation should be rejected");
+
+        assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
+    }
 }

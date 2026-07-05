@@ -37,9 +37,9 @@ The public edge routes are:
 There is no default public `/v1/evals/*` product route and no public
 `/v1/experiments/run` alias.
 
-Experiment execution is gated by the tenant operator/admin relation. In the
-current OpenFGA model, workspace-admin product access is represented as tenant
-admin on the target tenant; the tenant `operator` relation includes tenant
+Experiment execution is gated by the tenant operator/admin relation. Workspace
+admins are represented in OpenFGA as `workspace#admin`, inherited into each
+linked tenant's `tenant#admin`; the tenant `operator` relation includes tenant
 admins. Internal hosted eval execution uses the same tenant operator/admin
 admission check for `Eval/run`, and the detached `Eval/execute_run` worker
 entrypoint additionally requires the server-issued dispatch token created during

@@ -49,7 +49,11 @@ pub async fn authorize_tenant(
 ///
 /// The OpenFGA tenant model defines `operator` as the union of direct operators
 /// and tenant admins, so one `Operator` check admits tenant operators, tenant
-/// admins, and deployment/workspace admins that are represented as tenant admins.
+/// admins, and workspace admins.
+///
+/// Workspace-admin access is represented in OpenFGA as `workspace#admin`
+/// inherited into `tenant#admin`, which is then inherited into
+/// `tenant#operator`.
 pub async fn authorize_tenant_operator_or_admin(
     ctx: &impl RequestHeaders,
     tenant_id: TenantId,

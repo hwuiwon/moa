@@ -16,7 +16,7 @@ pub async fn service_provider_config() -> Json<Value> {
         "authenticationSchemes": [{
             "type": "oauthbearertoken",
             "name": "OAuth Bearer Token",
-            "description": "MOA API key with scim_admin scope",
+            "description": "MOA API key with tenant admin access",
             "primary": true
         }],
         "meta": {

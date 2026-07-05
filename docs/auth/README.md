@@ -62,6 +62,18 @@ owner subject. Agent delegation is two checks:
 
 Delegation does not borrow the user's resource permissions.
 
+Workspace admins are represented as `workspace#admin` in OpenFGA. Tenants are
+linked to the single deployment workspace
+`workspace:00000000-0000-0000-0000-000000000001` with the `workspace` relation
+on `tenant:<tenant-id>`, and the model inherits `workspace#admin` into
+`tenant#admin`, then into `tenant#operator`. Handlers must keep checking the
+target tenant/resource relation instead of adding local workspace-admin bypass
+logic.
+
+Contacts use MOA-issued contact JWTs for bounded agent/session routes. A
+contact token cannot become a workspace admin, tenant admin, or tenant
+operator identity and cannot call platform-internal control-plane APIs.
+
 ## Tuple Consistency
 
 Product handlers do not write OpenFGA tuples directly. They write product state
@@ -100,6 +112,7 @@ into an operator identity.
 | Edge header trust and network isolation | [operations/edge-network-isolation.md](../operations/edge-network-isolation.md) |
 | Builtin approval flow | [operations/builtin-approvals.md](../operations/builtin-approvals.md) |
 | Agent identity and deactivation | [operations/agent-lifecycle.md](../operations/agent-lifecycle.md) |
+| Workspace admin bootstrap | [operations/workspace-admin-bootstrap.md](../operations/workspace-admin-bootstrap.md) |
 | Auth0/OIDC setup | [operations/auth0-setup.md](../operations/auth0-setup.md) |
 | Token Vault setup | [operations/token-vault-setup.md](../operations/token-vault-setup.md) |
 | SCIM provisioning | [scim.md](scim.md) |

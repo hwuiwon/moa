@@ -36,6 +36,9 @@ MOA_AUTH_AUTH0_CLIENT_ID=...
 MOA_AUTH_AUTH0_CLIENT_SECRET=...
 ```
 
+MOA has exactly one workspace for workspace-admin inheritance. Its OpenFGA
+object is `workspace:00000000-0000-0000-0000-000000000001`.
+
 Build binaries that need Auth0 with the feature enabled:
 
 ```sh

@@ -258,16 +258,6 @@ async fn revoke_agent_api_keys(
         )
         .await
         .map_err(|error| TerminalError::new(format!("api key tenant outbox: {error}")))?;
-        enqueue_raw(
-            &mut **transaction,
-            TupleOp::Delete,
-            &format!("api_key:{key_id}"),
-            "member",
-            &format!("tenant:{tenant_id}"),
-            Some(tenant_id),
-        )
-        .await
-        .map_err(|error| TerminalError::new(format!("api key member outbox: {error}")))?;
         moa_ocsf::emit_api_key_revoked_tx(
             transaction,
             tenant_id,

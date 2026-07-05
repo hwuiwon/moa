@@ -2,6 +2,11 @@
 
 use std::path::Path;
 
+use uuid::Uuid;
+
+/// Canonical deployment workspace id used for workspace-admin OpenFGA tuples.
+pub const WORKSPACE_ID: Uuid = Uuid::from_u128(1);
+
 const INSTRUCTION_FILE_NAME: &str = "AGENTS.md";
 const MAX_INSTRUCTION_FILE_BYTES: usize = 32_768;
 

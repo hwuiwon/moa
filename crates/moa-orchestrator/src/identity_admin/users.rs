@@ -239,10 +239,6 @@ pub(crate) async fn create_user(
     .await
     .map_err(map_db)?;
 
-    if user.active {
-        enqueue_tenant_member(&mut tx, tenant_id, user_id, TupleOp::Write).await?;
-    }
-
     moa_ocsf::emit_scim_user_created_tx(&mut tx, tenant_id, actor, user_id)
         .await
         .map_err(map_audit)?;
@@ -288,7 +284,6 @@ pub(crate) async fn replace_user(
         .execute(&mut *tx)
         .await
         .map_err(map_db)?;
-        enqueue_tenant_member(&mut tx, tenant_id, user_id, TupleOp::Write).await?;
     } else {
         cascade_deactivate_user(&mut tx, tenant_id, user_id, actor.clone())
             .await
@@ -348,7 +343,6 @@ pub(crate) async fn patch_user(
             .execute(&mut *tx)
             .await
             .map_err(map_db)?;
-            enqueue_tenant_member(&mut tx, tenant_id, user_id, TupleOp::Write).await?;
         }
         None => {}
     }
@@ -529,24 +523,6 @@ async fn apply_user_mutation(
     Ok(())
 }
 
-async fn enqueue_tenant_member(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: Uuid,
-    user_id: Uuid,
-    op: TupleOp,
-) -> Result<(), ScimResponseError> {
-    enqueue_raw(
-        &mut **tx,
-        op,
-        &format!("user:{user_id}"),
-        "member",
-        &format!("tenant:{tenant_id}"),
-        Some(tenant_id),
-    )
-    .await
-    .map_err(map_outbox)
-}
-
 async fn revoke_user_api_keys(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
@@ -579,7 +555,7 @@ async fn revoke_user_api_keys(
             Some(tenant_id),
         )
         .await?;
-        for relation in ["member", "admin", "scim_admin"] {
+        for relation in ["admin", "operator"] {
             enqueue_raw(
                 &mut **tx,
                 TupleOp::Delete,
@@ -611,7 +587,7 @@ async fn enqueue_direct_user_tuple_deletes(
 ) -> Result<(), CascadeError> {
     let user_wire = format!("user:{user_id}");
 
-    for relation in ["member", "admin", "billing_admin"] {
+    for relation in ["admin", "operator"] {
         enqueue_raw(
             &mut **tx,
             TupleOp::Delete,
@@ -683,11 +659,6 @@ async fn table_exists(
         .fetch_one(&mut **tx)
         .await?;
     Ok(exists)
-}
-
-fn map_outbox(error: moa_authz::AuthzError) -> ScimResponseError {
-    tracing::error!(error = %error, "SCIM authorization queue error");
-    ScimResponseError::internal("authorization queue error")
 }
 
 fn map_cascade(error: CascadeError) -> ScimResponseError {

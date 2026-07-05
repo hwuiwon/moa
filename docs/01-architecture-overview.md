@@ -124,15 +124,19 @@ workspace
             -> session
 ```
 
-This is the complete runtime hierarchy. The workspace is a single deployment
-container, not a runtime parameter. A tenant is the hard runtime isolation
-boundary: sessions, contacts, memory, learning, artifacts, analytics, policies,
-events, and audit evidence are tenant-owned.
+This is the complete runtime hierarchy. The workspace is the deployment
+administration boundary. Workspace admins are super-admin principals whose
+OpenFGA `workspace#admin` relation inherits into every linked tenant's
+`tenant#admin` relation. A tenant remains the hard runtime isolation boundary:
+sessions, contacts, memory, learning, artifacts, analytics, policies, events,
+and audit evidence are tenant-owned.
 
 Contacts are end users inside a tenant. Users are admin/operator principals:
-tenant admins, tenant operators, service users, and API-key subjects. Users are
-authorized to administer or operate tenants, but they are not contact memory
-subjects and are not part of the contact/session lineage.
+workspace admins, tenant admins, tenant operators, service users, and API-key
+subjects. Users are authorized to administer or operate tenants, but they are
+not contact memory subjects and are not part of the contact/session lineage.
+Contact credentials cannot access platform-internal control-plane surfaces such
+as skills, experiments, knowledge management, or tenant administration.
 
 Contact memory is contact-local. A contact session never inherits another
 contact's memory or tenant admin/operator memory. When graph memory is enabled,

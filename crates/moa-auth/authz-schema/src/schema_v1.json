@@ -5,6 +5,34 @@
       "type": "user"
     },
     {
+      "type": "service"
+    },
+    {
+      "type": "workspace",
+      "metadata": {
+        "relations": {
+          "admin": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "api_key"
+              },
+              {
+                "type": "service"
+              }
+            ]
+          }
+        }
+      },
+      "relations": {
+        "admin": {
+          "this": {}
+        }
+      }
+    },
+    {
       "type": "contact",
       "metadata": {
         "relations": {
@@ -68,7 +96,23 @@
           "this": {}
         },
         "operator": {
-          "this": {}
+          "union": {
+            "child": [
+              {
+                "this": {}
+              },
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "tenant"
+                  },
+                  "computedUserset": {
+                    "relation": "admin"
+                  }
+                }
+              }
+            ]
+          }
         },
         "tenant": {
           "this": {}
@@ -124,6 +168,13 @@
               }
             ]
           },
+          "workspace": {
+            "directly_related_user_types": [
+              {
+                "type": "workspace"
+              }
+            ]
+          },
           "operator": {
             "directly_related_user_types": [
               {
@@ -141,7 +192,23 @@
       },
       "relations": {
         "admin": {
-          "this": {}
+          "union": {
+            "child": [
+              {
+                "this": {}
+              },
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "workspace"
+                  },
+                  "computedUserset": {
+                    "relation": "admin"
+                  }
+                }
+              }
+            ]
+          }
         },
         "operator": {
           "union": {
@@ -156,6 +223,9 @@
               }
             ]
           }
+        },
+        "workspace": {
+          "this": {}
         }
       }
     },

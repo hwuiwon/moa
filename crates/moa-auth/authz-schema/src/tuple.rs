@@ -11,6 +11,8 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ObjectType {
+    /// A deployment-level administration boundary.
+    Workspace,
     /// A tenant runtime boundary.
     Tenant,
     /// A tenant-local end-user contact.
@@ -28,8 +30,12 @@ pub enum ObjectType {
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum UserType {
+    /// A deployment workspace object used as a tuple subject.
+    Workspace,
     /// A human user.
     User,
+    /// A service principal.
+    Service,
     /// A tenant-local end-user contact.
     Contact,
     /// An AI agent principal.
@@ -60,6 +66,8 @@ pub enum Relation {
     CanActAs,
     /// Parent tenant relationship.
     Tenant,
+    /// Parent workspace relationship.
+    Workspace,
     /// Contact object relationship.
     Contact,
 }
@@ -169,6 +177,7 @@ mod tests {
         // previous hand-written tables, since these strings cross the OpenFGA
         // wire boundary and are baked into outbox idempotency keys.
         let object_types = [
+            (ObjectType::Workspace, "workspace"),
             (ObjectType::Tenant, "tenant"),
             (ObjectType::Contact, "contact"),
             (ObjectType::Session, "session"),
@@ -180,7 +189,9 @@ mod tests {
         }
 
         let user_types = [
+            (UserType::Workspace, "workspace"),
             (UserType::User, "user"),
+            (UserType::Service, "service"),
             (UserType::Contact, "contact"),
             (UserType::Agent, "agent"),
             (UserType::ApiKey, "api_key"),
@@ -196,6 +207,7 @@ mod tests {
             (Relation::Participant, "participant"),
             (Relation::CanActAs, "can_act_as"),
             (Relation::Tenant, "tenant"),
+            (Relation::Workspace, "workspace"),
             (Relation::Contact, "contact"),
         ];
         for (value, label) in relations {
@@ -231,6 +243,32 @@ mod tests {
             tuple.object_wire(),
             "session:22222222-2222-2222-2222-222222222222"
         );
+    }
+
+    #[test]
+    fn tuple_wire_format_workspace_to_tenant() {
+        // Pins: workspace admin inheritance uses a workspace object as the tuple subject.
+        let workspace_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111")
+            .expect("fixture workspace UUID should parse");
+        let tenant_id = Uuid::parse_str("22222222-2222-2222-2222-222222222222")
+            .expect("fixture tenant UUID should parse");
+        let tuple = TupleKey::new(
+            UserType::Workspace,
+            workspace_id,
+            Relation::Workspace,
+            ObjectType::Tenant,
+            tenant_id,
+        );
+
+        assert_eq!(
+            tuple.user_wire(),
+            "workspace:11111111-1111-1111-1111-111111111111"
+        );
+        assert_eq!(
+            tuple.object_wire(),
+            "tenant:22222222-2222-2222-2222-222222222222"
+        );
+        assert_eq!(tuple.to_wire().relation, "workspace");
     }
 
     #[test]
@@ -281,8 +319,26 @@ mod tests {
         types.sort_unstable();
         assert_eq!(
             types,
-            ["agent", "api_key", "contact", "session", "tenant", "user",]
+            [
+                "agent",
+                "api_key",
+                "contact",
+                "service",
+                "session",
+                "tenant",
+                "user",
+                "workspace",
+            ]
         );
+
+        let workspace = definitions
+            .iter()
+            .find(|definition| definition["type"] == "workspace")
+            .expect("schema_v1.json must define workspace");
+        let workspace_relations = workspace["relations"]
+            .as_object()
+            .expect("workspace relations must be an object");
+        assert!(workspace_relations.contains_key("admin"));
 
         let agent = definitions
             .iter()
@@ -300,12 +356,16 @@ mod tests {
         let tenant_relations = tenant["relations"]
             .as_object()
             .expect("tenant relations must be an object");
-        for relation in ["admin", "operator"] {
+        for relation in ["admin", "operator", "workspace"] {
             assert!(
                 tenant_relations.contains_key(relation),
                 "tenant must define relation {relation}"
             );
         }
+        assert_eq!(
+            tenant_relations["admin"]["union"]["child"][1]["tupleToUserset"]["tupleset"]["relation"],
+            "workspace"
+        );
 
         let session = definitions
             .iter()

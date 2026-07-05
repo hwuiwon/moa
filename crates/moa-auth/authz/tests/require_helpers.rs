@@ -122,6 +122,38 @@ async fn tenant_admin_administers_tenant() {
 }
 
 #[tokio::test]
+async fn workspace_admin_resolution_still_checks_target_tenant_admin() {
+    // Pins: workspace-admin super-admin behavior lives in OpenFGA inheritance;
+    // handlers still ask for tenant#admin on the target tenant.
+    let server = MockServer::start();
+    let user_id = Uuid::parse_str("99999999-9999-9999-9999-999999999999")
+        .expect("valid workspace admin user uuid");
+    let tenant_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    let allowed = server.mock(|when, then| {
+        when.method(POST)
+            .path("/stores/store-1/check")
+            .json_body(check_body(
+                "user:99999999-9999-9999-9999-999999999999",
+                "admin",
+                "tenant:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            ));
+        then.status(200).json_body(json!({ "allowed": true }));
+    });
+
+    require_authz(
+        &fga_client(&server),
+        &user_identity(user_id),
+        ObjectType::Tenant,
+        tenant_id,
+        Relation::Admin,
+    )
+    .await
+    .expect("workspace admin inherited tenant admin check should be allowed by FGA");
+
+    allowed.assert_hits(1);
+}
+
+#[tokio::test]
 async fn tenant_admin_participates_in_tenant_session() {
     // Pins: tenant admins read tenant sessions through session#participant.
     let server = MockServer::start();
@@ -187,6 +219,84 @@ async fn tenant_operator_cannot_admin_tenant() {
             assert_eq!(subject, "user:11111111-1111-1111-1111-111111111111");
             assert_eq!(object_type, ObjectType::Tenant);
             assert_eq!(object_id, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+            assert_eq!(relation, Relation::Admin);
+        }
+        AuthzCheckError::Engine(engine) => {
+            panic!("expected Forbidden, got Engine({engine})");
+        }
+    }
+    denied.assert_hits(1);
+}
+
+#[tokio::test]
+async fn tenant_operator_check_uses_operator_relation() {
+    // Pins: product control-plane reads continue checking tenant#operator.
+    let server = MockServer::start();
+    let user_id = Uuid::parse_str("12121212-1212-1212-1212-121212121212").expect("valid user uuid");
+    let tenant_id = "cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd";
+    let allowed = server.mock(|when, then| {
+        when.method(POST)
+            .path("/stores/store-1/check")
+            .json_body(check_body(
+                "user:12121212-1212-1212-1212-121212121212",
+                "operator",
+                "tenant:cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd",
+            ));
+        then.status(200).json_body(json!({ "allowed": true }));
+    });
+
+    require_authz(
+        &fga_client(&server),
+        &user_identity(user_id),
+        ObjectType::Tenant,
+        tenant_id,
+        Relation::Operator,
+    )
+    .await
+    .expect("tenant operator check should be allowed by FGA");
+
+    allowed.assert_hits(1);
+}
+
+#[tokio::test]
+async fn contact_cannot_admin_tenant() {
+    // Pins: contact credentials cannot satisfy tenant admin checks unless FGA
+    // explicitly grants the impossible contact subject, which the model does not.
+    let server = MockServer::start();
+    let contact_id =
+        Uuid::parse_str("34343434-3434-3434-3434-343434343434").expect("valid contact uuid");
+    let tenant_id = "efefefef-efef-efef-efef-efefefefefef";
+    let denied = server.mock(|when, then| {
+        when.method(POST)
+            .path("/stores/store-1/check")
+            .json_body(check_body(
+                "contact:34343434-3434-3434-3434-343434343434",
+                "admin",
+                "tenant:efefefef-efef-efef-efef-efefefefefef",
+            ));
+        then.status(200).json_body(json!({ "allowed": false }));
+    });
+
+    let error = require_authz(
+        &fga_client(&server),
+        &contact_identity(contact_id),
+        ObjectType::Tenant,
+        tenant_id,
+        Relation::Admin,
+    )
+    .await
+    .expect_err("contact tenant admin check should be forbidden");
+
+    match error {
+        AuthzCheckError::Forbidden {
+            subject,
+            object_type,
+            object_id,
+            relation,
+        } => {
+            assert_eq!(subject, "contact:34343434-3434-3434-3434-343434343434");
+            assert_eq!(object_type, ObjectType::Tenant);
+            assert_eq!(object_id, "efefefef-efef-efef-efef-efefefefefef");
             assert_eq!(relation, Relation::Admin);
         }
         AuthzCheckError::Engine(engine) => {

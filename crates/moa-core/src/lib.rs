@@ -51,3 +51,4 @@ pub use traits::{
 };
 pub use truncation::truncate_head_tail;
 pub use types::*;
+pub use workspace::WORKSPACE_ID;

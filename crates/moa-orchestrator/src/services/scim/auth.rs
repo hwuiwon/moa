@@ -6,8 +6,8 @@ use moa_core::traits::Identity;
 
 use super::{ScimResponseError, ScimState};
 
-/// Verify that the authenticated API key has `scim_admin` on its tenant.
-pub async fn require_scim_admin(
+/// Verify that the authenticated API key has tenant-admin access on its tenant.
+pub async fn require_tenant_admin(
     state: &ScimState,
     identity: &Identity,
 ) -> Result<(), ScimResponseError> {
@@ -29,7 +29,7 @@ pub async fn require_scim_admin(
 fn map_authz_error(error: AuthzCheckError) -> ScimResponseError {
     match error {
         AuthzCheckError::Forbidden { .. } => {
-            ScimResponseError::forbidden("API key is missing scim_admin scope")
+            ScimResponseError::forbidden("API key is missing tenant admin access")
         }
         AuthzCheckError::Engine(error) => {
             tracing::error!(error = %error, "SCIM authz check failed");
