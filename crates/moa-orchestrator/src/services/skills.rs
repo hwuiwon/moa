@@ -7,7 +7,7 @@ use moa_artifacts::action::ActionDefinition;
 use moa_artifacts::connector::ConnectorDefinition;
 use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
 use moa_artifacts::reference::ArtifactRef;
-use moa_artifacts::registry::{ArtifactRegistry, StoredArtifactRevision};
+use moa_artifacts::registry::{ArtifactRegistry, ArtifactRunListRequest, StoredArtifactRevision};
 use moa_artifacts::skill::SkillActionDefinition;
 use moa_authz_schema::Relation;
 use moa_core::wire::capabilities::{
@@ -16,8 +16,9 @@ use moa_core::wire::capabilities::{
 use moa_core::wire::knowledge::KnowledgeConnectionSummary;
 use moa_core::wire::procedures::{
     ProcedureCancelRequest, ProcedureCancelResponse, ProcedureNodeRunSummary,
-    ProcedureReviewDecisionRequest, ProcedureReviewDecisionResponse, ProcedureRunRequest,
-    ProcedureRunResponse, ProcedureRunStatus, ProcedureSignalRequest, ProcedureSignalResponse,
+    ProcedureReviewDecisionRequest, ProcedureReviewDecisionResponse, ProcedureRunListCursor,
+    ProcedureRunListRequest, ProcedureRunListResponse, ProcedureRunRequest, ProcedureRunResponse,
+    ProcedureRunStatus, ProcedureRunSummary, ProcedureSignalRequest, ProcedureSignalResponse,
     ProcedureStatusRequest,
 };
 use moa_core::wire::skills::{
@@ -85,6 +86,11 @@ pub trait Skills {
     async fn status(
         request: Json<ProcedureStatusRequest>,
     ) -> Result<Json<ProcedureRunStatus>, HandlerError>;
+
+    /// Lists procedure runs after a tenant operator check.
+    async fn list_runs(
+        request: Json<ProcedureRunListRequest>,
+    ) -> Result<Json<ProcedureRunListResponse>, HandlerError>;
 
     /// Requests procedure run cancellation.
     async fn cancel(
@@ -213,6 +219,22 @@ impl Skills for SkillsImpl {
         Ok(ctx
             .run(|| async move { status_inner(request).await.map(Json::from) })
             .name("skills_status")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn list_runs(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ProcedureRunListRequest>,
+    ) -> Result<Json<ProcedureRunListResponse>, HandlerError> {
+        annotate_restate_handler_span("Skills", "list_runs");
+        let request = request.into_inner();
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+
+        Ok(ctx
+            .run(|| async move { list_runs_inner(request).await.map(Json::from) })
+            .name("skills_list_runs")
             .await?)
     }
 
@@ -356,6 +378,67 @@ async fn status_inner(request: ProcedureStatusRequest) -> Result<ProcedureRunSta
         output: run.output,
         error: run.error,
     })
+}
+
+async fn list_runs_inner(
+    request: ProcedureRunListRequest,
+) -> Result<ProcedureRunListResponse, HandlerError> {
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: request.tenant_id,
+    };
+    let status = request
+        .status
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(|error: moa_core::MoaError| {
+            TerminalError::new_with_code(400, error.to_string())
+        })?;
+    let page = ArtifactRegistry::new(OrchestratorCtx::current_graph_pool())
+        .list_runs(
+            &scope,
+            ArtifactRunListRequest {
+                status,
+                limit: request.limit,
+                cursor: request.cursor.map(|cursor| {
+                    moa_artifacts::registry::ArtifactRunListCursor {
+                        started_at: cursor.started_at,
+                        run_uid: cursor.run_id,
+                    }
+                }),
+            },
+        )
+        .await
+        .map_err(|error| procedure_handler_error(ProcedureError::Artifact(error)))?;
+    Ok(ProcedureRunListResponse {
+        tenant_id: request.tenant_id,
+        runs: page
+            .runs
+            .into_iter()
+            .map(procedure_run_summary_from_run)
+            .collect(),
+        next_cursor: page.next_cursor.map(|cursor| ProcedureRunListCursor {
+            started_at: cursor.started_at,
+            run_id: cursor.run_uid,
+        }),
+    })
+}
+
+/// Converts a registry procedure run into a public list summary.
+pub fn procedure_run_summary_from_run(
+    run: moa_artifacts::registry::ArtifactRun,
+) -> ProcedureRunSummary {
+    ProcedureRunSummary {
+        run_id: run.run_uid,
+        artifact_uid: run.artifact_uid,
+        revision_uid: run.revision_uid,
+        session_id: run.session_id,
+        procedure_ref: run.procedure_ref,
+        status: run.status.as_str().to_string(),
+        current_node_id: run.current_node_id,
+        started_at: run.started_at,
+        completed_at: run.completed_at,
+    }
 }
 
 async fn cancel_inner(

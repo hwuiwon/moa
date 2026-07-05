@@ -3,15 +3,18 @@
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use moa_analytics::{AnalyticsError, AnalyticsService};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::TenantId;
+use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::analytics::AnalyticsQueryRequest;
+use serde::Deserialize;
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 /// Minimum spacing between analytics materialized-view refreshes, process-wide.
 const MV_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(60);
@@ -23,23 +26,36 @@ fn last_mv_refresh() -> &'static Mutex<Option<Instant>> {
 }
 
 use super::{
-    AppState, RouteTranslation, authenticate_direct_request, parse_json_body_with_tenant,
-    require_direct_authz, route_error, translate_json_object_with_tenant_id,
+    AppState, RouteTranslation, authenticate_direct_request, parse_json_body, require_direct_authz,
+    route_error, translate_json_object_with_tenant_id,
 };
+
+#[derive(Debug, Deserialize)]
+pub(super) struct AnalyticsTargetQuery {
+    tenant_id: Option<Uuid>,
+}
 
 /// Handles analytics catalog reads at the edge.
 #[tracing::instrument(skip(state, headers))]
-pub async fn handle_catalog(State(state): State<AppState>, headers: HeaderMap) -> Response {
+pub(super) async fn handle_catalog(
+    State(state): State<AppState>,
+    Query(query): Query<AnalyticsTargetQuery>,
+    headers: HeaderMap,
+) -> Response {
     let identity =
         match authenticate_direct_request(&state, &headers, "/v1/analytics/catalog").await {
             Ok(identity) => identity,
             Err(response) => return response,
         };
+    let tenant_id = match analytics_target_tenant(&identity, query.tenant_id.map(TenantId::from)) {
+        Ok(tenant_id) => tenant_id,
+        Err(response) => return response,
+    };
     if let Err(response) = require_direct_authz(
         &state,
         &identity,
         ObjectType::Tenant,
-        identity.tenant_id,
+        tenant_id,
         Relation::Operator,
     )
     .await
@@ -51,7 +67,7 @@ pub async fn handle_catalog(State(state): State<AppState>, headers: HeaderMap) -
 
 /// Handles tenant-scoped analytics queries at the edge.
 #[tracing::instrument(skip(state, headers, body))]
-pub async fn handle_query(
+pub(super) async fn handle_query(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
@@ -61,16 +77,20 @@ pub async fn handle_query(
         Ok(identity) => identity,
         Err(response) => return response,
     };
-    let request: AnalyticsQueryRequest =
-        match parse_json_body_with_tenant(&body, identity.tenant_id) {
-            Ok(request) => request,
-            Err(response) => return response,
-        };
+    let mut request: AnalyticsQueryRequest = match parse_json_body(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    let tenant_id = match analytics_target_tenant(&identity, request.tenant_id) {
+        Ok(tenant_id) => tenant_id,
+        Err(response) => return response,
+    };
+    request.tenant_id = Some(tenant_id);
     if let Err(response) = require_direct_authz(
         &state,
         &identity,
         ObjectType::Tenant,
-        identity.tenant_id,
+        tenant_id,
         Relation::Operator,
     )
     .await
@@ -82,6 +102,16 @@ pub async fn handle_query(
         Ok(response) => Json(response).into_response(),
         Err(error) => analytics_error_response(error),
     }
+}
+
+fn analytics_target_tenant(
+    identity: &Identity,
+    tenant_id: Option<TenantId>,
+) -> Result<TenantId, Response> {
+    if identity.identity_type == IdentityType::Contact {
+        return Err((StatusCode::FORBIDDEN, "forbidden").into_response());
+    }
+    Ok(tenant_id.unwrap_or(identity.tenant_id))
 }
 
 fn analytics_error_response(error: AnalyticsError) -> Response {

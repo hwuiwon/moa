@@ -52,6 +52,19 @@ async fn install_authz_outbox(service: &SessionStoreImpl) -> Result<()> {
         .store
         .schema_name()
         .context("test service should use an isolated schema")?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = $1 AND table_name = 'authz_outbox'
+        )",
+    )
+    .bind(schema_name)
+    .fetch_one(service.store.pool())
+    .await?;
+    if exists {
+        return Ok(());
+    }
     moa_migrations::run_auth_schema(service.store.pool(), schema_name).await?;
     Ok(())
 }

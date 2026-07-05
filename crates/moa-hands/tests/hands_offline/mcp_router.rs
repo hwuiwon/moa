@@ -68,7 +68,6 @@ async fn router_injects_mcp_credentials_via_proxy() {
         credentials: Some(McpCredentialConfig::Bearer {
             token_env: token_env.clone(),
         }),
-        ..McpServerConfig::default()
     }];
 
     let router = ToolRouter::from_config(&config).await.unwrap();
@@ -113,7 +112,6 @@ async fn router_fails_closed_when_credentialed_mcp_token_env_is_unset() {
         credentials: Some(McpCredentialConfig::Bearer {
             token_env: token_env.clone(),
         }),
-        ..McpServerConfig::default()
     }];
 
     let error = match ToolRouter::from_config(&config).await {

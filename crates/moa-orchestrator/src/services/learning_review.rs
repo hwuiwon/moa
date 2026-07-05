@@ -137,55 +137,43 @@ impl SessionLearningReviewStore {
 }
 
 impl LearningReviewStore for SessionLearningReviewStore {
-    fn get_learning_candidate<'a>(
-        &'a self,
-        tenant_id: &'a TenantId,
+    async fn get_learning_candidate(
+        &self,
+        tenant_id: &TenantId,
         candidate_id: Uuid,
-    ) -> impl std::future::Future<
-        Output = std::result::Result<Option<LearningCandidate>, moa_core::MoaError>,
-    > + Send
-    + 'a {
-        async move {
-            self.store
-                .get_learning_candidate(tenant_id, candidate_id)
-                .await
-        }
+    ) -> std::result::Result<Option<LearningCandidate>, moa_core::MoaError> {
+        self.store
+            .get_learning_candidate(tenant_id, candidate_id)
+            .await
     }
 
-    fn update_learning_candidate_status_from<'a>(
-        &'a self,
-        update: &'a LearningCandidateStatusUpdate,
+    async fn update_learning_candidate_status_from(
+        &self,
+        update: &LearningCandidateStatusUpdate,
         expected_status: LearningCandidateStatus,
-    ) -> impl std::future::Future<Output = std::result::Result<bool, moa_core::MoaError>> + Send + 'a
-    {
-        async move {
-            self.store
-                .update_learning_candidate_status_from(update, expected_status)
-                .await
-        }
+    ) -> std::result::Result<bool, moa_core::MoaError> {
+        self.store
+            .update_learning_candidate_status_from(update, expected_status)
+            .await
     }
 
-    fn update_learning_candidate_status_from_in_tx<'a>(
-        &'a self,
-        conn: &'a mut sqlx::PgConnection,
-        update: &'a LearningCandidateStatusUpdate,
+    async fn update_learning_candidate_status_from_in_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        update: &LearningCandidateStatusUpdate,
         expected_status: LearningCandidateStatus,
-    ) -> impl std::future::Future<Output = std::result::Result<bool, moa_core::MoaError>> + Send + 'a
-    {
-        async move {
-            self.store
-                .update_learning_candidate_status_from_in_tx(conn, update, expected_status)
-                .await
-        }
+    ) -> std::result::Result<bool, moa_core::MoaError> {
+        self.store
+            .update_learning_candidate_status_from_in_tx(conn, update, expected_status)
+            .await
     }
 
-    fn append_learning_in_tx<'a>(
-        &'a self,
-        conn: &'a mut sqlx::PgConnection,
-        entry: &'a moa_core::LearningEntry,
-    ) -> impl std::future::Future<Output = std::result::Result<(), moa_core::MoaError>> + Send + 'a
-    {
-        async move { self.store.append_learning_in_tx(conn, entry).await }
+    async fn append_learning_in_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        entry: &moa_core::LearningEntry,
+    ) -> std::result::Result<(), moa_core::MoaError> {
+        self.store.append_learning_in_tx(conn, entry).await
     }
 }
 

@@ -90,15 +90,15 @@ artifact revisions and materializes selected artifact files for the tool
 router, but that selection now runs inside the configured agent policy for the
 session.
 Skill procedures are explicit product operations run through the Skills surface
-(`/v1/skills/run`, `/v1/skills/status`, `/v1/skills/cancel`,
-`/v1/skills/signal`, `/v1/skills/decide-review`); a run may be associated with a
-session for UI/history. Starting a procedure validates caller inputs against the
-skill's input schema and returns a structured missing-inputs error instead of
-creating a run when required inputs are absent. The procedure runtime interprets
-explicit graph nodes; the open-ended agent loop does not implicitly choose
-procedure graphs. An agent can invoke a selected skill's procedure through a
-policy-gated hands tool, which enforces the same input-schema check before a run
-starts.
+(`/v1/skills/runs/list`, `/v1/skills/run`, `/v1/skills/status`,
+`/v1/skills/cancel`, `/v1/skills/signal`, `/v1/skills/decide-review`); a run
+may be associated with a session for UI/history. Starting a procedure validates
+caller inputs against the skill's input schema and returns a structured
+missing-inputs error instead of creating a run when required inputs are absent.
+The procedure runtime interprets explicit graph nodes; the open-ended agent loop
+does not implicitly choose procedure graphs. An agent can invoke a selected
+skill's procedure through a policy-gated hands tool, which enforces the same
+input-schema check before a run starts.
 
 Current artifact tables are `moa.artifact`, `moa.artifact_revision`, `moa.artifact_file`, `moa.artifact_run`, and `moa.artifact_node_run`. `moa.artifact` / `moa.artifact_revision` are the source of truth for skill packages, and `moa.artifact_run` / `moa.artifact_node_run` persist procedure runs and their per-node execution state. Automatic skill learning follows `skill proposal -> draft skill artifact + learning_candidate -> LearningReview accept -> published artifact`; generation never rewrites published skill revisions directly.
 
@@ -392,10 +392,11 @@ separate surfaces:
   `ExperimentTrialRun` owns per-trial simulator execution. The public edge
   routes are `POST /v1/experiments/generate-plan`,
   `/v1/experiments/run-plan`, `/v1/experiments/status`,
-  `/v1/experiments/list`, `/v1/experiments/trials`,
-  `/v1/experiments/trial-status`, `/v1/experiments/cancel`,
-  `/v1/experiments/propose-improvements`, `/v1/experiments/scores`, and
-  `/v1/experiments/compare`; stale aliases such as `/v1/experiments/run` are
+  `/v1/experiments/list`, `/v1/experiments/plans/list`,
+  `/v1/experiments/trials`, `/v1/experiments/trial-status`,
+  `/v1/experiments/cancel`, `/v1/experiments/propose-improvements`,
+  `/v1/experiments/scores`, and `/v1/experiments/compare`; stale aliases such
+  as `/v1/experiments/run` are
   not product routes. `Experiments/generate_plan`, `run`, `cancel`, and
   `propose_improvements` require a tenant admin or tenant operator relation;
   `status`, `list`, `trials`, `trial_status`, `scores`, and `compare` require
@@ -408,7 +409,8 @@ separate surfaces:
   agents must call these typed routes or application services, not raw SQL or
   unscoped `SessionStore` methods. Analytics catalog and query reads require
   tenant admin or tenant operator authorization and always scope rows to the
-  authenticated tenant. Audit verification and lineage explain/query/verify
+  explicitly requested tenant when supplied, otherwise to the authenticated
+  identity's tenant. Audit verification and lineage explain/query/verify
   remain direct read use cases with their own typed handlers.
   Lineage export and erase are intentionally not direct read handlers until a
   durable product workflow owns those side effects.

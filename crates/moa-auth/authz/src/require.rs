@@ -7,7 +7,7 @@
 
 use std::fmt;
 use std::future::Future;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
 use crate::{AuthzError, FgaClient};
@@ -17,7 +17,7 @@ use moka::future::Cache;
 use sqlx::PgPool;
 use thiserror::Error;
 
-static AUDIT: OnceLock<SecurityAuditConfig> = OnceLock::new();
+static AUDIT: OnceLock<RwLock<Option<SecurityAuditConfig>>> = OnceLock::new();
 
 /// Default decision-cache TTL. Bounds how long a stale allow can outlive a
 /// revocation before the next check re-consults OpenFGA.
@@ -43,7 +43,10 @@ struct SecurityAuditConfig {
 /// persisted off the request path.
 pub fn configure_security_audit(pool: PgPool, emit_allows: bool) {
     moa_ocsf::init_background_audit(pool.clone());
-    let _ = AUDIT.set(SecurityAuditConfig { pool, emit_allows });
+    let audit = AUDIT.get_or_init(|| RwLock::new(None));
+    if let Ok(mut config) = audit.write() {
+        *config = Some(SecurityAuditConfig { pool, emit_allows });
+    }
 }
 
 /// Positive-decision cache. Only allows are cached; denials always re-check so a
@@ -151,7 +154,12 @@ async fn emit_authz_audit(
     relation: &Relation,
     allowed: bool,
 ) -> Result<(), AuthzCheckError> {
-    let Some(config) = AUDIT.get() else {
+    let Some(config) = AUDIT
+        .get_or_init(|| RwLock::new(None))
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+    else {
         return Ok(());
     };
     if allowed && !config.emit_allows {

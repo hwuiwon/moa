@@ -60,7 +60,8 @@ pub(super) async fn run_agent_loop_trial(
     let mut transcript_sequence = latest_sequence(&initial_events);
     let mut target_usage_sequence = transcript_sequence;
     for turn_index in trial.turn_count.max(0) as u32..simulator_context.max_turns {
-        let observation = observe_session_after(ctx, session_id, transcript_sequence).await?;
+        let observation =
+            observe_session_after(ctx, &request.identity, session_id, transcript_sequence).await?;
         if let Some(stop) = stop_for_session_status(&observation.status) {
             return stop_trial(
                 ctx,
@@ -117,7 +118,8 @@ pub(super) async fn run_agent_loop_trial(
         increment_trial_turn(ctx, request.tenant_id, trial.trial_uid).await?;
         transcript.push(ContextMessage::user(simulator_message));
 
-        let status = wait_for_target_after_turn(ctx, session_id, turn_id).await?;
+        let status =
+            wait_for_target_after_turn(ctx, &request.identity, session_id, turn_id).await?;
         record_target_usage_after(ctx, session_id, &mut target_usage_sequence).await?;
         if let Some(stop) = stop_for_session_status(&status) {
             return stop_trial(
@@ -375,15 +377,18 @@ async fn create_new_session(
 
 async fn observe_session_after(
     ctx: &WorkflowContext<'_>,
+    identity: &Identity,
     session_id: SessionId,
     sequence_num: u64,
 ) -> Result<TargetObservation, HandlerError> {
-    let status = ctx
-        .object_client::<SessionClient>(session_id.to_string())
-        .status()
-        .call()
-        .await?
-        .into_inner();
+    let status = with_identity_headers(
+        ctx.object_client::<SessionClient>(session_id.to_string())
+            .status(),
+        identity,
+    )
+    .call()
+    .await?
+    .into_inner();
     let events = load_session_events(ctx, session_id, event_range_after(sequence_num)).await?;
     Ok(TargetObservation {
         status,
@@ -413,19 +418,22 @@ async fn load_session_events(
 
 async fn wait_for_target_after_turn(
     ctx: &WorkflowContext<'_>,
+    identity: &Identity,
     session_id: SessionId,
     turn_id: String,
 ) -> Result<SessionStatus, HandlerError> {
     let (awakeable_id, completion) = ctx.awakeable::<String>();
-    let attached = ctx
-        .object_client::<SessionClient>(session_id.to_string())
-        .attach_turn_waiter(Json::from(AttachSessionTurnWaiterInput {
-            turn_id: turn_id.clone(),
-            awakeable_id: awakeable_id.clone(),
-        }))
-        .call()
-        .await?
-        .into_inner();
+    let attached = with_identity_headers(
+        ctx.object_client::<SessionClient>(session_id.to_string())
+            .attach_turn_waiter(Json::from(AttachSessionTurnWaiterInput {
+                turn_id: turn_id.clone(),
+                awakeable_id: awakeable_id.clone(),
+            })),
+        identity,
+    )
+    .call()
+    .await?
+    .into_inner();
     if let Some(outcome) = attached.outcome {
         return Ok(status_for_turn_outcome(&outcome));
     }
@@ -436,13 +444,16 @@ async fn wait_for_target_after_turn(
             Ok(status_for_turn_outcome(&outcome))
         },
         _ = ctx.sleep(TARGET_WAIT_TIMEOUT) => {
-            ctx.object_client::<SessionClient>(session_id.to_string())
-                .remove_turn_waiter(Json::from(RemoveSessionTurnWaiterInput {
+            with_identity_headers(
+                ctx.object_client::<SessionClient>(session_id.to_string())
+                    .remove_turn_waiter(Json::from(RemoveSessionTurnWaiterInput {
                     turn_id: turn_id.clone(),
                     awakeable_id,
-                }))
-                .call()
-                .await?;
+                })),
+                identity,
+            )
+            .call()
+            .await?;
             Err(TerminalError::new(format!(
                 "timed out waiting for target session turn {turn_id}"
             )).into())

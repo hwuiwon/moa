@@ -27,6 +27,7 @@ The public edge routes are:
 | `POST /v1/experiments/run-plan` | `Experiments/run` |
 | `POST /v1/experiments/status` | `Experiments/status` |
 | `POST /v1/experiments/list` | `Experiments/list` |
+| `POST /v1/experiments/plans/list` | `Experiments/list_plans` |
 | `POST /v1/experiments/trials` | `Experiments/trials` |
 | `POST /v1/experiments/trial-status` | `Experiments/trial_status` |
 | `POST /v1/experiments/cancel` | `Experiments/cancel` |
@@ -44,6 +45,11 @@ admins. Internal hosted eval execution uses the same tenant operator/admin
 admission check for `Eval/run`, and the detached `Eval/execute_run` worker
 entrypoint additionally requires the server-issued dispatch token created during
 that admission step.
+Behavior Lab dashboards use `POST /v1/artifacts/list` and
+`POST /v1/artifacts/export` for experiment plan artifact inspection, and direct
+analytics reads through `GET /v1/analytics/catalog` and
+`POST /v1/analytics/query`; analytics calls may include an explicit `tenant_id`
+when the caller is authorized for that target tenant.
 
 ## Artifact Model
 

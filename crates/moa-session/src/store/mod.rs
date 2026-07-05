@@ -47,6 +47,7 @@ use crate::queries::{
     session_summary_from_row, task_segment_from_row, task_strategy_success_rate_from_row,
 };
 mod action_policy;
+mod dashboard;
 mod experience;
 mod helpers;
 mod learning;
@@ -55,6 +56,12 @@ mod session_attachments;
 mod session_store;
 
 use helpers::*;
+
+pub use dashboard::{
+    DashboardEventCursor, DashboardEventPage, DashboardEventPageRequest,
+    DashboardEventTimelineItem, DashboardSessionDetail, DashboardSessionListCursor,
+    DashboardSessionListPage, DashboardSessionListRequest,
+};
 
 fn local_rustfs_config() -> MoaConfig {
     let mut config = MoaConfig::default();

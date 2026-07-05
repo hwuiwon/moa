@@ -56,6 +56,10 @@ and wait-signals: `review` nodes pause the run until a reviewer decides, and
 `wait_signal` nodes suspend until an external signal arrives. Parallel nodes
 express graph fan-out/join semantics; their side effects currently execute
 sequentially in a deterministic order rather than concurrently.
+Dashboard and operator clients list procedure runs through
+`POST /v1/skills/runs/list`, then inspect or control an individual run through
+`POST /v1/skills/status`, `POST /v1/skills/cancel`,
+`POST /v1/skills/signal`, and `POST /v1/skills/decide-review`.
 
 When a procedure run starts, caller inputs are validated against the skill's
 input schema. A run with missing required inputs is rejected with a structured

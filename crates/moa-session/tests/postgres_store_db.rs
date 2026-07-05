@@ -1,6 +1,3 @@
-use std::future::Future;
-use std::time::Duration;
-
 use chrono::Utc;
 use moa_core::traits::{SessionChannelBindingUpdate, SessionChannelStore};
 use moa_core::{
@@ -8,18 +5,26 @@ use moa_core::{
     ContactId, ContactRef, ContextSnapshot, Event, EventType, ExperienceAttribution,
     ExperienceRecord, FileReadDedupState, LearningCandidate, LearningCandidateStatus,
     LearningCandidateStatusUpdate, LearningCandidateType, LearningEntry, LearningRiskClass,
-    MoaError, ModelId, SegmentAssessment, SegmentCompletion, SegmentEvidence, SegmentEvidenceKind,
-    SegmentEvidencePolarity, SegmentOutcome, SessionActorRef, SessionId, SessionMeta, SessionStore,
-    StoragePartitionId, TaskFacetSet, TaskFingerprint, TaskSegment, TenantId, ToolCallId,
-    ToolOutput, UserId, deterministic_segment_id,
+    MoaError, ModelId, ModelTier, SegmentAssessment, SegmentCompletion, SegmentEvidence,
+    SegmentEvidenceKind, SegmentEvidencePolarity, SegmentOutcome, SessionActorRef, SessionId,
+    SessionMeta, SessionStore, StoragePartitionId, TaskFacetSet, TaskFingerprint, TaskSegment,
+    TenantId, ToolCallId, ToolOutput, UserId, deterministic_segment_id,
 };
-use moa_session::{EventAppend, PostgresSessionStore, testing};
+use moa_session::{
+    EventAppend, PostgresSessionStore,
+    store::{
+        DashboardEventCursor, DashboardEventPageRequest, DashboardSessionListCursor,
+        DashboardSessionListRequest,
+    },
+    testing,
+};
 use moa_test_support::postgres::{
     test_action_policy_rules, test_create_and_get_session, test_emit_and_get_events,
     test_event_search, test_list_sessions_with_filter, test_session_status_update,
     test_tenant_cost_since,
 };
 use sqlx::{PgPool, Row};
+use std::{future::Future, time::Duration};
 use uuid::Uuid;
 
 async fn create_test_store() -> (PostgresSessionStore, String, String) {
@@ -73,6 +78,30 @@ fn test_session_meta(label: &str, model: &str) -> SessionMeta {
         agent_context: Some(AgentContext::system_default()),
         ..SessionMeta::default()
     }
+}
+
+fn test_session_meta_with_id(label: &str, model: &str, id: Uuid) -> SessionMeta {
+    SessionMeta {
+        id: SessionId(id),
+        ..test_session_meta(label, model)
+    }
+}
+
+async fn set_session_updated_at(
+    store: &PostgresSessionStore,
+    schema_name: &str,
+    session_id: SessionId,
+    updated_at: chrono::DateTime<Utc>,
+) {
+    sqlx::query(&format!(
+        "UPDATE {} SET updated_at = $1 WHERE id = $2",
+        qualified(schema_name, "sessions")
+    ))
+    .bind(updated_at)
+    .bind(session_id.0)
+    .execute(store.pool())
+    .await
+    .expect("fixture should update session timestamp");
 }
 
 fn contact_session_meta(label: &str, model: &str, contact_id: ContactId) -> SessionMeta {
@@ -213,6 +242,301 @@ async fn postgres_create_session_requires_creator_or_contact_and_agent_context()
         );
     })
     .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn dashboard_session_list_is_tenant_scoped_and_keyset_paginated() {
+    // Pins: dashboard session listing is tenant-scoped and uses deterministic
+    // `(updated_at, session_id)` keyset pagination for timestamp ties.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let tenant = tenant_id("dashboard-list");
+    let other_tenant = tenant_id("dashboard-list-other");
+    let high_id = SessionId(Uuid::from_u128(0x00000000000000000000000000000003));
+    let mid_id = SessionId(Uuid::from_u128(0x00000000000000000000000000000002));
+    let old_id = SessionId(Uuid::from_u128(0x00000000000000000000000000000001));
+    let other_id = SessionId(Uuid::from_u128(0x00000000000000000000000000000004));
+    let tie_time = chrono::DateTime::parse_from_rfc3339("2026-07-05T12:00:00Z")
+        .expect("fixture timestamp should parse")
+        .with_timezone(&Utc);
+    let old_time = chrono::DateTime::parse_from_rfc3339("2026-07-05T11:59:00Z")
+        .expect("fixture timestamp should parse")
+        .with_timezone(&Utc);
+    let other_time = chrono::DateTime::parse_from_rfc3339("2026-07-05T12:01:00Z")
+        .expect("fixture timestamp should parse")
+        .with_timezone(&Utc);
+
+    for session_id in [high_id, mid_id, old_id] {
+        store
+            .create_session(test_session_meta_with_id(
+                "dashboard-list",
+                "test-model",
+                session_id.0,
+            ))
+            .await
+            .expect("create tenant session");
+    }
+    store
+        .create_session(test_session_meta_with_id(
+            "dashboard-list-other",
+            "test-model",
+            other_id.0,
+        ))
+        .await
+        .expect("create other tenant session");
+
+    set_session_updated_at(&store, &schema_name, high_id, tie_time).await;
+    set_session_updated_at(&store, &schema_name, mid_id, tie_time).await;
+    set_session_updated_at(&store, &schema_name, old_id, old_time).await;
+    set_session_updated_at(&store, &schema_name, other_id, other_time).await;
+
+    let first_page = store
+        .list_dashboard_sessions(
+            tenant,
+            DashboardSessionListRequest {
+                limit: Some(2),
+                ..DashboardSessionListRequest::default()
+            },
+        )
+        .await
+        .expect("list first dashboard page");
+    let first_ids: Vec<_> = first_page
+        .sessions
+        .iter()
+        .map(|session| session.session_id)
+        .collect();
+    assert_eq!(first_ids, vec![high_id, mid_id]);
+    assert_eq!(
+        first_page.next_cursor,
+        Some(DashboardSessionListCursor {
+            updated_at: tie_time,
+            session_id: mid_id,
+        })
+    );
+
+    let second_page = store
+        .list_dashboard_sessions(
+            tenant,
+            DashboardSessionListRequest {
+                limit: Some(2),
+                cursor: first_page.next_cursor,
+                ..DashboardSessionListRequest::default()
+            },
+        )
+        .await
+        .expect("list second dashboard page");
+    let second_ids: Vec<_> = second_page
+        .sessions
+        .iter()
+        .map(|session| session.session_id)
+        .collect();
+    assert_eq!(second_ids, vec![old_id]);
+    assert_eq!(second_page.next_cursor, None);
+    assert!(
+        second_page
+            .sessions
+            .iter()
+            .all(|session| session.tenant_id == tenant),
+        "tenant-scoped list must not include another tenant"
+    );
+
+    let other_page = store
+        .list_dashboard_sessions(
+            other_tenant,
+            DashboardSessionListRequest {
+                limit: Some(10),
+                ..DashboardSessionListRequest::default()
+            },
+        )
+        .await
+        .expect("list other tenant dashboard page");
+    assert_eq!(other_page.sessions.len(), 1);
+    assert_eq!(other_page.sessions[0].session_id, other_id);
+    assert_eq!(other_page.next_cursor, None);
+
+    drop(store);
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn dashboard_session_detail_requires_tenant_scope_and_reports_aggregates() {
+    // Pins: dashboard detail reads require the owning tenant and expose aggregate
+    // counters through the real session/event write path.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let tenant = tenant_id("dashboard-detail");
+    let other_tenant = tenant_id("dashboard-detail-other");
+    let session_id = store
+        .create_session(test_session_meta("dashboard-detail", "test-model"))
+        .await
+        .expect("create dashboard detail session");
+    store
+        .emit_event(
+            session_id,
+            Event::BrainResponse {
+                text: "ready".to_string(),
+                thought_signature: None,
+                model: ModelId::new("test-model"),
+                model_tier: ModelTier::Main,
+                input_tokens_uncached: 4,
+                input_tokens_cache_write: 3,
+                input_tokens_cache_read: 2,
+                output_tokens: 5,
+                cost_cents: 7,
+                duration_ms: 10,
+            },
+        )
+        .await
+        .expect("emit aggregate event");
+
+    let detail = store
+        .get_dashboard_session_detail(tenant, session_id)
+        .await
+        .expect("load dashboard session detail")
+        .expect("session should be visible in owning tenant");
+    assert_eq!(detail.session_id, session_id);
+    assert_eq!(detail.tenant_id, tenant);
+    assert_eq!(detail.model, ModelId::new("test-model"));
+    assert_eq!(detail.event_count, 1);
+    assert_eq!(detail.total_input_tokens, 9);
+    assert_eq!(detail.total_output_tokens, 5);
+    assert_eq!(detail.total_cost_cents, 7);
+    assert!((detail.cache_hit_rate - (2.0_f64 / 9.0_f64)).abs() < f64::EPSILON);
+
+    let cross_tenant = store
+        .get_dashboard_session_detail(other_tenant, session_id)
+        .await
+        .expect("cross-tenant dashboard detail should not error");
+    assert_eq!(cross_tenant, None);
+
+    drop(store);
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn dashboard_event_pages_use_sequence_cursors_and_tenant_scope() {
+    // Pins: dashboard event pagination advances by event sequence number and
+    // cross-tenant reads return no events for the same session id while summaries
+    // redact raw event payload values.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let tenant = tenant_id("dashboard-events");
+    let other_tenant = tenant_id("dashboard-events-other");
+    let session_id = store
+        .create_session(test_session_meta("dashboard-events", "test-model"))
+        .await
+        .expect("create dashboard events session");
+    for index in 0..5 {
+        store
+            .emit_event(
+                session_id,
+                Event::UserMessage {
+                    text: format!("raw-dashboard-secret-{index}"),
+                    attachments: Vec::new(),
+                },
+            )
+            .await
+            .expect("emit dashboard event");
+    }
+
+    let first_page = store
+        .list_dashboard_session_events(
+            tenant,
+            session_id,
+            DashboardEventPageRequest {
+                limit: Some(2),
+                ..DashboardEventPageRequest::default()
+            },
+        )
+        .await
+        .expect("list first event page");
+    let first_sequences: Vec<_> = first_page
+        .events
+        .iter()
+        .map(|event| event.sequence_num)
+        .collect();
+    assert_eq!(first_sequences, vec![0, 1]);
+    assert_eq!(
+        first_page.next_cursor,
+        Some(DashboardEventCursor { sequence_num: 1 })
+    );
+    assert_eq!(
+        first_page
+            .events
+            .iter()
+            .map(|event| event.summary.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "user message with 0 attachments",
+            "user message with 0 attachments"
+        ]
+    );
+    let first_page_json =
+        serde_json::to_string(&first_page).expect("first dashboard event page should serialize");
+    assert!(
+        !first_page_json.contains("raw-dashboard-secret"),
+        "redacted event summaries must not expose raw payload values: {first_page_json}"
+    );
+
+    let second_page = store
+        .list_dashboard_session_events(
+            tenant,
+            session_id,
+            DashboardEventPageRequest {
+                limit: Some(2),
+                cursor: first_page.next_cursor,
+                ..DashboardEventPageRequest::default()
+            },
+        )
+        .await
+        .expect("list second event page");
+    let second_sequences: Vec<_> = second_page
+        .events
+        .iter()
+        .map(|event| event.sequence_num)
+        .collect();
+    assert_eq!(second_sequences, vec![2, 3]);
+    assert_eq!(
+        second_page.next_cursor,
+        Some(DashboardEventCursor { sequence_num: 3 })
+    );
+
+    let final_page = store
+        .list_dashboard_session_events(
+            tenant,
+            session_id,
+            DashboardEventPageRequest {
+                limit: Some(2),
+                cursor: second_page.next_cursor,
+                ..DashboardEventPageRequest::default()
+            },
+        )
+        .await
+        .expect("list final event page");
+    let final_sequences: Vec<_> = final_page
+        .events
+        .iter()
+        .map(|event| event.sequence_num)
+        .collect();
+    assert_eq!(final_sequences, vec![4]);
+    assert_eq!(final_page.next_cursor, None);
+
+    let cross_tenant = store
+        .list_dashboard_session_events(
+            other_tenant,
+            session_id,
+            DashboardEventPageRequest {
+                limit: Some(10),
+                ..DashboardEventPageRequest::default()
+            },
+        )
+        .await
+        .expect("cross-tenant dashboard events should not error");
+    assert_eq!(cross_tenant.events, Vec::new());
+    assert_eq!(cross_tenant.next_cursor, None);
+
+    drop(store);
+    cleanup_schema(&database_url, &schema_name).await;
 }
 
 #[tokio::test]

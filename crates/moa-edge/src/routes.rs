@@ -38,6 +38,7 @@ mod audit;
 mod auth;
 mod auth_accounts;
 mod contact_messages;
+mod dashboard;
 mod knowledge;
 mod lineage;
 mod memory;
@@ -145,6 +146,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/lineage/explain", post(lineage::handle_explain))
         .route("/v1/lineage/query", post(lineage::handle_query))
         .route("/v1/lineage/verify", post(lineage::handle_verify))
+        .merge(dashboard::router())
         .route(
             "/v1/security/secret-scanning/github",
             post(handle_github_secret_scan),

@@ -33,6 +33,72 @@ pub struct ProcedureRunResponse {
     pub status: String,
 }
 
+/// Request payload for listing skill-backed procedure runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcedureRunListRequest {
+    /// Tenant used for authorization and run filtering.
+    pub tenant_id: TenantId,
+    /// Optional lifecycle status filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Optional maximum number of runs to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// Cursor returned by a previous procedure run list response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<ProcedureRunListCursor>,
+}
+
+/// Keyset cursor for procedure run list pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcedureRunListCursor {
+    /// Last seen run start timestamp.
+    pub started_at: DateTime<Utc>,
+    /// Last seen procedure run identifier at that timestamp.
+    pub run_id: Uuid,
+}
+
+/// Lightweight procedure run summary for dashboard lists.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProcedureRunSummary {
+    /// Procedure run row identifier.
+    pub run_id: Uuid,
+    /// Artifact UID backing the procedure, when resolved at run creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_uid: Option<Uuid>,
+    /// Artifact revision UID backing the procedure, when resolved at run creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_uid: Option<Uuid>,
+    /// Session associated with this procedure run, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    /// Skill artifact reference carrying the procedure.
+    pub procedure_ref: String,
+    /// Current lifecycle status.
+    pub status: String,
+    /// Current node ID, if execution has started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_node_id: Option<String>,
+    /// Run start timestamp.
+    pub started_at: DateTime<Utc>,
+    /// Run completion timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Response payload containing one page of procedure run summaries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProcedureRunListResponse {
+    /// Tenant used for run filtering.
+    pub tenant_id: TenantId,
+    /// Procedure runs in descending start order.
+    #[serde(default)]
+    pub runs: Vec<ProcedureRunSummary>,
+    /// Cursor for the next page when more rows are available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<ProcedureRunListCursor>,
+}
+
 /// Request payload for loading procedure run status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcedureStatusRequest {
