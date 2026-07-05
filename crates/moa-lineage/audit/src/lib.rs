@@ -26,7 +26,7 @@ pub use merkle::{
     blake3_inclusion_proof, blake3_merkle_root, verify_blake3_inclusion,
 };
 pub use signing::{
-    AuditRootSignature, AuditRootSignaturePayload, AuditRootSigner, HttpAuditRootSigner,
-    LocalAuditRootSigner, SigningKey,
+    AuditRootSignature, AuditRootSignaturePayload, AuditRootSigner, LocalAuditRootSigner,
+    SigningKey,
 };
 pub use vault::{PiiVault, PseudonymizationOutcome, RedactionEvent};

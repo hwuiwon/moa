@@ -401,16 +401,15 @@ separate surfaces:
   `status`, `list`, `trials`, `trial_status`, `scores`, and `compare` require
   tenant participation, tenant operator, or tenant admin authorization according
   to the target resource.
-- Analytics and insights: `moa-edge` exposes direct read APIs for session,
-  tenant, tool, cache, experiment, learning-candidate, session-search, audit
-  verification, and lineage explain/query/verify use cases. These handlers read
-  Postgres/domain stores directly after authz instead of paying a Restate hop
-  for single-query reads. Future analytics agents must call these typed routes
-  or application services, not raw SQL or unscoped `SessionStore` methods.
-  Session stats require session participation; tenant, cache, experiment, and
-  session-search reads require tenant authorization; tenant learning candidate
-  reads require tenant admin or tenant operator authorization. Deployment-wide
-  tool stats are control-plane operations limited to service identities.
+- Analytics and insights: `moa-edge` exposes `GET /v1/analytics/catalog` and
+  `POST /v1/analytics/query` for tenant operator dashboards backed by curated
+  analytics read models. The handlers read Postgres/domain stores directly after
+  authz instead of paying a Restate hop for single-query reads. Future analytics
+  agents must call these typed routes or application services, not raw SQL or
+  unscoped `SessionStore` methods. Analytics catalog and query reads require
+  tenant admin or tenant operator authorization and always scope rows to the
+  authenticated tenant. Audit verification and lineage explain/query/verify
+  remain direct read use cases with their own typed handlers.
   Lineage export and erase are intentionally not direct read handlers until a
   durable product workflow owns those side effects.
 
@@ -455,8 +454,9 @@ enabled keep the L01-L03 behavior and store `prev_hash = NULL`.
 Audit bucket bootstrap lives in `scripts/bootstrap-audit-bucket.sh`. Buckets
 must be created with Object Lock enabled at creation time; production uses
 Compliance mode and development uses a separate bucket, usually Governance mode
-with short retention. Signing keys are local PKCS#8/seed files for development
-and should be HSM-backed KMS Ed25519 keys in production. Switching signing keys
+with short retention. Audit-root signing always uses the in-process Ed25519
+signer configured by `MOA_LINEAGE_AUDIT_SIGNING_KEY_HEX`; production must
+provision that key through the runtime secret manager. Switching signing keys
 starts new windows with the new label; old verifying keys remain required for
 old audit roots. The hosted lineage root verifier is fail-closed: audit-root
 window verification requires `MOA_LINEAGE_AUDIT_SIGNING_KEY_HEX` and a matching

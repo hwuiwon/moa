@@ -31,8 +31,7 @@ pub use auth::{
 };
 pub use authz::{AuthzConfig, AuthzEngine, OpenFgaConfig};
 pub use compliance::{
-    ComplianceConfig, LINEAGE_AUDIT_SIGNING_KEY_ID_DEFAULT, LineageAuditSigningProvider,
-    PRIVACY_EXPORT_SIGNING_KEY_ID_DEFAULT,
+    ComplianceConfig, LINEAGE_AUDIT_SIGNING_KEY_ID_DEFAULT, PRIVACY_EXPORT_SIGNING_KEY_ID_DEFAULT,
 };
 pub use context::{
     BudgetConfig, CompactionConfig, ContextSnapshotConfig, QueryRewriteConfig, ResolutionConfig,

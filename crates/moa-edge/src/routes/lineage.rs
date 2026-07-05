@@ -9,14 +9,14 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::config::{ComplianceConfig, LineageAuditSigningProvider};
+use moa_core::config::ComplianceConfig;
 use moa_core::wire::lineage::{
     LineageExplainRequest, LineageExplainResponse, LineageQueryOrder, LineageQueryRequest,
     LineageQueryResponse, LineageRecordView, LineageVerifyRequest, LineageVerifyResponse,
 };
 use moa_core::{RlsContext, SessionId, StoragePartitionId, TenantId, UserId};
 use moa_lineage_audit::admin as lineage_audit_admin;
-use moa_lineage_audit::{AuditRootSigner, HttpAuditRootSigner, LocalAuditRootSigner, SigningKey};
+use moa_lineage_audit::{AuditRootSigner, LocalAuditRootSigner, SigningKey};
 use moa_lineage_sink::admin as lineage_sink_admin;
 use sqlx::{Postgres, QueryBuilder, Row};
 
@@ -306,53 +306,12 @@ fn lineage_record_from_row(
 fn configured_audit_root_signer(
     config: &ComplianceConfig,
 ) -> Result<Arc<dyn AuditRootSigner>, Response> {
-    match config.lineage_audit_signing_provider {
-        LineageAuditSigningProvider::Local => {
-            let signing_key = configured_signing_key_from_config(
-                "MOA_LINEAGE_AUDIT_SIGNING_KEY_HEX",
-                config.lineage_audit_signing_key_hex.as_deref(),
-                config.lineage_audit_signing_key_id.clone(),
-            )?;
-            Ok(Arc::new(LocalAuditRootSigner::new(signing_key)))
-        }
-        LineageAuditSigningProvider::Http => configured_http_audit_root_signer(config),
-    }
-}
-
-fn configured_http_audit_root_signer(
-    config: &ComplianceConfig,
-) -> Result<Arc<dyn AuditRootSigner>, Response> {
-    let endpoint = required_signer_config(
-        "MOA_LINEAGE_AUDIT_SIGNING_ENDPOINT",
-        config.lineage_audit_signing_endpoint.as_deref(),
+    let signing_key = configured_signing_key_from_config(
+        "MOA_LINEAGE_AUDIT_SIGNING_KEY_HEX",
+        config.lineage_audit_signing_key_hex.as_deref(),
+        config.lineage_audit_signing_key_id.clone(),
     )?;
-    let token_env = required_signer_config(
-        "MOA_LINEAGE_AUDIT_SIGNING_BEARER_TOKEN_ENV",
-        config.lineage_audit_signing_bearer_token_env.as_deref(),
-    )?;
-    let token = std::env::var(&token_env).map_err(|_| {
-        route_error(format!(
-            "{token_env} is required when MOA_LINEAGE_AUDIT_SIGNING_PROVIDER=http"
-        ))
-    })?;
-    if token.trim().is_empty() {
-        return Err(route_error(format!(
-            "{token_env} is required when MOA_LINEAGE_AUDIT_SIGNING_PROVIDER=http"
-        )));
-    }
-    let signer =
-        HttpAuditRootSigner::new(endpoint, config.lineage_audit_signing_key_id.clone(), token)
-            .map_err(route_error)?;
-    Ok(Arc::new(signer))
-}
-
-fn required_signer_config(env_name: &str, value: Option<&str>) -> Result<String, Response> {
-    let value = value.map(str::trim).filter(|value| !value.is_empty());
-    value.map(ToOwned::to_owned).ok_or_else(|| {
-        route_error(format!(
-            "{env_name} is required when MOA_LINEAGE_AUDIT_SIGNING_PROVIDER=http"
-        ))
-    })
+    Ok(Arc::new(LocalAuditRootSigner::new(signing_key)))
 }
 
 fn configured_signing_key_from_config(
@@ -412,8 +371,7 @@ fn usize_to_u64(value: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::StatusCode;
-    use moa_core::config::{ComplianceConfig, LineageAuditSigningProvider};
+    use moa_core::config::ComplianceConfig;
     use moa_lineage_audit::SigningKey;
 
     use super::{configured_audit_root_signer, normalized_query_limit};
@@ -431,9 +389,11 @@ mod tests {
         // Pins: lineage root verification keeps the existing local signing key as the default provider.
         let seed = [21_u8; 32];
         let key = SigningKey::from_seed("lineage-local-key", seed);
-        let mut config = ComplianceConfig::default();
-        config.lineage_audit_signing_key_hex = Some(hex::encode(seed));
-        config.lineage_audit_signing_key_id = key.label().to_string();
+        let config = ComplianceConfig {
+            lineage_audit_signing_key_hex: Some(hex::encode(seed)),
+            lineage_audit_signing_key_id: key.label().to_string(),
+            ..Default::default()
+        };
 
         let signer =
             configured_audit_root_signer(&config).expect("default local signer should build");
@@ -445,20 +405,5 @@ mod tests {
                 .expect("local signer should expose verifying key"),
             key.verifying_key_bytes()
         );
-    }
-
-    #[test]
-    fn lineage_signer_config_rejects_http_without_endpoint() {
-        // Pins: HTTP lineage signing fails closed before verifier work when no endpoint is configured.
-        let mut config = ComplianceConfig::default();
-        config.lineage_audit_signing_provider = LineageAuditSigningProvider::Http;
-        config.lineage_audit_signing_bearer_token_env = Some("MOA_AUDIT_SIGNER_TOKEN".to_string());
-
-        let response = match configured_audit_root_signer(&config) {
-            Ok(_) => panic!("HTTP signer without endpoint should fail"),
-            Err(response) => response,
-        };
-
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

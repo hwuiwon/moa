@@ -19,6 +19,7 @@ clap = { workspace = true, features = ["env"] }
 futures-util.workspace = true
 hex.workspace = true
 hmac.workspace = true
+moa-analytics.workspace = true
 moa-auth-providers.workspace = true
 moa-authz.workspace = true
 moa-authz-schema.workspace = true

@@ -161,10 +161,8 @@ lane.
 | Internal-gated `Eval` dataset registration | `Tenant:Editor` |
 | `Experiments/generate_plan`, `run`, `cancel`, `propose_improvements` | `Tenant:Editor` |
 | `Experiments/status`, `list`, `trials`, `trial_status`, `scores`, `compare` | `Tenant:Member` |
-| direct edge `analytics/session-stats` | `Session:Participant` |
-| direct edge `analytics/tenant-stats`, `cache-stats`, `experiment-stats`, `session-search` | `Tenant:Member` |
-| direct edge `analytics/tool-stats` | `Tenant:Member` |
-| direct edge `analytics/learning-candidates` | `Tenant:Editor` |
+| direct edge `GET /v1/analytics/catalog` | `Tenant:Operator` |
+| direct edge `POST /v1/analytics/query` | `Tenant:Operator` |
 | direct edge `lineage/explain`, `query`, `verify` | `Tenant:Member` |
 
 Future MCP support is a thin adapter over product/default typed services such

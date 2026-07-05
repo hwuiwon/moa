@@ -8,9 +8,8 @@ use serde_json::{Map, Value, json};
 use crate::error::{MoaError, Result};
 
 use super::{
-    AsyncAuthzKind, AuthProviderKind, AuthzEngine, LineageAuditSigningProvider, MoaConfig,
-    OtlpProtocol, RuntimeCacheBackend, SessionAttachmentBackend, SessionBlobBackend,
-    TokenVaultKind,
+    AsyncAuthzKind, AuthProviderKind, AuthzEngine, MoaConfig, OtlpProtocol, RuntimeCacheBackend,
+    SessionAttachmentBackend, SessionBlobBackend, TokenVaultKind,
 };
 
 /// Optional flat environment overrides for `MoaConfig`.
@@ -171,12 +170,6 @@ pub struct MoaEnvOverlay {
     pub lineage_audit_signing_key_hex: Option<String>,
     /// `MOA_LINEAGE_AUDIT_SIGNING_KEY_ID`.
     pub lineage_audit_signing_key_id: Option<String>,
-    /// `MOA_LINEAGE_AUDIT_SIGNING_PROVIDER`.
-    pub lineage_audit_signing_provider: Option<LineageAuditSigningProvider>,
-    /// `MOA_LINEAGE_AUDIT_SIGNING_ENDPOINT`.
-    pub lineage_audit_signing_endpoint: Option<String>,
-    /// `MOA_LINEAGE_AUDIT_SIGNING_BEARER_TOKEN_ENV`.
-    pub lineage_audit_signing_bearer_token_env: Option<String>,
     /// `MOA_PII_VAULT_SECRET_HEX`.
     pub pii_vault_secret_hex: Option<String>,
     /// `MOA_LOCAL_DOCKER_ENABLED`.
@@ -576,10 +569,6 @@ impl MoaEnvOverlay {
                 &self.session_attachment_endpoint,
             ),
             (
-                "MOA_LINEAGE_AUDIT_SIGNING_ENDPOINT",
-                &self.lineage_audit_signing_endpoint,
-            ),
-            (
                 "MOA_OBSERVABILITY_OTLP_ENDPOINT",
                 &self.observability_otlp_endpoint,
             ),
@@ -782,11 +771,6 @@ fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
         "privacy_export_signing_key_id" => &["compliance", "privacy_export_signing_key_id"],
         "lineage_audit_signing_key_hex" => &["compliance", "lineage_audit_signing_key_hex"],
         "lineage_audit_signing_key_id" => &["compliance", "lineage_audit_signing_key_id"],
-        "lineage_audit_signing_provider" => &["compliance", "lineage_audit_signing_provider"],
-        "lineage_audit_signing_endpoint" => &["compliance", "lineage_audit_signing_endpoint"],
-        "lineage_audit_signing_bearer_token_env" => {
-            &["compliance", "lineage_audit_signing_bearer_token_env"]
-        }
         "pii_vault_secret_hex" => &["compliance", "pii_vault_secret_hex"],
         "pii_service_url" => &["memory", "pii_service_url"],
         "knowledge_external_parser_default" => &["knowledge", "parser", "external_default"][..],
@@ -1123,15 +1107,6 @@ mod tests {
                 lineage_key_hex.as_str(),
             ),
             ("MOA_LINEAGE_AUDIT_SIGNING_KEY_ID", "lineage-key-v2"),
-            ("MOA_LINEAGE_AUDIT_SIGNING_PROVIDER", "http"),
-            (
-                "MOA_LINEAGE_AUDIT_SIGNING_ENDPOINT",
-                "https://signer.example/audit-root",
-            ),
-            (
-                "MOA_LINEAGE_AUDIT_SIGNING_BEARER_TOKEN_ENV",
-                "MOA_AUDIT_SIGNER_TOKEN",
-            ),
             ("MOA_PII_VAULT_SECRET_HEX", pii_vault_secret_hex.as_str()),
             ("MOA_LOCAL_DOCKER_ENABLED", "false"),
             ("MOA_LOCAL_SANDBOX_DIR", "/tmp/moa-sandbox"),
@@ -1232,21 +1207,6 @@ mod tests {
         assert_eq!(
             config.compliance.lineage_audit_signing_key_id,
             "lineage-key-v2"
-        );
-        assert_eq!(
-            config.compliance.lineage_audit_signing_provider,
-            LineageAuditSigningProvider::Http
-        );
-        assert_eq!(
-            config.compliance.lineage_audit_signing_endpoint.as_deref(),
-            Some("https://signer.example/audit-root")
-        );
-        assert_eq!(
-            config
-                .compliance
-                .lineage_audit_signing_bearer_token_env
-                .as_deref(),
-            Some("MOA_AUDIT_SIGNER_TOKEN")
         );
         assert_eq!(
             config.compliance.pii_vault_secret_hex.as_deref(),

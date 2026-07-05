@@ -1,6 +1,5 @@
 //! DB-backed tests for direct edge read routes.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -10,11 +9,11 @@ use axum::routing::post;
 use chrono::{Duration, Utc};
 use moa_authz::{FgaClient, FgaConfig};
 use moa_core::traits::{AuthError, AuthProvider, Credential, Identity, IdentityType};
-use moa_core::wire::analytics::{SessionSearchResponse, ToolStatsResponse};
+use moa_core::wire::analytics::{AnalyticsCatalogResponse, AnalyticsCell, AnalyticsQueryResponse};
 use moa_core::wire::lineage::LineageQueryResponse;
 use moa_core::{
-    Event, MoaConfig, ModelId, SessionActorRef, SessionMeta, SessionStore, TenantId, ToolCallId,
-    ToolOutput,
+    AgentContext, Event, MoaConfig, ModelId, SessionActorRef, SessionMeta, SessionStore, TenantId,
+    ToolCallId, ToolOutput,
 };
 use moa_edge::proxy::OrchestratorProxy;
 use moa_edge::routes::{self, AppState, KnowledgeWebhookEdgeConfig};
@@ -157,6 +156,7 @@ fn session_meta(tenant_id: TenantId) -> SessionMeta {
         tenant_id,
         created_by: Some(SessionActorRef::Identity { id: Uuid::now_v7() }),
         model: ModelId::new("test-model"),
+        agent_context: Some(AgentContext::system_default()),
         ..SessionMeta::default()
     }
 }
@@ -225,6 +225,20 @@ async fn seed_tool_call(store: &PostgresSessionStore, tenant_id: TenantId, tool_
         .expect("emit tool result");
 }
 
+fn string_cell(cell: &AnalyticsCell) -> &str {
+    match cell {
+        AnalyticsCell::String(value) => value.as_str(),
+        other => panic!("expected string cell, got {other:?}"),
+    }
+}
+
+fn i64_cell(cell: &AnalyticsCell) -> i64 {
+    match cell {
+        AnalyticsCell::Number(value) => value.as_i64().expect("integer cell"),
+        other => panic!("expected integer cell, got {other:?}"),
+    }
+}
+
 async fn insert_lineage_row(
     pool: &PgPool,
     tenant_id: TenantId,
@@ -268,7 +282,7 @@ async fn delete_lineage_rows(pool: &PgPool, tenants: &[TenantId]) {
 }
 
 #[tokio::test]
-async fn authz_gate_runs_before_session_stats_read_db() {
+async fn authz_gate_runs_before_analytics_query_db() {
     // Pins: protected direct reads fail closed at authz before reading session data.
     let (store, database_url, schema_name) = create_test_store().await;
     let tenant_id = TenantId::new();
@@ -282,11 +296,14 @@ async fn authz_gate_runs_before_session_stats_read_db() {
     .await;
 
     let response = reqwest::Client::new()
-        .post(format!("{}/v1/analytics/session-stats", edge.base_url))
-        .json(&json!({ "session_id": Uuid::now_v7() }))
+        .post(format!("{}/v1/analytics/query", edge.base_url))
+        .json(&json!({
+            "dataset": "sessions",
+            "measures": [{ "aggregation": "count", "alias": "sessions" }]
+        }))
         .send()
         .await
-        .expect("send session stats request");
+        .expect("send analytics query request");
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
@@ -295,13 +312,17 @@ async fn authz_gate_runs_before_session_stats_read_db() {
 }
 
 #[tokio::test]
-async fn tool_stats_injects_user_tenant_and_allows_service_wide_reads_db() {
-    // Pins: user tool stats are forced to the authenticated tenant; service requests may omit tenant_id.
+async fn analytics_query_injects_user_tenant_and_scopes_tool_calls_db() {
+    // Pins: user analytics queries are forced to the authenticated tenant even if the body asks for another tenant.
     let (store, database_url, schema_name) = create_test_store().await;
     let tenant_a = TenantId::new();
     let tenant_b = TenantId::new();
     seed_tool_call(&store, tenant_a, "tenant_a_tool").await;
     seed_tool_call(&store, tenant_b, "tenant_b_tool").await;
+    store
+        .refresh_analytics_materialized_views()
+        .await
+        .expect("refresh analytics views");
 
     let fga = start_fga_mock(true).await;
     let user_edge = start_edge(
@@ -312,70 +333,98 @@ async fn tool_stats_injects_user_tenant_and_allows_service_wide_reads_db() {
         Some(fga.client.clone()),
     )
     .await;
-    let user_response: ToolStatsResponse = reqwest::Client::new()
-        .post(format!("{}/v1/analytics/tool-stats", user_edge.base_url))
-        .json(&json!({ "tenant_id": tenant_b }))
+    let user_response: AnalyticsQueryResponse = reqwest::Client::new()
+        .post(format!("{}/v1/analytics/query", user_edge.base_url))
+        .json(&json!({
+            "dataset": "tool_calls",
+            "tenant_id": tenant_b,
+            "dimensions": [{ "field": "tool_name" }],
+            "measures": [{ "aggregation": "count", "alias": "calls" }],
+            "order_by": [{ "field": "calls", "direction": "desc" }],
+            "limit": 10
+        }))
         .send()
         .await
-        .expect("send user tool stats request")
+        .expect("send user analytics query")
         .error_for_status()
-        .expect("user tool stats should succeed")
+        .expect("user analytics query should succeed")
         .json()
         .await
-        .expect("decode user tool stats response");
+        .expect("decode user analytics response");
 
-    assert_eq!(user_response.tenant_id, Some(tenant_a));
+    assert_eq!(user_response.metadata.effective_tenant_id, Some(tenant_a));
     assert_eq!(user_response.rows.len(), 1);
-    assert_eq!(user_response.rows[0].tool_name, "tenant_a_tool");
-
-    let service_edge = start_edge(
-        &store,
-        &database_url,
-        &schema_name,
-        identity(IdentityType::Service, tenant_a),
-        Some(fga.client.clone()),
-    )
-    .await;
-    let service_response: ToolStatsResponse = reqwest::Client::new()
-        .post(format!("{}/v1/analytics/tool-stats", service_edge.base_url))
-        .json(&json!({}))
-        .send()
-        .await
-        .expect("send service tool stats request")
-        .error_for_status()
-        .expect("service deployment-wide tool stats should succeed")
-        .json()
-        .await
-        .expect("decode service tool stats response");
-
-    let service_tools = service_response
-        .rows
-        .iter()
-        .map(|row| row.tool_name.as_str())
-        .collect::<HashSet<_>>();
-    assert_eq!(service_response.tenant_id, None);
-    assert_eq!(service_tools.len(), 2);
-    assert!(service_tools.contains("tenant_a_tool"));
-    assert!(service_tools.contains("tenant_b_tool"));
+    assert_eq!(string_cell(&user_response.rows[0][0]), "tenant_a_tool");
+    assert_eq!(i64_cell(&user_response.rows[0][1]), 1);
 
     let checks = fga.checks.lock().await.clone();
-    assert_eq!(checks.len(), 2);
+    assert_eq!(checks.len(), 1);
     assert_eq!(
         checks[0]["tuple_key"]["object"],
         json!(format!("tenant:{tenant_a}"))
     );
     assert_eq!(checks[0]["tuple_key"]["relation"], json!("operator"));
-    assert_eq!(checks[1]["tuple_key"]["relation"], json!("admin"));
 
     stop_server(user_edge.server).await;
-    stop_server(service_edge.server).await;
     stop_fga_mock(fga.server).await;
     cleanup_test_store(store, database_url, schema_name).await;
 }
 
 #[tokio::test]
-async fn session_search_uses_configured_schema_db() {
-    // Pins: direct session search builds its store with the configured schema, not the default schema.
+async fn analytics_catalog_requires_tenant_operator_db() {
+    // Pins: catalog is part of the tenant operator surface and stays behind edge authz.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let tenant_id = TenantId::new();
+    let fga = start_fga_mock(true).await;
+    let edge = start_edge(
+        &store,
+        &database_url,
+        &schema_name,
+        identity(IdentityType::User, tenant_id),
+        Some(fga.client.clone()),
+    )
+    .await;
+
+    let response: AnalyticsCatalogResponse = reqwest::Client::new()
+        .get(format!("{}/v1/analytics/catalog", edge.base_url))
+        .send()
+        .await
+        .expect("send analytics catalog request")
+        .error_for_status()
+        .expect("catalog should succeed")
+        .json()
+        .await
+        .expect("decode analytics catalog");
+
+    assert!(
+        response
+            .datasets
+            .iter()
+            .any(|dataset| dataset.id == "tool_calls")
+    );
+    assert!(
+        response
+            .datasets
+            .iter()
+            .any(|dataset| dataset.id == "events")
+    );
+
+    let checks = fga.checks.lock().await.clone();
+    assert_eq!(checks.len(), 1);
+    assert_eq!(
+        checks[0]["tuple_key"]["object"],
+        json!(format!("tenant:{tenant_id}"))
+    );
+    assert_eq!(checks[0]["tuple_key"]["relation"], json!("operator"));
+
+    stop_server(edge.server).await;
+    stop_fga_mock(fga.server).await;
+    cleanup_test_store(store, database_url, schema_name).await;
+}
+
+#[tokio::test]
+async fn analytics_query_uses_configured_schema_db() {
+    // Pins: direct analytics query reads read models built from the configured schema, not the default schema.
     let (store, database_url, schema_name) = create_test_store().await;
     let tenant_id = TenantId::new();
     let session_id = store
@@ -392,6 +441,10 @@ async fn session_search_uses_configured_schema_db() {
         )
         .await
         .expect("emit searchable event");
+    store
+        .refresh_analytics_materialized_views()
+        .await
+        .expect("refresh analytics views");
 
     let fga = start_fga_mock(true).await;
     let edge = start_edge(
@@ -402,25 +455,28 @@ async fn session_search_uses_configured_schema_db() {
         Some(fga.client.clone()),
     )
     .await;
-    let response: SessionSearchResponse = reqwest::Client::new()
-        .post(format!("{}/v1/analytics/session-search", edge.base_url))
+    let response: AnalyticsQueryResponse = reqwest::Client::new()
+        .post(format!("{}/v1/analytics/query", edge.base_url))
         .json(&json!({
-            "query": "needle",
+            "dataset": "events",
+            "dimensions": [{ "field": "event_type" }, { "field": "session_id" }],
+            "measures": [{ "aggregation": "count", "alias": "events" }],
             "limit": 5
         }))
         .send()
         .await
-        .expect("send session search request")
+        .expect("send analytics query request")
         .error_for_status()
-        .expect("session search should succeed")
+        .expect("analytics query should succeed")
         .json()
         .await
-        .expect("decode session search response");
+        .expect("decode analytics query response");
 
-    assert_eq!(response.tenant_id, tenant_id);
-    assert_eq!(response.results.len(), 1);
-    assert_eq!(response.results[0].session_id, session_id);
-    assert_eq!(response.results[0].snippet, "UserMessage");
+    assert_eq!(response.metadata.effective_tenant_id, Some(tenant_id));
+    assert_eq!(response.rows.len(), 1);
+    assert_eq!(string_cell(&response.rows[0][0]), "UserMessage");
+    assert_eq!(string_cell(&response.rows[0][1]), session_id.to_string());
+    assert_eq!(i64_cell(&response.rows[0][2]), 1);
 
     stop_server(edge.server).await;
     stop_fga_mock(fga.server).await;

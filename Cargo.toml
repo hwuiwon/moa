@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/moa-analytics",
     "crates/moa-core",
     "crates/moa-db",
     "crates/moa-scoring",
@@ -46,6 +47,7 @@ members = [
     "crates/xtask",
 ]
 default-members = [
+    "crates/moa-analytics",
     "crates/moa-core",
     "crates/moa-db",
     "crates/moa-scoring",
@@ -94,6 +96,7 @@ edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+moa-analytics = { path = "crates/moa-analytics" }
 moa-auth-providers = { path = "crates/moa-auth/providers" }
 moa-auth-providers-auth0 = { path = "crates/moa-auth/auth0" }
 moa-authz = { path = "crates/moa-auth/authz" }

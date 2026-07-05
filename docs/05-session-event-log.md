@@ -302,9 +302,10 @@ The `Experiments` service exposes `generate_plan`, `run`, `status`, `list`,
 `compare`. `generate_plan`, `run`, `cancel`, and `propose_improvements` require
 tenant admin or tenant operator authorization. `status`, `list`, `trials`,
 `trial_status`, `scores`, and `compare` require tenant authorization for the
-target tenant and resource. The direct edge `analytics/experiment-stats` route
-also requires tenant authorization. These checks sit above the tenant RLS scope
-on `moa.experiment_run`, `moa.experiment_trial`,
+target tenant and resource. The direct edge `POST /v1/analytics/query` route can
+read experiment analytics through curated datasets and requires tenant operator
+or tenant admin authorization. These checks sit above the tenant RLS scope on
+`moa.experiment_run`, `moa.experiment_trial`,
 `moa.experiment_run_artifact_revision`, and `analytics.score_run`.
 
 ## Graph Changelog

@@ -2,14 +2,16 @@ use std::future::Future;
 use std::time::Duration;
 
 use chrono::Utc;
+use moa_core::traits::{SessionChannelBindingUpdate, SessionChannelStore};
 use moa_core::{
-    AssessmentPhase, AttributionEffect, AttributionSubjectType, ContextSnapshot, Event, EventType,
-    ExperienceAttribution, ExperienceRecord, FileReadDedupState, LearningCandidate,
-    LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateType, LearningEntry,
-    LearningRiskClass, MoaError, ModelId, SegmentAssessment, SegmentCompletion, SegmentEvidence,
-    SegmentEvidenceKind, SegmentEvidencePolarity, SegmentOutcome, SessionActorRef, SessionId,
-    SessionMeta, SessionStore, StoragePartitionId, TaskFacetSet, TaskFingerprint, TaskSegment,
-    TenantId, ToolCallId, ToolOutput, UserId, deterministic_segment_id,
+    AgentContext, AssessmentPhase, AttributionEffect, AttributionSubjectType, ChannelRef,
+    ContactId, ContactRef, ContextSnapshot, Event, EventType, ExperienceAttribution,
+    ExperienceRecord, FileReadDedupState, LearningCandidate, LearningCandidateStatus,
+    LearningCandidateStatusUpdate, LearningCandidateType, LearningEntry, LearningRiskClass,
+    MoaError, ModelId, SegmentAssessment, SegmentCompletion, SegmentEvidence, SegmentEvidenceKind,
+    SegmentEvidencePolarity, SegmentOutcome, SessionActorRef, SessionId, SessionMeta, SessionStore,
+    StoragePartitionId, TaskFacetSet, TaskFingerprint, TaskSegment, TenantId, ToolCallId,
+    ToolOutput, UserId, deterministic_segment_id,
 };
 use moa_session::{EventAppend, PostgresSessionStore, testing};
 use moa_test_support::postgres::{
@@ -17,7 +19,7 @@ use moa_test_support::postgres::{
     test_event_search, test_list_sessions_with_filter, test_session_status_update,
     test_tenant_cost_since,
 };
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 async fn create_test_store() -> (PostgresSessionStore, String, String) {
@@ -68,6 +70,29 @@ fn test_session_meta(label: &str, model: &str) -> SessionMeta {
             id: Uuid::from_u128(1),
         }),
         model: ModelId::new(model),
+        agent_context: Some(AgentContext::system_default()),
+        ..SessionMeta::default()
+    }
+}
+
+fn contact_session_meta(label: &str, model: &str, contact_id: ContactId) -> SessionMeta {
+    let tenant_id = tenant_id(label);
+    SessionMeta {
+        tenant_id,
+        contact: Some(ContactRef {
+            contact_id,
+            tenant_id,
+            state: moa_core::ContactVerificationState::Verified,
+            canonical_contact_id: None,
+            linked_contact_ids: Vec::new(),
+            scopes: Vec::new(),
+            permissions: serde_json::json!({}),
+            agent_ids: Vec::new(),
+            session_ids: Vec::new(),
+            verified_contact_point_ids: Vec::new(),
+        }),
+        model: ModelId::new(model),
+        agent_context: Some(AgentContext::system_default()),
         ..SessionMeta::default()
     }
 }
@@ -1564,7 +1589,7 @@ async fn events_hot_path_triggers_are_removed_and_aggregates_maintained_by_app_d
 async fn postgres_tool_call_summary_view_reports_percentiles() {
     let (store, database_url, schema_name) = create_test_store().await;
     let session_id = store
-        .create_session(test_session_meta("tool-stats-ws", "test-model"))
+        .create_session(test_session_meta("tool-analytics-ws", "test-model"))
         .await
         .expect("create session");
 
@@ -1607,7 +1632,7 @@ async fn postgres_tool_call_summary_view_reports_percentiles() {
     }
 
     let tenant_rows = store
-        .list_tool_call_summaries(Some(&tenant_id("tool-stats-ws")))
+        .list_tool_call_summaries(Some(&tenant_id("tool-analytics-ws")))
         .await
         .expect("load tenant tool summary");
     let summary = tenant_rows
@@ -1770,6 +1795,258 @@ async fn postgres_materialized_analytics_views_refresh() {
     .await
     .expect("query daily workspace metrics");
     assert_eq!(session_count, 2);
+
+    pool.close().await;
+    drop(store);
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_analytics_query_read_models_refresh() {
+    let (store, database_url, schema_name) = create_test_store().await;
+    let tenant_id = tenant_id("analytics-facts");
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
+    let contact_id = ContactId::new();
+    let agent_id = Uuid::now_v7();
+    let mut meta = contact_session_meta("analytics-facts", "test-model", contact_id);
+    meta.agent_context.as_mut().expect("agent context").agent_id = Some(agent_id);
+    let session_id = store.create_session(meta).await.expect("create session");
+    let fixture_pool = PgPool::connect(&database_url)
+        .await
+        .expect("postgres fixture pool");
+    sqlx::query(&format!(
+        "INSERT INTO {} (id, tenant_id, storage_partition_id, state, display_name, contact_id) \
+         VALUES ($1, $2, $3, 'verified', $4, $1)",
+        qualified(&schema_name, "contacts")
+    ))
+    .bind(contact_id.0)
+    .bind(tenant_id.0)
+    .bind(StoragePartitionId::for_tenant(tenant_id).to_string())
+    .bind("Analytics Contact")
+    .execute(&fixture_pool)
+    .await
+    .expect("insert contact fixture");
+    fixture_pool.close().await;
+
+    SessionChannelStore::replace_session_channel_binding(
+        &store,
+        SessionChannelBindingUpdate {
+            tenant_id,
+            storage_partition_id,
+            session_id,
+            contact_id,
+            channel_account_id: None,
+            contact_point_id: None,
+            channel_ref: ChannelRef::Slack {
+                team_id: Some("T123".to_string()),
+                slack_channel_id: Some("C123".to_string()),
+                thread_ts: Some("1710000000.000100".to_string()),
+                user_id: Some("U123".to_string()),
+            },
+            reason: Some("analytics fixture".to_string()),
+        },
+    )
+    .await
+    .expect("bind slack channel");
+
+    let started_at = Utc::now();
+    let segment_id = deterministic_segment_id(session_id, 0);
+    store
+        .create_segment(&TaskSegment {
+            id: segment_id,
+            session_id,
+            tenant_id: tenant_id.to_string(),
+            segment_index: 0,
+            task_summary: Some("Answer billing question".to_string()),
+            started_at,
+            ended_at: Some(started_at + chrono::Duration::milliseconds(1_500)),
+            turn_count: 1,
+            tools_used: vec!["file_read".to_string()],
+            skills_activated: vec!["support-triage".to_string()],
+            token_cost: 22,
+            previous_segment_id: None,
+            outcome: Some(SegmentOutcome::Resolved.as_str().to_string()),
+            assessment: None,
+            outcome_confidence: Some(0.91),
+        })
+        .await
+        .expect("create task segment");
+
+    let tool_id = ToolCallId::new();
+    store
+        .emit_event(
+            session_id,
+            Event::ToolCall {
+                tool_id,
+                provider_tool_use_id: None,
+                provider_thought_signature: None,
+                tool_name: "file_read".to_string(),
+                input: serde_json::json!({ "path": "README.md" }),
+                hand_id: None,
+            },
+        )
+        .await
+        .expect("emit tool call");
+    store
+        .emit_event(
+            session_id,
+            Event::ToolResult {
+                tool_id,
+                provider_tool_use_id: None,
+                output: ToolOutput::text("ok", Duration::from_millis(120)),
+                original_output_tokens: None,
+                success: true,
+                duration_ms: 120,
+            },
+        )
+        .await
+        .expect("emit tool result");
+    store
+        .emit_event(
+            session_id,
+            Event::BrainResponse {
+                text: "turn".to_string(),
+                thought_signature: None,
+                model: "test-model".into(),
+                model_tier: moa_core::ModelTier::Main,
+                input_tokens_uncached: 15,
+                input_tokens_cache_write: 2,
+                input_tokens_cache_read: 5,
+                output_tokens: 4,
+                cost_cents: 12,
+                duration_ms: 250,
+            },
+        )
+        .await
+        .expect("emit brain response");
+
+    store
+        .refresh_analytics_materialized_views()
+        .await
+        .expect("refresh analytics query views");
+
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("postgres inspection pool");
+    let session_row = sqlx::query(
+        "SELECT tenant_id, agent_id, agent_display_name, channel, total_input_tokens, \
+                total_cache_read_tokens, total_output_tokens, total_cost_cents \
+         FROM analytics.session_fact WHERE session_id = $1",
+    )
+    .bind(session_id.0)
+    .fetch_one(&pool)
+    .await
+    .expect("query analytics.session_fact");
+    assert_eq!(session_row.get::<Uuid, _>("tenant_id"), tenant_id.0);
+    assert_eq!(session_row.get::<Uuid, _>("agent_id"), agent_id);
+    assert_eq!(
+        session_row.get::<String, _>("agent_display_name"),
+        "MOA Default Agent"
+    );
+    assert_eq!(session_row.get::<String, _>("channel"), "slack");
+    assert_eq!(session_row.get::<i64, _>("total_input_tokens"), 22);
+    assert_eq!(session_row.get::<i64, _>("total_cache_read_tokens"), 5);
+    assert_eq!(session_row.get::<i64, _>("total_output_tokens"), 4);
+    assert_eq!(session_row.get::<i64, _>("total_cost_cents"), 12);
+
+    let turn_row = sqlx::query(
+        "SELECT tenant_id, agent_id, channel, llm_ms, llm_ttft_ms, tool_ms, \
+                tool_call_count, total_input_tokens, output_tokens, cost_cents \
+         FROM analytics.turn_fact WHERE session_id = $1 AND turn_number = 1",
+    )
+    .bind(session_id.0)
+    .fetch_one(&pool)
+    .await
+    .expect("query analytics.turn_fact");
+    assert_eq!(turn_row.get::<Uuid, _>("tenant_id"), tenant_id.0);
+    assert_eq!(turn_row.get::<Uuid, _>("agent_id"), agent_id);
+    assert_eq!(turn_row.get::<String, _>("channel"), "slack");
+    assert!(approx_eq(turn_row.get::<f64, _>("llm_ms"), 250.0, 1e-9));
+    assert_eq!(turn_row.get::<Option<f64>, _>("llm_ttft_ms"), None);
+    assert!(approx_eq(turn_row.get::<f64, _>("tool_ms"), 120.0, 1e-9));
+    assert_eq!(turn_row.get::<i64, _>("tool_call_count"), 1);
+    assert_eq!(turn_row.get::<i64, _>("total_input_tokens"), 22);
+    assert_eq!(turn_row.get::<i64, _>("output_tokens"), 4);
+    assert_eq!(turn_row.get::<i64, _>("cost_cents"), 12);
+
+    let tool_row = sqlx::query(
+        "SELECT tenant_id, agent_id, channel, tool_name, success, duration_ms, model_tier \
+         FROM analytics.tool_call_fact WHERE session_id = $1 AND tool_id = $2",
+    )
+    .bind(session_id.0)
+    .bind(tool_id.0)
+    .fetch_one(&pool)
+    .await
+    .expect("query analytics.tool_call_fact");
+    assert_eq!(tool_row.get::<Uuid, _>("tenant_id"), tenant_id.0);
+    assert_eq!(tool_row.get::<Uuid, _>("agent_id"), agent_id);
+    assert_eq!(tool_row.get::<String, _>("channel"), "slack");
+    assert_eq!(tool_row.get::<String, _>("tool_name"), "file_read");
+    assert!(tool_row.get::<bool, _>("success"));
+    assert!(approx_eq(
+        tool_row.get::<f64, _>("duration_ms"),
+        120.0,
+        1e-9
+    ));
+    assert_eq!(tool_row.get::<String, _>("model_tier"), "main");
+
+    let event_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM analytics.event_fact WHERE session_id = $1 AND tenant_id = $2",
+    )
+    .bind(session_id.0)
+    .bind(tenant_id.0)
+    .fetch_one(&pool)
+    .await
+    .expect("query analytics.event_fact");
+    assert_eq!(event_count, 3);
+
+    let segment_row = sqlx::query(
+        "SELECT tenant_id, agent_id, channel, outcome, outcome_confidence, \
+                tools_used, skills_activated, turn_count, token_cost, duration_ms \
+         FROM analytics.task_segment_fact WHERE segment_id = $1",
+    )
+    .bind(segment_id.0)
+    .fetch_one(&pool)
+    .await
+    .expect("query analytics.task_segment_fact");
+    assert_eq!(segment_row.get::<Uuid, _>("tenant_id"), tenant_id.0);
+    assert_eq!(segment_row.get::<Uuid, _>("agent_id"), agent_id);
+    assert_eq!(segment_row.get::<String, _>("channel"), "slack");
+    assert_eq!(segment_row.get::<String, _>("outcome"), "resolved");
+    assert!(approx_eq(
+        segment_row.get::<f64, _>("outcome_confidence"),
+        0.91,
+        1e-9
+    ));
+    assert_eq!(
+        segment_row.get::<Vec<String>, _>("tools_used"),
+        vec!["file_read".to_string()]
+    );
+    assert_eq!(
+        segment_row.get::<Vec<String>, _>("skills_activated"),
+        vec!["support-triage".to_string()]
+    );
+    assert_eq!(segment_row.get::<i32, _>("turn_count"), 1);
+    assert_eq!(segment_row.get::<i64, _>("token_cost"), 22);
+    assert!(approx_eq(
+        segment_row.get::<f64, _>("duration_ms"),
+        1_500.0,
+        1e-9
+    ));
+
+    for view_name in [
+        "analytics.procedure_run_fact",
+        "analytics.procedure_node_run_fact",
+        "analytics.learning_candidate_fact",
+        "analytics.experiment_run_fact",
+    ] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {view_name}"))
+            .fetch_one(&pool)
+            .await
+            .expect("query empty analytics fact view");
+        assert_eq!(count, 0, "{view_name} should refresh while empty");
+    }
 
     pool.close().await;
     drop(store);

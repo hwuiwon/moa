@@ -6,19 +6,10 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use moa_analytics::{AnalyticsError, AnalyticsService};
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::traits::{IdentityType, SessionStore};
-use moa_core::wire::analytics::{
-    CacheStatsRequest, CacheStatsResponse, ExperimentAnalyticsRequest, ExperimentAnalyticsResponse,
-    ExperimentRunTrendPoint, ExperimentScoreRunRef, ExperimentStatusCount,
-    ExperimentTrialTrendPoint, LearningCandidateListRequest, LearningCandidateListResponse,
-    SessionSearchRequest, SessionSearchResponse, SessionSearchResult, SessionStatsRequest,
-    TenantStatsRequest, ToolStatsRequest, ToolStatsResponse,
-};
-use moa_core::{
-    CacheDailyMetric, EventFilter, EventRecord, MoaError, TenantAnalyticsSummary, TenantId,
-};
-use sqlx::Row;
+use moa_core::TenantId;
+use moa_core::wire::analytics::AnalyticsQueryRequest;
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -32,225 +23,45 @@ fn last_mv_refresh() -> &'static Mutex<Option<Instant>> {
 }
 
 use super::{
-    AppState, RouteTranslation, authenticate_direct_request, moa_error_response, parse_json_body,
-    parse_json_body_with_tenant, require_direct_authz, route_error,
-    translate_json_object_with_tenant_id,
+    AppState, RouteTranslation, authenticate_direct_request, parse_json_body_with_tenant,
+    require_direct_authz, route_error, translate_json_object_with_tenant_id,
 };
 
-/// Handles direct session analytics reads at the edge.
-#[tracing::instrument(skip(state, headers, body))]
-pub async fn handle_session_stats(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
+/// Handles analytics catalog reads at the edge.
+#[tracing::instrument(skip(state, headers))]
+pub async fn handle_catalog(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let identity =
-        match authenticate_direct_request(&state, &headers, "/v1/analytics/session-stats").await {
+        match authenticate_direct_request(&state, &headers, "/v1/analytics/catalog").await {
             Ok(identity) => identity,
             Err(response) => return response,
         };
-    let request: SessionStatsRequest = match parse_json_body(&body) {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
-    if let Err(response) = require_direct_authz(
-        &state,
-        &identity,
-        ObjectType::Session,
-        request.session_id,
-        Relation::Participant,
-    )
-    .await
-    {
-        return response;
-    }
-    match moa_session::analytics::get_session_summary(
-        &state.pool,
-        state.config.database.schema.as_deref(),
-        request.session_id,
-    )
-    .await
-    {
-        Ok(summary) => Json(summary).into_response(),
-        Err(error) => moa_error_response(error),
-    }
-}
-
-/// Handles direct tenant analytics reads at the edge.
-#[tracing::instrument(skip(state, headers, body))]
-pub async fn handle_tenant_stats(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let identity =
-        match authenticate_direct_request(&state, &headers, "/v1/analytics/tenant-stats").await {
-            Ok(identity) => identity,
-            Err(response) => return response,
-        };
-    let request: TenantStatsRequest = match parse_json_body_with_tenant(&body, identity.tenant_id) {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
     if let Err(response) = require_direct_authz(
         &state,
         &identity,
         ObjectType::Tenant,
-        request.tenant_id,
-        Relation::Admin,
+        identity.tenant_id,
+        Relation::Operator,
     )
     .await
     {
         return response;
     }
-    maybe_refresh_analytics_materialized_views(&state);
-    match moa_session::analytics::get_tenant_stats(
-        &state.pool,
-        state.config.database.schema.as_deref(),
-        &request.tenant_id,
-        request.days,
-    )
-    .await
-    {
-        Ok(summary) => Json(summary).into_response(),
-        Err(error) => moa_error_response(error),
-    }
+    Json(AnalyticsService::new().catalog()).into_response()
 }
 
-/// Handles direct per-tool analytics reads at the edge.
+/// Handles tenant-scoped analytics queries at the edge.
 #[tracing::instrument(skip(state, headers, body))]
-pub async fn handle_tool_stats(
+pub async fn handle_query(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let identity =
-        match authenticate_direct_request(&state, &headers, "/v1/analytics/tool-stats").await {
-            Ok(identity) => identity,
-            Err(response) => return response,
-        };
-    let mut request: ToolStatsRequest = match parse_json_body(&body) {
-        Ok(request) => request,
+    let identity = match authenticate_direct_request(&state, &headers, "/v1/analytics/query").await
+    {
+        Ok(identity) => identity,
         Err(response) => return response,
     };
-    if identity.identity_type != IdentityType::Service {
-        request.tenant_id = Some(identity.tenant_id);
-    }
-    let tenant_id = match request.tenant_id {
-        Some(tenant_id) => {
-            if let Err(response) = require_direct_authz(
-                &state,
-                &identity,
-                ObjectType::Tenant,
-                tenant_id,
-                Relation::Operator,
-            )
-            .await
-            {
-                return response;
-            }
-            Some(tenant_id)
-        }
-        None => {
-            if identity.identity_type != IdentityType::Service {
-                return (
-                    StatusCode::FORBIDDEN,
-                    "deployment-wide tool stats require a service identity",
-                )
-                    .into_response();
-            }
-            if let Err(response) = require_direct_authz(
-                &state,
-                &identity,
-                ObjectType::Tenant,
-                identity.tenant_id,
-                Relation::Admin,
-            )
-            .await
-            {
-                return response;
-            }
-            None
-        }
-    };
-    match moa_session::analytics::list_tool_call_summaries(
-        &state.pool,
-        state.config.database.schema.as_deref(),
-        tenant_id.as_ref(),
-    )
-    .await
-    {
-        Ok(rows) => Json(ToolStatsResponse { tenant_id, rows }).into_response(),
-        Err(error) => moa_error_response(error),
-    }
-}
-
-/// Handles direct tenant cache analytics reads at the edge.
-#[tracing::instrument(skip(state, headers, body))]
-pub async fn handle_cache_stats(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let identity =
-        match authenticate_direct_request(&state, &headers, "/v1/analytics/cache-stats").await {
-            Ok(identity) => identity,
-            Err(response) => return response,
-        };
-    let request: CacheStatsRequest = match parse_json_body_with_tenant(&body, identity.tenant_id) {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
-    if let Err(response) = require_direct_authz(
-        &state,
-        &identity,
-        ObjectType::Tenant,
-        request.tenant_id,
-        Relation::Admin,
-    )
-    .await
-    {
-        return response;
-    }
-    maybe_refresh_analytics_materialized_views(&state);
-    let summary = match moa_session::analytics::get_tenant_stats(
-        &state.pool,
-        state.config.database.schema.as_deref(),
-        &request.tenant_id,
-        request.days,
-    )
-    .await
-    {
-        Ok(summary) => summary,
-        Err(error) => return moa_error_response(error),
-    };
-    match moa_session::analytics::list_cache_daily_metrics(
-        &state.pool,
-        state.config.database.schema.as_deref(),
-        &request.tenant_id,
-        request.days,
-    )
-    .await
-    {
-        Ok(daily) => Json(cache_stats_response_from_parts(summary, daily)).into_response(),
-        Err(error) => moa_error_response(error),
-    }
-}
-
-/// Handles direct experiment analytics reads at the edge.
-#[tracing::instrument(skip(state, headers, body))]
-pub async fn handle_experiment_stats(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let identity =
-        match authenticate_direct_request(&state, &headers, "/v1/analytics/experiment-stats").await
-        {
-            Ok(identity) => identity,
-            Err(response) => return response,
-        };
-    let request: ExperimentAnalyticsRequest =
+    let request: AnalyticsQueryRequest =
         match parse_json_body_with_tenant(&body, identity.tenant_id) {
             Ok(request) => request,
             Err(response) => return response,
@@ -259,115 +70,28 @@ pub async fn handle_experiment_stats(
         &state,
         &identity,
         ObjectType::Tenant,
-        request.tenant_id,
+        identity.tenant_id,
         Relation::Operator,
     )
     .await
     {
         return response;
     }
-    match experiment_stats_inner(&state.pool, request).await {
+    maybe_refresh_analytics_materialized_views(&state);
+    match AnalyticsService::new().query(&state.pool, request).await {
         Ok(response) => Json(response).into_response(),
-        Err(response) => response,
+        Err(error) => analytics_error_response(error),
     }
 }
 
-/// Handles direct learning-candidate analytics reads at the edge.
-#[tracing::instrument(skip(state, headers, body))]
-pub async fn handle_learning_candidates(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let identity =
-        match authenticate_direct_request(&state, &headers, "/v1/analytics/learning-candidates")
-            .await
-        {
-            Ok(identity) => identity,
-            Err(response) => return response,
-        };
-    let request: LearningCandidateListRequest =
-        match parse_json_body_with_tenant(&body, identity.tenant_id) {
-            Ok(request) => request,
-            Err(response) => return response,
-        };
-    if let Err(response) = require_direct_authz(
-        &state,
-        &identity,
-        ObjectType::Tenant,
-        request.tenant_id,
-        Relation::Operator,
-    )
-    .await
-    {
-        return response;
+fn analytics_error_response(error: AnalyticsError) -> Response {
+    match error {
+        AnalyticsError::ConflictingTenantFilter => {
+            (StatusCode::FORBIDDEN, error.to_string()).into_response()
+        }
+        AnalyticsError::Execution(_) => route_error(error),
+        other => (StatusCode::BAD_REQUEST, other.to_string()).into_response(),
     }
-    match moa_session::analytics::list_learning_candidate_summaries(
-        &state.pool,
-        state.config.database.schema.as_deref(),
-        request.tenant_id,
-        request.status,
-        request.limit,
-    )
-    .await
-    {
-        Ok(candidates) => Json(LearningCandidateListResponse {
-            tenant_id: request.tenant_id,
-            candidates,
-        })
-        .into_response(),
-        Err(error) => moa_error_response(error),
-    }
-}
-
-/// Handles direct tenant session-search analytics reads at the edge.
-#[tracing::instrument(skip(state, headers, body))]
-pub async fn handle_session_search(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let identity =
-        match authenticate_direct_request(&state, &headers, "/v1/analytics/session-search").await {
-            Ok(identity) => identity,
-            Err(response) => return response,
-        };
-    let request: SessionSearchRequest = match parse_json_body_with_tenant(&body, identity.tenant_id)
-    {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
-    if let Err(response) = require_direct_authz(
-        &state,
-        &identity,
-        ObjectType::Tenant,
-        request.tenant_id,
-        Relation::Operator,
-    )
-    .await
-    {
-        return response;
-    }
-    let events = match state
-        .session_store
-        .search_events(
-            &request.query,
-            EventFilter {
-                session_id: None,
-                tenant_id: Some(request.tenant_id),
-                contact_id: None,
-                event_types: request.event_types.clone(),
-                from_time: request.from_time,
-                to_time: request.to_time,
-                limit: Some(request.limit as usize),
-            },
-        )
-        .await
-    {
-        Ok(events) => events,
-        Err(error) => return moa_error_response(error),
-    };
-    Json(session_search_response_from_events(request, events)).into_response()
 }
 
 /// Trigger an analytics materialized-view refresh at most once per interval.
@@ -504,216 +228,6 @@ pub(super) fn translate(
     Some(translation)
 }
 
-fn cache_stats_response_from_parts(
-    summary: TenantAnalyticsSummary,
-    daily: Vec<CacheDailyMetric>,
-) -> CacheStatsResponse {
-    CacheStatsResponse {
-        tenant_id: summary.tenant_id,
-        days: summary.days,
-        cache_hit_rate: summary.cache_hit_rate,
-        total_cache_read_tokens: summary.total_cache_read_tokens,
-        total_input_tokens: summary.total_input_tokens,
-        total_output_tokens: summary.total_output_tokens,
-        total_cost_cents: summary.total_cost_cents,
-        estimated_savings_cents: None,
-        daily,
-    }
-}
-
-async fn experiment_stats_inner(
-    pool: &sqlx::PgPool,
-    request: ExperimentAnalyticsRequest,
-) -> Result<ExperimentAnalyticsResponse, Response> {
-    let mut conn =
-        moa_db::ScopedConn::begin(pool, &moa_core::RlsContext::tenant(request.tenant_id))
-            .await
-            .map_err(moa_error_response)?;
-    let status_rows = sqlx::query(
-        r#"
-        SELECT status, COUNT(*)::BIGINT AS count
-        FROM moa.experiment_run
-        WHERE scope = 'tenant'
-          AND storage_partition_id = $1
-          AND user_id IS NULL
-          AND ($2::TIMESTAMPTZ IS NULL OR created_at >= $2)
-          AND ($3::TIMESTAMPTZ IS NULL OR created_at <= $3)
-        GROUP BY status
-        ORDER BY status
-        "#,
-    )
-    .bind(request.tenant_id.to_string())
-    .bind(request.from_time)
-    .bind(request.to_time)
-    .fetch_all(conn.as_mut())
-    .await
-    .map_err(sqlx_error_response)?;
-    let score_rows = sqlx::query(
-        r#"
-        SELECT run_uid, name, status, score_run_id, created_at
-        FROM moa.experiment_run
-        WHERE scope = 'tenant'
-          AND storage_partition_id = $1
-          AND user_id IS NULL
-          AND ($2::TIMESTAMPTZ IS NULL OR created_at >= $2)
-          AND ($3::TIMESTAMPTZ IS NULL OR created_at <= $3)
-        ORDER BY created_at DESC, run_uid ASC
-        LIMIT $4
-        "#,
-    )
-    .bind(request.tenant_id.to_string())
-    .bind(request.from_time)
-    .bind(request.to_time)
-    .bind(i64::from(request.limit))
-    .fetch_all(conn.as_mut())
-    .await
-    .map_err(sqlx_error_response)?;
-    let run_trend_rows = sqlx::query(
-        r#"
-        SELECT date_trunc('day', created_at) AS day,
-               status,
-               COUNT(*)::BIGINT AS count
-        FROM moa.experiment_run
-        WHERE scope = 'tenant'
-          AND storage_partition_id = $1
-          AND user_id IS NULL
-          AND ($2::TIMESTAMPTZ IS NULL OR created_at >= $2)
-          AND ($3::TIMESTAMPTZ IS NULL OR created_at <= $3)
-        GROUP BY day, status
-        ORDER BY day ASC, status
-        "#,
-    )
-    .bind(request.tenant_id.to_string())
-    .bind(request.from_time)
-    .bind(request.to_time)
-    .fetch_all(conn.as_mut())
-    .await
-    .map_err(sqlx_error_response)?;
-    let trial_trend_rows = sqlx::query(
-        r#"
-        SELECT date_trunc('day', created_at) AS day,
-               status,
-               variant_key,
-               scenario_id,
-               COUNT(*)::BIGINT AS count
-        FROM moa.experiment_trial
-        WHERE scope = 'tenant'
-          AND storage_partition_id = $1
-          AND user_id IS NULL
-          AND ($2::TIMESTAMPTZ IS NULL OR created_at >= $2)
-          AND ($3::TIMESTAMPTZ IS NULL OR created_at <= $3)
-        GROUP BY day, status, variant_key, scenario_id
-        ORDER BY day ASC, status, variant_key, scenario_id ASC NULLS FIRST
-        "#,
-    )
-    .bind(request.tenant_id.to_string())
-    .bind(request.from_time)
-    .bind(request.to_time)
-    .fetch_all(conn.as_mut())
-    .await
-    .map_err(sqlx_error_response)?;
-    conn.commit().await.map_err(moa_error_response)?;
-
-    let statuses = status_rows
-        .iter()
-        .map(experiment_status_count_from_row)
-        .collect::<Result<Vec<_>, _>>()?;
-    let score_runs = score_rows
-        .iter()
-        .map(experiment_score_run_ref_from_row)
-        .collect::<Result<Vec<_>, _>>()?;
-    let run_trends = run_trend_rows
-        .iter()
-        .map(experiment_run_trend_point_from_row)
-        .collect::<Result<Vec<_>, _>>()?;
-    let trial_trends = trial_trend_rows
-        .iter()
-        .map(experiment_trial_trend_point_from_row)
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let total_runs = statuses.iter().map(|row| row.count).sum();
-    Ok(ExperimentAnalyticsResponse {
-        tenant_id: request.tenant_id,
-        total_runs,
-        statuses,
-        score_runs,
-        run_trends,
-        trial_trends,
-    })
-}
-
-fn experiment_status_count_from_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<ExperimentStatusCount, Response> {
-    Ok(ExperimentStatusCount {
-        status: row.try_get("status").map_err(sqlx_error_response)?,
-        count: u64_from_i64(row.try_get("count").map_err(sqlx_error_response)?, "count")?,
-    })
-}
-
-fn experiment_score_run_ref_from_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<ExperimentScoreRunRef, Response> {
-    Ok(ExperimentScoreRunRef {
-        run_uid: row.try_get("run_uid").map_err(sqlx_error_response)?,
-        name: row.try_get("name").map_err(sqlx_error_response)?,
-        status: row.try_get("status").map_err(sqlx_error_response)?,
-        score_run_id: row.try_get("score_run_id").map_err(sqlx_error_response)?,
-        created_at: row.try_get("created_at").map_err(sqlx_error_response)?,
-    })
-}
-
-fn experiment_run_trend_point_from_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<ExperimentRunTrendPoint, Response> {
-    Ok(ExperimentRunTrendPoint {
-        day: row.try_get("day").map_err(sqlx_error_response)?,
-        status: row.try_get("status").map_err(sqlx_error_response)?,
-        count: u64_from_i64(row.try_get("count").map_err(sqlx_error_response)?, "count")?,
-    })
-}
-
-fn experiment_trial_trend_point_from_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<ExperimentTrialTrendPoint, Response> {
-    Ok(ExperimentTrialTrendPoint {
-        day: row.try_get("day").map_err(sqlx_error_response)?,
-        status: row.try_get("status").map_err(sqlx_error_response)?,
-        variant_key: row.try_get("variant_key").map_err(sqlx_error_response)?,
-        scenario_id: row.try_get("scenario_id").map_err(sqlx_error_response)?,
-        count: u64_from_i64(row.try_get("count").map_err(sqlx_error_response)?, "count")?,
-    })
-}
-
-fn u64_from_i64(value: i64, field: &'static str) -> Result<u64, Response> {
-    u64::try_from(value).map_err(|_| route_error(format!("{field} was negative: {value}")))
-}
-
-fn session_search_response_from_events(
-    request: SessionSearchRequest,
-    events: Vec<EventRecord>,
-) -> SessionSearchResponse {
-    SessionSearchResponse {
-        tenant_id: request.tenant_id,
-        query: request.query,
-        results: events
-            .iter()
-            .map(|event| SessionSearchResult {
-                session_id: event.session_id,
-                event_id: event.id,
-                sequence_num: event.sequence_num,
-                event_type: event.event_type,
-                timestamp: event.timestamp,
-                snippet: event.event.type_name().to_string(),
-            })
-            .collect(),
-    }
-}
-
-fn sqlx_error_response(error: sqlx::Error) -> Response {
-    moa_error_response(MoaError::StorageError(error.to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use axum::body::Bytes;
@@ -724,22 +238,17 @@ mod tests {
 
     #[test]
     fn analytics_public_routes_do_not_translate_to_restate_handlers() {
-        // Pins: hosted analytics read routes are direct edge handlers, not Restate forwards.
-        let paths = [
-            "/v1/analytics/session-stats",
-            "/v1/analytics/tenant-stats",
-            "/v1/analytics/tool-stats",
-            "/v1/analytics/cache-stats",
-            "/v1/analytics/experiment-stats",
-            "/v1/analytics/learning-candidates",
-            "/v1/analytics/session-search",
+        // Pins: hosted analytics routes are direct edge handlers, not Restate forwards.
+        let cases = [
+            (Method::GET, "/v1/analytics/catalog"),
+            (Method::POST, "/v1/analytics/query"),
         ];
 
-        for public_path in paths {
+        for (method, public_path) in cases {
             let uri = public_path.parse::<Uri>().expect("route path should parse");
             let body = Bytes::from_static(br#"{}"#);
 
-            let translation = translate(&Method::POST, &uri, &body);
+            let translation = translate(&method, &uri, &body);
 
             match translation {
                 RouteTranslation::NoChange => {}

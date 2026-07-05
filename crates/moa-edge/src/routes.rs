@@ -139,34 +139,8 @@ pub fn router(state: AppState) -> Router {
             post(auth_accounts::set_user_password),
         )
         .route("/v1/whoami", get(whoami::handle))
-        .route(
-            "/v1/analytics/session-stats",
-            post(analytics::handle_session_stats),
-        )
-        .route(
-            "/v1/analytics/tenant-stats",
-            post(analytics::handle_tenant_stats),
-        )
-        .route(
-            "/v1/analytics/tool-stats",
-            post(analytics::handle_tool_stats),
-        )
-        .route(
-            "/v1/analytics/cache-stats",
-            post(analytics::handle_cache_stats),
-        )
-        .route(
-            "/v1/analytics/experiment-stats",
-            post(analytics::handle_experiment_stats),
-        )
-        .route(
-            "/v1/analytics/learning-candidates",
-            post(analytics::handle_learning_candidates),
-        )
-        .route(
-            "/v1/analytics/session-search",
-            post(analytics::handle_session_search),
-        )
+        .route("/v1/analytics/catalog", get(analytics::handle_catalog))
+        .route("/v1/analytics/query", post(analytics::handle_query))
         .route("/v1/audit/verify", post(audit::handle_verify))
         .route("/v1/lineage/explain", post(lineage::handle_explain))
         .route("/v1/lineage/query", post(lineage::handle_query))
@@ -414,13 +388,6 @@ pub(super) async fn require_direct_authz(
 pub(super) fn route_error(error: impl std::fmt::Display) -> Response {
     tracing::error!(error = %error, "direct edge read failed");
     (StatusCode::INTERNAL_SERVER_ERROR, "read failed").into_response()
-}
-
-pub(super) fn moa_error_response(error: MoaError) -> Response {
-    match error {
-        MoaError::SessionNotFound(_) => (StatusCode::NOT_FOUND, error.to_string()).into_response(),
-        other => route_error(other),
-    }
 }
 
 fn authz_error_response(_state: &AppState, error: AuthzCheckError) -> Response {

@@ -5,178 +5,267 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Request payload for reading analytics for one session.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionStatsRequest {
-    /// Session whose analytics summary should be read.
-    pub session_id: SessionId,
-}
-
-/// Request payload for reading tenant analytics over a recent window.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TenantStatsRequest {
-    /// Tenant whose rollup should be read.
-    pub tenant_id: TenantId,
-    /// Number of whole days included in the rollup window.
-    pub days: u32,
-}
-
-/// Request payload for reading per-tool analytics.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ToolStatsRequest {
-    /// Optional tenant filter for the per-tool rollup.
-    ///
-    /// Non-service callers are forced to their authenticated tenant by the
-    /// edge; service callers may omit this for deployment-wide stats.
-    pub tenant_id: Option<TenantId>,
-}
-
-/// Response payload containing per-tool analytics rows.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ToolStatsResponse {
-    /// Tenant filter used for this response, if one was requested.
-    pub tenant_id: Option<TenantId>,
-    /// Per-tool analytics rows ordered for API display.
-    #[serde(default)]
-    pub rows: Vec<ToolCallSummary>,
-}
-
-/// Request payload for reading tenant cache analytics.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CacheStatsRequest {
-    /// Tenant whose cache rollup should be read.
-    pub tenant_id: TenantId,
-    /// Number of whole days included in the cache window.
-    pub days: u32,
-}
-
-/// Response payload containing tenant cache analytics.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CacheStatsResponse {
-    /// Tenant identifier.
-    pub tenant_id: TenantId,
-    /// Number of whole days included in the cache window.
-    pub days: u32,
-    /// Weighted cache-hit rate for the window.
-    pub cache_hit_rate: f64,
-    /// Cache-read input tokens across the window.
-    pub total_cache_read_tokens: u64,
-    /// Total input tokens across the window.
-    pub total_input_tokens: u64,
-    /// Total output tokens across the window.
-    pub total_output_tokens: u64,
-    /// Total cost in cents across the window.
-    pub total_cost_cents: u64,
-    /// Estimated cache savings in cents when pricing history can support it.
-    pub estimated_savings_cents: Option<u64>,
-    /// Daily cache trend rows ordered by day.
-    #[serde(default)]
-    pub daily: Vec<CacheDailyMetric>,
-}
-
-/// Request payload for tenant-scoped live experiment analytics.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExperimentAnalyticsRequest {
-    /// Tenant whose experiment runs should be summarized.
-    pub tenant_id: TenantId,
-    /// Optional lower bound on experiment creation time.
-    pub from_time: Option<DateTime<Utc>>,
-    /// Optional upper bound on experiment creation time.
-    pub to_time: Option<DateTime<Utc>>,
-    /// Maximum number of score-run references to include.
-    pub limit: u32,
-}
-
-/// Response payload containing tenant-scoped experiment analytics.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExperimentAnalyticsResponse {
-    /// Tenant whose experiment runs were summarized.
-    pub tenant_id: TenantId,
-    /// Total experiment runs in the requested window.
-    pub total_runs: u64,
-    /// Per-status run counts ordered by status.
-    #[serde(default)]
-    pub statuses: Vec<ExperimentStatusCount>,
-    /// Score-run references ordered by newest experiment run first.
-    #[serde(default)]
-    pub score_runs: Vec<ExperimentScoreRunRef>,
-    /// Daily experiment run trend points.
-    #[serde(default)]
-    pub run_trends: Vec<ExperimentRunTrendPoint>,
-    /// Daily experiment trial trend points.
-    #[serde(default)]
-    pub trial_trends: Vec<ExperimentTrialTrendPoint>,
-}
-
-/// Count of experiment runs for one lifecycle status.
+/// Response payload describing the analytics datasets available to query.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExperimentStatusCount {
-    /// Durable experiment run status.
-    pub status: String,
-    /// Number of runs with this status.
-    pub count: u64,
-}
-
-/// Reference from an experiment run to the associated score run.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExperimentScoreRunRef {
-    /// Stable experiment run identifier.
-    pub run_uid: Uuid,
-    /// Human-readable experiment run name.
-    pub name: String,
-    /// Durable experiment run status.
-    pub status: String,
-    /// Score run identifier used by `analytics.scores`.
-    pub score_run_id: Uuid,
-    /// Time the experiment run was accepted.
-    pub created_at: DateTime<Utc>,
-}
-
-/// Daily count of experiment runs for one lifecycle status.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExperimentRunTrendPoint {
-    /// UTC day bucket.
-    pub day: DateTime<Utc>,
-    /// Durable experiment run status.
-    pub status: String,
-    /// Number of runs created in the day bucket with this status.
-    pub count: u64,
-}
-
-/// Daily count of experiment trials for one lifecycle status and matrix cell.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExperimentTrialTrendPoint {
-    /// UTC day bucket.
-    pub day: DateTime<Utc>,
-    /// Durable experiment trial status.
-    pub status: String,
-    /// Stable target variant key selected for the trial.
-    pub variant_key: String,
-    /// Stable scenario ID selected for the trial.
-    pub scenario_id: Option<String>,
-    /// Number of trials created in the day bucket with this status and matrix cell.
-    pub count: u64,
-}
-
-/// Request payload for listing curated learning-candidate summaries.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LearningCandidateListRequest {
-    /// Tenant whose candidates should be listed.
-    pub tenant_id: TenantId,
-    /// Optional candidate status filter.
-    pub status: Option<LearningCandidateStatus>,
-    /// Maximum number of candidates to return.
-    pub limit: u32,
-}
-
-/// Response payload containing curated learning-candidate summaries.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LearningCandidateListResponse {
-    /// Tenant scope used for this response.
-    pub tenant_id: TenantId,
-    /// Candidate summaries ordered by newest update first.
+pub struct AnalyticsCatalogResponse {
+    /// Queryable analytics datasets.
     #[serde(default)]
-    pub candidates: Vec<LearningCandidateSummary>,
+    pub datasets: Vec<AnalyticsDataset>,
+}
+
+/// Catalog entry for one allowlisted analytics dataset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalyticsDataset {
+    /// Stable dataset identifier used by query requests.
+    pub id: String,
+    /// Human-readable dataset label.
+    pub label: String,
+    /// Human-readable dataset description.
+    pub description: String,
+    /// Default timestamp field for time-window filters, when the dataset has one.
+    pub default_time_field: Option<String>,
+    /// Fields that can be selected, aggregated, filtered, or ordered.
+    #[serde(default)]
+    pub fields: Vec<AnalyticsField>,
+}
+
+/// Catalog entry for one queryable field in an analytics dataset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalyticsField {
+    /// Stable field identifier used by query requests.
+    pub id: String,
+    /// Human-readable field label.
+    pub label: String,
+    /// Human-readable field description.
+    pub description: String,
+    /// Field data kind exposed to clients.
+    pub kind: AnalyticsFieldKind,
+    /// Field query role.
+    pub role: AnalyticsFieldRole,
+    /// Aggregations supported when this field is used as a measure.
+    #[serde(default)]
+    pub aggregations: Vec<AnalyticsAggregation>,
+    /// Filter operators supported for this field.
+    #[serde(default)]
+    pub filter_operators: Vec<AnalyticsFilterOperator>,
+}
+
+/// Role a field plays in the analytics query model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalyticsFieldRole {
+    /// Field can be grouped or returned as a table column.
+    Dimension,
+    /// Field can be aggregated as a measure.
+    Measure,
+    /// Field can be filtered but is not selectable by default.
+    FilterOnly,
+}
+
+/// Data kind exposed for a field or response column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalyticsFieldKind {
+    /// UTF-8 text value.
+    String,
+    /// Signed or unsigned integer value.
+    Integer,
+    /// Floating-point numeric value.
+    Float,
+    /// Boolean value.
+    Boolean,
+    /// RFC3339 timestamp value.
+    Timestamp,
+    /// UUID value serialized as a string.
+    Uuid,
+    /// Structured JSON value.
+    Json,
+}
+
+/// Aggregation allowed for analytics measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalyticsAggregation {
+    /// Count matching rows.
+    Count,
+    /// Count distinct values of a field.
+    CountDistinct,
+    /// Sum numeric values.
+    Sum,
+    /// Average numeric values.
+    Avg,
+    /// Minimum value.
+    Min,
+    /// Maximum value.
+    Max,
+    /// Median percentile over numeric values.
+    P50,
+    /// Ninety-fifth percentile over numeric values.
+    P95,
+    /// Ninety-ninth percentile over numeric values.
+    P99,
+}
+
+/// Filter operator allowed by the analytics query contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalyticsFilterOperator {
+    /// Field equals the supplied value.
+    Eq,
+    /// Field does not equal the supplied value.
+    NotEq,
+    /// Field is contained in the supplied array.
+    In,
+    /// Field is not contained in the supplied array.
+    NotIn,
+    /// Field is less than the supplied value.
+    Lt,
+    /// Field is less than or equal to the supplied value.
+    Lte,
+    /// Field is greater than the supplied value.
+    Gt,
+    /// Field is greater than or equal to the supplied value.
+    Gte,
+    /// Field contains the supplied text.
+    Contains,
+    /// Field starts with the supplied text.
+    StartsWith,
+    /// Field ends with the supplied text.
+    EndsWith,
+    /// Field is null.
+    IsNull,
+    /// Field is not null.
+    IsNotNull,
+    /// Field is between the supplied lower and upper values.
+    Between,
+}
+
+/// Sort direction for analytics query results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalyticsSortDirection {
+    /// Sort ascending.
+    Asc,
+    /// Sort descending.
+    Desc,
+}
+
+/// Generic analytics query request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnalyticsQueryRequest {
+    /// Dataset identifier from `AnalyticsCatalogResponse`.
+    pub dataset: String,
+    /// Optional tenant requested by the caller; edge authorization decides the effective tenant.
+    pub tenant_id: Option<TenantId>,
+    /// Grouping/table dimensions to return.
+    #[serde(default)]
+    pub dimensions: Vec<AnalyticsDimension>,
+    /// Aggregated measures to return.
+    #[serde(default)]
+    pub measures: Vec<AnalyticsMeasure>,
+    /// Filters applied before grouping.
+    #[serde(default)]
+    pub filters: Vec<AnalyticsFilter>,
+    /// Result ordering.
+    #[serde(default)]
+    pub order_by: Vec<AnalyticsOrderBy>,
+    /// Maximum number of rows to return.
+    pub limit: Option<u32>,
+}
+
+/// Dimension selected by a generic analytics query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalyticsDimension {
+    /// Field identifier from the selected dataset.
+    pub field: String,
+    /// Optional response column identifier.
+    pub alias: Option<String>,
+}
+
+/// Measure selected by a generic analytics query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalyticsMeasure {
+    /// Field identifier from the selected dataset, omitted for `count`.
+    pub field: Option<String>,
+    /// Aggregation to apply.
+    pub aggregation: AnalyticsAggregation,
+    /// Optional response column identifier.
+    pub alias: Option<String>,
+}
+
+/// Filter applied by a generic analytics query.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnalyticsFilter {
+    /// Field identifier from the selected dataset.
+    pub field: String,
+    /// Filter operator to apply.
+    pub operator: AnalyticsFilterOperator,
+    /// JSON-compatible filter value. Null-only operators do not require a value.
+    pub value: Option<AnalyticsCell>,
+}
+
+/// Ordering clause applied to generic analytics query results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalyticsOrderBy {
+    /// Field, dimension alias, or measure alias to order by.
+    pub field: String,
+    /// Sort direction.
+    pub direction: AnalyticsSortDirection,
+}
+
+/// Generic analytics query response for aggregate and table-shaped results.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnalyticsQueryResponse {
+    /// Ordered column metadata matching each row cell position.
+    #[serde(default)]
+    pub columns: Vec<AnalyticsColumn>,
+    /// Result rows with cells ordered to match `columns`.
+    #[serde(default)]
+    pub rows: Vec<Vec<AnalyticsCell>>,
+    /// Query metadata calculated by the analytics service.
+    pub metadata: AnalyticsQueryMetadata,
+}
+
+/// Response column metadata for one analytics result cell position.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalyticsColumn {
+    /// Stable response column identifier.
+    pub id: String,
+    /// Human-readable response column label.
+    pub label: String,
+    /// Column value kind.
+    pub kind: AnalyticsFieldKind,
+    /// Column role in the response.
+    pub role: AnalyticsFieldRole,
+}
+
+/// Metadata attached to a generic analytics query response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalyticsQueryMetadata {
+    /// Tenant used after edge authorization and service scoping.
+    pub effective_tenant_id: Option<TenantId>,
+    /// Dataset that was queried.
+    pub dataset: String,
+    /// Number of rows returned in this response.
+    pub row_count: u64,
+    /// Last known refresh timestamp for the backing read model, when available.
+    pub read_model_updated_at: Option<DateTime<Utc>>,
+}
+
+/// JSON-compatible analytics result or filter value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AnalyticsCell {
+    /// JSON null.
+    Null,
+    /// JSON boolean.
+    Bool(bool),
+    /// JSON number.
+    Number(serde_json::Number),
+    /// JSON string.
+    String(String),
+    /// JSON array or object.
+    Json(serde_json::Value),
 }
 
 /// Redacted read-model projection of one learning candidate.
@@ -208,50 +297,4 @@ pub struct LearningCandidateSummary {
     pub created_at: DateTime<Utc>,
     /// Last candidate update time.
     pub updated_at: DateTime<Utc>,
-}
-
-/// Request payload for tenant-scoped session event search.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSearchRequest {
-    /// Tenant whose sessions should be searched.
-    pub tenant_id: TenantId,
-    /// Full-text event search query.
-    pub query: String,
-    /// Optional lower timestamp bound.
-    pub from_time: Option<DateTime<Utc>>,
-    /// Optional upper timestamp bound.
-    pub to_time: Option<DateTime<Utc>>,
-    /// Optional event type filter.
-    pub event_types: Option<Vec<EventType>>,
-    /// Maximum number of snippets to return.
-    pub limit: u32,
-}
-
-/// Response payload containing redacted session event snippets.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSearchResponse {
-    /// Tenant whose sessions were searched.
-    pub tenant_id: TenantId,
-    /// Query text that produced the results.
-    pub query: String,
-    /// Redacted event snippets ordered by search rank.
-    #[serde(default)]
-    pub results: Vec<SessionSearchResult>,
-}
-
-/// One redacted event-search hit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSearchResult {
-    /// Session that owns the matching event.
-    pub session_id: SessionId,
-    /// Stable event identifier.
-    pub event_id: Uuid,
-    /// Event sequence number within the session.
-    pub sequence_num: u64,
-    /// Event type discriminator.
-    pub event_type: EventType,
-    /// Time the event was emitted.
-    pub timestamp: DateTime<Utc>,
-    /// Short redacted snippet for analytics review.
-    pub snippet: String,
 }

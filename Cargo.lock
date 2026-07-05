@@ -3237,6 +3237,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-analytics"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "moa-core",
+ "moa-db",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
 name = "moa-artifacts"
 version = "0.1.0"
 dependencies = [
@@ -3462,6 +3476,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "moa-analytics",
  "moa-auth-providers",
  "moa-authz",
  "moa-authz-schema",
@@ -3669,7 +3684,6 @@ dependencies = [
  "moa-memory-pii",
  "object_store",
  "rand 0.8.5",
- "reqwest 0.13.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3680,7 +3694,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
- "wiremock",
  "workspace-hack",
  "zip",
 ]

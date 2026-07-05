@@ -278,6 +278,25 @@ impl PostgresSessionStore {
             .await
             .map_err(map_sqlx_error)?;
         }
+
+        for qualified in [
+            "analytics.session_fact",
+            "analytics.turn_fact",
+            "analytics.tool_call_fact",
+            "analytics.event_fact",
+            "analytics.task_segment_fact",
+            "analytics.procedure_run_fact",
+            "analytics.procedure_node_run_fact",
+            "analytics.learning_candidate_fact",
+            "analytics.experiment_run_fact",
+        ] {
+            sqlx::query(&format!(
+                "REFRESH MATERIALIZED VIEW CONCURRENTLY {qualified}"
+            ))
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
         Ok(())
     }
 

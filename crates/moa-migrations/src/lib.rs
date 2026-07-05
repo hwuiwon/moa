@@ -94,6 +94,10 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         sql: include_str!("../migrations/postgres/V000001__session_baseline.sql"),
     },
     SchemaMigration {
+        name: "V000101__auth_baseline.sql",
+        sql: include_str!("../migrations/postgres/V000101__auth_baseline.sql"),
+    },
+    SchemaMigration {
         name: "V000302__action_policy_auto_mode.sql",
         sql: ACTION_POLICY_SCHEMA_MIGRATION_SQL,
     },
@@ -132,6 +136,10 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         ),
     },
     SchemaMigration {
+        name: "V000314__authz_outbox_claims.sql",
+        sql: include_str!("../migrations/postgres/V000314__authz_outbox_claims.sql"),
+    },
+    SchemaMigration {
         name: "V000315__session_blobs.sql",
         sql: include_str!("../migrations/postgres/V000315__session_blobs.sql"),
     },
@@ -156,6 +164,10 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
     SchemaMigration {
         name: "V000321__vector_sync_outbox.sql",
         sql: include_str!("../migrations/postgres/V000321__vector_sync_outbox.sql"),
+    },
+    SchemaMigration {
+        name: "V000326__analytics_query_read_models.sql",
+        sql: include_str!("../migrations/postgres/V000326__analytics_query_read_models.sql"),
     },
 ];
 
