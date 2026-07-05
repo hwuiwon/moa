@@ -33,6 +33,8 @@ pub enum DeliveryPurpose {
     ContactVerification,
     /// One-time dashboard account password reset token.
     PasswordReset,
+    /// One-time dashboard account invitation token.
+    AccountInvitation,
 }
 
 impl DeliveryPurpose {
@@ -42,6 +44,7 @@ impl DeliveryPurpose {
         match self {
             Self::ContactVerification => "contact_verification",
             Self::PasswordReset => "password_reset",
+            Self::AccountInvitation => "account_invitation",
         }
     }
 }
@@ -132,6 +135,44 @@ impl DeliveryMessage {
             channel: Channel::Email,
             to: to.into(),
             subject: Some("Reset your password".to_string()),
+            text_body,
+            html_body: Some(html_body),
+            metadata,
+        }
+    }
+
+    /// Builds an email delivery message for dashboard account invitation.
+    #[must_use]
+    pub fn account_invitation_email(
+        tenant_id: Uuid,
+        user_id: Uuid,
+        to: impl Into<String>,
+        tenant_name: impl AsRef<str>,
+        role: impl AsRef<str>,
+        token: impl AsRef<str>,
+        expires_at: DateTime<Utc>,
+    ) -> Self {
+        let tenant_name = tenant_name.as_ref();
+        let role = role.as_ref();
+        let token = token.as_ref();
+        let expires_at = expires_at.to_rfc3339();
+        let text_body = format!(
+            "You were invited to join {tenant_name} as {role}.\n\nSet up your account with this invitation token:\n{token}\n\nThis token expires at {expires_at}. If you did not expect this invitation, ignore this email."
+        );
+        let html_body = format!(
+            "<p>You were invited to join {tenant_name} as {role}.</p><p>Set up your account with this invitation token:<br><code>{token}</code></p><p>This token expires at {expires_at}.</p><p>If you did not expect this invitation, ignore this email.</p>"
+        );
+        let mut metadata = BTreeMap::new();
+        metadata.insert("purpose".to_string(), "account_invitation".to_string());
+        metadata.insert("user_id".to_string(), user_id.to_string());
+        metadata.insert("role".to_string(), role.to_string());
+        Self {
+            tenant_id,
+            contact_id: None,
+            purpose: DeliveryPurpose::AccountInvitation,
+            channel: Channel::Email,
+            to: to.into(),
+            subject: Some(format!("You're invited to join {tenant_name}")),
             text_body,
             html_body: Some(html_body),
             metadata,
@@ -534,6 +575,59 @@ mod tests {
                 .values()
                 .any(|value| value.contains("password_reset_secret")),
             "reset token must not be copied into provider metadata"
+        );
+    }
+
+    #[test]
+    fn account_invitation_email_builds_role_message_without_token_metadata() {
+        // Pins: invitation delivery includes role context but never copies the bearer token into provider metadata.
+        let tenant_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+        let expires_at = chrono::Utc
+            .with_ymd_and_hms(2026, 6, 21, 12, 0, 0)
+            .single()
+            .expect("fixed timestamp should be valid");
+
+        let message = DeliveryMessage::account_invitation_email(
+            tenant_id,
+            user_id,
+            "operator@example.com",
+            "Acme",
+            "operator",
+            "tenant_invite_secret",
+            expires_at,
+        );
+
+        assert_eq!(message.tenant_id, tenant_id);
+        assert_eq!(message.contact_id, None);
+        assert_eq!(message.purpose, DeliveryPurpose::AccountInvitation);
+        assert_eq!(message.channel, Channel::Email);
+        assert_eq!(message.to, "operator@example.com");
+        assert_eq!(
+            message.subject.as_deref(),
+            Some("You're invited to join Acme")
+        );
+        assert!(message.text_body.contains("tenant_invite_secret"));
+        assert!(message.text_body.contains("operator"));
+        assert_eq!(
+            message.metadata.get("purpose").map(String::as_str),
+            Some("account_invitation")
+        );
+        let user_id = user_id.to_string();
+        assert_eq!(
+            message.metadata.get("user_id").map(String::as_str),
+            Some(user_id.as_str())
+        );
+        assert_eq!(
+            message.metadata.get("role").map(String::as_str),
+            Some("operator")
+        );
+        assert!(
+            !message
+                .metadata
+                .values()
+                .any(|value| value.contains("tenant_invite_secret")),
+            "invitation token must not be copied into provider metadata"
         );
     }
 }

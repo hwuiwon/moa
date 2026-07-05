@@ -129,6 +129,11 @@ pub fn router(state: AppState) -> Router {
             "/v1/tenant/users",
             get(tenant_accounts::list_users).post(tenant_accounts::create_user),
         )
+        .route("/v1/tenant/invitations", post(tenant_accounts::invite_user))
+        .route(
+            "/v1/tenant/invitations/accept",
+            post(tenant_accounts::accept_invitation),
+        )
         .route(
             "/v1/tenant/users/{user_id}/password",
             post(auth_accounts::set_user_password),

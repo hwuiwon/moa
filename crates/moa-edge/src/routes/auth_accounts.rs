@@ -163,6 +163,20 @@ pub(super) struct UserCredentialRow {
     pub password_hash: String,
 }
 
+type UserCredentialRecord = (
+    Uuid,
+    Uuid,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    bool,
+    Value,
+    DateTime<Utc>,
+    DateTime<Utc>,
+    String,
+);
+
 /// Issued browser session and response body.
 pub(super) struct IssuedAuthSession {
     /// Response body returned to the browser.
@@ -782,7 +796,7 @@ async fn load_login_user(
     }
 }
 
-async fn load_user_credential_by_id(
+pub(super) async fn load_user_credential_by_id(
     pool: &sqlx::PgPool,
     tenant_id: Uuid,
     user_id: Uuid,
@@ -808,19 +822,7 @@ async fn query_user_credential(
     tenant_id: Option<Uuid>,
     tenant_slug: Option<&str>,
 ) -> Result<Vec<UserCredentialRow>, String> {
-    let rows: Vec<(
-        Uuid,
-        Uuid,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        bool,
-        Value,
-        DateTime<Utc>,
-        DateTime<Utc>,
-        String,
-    )> = sqlx::query_as(
+    let rows: Vec<UserCredentialRecord> = sqlx::query_as(
         r#"
         SELECT u.id, u.tenant_id, u.email, u.display_name, u.given_name,
                u.family_name, u.active, u.settings, u.created_at, u.updated_at,

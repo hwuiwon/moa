@@ -5,20 +5,27 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use moa_authz::enqueue_raw;
 use moa_authz_schema::{ObjectType, Relation, TupleOp};
+use moa_core::{StoragePartitionId, TenantId};
+use moa_messaging::{DeliveryMessage, ProviderDeliverySink};
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::auth_accounts::{
-    UserCredentialRow, UserResponse, internal_error, issue_login_session, normalize_email,
-    set_user_password_in_tx, validate_password_policy, validate_settings,
+    UserCredentialRow, UserResponse, internal_error, issue_login_session,
+    load_user_credential_by_id, normalize_email, set_user_password_in_tx, validate_password_policy,
+    validate_settings,
 };
 use super::{
     AppState, attach_set_cookie, authenticate_direct_request, parse_json_body, require_direct_authz,
 };
+
+const INVITATION_TOKEN_TTL_DAYS: i64 = 7;
 
 /// Public tenant signup request.
 #[derive(Debug, Deserialize)]
@@ -69,8 +76,40 @@ pub struct CreateTenantUserRequest {
     pub settings: Option<Value>,
 }
 
+/// Tenant-admin invitation request.
+#[derive(Debug, Deserialize)]
+pub struct InviteTenantUserRequest {
+    /// User email address.
+    pub email: String,
+    /// User role in this tenant.
+    pub role: TenantUserRole,
+    /// User display name.
+    pub display_name: Option<String>,
+    /// User given name.
+    pub given_name: Option<String>,
+    /// User family name.
+    pub family_name: Option<String>,
+    /// User settings object.
+    pub settings: Option<Value>,
+}
+
+/// Tenant invitation acceptance request.
+#[derive(Debug, Deserialize)]
+pub struct AcceptTenantInvitationRequest {
+    /// One-time invitation token delivered out of band.
+    pub token: String,
+    /// New plaintext password.
+    pub password: String,
+    /// Optional display name override.
+    pub display_name: Option<String>,
+    /// Optional given name override.
+    pub given_name: Option<String>,
+    /// Optional family name override.
+    pub family_name: Option<String>,
+}
+
 /// Tenant user role that can be assigned through tenant-scoped account endpoints.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TenantUserRole {
     /// Tenant administrator.
@@ -84,6 +123,14 @@ impl TenantUserRole {
         match self {
             Self::Admin => "admin",
             Self::Operator => "operator",
+        }
+    }
+
+    fn from_relation(relation: &str) -> Option<Self> {
+        match relation {
+            "admin" => Some(Self::Admin),
+            "operator" => Some(Self::Operator),
+            _ => None,
         }
     }
 }
@@ -118,6 +165,24 @@ pub struct DeleteTenantRequest {
 struct DeletedTenantResponse {
     deleted: bool,
     tenant_id: Uuid,
+}
+
+#[derive(Debug, Serialize)]
+struct TenantInvitationResponse {
+    id: Uuid,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    email: String,
+    role: TenantUserRole,
+    expires_at: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+    delivery_sent: bool,
+}
+
+struct CreatedInvitation {
+    response: TenantInvitationResponse,
+    tenant_name: String,
+    token: SecretString,
 }
 
 /// Create a new tenant and its first tenant admin.
@@ -518,6 +583,183 @@ pub async fn create_user(
     (StatusCode::CREATED, Json(user)).into_response()
 }
 
+/// Invite a tenant admin or operator to set up their own account.
+#[tracing::instrument(skip(state, headers, body))]
+pub async fn invite_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let identity =
+        match authenticate_direct_request(&state, &headers, "/v1/tenant/invitations").await {
+            Ok(identity) => identity,
+            Err(response) => return response,
+        };
+    if let Err(response) = require_direct_authz(
+        &state,
+        &identity,
+        ObjectType::Tenant,
+        identity.tenant_id,
+        Relation::Admin,
+    )
+    .await
+    {
+        return response;
+    }
+    let request: InviteTenantUserRequest = match parse_json_body(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    if let Err(response) = validate_settings(request.settings.as_ref()) {
+        return response;
+    }
+    let email = normalize_email(&request.email);
+    if !looks_like_email(&email) {
+        return (StatusCode::BAD_REQUEST, "email must be an email address").into_response();
+    }
+    let tenant = match load_tenant(&state.pool, identity.tenant_id.0).await {
+        Ok(Some(tenant)) => tenant,
+        Ok(None) => return (StatusCode::NOT_FOUND, "tenant not found").into_response(),
+        Err(error) => return internal_error(error),
+    };
+    let invitation = match create_tenant_invitation(
+        &state.pool,
+        identity.tenant_id.0,
+        identity.id,
+        tenant.name,
+        request,
+        email,
+    )
+    .await
+    {
+        Ok(invitation) => invitation,
+        Err(response) => return response,
+    };
+    let mut response = invitation.response;
+    response.delivery_sent = match deliver_tenant_invitation(
+        &state,
+        &response,
+        &invitation.tenant_name,
+        &invitation.token,
+    )
+    .await
+    {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                tenant_id = %response.tenant_id,
+                user_id = %response.user_id,
+                invitation_id = %response.id,
+                "tenant invitation delivery failed"
+            );
+            false
+        }
+    };
+    (StatusCode::CREATED, Json(response)).into_response()
+}
+
+/// Accept a tenant invitation, set the user's password, and sign in.
+#[tracing::instrument(skip(state, body))]
+// SAFETY: Invitation acceptance is authorized by consuming a short-lived one-time bearer token for one tenant user.
+pub async fn accept_invitation(State(state): State<AppState>, body: Bytes) -> Response {
+    let request: AcceptTenantInvitationRequest = match parse_json_body(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    if let Err(response) = validate_password_policy(&request.password) {
+        return response;
+    }
+    let token = request.token.trim();
+    if token.is_empty() {
+        return (StatusCode::BAD_REQUEST, "invitation token is required").into_response();
+    }
+    let token_hash = invitation_token_hash(token);
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => return internal_error(format!("db begin: {error}")),
+    };
+    let row: Option<(Uuid, Uuid, String)> = match sqlx::query_as(
+        r#"
+        UPDATE tenant_user_invitations
+        SET accepted_at = NOW()
+        WHERE token_hash = $1
+          AND accepted_at IS NULL
+          AND revoked_at IS NULL
+          AND expires_at > NOW()
+        RETURNING tenant_id, user_id, role
+        "#,
+    )
+    .bind(token_hash)
+    .fetch_optional(&mut *tx)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => return internal_error(format!("consume invitation: {error}")),
+    };
+    let Some((tenant_id, user_id, role)) = row else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "invalid or expired invitation token",
+        )
+            .into_response();
+    };
+    let Some(role) = TenantUserRole::from_relation(&role) else {
+        return internal_error("invitation role is invalid");
+    };
+    if let Err(response) =
+        set_user_password_in_tx(&mut tx, tenant_id, user_id, &request.password).await
+    {
+        return response;
+    }
+    if let Err(error) = sqlx::query(
+        r#"
+        UPDATE users
+        SET active = TRUE,
+            deactivated_at = NULL,
+            display_name = COALESCE($3, display_name),
+            given_name = COALESCE($4, given_name),
+            family_name = COALESCE($5, family_name),
+            updated_at = NOW(),
+            version = version + 1
+        WHERE tenant_id = $1 AND id = $2
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(user_id)
+    .bind(request.display_name)
+    .bind(request.given_name)
+    .bind(request.family_name)
+    .execute(&mut *tx)
+    .await
+    {
+        return internal_error(format!("activate invited user: {error}"));
+    }
+    if role == TenantUserRole::Operator
+        && let Err(error) =
+            enqueue_user_role_tuple(&mut tx, tenant_id, user_id, "admin", TupleOp::Delete).await
+    {
+        return internal_error(format!("tenant admin tuple delete: {error}"));
+    }
+    if let Err(error) =
+        enqueue_user_role_tuple(&mut tx, tenant_id, user_id, role.relation(), TupleOp::Write).await
+    {
+        return internal_error(format!("tenant role tuple: {error}"));
+    }
+    if let Err(error) = tx.commit().await {
+        return internal_error(format!("db commit: {error}"));
+    }
+    let credential = match load_user_credential_by_id(&state.pool, tenant_id, user_id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return (StatusCode::NOT_FOUND, "user not found").into_response(),
+        Err(error) => return internal_error(error),
+    };
+    match issue_login_session(&state, credential, true).await {
+        Ok(session) => session.into_response(),
+        Err(response) => response,
+    }
+}
+
 /// Delete this tenant account and tenant-owned data.
 #[tracing::instrument(skip(state, headers, body))]
 pub async fn delete_tenant(
@@ -602,6 +844,190 @@ async fn load_tenant(
         )
     })
     .map_err(|error| format!("load tenant: {error}"))
+}
+
+async fn create_tenant_invitation(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    invited_by_user_id: Uuid,
+    tenant_name: String,
+    request: InviteTenantUserRequest,
+    email: String,
+) -> Result<CreatedInvitation, Response> {
+    let InviteTenantUserRequest {
+        role,
+        display_name,
+        given_name,
+        family_name,
+        settings,
+        ..
+    } = request;
+    let token = invitation_token();
+    let token_hash = invitation_token_hash(&token);
+    let expires_at = Utc::now() + Duration::days(INVITATION_TOKEN_TTL_DAYS);
+    let invitation_id = Uuid::new_v4();
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| internal_error(format!("db begin: {error}")))?;
+
+    let existing: Option<(Uuid, bool)> = sqlx::query_as(
+        r#"
+        SELECT id, active
+        FROM users
+        WHERE tenant_id = $1 AND lower(email) = lower($2)
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(&email)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| internal_error(format!("load invited user: {error}")))?;
+
+    let user_id = match existing {
+        Some((_, true)) => {
+            return Err((StatusCode::CONFLICT, "user already exists").into_response());
+        }
+        Some((user_id, false)) => {
+            sqlx::query(
+                r#"
+                UPDATE users
+                SET email = $3,
+                    display_name = COALESCE($4, display_name),
+                    given_name = COALESCE($5, given_name),
+                    family_name = COALESCE($6, family_name),
+                    settings = COALESCE($7, settings),
+                    updated_at = NOW(),
+                    version = version + 1
+                WHERE tenant_id = $1 AND id = $2
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(user_id)
+            .bind(&email)
+            .bind(display_name.as_deref())
+            .bind(given_name.as_deref())
+            .bind(family_name.as_deref())
+            .bind(settings.clone())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| internal_error(format!("update invited user: {error}")))?;
+            user_id
+        }
+        None => {
+            let user_id = Uuid::new_v4();
+            sqlx::query(
+                r#"
+                INSERT INTO users
+                    (id, tenant_id, email, given_name, family_name, display_name, active, settings)
+                VALUES ($1, $2, $3, $4, $5, $6, FALSE, COALESCE($7, '{}'::jsonb))
+                "#,
+            )
+            .bind(user_id)
+            .bind(tenant_id)
+            .bind(&email)
+            .bind(given_name.as_deref())
+            .bind(family_name.as_deref())
+            .bind(display_name.as_deref())
+            .bind(settings)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| internal_error(format!("create invited user: {error}")))?;
+            user_id
+        }
+    };
+
+    sqlx::query(
+        r#"
+        UPDATE tenant_user_invitations
+        SET revoked_at = NOW()
+        WHERE tenant_id = $1
+          AND user_id = $2
+          AND accepted_at IS NULL
+          AND revoked_at IS NULL
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| internal_error(format!("revoke previous invitations: {error}")))?;
+
+    let (created_at,): (DateTime<Utc>,) = sqlx::query_as(
+        r#"
+        INSERT INTO tenant_user_invitations
+            (id, tenant_id, user_id, email, role, token_hash, invited_by_user_id, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING created_at
+        "#,
+    )
+    .bind(invitation_id)
+    .bind(tenant_id)
+    .bind(user_id)
+    .bind(&email)
+    .bind(role.relation())
+    .bind(token_hash)
+    .bind(invited_by_user_id)
+    .bind(expires_at)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| internal_error(format!("create invitation: {error}")))?;
+
+    tx.commit()
+        .await
+        .map_err(|error| internal_error(format!("db commit: {error}")))?;
+
+    Ok(CreatedInvitation {
+        response: TenantInvitationResponse {
+            id: invitation_id,
+            tenant_id,
+            user_id,
+            email,
+            role,
+            expires_at,
+            created_at,
+            delivery_sent: false,
+        },
+        tenant_name,
+        token: SecretString::from(token),
+    })
+}
+
+async fn deliver_tenant_invitation(
+    state: &AppState,
+    invitation: &TenantInvitationResponse,
+    tenant_name: &str,
+    token: &SecretString,
+) -> Result<(), String> {
+    let scope = StoragePartitionId::for_tenant(TenantId::from(invitation.tenant_id));
+    let sink = ProviderDeliverySink::from_env(scope.as_str(), &state.config.messaging)
+        .await
+        .map_err(|error| format!("build delivery sink: {error}"))?;
+    let message = DeliveryMessage::account_invitation_email(
+        invitation.tenant_id,
+        invitation.user_id,
+        invitation.email.clone(),
+        tenant_name,
+        invitation.role.relation(),
+        token.expose_secret(),
+        invitation.expires_at,
+    );
+    let receipt = sink
+        .deliver(message)
+        .await
+        .map_err(|error| format!("deliver invitation email: {error}"))?;
+    tracing::info!(
+        tenant_id = %invitation.tenant_id,
+        user_id = %invitation.user_id,
+        invitation_id = %invitation.id,
+        delivery_channel = receipt.channel.as_str(),
+        provider = %receipt.provider,
+        provider_message_id = ?receipt.provider_message_id,
+        provider_status = ?receipt.provider_status,
+        "tenant invitation token delivered"
+    );
+    Ok(())
 }
 
 async fn purge_tenant_account(pool: &sqlx::PgPool, tenant_id: Uuid) -> Result<(), String> {
@@ -744,6 +1170,7 @@ async fn delete_tenant_rows(
         "DELETE FROM contact_channel_accounts WHERE tenant_id = $1",
         "DELETE FROM contact_points WHERE tenant_id = $1",
         "DELETE FROM contacts WHERE tenant_id = $1",
+        "DELETE FROM tenant_user_invitations WHERE tenant_id = $1",
         "DELETE FROM password_reset_tokens WHERE tenant_id = $1",
         "DELETE FROM user_session_tokens WHERE tenant_id = $1",
         "DELETE FROM local_user_credentials WHERE tenant_id = $1",
@@ -927,6 +1354,21 @@ fn normalize_slug(slug: &str) -> Result<String, Response> {
     }
 }
 
+fn invitation_token() -> String {
+    format!(
+        "tenant_invite_{}{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    )
+}
+
+fn invitation_token_hash(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
 fn looks_like_email(email: &str) -> bool {
     let Some((local, domain)) = email.split_once('@') else {
         return false;
@@ -964,5 +1406,32 @@ mod tests {
         assert!(looks_like_email("admin@example.com"));
         assert!(!looks_like_email("admin"));
         assert!(!looks_like_email("admin@example"));
+    }
+
+    #[test]
+    fn tenant_user_roles_round_trip_openfga_relations() {
+        // Pins: invitation role strings are exactly the tenant relations written to OpenFGA.
+        assert_eq!(TenantUserRole::Admin.relation(), "admin");
+        assert_eq!(TenantUserRole::Operator.relation(), "operator");
+        assert_eq!(
+            TenantUserRole::from_relation("admin"),
+            Some(TenantUserRole::Admin)
+        );
+        assert_eq!(
+            TenantUserRole::from_relation("operator"),
+            Some(TenantUserRole::Operator)
+        );
+        assert_eq!(TenantUserRole::from_relation("workspace_admin"), None);
+    }
+
+    #[test]
+    fn invitation_token_hash_is_not_the_raw_token() {
+        // Pins: invitation tokens are stored as a deterministic digest, never as the bearer value.
+        let token = "tenant_invite_example";
+        let digest = invitation_token_hash(token);
+
+        assert_ne!(digest, token);
+        assert_eq!(digest.len(), 64);
+        assert_eq!(digest, invitation_token_hash(token));
     }
 }
