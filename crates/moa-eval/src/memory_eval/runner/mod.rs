@@ -1222,9 +1222,10 @@ async fn retrieve_probe(
     if deterministic_replay {
         vector_store = vector_store.with_exact_search(true);
     }
-    let vector: Arc<dyn VectorStore> = Arc::new(vector_store);
+    let vector = Arc::new(vector_store);
+    let graph_vector: Arc<dyn VectorStore> = vector.clone();
     let graph_store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_context)
-        .with_vector_store(vector.clone());
+        .with_vector_store(graph_vector);
     let graph: Arc<dyn GraphStore> = Arc::new(graph_store);
     let hybrid = Arc::new(
         HybridRetriever::new(pool.clone(), graph.clone(), vector)

@@ -3,11 +3,10 @@
 use moa_core::{MessageContent, OutboundMessage};
 use unicode_segmentation::UnicodeSegmentation;
 
-/// Builds a simple outbound text message with no buttons or reply target.
+/// Builds a simple outbound text message with no reply target.
 pub fn text_message(text: impl Into<String>) -> OutboundMessage {
     OutboundMessage {
         content: MessageContent::Text(text.into()),
-        buttons: Vec::new(),
         channel_ref: None,
         reply_to: None,
         ephemeral: false,

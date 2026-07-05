@@ -239,6 +239,7 @@ async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
             ],
             audits.clone(),
         ));
+        let expects_cache_hits = provider.capabilities().supports_prefix_caching;
         let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
             &config,
             store.clone(),
@@ -308,13 +309,15 @@ async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
                 .is_some_and(|audit| audit.stable_prefix_reused_from_previous_request),
             "expected turn 2 static-prefix reuse for {provider_name}"
         );
-        assert!(
-            provider_audits
-                .iter()
-                .skip(1)
-                .any(|audit| audit.cached_input_tokens > 0),
-            "expected a cache hit on turn 2 or 3 for {provider_name}: {provider_audits:#?}"
-        );
+        if expects_cache_hits {
+            assert!(
+                provider_audits
+                    .iter()
+                    .skip(1)
+                    .any(|audit| audit.cached_input_tokens > 0),
+                "expected a cache hit on turn 2 or 3 for {provider_name}: {provider_audits:#?}"
+            );
+        }
     }
 
     println!(
@@ -407,10 +410,9 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     let storage_partition_id = StoragePartitionId::new("cache-audit");
     let user_id = UserId::new("cache-audit-user");
 
-    let mut sonnet_config = MoaConfig::default();
-    sonnet_config.general.default_provider = "anthropic".to_string();
-    sonnet_config.models.main = "claude-sonnet-4-6".to_string();
-    sonnet_config.local.sandbox_dir = repo_root.display().to_string();
+    let mut sonnet_config = live_cache_config("anthropic", "claude-sonnet-4-6", &repo_root);
+    sonnet_config.providers.anthropic.api_key =
+        env::var("MOA_ANTHROPIC_API_KEY").expect("require_live_env checked MOA_ANTHROPIC_API_KEY");
 
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
     let store = Arc::new(store);

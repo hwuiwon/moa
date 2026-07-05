@@ -181,7 +181,6 @@ async fn send_reply(
     adapter
         .send(OutboundMessage {
             content: MessageContent::Markdown(text),
-            buttons: Vec::new(),
             channel_ref: Some(channel_ref.clone()),
             reply_to: Some(inbound.channel_msg_id.clone()),
             ephemeral: false,
@@ -379,8 +378,6 @@ mod tests {
         fn capabilities(&self) -> ChannelCapabilities {
             ChannelCapabilities {
                 max_message_length: 40_000,
-                supports_inline_buttons: true,
-                supports_modals: false,
                 supports_ephemeral: false,
                 supports_threads: true,
                 supports_code_blocks: true,

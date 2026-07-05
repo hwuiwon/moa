@@ -5,7 +5,7 @@ use moa_core::{
 };
 use moa_providers::GeminiProvider;
 use serde_json::json;
-use tokio::time::{advance, timeout};
+use tokio::time::timeout;
 use wiremock::MockServer;
 
 use crate::support::gemini_wiremock::{GEMINI_MODEL, mount_gemini_sse};
@@ -96,24 +96,16 @@ async fn gemini_offline_tool_call_response_parses_into_provider_event() {
 
 #[tokio::test]
 async fn gemini_offline_429_response_triggers_retry_with_backoff() {
-    tokio::time::pause();
     let server = MockServer::start().await;
     mount_retry_then_sse(&server, 429, r#"{"error":{"message":"rate limit"}}"#, TEXT).await;
     let provider = provider(&server, 1);
 
-    let task = tokio::spawn(async move {
-        provider
-            .complete(minimal_request("retry after rate limit"))
-            .await
-            .expect("request should start")
-            .collect()
-            .await
-    });
-    tokio::task::yield_now().await;
-    advance(Duration::from_secs(2)).await;
-    let response = task
+    let response = provider
+        .complete(minimal_request("retry after rate limit"))
         .await
-        .expect("task should join")
+        .expect("request should start")
+        .collect()
+        .await
         .expect("retry succeeds");
 
     assert_eq!(response.text, "Hello");
@@ -122,7 +114,6 @@ async fn gemini_offline_429_response_triggers_retry_with_backoff() {
 
 #[tokio::test]
 async fn gemini_offline_500_response_triggers_retry_then_surfaces_typed_error() {
-    tokio::time::pause();
     let server = MockServer::start().await;
     mount_always_status(
         &server,
@@ -132,19 +123,12 @@ async fn gemini_offline_500_response_triggers_retry_then_surfaces_typed_error() 
     .await;
     let provider = provider(&server, 1);
 
-    let task = tokio::spawn(async move {
-        provider
-            .complete(minimal_request("retry server error"))
-            .await
-            .expect("request should start")
-            .collect()
-            .await
-    });
-    tokio::task::yield_now().await;
-    advance(Duration::from_secs(2)).await;
-    let error = task
+    let error = provider
+        .complete(minimal_request("retry server error"))
         .await
-        .expect("task should join")
+        .expect("request should start")
+        .collect()
+        .await
         .expect_err("500 should fail");
 
     assert!(
@@ -270,24 +254,16 @@ async fn gemini_offline_empty_candidate_yields_empty_text_with_usage() {
 #[tokio::test]
 async fn gemini_offline_exhausted_429_surfaces_rate_limited_error() {
     // Pins: a 429 that survives every retry surfaces typed RateLimited, not HttpStatus{429}.
-    tokio::time::pause();
     let server = MockServer::start().await;
     mount_always_status(&server, 429, r#"{"error":{"message":"rate limit"}}"#).await;
     let provider = provider(&server, 1);
 
-    let task = tokio::spawn(async move {
-        provider
-            .complete(minimal_request("retry until exhausted"))
-            .await
-            .expect("request should start")
-            .collect()
-            .await
-    });
-    tokio::task::yield_now().await;
-    advance(Duration::from_secs(5)).await;
-    let error = task
+    let error = provider
+        .complete(minimal_request("retry until exhausted"))
         .await
-        .expect("task should join")
+        .expect("request should start")
+        .collect()
+        .await
         .expect_err("exhausted 429 should fail");
 
     assert!(

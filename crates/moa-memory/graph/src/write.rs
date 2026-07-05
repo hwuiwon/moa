@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use chrono::{DateTime, Duration, Utc};
-use moa_memory_vector::{VectorItem, VectorStore};
+use moa_memory_vector::{VECTOR_DIMENSION, VectorItem, VectorStore};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, Row};
@@ -39,6 +39,13 @@ pub async fn create_node_in_conn(
 
     insert_node_index(store, &mut *conn, &intent).await?;
     if let Some(item) = vector_item.as_ref() {
+        ensure_storage_partition_embedder_state(
+            &mut *conn,
+            intent.storage_partition_id.as_deref(),
+            &item.embedding_model,
+            item.embedding_model_version,
+        )
+        .await?;
         let vector = require_vector_store(store)?;
         vector
             .upsert_in_tx(&mut *conn, std::slice::from_ref(item))
@@ -83,9 +90,15 @@ pub async fn bulk_create_nodes(
     let mut valid_froms = Vec::with_capacity(count);
     let mut properties = Vec::with_capacity(count);
     let mut vector_items = Vec::new();
+    let mut vector_state_seeds = Vec::new();
     for intent in &intents {
         let (tenant_id, contact_id) = runtime_ids_for_node(store, intent)?;
         if let Some(item) = vector_item_from_intent(intent)? {
+            vector_state_seeds.push((
+                intent.storage_partition_id.clone(),
+                item.embedding_model.clone(),
+                item.embedding_model_version,
+            ));
             vector_items.push(item);
         }
         uids.push(intent.uid);
@@ -134,6 +147,16 @@ pub async fn bulk_create_nodes(
     .await?;
 
     if !vector_items.is_empty() {
+        for (storage_partition_id, embedding_model, embedding_model_version) in &vector_state_seeds
+        {
+            ensure_storage_partition_embedder_state(
+                conn.as_mut(),
+                storage_partition_id.as_deref(),
+                embedding_model,
+                *embedding_model_version,
+            )
+            .await?;
+        }
         let vector = require_vector_store(store)?;
         vector.upsert_in_tx(conn.as_mut(), &vector_items).await?;
     }
@@ -205,6 +228,13 @@ pub async fn supersede_node_in_conn(
     if let Some(vector) = store.vector() {
         vector.delete_in_tx(&mut *conn, &[current_uid]).await?;
         if let Some(item) = vector_item.as_ref() {
+            ensure_storage_partition_embedder_state(
+                &mut *conn,
+                new.storage_partition_id.as_deref(),
+                &item.embedding_model,
+                item.embedding_model_version,
+            )
+            .await?;
             vector
                 .upsert_in_tx(&mut *conn, std::slice::from_ref(item))
                 .await?;
@@ -468,6 +498,13 @@ pub async fn upsert_node_embedding(
         )));
     }
     let vector = require_vector_store(store)?;
+    ensure_storage_partition_embedder_state(
+        conn.as_mut(),
+        node.storage_partition_id.as_deref(),
+        &intent.embedding_model,
+        intent.embedding_model_version,
+    )
+    .await?;
     vector
         .upsert_in_tx(
             conn.as_mut(),
@@ -984,6 +1021,32 @@ fn vector_item_from_intent(intent: &NodeWriteIntent) -> Result<Option<VectorItem
         search_text: intent.embedding_text.clone(),
         valid_to: None,
     }))
+}
+
+async fn ensure_storage_partition_embedder_state(
+    conn: &mut PgConnection,
+    storage_partition_id: Option<&str>,
+    embedding_model: &str,
+    embedding_model_version: i32,
+) -> Result<()> {
+    let storage_partition_id = storage_partition_id.ok_or_else(|| {
+        GraphError::Conflict("embedding writes require storage partition state".to_string())
+    })?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.storage_partition_state
+            (storage_partition_id, embedding_model, embedding_model_version, embedding_dimension)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (storage_partition_id) DO NOTHING
+        "#,
+    )
+    .bind(storage_partition_id)
+    .bind(embedding_model)
+    .bind(embedding_model_version)
+    .bind(VECTOR_DIMENSION as i32)
+    .execute(conn)
+    .await?;
+    Ok(())
 }
 
 fn require_vector_store(store: &PostgresGraphStore) -> Result<&dyn VectorStore> {

@@ -99,8 +99,8 @@ async fn auto_delegation_fan_in_coordination_cost_service_e2e() {
         "four scripted turns x 64 uncached input tokens; a change is a context-size regression"
     );
     assert_eq!(
-        cost.total_output_tokens, 53,
-        "12+12+12 default turns + 17 synthesis output tokens"
+        cost.total_output_tokens, 20,
+        "three one-token worker/coordinator default turns + 17 synthesis output tokens"
     );
 
     // --- Final response regression guards: the coordinator's last model turn must carry the

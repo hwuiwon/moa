@@ -36,7 +36,7 @@ async fn live_brain_turn_completes() -> Result<()> {
         return Ok(());
     }
 
-    let mut config = MoaConfig::default();
+    let mut config = MoaConfig::load()?;
     let (provider_id, model_id) = resolve_provider_selection(&config, None)?;
     config.general.default_provider = provider_id.as_str().to_string();
     config.models.main = model_id.as_str().to_string();

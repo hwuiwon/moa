@@ -149,12 +149,11 @@ impl ScopedRetrievalRuntimeFactory for PostgresScopedRetrievalRuntimeFactory {
     ) -> Result<ScopedRetrievalRuntime> {
         let scope_context = RlsContext::from(scope.clone());
         let vector_factory = VectorStoreFactory::from_config(config);
-        let vector = vector_factory
-            .configured_for_scope(pool, scope_context.clone(), assume_app_role)
-            .await
-            .map_err(|error| {
-                MoaError::StorageError(format!("vector backend selection failed: {error}"))
-            })?;
+        let pgvector_source = if assume_app_role {
+            vector_factory.pgvector_source_for_app_role(pool.clone(), scope_context.clone())
+        } else {
+            vector_factory.pgvector_source(pool.clone(), scope_context.clone())
+        };
         let graph_store = if assume_app_role {
             PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_context)
         } else {
@@ -166,7 +165,7 @@ impl ScopedRetrievalRuntimeFactory for PostgresScopedRetrievalRuntimeFactory {
                 config,
                 pool.clone(),
                 graph.clone(),
-                vector,
+                pgvector_source,
             )
             .with_assume_app_role(assume_app_role),
         );

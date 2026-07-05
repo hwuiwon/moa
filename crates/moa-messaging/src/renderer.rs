@@ -2,13 +2,7 @@
 
 #[cfg(feature = "slack")]
 use moa_core::{
-    ActionButton, ButtonStyle, Channel, MessageContent, OutboundMessage, SessionStatus, ToolStatus,
-    types::DiffHunk,
-};
-#[cfg(feature = "slack")]
-use slack_morphism::prelude::{
-    SlackActionBlockElement, SlackActionId, SlackActionsBlock, SlackBlock, SlackBlockButtonElement,
-    SlackBlockMarkDownText, SlackBlockPlainText, SlackBlockPlainTextOnly, SlackSectionBlock,
+    Channel, MessageContent, OutboundMessage, SessionStatus, ToolStatus, types::DiffHunk,
 };
 #[cfg(feature = "slack")]
 use unicode_segmentation::UnicodeSegmentation;
@@ -16,17 +10,12 @@ use unicode_segmentation::UnicodeSegmentation;
 /// Slack's documented hard cap for one message text payload.
 pub const SLACK_MAX_MESSAGE_LENGTH: usize = 40_000;
 
-#[cfg(feature = "slack")]
-const SLACK_MAX_BLOCK_TEXT_LENGTH: usize = 3_000;
-
 /// One Slack-ready outbound chunk.
 #[cfg(feature = "slack")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlackRenderChunk {
-    /// Fallback text used for notifications and accessibility.
+    /// Text sent to Slack.
     pub text: String,
-    /// Optional Block Kit payload.
-    pub blocks: Option<Vec<SlackBlock>>,
 }
 
 /// Channel-adaptive renderer for Slack output.
@@ -77,28 +66,9 @@ impl SlackRenderer {
             ),
         };
 
-        let limit = if message.buttons.is_empty() {
-            SLACK_MAX_MESSAGE_LENGTH
-        } else {
-            SLACK_MAX_BLOCK_TEXT_LENGTH
-        };
-        let chunks = split_plain_text(&text, limit);
-        let chunk_count = chunks.len();
-
-        chunks
+        split_plain_text(&text, SLACK_MAX_MESSAGE_LENGTH)
             .into_iter()
-            .enumerate()
-            .map(|(index, text)| SlackRenderChunk {
-                blocks: slack_blocks_for_chunk(
-                    &text,
-                    if index + 1 == chunk_count {
-                        &message.buttons
-                    } else {
-                        &[]
-                    },
-                ),
-                text,
-            })
+            .map(|text| SlackRenderChunk { text })
             .collect()
     }
 
@@ -106,8 +76,6 @@ impl SlackRenderer {
     pub fn capabilities(&self) -> moa_core::ChannelCapabilities {
         moa_core::ChannelCapabilities {
             max_message_length: SLACK_MAX_MESSAGE_LENGTH,
-            supports_inline_buttons: true,
-            supports_modals: true,
             supports_ephemeral: true,
             supports_threads: true,
             supports_code_blocks: true,
@@ -273,61 +241,14 @@ fn split_hard(text: &str, limit: usize) -> Vec<String> {
     parts
 }
 
-#[cfg(feature = "slack")]
-fn slack_blocks_for_chunk(text: &str, buttons: &[ActionButton]) -> Option<Vec<SlackBlock>> {
-    if buttons.is_empty() {
-        return None;
-    }
-
-    let section = SlackSectionBlock {
-        block_id: None,
-        text: Some(
-            SlackBlockMarkDownText {
-                text: text.to_string(),
-                verbatim: None,
-            }
-            .as_block_text(),
-        ),
-        fields: None,
-        accessory: None,
-    };
-    let actions = SlackActionsBlock {
-        block_id: None,
-        elements: buttons
-            .iter()
-            .map(slack_button)
-            .map(SlackActionBlockElement::from)
-            .collect(),
-    };
-    Some(vec![section.into(), actions.into()])
-}
-
-#[cfg(feature = "slack")]
-fn slack_button(button: &ActionButton) -> SlackBlockButtonElement {
-    let style = match button.style {
-        ButtonStyle::Primary => Some("primary".to_string()),
-        ButtonStyle::Danger => Some("danger".to_string()),
-        ButtonStyle::Secondary => None,
-    };
-
-    SlackBlockButtonElement {
-        action_id: SlackActionId(button.id.clone()),
-        text: SlackBlockPlainTextOnly::from(SlackBlockPlainText::from(button.label.as_str())),
-        url: None,
-        value: Some(button.callback_data.clone()),
-        style,
-        confirm: None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "slack")]
     use super::*;
     #[cfg(feature = "slack")]
     use moa_core::{
-        ActionButton, ActionClass, ActionEnvelope, ActionReviewField, ActionReviewPreview,
-        ButtonStyle, RiskLevel, SessionActorRef, SessionId, SessionStatus, TenantId, ToolCallId,
+        ActionClass, ActionEnvelope, ActionReviewField, ActionReviewPreview, RiskLevel,
+        SessionActorRef, SessionId, SessionStatus, TenantId, ToolCallId,
     };
 
     #[cfg(feature = "slack")]
@@ -336,7 +257,6 @@ mod tests {
         let text = "a".repeat(SLACK_MAX_MESSAGE_LENGTH + 50);
         let message = OutboundMessage {
             content: MessageContent::Text(text.clone()),
-            buttons: Vec::new(),
             channel_ref: None,
             reply_to: Some("123".to_string()),
             ephemeral: false,
@@ -369,7 +289,6 @@ mod tests {
                 status: SessionStatus::Running,
                 summary: "Calling the model".to_string(),
             },
-            buttons: Vec::new(),
             channel_ref: None,
             reply_to: None,
             ephemeral: false,
@@ -382,12 +301,11 @@ mod tests {
             chunks[0].text,
             format!("🔄 Session {session_id}: Calling the model")
         );
-        assert!(chunks[0].blocks.is_none());
     }
 
     #[cfg(feature = "slack")]
     #[test]
-    fn slack_renderer_attaches_buttons_to_last_chunk_only() {
+    fn slack_renderer_renders_action_review_as_text() {
         let message = OutboundMessage {
             content: MessageContent::ActionReviewRequest {
                 envelope: Box::new(ActionEnvelope {
@@ -422,27 +340,14 @@ mod tests {
                     file_diffs: Vec::new(),
                 }),
             },
-            buttons: vec![ActionButton {
-                id: "open".to_string(),
-                label: "Open".to_string(),
-                style: ButtonStyle::Primary,
-                callback_data: "noop".to_string(),
-            }],
             channel_ref: None,
             reply_to: Some("123".to_string()),
             ephemeral: false,
         };
 
         let chunks = SlackRenderer::new().render(&message);
-        assert!(!chunks.is_empty());
-        for chunk in &chunks[..chunks.len().saturating_sub(1)] {
-            assert!(chunk.blocks.is_none());
-        }
-        assert!(
-            chunks
-                .last()
-                .and_then(|chunk| chunk.blocks.as_ref())
-                .is_some()
-        );
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].text.contains("Action review requested"));
+        assert!(chunks[0].text.contains("npm test"));
     }
 }

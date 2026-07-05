@@ -43,11 +43,10 @@ pub use agent::{
     SYSTEM_DEFAULT_AGENT_POLICY_HASH, SYSTEM_DEFAULT_AGENT_REF, SYSTEM_DEFAULT_AGENT_REVISION_UID,
 };
 pub use channel::{
-    ActionButton, Attachment, ButtonStyle, Channel, ChannelAccountId, ChannelAccountRef,
-    ChannelActor, ChannelCapabilities, ChannelEvent, ChannelRef, ChannelSessionCommand, DiffHunk,
-    InboundMessage, MessageContent, MessageId, OutboundMessage, SessionChannelBinding,
-    SessionChannelBindingId, SessionChannelBindingResolution, ToolStatus,
-    render_user_message_with_attachments,
+    Attachment, Channel, ChannelAccountId, ChannelAccountRef, ChannelActor, ChannelCapabilities,
+    ChannelEvent, ChannelRef, ChannelSessionCommand, DiffHunk, InboundMessage, MessageContent,
+    MessageId, OutboundMessage, SessionChannelBinding, SessionChannelBindingId,
+    SessionChannelBindingResolution, ToolStatus, render_user_message_with_attachments,
 };
 pub use completion::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,

@@ -411,7 +411,7 @@ pub const CATALOG: &[ProviderModel] = &[
         max_output_tokens: 65_536,
         supports_tools: true,
         supports_vision: true,
-        supports_prefix_caching: true,
+        supports_prefix_caching: false,
         cache_ttl_secs: None,
         tool_call_format: ToolCallFormat::Gemini,
         pricing: TokenPricing {
@@ -431,7 +431,7 @@ pub const CATALOG: &[ProviderModel] = &[
         max_output_tokens: 65_536,
         supports_tools: true,
         supports_vision: true,
-        supports_prefix_caching: true,
+        supports_prefix_caching: false,
         cache_ttl_secs: None,
         tool_call_format: ToolCallFormat::Gemini,
         pricing: TokenPricing {
@@ -451,7 +451,7 @@ pub const CATALOG: &[ProviderModel] = &[
         max_output_tokens: 65_536,
         supports_tools: true,
         supports_vision: true,
-        supports_prefix_caching: true,
+        supports_prefix_caching: false,
         cache_ttl_secs: None,
         tool_call_format: ToolCallFormat::Gemini,
         pricing: TokenPricing {
@@ -471,7 +471,7 @@ pub const CATALOG: &[ProviderModel] = &[
         max_output_tokens: 65_536,
         supports_tools: true,
         supports_vision: true,
-        supports_prefix_caching: true,
+        supports_prefix_caching: false,
         cache_ttl_secs: None,
         tool_call_format: ToolCallFormat::Gemini,
         pricing: TokenPricing {
@@ -492,7 +492,7 @@ pub const CATALOG: &[ProviderModel] = &[
         max_output_tokens: 65_536,
         supports_tools: true,
         supports_vision: true,
-        supports_prefix_caching: true,
+        supports_prefix_caching: false,
         cache_ttl_secs: None,
         tool_call_format: ToolCallFormat::Gemini,
         pricing: TokenPricing {

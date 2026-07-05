@@ -92,9 +92,10 @@ async fn query_retrieval_ctx_defaults_reranker_off_and_requires_explicit_opt_in(
     let storage_partition_id = "reranker-default-workspace";
     let scope = tenant_memory_scope(storage_partition_id);
     let scope_context = tenant_scope(storage_partition_id);
-    let vector: Arc<dyn moa_memory_vector::VectorStore> = Arc::new(
-        PgvectorStore::new_for_app_role(pool.clone(), scope_context.clone()),
-    );
+    let vector: Arc<PgvectorStore> = Arc::new(PgvectorStore::new_for_app_role(
+        pool.clone(),
+        scope_context.clone(),
+    ));
     let graph: Arc<dyn GraphStore> = Arc::new(
         PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_context)
             .with_vector_store(vector.clone()),
@@ -310,6 +311,44 @@ async fn set_storage_partition_vector_backend(
         .expect("commit storage_partition_state transaction");
 }
 
+async fn set_storage_partition_vector_backend_state(
+    pool: &PgPool,
+    storage_partition_id: &str,
+    backend: &str,
+    backend_state: &str,
+    dual_read_until: Option<DateTime<Utc>>,
+) {
+    let ctx = tenant_scope(storage_partition_id);
+    let mut conn = ScopedConn::begin(pool, &ctx)
+        .await
+        .expect("begin storage_partition_state transaction");
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(conn.as_mut())
+        .await
+        .expect("set app role");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.storage_partition_state
+            (storage_partition_id, vector_backend, vector_backend_state, dual_read_until)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (storage_partition_id) DO UPDATE
+            SET vector_backend = EXCLUDED.vector_backend,
+                vector_backend_state = EXCLUDED.vector_backend_state,
+                dual_read_until = EXCLUDED.dual_read_until
+        "#,
+    )
+    .bind(storage_partition_id)
+    .bind(backend)
+    .bind(backend_state)
+    .bind(dual_read_until)
+    .execute(conn.as_mut())
+    .await
+    .expect("set storage-partition vector backend state");
+    conn.commit()
+        .await
+        .expect("commit storage_partition_state transaction");
+}
+
 async fn set_workspace_embedder_state(pool: &PgPool, storage_partition_id: &str, model: &str) {
     let ctx = tenant_scope(storage_partition_id);
     let mut conn = ScopedConn::begin(pool, &ctx)
@@ -503,11 +542,10 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
     }
 
     let scope = tenant_memory_scope(&storage_partition_id);
-    let vector: Arc<dyn moa_memory_vector::VectorStore> =
-        Arc::new(PgvectorStore::new_for_app_role(
-            session_store.pool().clone(),
-            tenant_scope(&storage_partition_id),
-        ));
+    let vector: Arc<PgvectorStore> = Arc::new(PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(&storage_partition_id),
+    ));
     let retriever = HybridRetriever::new(
         session_store.pool().clone(),
         Arc::new(graph.clone()),
@@ -957,8 +995,9 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
 }
 
 #[tokio::test]
-async fn temporal_turbopuffer_unsupported_as_of_falls_back_to_pgvector() {
-    // Pins: temporal hybrid vector retrieval falls back to pgvector for Turbopuffer workspaces.
+async fn temporal_turbopuffer_as_of_uses_pgvector_without_calling_turbopuffer() {
+    // Pins: temporal hybrid vector retrieval routes directly to pgvector for
+    // Turbopuffer workspaces because external projections are current-read only.
     let _guard = TEST_LOCK.lock().await;
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
@@ -982,14 +1021,15 @@ async fn temporal_turbopuffer_unsupported_as_of_falls_back_to_pgvector() {
     )
     .await;
 
+    let server = MockServer::start().await;
     let vector = PgvectorStore::new_for_app_role(
         session_store.pool().clone(),
         tenant_scope(&storage_partition_id),
     );
     let turbopuffer = TurbopufferStore::new(
-        "http://127.0.0.1:9".to_string(),
+        server.uri(),
         SecretString::from("unused-key"),
-        "temporal-fallback",
+        "temporal-as-of",
         false,
     )
     .expect("build Turbopuffer store");
@@ -1023,9 +1063,108 @@ async fn temporal_turbopuffer_unsupported_as_of_falls_back_to_pgvector() {
 
     assert_eq!(hits.first().map(|hit| hit.uid), Some(fact_uid));
     assert!(hits[0].legs.vector, "{hits:?}");
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose captured requests");
+    assert_eq!(
+        requests.len(),
+        0,
+        "as_of vector reads must not call Turbopuffer"
+    );
 
     let _ = graph
         .hard_purge(fact_uid, "redacted:hybrid-temporal-test")
+        .await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn temporal_dual_read_as_of_uses_pgvector_without_calling_turbopuffer() {
+    // Pins: promotion dual-read is current-read only; historical reads stay on
+    // the pgvector source and do not fan out to external projections.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = test_storage_partition_id();
+    let graph = graph_store(session_store.pool(), &storage_partition_id);
+    set_workspace_embedder_state(session_store.pool(), &storage_partition_id, "test-model").await;
+    let fact = "temporal dual read pgvector source fact";
+    let mut intent = node_intent(
+        &storage_partition_id,
+        NodeLabel::Fact,
+        fact,
+        Some(deterministic_vector(fact)),
+    );
+    intent.valid_from = utc("2026-02-01T00:00:00Z");
+    let fact_uid = graph.create_node(intent).await.expect("create vector fact");
+    set_storage_partition_vector_backend_state(
+        session_store.pool(),
+        &storage_partition_id,
+        "turbopuffer",
+        "dual_read",
+        Some(Utc::now() + chrono::Duration::hours(1)),
+    )
+    .await;
+
+    let server = MockServer::start().await;
+    let vector = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(&storage_partition_id),
+    );
+    let turbopuffer = TurbopufferStore::new(
+        server.uri(),
+        SecretString::from("unused-key"),
+        "temporal-dual-read",
+        false,
+    )
+    .expect("build Turbopuffer store");
+    let retriever = HybridRetriever::new(
+        session_store.pool().clone(),
+        Arc::new(graph.clone()),
+        Arc::new(vector),
+    )
+    .with_turbopuffer(Some(Arc::new(turbopuffer)))
+    .with_assume_app_role(true);
+
+    let hits = retriever
+        .retrieve(RetrievalRequest {
+            seeds: Vec::new(),
+            query_text: String::new(),
+            query_embedding: deterministic_vector(fact),
+            scope: tenant_memory_scope(&storage_partition_id),
+            label_filter: Some(vec![NodeLabel::Fact]),
+            max_pii_class: PiiClass::Restricted,
+            k_final: 5,
+            use_reranker: false,
+            strategy: None,
+            as_of: Some(utc("2026-03-01T00:00:00Z")),
+            ranking_reference_time: None,
+            lineage: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: false,
+        })
+        .await
+        .expect("retrieve through pgvector source");
+
+    assert_eq!(hits.first().map(|hit| hit.uid), Some(fact_uid));
+    assert!(hits[0].legs.vector, "{hits:?}");
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose captured requests");
+    assert_eq!(
+        requests.len(),
+        0,
+        "dual-read as_of vector reads must not call Turbopuffer"
+    );
+
+    let _ = graph
+        .hard_purge(fact_uid, "redacted:hybrid-temporal-dual-read-test")
         .await;
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)

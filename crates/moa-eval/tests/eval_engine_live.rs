@@ -48,7 +48,7 @@ async fn live_eval_engine_runs_single_case() {
     );
 
     let temp = tempdir().unwrap();
-    let mut config = MoaConfig::default();
+    let mut config = MoaConfig::load().expect("live eval config should load from env");
     config.database.url = test_database_url();
     let engine = EvalEngine::new(
         config,

@@ -182,8 +182,10 @@ cluster rule book and per-scope counters that back this admission control.
 
 `moa-messaging` owns messaging adapters, renderers, and channel-neutral
 delivery helpers. The current conversation adapter is Slack; it converts Slack
-callbacks into the shared command/event model and renders approvals with
-channel-native controls when available. The crate also owns outbound
+messages into the shared command/event model and renders outbound Slack content
+as plain text or Markdown, including action-review notifications. Interactive
+Slack controls are intentionally out of scope; action-review decisions happen
+through the durable admin/API review surface. The crate also owns outbound
 notification connectors such as Postmark email and Twilio SMS, plus a delivery
 sink that routes email and SMS use cases such as contact verification through
 those existing connectors. Slack, Postmark, Twilio, and the delivery sink record
@@ -199,4 +201,4 @@ per-channel send slots and edit/delete references. With the memory backend,
 those values are per-pod best effort; durable conversation routing still comes
 from Postgres session/channel bindings and session events.
 
-Current implementation caveats are documented in `implementation-caveats.md`, especially around callback normalization and outbound routing anchors.
+Current implementation caveats are documented in `implementation-caveats.md`.

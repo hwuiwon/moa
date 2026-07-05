@@ -324,11 +324,10 @@ async fn knn_on_unprovisioned_partition_returns_no_hits_instead_of_erroring() {
 }
 
 #[tokio::test]
-async fn first_write_provisions_partition_embedder_and_pins_the_model() {
-    // Pins: with no production tenant-provisioning step, the FIRST vector
-    // write establishes the partition's embedder identity (model, version,
-    // dimension); later writes with a different model are rejected against
-    // the pinned identity instead of silently mixing vector spaces.
+async fn preseeded_partition_pins_embedder_model_for_vector_writes() {
+    // Pins: direct vector writes require a preseeded partition embedder
+    // identity and reject later writes from a different model instead of
+    // silently mixing vector spaces.
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
@@ -345,6 +344,7 @@ async fn first_write_provisions_partition_embedder_and_pins_the_model() {
         std::slice::from_ref(&item),
     )
     .await;
+    set_workspace_embedder_state(session_store.pool(), &storage_partition_id, "test-model").await;
 
     let store = PgvectorStore::new_for_app_role(
         session_store.pool().clone(),
@@ -353,7 +353,7 @@ async fn first_write_provisions_partition_embedder_and_pins_the_model() {
     store
         .upsert(std::slice::from_ref(&item))
         .await
-        .expect("first write provisions the partition and succeeds");
+        .expect("write with matching preseeded embedder succeeds");
 
     let pinned: (String, i32) = sqlx::query_as(
         "SELECT embedding_model, embedding_dimension FROM moa.storage_partition_state \

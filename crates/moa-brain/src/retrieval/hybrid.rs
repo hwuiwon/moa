@@ -14,7 +14,7 @@ use moa_db::ScopedConn;
 use moa_lineage_core::TurnId;
 use moa_memory_graph::{GraphError, GraphStore, NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_types::MemoryScope;
-use moa_memory_vector::{Error as VectorError, TurbopufferStore, VectorStore};
+use moa_memory_vector::{Error as VectorError, PgvectorStore, TurbopufferStore};
 use moa_providers::{ConfiguredReranker, Reranker, build_reranker_from_config};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -212,7 +212,7 @@ pub struct RetrievalHit {
 pub struct HybridRetriever {
     pool: PgPool,
     graph: Arc<dyn GraphStore>,
-    vector: Arc<dyn VectorStore>,
+    pgvector_source: Arc<PgvectorStore>,
     turbopuffer: Option<Arc<TurbopufferStore>>,
     reranker: Arc<dyn Reranker>,
     rerank_model: String,
@@ -224,12 +224,16 @@ pub struct HybridRetriever {
 impl HybridRetriever {
     /// Creates a hybrid retriever with deterministic no-op reranking.
     #[must_use]
-    pub fn new(pool: PgPool, graph: Arc<dyn GraphStore>, vector: Arc<dyn VectorStore>) -> Self {
+    pub fn new(
+        pool: PgPool,
+        graph: Arc<dyn GraphStore>,
+        pgvector_source: Arc<PgvectorStore>,
+    ) -> Self {
         let configured_reranker = ConfiguredReranker::noop();
         Self {
             pool,
             graph,
-            vector,
+            pgvector_source,
             turbopuffer: None,
             reranker: configured_reranker.reranker,
             rerank_model: configured_reranker.model,
@@ -245,11 +249,11 @@ impl HybridRetriever {
         config: &MoaConfig,
         pool: PgPool,
         graph: Arc<dyn GraphStore>,
-        vector: Arc<dyn VectorStore>,
+        pgvector_source: Arc<PgvectorStore>,
     ) -> Self {
         let configured = configured_reranker_or_noop(config);
         let turbopuffer = TurbopufferStore::from_config(config).ok().map(Arc::new);
-        Self::new(pool, graph, vector)
+        Self::new(pool, graph, pgvector_source)
             .with_turbopuffer(turbopuffer)
             .with_configured_reranker(configured)
             .with_ranking_config(RankingConfig::from(&config.memory.retrieval.ranking))
@@ -449,6 +453,10 @@ impl HybridRetriever {
             return Ok(Vec::new());
         }
 
+        if req.as_of.is_some() {
+            return run_vector_leg(self.pgvector_source.as_ref(), req).await;
+        }
+
         let tenant_id = req.scope.tenant_id();
         if state.is_dual_read_active() {
             return self.dual_read_vector_leg(req).await;
@@ -459,19 +467,10 @@ impl HybridRetriever {
                 .as_ref()
                 .ok_or_else(|| turbopuffer_unavailable_for_request(req))?;
             let scoped_turbopuffer = turbopuffer.scoped_to_tenant(tenant_id);
-            return match run_vector_leg(&scoped_turbopuffer, req).await {
-                Ok(hits) => Ok(hits),
-                Err(error) if is_turbopuffer_as_of_unsupported(&error) => {
-                    tracing::debug!(
-                        "Turbopuffer does not support as-of vector queries; using pgvector"
-                    );
-                    run_vector_leg(self.vector.as_ref(), req).await
-                }
-                Err(error) => Err(error),
-            };
+            return run_vector_leg(&scoped_turbopuffer, req).await;
         }
 
-        run_vector_leg(self.vector.as_ref(), req).await
+        run_vector_leg(self.pgvector_source.as_ref(), req).await
     }
 
     async fn lexical_leg(
@@ -526,7 +525,7 @@ impl HybridRetriever {
         };
 
         let scoped_turbopuffer = turbopuffer.scoped_to_tenant(req.scope.tenant_id());
-        let pg_future = run_vector_leg(self.vector.as_ref(), req);
+        let pg_future = run_vector_leg(self.pgvector_source.as_ref(), req);
         let tp_future = run_vector_leg(&scoped_turbopuffer, req);
         let (pg_result, tp_result) = tokio::join!(pg_future, tp_future);
 
@@ -540,9 +539,6 @@ impl HybridRetriever {
             (Err(error), Ok(pg_hits)) => {
                 tracing::warn!(error = %error, "Turbopuffer vector dual-read leg failed; using pgvector result");
                 Ok(pg_hits)
-            }
-            (Err(tp_error), Err(pg_error)) if is_turbopuffer_as_of_unsupported(&tp_error) => {
-                Err(pg_error)
             }
             (Err(error), Err(_)) => Err(error),
         }
@@ -835,15 +831,6 @@ where
     leg_or_empty(name, timed_leg(name, budget, future).await)
 }
 
-fn is_turbopuffer_as_of_unsupported(error: &RetrievalError) -> bool {
-    if let RetrievalError::Vector(VectorError::UnsupportedQueryFeature { backend, feature }) = error
-    {
-        *backend == "turbopuffer" && *feature == "as_of"
-    } else {
-        false
-    }
-}
-
 fn build_hits(fused: Vec<(Uuid, f64, LegSources)>, nodes: Vec<NodeIndexRow>) -> Vec<RetrievalHit> {
     let mut nodes_by_uid = nodes
         .into_iter()
@@ -1102,13 +1089,21 @@ mod tests {
         }
     }
 
+    fn lazy_pgvector_source(pool: &PgPool) -> Arc<PgvectorStore> {
+        Arc::new(PgvectorStore::new(
+            pool.clone(),
+            RlsContext::tenant(TenantId::from(Uuid::from_u128(0x100))),
+        ))
+    }
+
     #[tokio::test]
     async fn reranker_reorders_candidates_when_enabled() {
+        let pool = PgPool::connect_lazy("postgres://unused")
+            .expect("lazy pool construction should not connect");
         let retriever = HybridRetriever::new(
-            PgPool::connect_lazy("postgres://unused")
-                .expect("lazy pool construction should not connect"),
+            pool.clone(),
             Arc::new(EmptyGraph),
-            Arc::new(EmptyVector),
+            lazy_pgvector_source(&pool),
         )
         .with_reranker(Arc::new(ReverseReranker));
         let req = RetrievalRequest {
@@ -1605,11 +1600,12 @@ mod tests {
     }
 
     fn lazy_retriever() -> HybridRetriever {
+        let pool = PgPool::connect_lazy("postgres://unused")
+            .expect("lazy pool construction should not connect");
         HybridRetriever::new(
-            PgPool::connect_lazy("postgres://unused")
-                .expect("lazy pool construction should not connect"),
+            pool.clone(),
             Arc::new(EmptyGraph),
-            Arc::new(EmptyVector),
+            lazy_pgvector_source(&pool),
         )
     }
 
@@ -1802,37 +1798,6 @@ mod tests {
             _as_of: Option<DateTime<Utc>>,
         ) -> std::result::Result<Vec<NodeIndexRow>, GraphError> {
             Ok(Vec::new())
-        }
-    }
-
-    struct EmptyVector;
-
-    #[async_trait]
-    impl VectorStore for EmptyVector {
-        fn backend(&self) -> &'static str {
-            "empty"
-        }
-
-        fn dimension(&self) -> usize {
-            1024
-        }
-
-        async fn upsert(
-            &self,
-            _items: &[moa_memory_vector::VectorItem],
-        ) -> std::result::Result<(), VectorError> {
-            unreachable!("not used by retrieval tests")
-        }
-
-        async fn knn(
-            &self,
-            _query: &moa_memory_vector::VectorQuery,
-        ) -> std::result::Result<Vec<moa_memory_vector::VectorMatch>, VectorError> {
-            Ok(Vec::new())
-        }
-
-        async fn delete(&self, _uids: &[Uuid]) -> std::result::Result<(), VectorError> {
-            unreachable!("not used by retrieval tests")
         }
     }
 }

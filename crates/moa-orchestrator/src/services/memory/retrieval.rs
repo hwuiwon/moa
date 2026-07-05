@@ -248,12 +248,11 @@ async fn memory_stack(
     let pool = runtime.graph_pool();
     let config = runtime.config();
     let vector_factory = VectorStoreFactory::from_config(config.as_ref());
-    let vector = vector_factory
-        .configured_for_scope(&pool, scope.to_rls_context(), true)
-        .await
-        .map_err(memory_handler_error)?;
-    let retriever = HybridRetriever::from_config(config.as_ref(), pool, graph.clone(), vector)
-        .with_assume_app_role(true);
+    let pgvector_source =
+        vector_factory.pgvector_source_for_app_role(pool.clone(), scope.to_rls_context());
+    let retriever =
+        HybridRetriever::from_config(config.as_ref(), pool, graph.clone(), pgvector_source)
+            .with_assume_app_role(true);
     Ok((graph, Arc::new(retriever)))
 }
 

@@ -268,18 +268,6 @@ string_id!(
     pub struct MessageId
 );
 
-/// Button style for outbound channel actions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ButtonStyle {
-    /// Primary action.
-    Primary,
-    /// Destructive or dangerous action.
-    Danger,
-    /// Secondary action.
-    Secondary,
-}
-
 /// Diff hunk for rendered channel output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffHunk {
@@ -349,26 +337,11 @@ pub enum MessageContent {
     },
 }
 
-/// Outbound button definition.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActionButton {
-    /// Stable button identifier.
-    pub id: String,
-    /// Button label.
-    pub label: String,
-    /// Button style.
-    pub style: ButtonStyle,
-    /// Channel callback payload.
-    pub callback_data: String,
-}
-
 /// Normalized outbound message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboundMessage {
     /// Renderable message content.
     pub content: MessageContent,
-    /// Attached buttons.
-    pub buttons: Vec<ActionButton>,
     /// Concrete channel route when the caller already resolved it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_ref: Option<ChannelRef>,
@@ -383,10 +356,6 @@ pub struct OutboundMessage {
 pub struct ChannelCapabilities {
     /// Maximum message length.
     pub max_message_length: usize,
-    /// Whether inline buttons are supported.
-    pub supports_inline_buttons: bool,
-    /// Whether modals are supported.
-    pub supports_modals: bool,
     /// Whether ephemeral messages are supported.
     pub supports_ephemeral: bool,
     /// Whether threaded conversations are supported.

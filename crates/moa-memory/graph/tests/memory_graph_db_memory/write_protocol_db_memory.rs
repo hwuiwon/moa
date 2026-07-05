@@ -230,6 +230,19 @@ async fn vector_count(pool: &PgPool, storage_partition_id: &str, uid: Uuid) -> i
     count
 }
 
+async fn embedding_model_for_partition(pool: &PgPool, storage_partition_id: &str) -> String {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
+    let embedding_model = sqlx::query_scalar::<_, String>(
+        "SELECT embedding_model FROM moa.storage_partition_state WHERE storage_partition_id = $1",
+    )
+    .bind(storage_partition_id)
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("read storage partition embedding model");
+    conn.commit().await.expect("commit embedding model read");
+    embedding_model
+}
+
 async fn node_valid_to(
     pool: &PgPool,
     storage_partition_id: &str,
@@ -639,6 +652,10 @@ async fn graph_write_runs_vector_sync_after_commit_db_memory() {
 
     assert_eq!(post_commit_calls.load(Ordering::SeqCst), 1);
     assert_eq!(visible_rows_at_sync.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        embedding_model_for_partition(session_store.pool(), &storage_partition_id).await,
+        "test-model"
+    );
     assert_eq!(
         node_valid_to(session_store.pool(), &storage_partition_id, uid).await,
         None

@@ -5,7 +5,7 @@ use moa_core::{
 };
 use moa_providers::OpenAIProvider;
 use serde_json::{Value, json};
-use tokio::time::{advance, timeout};
+use tokio::time::timeout;
 use wiremock::MockServer;
 
 use crate::support::openai_wiremock::{OPENAI_MODEL, mount_openai_sse};
@@ -122,7 +122,6 @@ async fn openai_offline_tool_call_response_parses_into_provider_event() {
 
 #[tokio::test]
 async fn openai_offline_429_response_triggers_retry_with_backoff() {
-    tokio::time::pause();
     let server = MockServer::start().await;
     mount_retry_then_sse(
         &server,
@@ -133,19 +132,12 @@ async fn openai_offline_429_response_triggers_retry_with_backoff() {
     .await;
     let provider = provider(&server, 1);
 
-    let task = tokio::spawn(async move {
-        provider
-            .complete(minimal_request("retry after rate limit"))
-            .await
-            .expect("request should start")
-            .collect()
-            .await
-    });
-    tokio::task::yield_now().await;
-    advance(Duration::from_secs(2)).await;
-    let response = task
+    let response = provider
+        .complete(minimal_request("retry after rate limit"))
         .await
-        .expect("task should join")
+        .expect("request should start")
+        .collect()
+        .await
         .expect("retry succeeds");
 
     assert_eq!(response.text, "Hello");
@@ -154,7 +146,6 @@ async fn openai_offline_429_response_triggers_retry_with_backoff() {
 
 #[tokio::test]
 async fn openai_offline_500_response_triggers_retry_then_surfaces_typed_error() {
-    tokio::time::pause();
     let server = MockServer::start().await;
     mount_always_status(
         &server,
@@ -164,19 +155,12 @@ async fn openai_offline_500_response_triggers_retry_then_surfaces_typed_error() 
     .await;
     let provider = provider(&server, 1);
 
-    let task = tokio::spawn(async move {
-        provider
-            .complete(minimal_request("retry server error"))
-            .await
-            .expect("request should start")
-            .collect()
-            .await
-    });
-    tokio::task::yield_now().await;
-    advance(Duration::from_secs(2)).await;
-    let error = task
+    let error = provider
+        .complete(minimal_request("retry server error"))
         .await
-        .expect("task should join")
+        .expect("request should start")
+        .collect()
+        .await
         .expect_err("500 should fail");
 
     assert!(
@@ -311,7 +295,6 @@ async fn openai_offline_exhausted_429_surfaces_typed_rate_limit_error() {
     // Anthropic/Gemini, the OpenAI Responses adapter exhausts retries inside its
     // own stream-consume loop, so the surfaced variant is asserted from the real
     // path here.
-    tokio::time::pause();
     let server = MockServer::start().await;
     mount_always_status(
         &server,
@@ -321,19 +304,12 @@ async fn openai_offline_exhausted_429_surfaces_typed_rate_limit_error() {
     .await;
     let provider = provider(&server, 1);
 
-    let task = tokio::spawn(async move {
-        provider
-            .complete(minimal_request("retry until exhausted"))
-            .await
-            .expect("request should start")
-            .collect()
-            .await
-    });
-    tokio::task::yield_now().await;
-    advance(Duration::from_secs(5)).await;
-    let error = task
+    let error = provider
+        .complete(minimal_request("retry until exhausted"))
         .await
-        .expect("task should join")
+        .expect("request should start")
+        .collect()
+        .await
         .expect_err("exhausted 429 should fail");
 
     assert!(

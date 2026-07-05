@@ -18,9 +18,11 @@ use moa_lineage_core::{LineageEvent, RetrievalLineage};
 use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{
-    PgvectorStore, PromotionOptions, VECTOR_DIMENSION, VectorPartitionPromotion, VectorStore,
+    PgvectorStore, PromotionOptions, TurbopufferStore, VECTOR_DIMENSION, VectorPartitionPromotion,
+    VectorStore,
 };
 use moa_session::testing;
+use secrecy::SecretString;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio::sync::Mutex;
@@ -848,12 +850,22 @@ fn cached_retriever(
     tenant_id: TenantId,
     graph: &PostgresGraphStore,
 ) -> CachedHybridRetriever {
-    let vector: Arc<dyn VectorStore> = Arc::new(PgvectorStore::new_for_app_role(
+    let vector: Arc<PgvectorStore> = Arc::new(PgvectorStore::new_for_app_role(
         pool.clone(),
         RlsContext::tenant(tenant_id),
     ));
+    let turbopuffer = Arc::new(
+        TurbopufferStore::new(
+            "http://127.0.0.1:9".to_string(),
+            SecretString::from("unused-key"),
+            "cache-version-test",
+            false,
+        )
+        .expect("build inert Turbopuffer store"),
+    );
     let hybrid = Arc::new(
         HybridRetriever::new(pool.clone(), Arc::new(graph.clone()), vector)
+            .with_turbopuffer(Some(turbopuffer))
             .with_assume_app_role(true),
     );
     CachedHybridRetriever::new_for_app_role(hybrid, pool.clone())

@@ -1,22 +1,16 @@
 //! Unified action-review rendering across channel adapters.
 
-use moa_core::{Channel, ChannelCapabilities, MessageContent, OutboundMessage};
+use moa_core::{MessageContent, OutboundMessage};
 
 use crate::renderer::render_action_review_request;
 
-/// Adds channel-native action-review affordances to an outbound message when possible.
-pub fn prepare_outbound_message(
-    _channel: Channel,
-    capabilities: &ChannelCapabilities,
-    mut message: OutboundMessage,
-) -> OutboundMessage {
+/// Converts structured action-review requests into text-only outbound content.
+pub fn prepare_outbound_message(mut message: OutboundMessage) -> OutboundMessage {
     let MessageContent::ActionReviewRequest { envelope, preview } = &message.content else {
         return message;
     };
 
-    if !capabilities.supports_inline_buttons {
-        message.content = MessageContent::Markdown(render_action_review_request(envelope, preview));
-    }
+    message.content = MessageContent::Markdown(render_action_review_request(envelope, preview));
 
     message
 }
@@ -25,9 +19,8 @@ pub fn prepare_outbound_message(
 mod tests {
     use chrono::Utc;
     use moa_core::{
-        ActionClass, ActionEnvelope, ActionReviewField, ActionReviewPreview, Channel,
-        ChannelCapabilities, MessageContent, OutboundMessage, RiskLevel, SessionActorRef, TenantId,
-        ToolCallId,
+        ActionClass, ActionEnvelope, ActionReviewField, ActionReviewPreview, MessageContent,
+        OutboundMessage, RiskLevel, SessionActorRef, TenantId, ToolCallId,
     };
     use uuid::Uuid;
 
@@ -68,43 +61,15 @@ mod tests {
                     file_diffs: Vec::new(),
                 }),
             },
-            buttons: Vec::new(),
             channel_ref: None,
             reply_to: Some("42".to_string()),
             ephemeral: false,
         }
     }
 
-    fn capabilities(supports_inline_buttons: bool) -> ChannelCapabilities {
-        ChannelCapabilities {
-            max_message_length: 2_000,
-            supports_inline_buttons,
-            supports_modals: supports_inline_buttons,
-            supports_ephemeral: supports_inline_buttons,
-            supports_threads: true,
-            supports_code_blocks: true,
-            supports_edit: supports_inline_buttons,
-            supports_reactions: false,
-            min_edit_interval: std::time::Duration::from_secs(0),
-        }
-    }
-
-    #[test]
-    fn prepare_outbound_message_keeps_review_card_when_buttons_are_available() {
-        let prepared =
-            prepare_outbound_message(Channel::Slack, &capabilities(true), review_message());
-
-        assert!(matches!(
-            prepared.content,
-            MessageContent::ActionReviewRequest { .. }
-        ));
-        assert!(prepared.buttons.is_empty());
-    }
-
     #[test]
     fn prepare_outbound_message_degrades_review_card_to_text() {
-        let prepared =
-            prepare_outbound_message(Channel::Chat, &capabilities(false), review_message());
+        let prepared = prepare_outbound_message(review_message());
 
         match prepared.content {
             MessageContent::Markdown(text) => {
@@ -113,5 +78,17 @@ mod tests {
             }
             other => panic!("expected markdown fallback, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn prepare_outbound_message_preserves_non_action_content() {
+        let message = OutboundMessage {
+            content: MessageContent::Text("hello".to_string()),
+            channel_ref: None,
+            reply_to: None,
+            ephemeral: false,
+        };
+
+        assert_eq!(prepare_outbound_message(message.clone()), message);
     }
 }

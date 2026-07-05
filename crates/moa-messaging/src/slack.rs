@@ -560,7 +560,7 @@ impl ChannelAdapter for SlackAdapter {
 
     /// Sends a new outbound Slack message, splitting at Slack's length limit.
     async fn send(&self, msg: OutboundMessage) -> Result<MessageId> {
-        let msg = prepare_outbound_message(self.channel(), &self.capabilities(), msg);
+        let msg = prepare_outbound_message(msg);
         let target = self
             .resolve_target(msg.reply_to.as_deref(), msg.channel_ref.as_ref())
             .await?;
@@ -601,7 +601,7 @@ impl ChannelAdapter for SlackAdapter {
 impl SlackAdapter {
     async fn edit_locked(&self, msg_id: &MessageId, msg: OutboundMessage) -> Result<()> {
         self.record_edit_attempt(msg_id).await;
-        let msg = prepare_outbound_message(self.channel(), &self.capabilities(), msg);
+        let msg = prepare_outbound_message(msg);
 
         let existing = self.outbound_refs.resolve(msg_id).await?;
         let rendered = self.renderer.render(&msg);
@@ -1183,7 +1183,7 @@ fn slack_sender_name(sender: &SlackMessageSender) -> String {
 fn slack_message_content(chunk: &SlackRenderChunk) -> SlackMessageContent {
     SlackMessageContent {
         text: Some(chunk.text.clone()),
-        blocks: chunk.blocks.clone(),
+        blocks: None,
         attachments: None,
         upload: None,
         files: None,
