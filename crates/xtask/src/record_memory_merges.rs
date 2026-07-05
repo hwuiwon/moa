@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use moa_eval::memory_eval::{MemoryMergeRecordingOptions, record_memory_merges};
 
-/// Records live LLM entity-merge fixtures for a memory eval corpus.
+/// Records live model entity-merge fixtures for a memory eval corpus.
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     let options = Options::parse(args)?;
     let mut recording = MemoryMergeRecordingOptions::new(&options.corpus);
@@ -110,7 +110,7 @@ impl Options {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- record-memory-merges --corpus <path> [--output <path>] [--extractions <path>] [--api-key-env MOA_COHERE_API_KEY] [--model command-a-plus-05-2026] [--timeout-ms N]"
+    "usage: cargo run -p xtask -- record-memory-merges --corpus <path> [--output <path>] [--extractions <path>] [--api-key-env MOA_OPENAI_API_KEY] [--model gpt-5.4-mini] [--timeout-ms N]"
 }
 
 fn parse_u64(value: &str, flag: &str) -> Result<u64> {

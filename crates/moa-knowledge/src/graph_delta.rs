@@ -15,9 +15,6 @@ pub struct KnowledgeGraphDelta {
     /// Edges to upsert.
     #[serde(default)]
     pub edges: Vec<GraphEdgeUpsert>,
-    /// Chunk hashes to tombstone or delete from active retrieval.
-    #[serde(default)]
-    pub tombstone_chunk_hashes: Vec<String>,
 }
 
 /// Graph node upsert request.
@@ -96,7 +93,6 @@ pub fn document_chunk_delta(
             relationship: "HAS_DOCUMENT".to_string(),
             properties: serde_json::json!({}),
         }],
-        tombstone_chunk_hashes: Vec::new(),
     };
     for chunk in chunks {
         let chunk_key = format!("chunk:{}:{}", object.tenant_id, chunk.chunk_hash);

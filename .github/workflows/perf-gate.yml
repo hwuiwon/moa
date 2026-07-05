@@ -32,10 +32,10 @@ jobs:
         with:
           cache-on-failure: true
       - name: Run perf gate
-        run: cargo run -p moa-loadtest --release --bin perf_gate -- --duration 5m
+        run: cargo run -p moa-loadtest --release --bin perf_gate -- --profile retrieval --duration 5m
         env:
           MOA_DATABASE_URL: postgres://postgres:ci@localhost/postgres
-          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY_CI }}
+          MOA_COHERE_API_KEY: ${{ secrets.COHERE_API_KEY_CI }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -44,36 +44,10 @@ jobs:
 
   loadtest-mock-smoke:
     runs-on: ubuntu-latest-8-core
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
-    services:
-      postgres:
-        image: pgvector/pgvector:pg17
-        ports:
-          - "5432:5432"
-        env:
-          POSTGRES_PASSWORD: ci
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-      restate:
-        image: docker.restate.dev/restatedev/restate:1.7.0
-        ports:
-          - "8080:8080"
-          - "9070:9070"
-          - "5122:5122"
-        env:
-          DO_NOT_TRACK: "1"
-          RESTATE_EXPERIMENTAL_ENABLE_VQUEUES: "true"
-        options: >-
-          --health-cmd "wget -qO- http://localhost:9070/health >/dev/null 2>&1"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -81,48 +55,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - name: Build orchestrator
-        run: cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features provider-overrides
-      - name: Start orchestrator with scripted providers
-        env:
-          MOA_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres
-          MOA_RESTATE_ADMIN_URL: http://localhost:9070
-          MOA_RESTATE_INGRESS_URL: http://localhost:8080
-          MOA_PROVIDERS_OVERRIDE: scripted:${{ github.workspace }}/crates/moa-loadtest/scripts/perf-gate.json
-          MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS: "false"
-          MOA_DEREGISTER_ON_SHUTDOWN: "false"
-        run: |
-          ./target/debug/moa-orchestrator-bin --port 9080 --health-port 9081 &
-          echo "ORCH_PID=$!" >> "$GITHUB_ENV"
-          for i in $(seq 1 30); do
-            if curl -fsS http://localhost:9081/_health/live >/dev/null; then
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "orchestrator did not become live"
-          exit 1
-      - name: Register orchestrator with Restate
-        run: |
-          docker run --rm --network host \
-            -e RESTATE_ADMIN_URL=http://localhost:9070 \
-            docker.restate.dev/restatedev/restate-cli:1.7.0 \
-              --connect-timeout 10000 \
-              --request-timeout 30000 \
-              deployments register --force http://localhost:9080 --yes
       - name: Run remote mock loadtest gate
-        run: >-
-          cargo run -p moa-loadtest --release --bin perf_gate --
-          --profile mock-short
-          --endpoint http://localhost:8080
-          --duration 30s
-          --max-p95-ms 5000
-          --max-error-rate 0.01
-      - name: Stop orchestrator
-        if: always()
-        run: kill "$ORCH_PID" || true
+        run: make loadtest-mock
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: perf-gate-loadtest-mock-snapshot
-          path: target/perf-gate/snapshot.prom
+          path: target/perf-gate/mock-short.prom

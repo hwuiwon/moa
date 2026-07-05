@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use moa_core::RlsContext;
-use moa_core::{ActionRuleScope, MoaError, Result, SessionId, StoragePartitionId, UserId};
+use moa_core::{
+    ActionRuleScope, ContactId, MoaError, Result, SessionId, StoragePartitionId, UserId,
+};
 use moa_db::ScopedConn;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -43,6 +45,14 @@ impl ArtifactScopeParts {
                 storage_partition_id: Some(StoragePartitionId::for_tenant(*tenant_id).to_string()),
                 user_id: None,
             },
+            ActionRuleScope::Contact {
+                tenant_id,
+                contact_id,
+            } => Self {
+                tenant_id: Some(tenant_id.0),
+                storage_partition_id: Some(StoragePartitionId::for_tenant(*tenant_id).to_string()),
+                user_id: Some(contact_id.to_string()),
+            },
         }
     }
 }
@@ -50,6 +60,10 @@ impl ArtifactScopeParts {
 fn artifact_scope_context(scope: &ActionRuleScope) -> RlsContext {
     match scope {
         ActionRuleScope::Tenant { tenant_id } => RlsContext::tenant(*tenant_id),
+        ActionRuleScope::Contact {
+            tenant_id,
+            contact_id,
+        } => RlsContext::contact(*tenant_id, *contact_id),
     }
 }
 
@@ -624,10 +638,11 @@ impl ArtifactRegistry {
               AND ($3::TEXT IS NULL OR a.kind = $3)
               AND ($4::TEXT IS NULL OR r.status = $4)
               AND a.storage_partition_id = $1
-              AND a.user_id IS NULL
+              AND (a.user_id IS NULL OR a.user_id IS NOT DISTINCT FROM $2)
             ORDER BY
               a.kind ASC,
               a.name ASC,
+              CASE WHEN a.user_id IS NOT NULL THEN 0 ELSE 1 END ASC,
               r.version DESC
             "#,
         )
@@ -720,7 +735,7 @@ impl ArtifactRegistry {
             FROM moa.artifact_run
             WHERE run_uid = $3
               AND storage_partition_id = $1
-              AND user_id IS NULL
+              AND user_id IS NOT DISTINCT FROM $2
             LIMIT 1
             "#,
         )
@@ -775,7 +790,7 @@ impl ArtifactRegistry {
                 updated_at = now()
             WHERE run_uid = $14
               AND storage_partition_id = $1
-              AND user_id IS NULL
+              AND user_id IS NOT DISTINCT FROM $15
             RETURNING run_uid, artifact_uid, revision_uid, session_id, procedure_ref, status,
                       current_node_id, input, state, output, error, started_at, completed_at
             "#,
@@ -794,6 +809,7 @@ impl ArtifactRegistry {
         .bind(completed_at_present)
         .bind(completed_at_value)
         .bind(run_uid)
+        .bind(parts.user_id.as_deref())
         .fetch_optional(&mut *conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
@@ -820,7 +836,7 @@ impl ArtifactRegistry {
             WHERE run_uid = $3
               AND status NOT IN ('completed', 'failed', 'cancelled')
               AND storage_partition_id = $1
-              AND user_id IS NULL
+              AND user_id IS NOT DISTINCT FROM $2
             RETURNING run_uid, artifact_uid, revision_uid, session_id, procedure_ref, status,
                       current_node_id, input, state, output, error, started_at, completed_at
             "#,
@@ -851,7 +867,7 @@ impl ArtifactRegistry {
             WHERE run_uid = $2
               AND node_id = $3
               AND storage_partition_id = $1
-              AND user_id IS NULL
+              AND user_id IS NOT DISTINCT FROM $4
             ORDER BY started_at ASC, node_run_uid ASC
             LIMIT 1
             "#,
@@ -859,6 +875,7 @@ impl ArtifactRegistry {
         .bind(parts.storage_partition_id.as_deref())
         .bind(node_run.run_uid)
         .bind(&node_run.node_id)
+        .bind(parts.user_id.as_deref())
         .fetch_optional(&mut *conn.as_mut())
         .await
         .map_err(map_sqlx_error)?
@@ -922,13 +939,14 @@ impl ArtifactRegistry {
             WHERE run_uid = $2
               AND node_id = ANY($3)
               AND storage_partition_id = $1
-              AND user_id IS NULL
+              AND user_id IS NOT DISTINCT FROM $4
             ORDER BY started_at ASC, node_run_uid ASC
             "#,
         )
         .bind(parts.storage_partition_id.as_deref())
         .bind(run_uid)
         .bind(&node_ids)
+        .bind(parts.user_id.as_deref())
         .fetch_all(&mut *conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
@@ -1012,7 +1030,7 @@ impl ArtifactRegistry {
                 updated_at = now()
             WHERE node_run_uid = $10
               AND storage_partition_id = $1
-              AND user_id IS NULL
+              AND user_id IS NOT DISTINCT FROM $11
             RETURNING node_run_uid, run_uid, node_id, status, input, output, error,
                       started_at, completed_at
             "#,
@@ -1027,6 +1045,7 @@ impl ArtifactRegistry {
         .bind(completed_at_present)
         .bind(completed_at_value)
         .bind(node_run_uid)
+        .bind(parts.user_id.as_deref())
         .fetch_optional(&mut *conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
@@ -1049,12 +1068,13 @@ impl ArtifactRegistry {
             FROM moa.artifact_node_run
             WHERE run_uid = $2
               AND storage_partition_id = $1
-              AND user_id IS NULL
+              AND user_id IS NOT DISTINCT FROM $3
             ORDER BY started_at ASC, node_run_uid ASC
             "#,
         )
         .bind(parts.storage_partition_id.as_deref())
         .bind(run_uid)
+        .bind(parts.user_id.as_deref())
         .fetch_all(&mut *conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
@@ -1146,8 +1166,9 @@ async fn load_visible_with_status(
           AND a.name = $4
           AND ($5::TEXT IS NULL OR r.status = $5)
           AND a.storage_partition_id = $1
-          AND a.user_id IS NULL
+          AND (a.user_id IS NULL OR a.user_id IS NOT DISTINCT FROM $2)
         ORDER BY
+          CASE WHEN a.user_id IS NOT NULL THEN 0 ELSE 1 END ASC,
           r.version DESC
         LIMIT 1
         "#
@@ -1324,7 +1345,7 @@ async fn load_files(
         JOIN moa.artifact a ON a.artifact_uid = f.artifact_uid
         WHERE f.revision_uid = $3
           AND a.storage_partition_id = $1
-          AND a.user_id IS NULL
+          AND (a.user_id IS NULL OR a.user_id IS NOT DISTINCT FROM $2)
         ORDER BY f.path ASC
         "#,
     )
@@ -1336,6 +1357,35 @@ async fn load_files(
     .map_err(map_sqlx_error)?;
 
     rows.iter().map(file_from_row).collect()
+}
+
+fn scope_from_columns(
+    scope: String,
+    storage_partition_id: Option<String>,
+    user_id: Option<String>,
+) -> Result<(Option<StoragePartitionId>, Option<UserId>, String)> {
+    let storage_partition_id = storage_partition_id.map(StoragePartitionId::new);
+    let user_id = match (scope.as_str(), user_id) {
+        ("tenant", None) => None,
+        ("contact", Some(user_id)) => {
+            parse_contact_user_id(&user_id)?;
+            Some(UserId::new(user_id))
+        }
+        _ => {
+            return Err(MoaError::StorageError(format!(
+                "invalid artifact scope columns for `{scope}`"
+            )));
+        }
+    };
+    Ok((storage_partition_id, user_id, scope))
+}
+
+fn parse_contact_user_id(value: &str) -> Result<ContactId> {
+    uuid::Uuid::parse_str(value)
+        .map(ContactId)
+        .map_err(|error| {
+            MoaError::StorageError(format!("invalid contact scope `{value}`: {error}"))
+        })
 }
 
 /// Column projection shared by every full artifact-revision load.
@@ -1352,18 +1402,18 @@ fn revision_from_row(row: &sqlx::postgres::PgRow) -> Result<StoredArtifactRevisi
     let kind_text: String = row.try_get("kind").map_err(map_sqlx_error)?;
     let status_text: String = row.try_get("status").map_err(map_sqlx_error)?;
     let definition: Value = row.try_get("definition").map_err(map_sqlx_error)?;
+    let (storage_partition_id, user_id, scope) = scope_from_columns(
+        row.try_get("scope").map_err(map_sqlx_error)?,
+        row.try_get("storage_partition_id")
+            .map_err(map_sqlx_error)?,
+        row.try_get("user_id").map_err(map_sqlx_error)?,
+    )?;
     Ok(StoredArtifactRevision {
         artifact_uid: row.try_get("artifact_uid").map_err(map_sqlx_error)?,
         revision_uid: row.try_get("revision_uid").map_err(map_sqlx_error)?,
-        storage_partition_id: row
-            .try_get::<Option<String>, _>("storage_partition_id")
-            .map_err(map_sqlx_error)?
-            .map(StoragePartitionId::new),
-        user_id: row
-            .try_get::<Option<String>, _>("user_id")
-            .map_err(map_sqlx_error)?
-            .map(UserId::new),
-        scope: row.try_get("scope").map_err(map_sqlx_error)?,
+        storage_partition_id,
+        user_id,
+        scope,
         kind: kind_text
             .parse()
             .map_err(|error: crate::Error| MoaError::StorageError(error.to_string()))?,

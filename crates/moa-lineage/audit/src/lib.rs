@@ -9,10 +9,8 @@
 //!
 //! Do not represent this implementation as compliance evidence to customers,
 //! auditors, regulators, or certification bodies until external cryptographic
-//! review is complete and linked from the architecture documentation. The
-//! `ct-merkle` crate used for RFC 6962 proof shape support is explicitly not
-//! audited by its authors. Internal engineering forensics are not blocked by
-//! that gate.
+//! review is complete and linked from the architecture documentation. Internal
+//! engineering forensics are not blocked by that gate.
 
 pub mod admin;
 pub mod error;
@@ -25,7 +23,10 @@ pub use error::{AuditError, Result};
 pub use export::{DsarBundle, DsarExporter, DsarJsonlExport, ExportOptions, RootWindow};
 pub use merkle::{
     AuditRootManifest, MerkleRootPublisher, ObjectLockMode, RootPublisherConfig,
-    blake3_inclusion_proof, blake3_merkle_root, ct_sha256_root, verify_blake3_inclusion,
+    blake3_inclusion_proof, blake3_merkle_root, verify_blake3_inclusion,
 };
-pub use signing::{AuditRootSignaturePayload, LocalSigningKeyVault, SigningKey, SigningKeyVault};
+pub use signing::{
+    AuditRootSignature, AuditRootSignaturePayload, AuditRootSigner, HttpAuditRootSigner,
+    LocalAuditRootSigner, SigningKey,
+};
 pub use vault::{PiiVault, PseudonymizationOutcome, RedactionEvent};

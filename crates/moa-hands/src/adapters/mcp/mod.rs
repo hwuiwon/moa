@@ -1,24 +1,15 @@
-//! Model Context Protocol client support for stdio and remote transports.
+//! Model Context Protocol client support for HTTP and SSE transports.
 
 use std::collections::HashMap;
-use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use eventsource_stream::Eventsource;
 use futures_util::{StreamExt, pin_mut};
-use moa_core::{
-    McpServerConfig, McpTransportConfig, MoaError, Result, ToolContent, ToolFailureClass,
-    ToolOutput, classify_tool_error,
-};
+use moa_core::{McpServerConfig, MoaError, Result, ToolContent, ToolOutput};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{Mutex, oneshot};
-use tokio::task::JoinHandle;
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const DEFAULT_MCP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -37,24 +28,16 @@ pub struct McpDiscoveredTool {
 /// Async MCP client bound to a single configured server.
 pub struct MCPClient {
     server_name: String,
-    transport: McpTransport,
+    transport: RemoteClient,
     next_id: AtomicU64,
 }
 
 impl MCPClient {
     /// Connects to an MCP server and performs the initialize handshake.
     pub async fn connect(config: &McpServerConfig) -> Result<Self> {
-        let transport = match config.transport {
-            McpTransportConfig::Stdio => {
-                McpTransport::Stdio(Box::new(StdioTransport::spawn(config)?))
-            }
-            McpTransportConfig::Http | McpTransportConfig::Sse => {
-                McpTransport::Remote(RemoteClient::new(config)?)
-            }
-        };
         let client = Self {
             server_name: config.name.clone(),
-            transport,
+            transport: RemoteClient::new(config)?,
             next_id: AtomicU64::new(1),
         };
         client.initialize().await?;
@@ -104,19 +87,6 @@ impl MCPClient {
         Ok(flatten_call_result(response))
     }
 
-    /// Returns whether the current MCP transport is still healthy enough for another request.
-    pub async fn health_check(&self) -> Result<bool> {
-        Ok(match &self.transport {
-            McpTransport::Stdio(transport) => !transport.closed.load(Ordering::Acquire),
-            McpTransport::Remote(_) => true,
-        })
-    }
-
-    /// Classifies one MCP execution error for retry and reconnect decisions.
-    pub fn classify_error(error: &MoaError, consecutive_timeouts: u32) -> ToolFailureClass {
-        self::classify_error(error, consecutive_timeouts)
-    }
-
     async fn initialize(&self) -> Result<()> {
         let _ = self
             .request(
@@ -141,10 +111,7 @@ impl MCPClient {
             "method": method,
             "params": params,
         });
-        match &self.transport {
-            McpTransport::Stdio(transport) => transport.notify(message).await,
-            McpTransport::Remote(transport) => transport.notify(message).await,
-        }
+        self.transport.notify(message).await
     }
 
     async fn request(&self, method: &str, params: Value, headers: HeaderMap) -> Result<Value> {
@@ -155,238 +122,13 @@ impl MCPClient {
             "method": method,
             "params": params,
         });
-        let response = match &self.transport {
-            McpTransport::Stdio(transport) => transport.request(message_id, request).await?,
-            McpTransport::Remote(transport) => transport.request(request, headers).await?,
-        };
+        let response = self.transport.request(request, headers).await?;
         parse_jsonrpc_result(response)
     }
 }
 
-enum McpTransport {
-    Stdio(Box<StdioTransport>),
-    Remote(RemoteClient),
-}
-
 // ---------------------------------------------------------------------------
-// Stdio transport — demuxed, concurrent-safe
-// ---------------------------------------------------------------------------
-
-/// Process-local stdio transport state: id -> oneshot sender for one response.
-///
-/// This map only demultiplexes responses from a child process owned by this
-/// client. It is not cross-request correctness state and is never used by
-/// cloud-safe HTTP/SSE transports.
-type PendingMap = Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>;
-
-struct StdioTransport {
-    /// Mutex only held during the actual `write_all` call — released before
-    /// waiting for a response.
-    writer: Mutex<ChildStdin>,
-    pending: Arc<PendingMap>,
-    closed: Arc<AtomicBool>,
-    /// Background reader task handle (kept so it is aborted on drop).
-    _reader_task: JoinHandle<()>,
-    /// Held to keep the child process alive.
-    _child: Child,
-}
-
-impl StdioTransport {
-    fn spawn(config: &McpServerConfig) -> Result<Self> {
-        let command = config.command.as_deref().ok_or_else(|| {
-            MoaError::ConfigError(format!(
-                "MCP server {} requires a command for stdio transport",
-                config.name
-            ))
-        })?;
-        let mut child = Command::new(command)
-            .args(&config.args)
-            .envs(&config.env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let stdin = child.stdin.take().ok_or_else(|| {
-            MoaError::ProviderError(format!(
-                "failed to capture stdin for MCP server {}",
-                config.name
-            ))
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            MoaError::ProviderError(format!(
-                "failed to capture stdout for MCP server {}",
-                config.name
-            ))
-        })?;
-
-        let pending: Arc<PendingMap> = Arc::new(Mutex::new(HashMap::new()));
-        let pending_reader = pending.clone();
-        let closed = Arc::new(AtomicBool::new(false));
-        let closed_reader = closed.clone();
-
-        let reader_task = tokio::spawn(async move {
-            run_reader(BufReader::new(stdout), pending_reader, closed_reader).await;
-        });
-
-        Ok(Self {
-            writer: Mutex::new(stdin),
-            pending,
-            closed,
-            _reader_task: reader_task,
-            _child: child,
-        })
-    }
-
-    fn ensure_open(&self) -> Result<()> {
-        if self.closed.load(Ordering::Acquire) {
-            return Err(MoaError::StreamError(
-                "MCP stdio transport is closed".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    /// Write a notification (fire-and-forget, no response expected).
-    async fn notify(&self, message: Value) -> Result<()> {
-        self.ensure_open()?;
-        let mut stdin = self.writer.lock().await;
-        write_framed_message(&mut stdin, &message).await
-        // lock released here — before any await that waits for a response
-    }
-
-    /// Send a request and wait for the matching response, fully concurrent.
-    async fn request(&self, id: u64, message: Value) -> Result<Value> {
-        self.ensure_open()?;
-        let (tx, rx) = oneshot::channel::<Result<Value>>();
-
-        // Register before writing so we never miss a fast response.
-        self.pending.lock().await.insert(id, tx);
-
-        // RAII guard: removes the pending entry if this future is dropped
-        // (cancelled) before the oneshot fires.
-        let pending_ref = self.pending.clone();
-        let guard = PendingGuard {
-            id,
-            pending: Some(pending_ref),
-        };
-
-        if self.closed.load(Ordering::Acquire) {
-            drop(guard);
-            return Err(MoaError::StreamError(
-                "MCP stdio transport is closed".to_string(),
-            ));
-        }
-
-        // Write to stdin — mutex is held only for the duration of the write.
-        {
-            let mut stdin = self.writer.lock().await;
-            if let Err(err) = write_framed_message(&mut stdin, &message).await {
-                drop(guard);
-                return Err(err);
-            }
-        } // write mutex released here
-
-        // Await the response via the oneshot — no lock held.
-        let result = tokio::time::timeout(DEFAULT_MCP_TIMEOUT, rx).await;
-
-        // Disarm the guard: the oneshot fired (or we're about to error out).
-        guard.disarm();
-
-        match result {
-            Ok(Ok(value)) => value,
-            Ok(Err(_)) => Err(MoaError::StreamError(
-                "MCP stdio reader task closed".to_string(),
-            )),
-            Err(_) => {
-                // Timeout: clean up the now-stale pending entry.
-                self.pending.lock().await.remove(&id);
-                Err(MoaError::StreamError(format!(
-                    "MCP stdio request timed out after {}s",
-                    DEFAULT_MCP_TIMEOUT.as_secs()
-                )))
-            }
-        }
-    }
-}
-
-/// RAII guard that removes a pending entry from the map when dropped (cancel
-/// safety). Call `disarm()` before intentional completion to skip removal.
-struct PendingGuard {
-    id: u64,
-    pending: Option<Arc<PendingMap>>,
-}
-
-impl PendingGuard {
-    fn disarm(mut self) {
-        self.pending = None;
-    }
-}
-
-impl Drop for PendingGuard {
-    fn drop(&mut self) {
-        if let Some(pending) = self.pending.take() {
-            if let Ok(mut map) = pending.try_lock() {
-                map.remove(&self.id);
-                return;
-            }
-
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let id = self.id;
-                handle.spawn(async move {
-                    pending.lock().await.remove(&id);
-                });
-                return;
-            }
-
-            loop {
-                if let Ok(mut map) = pending.try_lock() {
-                    map.remove(&self.id);
-                    break;
-                }
-                std::thread::yield_now();
-            }
-        }
-    }
-}
-
-/// Background task: reads framed JSON-RPC messages from stdout and routes
-/// each response to the appropriate oneshot sender by id.
-async fn run_reader(
-    mut stdout: BufReader<ChildStdout>,
-    pending: Arc<PendingMap>,
-    closed: Arc<AtomicBool>,
-) {
-    loop {
-        match read_framed_message(&mut stdout).await {
-            Ok(value) => {
-                // Responses carry an "id"; notifications do not.
-                let id = match value.get("id").and_then(Value::as_u64) {
-                    Some(id) => id,
-                    None => continue, // server-side notification — ignore
-                };
-                let sender = pending.lock().await.remove(&id);
-                if let Some(tx) = sender {
-                    let _ = tx.send(Ok(value));
-                }
-            }
-            Err(err) => {
-                // EOF or framing error — drain all pending requests with an
-                // error so callers don't wait until timeout.
-                closed.store(true, Ordering::Release);
-                let mut map = pending.lock().await;
-                for (_, tx) in map.drain() {
-                    let _ = tx.send(Err(MoaError::StreamError(format!(
-                        "MCP stdio process exited: {err}"
-                    ))));
-                }
-                return;
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// HTTP / SSE remote client (unchanged)
+// HTTP / SSE remote client
 // ---------------------------------------------------------------------------
 
 struct RemoteClient {
@@ -486,44 +228,6 @@ struct ToolsListEntry {
     input_schema: Value,
 }
 
-async fn write_framed_message(stdin: &mut ChildStdin, message: &Value) -> Result<()> {
-    let payload = serde_json::to_vec(message)?;
-    let header = format!("Content-Length: {}\r\n\r\n", payload.len());
-    stdin.write_all(header.as_bytes()).await?;
-    stdin.write_all(&payload).await?;
-    stdin.flush().await?;
-    Ok(())
-}
-
-async fn read_framed_message(stdout: &mut BufReader<ChildStdout>) -> Result<Value> {
-    let mut content_length = None;
-    loop {
-        let mut line = String::new();
-        let bytes = stdout.read_line(&mut line).await?;
-        if bytes == 0 {
-            return Err(MoaError::StreamError(
-                "MCP stdio stream closed while waiting for response".to_string(),
-            ));
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            break;
-        }
-        if let Some(value) = trimmed.strip_prefix("Content-Length:") {
-            content_length = Some(value.trim().parse::<usize>().map_err(|error| {
-                MoaError::StreamError(format!("invalid MCP Content-Length header: {error}"))
-            })?);
-        }
-    }
-
-    let content_length = content_length
-        .ok_or_else(|| MoaError::StreamError("missing MCP Content-Length header".to_string()))?;
-    let mut payload = vec![0_u8; content_length];
-    stdout.read_exact(&mut payload).await?;
-    serde_json::from_slice(&payload)
-        .map_err(|error| MoaError::StreamError(format!("invalid MCP stdio payload: {error}")))
-}
-
 async fn read_sse_response(response: reqwest::Response) -> Result<Value> {
     // `eventsource-stream` defaults an absent `event:` field to "message", so a
     // bare `data:`-only event matches the same JSON-RPC response the manual
@@ -589,22 +293,6 @@ fn flatten_call_result(result: Value) -> ToolOutput {
         original_output_tokens: None,
         artifact: None,
     }
-}
-
-/// Classifies one MCP client error for retry and reconnect decisions.
-pub fn classify_error(error: &MoaError, consecutive_timeouts: u32) -> ToolFailureClass {
-    let message = error.to_string().to_ascii_lowercase();
-    if message.contains("mcp stdio transport is closed")
-        || message.contains("mcp stdio process exited")
-        || message.contains("mcp stdio stream closed")
-        || message.contains("mcp stdio reader task closed")
-    {
-        return ToolFailureClass::ReProvision {
-            reason: "MCP server disconnected".to_string(),
-        };
-    }
-
-    classify_tool_error(error, consecutive_timeouts)
 }
 
 fn header_map_from_pairs(headers: HashMap<String, String>) -> Result<HeaderMap> {

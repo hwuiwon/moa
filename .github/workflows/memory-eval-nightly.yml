@@ -47,9 +47,6 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Probe test database
-        run: cargo run -p xtask --release -- migrate-test-db
-
       - name: Generate PR natural corpus
         run: cargo run -p xtask --release -- generate-memory-eval-corpus --profile pr --transcript-style natural --seed 1 --seed 2 --seed 3 --output target/memory-eval/pr-natural
 

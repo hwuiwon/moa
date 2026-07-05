@@ -62,7 +62,8 @@ with a multi-tenant workload distribution.
 
 | Tier | Where | Cadence | Question answered |
 |---|---|---|---|
-| T1 smoke | compose, 1 replica | every PR (`perf_gate --profile mock-short`) | did p95/error-rate regress? |
+| T1 mock smoke | compose, 1 replica | every PR (`perf_gate --profile mock-short`, locally via `make loadtest-mock`) | did p95/error-rate regress? |
+| Retrieval smoke | local Postgres + embedder | after RAG/retrieval changes (`perf_gate --profile retrieval-smoke`) | did retrieval correctness, RLS, cache-hit, or broad latency regress on developer hardware? |
 | T2 capacity | one strong box, compose | nightly (`make loadtest-capacity`) | max sustainable turns/sec per replica + per-turn resource bill |
 | T3 scale-out | k8s topology (HPA 2–50) | pre-release / on demand | does capacity scale ≈ linearly with replicas, and what breaks first? |
 
@@ -119,9 +120,22 @@ Prometheus metrics — never traces, because Restate replay suppresses spans.
 
 ## Runbooks
 
-**T1 smoke (PR gate).** `cargo run --release -p moa-loadtest --bin perf_gate --
---profile mock-short --duration 30s` against a stack started by
-`make loadtest-mock`. Gates: corrected p95, turn error rate, session failures.
+**T1 mock smoke (PR gate).** `make loadtest-mock` starts compose dependencies,
+bootstraps OpenFGA into `.env.fga`, restarts the orchestrator with
+`scripts/perf-gate.json`, and runs `cargo run --release -p moa-loadtest --bin
+perf_gate -- --profile mock-short`. The target defaults RustFS to host ports
+`10090` and `10091` for this local smoke path. Gates: corrected p95, turn error
+rate, session failures.
+
+**Retrieval smoke.** `cargo run --release -p moa-loadtest --bin perf_gate -- \
+--profile retrieval-smoke --tenants 2 --facts-per-tenant 50 --qps 5 \
+--duration 15s --max-p95-ms 1000 --p99-soft-target-ms 2000 \
+--cache-hit-floor 0.50`. This profile is for developer machines and skips the
+strict AVX2 hardware floor. It uses the local pgvector path unless the test
+database explicitly configures a storage partition for Turbopuffer; such cloud
+vector runs must set `MOA_TURBOPUFFER_API_KEY` and should fail closed if the
+client is missing. The release `retrieval` profile remains strict and is the
+only source for baseline updates.
 
 **T2 capacity (nightly).** `make loadtest-capacity` — recreates the
 orchestrator with `scripts/realistic.json` (real latency/TTFT pacing, tool
@@ -176,8 +190,9 @@ with the invariant sweep from `moa_test_support::invariants`.
 - **The generator is wedge-proof by design** (staleness shedding, bounded
   pool waits, pool self-healing, overlapped setup). If a run ever exceeds
   `duration + ~2 min`, treat it as a bug in the harness, not the system.
-- Host ports 9000/9001 frequently collide (minio, k3d node ports); export
-  `MOA_RUSTFS_PORT`/`MOA_RUSTFS_CONSOLE_PORT` to relocate rustfs.
+- Host ports 9000/9001 frequently collide (minio, k3d node ports). The
+  `loadtest-mock` target defaults RustFS to 10090/10091; export
+  `MOA_RUSTFS_PORT`/`MOA_RUSTFS_CONSOLE_PORT` to choose a different pair.
 
 ## Certification checklist (per release)
 

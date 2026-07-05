@@ -163,7 +163,7 @@ it is realized as Restate services and virtual objects in `moa-orchestrator`
 | `Reranker` | Shared reranking interface | Noop, Cohere Rerank, and ZeroEntropy rerank through `moa-providers` |
 | `ChannelAdapter` | Channel inbound/outbound normalization | Slack |
 | `BuiltInTool` | Built-in tool execution | memory/search/web and other built-ins |
-| `ContextProcessor` | One stage in context compilation | identity, agent instructions, instructions, tools, query rewrite, skills, digest, memory, history, runtime context, compactor |
+| `ContextProcessor` | One stage in context compilation | identity, agent instructions, instructions, tools, query rewrite, skills, digest, memory, history, runtime context |
 | `LinkedIntegrationProvider` | Tenant knowledge linked-account flow, provider sync trigger, changed-record listing, and webhook verification | Nango and Merge adapters in `moa-knowledge` |
 | `DocumentParser` | Structure-aware parsing into normalized document elements for tenant knowledge ingestion | Native parser backed by `liteparse` for local file parsing, plus LlamaParse, Unstructured, and Reducto adapters in `moa-knowledge` |
 | `CredentialVault` | Secret storage and retrieval | environment-backed MCP vault |
@@ -187,18 +187,15 @@ Core production bindings:
 - Virtual objects: `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO`
 - Services: `ActionReviews`, `AgentDefinitions`, `Agents`,
   `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`,
-  `Contacts`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`,
-  `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`,
-  `Tenants`, `ToolExecutor`, `ActionPolicy`
+  `Contacts`, `Eval`, `Experiments`, `GraphMemoryMaint`, `Knowledge`,
+  `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`,
+  `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy`
 - Workflows: `ProcedureExecution`, `KnowledgeSyncIngestion`,
-  `Consolidate`, `TurnExecution`, `WorkerTurnExecution`
+  `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`, `TurnExecution`,
+  `WorkerTurnExecution`
 
 Feature-gated bindings:
 
-- `experiments`: `Experiments` service plus `ExperimentRun` and
-  `ExperimentTrialRun` workflows.
-- `internal-eval-runner`: `Eval` service. Run status and responses live in
-  Postgres, not a Restate workflow state row.
 - `skill-learning`: detached `SkillLearning` workflow.
 
 Internal application boundaries are in-process modules or domain crates behind
@@ -249,7 +246,6 @@ User message
        7 memory
        8 history
        9 runtime_context
-       10 compactor
   -> Query rewrite may mark `is_new_task`
   -> SegmentTracker opens or rolls a task segment
   -> LLM response is streamed/collected
@@ -371,12 +367,15 @@ separate surfaces:
 
 - Regression eval: `moa-eval` owns deterministic datasets, replay plans,
   CI/nightly regression runs, and score comparisons. In default cloud builds
-  these remain local and CI tooling; the public edge does not translate
-  `/v1/evals/*`. The `Eval` service is available only when the orchestrator is
-  compiled with `internal-eval-runner`; hosted run status is stored in
-  `analytics.eval_run_status` so it is not a Restate workflow-state mirror. If
-  exposed internally, handlers enforce tenant authorization for tenant-owned
-  replay, dataset, score, or compare reads.
+  the public edge does not translate `/v1/evals/*`. The `Eval` service is
+  compiled into the orchestrator as an internal control-plane surface; hosted
+  run status is stored in `analytics.eval_run_status` so it is not a Restate
+  workflow-state mirror. Tenant-owned plan, run, replay, dataset, score, and
+  compare handlers require the tenant operator relation, which includes tenant
+  admins in the OpenFGA model. The detached `Eval/execute_run` worker entrypoint
+  is not caller-authorized directly; it must carry the dispatch token created
+  by the authorized `Eval/run` admission path before it can return or mutate run
+  data.
 - Live behavior experiments: `moa-experiments` owns the typed domain model and
   storage repository; the `Experiments` service accepts and tracks runs against
   production execution paths. Agent-loop targets create or reuse `Session`
@@ -429,9 +428,9 @@ is the only runtime path that publishes those drafts inside the tenant, records
 
 Future MCP support is a transport adapter over product/default services such as
 `Experiments`, direct edge analytics/lineage reads, `Skills`, and other typed
-surfaces. If internal eval is exposed through MCP, it must remain qualified as
-`internal-eval-runner` gated. MCP must not publish public `/v1/evals/*`
-semantics, own experiment, eval, analytics, learning, or lineage
+surfaces. If internal eval is exposed through MCP, it must remain explicitly
+internal and operator/admin-authorized. MCP must not publish public
+`/v1/evals/*` semantics, own experiment, eval, analytics, learning, or lineage
 domain models, or bypass service-level authorization.
 
 Grafana dashboards live in `dashboards/grafana/` and Prometheus alert rules live
@@ -463,15 +462,14 @@ Lineage DSAR bundle export uses the privacy export signing key contract,
 `MOA_PRIVACY_EXPORT_SIGNING_KEY_ID`.
 
 **ATTESTATION GATE - DO NOT REPRESENT THIS AS COMPLIANCE EVIDENCE TO REGULATORS
-OR CUSTOMERS UNTIL EXTERNAL CRYPTOGRAPHIC REVIEW IS COMPLETE.** The
-`ct-merkle` crate is explicitly not audited by its authors. `moa-lineage-audit`
-must receive external cryptographer or appsec review before DSAR exports,
-regulator responses, audit attestations, or certifications rely on this layer as
-compliance-grade evidence. Internal debugging and forensics may use it before
-that review. The review must cover BLAKE3 canonicalization and chain extension,
-Ed25519 key handling, Merkle inclusion and consistency proof construction, PII
-crypto-shredding semantics, S3 Object Lock configuration, timestamp discipline,
-and replay resistance on the verify path.
+OR CUSTOMERS UNTIL EXTERNAL CRYPTOGRAPHIC REVIEW IS COMPLETE.**
+`moa-lineage-audit` must receive external cryptographer or appsec review before
+DSAR exports, regulator responses, audit attestations, or certifications rely on
+this layer as compliance-grade evidence. Internal debugging and forensics may
+use it before that review. The review must cover BLAKE3 canonicalization and
+chain extension, Ed25519 key handling, Merkle inclusion and consistency proof
+construction, PII crypto-shredding semantics, S3 Object Lock configuration,
+timestamp discipline, and replay resistance on the verify path.
 
 ## Workspace Layout
 

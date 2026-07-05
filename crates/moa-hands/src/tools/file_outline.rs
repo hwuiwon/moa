@@ -26,7 +26,6 @@ pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
 }
 
 /// Renders a `file_outline` response from content already loaded by a provider.
-#[cfg(any(feature = "daytona", feature = "e2b"))]
 pub(crate) fn execute_with_content(
     input: &str,
     display_path: &str,

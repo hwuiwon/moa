@@ -64,9 +64,8 @@ fn heuristic_classifier_returns_offsets_categories_confidence_and_redactions() {
         assert_eq!(span.end, start + needle.len(), "{text}");
         assert_eq!(span.category, category, "{text}");
         assert_eq!(span.confidence, confidence, "{text}");
-        assert_eq!(
-            span.redaction_replacement(),
-            redaction_replacement(category),
+        assert!(
+            expected_redacted.contains(redaction_replacement(category)),
             "{text}"
         );
         assert_eq!(

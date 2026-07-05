@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use moa_core::traits::EmbeddingProvider;
-use moa_core::{MoaConfig, MoaError, Result};
+use moa_core::{MoaError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -48,15 +48,6 @@ impl ZeroEntropyEmbedding {
             pacer: RatePacer::new(PacerConfig::disabled()),
             limiter: ConcurrencyLimiter::new(DEFAULT_EMBEDDING_CONCURRENCY),
         })
-    }
-
-    /// Creates a ZeroEntropy embedding client from config using an explicit model id.
-    pub(super) fn from_config_with_model(config: &MoaConfig, model: String) -> Result<Self> {
-        let api_key = moa_core::config::required_config_secret(
-            "MOA_ZEROENTROPY_API_KEY",
-            &config.providers.zeroentropy.api_key,
-        )?;
-        Self::new(api_key, model)
     }
 
     /// Overrides the embeddings URL, primarily for HTTP-level tests.

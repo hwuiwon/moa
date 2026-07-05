@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use globset::{Glob, GlobMatcher};
 use moa_core::shell::{has_action_policy_unsafe_shell_syntax, split_shell_chain};
 use moa_core::{
-    ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, MoaConfig, MoaError, Result,
+    ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, ContactId, MoaConfig, MoaError, Result,
     SessionMeta, TenantId, ToolPolicyInput, UserId,
 };
 
@@ -37,6 +37,8 @@ pub trait ActionPolicyRuleStore: Send + Sync {
 pub struct ActionPolicyContext {
     /// Tenant associated with the current session.
     pub tenant_id: TenantId,
+    /// Contact-associated storage key for contact-local rules.
+    pub contact_id: Option<ContactId>,
 }
 
 impl ActionPolicyContext {
@@ -44,6 +46,7 @@ impl ActionPolicyContext {
     pub fn from_session(session: &SessionMeta) -> Self {
         Self {
             tenant_id: session.tenant_id,
+            contact_id: session.contact.as_ref().map(|contact| contact.contact_id),
         }
     }
 }
@@ -263,6 +266,10 @@ pub fn parse_and_match_command(command: &str, rule_pattern: &str) -> Result<bool
 fn rule_visible_to_context(rule: &ActionPolicyRule, ctx: &ActionPolicyContext) -> bool {
     match rule.scope {
         ActionRuleScope::Tenant { tenant_id } => tenant_id == ctx.tenant_id,
+        ActionRuleScope::Contact {
+            tenant_id,
+            contact_id,
+        } => tenant_id == ctx.tenant_id && ctx.contact_id == Some(contact_id),
     }
 }
 
@@ -291,8 +298,9 @@ mod tests {
     use chrono::Utc;
     use moa_core::shell::split_shell_chain;
     use moa_core::{
-        ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, MoaConfig, MoaError, ModelId,
-        RiskLevel, SessionMeta, TenantId, ToolPolicyInput, UserId,
+        ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, ContactId, ContactRef,
+        ContactVerificationState, MoaConfig, MoaError, ModelId, RiskLevel, SessionMeta, TenantId,
+        ToolPolicyInput, UserId,
     };
     use uuid::Uuid;
 
@@ -309,11 +317,37 @@ mod tests {
         TenantId::from(Uuid::from_u128(43))
     }
 
+    fn contact_id() -> ContactId {
+        ContactId(Uuid::from_u128(44))
+    }
+
+    fn other_contact_id() -> ContactId {
+        ContactId(Uuid::from_u128(45))
+    }
+
     fn session() -> SessionMeta {
         SessionMeta {
             tenant_id: tenant_id(),
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
+        }
+    }
+
+    fn contact_session(contact_id: ContactId) -> SessionMeta {
+        SessionMeta {
+            contact: Some(ContactRef {
+                contact_id,
+                tenant_id: tenant_id(),
+                state: ContactVerificationState::Unverified,
+                canonical_contact_id: None,
+                linked_contact_ids: Vec::new(),
+                scopes: Vec::new(),
+                permissions: serde_json::Value::Null,
+                agent_ids: Vec::new(),
+                session_ids: Vec::new(),
+                verified_contact_point_ids: Vec::new(),
+            }),
+            ..session()
         }
     }
 
@@ -658,6 +692,53 @@ mod tests {
                 &[rule],
             )
             .expect("policy evaluation for target user");
+        assert_eq!(target_check.effect, ActionPolicyEffect::Deny);
+        assert!(target_check.matched_rule.is_some());
+    }
+
+    #[test]
+    fn contact_scoped_rules_only_match_the_current_contact() {
+        // Pins: contact action-policy overrides are personal to one contact and do not leak to peers.
+        let policies = ActionPolicies::default();
+        let rule = ActionPolicyRule {
+            id: Uuid::now_v7(),
+            scope: ActionRuleScope::Contact {
+                tenant_id: tenant_id(),
+                contact_id: contact_id(),
+            },
+            tool: "bash".to_string(),
+            pattern: "git push".to_string(),
+            effect: ActionPolicyEffect::Deny,
+            reason: Some("target contact only".to_string()),
+            created_by: UserId::new("admin"),
+            created_at: Utc::now(),
+        };
+        let input = ToolPolicyInput {
+            tool_name: "bash".to_string(),
+            normalized_input: "git push".to_string(),
+            input_summary: "Command: git push".to_string(),
+            risk_level: RiskLevel::High,
+            default_effect: ActionPolicyEffect::Allow,
+            action_class: moa_core::ActionClass::CommandExecution,
+        };
+
+        let peer_check = policies
+            .check(
+                &input,
+                &ActionPolicyContext::from_session(&contact_session(other_contact_id())),
+                std::slice::from_ref(&rule),
+            )
+            .expect("policy evaluation for other contact");
+        assert_eq!(peer_check.effect, ActionPolicyEffect::Allow);
+        assert!(peer_check.matched_rule.is_none());
+
+        let target_check = policies
+            .check(
+                &input,
+                &ActionPolicyContext::from_session(&contact_session(contact_id())),
+                &[rule],
+            )
+            .expect("policy evaluation for target contact");
         assert_eq!(target_check.effect, ActionPolicyEffect::Deny);
         assert!(target_check.matched_rule.is_some());
     }

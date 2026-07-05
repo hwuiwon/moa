@@ -75,13 +75,17 @@ pub struct PerfGateConfig {
     pub cache_hit_floor: f64,
     /// Prometheus textfile output path.
     pub prom_out: PathBuf,
+    /// Whether to enforce the release hardware floor before running the gate.
+    pub require_hardware_floor: bool,
 }
 
 /// Runs the graph-memory retrieval performance gate.
 pub async fn run_perf_gate(cfg: PerfGateConfig) -> Result<()> {
     let result = async {
         validate_config(&cfg)?;
-        validate_hardware_floor()?;
+        if cfg.require_hardware_floor {
+            validate_hardware_floor()?;
+        }
         let metrics = install_metrics_recorder()?;
         run_perf_gate_inner(&cfg, &metrics).await
     }

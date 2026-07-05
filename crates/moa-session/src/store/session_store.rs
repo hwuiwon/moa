@@ -335,6 +335,60 @@ impl PostgresSessionStore {
         }))
     }
 
+    /// Resolves the active session bound to a channel route, when one exists.
+    pub async fn get_active_session_binding_for_channel(
+        &self,
+        channel_ref: &ChannelRef,
+    ) -> Result<Option<moa_core::SessionChannelBindingResolution>> {
+        let route_keys = channel_route_keys(channel_ref);
+        let sessions = self.table_name("sessions");
+        let bindings = self.table_name("session_channel_bindings");
+        let rows = sqlx::query(&format!(
+            "SELECT b.tenant_id, b.session_id, b.contact_id, b.id, b.route \
+             FROM {bindings} b \
+             JOIN {sessions} s ON s.id = b.session_id AND s.active_channel_binding_id = b.id \
+             WHERE b.channel = $1 \
+               AND b.ended_at IS NULL \
+               AND b.external_tenant_key IS NOT DISTINCT FROM $2 \
+               AND b.external_conversation_key IS NOT DISTINCT FROM $3 \
+               AND b.external_thread_key IS NOT DISTINCT FROM $4 \
+             ORDER BY b.last_used_at DESC, b.created_at DESC \
+             LIMIT 2"
+        ))
+        .bind(channel_ref.channel().as_str())
+        .bind(route_keys.external_tenant_key)
+        .bind(route_keys.external_conversation_key)
+        .bind(route_keys.external_thread_key)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        if rows.len() > 1 {
+            return Err(MoaError::ValidationError(
+                "channel route is active in multiple tenants".to_string(),
+            ));
+        }
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let tenant_id = row.col::<Uuid>("tenant_id").map(moa_core::TenantId)?;
+        let session_id = row.col::<Uuid>("session_id").map(SessionId)?;
+        let contact_id = row.col::<Uuid>("contact_id").map(moa_core::ContactId)?;
+        let binding_id = row
+            .col::<Uuid>("id")
+            .map(moa_core::SessionChannelBindingId)?;
+        let channel_ref = row.col::<Json<ChannelRef>>("route").map(|route| route.0)?;
+        Ok(Some(moa_core::SessionChannelBindingResolution {
+            tenant_id,
+            session_id,
+            contact_id,
+            binding: SessionChannelBinding {
+                binding_id,
+                channel_ref,
+            },
+        }))
+    }
+
     /// Updates contact metadata attached to an existing session.
     pub async fn update_session_contact(
         &self,
@@ -812,6 +866,13 @@ impl SessionChannelStore for PostgresSessionStore {
         session_id: moa_core::SessionId,
     ) -> Result<Option<SessionChannelBinding>> {
         PostgresSessionStore::get_active_session_channel_binding(self, session_id).await
+    }
+
+    async fn get_active_session_binding_for_channel(
+        &self,
+        channel_ref: &ChannelRef,
+    ) -> Result<Option<moa_core::SessionChannelBindingResolution>> {
+        PostgresSessionStore::get_active_session_binding_for_channel(self, channel_ref).await
     }
 }
 

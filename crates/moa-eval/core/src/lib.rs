@@ -19,7 +19,7 @@ pub use evaluators::{
     EvaluatorOptions, OutputMatchEvaluator, ThresholdEvaluator, ToolSuccessEvaluator,
     TrajectoryMatchEvaluator, build_evaluators, evaluate_run, score_is_failure,
 };
-pub use loader::{discover_configs, discover_suites, load_agent_config, load_suite};
+pub use loader::{load_agent_config, load_suite};
 pub use plan::{EvalPlan, build_eval_plan};
 pub use replay::{ReplayConfig, token_f1};
 pub use results::{EvalMetrics, EvalResult, EvalScore, EvalScoreValue, EvalStatus, TrajectoryStep};

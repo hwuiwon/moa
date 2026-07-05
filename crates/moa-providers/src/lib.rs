@@ -8,7 +8,6 @@ mod registry;
 mod routing;
 
 pub mod embedding;
-pub mod memory_llm;
 pub mod rerank;
 
 pub use adapters::anthropic::AnthropicProvider;
@@ -22,7 +21,7 @@ pub use adapters::scripted::{
     ScriptedBlock, ScriptedFault, ScriptedProvider, ScriptedResponse, ScriptedTiming,
 };
 pub use core::factory::{
-    ProviderSelection, build_provider_from_config, build_provider_from_selection,
+    build_provider_from_config, build_provider_from_model, build_provider_from_selection,
     resolve_provider_selection, resolve_rewriter_provider,
 };
 pub use core::models::{
@@ -35,15 +34,11 @@ pub use core::router::ModelRouter;
 #[cfg(any(test, feature = "mock-embedding"))]
 pub use embedding::MockEmbedding;
 pub use embedding::{
-    CohereEmbedding, CohereV4Embedder, EmbedRole, EmbedderConstructionRole,
-    GeminiEmbeddingEmbedder, OpenAIEmbedding, ZeroEntropyEmbedding, build_embedder_from_config,
+    CohereEmbedding, CohereV4Embedder, EmbedderConstructionRole, GeminiEmbeddingEmbedder,
+    OpenAIEmbedding, ZeroEntropyEmbedding, build_embedder_from_config,
     build_embedding_provider_from_config,
 };
 pub use failover::FailoverLLMProvider;
-pub use memory_llm::{
-    EXTRACTION_PROMPT_VERSION, LlmChatClient, LlmChatError, LlmEntityMergeClient, LlmExtractedFact,
-    LlmFactExtractionChunk, LlmFactExtractionClient, MERGE_PROMPT_VERSION,
-};
 pub use registry::{ProviderRegistry, ResolvedProvider};
 pub use rerank::{
     COHERE_DEFAULT_RERANK_MODEL, CohereReranker, ConfiguredReranker, NOOP_RERANK_MODEL,

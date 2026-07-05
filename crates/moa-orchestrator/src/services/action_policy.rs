@@ -7,8 +7,8 @@ use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::{
     ActionEnvelope, ActionPolicyEffect, ActionPolicyRule, ActionReviewPreview, ActionRuleScope,
-    AgentPolicySnapshot, MoaError, SessionMeta, TenantId, ToolCallId, ToolInvocation, UserId,
-    WorkerId,
+    AgentPolicySnapshot, ContactId, MoaError, SessionMeta, TenantId, ToolCallId, ToolInvocation,
+    UserId, WorkerId,
 };
 use moa_hands::{ActionOrigin, ToolRouter};
 use moa_security::{ActionPolicyRuleStore, stricter_effect};
@@ -52,6 +52,9 @@ pub struct PrepareActionReviewRequest {
 pub struct UpsertActionPolicyRuleRequest {
     /// Tenant that owns the rule.
     pub tenant_id: TenantId,
+    /// Contact that owns the rule when creating a personal/contact-scoped override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact_id: Option<ContactId>,
     /// Tool name the rule applies to.
     pub tool_name: String,
     /// Persisted normalized pattern.
@@ -181,14 +184,21 @@ impl ActionPolicy for ActionPolicyImpl {
 
         Ok(ctx
             .run(|| async move {
+                let scope = match request.contact_id {
+                    Some(contact_id) => ActionRuleScope::Contact {
+                        tenant_id: request.tenant_id,
+                        contact_id,
+                    },
+                    None => ActionRuleScope::Tenant {
+                        tenant_id: request.tenant_id,
+                    },
+                };
                 let rule = ActionPolicyRule {
                     id: Uuid::now_v7(),
                     tool: request.tool_name,
                     pattern: request.pattern,
                     effect: request.effect,
-                    scope: ActionRuleScope::Tenant {
-                        tenant_id: request.tenant_id,
-                    },
+                    scope,
                     reason: request.reason,
                     created_by,
                     created_at: Utc::now(),

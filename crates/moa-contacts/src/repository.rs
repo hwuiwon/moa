@@ -7,7 +7,7 @@ use moa_core::{
     ContactTokenIssueRequest, ContactVerificationChallengeId, ContactVerificationStartResponse,
     ContactVerificationState, MessagingConfig, MoaError, SessionMeta, StoragePartitionId, TenantId,
 };
-use moa_messaging::{DeliveryMessage, DeliverySink, ProviderDeliverySink};
+use moa_messaging::{DeliveryMessage, ProviderDeliverySink};
 use sqlx::Row;
 use uuid::Uuid;
 

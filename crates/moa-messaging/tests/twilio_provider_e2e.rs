@@ -193,19 +193,19 @@ impl CredentialVault for LocalTwilioVault {
         ))
     }
 
-    async fn delete(&self, _service: &str, _scope: &str) -> moa_core::Result<()> {
+    async fn delete(&self, _service: &str, _scope: &str) -> moa_core::Result<bool> {
         Err(MoaError::StorageError(
             "Twilio e2e vault is read-only".to_string(),
         ))
     }
 
-    async fn list(&self, scope: &str) -> moa_core::Result<Vec<String>> {
-        Ok(self
-            .credentials
-            .keys()
-            .filter(|(_, candidate_scope)| candidate_scope == scope)
-            .map(|(service, _)| service.clone())
-            .collect())
+    async fn list(
+        &self,
+        _service_prefix: &str,
+    ) -> moa_core::Result<Vec<moa_core::StoredCredentialMetadata>> {
+        Err(MoaError::StorageError(
+            "Twilio e2e vault does not support listing".to_string(),
+        ))
     }
 }
 

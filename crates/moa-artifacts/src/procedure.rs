@@ -109,7 +109,7 @@ pub enum ProcedureNodeKind {
     MemoryWrite,
 }
 
-/// Typed condition expression for nodes and edges.
+/// Typed condition for nodes and edges.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProcedureCondition {
@@ -124,12 +124,5 @@ pub enum ProcedureCondition {
     Exists {
         /// JSON-path-like state/input path.
         path: String,
-    },
-    /// Escape hatch for future expression languages.
-    Expression {
-        /// Expression language identifier.
-        language: String,
-        /// Expression source text.
-        source: String,
     },
 }

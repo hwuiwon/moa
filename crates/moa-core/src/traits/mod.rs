@@ -21,16 +21,17 @@ use crate::analytics::{
 use crate::error::{MoaError, Result, ToolFailureClass, classify_tool_error};
 use crate::events::Event;
 use crate::types::{
-    Attachment, Channel, ChannelAccountId, ChannelCapabilities, ChannelRef, CheckpointHandle,
-    CheckpointInfo, ClaimCheck, CompletionRequest, CompletionStream, ContactId, ContactPointId,
-    ContextSnapshot, Credential as StoredCredential, EventFilter, EventRange, EventRecord,
-    EventType, ExperienceAttribution, ExperienceRecord, HandHandle, HandSpec, HandStatus,
-    InboundMessage, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
+    Attachment, Channel, ChannelAccountId, ChannelCapabilities, ChannelEvent, ChannelRef,
+    CheckpointHandle, CheckpointInfo, ClaimCheck, CompletionRequest, CompletionStream, ContactId,
+    ContactPointId, ContextSnapshot, Credential as StoredCredential, EventFilter, EventRange,
+    EventRecord, EventType, ExperienceAttribution, ExperienceRecord, HandHandle, HandSpec,
+    HandStatus, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
     LearningEntry, MessageId, ModelCapabilities, OutboundMessage, ProcessorOutput, SandboxFile,
     SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId, SequenceNum,
-    SessionAttachmentId, SessionChannelBinding, SessionChannelBindingId, SessionFilter, SessionId,
-    SessionMeta, SessionStatus, SessionSummary, SkillResolutionRate, StoragePartitionId,
-    TaskSegment, TaskStrategySuccessRate, TenantId, ToolCallId, ToolOutput, WorkingContext,
+    SessionAttachmentId, SessionChannelBinding, SessionChannelBindingId,
+    SessionChannelBindingResolution, SessionFilter, SessionId, SessionMeta, SessionStatus,
+    SessionSummary, SkillResolutionRate, StoragePartitionId, TaskSegment, TaskStrategySuccessRate,
+    TenantId, ToolCallId, ToolOutput, WorkingContext,
 };
 use crate::wire::analytics::LearningCandidateSummary;
 
@@ -220,6 +221,12 @@ pub trait SessionChannelStore: Send + Sync {
         &self,
         session_id: SessionId,
     ) -> Result<Option<SessionChannelBinding>>;
+
+    /// Resolves the active session bound to a channel route, when present.
+    async fn get_active_session_binding_for_channel(
+        &self,
+        channel_ref: &ChannelRef,
+    ) -> Result<Option<SessionChannelBindingResolution>>;
 }
 
 /// Focused contract for event-idempotency lookups that avoid decoding payloads.
@@ -269,22 +276,8 @@ pub trait SessionAnalyticsStore: Send + Sync {
         days: u32,
     ) -> Result<TenantAnalyticsSummary>;
 
-    /// Loads aggregated tenant analytics over a recent day window through control-plane RLS.
-    async fn get_tenant_stats_control_plane(
-        &self,
-        tenant_id: &TenantId,
-        days: u32,
-    ) -> Result<TenantAnalyticsSummary>;
-
     /// Lists daily cache trend rows for one tenant.
     async fn list_cache_daily_metrics(
-        &self,
-        tenant_id: &TenantId,
-        days: u32,
-    ) -> Result<Vec<CacheDailyMetric>>;
-
-    /// Lists daily cache trend rows for one tenant through control-plane RLS.
-    async fn list_cache_daily_metrics_control_plane(
         &self,
         tenant_id: &TenantId,
         days: u32,
@@ -650,8 +643,8 @@ pub trait ChannelAdapter: Send + Sync {
     /// Returns adapter capabilities.
     fn capabilities(&self) -> ChannelCapabilities;
 
-    /// Starts receiving inbound messages.
-    async fn start(&self, event_tx: mpsc::Sender<InboundMessage>) -> Result<()>;
+    /// Starts receiving inbound channel events.
+    async fn start(&self, event_tx: mpsc::Sender<ChannelEvent>) -> Result<()>;
 
     /// Sends a new outbound message.
     async fn send(&self, msg: OutboundMessage) -> Result<MessageId>;
@@ -824,6 +817,17 @@ pub trait ContextProcessor: Send + Sync {
     }
 }
 
+/// Metadata for a stored credential without secret material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredCredentialMetadata {
+    /// Credential service namespace.
+    pub service: String,
+    /// Credential scope inside the service namespace.
+    pub scope: String,
+    /// Stable credential material kind, such as `bearer`, `oauth`, or `api_key`.
+    pub kind: String,
+}
+
 /// Secure credential storage abstraction.
 #[async_trait]
 pub trait CredentialVault: Send + Sync {
@@ -833,9 +837,9 @@ pub trait CredentialVault: Send + Sync {
     /// Stores credentials for a service and scope.
     async fn set(&self, service: &str, scope: &str, cred: StoredCredential) -> Result<()>;
 
-    /// Deletes credentials for a service and scope.
-    async fn delete(&self, service: &str, scope: &str) -> Result<()>;
+    /// Deletes credentials for a service and scope, returning whether a value existed.
+    async fn delete(&self, service: &str, scope: &str) -> Result<bool>;
 
-    /// Lists services with stored credentials in a scope.
-    async fn list(&self, scope: &str) -> Result<Vec<String>>;
+    /// Lists stored credential metadata for services with the supplied prefix.
+    async fn list(&self, service_prefix: &str) -> Result<Vec<StoredCredentialMetadata>>;
 }

@@ -99,51 +99,18 @@ pub struct PiiSpan {
     pub category: PiiCategory,
     /// Model confidence for this span.
     pub confidence: f32,
-    /// Optional caller-facing replacement text for redaction.
-    ///
-    /// Older serialized spans may omit this field; callers should use
-    /// [`PiiSpan::redaction_replacement`] rather than reading it directly.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replacement: Option<String>,
 }
 
 impl PiiSpan {
-    /// Builds a span with the canonical replacement text for its category.
+    /// Builds a detected PII span.
     #[must_use]
     pub fn new(start: usize, end: usize, category: PiiCategory, confidence: f32) -> Self {
-        Self::with_replacement(
-            start,
-            end,
-            category,
-            confidence,
-            redaction_replacement(category),
-        )
-    }
-
-    /// Builds a span with an explicit replacement text.
-    #[must_use]
-    pub fn with_replacement(
-        start: usize,
-        end: usize,
-        category: PiiCategory,
-        confidence: f32,
-        replacement: impl Into<String>,
-    ) -> Self {
         Self {
             start,
             end,
             category,
             confidence,
-            replacement: Some(replacement.into()),
         }
-    }
-
-    /// Returns the replacement text to use when redacting this span.
-    #[must_use]
-    pub fn redaction_replacement(&self) -> &str {
-        self.replacement
-            .as_deref()
-            .unwrap_or(redaction_replacement(self.category))
     }
 }
 
@@ -197,7 +164,7 @@ pub fn redact_text(text: &str, spans: &[PiiSpan]) -> String {
             continue;
         }
         redacted.push_str(&text[cursor..span.start]);
-        redacted.push_str(span.redaction_replacement());
+        redacted.push_str(redaction_replacement(span.category));
         cursor = span.end;
     }
     redacted.push_str(&text[cursor..]);
@@ -422,14 +389,12 @@ mod tests {
                 end: 23,
                 category: PiiCategory::Email,
                 confidence: 0.99,
-                replacement: Some(redaction_replacement(PiiCategory::Email).to_string()),
             },
             PiiSpan {
                 start: 32,
                 end: 43,
                 category: PiiCategory::Ssn,
                 confidence: 0.99,
-                replacement: Some(redaction_replacement(PiiCategory::Ssn).to_string()),
             },
         ];
 
@@ -447,7 +412,6 @@ mod tests {
             end: 100,
             category: PiiCategory::Secret,
             confidence: 0.99,
-            replacement: Some(redaction_replacement(PiiCategory::Secret).to_string()),
         }];
 
         assert_eq!(redact_text(text, &spans), text);

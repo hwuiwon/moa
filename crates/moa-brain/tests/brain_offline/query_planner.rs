@@ -31,7 +31,6 @@ async fn planner_classify_and_seed_dependency_query() {
     assert_eq!(planned.strategy, Strategy::GraphFirst);
     assert_eq!(planned.seeds, vec![auth_uid]);
     assert_eq!(planned.scope, scope);
-    assert_eq!(planned.scope_ancestors.len(), 1);
     assert!(planned.temporal_filter.is_none());
 }
 

@@ -4,17 +4,18 @@ use chrono::{TimeZone, Utc};
 use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_artifacts::validation::validate_for_status;
+use moa_core::wire::artifacts::ArtifactSummary;
 use moa_core::wire::experiments::{
     ExperimentCancelRequest, ExperimentCancelResponse, ExperimentCompareRequest,
     ExperimentCompareResponse, ExperimentCompareRow, ExperimentGeneratePlanRequest,
     ExperimentGeneratePlanResponse, ExperimentListRequest, ExperimentListResponse,
-    ExperimentProposeImprovementsRequest, ExperimentProposeImprovementsResponse,
-    ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
-    ExperimentRunStatusResponse, ExperimentScenarioScoreDeltaRow, ExperimentScenarioScoreSummary,
-    ExperimentScoreSummaryRow, ExperimentScoresRequest, ExperimentScoresResponse,
-    ExperimentTrialScoreSummary, ExperimentTrialStatusRequest, ExperimentTrialStatusResponse,
-    ExperimentTrialSummary, ExperimentTrialsRequest, ExperimentTrialsResponse,
-    ExperimentVariantScoreDeltaRow,
+    ExperimentPlanListRequest, ExperimentPlanListResponse, ExperimentProposeImprovementsRequest,
+    ExperimentProposeImprovementsResponse, ExperimentRunRequest, ExperimentRunResponse,
+    ExperimentRunStatusRequest, ExperimentRunStatusResponse, ExperimentScenarioScoreDeltaRow,
+    ExperimentScenarioScoreSummary, ExperimentScoreSummaryRow, ExperimentScoresRequest,
+    ExperimentScoresResponse, ExperimentTrialScoreSummary, ExperimentTrialStatusRequest,
+    ExperimentTrialStatusResponse, ExperimentTrialSummary, ExperimentTrialsRequest,
+    ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
 };
 use moa_core::{ActionRuleScope, ModelId, SessionId, StoragePartitionId, TenantId};
 use moa_experiments::app::{
@@ -40,6 +41,8 @@ fn experiment_wire_dtos_use_experiment_names_and_include_tenant_id() {
     assert_experiment_type::<ExperimentRunStatusResponse>();
     assert_experiment_type::<ExperimentListRequest>();
     assert_experiment_type::<ExperimentListResponse>();
+    assert_experiment_type::<ExperimentPlanListRequest>();
+    assert_experiment_type::<ExperimentPlanListResponse>();
     assert_experiment_type::<ExperimentTrialsRequest>();
     assert_experiment_type::<ExperimentTrialsResponse>();
     assert_experiment_type::<ExperimentTrialStatusRequest>();
@@ -111,6 +114,26 @@ fn experiment_wire_dtos_use_experiment_names_and_include_tenant_id() {
     assert_has_tenant_id(ExperimentListResponse {
         tenant_id,
         runs: vec![json!({"run_uid": fixture_uuid(1)})],
+    });
+    assert_has_tenant_id(ExperimentPlanListRequest {
+        tenant_id,
+        scope: Some(ActionRuleScope::Tenant { tenant_id }),
+        status: Some("published".to_string()),
+    });
+    assert_has_tenant_id(ExperimentPlanListResponse {
+        tenant_id,
+        plans: vec![ArtifactSummary {
+            artifact_uid: fixture_uuid(1),
+            revision_uid: fixture_uuid(2),
+            scope: "tenant".to_string(),
+            kind: "experiment_plan".to_string(),
+            name: "support-behavior".to_string(),
+            description: "Support behavior plan".to_string(),
+            tags: vec!["behavior-lab".to_string()],
+            status: "published".to_string(),
+            version: 1,
+            updated_at: fixture_time(),
+        }],
     });
     let trial_summary = ExperimentTrialSummary {
         tenant_id,
@@ -381,8 +404,9 @@ fn experiment_compare_response_serializes_scenario_and_variant_deltas() {
 // Authorization for the Experiments service is exercised behaviorally, not by source-grep:
 // `experiment_procedure_e2e::experiments_run_denies_caller_without_tenant_operator` calls
 // `Experiments/run` over the real Restate + OpenFGA stack as a caller with no Tenant:Operator
-// grant and asserts a 403 denial. Every Experiments handler authorizes Tenant:Operator as its
-// first statement, so that e2e is the template for the remaining read/mutate handlers.
+// grant and asserts a 403 denial. Every Experiments handler authorizes tenant
+// operator/admin access as its first statement, so that e2e is the template for
+// the remaining read/mutate handlers.
 
 #[test]
 fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
@@ -430,7 +454,7 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
 
     assert_eq!(candidate.status.as_str(), "proposed");
     assert_eq!(candidate.tenant_id, tenant_id);
-    assert_eq!(candidate.candidate_type.as_str(), "workflow");
+    assert_eq!(candidate.candidate_type.as_str(), "skill");
     assert_eq!(candidate.payload["kind"], "experiment_learning_proposal");
     assert_eq!(
         candidate.promotion_requirements,

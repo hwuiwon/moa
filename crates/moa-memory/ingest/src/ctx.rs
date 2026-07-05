@@ -13,9 +13,10 @@ use moa_memory_vector::{VectorStore, VectorStoreFactory};
 use moa_providers::CohereV4Embedder;
 use sqlx::PgPool;
 
+use crate::model_client::resolved_extraction_config;
 use crate::{
     ContradictionDetector, EntityMergeVerifier, EntityResolver, FactExtractor,
-    HeuristicFactExtractor, IngestError, LlmEntityMergeVerifier, LlmFactExtractor, Result,
+    HeuristicFactExtractor, IngestError, ModelEntityMergeVerifier, ModelFactExtractor, Result,
     RrfPlusJudgeDetector,
 };
 
@@ -418,21 +419,23 @@ impl IngestRuntime {
 }
 
 fn entity_resolver_from_config(config: &MoaConfig) -> (Arc<EntityResolver>, &'static str) {
-    let extraction = &config.memory.extraction;
-    if extraction.enabled && !config.providers.cohere.api_key.trim().is_empty() {
-        let verifier = LlmEntityMergeVerifier::from_api_key(
-            config.providers.cohere.api_key.clone(),
-            &extraction.model,
-            extraction.timeout_ms,
-        );
-        tracing::info!(
-            model = %extraction.model,
-            "memory entity merge verifier installed: llm"
-        );
-        return (
-            Arc::new(EntityResolver::for_app_role(Arc::new(verifier))),
-            "llm",
-        );
+    if resolved_extraction_config(config).is_some() {
+        match ModelEntityMergeVerifier::from_config(config) {
+            Ok(verifier) => {
+                tracing::info!(
+                    model = %config.memory.extraction.model,
+                    "memory entity merge verifier installed: model"
+                );
+                return (
+                    Arc::new(EntityResolver::for_app_role(Arc::new(verifier))),
+                    "model",
+                );
+            }
+            Err(error) => tracing::warn!(
+                error = %error,
+                "memory entity merge verifier could not initialize; installing deterministic verifier"
+            ),
+        }
     }
     tracing::info!("memory entity merge verifier installed: deterministic");
     (
@@ -490,34 +493,26 @@ fn entity_blocking_enabled_from_config(config: &MoaConfig) -> bool {
 }
 
 fn extractor_from_config(config: &MoaConfig) -> (Arc<dyn FactExtractor>, &'static str) {
-    let extraction = &config.memory.extraction;
-    if !extraction.enabled {
+    if !config.memory.extraction.enabled {
         tracing::info!("memory fact extractor installed: heuristic");
         return (Arc::new(HeuristicFactExtractor), "heuristic");
     }
-    let mut extraction = extraction.clone();
-    if extraction.api_key.trim().is_empty() {
-        extraction.api_key = config.providers.cohere.api_key.clone();
-    }
-    if extraction.api_key.trim().is_empty() {
-        tracing::warn!(
-            "memory extraction enabled but credential is absent; installing heuristic extractor"
-        );
+    if resolved_extraction_config(config).is_none() {
         return (Arc::new(HeuristicFactExtractor), "heuristic");
     }
-    match LlmFactExtractor::from_config(&extraction) {
+    match ModelFactExtractor::from_config(config) {
         Ok(extractor) => {
             tracing::info!(
-                model = %extraction.model,
-                max_facts_per_chunk = extraction.max_facts_per_chunk,
-                "memory fact extractor installed: llm"
+                model = %config.memory.extraction.model,
+                max_facts_per_chunk = config.memory.extraction.max_facts_per_chunk,
+                "memory fact extractor installed: model"
             );
-            (Arc::new(extractor), "llm")
+            (Arc::new(extractor), "model")
         }
         Err(error) => {
             tracing::warn!(
                 error = %error,
-                "memory extraction enabled but LLM extractor could not initialize; installing heuristic extractor"
+                "memory extraction enabled but model extractor could not initialize; installing heuristic extractor"
             );
             (Arc::new(HeuristicFactExtractor), "heuristic")
         }
@@ -613,7 +608,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_installs_llm_extractor_only_when_enabled_and_credentialed() {
+    async fn runtime_installs_model_extractor_only_when_enabled_and_provider_configured() {
         // Pins: model-backed extraction is gated by both config and a direct configured credential.
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://localhost/moa_test")
@@ -624,13 +619,25 @@ mod tests {
         let missing = IngestRuntime::from_config(pool.clone(), &config);
         assert_eq!(missing.extractor_name(), "heuristic");
 
-        config.providers.cohere.api_key = "test-key".to_string();
+        config.providers.openai.api_key = "test-openai-key".to_string();
         let credentialed = IngestRuntime::from_config(pool.clone(), &config);
-        assert_eq!(credentialed.extractor_name(), "llm");
+        assert_eq!(credentialed.extractor_name(), "model");
 
         config.memory.extraction.enabled = false;
         let disabled = IngestRuntime::from_config(pool, &config);
         assert_eq!(disabled.extractor_name(), "heuristic");
+    }
+
+    #[test]
+    fn entity_resolver_uses_provider_backed_memory_extraction_model() {
+        // Pins: merge verification follows the same provider-backed model path as fact extraction.
+        let mut config = MoaConfig::default();
+        config.memory.extraction.enabled = true;
+        config.providers.openai.api_key = "test-openai-key".to_string();
+
+        let (_resolver, resolver_name) = super::entity_resolver_from_config(&config);
+
+        assert_eq!(resolver_name, "model");
     }
 
     #[tokio::test]

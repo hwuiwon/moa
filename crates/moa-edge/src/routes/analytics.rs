@@ -9,16 +9,14 @@ use axum::response::{IntoResponse, Response};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{IdentityType, SessionStore};
 use moa_core::wire::analytics::{
-    CacheDailyMetricRow, CacheStatsRequest, CacheStatsResponse, ExperimentAnalyticsRequest,
-    ExperimentAnalyticsResponse, ExperimentRunTrendPoint, ExperimentScoreRunRef,
-    ExperimentStatusCount, ExperimentTrialTrendPoint, LearningCandidateListRequest,
-    LearningCandidateListResponse, SessionSearchRequest, SessionSearchResponse,
-    SessionSearchResult, SessionStatsRequest, SessionStatsResponse, TenantStatsRequest,
-    TenantStatsResponse, ToolStatsRequest, ToolStatsResponse, ToolStatsRow,
+    CacheStatsRequest, CacheStatsResponse, ExperimentAnalyticsRequest, ExperimentAnalyticsResponse,
+    ExperimentRunTrendPoint, ExperimentScoreRunRef, ExperimentStatusCount,
+    ExperimentTrialTrendPoint, LearningCandidateListRequest, LearningCandidateListResponse,
+    SessionSearchRequest, SessionSearchResponse, SessionSearchResult, SessionStatsRequest,
+    TenantStatsRequest, ToolStatsRequest, ToolStatsResponse,
 };
 use moa_core::{
-    CacheDailyMetric, EventFilter, EventRecord, MoaError, SessionAnalyticsSummary,
-    TenantAnalyticsSummary, TenantId, ToolCallSummary,
+    CacheDailyMetric, EventFilter, EventRecord, MoaError, TenantAnalyticsSummary, TenantId,
 };
 use sqlx::Row;
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -73,7 +71,7 @@ pub async fn handle_session_stats(
     )
     .await
     {
-        Ok(summary) => Json(session_stats_response_from_summary(summary)).into_response(),
+        Ok(summary) => Json(summary).into_response(),
         Err(error) => moa_error_response(error),
     }
 }
@@ -106,7 +104,7 @@ pub async fn handle_tenant_stats(
         return response;
     }
     maybe_refresh_analytics_materialized_views(&state);
-    match moa_session::analytics::get_tenant_stats_control_plane(
+    match moa_session::analytics::get_tenant_stats(
         &state.pool,
         state.config.database.schema.as_deref(),
         &request.tenant_id,
@@ -114,7 +112,7 @@ pub async fn handle_tenant_stats(
     )
     .await
     {
-        Ok(summary) => Json(tenant_stats_response_from_summary(summary)).into_response(),
+        Ok(summary) => Json(summary).into_response(),
         Err(error) => moa_error_response(error),
     }
 }
@@ -182,7 +180,7 @@ pub async fn handle_tool_stats(
     )
     .await
     {
-        Ok(rows) => Json(tool_stats_response_from_rows(tenant_id, rows)).into_response(),
+        Ok(rows) => Json(ToolStatsResponse { tenant_id, rows }).into_response(),
         Err(error) => moa_error_response(error),
     }
 }
@@ -215,7 +213,7 @@ pub async fn handle_cache_stats(
         return response;
     }
     maybe_refresh_analytics_materialized_views(&state);
-    let summary = match moa_session::analytics::get_tenant_stats_control_plane(
+    let summary = match moa_session::analytics::get_tenant_stats(
         &state.pool,
         state.config.database.schema.as_deref(),
         &request.tenant_id,
@@ -226,7 +224,7 @@ pub async fn handle_cache_stats(
         Ok(summary) => summary,
         Err(error) => return moa_error_response(error),
     };
-    match moa_session::analytics::list_cache_daily_metrics_control_plane(
+    match moa_session::analytics::list_cache_daily_metrics(
         &state.pool,
         state.config.database.schema.as_deref(),
         &request.tenant_id,
@@ -425,6 +423,9 @@ pub(super) fn translate(
         "/v1/experiments/list" => {
             translate_json_object_with_tenant_id(body, "/Experiments/list", tenant_id)
         }
+        "/v1/experiments/plans/list" => {
+            translate_json_object_with_tenant_id(body, "/Experiments/list_plans", tenant_id)
+        }
         "/v1/experiments/trials" => {
             translate_json_object_with_tenant_id(body, "/Experiments/trials", tenant_id)
         }
@@ -503,60 +504,6 @@ pub(super) fn translate(
     Some(translation)
 }
 
-fn session_stats_response_from_summary(summary: SessionAnalyticsSummary) -> SessionStatsResponse {
-    SessionStatsResponse {
-        session_id: summary.session_id,
-        tenant_id: summary.tenant_id,
-        contact_id: summary.contact_id,
-        status: summary.status,
-        turn_count: summary.turn_count,
-        event_count: summary.event_count,
-        total_input_tokens: summary.total_input_tokens,
-        total_output_tokens: summary.total_output_tokens,
-        total_cost_cents: summary.total_cost_cents,
-        main_cost_cents: summary.main_cost_cents,
-        auxiliary_cost_cents: summary.auxiliary_cost_cents,
-        cache_hit_rate: summary.cache_hit_rate,
-        duration_seconds: summary.duration_seconds,
-        tool_call_count: summary.tool_call_count,
-        error_count: summary.error_count,
-    }
-}
-
-fn tenant_stats_response_from_summary(summary: TenantAnalyticsSummary) -> TenantStatsResponse {
-    TenantStatsResponse {
-        tenant_id: summary.tenant_id,
-        days: summary.days,
-        session_count: summary.session_count,
-        turn_count: summary.turn_count,
-        total_input_tokens: summary.total_input_tokens,
-        total_cache_read_tokens: summary.total_cache_read_tokens,
-        total_output_tokens: summary.total_output_tokens,
-        total_cost_cents: summary.total_cost_cents,
-        cache_hit_rate: summary.cache_hit_rate,
-    }
-}
-
-fn tool_stats_response_from_rows(
-    tenant_id: Option<TenantId>,
-    rows: Vec<ToolCallSummary>,
-) -> ToolStatsResponse {
-    ToolStatsResponse {
-        tenant_id,
-        rows: rows
-            .into_iter()
-            .map(|row| ToolStatsRow {
-                tool_name: row.tool_name,
-                call_count: row.call_count,
-                success_rate: row.success_rate,
-                avg_duration_ms: row.avg_duration_ms,
-                p50_ms: row.p50_ms,
-                p95_ms: row.p95_ms,
-            })
-            .collect(),
-    }
-}
-
 fn cache_stats_response_from_parts(
     summary: TenantAnalyticsSummary,
     daily: Vec<CacheDailyMetric>,
@@ -570,20 +517,7 @@ fn cache_stats_response_from_parts(
         total_output_tokens: summary.total_output_tokens,
         total_cost_cents: summary.total_cost_cents,
         estimated_savings_cents: None,
-        daily: daily
-            .into_iter()
-            .map(|row| CacheDailyMetricRow {
-                tenant_id: row.tenant_id,
-                day: row.day,
-                session_count: row.session_count,
-                turn_count: row.turn_count,
-                total_input_tokens: row.total_input_tokens,
-                total_cache_read_tokens: row.total_cache_read_tokens,
-                total_output_tokens: row.total_output_tokens,
-                total_cost_cents: row.total_cost_cents,
-                avg_cache_hit_rate: row.avg_cache_hit_rate,
-            })
-            .collect(),
+        daily,
     }
 }
 
@@ -867,6 +801,7 @@ mod tests {
             ("/v1/experiments/run-plan", "/Experiments/run"),
             ("/v1/experiments/status", "/Experiments/status"),
             ("/v1/experiments/list", "/Experiments/list"),
+            ("/v1/experiments/plans/list", "/Experiments/list_plans"),
             ("/v1/experiments/trials", "/Experiments/trials"),
             ("/v1/experiments/trial-status", "/Experiments/trial_status"),
             ("/v1/experiments/cancel", "/Experiments/cancel"),

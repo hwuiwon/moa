@@ -98,21 +98,6 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
-    /// Builds a registry from the provider API keys available in standard provider env vars.
-    #[must_use]
-    pub fn from_env() -> Self {
-        let mut registry = Self::default();
-        for descriptor in PROVIDER_DESCRIPTORS {
-            if configured_env(descriptor.default_api_key_env) {
-                registry.register_factory(
-                    descriptor,
-                    Arc::new(move |model| (descriptor.build_from_env)(model)),
-                );
-            }
-        }
-        registry
-    }
-
     /// Builds a registry from configured provider API keys.
     #[must_use]
     pub fn from_config(config: &MoaConfig) -> Self {
@@ -504,12 +489,6 @@ impl ProviderRegistry {
     }
 }
 
-fn configured_env(key: &str) -> bool {
-    std::env::var(key)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-}
-
 fn configured_secret(value: &str) -> bool {
     !value.trim().is_empty()
 }
@@ -883,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn rewriter_resolution_prefers_anthropic_small_model_when_available() {
+    fn rewriter_resolution_prefers_openai_nano_model_when_available() {
         // Pins: query rewrite selects by rewriter priority and builds the provider's
         // rewriter model, not the main-loop default model.
         let builds = Arc::new(AtomicUsize::new(0));
@@ -908,7 +887,7 @@ mod tests {
 
         assert_eq!(
             provider.capabilities().model_id,
-            ModelId::new("claude-haiku-4-5")
+            ModelId::new("gpt-5.4-nano")
         );
         assert_eq!(builds.load(Ordering::SeqCst), 1);
     }

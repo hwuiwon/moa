@@ -4,7 +4,7 @@
 //! `MOA_RUN_LIVE_GEMINI_EMBEDDING_TESTS=1` because they call a billed external API.
 
 use moa_core::traits::EmbeddingProvider;
-use moa_providers::{EmbedRole, GeminiEmbeddingEmbedder};
+use moa_providers::{EmbedderConstructionRole, GeminiEmbeddingEmbedder};
 
 const LIVE_DIMENSIONS: usize = 1024;
 
@@ -37,8 +37,12 @@ async fn gemini_embedding_2_returns_1024_dimensional_float_embeddings() {
     let Some(api_key) = live_gemini_key() else {
         return;
     };
-    let embedder = GeminiEmbeddingEmbedder::new(api_key, LIVE_DIMENSIONS, EmbedRole::SearchQuery)
-        .expect("Gemini embedding provider should build");
+    let embedder = GeminiEmbeddingEmbedder::new(
+        api_key,
+        LIVE_DIMENSIONS,
+        EmbedderConstructionRole::Retrieval,
+    )
+    .expect("Gemini embedding provider should build");
     let texts = vec![
         "MOA stores graph memory in PostgreSQL with row-level security.".to_string(),
         "Gemini Embedding 2 should return finite text embeddings.".to_string(),

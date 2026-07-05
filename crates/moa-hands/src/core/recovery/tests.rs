@@ -10,7 +10,7 @@ use moa_core::{
 };
 use serde_json::json;
 
-use crate::core::{ToolRegistry, ToolRouter};
+use crate::core::{HandRoute, ToolRegistry, ToolRouter};
 
 #[derive(Default)]
 struct MockProviderState {
@@ -18,6 +18,7 @@ struct MockProviderState {
     provision_calls: u32,
     destroy_calls: u32,
     execute_calls: u32,
+    provision_results: VecDeque<Result<()>>,
     execute_results: VecDeque<Result<ToolOutput>>,
     classifications: VecDeque<ToolFailureClass>,
     health_checks: VecDeque<Result<bool>>,
@@ -63,6 +64,9 @@ impl HandProvider for MockHandProvider {
     async fn provision(&self, _spec: HandSpec) -> Result<HandHandle> {
         let mut state = self.state.lock().expect("lock mock provider state");
         state.provision_calls += 1;
+        if let Some(result) = state.provision_results.pop_front() {
+            result?;
+        }
         state.next_handle += 1;
         Ok(HandHandle::docker(format!(
             "{}-{}",
@@ -144,11 +148,49 @@ async fn router_with_provider_and_idempotency(
         },
         idempotency_class,
     );
-    registry.retarget_hand_tools(provider.provider_name(), SandboxTier::Container);
+    registry.retarget_hand_tools(vec![HandRoute {
+        provider: provider.provider_name().to_string(),
+        tier: SandboxTier::Container,
+    }]);
     registry.retain_only(["bash"]);
     let mut providers = HashMap::new();
     providers.insert(provider.provider_name().to_string(), provider);
     ToolRouter::new(registry, providers)
+}
+
+async fn router_with_providers_and_routes(
+    providers: &[Arc<MockHandProvider>],
+    routes: Vec<HandRoute>,
+    idempotency_class: IdempotencyClass,
+) -> ToolRouter {
+    let mut registry = ToolRegistry::default_local();
+    registry.register_hand(
+        "bash",
+        "test shell command",
+        json!({
+            "type": "object",
+            "properties": {
+                "cmd": { "type": "string" }
+            },
+            "required": ["cmd"]
+        }),
+        ToolPolicySpec {
+            risk_level: RiskLevel::High,
+            default_effect: ActionPolicyEffect::Allow,
+            action_class: ActionClass::CommandExecution,
+            input_shape: ToolInputShape::Json,
+            diff_strategy: ToolDiffStrategy::None,
+        },
+        idempotency_class,
+    );
+    registry.retarget_hand_tools(routes);
+    registry.retain_only(["bash"]);
+    let mut provider_map = HashMap::new();
+    for provider in providers {
+        let provider_trait: Arc<dyn HandProvider> = provider.clone();
+        provider_map.insert(provider.provider_name().to_string(), provider_trait);
+    }
+    ToolRouter::new(registry, provider_map)
 }
 
 fn session() -> SessionMeta {
@@ -408,4 +450,220 @@ async fn recovery_reprovisions_non_idempotent_before_execution() {
     assert_eq!(snapshot.execute_calls, 1);
     assert_eq!(snapshot.provision_calls, 2);
     assert_eq!(snapshot.destroy_calls, 1);
+}
+
+#[tokio::test]
+async fn recovery_falls_back_when_primary_provider_fails_before_execution() {
+    let primary = Arc::new(MockHandProvider::new(
+        "primary-cloud",
+        MockProviderState {
+            provision_results: VecDeque::from([Err(MoaError::ProviderError(
+                "connection refused".to_string(),
+            ))]),
+            ..MockProviderState::default()
+        },
+    ));
+    let fallback = Arc::new(MockHandProvider::new(
+        "fallback-cloud",
+        MockProviderState {
+            execute_results: VecDeque::from([Ok(ToolOutput::text(
+                "fallback ran",
+                Duration::from_millis(1),
+            ))]),
+            ..MockProviderState::default()
+        },
+    ));
+    let router = router_with_providers_and_routes(
+        &[primary.clone(), fallback.clone()],
+        vec![
+            HandRoute {
+                provider: primary.provider_name().to_string(),
+                tier: SandboxTier::Container,
+            },
+            HandRoute {
+                provider: fallback.provider_name().to_string(),
+                tier: SandboxTier::MicroVM,
+            },
+        ],
+        IdempotencyClass::NonIdempotent,
+    )
+    .await;
+
+    let (_hand_id, output) = router
+        .execute_authorized_with_recovery(&session(), None, &bash_invocation())
+        .await
+        .expect("fallback route should return a tool output");
+
+    assert!(!output.is_error);
+    assert_eq!(output.to_text(), "fallback ran");
+    let primary = primary.snapshot();
+    let fallback = fallback.snapshot();
+    assert_eq!(primary.provision_calls, 1);
+    assert_eq!(primary.execute_calls, 0);
+    assert_eq!(fallback.provision_calls, 1);
+    assert_eq!(fallback.execute_calls, 1);
+}
+
+#[tokio::test]
+async fn recovery_falls_back_after_execution_only_for_idempotent_tools() {
+    let primary = Arc::new(MockHandProvider::new(
+        "primary-idempotent",
+        MockProviderState {
+            execute_results: VecDeque::from([Err(MoaError::ProviderError(
+                "gateway temporarily unavailable".to_string(),
+            ))]),
+            classifications: VecDeque::from([ToolFailureClass::Retryable {
+                reason: "gateway temporarily unavailable".to_string(),
+                backoff_hint: Duration::ZERO,
+            }]),
+            ..MockProviderState::default()
+        },
+    ));
+    let fallback = Arc::new(MockHandProvider::new(
+        "fallback-idempotent",
+        MockProviderState {
+            execute_results: VecDeque::from([Ok(ToolOutput::text(
+                "idempotent fallback",
+                Duration::from_millis(1),
+            ))]),
+            ..MockProviderState::default()
+        },
+    ));
+    let router = router_with_providers_and_routes(
+        &[primary.clone(), fallback.clone()],
+        vec![
+            HandRoute {
+                provider: primary.provider_name().to_string(),
+                tier: SandboxTier::Container,
+            },
+            HandRoute {
+                provider: fallback.provider_name().to_string(),
+                tier: SandboxTier::MicroVM,
+            },
+        ],
+        IdempotencyClass::Idempotent,
+    )
+    .await;
+
+    let (_hand_id, output) = router
+        .execute_authorized_with_recovery(&session(), None, &bash_invocation())
+        .await
+        .expect("idempotent fallback route should return a tool output");
+
+    assert!(!output.is_error);
+    assert_eq!(output.to_text(), "idempotent fallback");
+    assert_eq!(primary.snapshot().execute_calls, 1);
+    assert_eq!(fallback.snapshot().execute_calls, 1);
+}
+
+#[tokio::test]
+async fn recovery_does_not_fallback_after_non_idempotent_execution_failure() {
+    let primary = Arc::new(MockHandProvider::new(
+        "primary-non-idempotent",
+        MockProviderState {
+            execute_results: VecDeque::from([Err(MoaError::ProviderError(
+                "sandbox died after command started".to_string(),
+            ))]),
+            classifications: VecDeque::from([ToolFailureClass::ReProvision {
+                reason: "sandbox died after command started".to_string(),
+            }]),
+            ..MockProviderState::default()
+        },
+    ));
+    let fallback = Arc::new(MockHandProvider::new(
+        "fallback-non-idempotent",
+        MockProviderState {
+            execute_results: VecDeque::from([Ok(ToolOutput::text(
+                "should not run",
+                Duration::from_millis(1),
+            ))]),
+            ..MockProviderState::default()
+        },
+    ));
+    let router = router_with_providers_and_routes(
+        &[primary.clone(), fallback.clone()],
+        vec![
+            HandRoute {
+                provider: primary.provider_name().to_string(),
+                tier: SandboxTier::Container,
+            },
+            HandRoute {
+                provider: fallback.provider_name().to_string(),
+                tier: SandboxTier::MicroVM,
+            },
+        ],
+        IdempotencyClass::NonIdempotent,
+    )
+    .await;
+
+    let (_hand_id, output) = router
+        .execute_authorized_with_recovery(&session(), None, &bash_invocation())
+        .await
+        .expect("non-idempotent failure should return a tool output");
+
+    assert!(output.is_error);
+    assert!(
+        output
+            .to_text()
+            .contains("automatic re-provision is disabled for non_idempotent tools")
+    );
+    assert_eq!(primary.snapshot().execute_calls, 1);
+    let fallback = fallback.snapshot();
+    assert_eq!(fallback.provision_calls, 0);
+    assert_eq!(fallback.execute_calls, 0);
+}
+
+#[tokio::test]
+async fn recovery_prefers_successful_fallback_for_same_scope() {
+    let primary = Arc::new(MockHandProvider::new(
+        "primary-once",
+        MockProviderState {
+            provision_results: VecDeque::from([Err(MoaError::ProviderError(
+                "connection refused".to_string(),
+            ))]),
+            ..MockProviderState::default()
+        },
+    ));
+    let fallback = Arc::new(MockHandProvider::new(
+        "fallback-sticky",
+        MockProviderState {
+            execute_results: VecDeque::from([Ok(ToolOutput::text(
+                "first fallback",
+                Duration::from_millis(1),
+            ))]),
+            ..MockProviderState::default()
+        },
+    ));
+    let router = router_with_providers_and_routes(
+        &[primary.clone(), fallback.clone()],
+        vec![
+            HandRoute {
+                provider: primary.provider_name().to_string(),
+                tier: SandboxTier::Container,
+            },
+            HandRoute {
+                provider: fallback.provider_name().to_string(),
+                tier: SandboxTier::MicroVM,
+            },
+        ],
+        IdempotencyClass::NonIdempotent,
+    )
+    .await;
+    let session = session();
+
+    let (_first_hand_id, first_output) = router
+        .execute_authorized_with_recovery(&session, None, &bash_invocation())
+        .await
+        .expect("first call should use fallback");
+    let (_second_hand_id, second_output) = router
+        .execute_authorized_with_recovery(&session, None, &bash_invocation())
+        .await
+        .expect("second call should prefer the proven fallback");
+
+    assert_eq!(first_output.to_text(), "first fallback");
+    assert_eq!(second_output.to_text(), "ok");
+    assert_eq!(primary.snapshot().provision_calls, 1);
+    let fallback = fallback.snapshot();
+    assert_eq!(fallback.provision_calls, 1);
+    assert_eq!(fallback.execute_calls, 2);
 }

@@ -28,7 +28,7 @@ use crate::adapters::mcp::MCPClient;
 
 use leases::HandLeaseStore;
 pub use policy::{ActionOrigin, PreparedActionInvocation};
-pub use registration::{ToolExecution, ToolRegistry};
+pub use registration::{HandRoute, ToolExecution, ToolRegistry};
 
 const DEFAULT_PROVIDER_NAME: &str = "local";
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -42,6 +42,7 @@ pub struct ToolRouter {
     mcp_servers: HashMap<String, McpServerConfig>,
     mcp_proxy: Option<Arc<MCPCredentialProxy>>,
     active_hands: RwLock<HashMap<String, HandHandle>>,
+    preferred_hand_routes: RwLock<HashMap<String, String>>,
     hand_leases: Option<Arc<dyn HandLeaseStore>>,
     /// Trusted sandbox file manifests keyed by hand scope (`scope_key`):
     /// `"{session_id}:{worker_id}"`, where an empty worker segment is the

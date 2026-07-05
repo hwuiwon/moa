@@ -5,7 +5,8 @@ use axum::http::{HeaderMap, Method, Uri};
 use base64::{Engine as _, engine::general_purpose};
 use moa_core::TenantId;
 use moa_core::wire::knowledge::{
-    KnowledgeConnectionListRequest, KnowledgeCreateLinkTokenRequest, KnowledgeExchangeTokenRequest,
+    KnowledgeConnectionListRequest, KnowledgeCreateLinkTokenRequest,
+    KnowledgeDisconnectConnectionRequest, KnowledgeExchangeTokenRequest,
     KnowledgeIntegrationListRequest, KnowledgeObjectInspectRequest, KnowledgeObjectListRequest,
     KnowledgeProviderWebhookRequest, KnowledgeQueryTraceRequest, KnowledgeSyncEventsRequest,
     KnowledgeSyncRequest, KnowledgeSyncStatusRequest,
@@ -61,6 +62,13 @@ pub(super) fn translate(
             translate_knowledge_json_body::<KnowledgeUpdateConnectionSourceSelectionRequest>(
                 body,
                 "/Knowledge/update_connection_source_selection",
+                tenant_id,
+            )
+        }
+        "/v1/knowledge/connections/disconnect" => {
+            translate_knowledge_json_body::<KnowledgeDisconnectConnectionRequest>(
+                body,
+                "/Knowledge/disconnect_connection",
                 tenant_id,
             )
         }
@@ -231,6 +239,14 @@ mod tests {
                         }
                     },
                     "sync": true
+                }),
+            ),
+            (
+                "/v1/knowledge/connections/disconnect",
+                "/Knowledge/disconnect_connection",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "connection_uid": connection_uid
                 }),
             ),
             (

@@ -77,14 +77,6 @@
             "path": { "type": "string" }
           },
           "required": ["path"]
-        },
-        {
-          "properties": {
-            "type": { "const": "expression" },
-            "language": { "type": "string" },
-            "source": { "type": "string" }
-          },
-          "required": ["language", "source"]
         }
       ]
     }

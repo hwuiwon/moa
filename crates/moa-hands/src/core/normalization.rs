@@ -111,7 +111,7 @@ pub(super) fn unwrap_shell_wrapper(normalized_input: &str) -> Option<String> {
 
 pub(super) fn action_pattern_for(
     tool_name: &str,
-    input_shape: ToolInputShape,
+    _input_shape: ToolInputShape,
     normalized_input: &str,
 ) -> String {
     if let Some(descriptor) = sandbox_tool_descriptor(tool_name) {
@@ -120,14 +120,6 @@ pub(super) fn action_pattern_for(
             SandboxActionPattern::ShellFirstCommand => shell_action_pattern_for(normalized_input),
         };
     }
-    action_pattern_for_shape(input_shape, normalized_input)
-}
-
-fn action_pattern_for_shape(input_shape: ToolInputShape, normalized_input: &str) -> String {
-    if matches!(input_shape, ToolInputShape::Command) {
-        return shell_action_pattern_for(normalized_input);
-    }
-
     normalized_input.to_string()
 }
 
@@ -164,73 +156,8 @@ pub(super) fn review_fields_for(
     }
 
     match input_shape {
-        ToolInputShape::Command => {
-            let command = invocation
-                .input
-                .get("cmd")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let mut fields = vec![ActionReviewField {
-                label: "Command".to_string(),
-                value: command,
-            }];
-            if let Some(sandbox_root) = sandbox_root {
-                fields.push(ActionReviewField {
-                    label: "Working dir".to_string(),
-                    value: sandbox_root.display().to_string(),
-                });
-            }
-            fields
-        }
-        ToolInputShape::Path => {
-            let mut fields = single_review_field("Path", &invocation.input, "path");
-            if invocation.name == "file_write" {
-                let content_len = invocation
-                    .input
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .map(|content| content.chars().count())
-                    .unwrap_or_default();
-                fields.push(ActionReviewField {
-                    label: "Content".to_string(),
-                    value: format!("{content_len} chars"),
-                });
-            }
-            if invocation.name == "str_replace" {
-                let old_len = invocation
-                    .input
-                    .get("old_str")
-                    .and_then(Value::as_str)
-                    .map(|content| content.chars().count())
-                    .unwrap_or_default();
-                let new_len = invocation
-                    .input
-                    .get("new_str")
-                    .and_then(Value::as_str)
-                    .map(|content| content.chars().count())
-                    .unwrap_or_default();
-                fields.push(ActionReviewField {
-                    label: "Old string".to_string(),
-                    value: format!("{old_len} chars"),
-                });
-                fields.push(ActionReviewField {
-                    label: "New string".to_string(),
-                    value: format!("{new_len} chars"),
-                });
-                if let Some(insert_after_line) = invocation
-                    .input
-                    .get("insert_after_line")
-                    .and_then(Value::as_u64)
-                {
-                    fields.push(ActionReviewField {
-                        label: "Insert after line".to_string(),
-                        value: insert_after_line.to_string(),
-                    });
-                }
-            }
-            fields
-        }
+        ToolInputShape::Command => single_review_field("Command", &invocation.input, "cmd"),
+        ToolInputShape::Path => single_review_field("Path", &invocation.input, "path"),
         ToolInputShape::Pattern => single_review_field("Pattern", &invocation.input, "pattern"),
         ToolInputShape::Query => single_review_field("Query", &invocation.input, "query"),
         ToolInputShape::Url => single_review_field("URL", &invocation.input, "url"),
@@ -251,24 +178,20 @@ fn sandbox_review_fields_for(
     invocation: &ToolInvocation,
 ) -> Vec<ActionReviewField> {
     match preview {
-        SandboxReviewPreviewMetadata::Command {
-            command_field,
-            command_label,
-            working_dir_label,
-        } => {
+        SandboxReviewPreviewMetadata::Command => {
             let command = invocation
                 .input
-                .get(command_field)
+                .get("cmd")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
             let mut fields = vec![ActionReviewField {
-                label: command_label.to_string(),
+                label: "Command".to_string(),
                 value: command,
             }];
             if let Some(sandbox_root) = sandbox_root {
                 fields.push(ActionReviewField {
-                    label: working_dir_label.to_string(),
+                    label: "Working dir".to_string(),
                     value: sandbox_root.display().to_string(),
                 });
             }
@@ -467,9 +390,7 @@ pub(super) fn expand_local_path(path: &str) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::ToolInputShape;
-
-    use super::{action_pattern_for_shape, unwrap_shell_wrapper};
+    use super::{shell_action_pattern_for, unwrap_shell_wrapper};
 
     #[test]
     fn unwrap_shell_wrapper_recognizes_supported_forms() {
@@ -497,10 +418,7 @@ mod tests {
 
     #[test]
     fn action_pattern_unwraps_zsh_wrapper() {
-        let pattern = action_pattern_for_shape(
-            ToolInputShape::Command,
-            r#"zsh -lc "cd server && rg -n 'class' .""#,
-        );
+        let pattern = shell_action_pattern_for(r#"zsh -lc "cd server && rg -n 'class' .""#);
 
         assert_eq!(pattern, "cd *");
         assert_ne!(pattern, "zsh *");
@@ -508,20 +426,20 @@ mod tests {
 
     #[test]
     fn action_pattern_simple_command() {
-        let pattern = action_pattern_for_shape(ToolInputShape::Command, "npm test");
+        let pattern = shell_action_pattern_for("npm test");
         assert_eq!(pattern, "npm *");
     }
 
     #[test]
     fn action_pattern_single_token() {
-        let pattern = action_pattern_for_shape(ToolInputShape::Command, "pwd");
+        let pattern = shell_action_pattern_for("pwd");
         assert_eq!(pattern, "pwd");
     }
 
     #[test]
     fn action_pattern_nested_shell_not_recursed() {
         let input = r#"bash -c "bash -c 'rm -rf /'""#;
-        let pattern = action_pattern_for_shape(ToolInputShape::Command, input);
+        let pattern = shell_action_pattern_for(input);
 
         assert_eq!(pattern, input);
         assert!(!pattern.starts_with("rm"));
@@ -529,10 +447,7 @@ mod tests {
 
     #[test]
     fn action_pattern_chained_inner_uses_first_subcommand() {
-        let pattern = action_pattern_for_shape(
-            ToolInputShape::Command,
-            r#"zsh -lc "npm install && npm test""#,
-        );
+        let pattern = shell_action_pattern_for(r#"zsh -lc "npm install && npm test""#);
 
         assert_eq!(pattern, "npm *");
     }
@@ -540,7 +455,7 @@ mod tests {
     #[test]
     fn action_pattern_malformed_wrapper_falls_back_to_full_input() {
         let input = r#"zsh -lc "unterminated"#;
-        let pattern = action_pattern_for_shape(ToolInputShape::Command, input);
+        let pattern = shell_action_pattern_for(input);
 
         assert_eq!(pattern, input);
     }

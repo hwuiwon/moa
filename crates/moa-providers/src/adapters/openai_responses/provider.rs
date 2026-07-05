@@ -1,9 +1,8 @@
 //! `OpenAI` Responses API provider implementation.
 
 use std::env;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use async_openai::config::OpenAIConfig;
 use moa_core::{
     CompletionRequest, CompletionStream, LLMProvider, MoaConfig, MoaError, ModelCapabilities,
     ModelId, ProviderNativeTool, Result,
@@ -12,9 +11,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
-use crate::adapters::openai_responses::{
-    build_openai_client, build_responses_request, stream_responses_with_retry,
-};
+use crate::adapters::openai_responses::{build_responses_request, stream_responses_with_retry};
 use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_BLOCK_THRESHOLD};
 use crate::core::instrumentation::LLMSpanRecorder;
 use crate::core::models::{self, PROVIDER_OPENAI};
@@ -25,6 +22,7 @@ use crate::core::retry::RetryPolicy;
 
 const DEFAULT_STREAM_BUFFER: usize = 128;
 const DEFAULT_MAX_RETRIES: usize = 3;
+const DEFAULT_OPENAI_API_BASE: &str = "https://api.openai.com/v1";
 const MODEL_GPT_5_4: &str = "gpt-5.4";
 #[cfg(test)]
 const MODEL_GPT_5_4_MINI: &str = "gpt-5.4-mini";
@@ -52,7 +50,8 @@ pub fn debug_build_openai_request_body(
 
 /// `OpenAI` provider backed by the Responses API.
 pub struct OpenAIProvider {
-    client: async_openai::Client<OpenAIConfig>,
+    http_client: reqwest::Client,
+    api_base: String,
     api_key: String,
     default_model: String,
     default_reasoning_effort: String,
@@ -79,10 +78,10 @@ impl OpenAIProvider {
         let default_model = canonical_model_id(&default_model.into())?;
         let default_capabilities = capabilities_for_model(&default_model)?;
         let api_key = api_key.into();
-        let client = build_openai_client(OpenAIConfig::new().with_api_key(api_key.clone()));
 
         Ok(Self {
-            client,
+            http_client: openai_http_client()?,
+            api_base: DEFAULT_OPENAI_API_BASE.to_string(),
             api_key,
             default_model,
             default_reasoning_effort: default_reasoning_effort.into(),
@@ -136,10 +135,7 @@ impl OpenAIProvider {
 
     /// Overrides the Responses API base URL, primarily for tests.
     pub fn with_api_base(mut self, api_base: impl Into<String>) -> Result<Self> {
-        let config = OpenAIConfig::new()
-            .with_api_key(self.api_key.clone())
-            .with_api_base(api_base.into());
-        self.client = build_openai_client(config);
+        self.api_base = api_base.into();
         Ok(self)
     }
 
@@ -233,7 +229,9 @@ impl LLMProvider for OpenAIProvider {
         // Chat completions are request-rate limited; pace after taking the
         // in-flight slot so queued callers do not consume rate budget early.
         self.pacer.acquire(1, 0).await;
-        let client = self.client.clone();
+        let client = self.http_client.clone();
+        let api_base = self.api_base.clone();
+        let api_key = self.api_key.clone();
         let retry_policy = self.retry_policy.clone();
         let guard = self.guard.clone();
         let (tx, rx) = mpsc::channel(DEFAULT_STREAM_BUFFER);
@@ -246,6 +244,8 @@ impl LLMProvider for OpenAIProvider {
                 let started_at = Instant::now();
                 stream_responses_with_retry(
                     &client,
+                    &api_base,
+                    &api_key,
                     &request,
                     tx,
                     ModelId::new(resolved_model),
@@ -269,6 +269,28 @@ pub(crate) fn canonical_model_id(model: &str) -> Result<String> {
 
 pub(crate) fn capabilities_for_model(model: &str) -> Result<ModelCapabilities> {
     models::capabilities_for_provider_model(PROVIDER_OPENAI, model, native_web_search_tools())
+}
+
+fn openai_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .use_rustls_tls()
+        .tls_certs_only(webpki_root_certificates()?)
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| {
+            MoaError::ConfigError(format!("failed to build OpenAI HTTP client: {error}"))
+        })
+}
+
+fn webpki_root_certificates() -> Result<Vec<reqwest::Certificate>> {
+    webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .map(|cert| {
+            reqwest::Certificate::from_der(cert.as_ref()).map_err(|error| {
+                MoaError::ConfigError(format!("failed to load WebPKI root certificate: {error}"))
+            })
+        })
+        .collect()
 }
 
 fn native_web_search_tools() -> Vec<ProviderNativeTool> {

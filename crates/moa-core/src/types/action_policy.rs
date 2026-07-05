@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{SessionActorRef, SessionId, TenantId, ToolCallId, UserId, WorkerId};
+use super::{ContactId, SessionActorRef, SessionId, TenantId, ToolCallId, UserId, WorkerId};
 
 /// Risk level assigned to one policy-facing action.
 #[derive(
@@ -123,6 +123,13 @@ pub enum ActionRuleScope {
         /// Tenant that owns the override.
         tenant_id: TenantId,
     },
+    /// Rule applies to one contact's personal scope inside a tenant.
+    Contact {
+        /// Tenant that owns the contact.
+        tenant_id: TenantId,
+        /// Contact that owns the personal override.
+        contact_id: ContactId,
+    },
 }
 
 impl ActionRuleScope {
@@ -131,6 +138,24 @@ impl ActionRuleScope {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Tenant { .. } => "tenant",
+            Self::Contact { .. } => "contact",
+        }
+    }
+
+    /// Returns the tenant that owns this scope.
+    #[must_use]
+    pub fn tenant_id(self) -> TenantId {
+        match self {
+            Self::Tenant { tenant_id } | Self::Contact { tenant_id, .. } => tenant_id,
+        }
+    }
+
+    /// Returns the contact that owns this personal scope, when present.
+    #[must_use]
+    pub fn contact_id(self) -> Option<ContactId> {
+        match self {
+            Self::Tenant { .. } => None,
+            Self::Contact { contact_id, .. } => Some(contact_id),
         }
     }
 }

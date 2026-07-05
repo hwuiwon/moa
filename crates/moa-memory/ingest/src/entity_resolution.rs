@@ -222,7 +222,7 @@ impl EntityResolver {
                 };
                 (
                     Some(embedding),
-                    Some(blocker.embedder.model_name().to_string()),
+                    Some(blocker.embedder.model_id().to_string()),
                     Some(blocker.embedder.model_version()),
                 )
             } else {

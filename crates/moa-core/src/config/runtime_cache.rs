@@ -33,19 +33,3 @@ impl Default for RuntimeCacheConfig {
         }
     }
 }
-
-impl super::MoaEnvOverlay {
-    /// Applies runtime cache environment overrides.
-    pub(in crate::config) fn apply_runtime_cache_overlay(&self, config: &mut super::MoaConfig) {
-        use super::env_overlay::{set_copy_if_some, set_option_if_some};
-
-        set_copy_if_some(
-            &mut config.runtime_cache.backend,
-            self.runtime_cache_backend,
-        );
-        set_option_if_some(
-            &mut config.runtime_cache.redis_url,
-            &self.runtime_cache_redis_url,
-        );
-    }
-}

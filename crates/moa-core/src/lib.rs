@@ -21,16 +21,16 @@ pub use analytics::{
     ToolCallSummary,
 };
 pub use config::{
-    AuthzConfig, AuthzEngine, CloudConfig, CloudHandsConfig, CohereEmbedderConfig,
-    CompactionConfig, ContextSnapshotConfig, DatabaseConfig, DatabaseNeonConfig,
-    GeminiEmbedderConfig, GeneralConfig, LineageConfig, LocalConfig, McpCredentialConfig,
-    McpServerConfig, McpTransportConfig, MemoryConfig, MemoryDigestConfig, MemoryRankingConfig,
-    MemoryRankingWeights, MemoryRetrievalConfig, MemoryVectorConfig, MessagingConfig,
-    MetricsConfig, MoaConfig, ModelsConfig, ObservabilityConfig, OpenFgaConfig, OrchestratorConfig,
-    OtlpProtocol, PermissionsConfig, ProviderCredentialConfig, ProvidersConfig, QueryRewriteConfig,
-    ResolutionConfig, ResolutionWeights, SessionAttachmentBackend, SessionAttachmentStorageConfig,
+    AuthzConfig, AuthzEngine, CloudConfig, CloudHandsConfig, CompactionConfig,
+    ContextSnapshotConfig, DatabaseConfig, DatabaseNeonConfig, GeneralConfig, LineageConfig,
+    LocalConfig, McpCredentialConfig, McpServerConfig, McpTransportConfig, MemoryConfig,
+    MemoryDigestConfig, MemoryRankingConfig, MemoryRankingWeights, MemoryRetrievalConfig,
+    MemoryVectorConfig, MessagingConfig, MetricsConfig, MoaConfig, ModelsConfig,
+    ObservabilityConfig, OpenFgaConfig, OrchestratorConfig, OtlpProtocol, PermissionsConfig,
+    ProviderCredentialConfig, ProvidersConfig, QueryRewriteConfig, ResolutionConfig,
+    ResolutionWeights, SessionAttachmentBackend, SessionAttachmentStorageConfig,
     SessionBlobBackend, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig,
-    VectorEmbedderConfig, ZeroEntropyEmbedderConfig,
+    VectorEmbedderConfig,
 };
 pub use coordination_counters::{
     CoordinationCounters, CoordinationSnapshot, record_durable_append, record_session_vo_call,
@@ -47,7 +47,7 @@ pub use traits::{
     BlobStore, BranchManager, BuiltInTool, ContextProcessor, CredentialVault, EmbeddingProvider,
     ExperienceStore, HandProvider, LLMProvider, LearningCandidateStore, LineageHandle,
     MemoryToolExecutor, NULL_LINEAGE_HANDLE, NullLineageHandle, SegmentStore,
-    SessionAttachmentStore, SessionStore, StageApply, ToolContext,
+    SessionAttachmentStore, SessionStore, StageApply, StoredCredentialMetadata, ToolContext,
 };
 pub use truncation::truncate_head_tail;
 pub use types::*;

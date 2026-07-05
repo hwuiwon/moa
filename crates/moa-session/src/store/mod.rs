@@ -110,36 +110,10 @@ pub struct SessionChannelBindingReplacement<'a> {
 }
 
 impl PostgresSessionStore {
-    /// Creates a session store using the default MOA `PostgreSQL` pool settings.
-    pub async fn new(database_url: &str) -> Result<Self> {
-        let blob_store: Arc<dyn BlobStore> =
-            Arc::new(FileBlobStore::new(FileBlobStore::default_dir()?));
-        let attachment_store = AttachmentObjectStore::from_config(&local_rustfs_config())?;
-        let backends = SessionStorageBackends {
-            blob_store,
-            blob_threshold_bytes: 65_536,
-            attachment_store,
-        };
-        Self::new_with_options_and_blob_store(database_url, 1, 5, 10, backends).await
-    }
-
     /// Creates a session store from config using the configured `PostgreSQL` pool settings.
     pub async fn from_config(config: &MoaConfig) -> Result<Self> {
         Self::new_with_options_and_config(
             config.database.runtime_url(),
-            1,
-            config.database.max_connections,
-            config.database.connect_timeout_seconds,
-            config.database.schema.as_deref(),
-            config,
-        )
-        .await
-    }
-
-    /// Creates a session store from config using the direct/admin `PostgreSQL` URL when present.
-    pub async fn from_admin_config(config: &MoaConfig) -> Result<Self> {
-        Self::new_with_options_and_config(
-            config.database.admin_url(),
             1,
             config.database.max_connections,
             config.database.connect_timeout_seconds,
@@ -189,26 +163,6 @@ impl PostgresSessionStore {
             false,
         )
         .await
-    }
-
-    /// Creates a session store from an existing Postgres pool without running migrations.
-    ///
-    /// This is intended for binaries that own pool construction and migration orchestration
-    /// themselves while still reusing the canonical store implementation.
-    pub async fn from_existing_pool(database_url: &str, pool: PgPool) -> Result<Self> {
-        let blob_store: Arc<dyn BlobStore> =
-            Arc::new(FileBlobStore::new(FileBlobStore::default_dir()?));
-        let attachment_store = AttachmentObjectStore::from_config(&local_rustfs_config())?;
-        let store = Self {
-            url: database_url.to_string(),
-            pool,
-            schema_name: None,
-            blob_store,
-            blob_threshold_bytes: 65_536,
-            attachment_store,
-        };
-        store.refresh_active_session_metric().await?;
-        Ok(store)
     }
 
     /// Creates a session store from an existing Postgres pool using configured blob storage.
@@ -286,21 +240,6 @@ impl PostgresSessionStore {
         crate::analytics::get_tenant_stats(&self.pool, self.schema_name(), tenant_id, days).await
     }
 
-    /// Loads aggregated tenant analytics over a recent day window through control-plane RLS.
-    pub async fn get_tenant_stats_control_plane(
-        &self,
-        tenant_id: &TenantId,
-        days: u32,
-    ) -> Result<TenantAnalyticsSummary> {
-        crate::analytics::get_tenant_stats_control_plane(
-            &self.pool,
-            self.schema_name(),
-            tenant_id,
-            days,
-        )
-        .await
-    }
-
     /// Lists daily cache trend rows for one tenant.
     pub async fn list_cache_daily_metrics(
         &self,
@@ -309,21 +248,6 @@ impl PostgresSessionStore {
     ) -> Result<Vec<CacheDailyMetric>> {
         crate::analytics::list_cache_daily_metrics(&self.pool, self.schema_name(), tenant_id, days)
             .await
-    }
-
-    /// Lists daily cache trend rows for one tenant through control-plane RLS.
-    pub async fn list_cache_daily_metrics_control_plane(
-        &self,
-        tenant_id: &TenantId,
-        days: u32,
-    ) -> Result<Vec<CacheDailyMetric>> {
-        crate::analytics::list_cache_daily_metrics_control_plane(
-            &self.pool,
-            self.schema_name(),
-            tenant_id,
-            days,
-        )
-        .await
     }
 
     /// Lists redacted learning-candidate summaries for one tenant.
@@ -355,25 +279,6 @@ impl PostgresSessionStore {
             .map_err(map_sqlx_error)?;
         }
         Ok(())
-    }
-
-    async fn new_with_options_and_blob_store(
-        database_url: &str,
-        pool_min: u32,
-        pool_max: u32,
-        connect_timeout_secs: u64,
-        backends: SessionStorageBackends,
-    ) -> Result<Self> {
-        Self::new_with_options_and_schema(
-            database_url,
-            pool_min,
-            pool_max,
-            connect_timeout_secs,
-            None,
-            backends,
-            true,
-        )
-        .await
     }
 
     async fn new_with_options_and_schema(
@@ -568,28 +473,12 @@ impl SessionAnalyticsStore for PostgresSessionStore {
         PostgresSessionStore::get_tenant_stats(self, tenant_id, days).await
     }
 
-    async fn get_tenant_stats_control_plane(
-        &self,
-        tenant_id: &TenantId,
-        days: u32,
-    ) -> Result<TenantAnalyticsSummary> {
-        PostgresSessionStore::get_tenant_stats_control_plane(self, tenant_id, days).await
-    }
-
     async fn list_cache_daily_metrics(
         &self,
         tenant_id: &TenantId,
         days: u32,
     ) -> Result<Vec<CacheDailyMetric>> {
         PostgresSessionStore::list_cache_daily_metrics(self, tenant_id, days).await
-    }
-
-    async fn list_cache_daily_metrics_control_plane(
-        &self,
-        tenant_id: &TenantId,
-        days: u32,
-    ) -> Result<Vec<CacheDailyMetric>> {
-        PostgresSessionStore::list_cache_daily_metrics_control_plane(self, tenant_id, days).await
     }
 
     async fn list_learning_candidate_summaries(

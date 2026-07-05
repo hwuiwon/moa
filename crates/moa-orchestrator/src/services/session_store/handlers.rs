@@ -114,10 +114,19 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<u64, HandlerError> {
         annotate_restate_handler_span("SessionStore", "append_event");
         let request = request.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
-            .run(|| async move { service.append_event_inner(request).await })
+            .run(|| async move {
+                if matches!(&request.event, Event::Error { .. }) {
+                    record_session_error("event_log");
+                }
+                store
+                    .emit_event_record(request.session_id, request.event, request.dedupe_key)
+                    .await
+                    .map(|record| record.sequence_num)
+                    .map_err(HandlerError::from)
+            })
             .name("append_event")
             .await?)
     }
@@ -131,10 +140,16 @@ impl RestateSessionStore for SessionStoreImpl {
         annotate_restate_handler_span("SessionStore", "get_events");
         let request = request.into_inner();
         authorize_session_read(&ctx, request.session_id).await?;
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
-            .run(|| async move { service.get_events_inner(request).await.map(Json::from) })
+            .run(|| async move {
+                store
+                    .get_events(request.session_id, request.range)
+                    .await
+                    .map(Json::from)
+                    .map_err(HandlerError::from)
+            })
             .name("get_events")
             .await?)
     }
@@ -148,10 +163,16 @@ impl RestateSessionStore for SessionStoreImpl {
         annotate_restate_handler_span("SessionStore", "get_session");
         let session_id = session_id.into_inner();
         authorize_session_read(&ctx, session_id).await?;
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
-            .run(|| async move { service.get_session_inner(session_id).await.map(Json::from) })
+            .run(|| async move {
+                store
+                    .get_session(session_id)
+                    .await
+                    .map(Json::from)
+                    .map_err(HandlerError::from)
+            })
             .name("get_session")
             .await?)
     }
@@ -165,10 +186,15 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SessionStore", "update_status");
         let request = request.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
-            .run(|| async move { service.update_status_inner(request).await })
+            .run(|| async move {
+                store
+                    .update_status(request.session_id, request.status)
+                    .await
+                    .map_err(HandlerError::from)
+            })
             .name("update_status")
             .await?)
     }
@@ -182,10 +208,16 @@ impl RestateSessionStore for SessionStoreImpl {
         annotate_restate_handler_span("SessionStore", "search_events");
         let request = request.into_inner();
         authorize_event_search(&ctx, &request).await?;
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
-            .run(|| async move { service.search_events_inner(request).await.map(Json::from) })
+            .run(|| async move {
+                store
+                    .search_events(&request.query, request.filter)
+                    .await
+                    .map(Json::from)
+                    .map_err(HandlerError::from)
+            })
             .name("search_events")
             .await?)
     }
@@ -200,10 +232,16 @@ impl RestateSessionStore for SessionStoreImpl {
         let request = request.into_inner();
         let tenant_id = tenant_id_for_session_listing(&request)?;
         authorize_tenant_admin(&ctx, tenant_id).await?;
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
-            .run(|| async move { service.list_sessions_inner(request).await.map(Json::from) })
+            .run(|| async move {
+                store
+                    .list_sessions(request.filter)
+                    .await
+                    .map(Json::from)
+                    .map_err(HandlerError::from)
+            })
             .name("list_sessions")
             .await?)
     }
@@ -217,10 +255,15 @@ impl RestateSessionStore for SessionStoreImpl {
         annotate_restate_handler_span("SessionStore", "tenant_cost_since");
         let request = request.into_inner();
         authorize_tenant_read(&ctx, request.tenant_id).await?;
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
-            .run(|| async move { service.tenant_cost_since_inner(request).await })
+            .run(|| async move {
+                store
+                    .tenant_cost_since(&request.tenant_id, request.since)
+                    .await
+                    .map_err(HandlerError::from)
+            })
             .name("tenant_cost_since")
             .await?)
     }
@@ -250,10 +293,15 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SessionStore", "create_segment");
         let request = request.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
-            .run(|| async move { service.create_segment_inner(request).await })
+            .run(|| async move {
+                store
+                    .create_segment(&request.segment)
+                    .await
+                    .map_err(HandlerError::from)
+            })
             .name("create_segment")
             .await?)
     }
@@ -267,10 +315,15 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SessionStore", "complete_segment");
         let request = request.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
-            .run(|| async move { service.complete_segment_inner(request).await })
+            .run(|| async move {
+                store
+                    .complete_segment(request.segment_id, request.update)
+                    .await
+                    .map_err(HandlerError::from)
+            })
             .name("complete_segment")
             .await?)
     }
@@ -284,14 +337,15 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<Json<Option<TaskSegment>>, HandlerError> {
         annotate_restate_handler_span("SessionStore", "get_active_segment");
         let session_id = session_id.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
             .run(|| async move {
-                service
-                    .get_active_segment_inner(session_id)
+                store
+                    .get_active_segment(session_id)
                     .await
                     .map(Json::from)
+                    .map_err(HandlerError::from)
             })
             .name("get_active_segment")
             .await?)
@@ -306,14 +360,15 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<Json<Vec<TaskSegment>>, HandlerError> {
         annotate_restate_handler_span("SessionStore", "list_segments");
         let session_id = session_id.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
             .run(|| async move {
-                service
-                    .list_segments_inner(session_id)
+                store
+                    .list_segments(session_id)
                     .await
                     .map(Json::from)
+                    .map_err(HandlerError::from)
             })
             .name("list_segments")
             .await?)
@@ -328,10 +383,15 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SessionStore", "update_segment_assessment");
         let request = request.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
-            .run(|| async move { service.update_segment_assessment_inner(request).await })
+            .run(|| async move {
+                store
+                    .update_segment_assessment(request.segment_id, &request.assessment)
+                    .await
+                    .map_err(HandlerError::from)
+            })
             .name("update_segment_assessment")
             .await?)
     }
@@ -345,14 +405,16 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<Json<Option<SegmentBaseline>>, HandlerError> {
         annotate_restate_handler_span("SessionStore", "get_segment_baseline");
         let request = request.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
             .run(|| async move {
-                service
-                    .get_segment_baseline_inner(request)
+                let tenant_id = request.tenant_id.to_string();
+                store
+                    .get_segment_baseline(&tenant_id)
                     .await
                     .map(Json::from)
+                    .map_err(HandlerError::from)
             })
             .name("get_segment_baseline")
             .await?)
@@ -367,14 +429,16 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<Json<Vec<SkillResolutionRate>>, HandlerError> {
         annotate_restate_handler_span("SessionStore", "list_skill_resolution_rates");
         let request = request.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
             .run(|| async move {
-                service
-                    .list_skill_resolution_rates_inner(request)
+                let tenant_id = request.tenant_id.to_string();
+                store
+                    .list_skill_resolution_rates(&tenant_id)
                     .await
                     .map(Json::from)
+                    .map_err(HandlerError::from)
             })
             .name("list_skill_resolution_rates")
             .await?)
@@ -389,14 +453,16 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<Json<Vec<TaskStrategySuccessRate>>, HandlerError> {
         annotate_restate_handler_span("SessionStore", "list_task_strategy_success_rates");
         let request = request.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
             .run(|| async move {
-                service
-                    .list_task_strategy_success_rates_inner(request)
+                let tenant_id = request.tenant_id.to_string();
+                store
+                    .list_task_strategy_success_rates(&tenant_id, &request.task_fingerprint)
                     .await
                     .map(Json::from)
+                    .map_err(HandlerError::from)
             })
             .name("list_task_strategy_success_rates")
             .await?)
@@ -411,10 +477,15 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SessionStore", "append_experience_record");
         let request = request.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
-            .run(|| async move { service.append_experience_record_inner(request).await })
+            .run(|| async move {
+                store
+                    .append_experience_record(&request.experience)
+                    .await
+                    .map_err(HandlerError::from)
+            })
             .name("append_experience_record")
             .await?)
     }
@@ -428,14 +499,15 @@ impl RestateSessionStore for SessionStoreImpl {
         annotate_restate_handler_span("SessionStore", "list_experience_records");
         let request = request.into_inner();
         authorize_session_read(&ctx, request.session_id).await?;
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
             .run(|| async move {
-                service
-                    .list_experience_records_inner(request)
+                store
+                    .list_experience_records(request.session_id)
                     .await
                     .map(Json::from)
+                    .map_err(HandlerError::from)
             })
             .name("list_experience_records")
             .await?)
@@ -450,10 +522,15 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SessionStore", "append_experience_attributions");
         let request = request.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
-            .run(|| async move { service.append_experience_attributions_inner(request).await })
+            .run(|| async move {
+                store
+                    .append_experience_attributions(&request.attributions)
+                    .await
+                    .map_err(HandlerError::from)
+            })
             .name("append_experience_attributions")
             .await?)
     }
@@ -467,14 +544,15 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<Json<Vec<ExperienceAttribution>>, HandlerError> {
         annotate_restate_handler_span("SessionStore", "list_experience_attributions");
         let request = request.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
             .run(|| async move {
-                service
-                    .list_experience_attributions_inner(request)
+                store
+                    .list_experience_attributions(request.experience_id)
                     .await
                     .map(Json::from)
+                    .map_err(HandlerError::from)
             })
             .name("list_experience_attributions")
             .await?)
@@ -489,10 +567,15 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SessionStore", "append_learning_candidate");
         let request = request.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
-            .run(|| async move { service.append_learning_candidate_inner(request).await })
+            .run(|| async move {
+                store
+                    .append_learning_candidate(&request.candidate)
+                    .await
+                    .map_err(HandlerError::from)
+            })
             .name("append_learning_candidate")
             .await?)
     }
@@ -506,13 +589,24 @@ impl RestateSessionStore for SessionStoreImpl {
         annotate_restate_handler_span("SessionStore", "get_learning_candidate");
         let request = request.into_inner();
         authorize_tenant_read(&ctx, request.tenant_id).await?;
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
             .run(|| async move {
-                service
-                    .get_learning_candidate_inner(request)
+                store
+                    .get_learning_candidate(&request.tenant_id, request.candidate_id)
                     .await
+                    .map_err(HandlerError::from)?
+                    .ok_or_else(|| {
+                        TerminalError::new_with_code(
+                            404,
+                            format!(
+                                "learning candidate {} not found in tenant {}",
+                                request.candidate_id, request.tenant_id
+                            ),
+                        )
+                        .into()
+                    })
                     .map(Json::from)
             })
             .name("get_learning_candidate")
@@ -528,14 +622,16 @@ impl RestateSessionStore for SessionStoreImpl {
         annotate_restate_handler_span("SessionStore", "list_learning_candidates");
         let request = request.into_inner();
         authorize_tenant_read(&ctx, request.tenant_id).await?;
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
             .run(|| async move {
-                service
-                    .list_learning_candidates_inner(request)
+                let tenant_id = request.tenant_id.to_string();
+                store
+                    .list_learning_candidates(&tenant_id, request.status, request.limit)
                     .await
                     .map(Json::from)
+                    .map_err(HandlerError::from)
             })
             .name("list_learning_candidates")
             .await?)
@@ -550,13 +646,14 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SessionStore", "update_learning_candidate_status");
         let request = request.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
             .run(|| async move {
-                service
-                    .update_learning_candidate_status_inner(request)
+                store
+                    .update_learning_candidate_status(&request.update)
                     .await
+                    .map_err(HandlerError::from)
             })
             .name("update_learning_candidate_status")
             .await?)
@@ -570,10 +667,15 @@ impl RestateSessionStore for SessionStoreImpl {
         _request: Json<serde_json::Value>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SessionStore", "refresh_segment_materialized_views");
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
-            .run(|| async move { service.refresh_segment_materialized_views_inner().await })
+            .run(|| async move {
+                store
+                    .refresh_segment_materialized_views()
+                    .await
+                    .map_err(HandlerError::from)
+            })
             .name("refresh_segment_materialized_views")
             .await?)
     }
@@ -587,10 +689,15 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SessionStore", "record_segment_tool_use");
         let request = request.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
-            .run(|| async move { service.record_segment_tool_use_inner(request).await })
+            .run(|| async move {
+                store
+                    .record_active_segment_tool_use(request.session_id, &request.tool_name)
+                    .await
+                    .map_err(HandlerError::from)
+            })
             .name("record_segment_tool_use")
             .await?)
     }
@@ -604,10 +711,15 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SessionStore", "record_segment_skill_activation");
         let request = request.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
-            .run(|| async move { service.record_segment_skill_activation_inner(request).await })
+            .run(|| async move {
+                store
+                    .record_active_segment_skill_activation(request.session_id, &request.skill_name)
+                    .await
+                    .map_err(HandlerError::from)
+            })
             .name("record_segment_skill_activation")
             .await?)
     }
@@ -621,10 +733,15 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SessionStore", "record_segment_turn_usage");
         let request = request.into_inner();
-        let service = self.clone();
+        let store = self.store.clone();
 
         Ok(ctx
-            .run(|| async move { service.record_segment_turn_usage_inner(request).await })
+            .run(|| async move {
+                store
+                    .record_active_segment_turn_usage(request.session_id, request.token_cost)
+                    .await
+                    .map_err(HandlerError::from)
+            })
             .name("record_segment_turn_usage")
             .await?)
     }

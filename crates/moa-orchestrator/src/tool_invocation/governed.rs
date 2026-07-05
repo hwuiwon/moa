@@ -4,7 +4,6 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequest};
-use moa_core::wire::turn::TurnPhase;
 use moa_core::{
     ActionPolicyEffect, Event, ProcedureTool, SessionId, SessionMeta, ToolCallContent, ToolCallId,
     ToolCallRequest, ToolInvocation, ToolOutput, TrustedSandboxFileManifestRef, WorkerId,
@@ -41,17 +40,6 @@ pub(crate) enum GovernedInvocationOrigin<'a> {
     },
 }
 
-/// Progress cadence owned by the caller workflow.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct GovernedInvocationProgress<'a> {
-    /// Turn id used by progress events.
-    pub(crate) turn_id: &'a str,
-    /// Delay before the first progress event may be emitted.
-    pub(crate) first_delay_ms: u64,
-    /// Minimum interval between progress events.
-    pub(crate) interval_ms: u64,
-}
-
 /// Request for coordinating one governed tool invocation.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct GovernedInvocationRequest<'a> {
@@ -74,8 +62,6 @@ pub(crate) struct GovernedInvocationRequest<'a> {
     pub(crate) trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
     /// Root or worker origin metadata.
     pub(crate) origin: GovernedInvocationOrigin<'a>,
-    /// Caller-owned progress cadence for allowed execution.
-    pub(crate) progress: GovernedInvocationProgress<'a>,
 }
 
 /// Completed governed tool invocation result.
@@ -266,11 +252,7 @@ async fn execute_allowed_tool(
     turn_progress::maybe_emit(
         ctx,
         request.session_id,
-        request.progress.turn_id,
-        TurnPhase::Tooling,
         turn_progress::running_tool_summary(&invocation.name),
-        request.progress.first_delay_ms,
-        request.progress.interval_ms,
     )
     .await?;
     let dispatch_started = Instant::now();
@@ -353,11 +335,7 @@ async fn execute_procedure_tool(
     turn_progress::maybe_emit(
         ctx,
         request.session_id,
-        request.progress.turn_id,
-        TurnPhase::Tooling,
         turn_progress::running_tool_summary(&invocation.name),
-        request.progress.first_delay_ms,
-        request.progress.interval_ms,
     )
     .await?;
 
@@ -623,8 +601,8 @@ mod tests {
 
     use super::{
         GovernedInvocationDisposition, GovernedInvocationEventPlan, GovernedInvocationOrigin,
-        GovernedInvocationProgress, GovernedInvocationRequest, completed_result,
-        pending_review_output, prepare_action_review_request, tool_call_request,
+        GovernedInvocationRequest, completed_result, pending_review_output,
+        prepare_action_review_request, tool_call_request,
     };
     use crate::delegation::storage_user_id;
 
@@ -666,11 +644,6 @@ mod tests {
             active_canary: Some("canary"),
             trusted_sandbox_manifest: None,
             origin,
-            progress: GovernedInvocationProgress {
-                turn_id: "turn-1",
-                first_delay_ms: 100,
-                interval_ms: 200,
-            },
         }
     }
 

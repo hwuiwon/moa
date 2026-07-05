@@ -10,8 +10,6 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use async_openai::Client as OpenAiClient;
-use async_openai::config::OpenAIConfig;
 use async_openai::error::OpenAIError;
 use async_openai::types::responses::ReasoningEffort;
 use async_openai::types::responses::{
@@ -51,7 +49,7 @@ mod streaming_tests;
 mod tests;
 
 pub use provider::{OpenAIProvider, debug_build_openai_request_body};
-pub(crate) use request::{build_openai_client, build_responses_request};
+pub(crate) use request::build_responses_request;
 pub(crate) use streaming::stream_responses_with_retry;
 
 #[cfg(test)]

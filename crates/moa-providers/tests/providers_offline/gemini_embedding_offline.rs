@@ -1,7 +1,7 @@
 //! Deterministic Gemini embedder request-shape coverage.
 
 use moa_core::traits::EmbeddingProvider;
-use moa_providers::{EmbedRole, GeminiEmbeddingEmbedder};
+use moa_providers::{EmbedderConstructionRole, GeminiEmbeddingEmbedder};
 use serde_json::Value;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -23,9 +23,10 @@ async fn gemini_v2_uses_prompt_prefix_and_snake_case_output_dimensionality() {
         .mount(&server)
         .await;
 
-    let embedder = GeminiEmbeddingEmbedder::new("test-key", 128, EmbedRole::SearchQuery)
-        .expect("v2 embedder config should be valid")
-        .with_endpoint(format!("{}/v1beta", server.uri()));
+    let embedder =
+        GeminiEmbeddingEmbedder::new("test-key", 128, EmbedderConstructionRole::Retrieval)
+            .expect("v2 embedder config should be valid")
+            .with_endpoint(format!("{}/v1beta", server.uri()));
 
     let embeddings = embedder
         .embed(&["oauth".to_string()])
@@ -60,7 +61,7 @@ async fn gemini_v2_does_not_renormalize_server_output() {
         .await;
 
     let embedder =
-        GeminiEmbeddingEmbedder::new("test-key", 128, EmbedRole::Document { title: None })
+        GeminiEmbeddingEmbedder::new("test-key", 128, EmbedderConstructionRole::Ingestion)
             .expect("v2 embedder config should be valid")
             .with_endpoint(format!("{}/v1beta", server.uri()));
 
@@ -91,9 +92,10 @@ async fn gemini_v2_chunks_inputs_beyond_batch_limit_and_preserves_order() {
         .mount(&server)
         .await;
 
-    let embedder = GeminiEmbeddingEmbedder::new("test-key", 128, EmbedRole::SearchQuery)
-        .expect("v2 embedder config should be valid")
-        .with_endpoint(format!("{}/v1beta", server.uri()));
+    let embedder =
+        GeminiEmbeddingEmbedder::new("test-key", 128, EmbedderConstructionRole::Retrieval)
+            .expect("v2 embedder config should be valid")
+            .with_endpoint(format!("{}/v1beta", server.uri()));
 
     // 150 inputs => one full 100-input batch plus a 50-input batch.
     let inputs: Vec<String> = (0..150).map(|index| format!("doc-{index}")).collect();

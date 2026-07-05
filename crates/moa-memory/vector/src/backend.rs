@@ -551,6 +551,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turbopuffer_backend_requires_configured_client() {
+        // Pins: cloud storage partitions that select Turbopuffer fail clearly
+        // instead of falling back to the local pgvector source.
+        let err = match resolve_backend_choice("w1", "turbopuffer", "standard", pg_store(), None) {
+            Ok(store) => panic!(
+                "missing Turbopuffer client should reject {}",
+                store.backend()
+            ),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            err,
+            Error::TurbopufferUnavailable {
+                storage_partition_id
+            } if storage_partition_id == "w1"
+        ));
+    }
+
+    #[tokio::test]
     async fn factory_transactional_graph_backend_uses_pgvector_source() {
         // Pins: graph writes keep a transaction-capable pgvector source even when
         // external vector backends are configured for read-side retrieval.

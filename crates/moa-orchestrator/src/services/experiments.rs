@@ -1,8 +1,10 @@
 //! Restate service for authorized live behavior experiment run metadata.
 
 use moa_agents::{AgentResolver, AgentRuntimePolicy};
-use moa_authz_schema::Relation;
+use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
+use moa_artifacts::registry::ArtifactRegistry;
 use moa_core::traits::{Identity, LearningCandidateStore};
+use moa_core::wire::artifacts::ArtifactSummary as WireArtifactSummary;
 use moa_core::wire::experiments::{
     AgentArtifactDependencyDelta, AgentDependencyChange, AgentRevisionCompareRequest,
     AgentRevisionCompareResponse, AgentRevisionSimulationCompareRequest,
@@ -11,11 +13,12 @@ use moa_core::wire::experiments::{
     AgentRevisionSimulationVariantResult, AgentToolDependencyDelta, ExperimentCancelRequest,
     ExperimentCancelResponse, ExperimentCompareRequest, ExperimentCompareResponse,
     ExperimentGeneratePlanRequest, ExperimentGeneratePlanResponse, ExperimentListRequest,
-    ExperimentListResponse, ExperimentProposeImprovementsRequest,
-    ExperimentProposeImprovementsResponse, ExperimentRunRequest, ExperimentRunResponse,
-    ExperimentRunStatusRequest, ExperimentRunStatusResponse, ExperimentScoresRequest,
-    ExperimentScoresResponse, ExperimentTrialStatusRequest, ExperimentTrialStatusResponse,
-    ExperimentTrialsRequest, ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
+    ExperimentListResponse, ExperimentPlanListRequest, ExperimentPlanListResponse,
+    ExperimentProposeImprovementsRequest, ExperimentProposeImprovementsResponse,
+    ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
+    ExperimentRunStatusResponse, ExperimentScoresRequest, ExperimentScoresResponse,
+    ExperimentTrialStatusRequest, ExperimentTrialStatusResponse, ExperimentTrialsRequest,
+    ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
 };
 use moa_core::{ActionRuleScope, TenantId};
 use moa_experiments::app::{
@@ -35,7 +38,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::OrchestratorCtx;
-use crate::handlers::authz_shim::authorize_tenant;
+use crate::handlers::authz_shim::authorize_tenant_operator_or_admin;
 use crate::services::llm_gateway::LLMGatewayImpl;
 use crate::workflows::errors::moa_error_to_handler_error;
 use crate::workflows::experiment_run::{ExperimentRunClient, ExperimentRunWorkflowRequest};
@@ -44,37 +47,42 @@ use crate::workflows::experiment_run::{ExperimentRunClient, ExperimentRunWorkflo
 #[restate_sdk::service]
 #[name = "Experiments"]
 pub trait Experiments {
-    /// Generates and stores a draft experiment plan artifact after a tenant operator check.
+    /// Generates and stores a draft experiment plan artifact after a tenant operator/admin check.
     async fn generate_plan(
         request: Json<ExperimentGeneratePlanRequest>,
     ) -> Result<Json<ExperimentGeneratePlanResponse>, HandlerError>;
 
-    /// Accepts and stores a live behavior experiment run after a tenant operator check.
+    /// Accepts and stores a live behavior experiment run after a tenant operator/admin check.
     async fn run(
         request: Json<ExperimentRunRequest>,
     ) -> Result<Json<ExperimentRunResponse>, HandlerError>;
 
-    /// Loads one live behavior experiment run status after a tenant operator check.
+    /// Loads one live behavior experiment run status after a tenant operator/admin check.
     async fn status(
         request: Json<ExperimentRunStatusRequest>,
     ) -> Result<Json<ExperimentRunStatusResponse>, HandlerError>;
 
-    /// Lists live behavior experiment runs after a tenant operator check.
+    /// Lists live behavior experiment runs after a tenant operator/admin check.
     async fn list(
         request: Json<ExperimentListRequest>,
     ) -> Result<Json<ExperimentListResponse>, HandlerError>;
 
-    /// Lists live behavior experiment trials after a tenant operator check.
+    /// Lists visible behavior-lab plan artifacts after a tenant operator/admin check.
+    async fn list_plans(
+        request: Json<ExperimentPlanListRequest>,
+    ) -> Result<Json<ExperimentPlanListResponse>, HandlerError>;
+
+    /// Lists live behavior experiment trials after a tenant operator/admin check.
     async fn trials(
         request: Json<ExperimentTrialsRequest>,
     ) -> Result<Json<ExperimentTrialsResponse>, HandlerError>;
 
-    /// Loads one live behavior experiment trial status after a tenant operator check.
+    /// Loads one live behavior experiment trial status after a tenant operator/admin check.
     async fn trial_status(
         request: Json<ExperimentTrialStatusRequest>,
     ) -> Result<Json<ExperimentTrialStatusResponse>, HandlerError>;
 
-    /// Cancels a live behavior experiment run after a tenant operator check.
+    /// Cancels a live behavior experiment run after a tenant operator/admin check.
     async fn cancel(
         request: Json<ExperimentCancelRequest>,
     ) -> Result<Json<ExperimentCancelResponse>, HandlerError>;
@@ -84,12 +92,12 @@ pub trait Experiments {
         request: Json<ExperimentProposeImprovementsRequest>,
     ) -> Result<Json<ExperimentProposeImprovementsResponse>, HandlerError>;
 
-    /// Reads score summaries for an experiment run after a tenant operator check.
+    /// Reads score summaries for an experiment run after a tenant operator/admin check.
     async fn scores(
         request: Json<ExperimentScoresRequest>,
     ) -> Result<Json<ExperimentScoresResponse>, HandlerError>;
 
-    /// Compares score summaries for two experiment runs after a tenant operator check.
+    /// Compares score summaries for two experiment runs after a tenant operator/admin check.
     async fn compare(
         request: Json<ExperimentCompareRequest>,
     ) -> Result<Json<ExperimentCompareResponse>, HandlerError>;
@@ -123,7 +131,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentGeneratePlanResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "generate_plan");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let runtime = OrchestratorCtx::current();
         let pool = runtime.graph_pool();
         let gateway = LLMGatewayImpl::new(runtime.provider_registry());
@@ -146,7 +154,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentRunResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "run");
         let request = request.into_inner();
-        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let identity = authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         let accepted = ctx
@@ -178,7 +186,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentRunStatusResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "status");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
 
         ctx.workflow_client::<ExperimentRunClient>(request.run_uid.to_string())
             .status(Json::from(request))
@@ -195,12 +203,29 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentListResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "list");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move { list_inner(pool, request).await.map(Json::from) })
             .name("experiments_list")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn list_plans(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ExperimentPlanListRequest>,
+    ) -> Result<Json<ExperimentPlanListResponse>, HandlerError> {
+        annotate_restate_handler_span("Experiments", "list_plans");
+        let request = request.into_inner();
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        let pool = OrchestratorCtx::current_graph_pool();
+
+        Ok(ctx
+            .run(|| async move { list_plans_inner(pool, request).await.map(Json::from) })
+            .name("experiments_list_plans")
             .await?)
     }
 
@@ -212,7 +237,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentTrialsResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "trials");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -229,7 +254,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentTrialStatusResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "trial_status");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -246,7 +271,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentCancelResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "cancel");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -263,7 +288,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentProposeImprovementsResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "propose_improvements");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let runtime = OrchestratorCtx::current();
         let pool = runtime.graph_pool();
         let session_store = runtime.learning_candidate_store();
@@ -286,7 +311,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentScoresResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "scores");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -303,7 +328,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentCompareResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "compare");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -320,7 +345,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<AgentRevisionSimulationRunResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "run_agent_revision_simulation");
         let request = request.into_inner();
-        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let identity = authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         let accepted = ctx
@@ -333,16 +358,7 @@ impl Experiments for ExperimentsImpl {
             .await?
             .into_inner();
         ctx.workflow_client::<ExperimentRunClient>(accepted.run_uid.to_string())
-            .run(Json::from(ExperimentRunWorkflowRequest {
-                tenant_id: accepted.tenant_id,
-                run_uid: accepted.run_uid,
-                target: serde_json::json!({}),
-                variant: serde_json::json!({}),
-                plan_revision_uid: Some(accepted.plan_revision_uid),
-                identity: accepted.identity,
-                score_run_id: accepted.score_run_id,
-                agent_revision_variants: accepted.variants.clone(),
-            }))
+            .run(Json::from(accepted.workflow_request()))
             .send();
         Ok(Json::from(accepted.response))
     }
@@ -355,7 +371,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<AgentRevisionSimulationCompareResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "compare_agent_revision_simulation");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -376,7 +392,7 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<AgentRevisionCompareResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "compare_agent_revisions");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -424,6 +440,52 @@ async fn list_inner(
     list_runs(pool, request)
         .await
         .map_err(experiment_app_error_to_handler_error)
+}
+
+/// Lists visible behavior-lab plan artifacts after caller authorization has passed.
+pub async fn list_plans_inner(
+    pool: sqlx::PgPool,
+    request: ExperimentPlanListRequest,
+) -> Result<ExperimentPlanListResponse, HandlerError> {
+    let scope = request.scope.unwrap_or(ActionRuleScope::Tenant {
+        tenant_id: request.tenant_id,
+    });
+    if scope.tenant_id() != request.tenant_id {
+        return Err(TerminalError::new_with_code(
+            400,
+            "plan list scope tenant_id must match request tenant_id",
+        )
+        .into());
+    }
+    let status = request
+        .status
+        .as_deref()
+        .map(str::parse::<ArtifactStatus>)
+        .transpose()
+        .map_err(|error| TerminalError::new_with_code(400, error.to_string()))?;
+    let plans = ArtifactRegistry::new(pool)
+        .list_visible(&scope, Some(ArtifactKind::ExperimentPlan), status)
+        .await
+        .map_err(moa_error_to_handler_error)?
+        .into_iter()
+        .map(|summary| WireArtifactSummary {
+            artifact_uid: summary.artifact_uid,
+            revision_uid: summary.revision_uid,
+            scope: summary.scope,
+            kind: summary.kind.to_string(),
+            name: summary.name,
+            description: summary.description,
+            tags: summary.tags,
+            status: summary.status.to_string(),
+            version: summary.version,
+            updated_at: summary.updated_at,
+        })
+        .collect();
+
+    Ok(ExperimentPlanListResponse {
+        tenant_id: request.tenant_id,
+        plans,
+    })
 }
 
 async fn trials_inner(
@@ -505,6 +567,23 @@ pub struct AgentRevisionSimulationAccepted {
     variants: Vec<AgentRevisionSimulationVariant>,
     /// Public response payload returned by the Restate handler.
     response: AgentRevisionSimulationRunResponse,
+}
+
+impl AgentRevisionSimulationAccepted {
+    /// Builds the workflow dispatch request for the accepted simulation run.
+    #[must_use]
+    pub fn workflow_request(&self) -> ExperimentRunWorkflowRequest {
+        ExperimentRunWorkflowRequest {
+            tenant_id: self.tenant_id,
+            run_uid: self.run_uid,
+            target: serde_json::json!({}),
+            variant: serde_json::json!({}),
+            plan_revision_uid: Some(self.plan_revision_uid),
+            identity: self.identity.clone(),
+            score_run_id: self.score_run_id,
+            agent_revision_variants: self.variants.clone(),
+        }
+    }
 }
 
 /// Admits an agent-revision simulation run after caller authorization has passed.
@@ -1008,12 +1087,12 @@ mod tests {
 
         let artifact_deltas = compare_artifact_dependencies(&base, &new);
         assert_eq!(artifact_deltas.len(), 2);
-        assert_eq!(artifact_deltas[0].reference, "skill://support");
-        assert_eq!(artifact_deltas[0].base_revision_uid, Some(base_skill));
-        assert_eq!(artifact_deltas[0].new_revision_uid, Some(new_skill));
-        assert_eq!(artifact_deltas[0].change, AgentDependencyChange::Changed);
-        assert_eq!(artifact_deltas[1].reference, "skill://refund");
-        assert_eq!(artifact_deltas[1].change, AgentDependencyChange::Added);
+        assert_eq!(artifact_deltas[0].reference, "skill://refund");
+        assert_eq!(artifact_deltas[0].change, AgentDependencyChange::Added);
+        assert_eq!(artifact_deltas[1].reference, "skill://support");
+        assert_eq!(artifact_deltas[1].base_revision_uid, Some(base_skill));
+        assert_eq!(artifact_deltas[1].new_revision_uid, Some(new_skill));
+        assert_eq!(artifact_deltas[1].change, AgentDependencyChange::Changed);
 
         let tool_deltas = compare_tool_dependencies(&base, &new);
         assert_eq!(tool_deltas.len(), 1);

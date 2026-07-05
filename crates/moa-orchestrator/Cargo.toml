@@ -10,18 +10,9 @@ integration = []
 auth0 = ["moa-auth-providers/auth0"]
 provider-overrides = ["moa-providers/scripted-provider"]
 skill-learning = ["moa-skills/skill-learning"]
-experiments = ["dep:moa-experiments", "dep:moa-scoring"]
 slack = ["moa-messaging/slack"]
 postmark = ["moa-messaging/postmark"]
 twilio = ["moa-messaging/twilio"]
-redis = ["moa-runtime-store/redis"]
-internal-eval-runner = [
-    "dep:moa-eval-core",
-    "dep:moa-eval",
-    "dep:moa-scoring",
-    "moa-brain/eval-harness",
-    "moa-skills/regression",
-]
 
 [[bin]]
 name = "moa-orchestrator-bin"
@@ -30,37 +21,30 @@ path = "src/main.rs"
 [[test]]
 name = "eval_service"
 path = "tests/eval_service.rs"
-required-features = ["internal-eval-runner"]
 
 [[test]]
 name = "agent_revision_simulation_db_memory"
 path = "tests/agent_revision_simulation_db_memory.rs"
-required-features = ["experiments"]
 
 [[test]]
 name = "behavior_lab_simulation_e2e"
 path = "tests/behavior_lab_simulation_e2e.rs"
-required-features = ["experiments"]
 
 [[test]]
 name = "experiment_agent_loop_e2e"
 path = "tests/experiment_agent_loop_e2e.rs"
-required-features = ["experiments"]
 
 [[test]]
 name = "experiment_service"
 path = "tests/experiment_service.rs"
-required-features = ["experiments"]
 
 [[test]]
 name = "experiment_trial_run_e2e"
 path = "tests/experiment_trial_run_e2e.rs"
-required-features = ["experiments"]
 
 [[test]]
 name = "experiment_procedure_e2e"
 path = "tests/experiment_procedure_e2e.rs"
-required-features = ["experiments"]
 
 [dependencies]
 anyhow.workspace = true
@@ -81,13 +65,13 @@ moa-authz-schema.workspace = true
 moa-auth-providers.workspace = true
 moa-agents.workspace = true
 moa-artifacts.workspace = true
-moa-brain = { workspace = true }
+moa-brain = { workspace = true, features = ["eval-harness"] }
 moa-contacts = { workspace = true }
 moa-core = { workspace = true }
 moa-db = { workspace = true }
-moa-eval-core = { workspace = true, optional = true }
-moa-eval = { workspace = true, optional = true }
-moa-experiments = { workspace = true, optional = true }
+moa-eval-core = { workspace = true }
+moa-eval = { workspace = true }
+moa-experiments = { workspace = true }
 moa-hands = { workspace = true }
 moa-knowledge = { workspace = true }
 moa-lineage-audit = { workspace = true }
@@ -103,13 +87,13 @@ moa-messaging.workspace = true
 moa-observability = { workspace = true }
 moa-ocsf.workspace = true
 moa-security = { workspace = true }
-moa-scoring = { workspace = true, optional = true }
+moa-scoring = { workspace = true }
 moa-memory-ingest = { workspace = true }
 moa-migrations = { workspace = true }
 moa-providers = { workspace = true }
-moa-runtime-store = { workspace = true }
+moa-runtime-store = { workspace = true, features = ["redis"] }
 moa-session = { workspace = true }
-moa-skills = { workspace = true }
+moa-skills = { workspace = true, features = ["regression"] }
 rand.workspace = true
 restate-sdk.workspace = true
 reqwest.workspace = true

@@ -1,10 +1,10 @@
 //! History-stage checkpoint generation trigger.
 
-use moa_core::{EventRange, EventRecord, ModelTask, Result, WorkingContext};
+use moa_core::{Event, EventRange, EventRecord, ModelTask, Result, WorkingContext};
 
-use crate::compaction::{maybe_compact_events, watermark_may_compact};
+use crate::compaction::{latest_checkpoint_state, maybe_compact_events, watermark_may_compact};
 
-use super::{CompiledHistory, HistoryCompiler};
+use super::{CompiledHistory, HistoryCompactionStats, HistoryCompiler};
 
 impl HistoryCompiler {
     /// Returns whether compaction might fire this turn, using only the cheap
@@ -68,11 +68,21 @@ impl HistoryCompiler {
             .get_events(ctx.session_id, EventRange::all())
             .await?;
 
-        if let Some(checkpoint) = self.maybe_emit_checkpoint_for_events(ctx, &events).await? {
-            events.push(checkpoint);
-        }
+        let previously_summarized = latest_checkpoint_state(&events)
+            .map(|state| state.events_summarized as u64)
+            .unwrap_or(0);
+        let compaction =
+            if let Some(checkpoint) = self.maybe_emit_checkpoint_for_events(ctx, &events).await? {
+                let stats = checkpoint_stats(&checkpoint, previously_summarized);
+                events.push(checkpoint);
+                stats
+            } else {
+                HistoryCompactionStats::default()
+            };
 
-        self.compile_messages_with_stats(&events, remaining_budget)
+        let mut compiled = self.compile_messages_with_stats(&events, remaining_budget)?;
+        compiled.compaction = compaction;
+        Ok(compiled)
     }
 
     /// Reads the full log once and compiles it without attempting compaction.
@@ -90,6 +100,22 @@ impl HistoryCompiler {
             .await?;
 
         self.compile_messages_with_stats(&events, remaining_budget)
+    }
+}
+
+fn checkpoint_stats(record: &EventRecord, previously_summarized: u64) -> HistoryCompactionStats {
+    match &record.event {
+        Event::Checkpoint {
+            events_summarized,
+            token_count,
+            ..
+        } => HistoryCompactionStats {
+            checkpoint_emitted: true,
+            events_summarized: Some(*events_summarized),
+            events_summarized_delta: Some(events_summarized.saturating_sub(previously_summarized)),
+            summary_tokens: Some(u64::try_from(*token_count).unwrap_or(u64::MAX)),
+        },
+        _ => HistoryCompactionStats::default(),
     }
 }
 
@@ -134,12 +160,26 @@ mod tests {
         );
         let mut ctx = WorkingContext::new(&session, capabilities());
 
-        compiler.process(&mut ctx).await.unwrap();
+        let output = compiler.process(&mut ctx).await.unwrap();
         let stored_events = store
             .get_events(session.id, EventRange::all())
             .await
             .unwrap();
 
+        assert_eq!(
+            output
+                .metadata
+                .get("tier3_applied")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            output
+                .metadata
+                .get("events_summarized_delta")
+                .and_then(serde_json::Value::as_u64),
+            Some(5)
+        );
         assert_eq!(stored_events.len(), 8);
         assert!(matches!(
             stored_events.last().map(|record| &record.event),

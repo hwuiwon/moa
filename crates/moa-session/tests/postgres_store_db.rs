@@ -1287,7 +1287,10 @@ async fn postgres_session_ids_are_native_uuid_and_concurrent_emits_are_serialize
 #[tokio::test]
 #[ignore]
 async fn postgres_connection_retry_surfaces_final_failure() {
-    let error = match PostgresSessionStore::new("postgres://127.0.0.1:1/moa_test").await {
+    let mut config = moa_core::MoaConfig::default();
+    config.database.url = "postgres://127.0.0.1:1/moa_test".to_string();
+    config.database.connect_timeout_seconds = 1;
+    let error = match PostgresSessionStore::from_config(&config).await {
         Ok(_) => panic!("invalid endpoint should fail"),
         Err(error) => error,
     };

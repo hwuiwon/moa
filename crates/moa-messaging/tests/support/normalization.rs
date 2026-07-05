@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use moa_core::{InboundMessage, MoaError};
+use moa_core::MoaError;
 
 /// Loads a JSON fixture, stripping leading provenance comments before parsing.
 pub fn fixture_text(name: &str) -> String {
@@ -16,7 +16,7 @@ pub fn fixture_text(name: &str) -> String {
 }
 
 /// Asserts a normalizer rejected an unparseable payload with the `SerdeJson` variant.
-pub fn assert_serde_json_error(result: moa_core::Result<InboundMessage>) {
+pub fn assert_serde_json_error<T: std::fmt::Debug>(result: moa_core::Result<T>) {
     assert!(
         matches!(result, Err(MoaError::SerdeJson(_))),
         "expected a SerdeJson deserialization error, got {result:?}"
@@ -25,7 +25,7 @@ pub fn assert_serde_json_error(result: moa_core::Result<InboundMessage>) {
 
 /// Asserts a normalizer rejected a well-formed but unsupported event with the
 /// `ValidationError` variant (not a deserialization failure).
-pub fn assert_validation_error(result: moa_core::Result<InboundMessage>) {
+pub fn assert_validation_error<T: std::fmt::Debug>(result: moa_core::Result<T>) {
     assert!(
         matches!(result, Err(MoaError::ValidationError(_))),
         "expected a ValidationError, got {result:?}"

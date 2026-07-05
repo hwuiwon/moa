@@ -1,9 +1,11 @@
 //! Ignored live matrix tests for real chat provider behavior.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use moa_core::{CompletionContent, CompletionRequest, ContextMessage, LLMProvider};
+use moa_core::{
+    CompletionContent, CompletionRequest, ContextMessage, JsonResponseFormat, LLMProvider,
+};
 use moa_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 use serde_json::json;
 use tokio::time::timeout;
@@ -198,6 +200,60 @@ async fn live_providers_answer_simple_prompt_across_available_keys() {
             response.text
         );
     }
+}
+
+#[tokio::test]
+#[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1 and MOA_OPENAI_API_KEY"]
+async fn live_openai_structured_output_returns_direct_response() {
+    if !live_provider_tests_enabled() {
+        return;
+    }
+
+    let provider = OpenAIProvider::from_env("gpt-5.4-nano")
+        .expect("MOA_RUN_LIVE_PROVIDER_TESTS=1 requires MOA_OPENAI_API_KEY for this OpenAI test");
+    let mut metadata = HashMap::new();
+    metadata.insert("_moa.openai.reasoning_effort".to_string(), json!("none"));
+    let request = CompletionRequest {
+        model: None,
+        messages: vec![ContextMessage::user(
+            "Return a JSON object with answer set to four.",
+        )],
+        tools: Vec::new(),
+        max_output_tokens: Some(64),
+        temperature: Some(0.0),
+        response_format: Some(JsonResponseFormat::strict_json_schema(
+            "answer_payload",
+            "Small structured answer.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "answer": { "type": "string" }
+                },
+                "required": ["answer"]
+            }),
+        )),
+        metadata,
+    };
+
+    let started = Instant::now();
+    let response = timeout(Duration::from_secs(10), async {
+        provider.complete(request).await?.collect().await
+    })
+    .await
+    .expect("OpenAI structured output request should finish within 10 seconds")
+    .expect("OpenAI structured output request should succeed");
+
+    assert!(
+        response.text.to_ascii_lowercase().contains("four"),
+        "unexpected structured response text: {:?}",
+        response.text
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "structured output took too long: {:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]

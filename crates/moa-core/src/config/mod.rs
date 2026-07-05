@@ -31,7 +31,8 @@ pub use auth::{
 };
 pub use authz::{AuthzConfig, AuthzEngine, OpenFgaConfig};
 pub use compliance::{
-    ComplianceConfig, LINEAGE_AUDIT_SIGNING_KEY_ID_DEFAULT, PRIVACY_EXPORT_SIGNING_KEY_ID_DEFAULT,
+    ComplianceConfig, LINEAGE_AUDIT_SIGNING_KEY_ID_DEFAULT, LineageAuditSigningProvider,
+    PRIVACY_EXPORT_SIGNING_KEY_ID_DEFAULT,
 };
 pub use context::{
     BudgetConfig, CompactionConfig, ContextSnapshotConfig, QueryRewriteConfig, ResolutionConfig,
@@ -48,9 +49,9 @@ pub use knowledge::{
 pub use learning::{LearningConfig, SkillLearningConfig};
 pub use lineage::LineageConfig;
 pub use memory::{
-    CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryDigestConfig,
-    MemoryExtractionConfig, MemoryRankingConfig, MemoryRankingWeights, MemoryRetrievalConfig,
-    MemoryVectorConfig, TurbopufferVectorConfig, VectorEmbedderConfig, ZeroEntropyEmbedderConfig,
+    MemoryConfig, MemoryDigestConfig, MemoryExtractionConfig, MemoryRankingConfig,
+    MemoryRankingWeights, MemoryRetrievalConfig, MemoryVectorConfig, TurbopufferVectorConfig,
+    VectorEmbedderConfig,
 };
 pub use messaging::MessagingConfig;
 pub use orchestrator::OrchestratorConfig;
@@ -376,14 +377,14 @@ mod tests {
     }
 
     #[test]
-    fn env_only_loads_memory_extraction_and_embedder_config() {
-        // Pins: model-backed memory extraction and vector embedder keys use flat MOA env names.
+    fn env_only_loads_memory_extraction_and_provider_config() {
+        // Pins: model-backed memory extraction and provider keys use flat MOA env names.
         let _guard = ENV_LOCK.lock().expect("env test lock");
         let _env = EnvRestore::clear(CONFIG_ENV_KEYS);
         unsafe {
             std::env::set_var("MOA_MEMORY_EXTRACTION_ENABLED", "true");
-            std::env::set_var("MOA_COHERE_API_KEY", "MOA_TEST_COHERE_KEY");
-            std::env::set_var("MOA_MEMORY_EXTRACTION_MODEL", "command-test");
+            std::env::set_var("MOA_OPENAI_API_KEY", "MOA_TEST_OPENAI_KEY");
+            std::env::set_var("MOA_MEMORY_EXTRACTION_MODEL", "gpt-5.4-mini");
             std::env::set_var("MOA_MEMORY_EXTRACTION_MAX_FACTS_PER_CHUNK", "5");
             std::env::set_var("MOA_MEMORY_EXTRACTION_TIMEOUT_MS", "2500");
             std::env::set_var("MOA_ZEROENTROPY_API_KEY", "MOA_TEST_ZEROENTROPY_KEY");
@@ -392,17 +393,12 @@ mod tests {
         let config = MoaConfig::load_from_env().expect("load config from env");
 
         assert!(config.memory.extraction.enabled);
-        assert_eq!(config.providers.cohere.api_key, "MOA_TEST_COHERE_KEY");
-        assert_eq!(config.memory.extraction.api_key, "MOA_TEST_COHERE_KEY");
-        assert_eq!(config.memory.extraction.model, "command-test");
+        assert_eq!(config.providers.openai.api_key, "MOA_TEST_OPENAI_KEY");
+        assert_eq!(config.memory.extraction.model, "gpt-5.4-mini");
         assert_eq!(config.memory.extraction.max_facts_per_chunk, 5);
         assert_eq!(config.memory.extraction.timeout_ms, 2500);
         assert_eq!(
             config.providers.zeroentropy.api_key,
-            "MOA_TEST_ZEROENTROPY_KEY"
-        );
-        assert_eq!(
-            config.memory.vector.embedder.zeroentropy.api_key,
             "MOA_TEST_ZEROENTROPY_KEY"
         );
     }

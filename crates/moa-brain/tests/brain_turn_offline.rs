@@ -1,6 +1,7 @@
 //! Offline brain turn coverage using mock stores/providers and wiremock.
 
 include!("brain_turn_support/common.rs");
+include!("brain_turn_support/pipeline.rs");
 include!("brain_turn_support/offline.rs");
 
 #[path = "support/offline_session_store.rs"]
@@ -31,7 +32,7 @@ async fn offline_brain_turn_returns_response() -> moa_core::Result<()> {
     let session = session_meta("offline-brain-turn", "gpt-5.4");
     let session_id = session.id;
     let store = Arc::new(MockSessionStore::new(session, Vec::new()));
-    let pipeline = build_default_pipeline(&config, store.clone());
+    let pipeline = build_no_memory_test_pipeline(&config, store.clone());
 
     store
         .emit_event(
@@ -83,7 +84,7 @@ async fn run_brain_turn_emits_brain_response_event() {
         },
     )];
     let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
-    let pipeline = build_default_pipeline(&MoaConfig::default(), store.clone());
+    let pipeline = build_no_memory_test_pipeline(&MoaConfig::default(), store.clone());
     let llm = Arc::new(MockLlmProvider);
 
     let result = run_brain_turn(session.id, store.clone(), llm, &pipeline, None)
@@ -140,7 +141,7 @@ async fn run_brain_turn_marks_cache_prefix_reuse_on_second_request() {
         },
     )];
     let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
-    let pipeline = build_default_pipeline(&MoaConfig::default(), store.clone());
+    let pipeline = build_no_memory_test_pipeline(&MoaConfig::default(), store.clone());
     let llm = Arc::new(MockLlmProvider);
 
     run_brain_turn(session.id, store.clone(), llm.clone(), &pipeline, None)
@@ -213,7 +214,7 @@ async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
     let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
     let mut config = MoaConfig::default();
     config.budgets.daily_tenant_cents = 5;
-    let pipeline = build_default_pipeline(&config, store.clone());
+    let pipeline = build_no_memory_test_pipeline(&config, store.clone());
     let llm = Arc::new(CapturingTextLlmProvider::new("should not run"));
 
     let error = run_brain_turn(session.id, store.clone(), llm.clone(), &pipeline, None)
@@ -283,7 +284,7 @@ async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
     let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
     let mut config = MoaConfig::default();
     config.budgets.daily_tenant_cents = 0;
-    let pipeline = build_default_pipeline(&config, store.clone());
+    let pipeline = build_no_memory_test_pipeline(&config, store.clone());
     let llm = Arc::new(CapturingTextLlmProvider::new("still runs"));
 
     let result = run_brain_turn(session.id, store.clone(), llm.clone(), &pipeline, None)
@@ -317,7 +318,7 @@ async fn run_brain_turn_executes_tool_in_auto_mode() {
     let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
     let sandbox_dir = tempdir().unwrap();
     let tool_router = Arc::new(ToolRouter::new_local(sandbox_dir.path()).await.unwrap());
-    let pipeline = build_default_pipeline_with_tools(
+    let pipeline = build_no_memory_test_pipeline_with_tools(
         &MoaConfig::default(),
         store.clone(),
         tool_router.tool_schemas(),
@@ -376,7 +377,7 @@ async fn run_brain_turn_preserves_openai_function_call_id_after_auto_mode_tool_e
     let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
     let sandbox_dir = tempdir().unwrap();
     let tool_router = Arc::new(ToolRouter::new_local(sandbox_dir.path()).await.unwrap());
-    let pipeline = build_default_pipeline_with_tools(
+    let pipeline = build_no_memory_test_pipeline_with_tools(
         &MoaConfig::default(),
         store.clone(),
         tool_router.tool_schemas(),
@@ -433,7 +434,7 @@ async fn run_brain_turn_persists_truncated_tool_result_metadata() {
     let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
     let sandbox_dir = tempdir().unwrap();
     let tool_router = Arc::new(ToolRouter::new_local(sandbox_dir.path()).await.unwrap());
-    let pipeline = build_default_pipeline_with_tools(
+    let pipeline = build_no_memory_test_pipeline_with_tools(
         &MoaConfig::default(),
         store.clone(),
         tool_router.tool_schemas(),
@@ -493,7 +494,7 @@ async fn run_brain_turn_records_tool_call_before_auto_allowed_tool_error() {
     let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
     let sandbox_dir = tempdir().unwrap();
     let tool_router = Arc::new(ToolRouter::new_local(sandbox_dir.path()).await.unwrap());
-    let pipeline = build_default_pipeline_with_tools(
+    let pipeline = build_no_memory_test_pipeline_with_tools(
         &MoaConfig::default(),
         store.clone(),
         tool_router.tool_schemas(),
@@ -547,6 +548,158 @@ async fn run_brain_turn_records_tool_call_before_auto_allowed_tool_error() {
 }
 
 #[tokio::test]
+async fn run_brain_turn_denied_action_policy_skips_tool_body_and_records_tool_error() {
+    // Pins: the brain harness enforces Deny before router execution and feeds a ToolError back.
+    let mut config = MoaConfig::default();
+    config.permissions.always_deny = vec!["file_write".to_string()];
+    let events = run_policy_blocked_file_write_turn(
+        config,
+        "policy_deny_write_1",
+        "denied by action policy",
+        "Denied write handled",
+    )
+    .await;
+
+    assert_policy_blocked_file_write_events(
+        &events,
+        "policy_deny_write_1",
+        "denied by action policy",
+    );
+}
+
+#[tokio::test]
+async fn run_brain_turn_admin_review_action_policy_skips_tool_body_and_records_tool_error() {
+    // Pins: local brain harnesses cannot queue durable admin review, so AdminReview is non-executing.
+    let mut config = MoaConfig::default();
+    config.permissions.default_effect = moa_core::ActionPolicyEffect::AdminReview;
+    let events = run_policy_blocked_file_write_turn(
+        config,
+        "policy_review_write_1",
+        "requires tenant admin review",
+        "Admin review write handled",
+    )
+    .await;
+
+    assert_policy_blocked_file_write_events(
+        &events,
+        "policy_review_write_1",
+        "requires tenant admin review",
+    );
+}
+
+async fn run_policy_blocked_file_write_turn(
+    config: MoaConfig,
+    provider_tool_use_id: &'static str,
+    expected_error_fragment: &'static str,
+    final_text: &'static str,
+) -> Vec<EventRecord> {
+    let session = SessionMeta {
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
+        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        ..SessionMeta::default()
+    };
+    let session_id = session.id;
+    let initial_events = vec![make_event_record(
+        &session_id,
+        0,
+        Event::UserMessage {
+            text: "Write a file".to_string(),
+            attachments: Vec::new(),
+        },
+    )];
+    let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
+    let sandbox_dir = tempdir().unwrap();
+    let tool_router = Arc::new(
+        ToolRouter::new_local(sandbox_dir.path())
+            .await
+            .unwrap()
+            .with_policies(
+                moa_security::ActionPolicies::from_config(&config)
+                    .expect("policy config should be valid"),
+            ),
+    );
+    let pipeline = build_no_memory_test_pipeline_with_tools(
+        &MoaConfig::default(),
+        store.clone(),
+        tool_router.tool_schemas(),
+    );
+    let llm = Arc::new(PolicyBlockedToolLlmProvider::new(
+        provider_tool_use_id,
+        expected_error_fragment,
+        final_text,
+    ));
+
+    let result = run_brain_turn(session_id, store.clone(), llm, &pipeline, Some(tool_router))
+        .await
+        .unwrap();
+    assert_eq!(result, TurnResult::Complete);
+    assert!(
+        !sandbox_dir.path().join("blocked-policy-write.txt").exists(),
+        "blocked file_write must not create the requested file"
+    );
+    store.events.lock().await.clone()
+}
+
+fn assert_policy_blocked_file_write_events(
+    events: &[EventRecord],
+    provider_tool_use_id: &str,
+    expected_error_fragment: &str,
+) {
+    let call_index = events.iter().position(|record| {
+        matches!(
+            &record.event,
+            Event::ToolCall {
+                provider_tool_use_id: Some(id),
+                tool_name,
+                ..
+            } if id == provider_tool_use_id && tool_name == "file_write"
+        )
+    });
+    let error_index = events.iter().position(|record| {
+        matches!(
+            &record.event,
+            Event::ToolError {
+                provider_tool_use_id: Some(id),
+                tool_name,
+                error,
+                retryable,
+                ..
+            } if id == provider_tool_use_id
+                && tool_name == "file_write"
+                && error.contains(expected_error_fragment)
+                && !retryable
+        )
+    });
+
+    assert!(
+        call_index.is_some(),
+        "expected ToolCall for {provider_tool_use_id}; events were: {events:#?}"
+    );
+    assert!(
+        error_index.is_some(),
+        "expected ToolError containing `{expected_error_fragment}` for {provider_tool_use_id}; events were: {events:#?}"
+    );
+    assert!(
+        call_index.unwrap() < error_index.unwrap(),
+        "expected ToolCall to precede ToolError; events were: {events:#?}"
+    );
+    assert!(
+        !events.iter().any(|record| matches!(
+            &record.event,
+            Event::ToolResult {
+                provider_tool_use_id: Some(id),
+                ..
+            } if id == provider_tool_use_id
+        )),
+        "blocked tool must not emit a ToolResult; events were: {events:#?}"
+    );
+}
+
+#[tokio::test]
 async fn streamed_turn_provider_tool_result_surfaces_notice_without_router_execution() {
     let session = SessionMeta {
         tenant_id: test_tenant_id(),
@@ -580,7 +733,7 @@ async fn streamed_turn_provider_tool_result_surfaces_notice_without_router_execu
             .unwrap()
             .with_session_store(store.clone()),
     );
-    let pipeline = build_default_pipeline_with_tools(
+    let pipeline = build_no_memory_test_pipeline_with_tools(
         &MoaConfig::default(),
         store.clone(),
         tool_router.tool_schemas(),
@@ -657,7 +810,7 @@ async fn canary_leaks_in_tool_input_are_detected_and_blocked() {
     ));
     let sandbox_dir = tempdir().unwrap();
     let tool_router = Arc::new(ToolRouter::new_local(sandbox_dir.path()).await.unwrap());
-    let pipeline = build_default_pipeline_with_tools(
+    let pipeline = build_no_memory_test_pipeline_with_tools(
         &MoaConfig::default(),
         store.clone(),
         tool_router.tool_schemas(),
@@ -723,7 +876,7 @@ async fn malicious_tool_results_are_wrapped_as_untrusted_content() {
             token_count: None,
         }],
     ));
-    let pipeline = build_default_pipeline_with_tools(
+    let pipeline = build_no_memory_test_pipeline_with_tools(
         &MoaConfig::default(),
         store.clone(),
         tool_router.tool_schemas(),
@@ -796,7 +949,8 @@ async fn streamed_turn_runtime_matches_buffered_response() {
         session.clone(),
         initial_events.clone(),
     ));
-    let streamed_pipeline = build_default_pipeline(&MoaConfig::default(), streamed_store.clone());
+    let streamed_pipeline =
+        build_no_memory_test_pipeline(&MoaConfig::default(), streamed_store.clone());
     let streamed_provider = Arc::new(CapturingTextLlmProvider::new("Hello streamed world"));
     let (runtime_tx, mut runtime_rx) = broadcast::channel(64);
 
@@ -845,7 +999,8 @@ async fn streamed_turn_runtime_matches_buffered_response() {
     assert_eq!(streamed_response, Some("Hello streamed world".to_string()));
 
     let buffered_store = Arc::new(MockSessionStore::new(session, initial_events));
-    let buffered_pipeline = build_default_pipeline(&MoaConfig::default(), buffered_store.clone());
+    let buffered_pipeline =
+        build_no_memory_test_pipeline(&MoaConfig::default(), buffered_store.clone());
     let buffered_provider = Arc::new(CapturingTextLlmProvider::new("Hello streamed world"));
 
     let buffered_result = run_brain_turn(

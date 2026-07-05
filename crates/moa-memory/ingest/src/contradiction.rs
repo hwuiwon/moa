@@ -10,18 +10,17 @@ use moa_core::RlsContext;
 use moa_db::ScopedConn;
 use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_vector::{Error as VectorError, VECTOR_DIMENSION, VectorQuery, VectorStore};
-use moa_providers::{
-    COHERE_DEFAULT_RERANK_MODEL, CohereReranker, ConfiguredReranker, LlmChatClient, NoopReranker,
-    Reranker, build_reranker_from_config,
-};
+#[cfg(test)]
+use moa_providers::COHERE_DEFAULT_RERANK_MODEL;
+use moa_providers::{ConfiguredReranker, Reranker, build_reranker_from_config};
 use moka::future::Cache;
-use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{FromRow, PgPool, Row};
 use tokio::time::timeout;
 use uuid::Uuid;
 
+use crate::model_client::{ModelTextClient, resolved_extraction_config};
 use crate::{EmbeddedFact, IngestError, Result};
 
 const VECTOR_K: usize = 10;
@@ -168,27 +167,27 @@ impl JudgeModel for HeuristicJudge {
     }
 }
 
-/// Chat-backed judge using the provider-owned LLM transport.
+/// Model-backed judge using the shared provider stack.
 #[derive(Clone)]
-struct LlmJudge {
-    client: LlmChatClient,
+struct ModelJudge {
+    client: ModelTextClient,
 }
 
-impl LlmJudge {
-    fn new(client: LlmChatClient) -> Self {
+impl ModelJudge {
+    fn new(client: ModelTextClient) -> Self {
         Self { client }
     }
 }
 
 #[async_trait]
-impl JudgeModel for LlmJudge {
+impl JudgeModel for ModelJudge {
     async fn judge(
         &self,
         prompt: &str,
         _fact_text: &str,
         _candidates: &[NodeIndexRow],
     ) -> Result<JudgeResponse> {
-        let response = self.client.chat("", prompt).await?;
+        let response = self.client.complete_text("", prompt).await?;
         parse_judge_response(&response)
     }
 }
@@ -207,6 +206,7 @@ pub struct RrfPlusJudgeDetector {
 
 impl RrfPlusJudgeDetector {
     /// Creates a detector from explicit reranker and judge backends.
+    #[cfg(test)]
     #[must_use]
     fn new(reranker: Arc<dyn Reranker>, judge: Arc<dyn JudgeModel>) -> Self {
         Self::new_with_model(reranker, COHERE_DEFAULT_RERANK_MODEL.to_string(), judge)
@@ -232,42 +232,8 @@ impl RrfPlusJudgeDetector {
     #[must_use]
     pub fn from_config_or_heuristic(config: &MoaConfig) -> Self {
         let configured = configured_reranker_or_noop(config);
-        let api_key = cohere_judge_api_key(config);
-        let judge = llm_judge_or_heuristic(
-            api_key,
-            &config.memory.extraction.model,
-            config.memory.extraction.timeout_ms,
-        );
+        let judge = model_judge_from_config_or_heuristic(config);
         Self::new_with_model(configured.reranker, configured.model, judge)
-    }
-
-    /// Creates a detector using a direct Cohere API key and judge model.
-    #[must_use]
-    pub fn from_cohere_api_key_model_or_heuristic(
-        api_key: &str,
-        judge_model: &str,
-        timeout_ms: u64,
-    ) -> Self {
-        let api_key = api_key.trim();
-        if api_key.is_empty() {
-            return Self::new(NoopReranker::shared(), Arc::new(HeuristicJudge));
-        }
-        let reranker: Arc<dyn Reranker> = match CohereReranker::new(api_key.to_string()) {
-            Ok(reranker) => Arc::new(reranker),
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "falling back to no-op contradiction reranker"
-                );
-                NoopReranker::shared()
-            }
-        };
-        let judge: Arc<dyn JudgeModel> = Arc::new(LlmJudge::new(LlmChatClient::from_api_key(
-            SecretString::from(api_key.to_string()),
-            judge_model,
-            timeout_ms,
-        )));
-        Self::new(reranker, judge)
     }
 
     /// Overrides all latency budgets, primarily for deterministic tests.
@@ -397,28 +363,20 @@ fn configured_reranker_or_noop(config: &MoaConfig) -> ConfiguredReranker {
     })
 }
 
-fn cohere_judge_api_key(config: &MoaConfig) -> &str {
-    if config.providers.cohere.api_key.trim().is_empty() {
-        &config.memory.extraction.api_key
-    } else {
-        &config.providers.cohere.api_key
-    }
-}
-
-fn llm_judge_or_heuristic(
-    api_key: &str,
-    judge_model: &str,
-    timeout_ms: u64,
-) -> Arc<dyn JudgeModel> {
-    let api_key = api_key.trim();
-    if api_key.is_empty() {
+fn model_judge_from_config_or_heuristic(config: &MoaConfig) -> Arc<dyn JudgeModel> {
+    let Some(extraction) = resolved_extraction_config(config) else {
         return Arc::new(HeuristicJudge);
+    };
+    match ModelTextClient::from_config(config, &extraction) {
+        Ok(client) => Arc::new(ModelJudge::new(client)),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "memory contradiction model judge could not initialize; installing heuristic judge"
+            );
+            Arc::new(HeuristicJudge)
+        }
     }
-    Arc::new(LlmJudge::new(LlmChatClient::from_api_key(
-        SecretString::from(api_key.to_string()),
-        judge_model,
-        timeout_ms,
-    )))
 }
 
 impl Default for RrfPlusJudgeDetector {
@@ -827,17 +785,67 @@ fn normalize_fact_text(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
+    use async_trait::async_trait;
     use chrono::Utc;
+    use moa_core::{
+        CompletionRequest, CompletionResponse, CompletionStream, LLMProvider, ModelCapabilities,
+        ModelId, StopReason, TokenPricing, TokenUsage, ToolCallFormat,
+    };
     use moa_memory_graph::PiiClass;
-    use secrecy::SecretString;
+    use moa_providers::NoopReranker;
     use tokio::time::sleep;
-    use wiremock::matchers::{body_string_contains, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+
+    struct StaticJudgeProvider {
+        response: String,
+        request: Mutex<Option<CompletionRequest>>,
+    }
+
+    #[async_trait]
+    impl LLMProvider for StaticJudgeProvider {
+        fn name(&self) -> &str {
+            "static-judge"
+        }
+
+        fn capabilities(&self) -> ModelCapabilities {
+            ModelCapabilities {
+                model_id: ModelId::new("gpt-5.4-mini"),
+                context_window: 400_000,
+                max_output: 128_000,
+                supports_tools: true,
+                supports_vision: true,
+                supports_prefix_caching: true,
+                cache_ttl: None,
+                tool_call_format: ToolCallFormat::OpenAiCompatible,
+                pricing: TokenPricing {
+                    input_per_mtok: 0.0,
+                    output_per_mtok: 0.0,
+                    cached_input_per_mtok: None,
+                    cache_write_5m_per_mtok: None,
+                    cache_write_1h_per_mtok: None,
+                },
+                native_tools: Vec::new(),
+            }
+        }
+
+        async fn complete(&self, request: CompletionRequest) -> moa_core::Result<CompletionStream> {
+            *self.request.lock().expect("capture request") = Some(request);
+            Ok(CompletionStream::from_response(CompletionResponse {
+                text: self.response.clone(),
+                content: Vec::new(),
+                stop_reason: StopReason::EndTurn,
+                model: ModelId::new("gpt-5.4-mini"),
+                usage: TokenUsage::default(),
+                duration_ms: 1,
+                thought_signature: None,
+            }))
+        }
+    }
 
     #[test]
     fn rrf_fusion_prioritizes_hits_seen_by_both_rankers() {
@@ -905,39 +913,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contradiction_judge_parsing_unchanged_on_shared_client() {
-        // Pins: the shared Cohere chat transport preserves judge prompt content and JSON parsing.
+    async fn contradiction_model_judge_parses_provider_response() {
+        // Pins: the model-backed judge preserves prompt content and JSON verdict parsing.
         let candidate = candidate("we deploy to fly.io", None);
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v2/chat"))
-            .and(body_string_contains("NEW FACT:"))
-            .and(body_string_contains(candidate.uid.to_string()))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "message": {
-                    "content": [{
-                        "type": "text",
-                        "text": format!(
-                            "```json\n{{\"verdict\":\"CONTRADICTS\",\"candidate_uid\":\"{}\",\"rationale\":\"deployment provider changed\"}}\n```",
-                            candidate.uid
-                        )
-                    }]
-                }
-            })))
-            .mount(&server)
-            .await;
-        let client =
-            LlmChatClient::from_api_key(SecretString::from("test-key"), "command-test", 1_000)
-                .with_endpoint(format!("{}/v2/chat", server.uri()));
+        let provider = Arc::new(StaticJudgeProvider {
+            response: format!(
+                "```json\n{{\"verdict\":\"CONTRADICTS\",\"candidate_uid\":\"{}\",\"rationale\":\"deployment provider changed\"}}\n```",
+                candidate.uid
+            ),
+            request: Mutex::new(None),
+        });
+        let client = ModelTextClient::new(provider.clone(), ModelId::new("gpt-5.4-mini"), 1_000)
+            .expect("model client should build");
         let detector =
-            RrfPlusJudgeDetector::new(Arc::new(NoopReranker), Arc::new(LlmJudge::new(client)));
+            RrfPlusJudgeDetector::new(Arc::new(NoopReranker), Arc::new(ModelJudge::new(client)));
 
         let conflict = detector
             .judge_candidates("we deploy to AWS", std::slice::from_ref(&candidate))
             .await
-            .expect("judge should parse shared-client response");
+            .expect("judge should parse model response");
 
         assert_eq!(conflict, Conflict::Supersede(candidate.uid));
+        let request = provider
+            .request
+            .lock()
+            .expect("capture request")
+            .clone()
+            .expect("request captured");
+        assert_eq!(request.model, Some(ModelId::new("gpt-5.4-mini")));
+        assert!(request.messages[0].content.contains("NEW FACT:"));
+        assert!(
+            request.messages[0]
+                .content
+                .contains(&candidate.uid.to_string())
+        );
     }
 
     #[tokio::test]

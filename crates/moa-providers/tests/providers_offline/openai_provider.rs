@@ -6,7 +6,8 @@ use std::sync::{
 use std::time::Duration;
 
 use moa_core::{
-    CompletionContent, CompletionRequest, ContextMessage, LLMProvider, StopReason, ToolContent,
+    CompletionContent, CompletionRequest, ContextMessage, JsonResponseFormat, LLMProvider,
+    StopReason, ToolContent,
 };
 use moa_providers::OpenAIProvider;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -89,6 +90,196 @@ async fn openai_provider_translates_requests_to_responses_api() {
         .await
         .unwrap();
     assert_eq!(response.text, "ok");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn openai_provider_uses_non_streaming_response_for_structured_output() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = vec![0_u8; 8192];
+        let read = socket.read(&mut buffer).await.unwrap();
+        let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+
+        assert!(request.contains("POST /v1/responses"));
+        assert!(request.contains("\"stream\":false"));
+        assert!(request.contains("\"type\":\"json_schema\""));
+        assert!(request.contains("\"name\":\"query_rewrite_result\""));
+
+        let body = serde_json::json!({
+            "id": "resp_1",
+            "object": "response",
+            "created_at": 1,
+            "model": MODEL,
+            "output": [{
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{
+                    "type": "output_text",
+                    "text": "{\"retrieval_query\":\"fix auth/refresh.rs\",\"is_new_task\":false,\"task_summary\":null,\"task_facets\":null}",
+                    "annotations": [],
+                    "logprobs": null
+                }]
+            }],
+            "status": "completed",
+            "usage": {
+                "input_tokens": 10,
+                "input_tokens_details": {
+                    "cached_tokens": 0
+                },
+                "output_tokens": 4,
+                "output_tokens_details": {
+                    "reasoning_tokens": 0
+                },
+                "total_tokens": 14
+            }
+        })
+        .to_string();
+        socket
+            .write_all(json_response(&body).as_bytes())
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+    });
+
+    let provider = OpenAIProvider::new("test-key", MODEL)
+        .unwrap()
+        .with_api_base(format!("http://{address}/v1"))
+        .unwrap()
+        .with_max_retries(0);
+    let mut request = CompletionRequest::simple("Rewrite this query.");
+    request.response_format = Some(JsonResponseFormat::strict_json_schema(
+        "query_rewrite_result",
+        "Query rewrite result.",
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "retrieval_query": { "type": "string" },
+                "is_new_task": { "type": "boolean" },
+                "task_summary": { "type": ["string", "null"] },
+                "task_facets": { "type": ["object", "null"] }
+            },
+            "required": ["retrieval_query", "is_new_task", "task_summary", "task_facets"]
+        }),
+    ));
+
+    let response = provider
+        .complete(request)
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.text,
+        "{\"retrieval_query\":\"fix auth/refresh.rs\",\"is_new_task\":false,\"task_summary\":null,\"task_facets\":null}"
+    );
+    assert_eq!(response.usage.input_tokens_uncached, 10);
+    assert_eq!(response.usage.output_tokens, 4);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn openai_provider_retries_empty_structured_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for attempt in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0_u8; 8192];
+            let read = socket.read(&mut buffer).await.unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+
+            assert!(request.contains("POST /v1/responses"));
+            assert!(request.contains("\"stream\":false"));
+            assert!(request.contains("\"type\":\"json_schema\""));
+
+            let output = if attempt == 0 {
+                serde_json::json!([])
+            } else {
+                serde_json::json!([{
+                    "type": "message",
+                    "id": "msg_retry",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "{\"retrieval_query\":\"fix auth/refresh.rs\",\"is_new_task\":false,\"task_summary\":null,\"task_facets\":null}",
+                        "annotations": [],
+                        "logprobs": null
+                    }]
+                }])
+            };
+            let body = serde_json::json!({
+                "id": format!("resp_{attempt}"),
+                "object": "response",
+                "created_at": 1,
+                "model": MODEL,
+                "output": output,
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 10,
+                    "input_tokens_details": {
+                        "cached_tokens": 0
+                    },
+                    "output_tokens": 4,
+                    "output_tokens_details": {
+                        "reasoning_tokens": 0
+                    },
+                    "total_tokens": 14
+                }
+            })
+            .to_string();
+            socket
+                .write_all(json_response(&body).as_bytes())
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+        }
+    });
+
+    let provider = OpenAIProvider::new("test-key", MODEL)
+        .unwrap()
+        .with_api_base(format!("http://{address}/v1"))
+        .unwrap()
+        .with_max_retries(1);
+    let mut request = CompletionRequest::simple("Rewrite this query.");
+    request.response_format = Some(JsonResponseFormat::strict_json_schema(
+        "query_rewrite_result",
+        "Query rewrite result.",
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "retrieval_query": { "type": "string" },
+                "is_new_task": { "type": "boolean" },
+                "task_summary": { "type": ["string", "null"] },
+                "task_facets": { "type": ["object", "null"] }
+            },
+            "required": ["retrieval_query", "is_new_task", "task_summary", "task_facets"]
+        }),
+    ));
+
+    let response = provider
+        .complete(request)
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.text,
+        "{\"retrieval_query\":\"fix auth/refresh.rs\",\"is_new_task\":false,\"task_summary\":null,\"task_facets\":null}"
+    );
 
     server.abort();
 }
@@ -911,5 +1102,19 @@ fn sse_response(events: Vec<serde_json::Value>) -> String {
             "{body}"
         ),
         body = body
+    )
+}
+
+fn json_response(body: &str) -> String {
+    format!(
+        concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "content-type: application/json\r\n",
+            "content-length: {}\r\n",
+            "connection: close\r\n\r\n",
+            "{}"
+        ),
+        body.len(),
+        body
     )
 }

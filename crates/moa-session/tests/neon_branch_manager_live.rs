@@ -4,8 +4,8 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use moa_core::{
-    BranchManager, MoaConfig, ModelId, SessionActorRef, SessionFilter, SessionMeta, SessionStore,
-    TenantId,
+    BranchManager, MoaConfig, ModelId, SessionActorRef, SessionAttachmentStorageConfig,
+    SessionFilter, SessionMeta, SessionStore, TenantId,
 };
 use moa_session::{NeonBranchManager, PostgresSessionStore};
 use reqwest::Client;
@@ -168,7 +168,10 @@ async fn live_session_store(database_url: &str) -> PostgresSessionStore {
         .connect(database_url)
         .await
         .expect("connect live Neon database");
-    PostgresSessionStore::from_existing_pool(database_url, pool)
+    let mut config = MoaConfig::default();
+    config.database.url = database_url.to_string();
+    config.session.attachments = SessionAttachmentStorageConfig::local_rustfs();
+    PostgresSessionStore::from_existing_pool_with_config(&config, pool)
         .await
         .expect("live Neon session store")
 }

@@ -15,7 +15,7 @@
 //! the table owner, which carries the `owner_dev_access` RLS policy, so seeds
 //! and reads use the plain pool.
 
-use moa_core::{ActionRuleScope, TenantId};
+use moa_core::{ActionRuleScope, ContactId, TenantId};
 use moa_scoring::{
     ExperimentRunScoreRef, SCORE_RUN_SOURCE_EVAL_REPLAY, SCORE_RUN_SOURCE_EXPERIMENT_RUN,
     ScoreCompareRef, ScoreRunRef, ScoringError, compare_score_runs_for_tenant,
@@ -23,7 +23,7 @@ use moa_scoring::{
     scenario_score_summaries_from_rows, score_summaries_for_tenant,
     trial_score_summaries_from_rows,
 };
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 fn approx(actual: Option<f64>, expected: f64) {
@@ -436,5 +436,83 @@ async fn ensure_score_run_parent_is_idempotent_and_rejects_source_mismatch_db_me
                 if score_run_id == run_id && expected_source == SCORE_RUN_SOURCE_EXPERIMENT_RUN
         ),
         "expected ScoreRunMismatch, got {error:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn ensure_score_run_parent_preserves_contact_scope_db_memory() {
+    // Pins: score-run parents can be contact-scoped and the same tenant's other contacts cannot reuse them.
+    let test_db = moa_test_support::postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap test db");
+    let pool = test_db.store().pool();
+
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let contact_id = ContactId(Uuid::now_v7());
+    let other_contact_id = ContactId(Uuid::now_v7());
+    let contact_scope = ActionRuleScope::Contact {
+        tenant_id,
+        contact_id,
+    };
+    let other_contact_scope = ActionRuleScope::Contact {
+        tenant_id,
+        contact_id: other_contact_id,
+    };
+    let run_id = Uuid::now_v7();
+
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    ensure_score_run_parent(
+        &mut conn,
+        &contact_scope,
+        run_id,
+        SCORE_RUN_SOURCE_EXPERIMENT_RUN,
+    )
+    .await
+    .expect("contact scope inserts parent");
+    ensure_score_run_parent(
+        &mut conn,
+        &contact_scope,
+        run_id,
+        SCORE_RUN_SOURCE_EXPERIMENT_RUN,
+    )
+    .await
+    .expect("same contact scope is idempotent");
+
+    let row = sqlx::query(
+        "SELECT scope, storage_partition_id, user_id FROM analytics.score_run WHERE run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await
+    .expect("load score-run parent");
+    assert_eq!(row.get::<String, _>("scope"), "contact");
+    assert_eq!(
+        row.get::<Option<String>, _>("storage_partition_id")
+            .as_deref(),
+        Some(tenant_id.to_string().as_str())
+    );
+    assert_eq!(
+        row.get::<Option<String>, _>("user_id").as_deref(),
+        Some(contact_id.to_string().as_str())
+    );
+
+    let error = ensure_score_run_parent(
+        &mut conn,
+        &other_contact_scope,
+        run_id,
+        SCORE_RUN_SOURCE_EXPERIMENT_RUN,
+    )
+    .await
+    .expect_err("other contact must not reuse the score-run parent");
+    assert!(
+        matches!(
+            error,
+            ScoringError::ScoreRunMismatch {
+                score_run_id,
+                expected_source
+            } if score_run_id == run_id && expected_source == SCORE_RUN_SOURCE_EXPERIMENT_RUN
+        ),
+        "expected contact scope mismatch, got {error:?}"
     );
 }

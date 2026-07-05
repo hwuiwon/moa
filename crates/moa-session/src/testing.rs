@@ -13,8 +13,8 @@
 use std::time::Duration;
 
 use moa_core::{MoaError, Result};
-use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::{Connection, PgConnection, PgPool};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
@@ -69,7 +69,7 @@ pub async fn provision_cloned_database() -> Result<(String, String)> {
     let template_name = ensure_template().await?;
     let maintenance_url = test_database_url();
     let db_name = format!("moa_test_{}", Uuid::now_v7().simple());
-    let admin = connect_maintenance(&maintenance_url).await?;
+    let mut admin = connect_maintenance(&maintenance_url).await?;
 
     let statement = format!(
         "CREATE DATABASE {} TEMPLATE {}",
@@ -78,7 +78,7 @@ pub async fn provision_cloned_database() -> Result<(String, String)> {
     );
     let mut attempt = 0_u32;
     let result = loop {
-        match sqlx::query(&statement).execute(&admin).await {
+        match sqlx::query(&statement).execute(&mut admin).await {
             Ok(_) => break Ok(()),
             Err(error) if attempt < 4 && is_template_busy(&error) => {
                 attempt += 1;
@@ -87,7 +87,6 @@ pub async fn provision_cloned_database() -> Result<(String, String)> {
             Err(error) => break Err(error),
         }
     };
-    admin.close().await;
     result.map_err(|error| {
         MoaError::StorageError(format!(
             "clone test database {db_name} from template: {error}"
@@ -112,13 +111,12 @@ pub async fn cleanup_test_schema(database_url: &str, _schema_name: &str) -> Resu
         return Ok(());
     }
 
-    let admin = connect_maintenance(&maintenance_url).await?;
+    let mut admin = connect_maintenance(&maintenance_url).await?;
     let statement = format!(
         "DROP DATABASE IF EXISTS {} WITH (FORCE)",
         quote_identifier(&db_name)
     );
-    let result = sqlx::query(&statement).execute(&admin).await;
-    admin.close().await;
+    let result = sqlx::query(&statement).execute(&mut admin).await;
     result
         .map(|_| ())
         .map_err(|error| MoaError::StorageError(format!("drop test database {db_name}: {error}")))
@@ -161,7 +159,7 @@ fn clone_name_is_sweepable(db_name: &str, now_unix_secs: u64) -> bool {
 pub async fn drop_orphaned_test_databases() -> Result<u64> {
     let maintenance_url = test_database_url();
     let (_, maintenance_db, _) = split_database_url(&maintenance_url)?;
-    let admin = connect_maintenance(&maintenance_url).await?;
+    let mut admin = connect_maintenance(&maintenance_url).await?;
 
     let candidates: Vec<String> = sqlx::query_scalar(
         "SELECT d.datname FROM pg_database d
@@ -173,7 +171,7 @@ pub async fn drop_orphaned_test_databases() -> Result<u64> {
            )",
     )
     .bind(&maintenance_db)
-    .fetch_all(&admin)
+    .fetch_all(&mut admin)
     .await
     .map_err(|error| MoaError::StorageError(format!("list orphaned test databases: {error}")))?;
 
@@ -190,11 +188,10 @@ pub async fn drop_orphaned_test_databases() -> Result<u64> {
             "DROP DATABASE IF EXISTS {} WITH (FORCE)",
             quote_identifier(&name)
         );
-        if sqlx::query(&statement).execute(&admin).await.is_ok() {
+        if sqlx::query(&statement).execute(&mut admin).await.is_ok() {
             dropped += 1;
         }
     }
-    admin.close().await;
     Ok(dropped)
 }
 
@@ -256,14 +253,10 @@ async fn build_template() -> Result<String> {
     let fingerprint = moa_migrations::session_schema_fingerprint();
     let template_name = format!("moa_test_template_{fingerprint}_r{TEMPLATE_RECIPE_VERSION}");
     let maintenance_url = test_database_url();
-    let admin = connect_maintenance(&maintenance_url).await?;
-
-    let mut conn = admin.acquire().await.map_err(|error| {
-        MoaError::StorageError(format!("acquire template build connection: {error}"))
-    })?;
+    let mut conn = connect_maintenance(&maintenance_url).await?;
     sqlx::query("SELECT pg_advisory_lock($1)")
         .bind(TEMPLATE_BUILD_LOCK_ID)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map_err(|error| MoaError::StorageError(format!("acquire template build lock: {error}")))?;
 
@@ -271,10 +264,8 @@ async fn build_template() -> Result<String> {
 
     let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
         .bind(TEMPLATE_BUILD_LOCK_ID)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await;
-    drop(conn);
-    admin.close().await;
 
     result.map(|()| template_name)
 }
@@ -440,17 +431,31 @@ async fn exec_admin(conn: &mut sqlx::PgConnection, statement: &str) -> Result<()
         .map_err(|error| MoaError::StorageError(format!("admin statement failed: {error}")))
 }
 
-/// Connects a short-lived pool to the maintenance database for admin statements.
-async fn connect_maintenance(url: &str) -> Result<PgPool> {
-    PgPoolOptions::new()
-        .min_connections(1)
-        .max_connections(4)
-        .acquire_timeout(Duration::from_secs(30))
-        .connect(url)
-        .await
-        .map_err(|error| {
-            MoaError::StorageError(format!("connect to maintenance database: {error}"))
-        })
+/// Connects one admin session to the maintenance database for administrative statements.
+async fn connect_maintenance(url: &str) -> Result<PgConnection> {
+    match tokio::time::timeout(Duration::from_secs(30), PgConnection::connect(url)).await {
+        Ok(Ok(conn)) => Ok(conn),
+        Ok(Err(error)) => Err(maintenance_connection_error(url, error)),
+        Err(_) => Err(maintenance_connection_error(
+            url,
+            "timed out after 30 seconds",
+        )),
+    }
+}
+
+fn maintenance_connection_error(url: &str, detail: impl std::fmt::Display) -> MoaError {
+    MoaError::StorageError(format!(
+        "connect to maintenance database failed: {detail}. {}",
+        maintenance_connection_hint(url)
+    ))
+}
+
+fn maintenance_connection_hint(url: &str) -> &'static str {
+    if url.contains("127.0.0.1:10040") || url.contains("localhost:10040") {
+        "local compose Postgres appears unavailable; start it with `docker compose up -d postgres` and verify `nc -z 127.0.0.1 10040`, or set MOA_DATABASE_URL to another reachable maintenance database"
+    } else {
+        "check that MOA_DATABASE_URL points to a reachable maintenance database"
+    }
 }
 
 /// Returns whether a `CREATE DATABASE ... TEMPLATE` error is the transient
@@ -497,7 +502,11 @@ fn quote_literal(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ORPHAN_CLONE_MIN_AGE, clone_name_is_sweepable, split_database_url, with_database};
+    use super::{
+        DEFAULT_DATABASE_URL, ORPHAN_CLONE_MIN_AGE, clone_name_is_sweepable,
+        maintenance_connection_error, split_database_url, with_database,
+    };
+    use moa_core::MoaError;
     use uuid::{NoContext, Timestamp, Uuid};
 
     #[test]
@@ -554,5 +563,34 @@ mod tests {
             rewritten,
             "postgres://u:p@h:5432/moa_test_abc?sslmode=require"
         );
+    }
+
+    #[test]
+    fn maintenance_connect_error_points_to_compose_postgres_for_default_url() {
+        // Pins: local setup failures should tell developers how to start and
+        // verify the compose Postgres dependency instead of surfacing only a
+        // generic SQLx connection error.
+        let message = match maintenance_connection_error(DEFAULT_DATABASE_URL, "connection refused")
+        {
+            MoaError::StorageError(message) => message,
+            error => panic!("unexpected error variant: {error:?}"),
+        };
+        assert!(message.contains("docker compose up -d postgres"));
+        assert!(message.contains("nc -z 127.0.0.1 10040"));
+    }
+
+    #[test]
+    fn maintenance_connect_error_uses_database_url_hint_for_custom_url() {
+        // Pins: custom maintenance databases should point at the override knob
+        // without leaking or assuming the repository compose endpoint.
+        let message = match maintenance_connection_error(
+            "postgres://moa_owner:secret@db.internal:5432/moa",
+            "connection refused",
+        ) {
+            MoaError::StorageError(message) => message,
+            error => panic!("unexpected error variant: {error:?}"),
+        };
+        assert!(message.contains("MOA_DATABASE_URL"));
+        assert!(!message.contains("docker compose up -d postgres"));
     }
 }

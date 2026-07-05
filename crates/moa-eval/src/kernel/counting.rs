@@ -46,10 +46,6 @@ where
         self.inner.model_version()
     }
 
-    fn model_name(&self) -> &str {
-        self.inner.model_name()
-    }
-
     async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
         let embeddings = self.inner.embed(inputs).await?;
         let tokens = inputs

@@ -32,6 +32,10 @@ pub(crate) fn tenant_artifact_scope(tenant_id: TenantId) -> ActionRuleScope {
 pub(crate) fn artifact_scope_context(scope: &ActionRuleScope) -> RlsContext {
     match scope {
         ActionRuleScope::Tenant { tenant_id } => RlsContext::tenant(*tenant_id),
+        ActionRuleScope::Contact {
+            tenant_id,
+            contact_id,
+        } => RlsContext::contact(*tenant_id, *contact_id),
     }
 }
 

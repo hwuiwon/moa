@@ -3,6 +3,7 @@
 use chrono::Utc;
 use moa_core::wire::knowledge::{
     KnowledgeCreateLinkTokenRequest, KnowledgeCreateLinkTokenResponse,
+    KnowledgeDisconnectConnectionRequest, KnowledgeDisconnectConnectionResponse,
     KnowledgeExchangeTokenRequest, KnowledgeExchangeTokenResponse, KnowledgeSyncRequest,
     KnowledgeUpdateConnectionSourceSelectionRequest,
     KnowledgeUpdateConnectionSourceSelectionResponse,
@@ -145,6 +146,35 @@ impl KnowledgeService {
             source_selection: connection.source_selection,
             sync_run_uid: sync.as_ref().map(|sync| sync.sync_run_uid),
             sync_status: sync.map(|sync| sync.status),
+        })
+    }
+
+    /// Disables one linked connection and revokes MOA-managed credential material.
+    pub async fn disconnect_connection(
+        &self,
+        request: KnowledgeDisconnectConnectionRequest,
+    ) -> Result<KnowledgeDisconnectConnectionResponse, KnowledgeServiceError> {
+        let repository = self.repository(request.tenant_id);
+        let connection = repository
+            .get_connection(request.connection_uid)
+            .await?
+            .ok_or(KnowledgeServiceError::NotFound("knowledge connection"))?;
+        if connection.tenant_id != request.tenant_id {
+            return Err(KnowledgeServiceError::NotFound("knowledge connection"));
+        }
+
+        let credential_revoked = self
+            .credentials
+            .delete_linked_account(request.tenant_id, &connection)
+            .await?;
+        let connection = repository
+            .disable_connection(request.tenant_id, request.connection_uid)
+            .await?;
+
+        Ok(KnowledgeDisconnectConnectionResponse {
+            connection_uid: connection.connection_uid,
+            status: connection.status.as_str().to_string(),
+            credential_revoked,
         })
     }
 }

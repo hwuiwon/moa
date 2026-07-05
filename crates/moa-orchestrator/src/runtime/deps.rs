@@ -246,19 +246,12 @@ async fn build_runtime_cache_store(config: &MoaConfig) -> Result<Arc<dyn Runtime
     }
 }
 
-#[cfg(feature = "redis")]
 async fn build_redis_runtime_cache_store(redis_url: &str) -> Result<Arc<dyn RuntimeCacheStore>> {
     Ok(Arc::new(
         moa_runtime_store::RedisRuntimeCacheStore::new(redis_url)
             .await
             .context("build Redis runtime cache store")?,
     ))
-}
-
-#[cfg(not(feature = "redis"))]
-async fn build_redis_runtime_cache_store(redis_url: &str) -> Result<Arc<dyn RuntimeCacheStore>> {
-    let _ = redis_url;
-    bail!("runtime_cache.backend = redis requires the moa-orchestrator redis feature");
 }
 
 fn build_channel_adapters(

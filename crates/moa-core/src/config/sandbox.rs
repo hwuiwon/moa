@@ -49,6 +49,8 @@ impl Default for CloudConfig {
 pub struct CloudHandsConfig {
     /// Default hand provider.
     pub default_provider: Option<String>,
+    /// Ordered fallback cloud providers attempted when the selected cloud hand is unavailable.
+    pub fallback_providers: Vec<String>,
     /// Daytona API key loaded from runtime configuration.
     pub daytona_api_key: Option<String>,
     /// Optional Daytona API base URL override.
@@ -69,12 +71,10 @@ pub struct CloudHandsConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum McpTransportConfig {
-    /// Launch a local MCP server over stdio.
-    #[default]
-    Stdio,
     /// Connect to a server-sent-event MCP endpoint.
     Sse,
     /// Connect to a Streamable HTTP MCP endpoint.
+    #[default]
     Http,
 }
 
@@ -103,73 +103,13 @@ pub enum McpCredentialConfig {
 
 /// One configured MCP server connection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default)]
 pub struct McpServerConfig {
     /// Stable MCP server name.
     pub name: String,
     /// Selected transport for the server.
     pub transport: McpTransportConfig,
-    /// Optional stdio command.
-    pub command: Option<String>,
-    /// Optional stdio command arguments.
-    pub args: Vec<String>,
-    /// Optional stdio environment variables.
-    pub env: std::collections::HashMap<String, String>,
     /// Optional remote endpoint URL for HTTP/SSE transports.
     pub url: Option<String>,
     /// Optional credential injection configuration.
     pub credentials: Option<McpCredentialConfig>,
-}
-
-impl super::MoaEnvOverlay {
-    /// Applies local runtime environment overrides.
-    pub(in crate::config) fn apply_local_overlay(&self, config: &mut super::MoaConfig) {
-        use super::env_overlay::{set_copy_if_some, set_if_some};
-
-        set_copy_if_some(&mut config.local.docker_enabled, self.local_docker_enabled);
-        set_if_some(&mut config.local.sandbox_dir, &self.local_sandbox_dir);
-        set_if_some(&mut config.local.memory_dir, &self.local_memory_dir);
-    }
-
-    /// Applies cloud runtime and cloud hands environment overrides.
-    pub(in crate::config) fn apply_cloud_overlay(&self, config: &mut super::MoaConfig) {
-        use super::env_overlay::{any_present, set_option_if_some};
-
-        set_option_if_some(&mut config.cloud.memory_dir, &self.cloud_memory_dir);
-        if any_present(&[
-            self.cloud_hands_default_provider.is_some(),
-            self.cloud_hands_daytona_api_key.is_some(),
-            self.cloud_hands_daytona_api_url.is_some(),
-            self.cloud_hands_daytona_default_image.is_some(),
-            self.cloud_hands_e2b_api_key.is_some(),
-            self.cloud_hands_e2b_api_url.is_some(),
-            self.cloud_hands_e2b_domain.is_some(),
-            self.cloud_hands_e2b_template.is_some(),
-        ]) {
-            let hands = config
-                .cloud
-                .hands
-                .get_or_insert_with(CloudHandsConfig::default);
-            set_option_if_some(
-                &mut hands.default_provider,
-                &self.cloud_hands_default_provider,
-            );
-            set_option_if_some(
-                &mut hands.daytona_api_key,
-                &self.cloud_hands_daytona_api_key,
-            );
-            set_option_if_some(
-                &mut hands.daytona_api_url,
-                &self.cloud_hands_daytona_api_url,
-            );
-            set_option_if_some(
-                &mut hands.daytona_default_image,
-                &self.cloud_hands_daytona_default_image,
-            );
-            set_option_if_some(&mut hands.e2b_api_key, &self.cloud_hands_e2b_api_key);
-            set_option_if_some(&mut hands.e2b_api_url, &self.cloud_hands_e2b_api_url);
-            set_option_if_some(&mut hands.e2b_domain, &self.cloud_hands_e2b_domain);
-            set_option_if_some(&mut hands.e2b_template, &self.cloud_hands_e2b_template);
-        }
-    }
 }

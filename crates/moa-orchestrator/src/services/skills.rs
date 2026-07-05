@@ -629,6 +629,7 @@ async fn load_datasource_summaries(
                 .map(|status| status.as_str().to_string()),
             last_synced_at: projection.connection.last_synced_at,
             source_selection: projection.connection.source_selection,
+            credential_status: None,
         })
         .collect())
 }
@@ -762,7 +763,7 @@ async fn authorized_import_scope(
     scope: ActionRuleScope,
 ) -> Result<ActionRuleScope, HandlerError> {
     match scope {
-        ActionRuleScope::Tenant { tenant_id } => {
+        ActionRuleScope::Tenant { tenant_id } | ActionRuleScope::Contact { tenant_id, .. } => {
             authorize_tenant(ctx, tenant_id, Relation::Operator).await?;
         }
     }
@@ -911,6 +912,7 @@ mod capabilities_tests {
             last_sync_status: None,
             last_synced_at: None,
             source_selection: serde_json::json!({}),
+            credential_status: None,
         }
     }
 

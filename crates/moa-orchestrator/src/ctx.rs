@@ -8,15 +8,12 @@ use moa_brain::pipeline::{memory::GraphMemoryRetriever, skills::SkillInjector};
 use moa_core::{
     Channel, LineageHandle, MoaConfig,
     traits::{
-        ChannelAdapter, EmbeddingProvider, ExperienceStore, Identity, IdentityType,
-        LearningCandidateStore, RuntimeCacheStore, SegmentStore, SessionAnalyticsStore,
-        SessionChannelStore, SessionEventLookupStore, SessionLearningLogStore, SessionRepository,
-        SessionStore,
+        ChannelAdapter, EmbeddingProvider, Identity, IdentityType, LearningCandidateStore,
+        RuntimeCacheStore, SessionRepository,
     },
 };
 use moa_hands::ToolRouter;
 use moa_providers::ProviderRegistry;
-use moa_security::ActionPolicyRuleStore;
 use moa_session::PostgresSessionStore;
 use serde_json::Value;
 use uuid::Uuid;
@@ -27,15 +24,6 @@ static CTX: OnceLock<Arc<OrchestratorCtx>> = OnceLock::new();
 #[derive(Clone)]
 pub struct PersistenceDeps {
     session_repository: Arc<dyn SessionRepository>,
-    session_store: Arc<dyn SessionStore>,
-    segment_store: Arc<dyn SegmentStore>,
-    experience_store: Arc<dyn ExperienceStore>,
-    learning_candidate_store: Arc<dyn LearningCandidateStore>,
-    analytics_store: Arc<dyn SessionAnalyticsStore>,
-    event_lookup_store: Arc<dyn SessionEventLookupStore>,
-    learning_log_store: Arc<dyn SessionLearningLogStore>,
-    channel_store: Arc<dyn SessionChannelStore>,
-    action_policy_store: Arc<dyn ActionPolicyRuleStore>,
     session_store_backend: Arc<PostgresSessionStore>,
     graph_pool: sqlx::PgPool,
 }
@@ -46,15 +34,6 @@ impl PersistenceDeps {
     pub fn new(session_store: Arc<PostgresSessionStore>, graph_pool: sqlx::PgPool) -> Self {
         Self {
             session_repository: session_store.clone(),
-            session_store: session_store.clone(),
-            segment_store: session_store.clone(),
-            experience_store: session_store.clone(),
-            learning_candidate_store: session_store.clone(),
-            analytics_store: session_store.clone(),
-            event_lookup_store: session_store.clone(),
-            learning_log_store: session_store.clone(),
-            channel_store: session_store.clone(),
-            action_policy_store: session_store.clone(),
             session_store_backend: session_store,
             graph_pool,
         }
@@ -64,60 +43,6 @@ impl PersistenceDeps {
     #[must_use]
     pub fn session_store(&self) -> Arc<dyn SessionRepository> {
         self.session_repository.clone()
-    }
-
-    /// Returns the durable session event store contract.
-    #[must_use]
-    pub fn session_event_store(&self) -> Arc<dyn SessionStore> {
-        self.session_store.clone()
-    }
-
-    /// Returns the task-segment store contract.
-    #[must_use]
-    pub fn segment_store(&self) -> Arc<dyn SegmentStore> {
-        self.segment_store.clone()
-    }
-
-    /// Returns the experience store contract.
-    #[must_use]
-    pub fn experience_store(&self) -> Arc<dyn ExperienceStore> {
-        self.experience_store.clone()
-    }
-
-    /// Returns the learning-candidate store contract.
-    #[must_use]
-    pub fn learning_candidate_store(&self) -> Arc<dyn LearningCandidateStore> {
-        self.learning_candidate_store.clone()
-    }
-
-    /// Returns the analytics read-model store contract.
-    #[must_use]
-    pub fn analytics_store(&self) -> Arc<dyn SessionAnalyticsStore> {
-        self.analytics_store.clone()
-    }
-
-    /// Returns the event idempotency lookup contract.
-    #[must_use]
-    pub fn event_lookup_store(&self) -> Arc<dyn SessionEventLookupStore> {
-        self.event_lookup_store.clone()
-    }
-
-    /// Returns the learning-log store contract.
-    #[must_use]
-    pub fn learning_log_store(&self) -> Arc<dyn SessionLearningLogStore> {
-        self.learning_log_store.clone()
-    }
-
-    /// Returns the session channel-binding store contract.
-    #[must_use]
-    pub fn channel_store(&self) -> Arc<dyn SessionChannelStore> {
-        self.channel_store.clone()
-    }
-
-    /// Returns the action-policy rule store contract.
-    #[must_use]
-    pub fn action_policy_store(&self) -> Arc<dyn ActionPolicyRuleStore> {
-        self.action_policy_store.clone()
     }
 
     /// Returns the concrete Postgres session-store backend for composition-only surfaces.
@@ -441,12 +366,6 @@ impl OrchestratorCtx {
         self.config.clone()
     }
 
-    /// Returns the persistence dependency group.
-    #[must_use]
-    pub fn persistence_deps(&self) -> PersistenceDeps {
-        self.persistence.clone()
-    }
-
     /// Returns the authentication dependency group.
     #[must_use]
     pub fn auth_deps(&self) -> AuthDeps {
@@ -498,13 +417,7 @@ impl OrchestratorCtx {
     /// Returns the learning-candidate store contract.
     #[must_use]
     pub fn learning_candidate_store(&self) -> Arc<dyn LearningCandidateStore> {
-        self.persistence.learning_candidate_store()
-    }
-
-    /// Returns the action-policy rule store contract.
-    #[must_use]
-    pub fn action_policy_store(&self) -> Arc<dyn ActionPolicyRuleStore> {
-        self.persistence.action_policy_store()
+        self.persistence.session_store_backend()
     }
 
     /// Returns the concrete session-store backend for composition-only surfaces.

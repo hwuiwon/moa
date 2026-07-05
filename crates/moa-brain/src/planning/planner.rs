@@ -66,8 +66,6 @@ pub struct PlannedQuery {
     pub label_hint: Option<Vec<NodeLabel>>,
     /// Most-specific request scope.
     pub scope: MemoryScope,
-    /// Ancestor chain from global through the most-specific scope.
-    pub scope_ancestors: Vec<MemoryScope>,
     /// Optional application-time filter. V1 leaves this unset.
     pub temporal_filter: Option<DateTime<Utc>>,
 }
@@ -178,7 +176,6 @@ impl QueryPlanner {
             seeds,
             label_hint: infer_label_hint(query_text, &spans),
             scope: ctx.scope.clone(),
-            scope_ancestors: ctx.scope.ancestors(),
             temporal_filter,
         })
     }
@@ -731,7 +728,6 @@ mod tests {
             seeds: Vec::new(),
             label_hint: None,
             scope: scope.clone(),
-            scope_ancestors: scope.ancestors(),
             temporal_filter,
         }
     }

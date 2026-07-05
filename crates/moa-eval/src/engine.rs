@@ -81,22 +81,6 @@ impl EvalEngine {
             .await
     }
 
-    /// Runs one test case against one agent config using one provider instance.
-    pub async fn run_single_with_provider(
-        &self,
-        case: &TestCase,
-        config: &AgentConfig,
-        llm_provider: Arc<dyn LLMProvider>,
-    ) -> Result<EvalResult> {
-        self.run_single_with_timeout(
-            case,
-            config,
-            DEFAULT_SINGLE_TIMEOUT_SECONDS,
-            Some(llm_provider),
-        )
-        .await
-    }
-
     async fn run_suite_inner(
         &self,
         suite: &TestSuite,

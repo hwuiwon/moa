@@ -857,7 +857,7 @@ mod tests {
         ToolCallRequest, ToolDiffStrategy, ToolInputShape, ToolOutput, ToolPolicySpec,
         TrustedSandboxFileEntry, TrustedSandboxFileManifestRef, UserId,
     };
-    use moa_hands::{ToolRegistry, ToolRouter};
+    use moa_hands::{HandRoute, ToolRegistry, ToolRouter};
     use uuid::Uuid;
 
     use super::{
@@ -1081,7 +1081,10 @@ mod tests {
             },
             IdempotencyClass::Idempotent,
         );
-        registry.retarget_hand_tools(provider.provider_name(), SandboxTier::Container);
+        registry.retarget_hand_tools(vec![HandRoute {
+            provider: provider.provider_name().to_string(),
+            tier: SandboxTier::Container,
+        }]);
         registry.retain_only(["bash"]);
         let provider_trait: Arc<dyn HandProvider> = provider.clone();
         let mut providers = HashMap::new();

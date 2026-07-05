@@ -2,13 +2,15 @@
 
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
 
 use crate::error::{MoaError, Result};
 
 use super::{
-    AsyncAuthzKind, AuthProviderKind, AuthzEngine, MoaConfig, OtlpProtocol, RuntimeCacheBackend,
-    SessionAttachmentBackend, SessionBlobBackend, TokenVaultKind,
+    AsyncAuthzKind, AuthProviderKind, AuthzEngine, LineageAuditSigningProvider, MoaConfig,
+    OtlpProtocol, RuntimeCacheBackend, SessionAttachmentBackend, SessionBlobBackend,
+    TokenVaultKind,
 };
 
 /// Optional flat environment overrides for `MoaConfig`.
@@ -17,7 +19,7 @@ use super::{
 /// fields. Only URL validation, header maps, and comma-separated lists need
 /// bespoke handling (`validate_urls`, `deserialize_optional_headers`, and
 /// `deserialize_optional_list`).
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct MoaEnvOverlay {
     /// `MOA_GENERAL_DEFAULT_PROVIDER`.
@@ -169,6 +171,12 @@ pub struct MoaEnvOverlay {
     pub lineage_audit_signing_key_hex: Option<String>,
     /// `MOA_LINEAGE_AUDIT_SIGNING_KEY_ID`.
     pub lineage_audit_signing_key_id: Option<String>,
+    /// `MOA_LINEAGE_AUDIT_SIGNING_PROVIDER`.
+    pub lineage_audit_signing_provider: Option<LineageAuditSigningProvider>,
+    /// `MOA_LINEAGE_AUDIT_SIGNING_ENDPOINT`.
+    pub lineage_audit_signing_endpoint: Option<String>,
+    /// `MOA_LINEAGE_AUDIT_SIGNING_BEARER_TOKEN_ENV`.
+    pub lineage_audit_signing_bearer_token_env: Option<String>,
     /// `MOA_PII_VAULT_SECRET_HEX`.
     pub pii_vault_secret_hex: Option<String>,
     /// `MOA_LOCAL_DOCKER_ENABLED`.
@@ -177,8 +185,6 @@ pub struct MoaEnvOverlay {
     pub local_sandbox_dir: Option<String>,
     /// `MOA_LOCAL_MEMORY_DIR`.
     pub local_memory_dir: Option<String>,
-    /// `MOA_MEMORY_AUTO_BOOTSTRAP`.
-    pub memory_auto_bootstrap: Option<bool>,
     /// `MOA_MEMORY_EMBEDDING_MODEL`.
     pub memory_embedding_model: Option<String>,
     /// `MOA_MEMORY_RETRIEVAL_RERANKER_MODEL`.
@@ -205,8 +211,6 @@ pub struct MoaEnvOverlay {
     pub memory_vector_embedder_name: Option<String>,
     /// `MOA_MEMORY_VECTOR_EMBEDDER_OUTPUT_DIM`.
     pub memory_vector_embedder_output_dim: Option<usize>,
-    /// `MOA_MEMORY_VECTOR_EMBEDDER_GEMINI_DEFAULT_ROLE`.
-    pub memory_vector_embedder_gemini_default_role: Option<String>,
     /// `MOA_KNOWLEDGE_PROVIDERS_ENABLED`.
     #[serde(deserialize_with = "deserialize_optional_list")]
     pub knowledge_providers_enabled: Option<Vec<String>>,
@@ -265,8 +269,6 @@ pub struct MoaEnvOverlay {
     pub reducto_async_enabled: Option<bool>,
     /// `MOA_REDUCTO_CHUNK_MODE`.
     pub reducto_chunk_mode: Option<String>,
-    /// `MOA_KNOWLEDGE_QUERY_TRACE_ENABLED`.
-    pub knowledge_query_trace_enabled: Option<bool>,
     /// `MOA_PII_SERVICE_URL`.
     pub pii_service_url: Option<String>,
     /// `MOA_TURBOPUFFER_API_KEY`.
@@ -281,6 +283,9 @@ pub struct MoaEnvOverlay {
     pub cloud_memory_dir: Option<String>,
     /// `MOA_CLOUD_HANDS_DEFAULT_PROVIDER`.
     pub cloud_hands_default_provider: Option<String>,
+    /// `MOA_CLOUD_HANDS_FALLBACK_PROVIDERS`.
+    #[serde(deserialize_with = "deserialize_optional_list")]
+    pub cloud_hands_fallback_providers: Option<Vec<String>>,
     /// `MOA_CLOUD_HANDS_DAYTONA_API_KEY`.
     pub cloud_hands_daytona_api_key: Option<String>,
     /// `MOA_CLOUD_HANDS_DAYTONA_API_URL`.
@@ -571,6 +576,10 @@ impl MoaEnvOverlay {
                 &self.session_attachment_endpoint,
             ),
             (
+                "MOA_LINEAGE_AUDIT_SIGNING_ENDPOINT",
+                &self.lineage_audit_signing_endpoint,
+            ),
+            (
                 "MOA_OBSERVABILITY_OTLP_ENDPOINT",
                 &self.observability_otlp_endpoint,
             ),
@@ -584,30 +593,371 @@ impl MoaEnvOverlay {
 
     /// Applies this overlay to a typed MOA config.
     pub fn apply_to(&self, config: &mut MoaConfig) -> Result<()> {
-        self.apply_provider_overlay(config);
-        self.apply_database_overlay(config);
-        self.apply_auth_overlay(config)?;
-        self.apply_authz_overlay(config)?;
-        self.apply_token_vault_overlay(config);
-        self.apply_async_authz_overlay(config);
-        self.apply_audit_security_overlay(config);
-        self.apply_compliance_overlay(config);
-        self.apply_local_overlay(config);
-        self.apply_memory_overlay(config);
-        self.apply_knowledge_overlay(config);
-        self.apply_cloud_overlay(config);
-        self.apply_messaging_overlay(config);
-        self.apply_permissions_overlay(config);
-        self.apply_session_overlay(config);
-        self.apply_runtime_cache_overlay(config);
-        self.apply_compaction_overlay(config);
-        self.apply_orchestrator_overlay(config);
-        self.apply_observability_overlay(config);
-        self.apply_metrics_overlay(config);
-        self.apply_context_overlay(config);
-        self.apply_learning_overlay(config);
-        config.validate()
+        let mut config_value = serde_json::to_value(&*config).map_err(config_codec_error)?;
+        let mut schema_value = config_value.clone();
+        seed_optional_sections(&mut schema_value)?;
+
+        for (field, value) in self.present_values()? {
+            let path = overlay_path(&field, &schema_value)?;
+            insert_overlay_value(&mut config_value, &path, value)?;
+        }
+
+        let mut next: MoaConfig =
+            serde_json::from_value(config_value).map_err(config_codec_error)?;
+        self.finalize_intentional_fanout(&mut next);
+        self.validate_required_sections(&next)?;
+        next.validate()?;
+        *config = next;
+        Ok(())
     }
+
+    fn present_values(&self) -> Result<Vec<(String, Value)>> {
+        let Value::Object(values) = serde_json::to_value(self).map_err(config_codec_error)? else {
+            return Err(MoaError::ConfigError(
+                "MOA env overlay did not serialize to an object".to_string(),
+            ));
+        };
+
+        Ok(values
+            .into_iter()
+            .filter(|(_, value)| !value.is_null())
+            .collect())
+    }
+
+    fn finalize_intentional_fanout(&self, config: &mut MoaConfig) {
+        if let Some(restate_ingress_url) = &self.restate_ingress_url {
+            config.orchestrator.endpoint = Some(restate_ingress_url.clone());
+        }
+        if let Some(endpoint) = &self.orchestrator_endpoint {
+            config.orchestrator.endpoint = Some(endpoint.clone());
+        }
+    }
+
+    fn validate_required_sections(&self, config: &MoaConfig) -> Result<()> {
+        self.validate_auth0(config)?;
+        self.validate_oidc(config)?;
+        self.validate_contact_tokens(config)?;
+        self.validate_openfga(config)
+    }
+
+    fn validate_auth0(&self, config: &MoaConfig) -> Result<()> {
+        if !any_present(&[
+            self.auth_auth0_domain.is_some(),
+            self.auth_auth0_audience.is_some(),
+            self.auth_auth0_client_id.is_some(),
+            self.auth_auth0_client_secret.is_some(),
+        ]) {
+            return Ok(());
+        }
+
+        let auth0 = config.auth.auth0.as_ref().ok_or_else(|| {
+            MoaError::ConfigError(
+                "MOA_AUTH_AUTH0_DOMAIN is required when configuring this section".to_string(),
+            )
+        })?;
+        require_non_empty("MOA_AUTH_AUTH0_DOMAIN", &auth0.domain)?;
+        require_non_empty("MOA_AUTH_AUTH0_AUDIENCE", &auth0.audience)?;
+        require_non_empty("MOA_AUTH_AUTH0_CLIENT_ID", &auth0.client_id)?;
+        require_non_empty("MOA_AUTH_AUTH0_CLIENT_SECRET", &auth0.client_secret)
+    }
+
+    fn validate_oidc(&self, config: &MoaConfig) -> Result<()> {
+        if !any_present(&[
+            self.auth_oidc_issuer.is_some(),
+            self.auth_oidc_audience.is_some(),
+            self.auth_oidc_jwks_url.is_some(),
+        ]) {
+            return Ok(());
+        }
+
+        let oidc = config.auth.oidc.as_ref().ok_or_else(|| {
+            MoaError::ConfigError(
+                "MOA_AUTH_OIDC_ISSUER is required when configuring this section".to_string(),
+            )
+        })?;
+        require_non_empty("MOA_AUTH_OIDC_ISSUER", &oidc.issuer)?;
+        require_non_empty("MOA_AUTH_OIDC_AUDIENCE", &oidc.audience)?;
+        require_non_empty("MOA_AUTH_OIDC_JWKS_URL", &oidc.jwks_url)
+    }
+
+    fn validate_contact_tokens(&self, config: &MoaConfig) -> Result<()> {
+        if !any_present(&[
+            self.auth_contact_tokens_issuer.is_some(),
+            self.auth_contact_tokens_audience.is_some(),
+            self.auth_contact_tokens_key_id.is_some(),
+            self.auth_contact_tokens_private_key_pem.is_some(),
+            self.auth_contact_tokens_public_key_pem.is_some(),
+            self.auth_contact_tokens_contact_point_hash_key_hex
+                .is_some(),
+            self.auth_contact_tokens_unverified_ttl_seconds.is_some(),
+            self.auth_contact_tokens_verified_ttl_seconds.is_some(),
+            self.auth_contact_tokens_verification_ttl_seconds.is_some(),
+        ]) {
+            return Ok(());
+        }
+
+        let contact_tokens = &config.auth.contact_tokens;
+        require_non_empty("MOA_AUTH_CONTACT_TOKENS_ISSUER", &contact_tokens.issuer)?;
+        require_non_empty("MOA_AUTH_CONTACT_TOKENS_AUDIENCE", &contact_tokens.audience)?;
+        require_non_empty("MOA_AUTH_CONTACT_TOKENS_KEY_ID", &contact_tokens.key_id)?;
+        require_non_empty(
+            "MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM",
+            &contact_tokens.private_key_pem,
+        )?;
+        require_non_empty(
+            "MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM",
+            &contact_tokens.public_key_pem,
+        )?;
+        require_non_empty(
+            "MOA_AUTH_CONTACT_TOKENS_CONTACT_POINT_HASH_KEY_HEX",
+            &contact_tokens.contact_point_hash_key_hex,
+        )
+    }
+
+    fn validate_openfga(&self, config: &MoaConfig) -> Result<()> {
+        if !any_present(&[
+            self.authz_openfga_url.is_some(),
+            self.authz_openfga_preshared_key.is_some(),
+            self.authz_openfga_store_id.is_some(),
+            self.authz_openfga_model_id.is_some(),
+            self.authz_openfga_timeout_ms.is_some(),
+        ]) {
+            return Ok(());
+        }
+
+        let openfga = config.authz.openfga.as_ref().ok_or_else(|| {
+            MoaError::ConfigError(
+                "MOA_AUTHZ_OPENFGA_URL is required when configuring this section".to_string(),
+            )
+        })?;
+        require_non_empty("MOA_AUTHZ_OPENFGA_URL", &openfga.url)?;
+        require_non_empty("MOA_AUTHZ_OPENFGA_PRESHARED_KEY", &openfga.preshared_key)?;
+        require_non_empty("MOA_AUTHZ_OPENFGA_STORE_ID", &openfga.store_id)?;
+        require_non_empty("MOA_AUTHZ_OPENFGA_MODEL_ID", &openfga.model_id)
+    }
+}
+
+fn config_codec_error(error: serde_json::Error) -> MoaError {
+    MoaError::ConfigError(format!("MOA env overlay could not update config: {error}"))
+}
+
+fn overlay_path(field: &str, schema: &Value) -> Result<Vec<String>> {
+    if let Some(path) = exact_overlay_path(field) {
+        return Ok(path);
+    }
+
+    for (prefix, path_prefix) in PREFIX_ALIASES {
+        let Some(remainder) = field.strip_prefix(prefix) else {
+            continue;
+        };
+        let Some(remainder) = remainder.strip_prefix('_') else {
+            continue;
+        };
+        let base = value_at_path(schema, path_prefix).ok_or_else(|| {
+            MoaError::ConfigError(format!(
+                "MOA env overlay mapping `{field}` references missing config path `{}`",
+                path_prefix.join(".")
+            ))
+        })?;
+        let mut path = strings(path_prefix);
+        match resolve_path(&split_segments(remainder), base) {
+            Some(resolved) => path.extend(resolved),
+            None => path.push(remainder.to_string()),
+        }
+        return Ok(path);
+    }
+
+    resolve_path(&split_segments(field), schema).ok_or_else(|| {
+        MoaError::ConfigError(format!(
+            "MOA env overlay field `{field}` does not map to MoaConfig"
+        ))
+    })
+}
+
+fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
+    let path = match field {
+        "models_fallback_models" => &["models", "fallback_models"][..],
+        "privacy_approval_public_key_hex" => &["compliance", "privacy_approval_public_key_hex"],
+        "privacy_export_signing_key_hex" => &["compliance", "privacy_export_signing_key_hex"],
+        "privacy_export_signing_key_id" => &["compliance", "privacy_export_signing_key_id"],
+        "lineage_audit_signing_key_hex" => &["compliance", "lineage_audit_signing_key_hex"],
+        "lineage_audit_signing_key_id" => &["compliance", "lineage_audit_signing_key_id"],
+        "lineage_audit_signing_provider" => &["compliance", "lineage_audit_signing_provider"],
+        "lineage_audit_signing_endpoint" => &["compliance", "lineage_audit_signing_endpoint"],
+        "lineage_audit_signing_bearer_token_env" => {
+            &["compliance", "lineage_audit_signing_bearer_token_env"]
+        }
+        "pii_vault_secret_hex" => &["compliance", "pii_vault_secret_hex"],
+        "pii_service_url" => &["memory", "pii_service_url"],
+        "knowledge_external_parser_default" => &["knowledge", "parser", "external_default"][..],
+        "llamaparse_api_url" => &["knowledge", "llamaparse", "api_base_url"],
+        "unstructured_api_url" => &["knowledge", "unstructured", "api_base_url"],
+        "reducto_api_url" => &["knowledge", "reducto", "api_base_url"],
+        "turbopuffer_baa" => &["memory", "vector", "turbopuffer", "baa_enabled"],
+        "restate_ingress_url" => &["orchestrator", "restate_ingress_url"],
+        "restate_admin_url" => &["orchestrator", "restate_admin_url"],
+        "restate_llm_gateway_url" => &["orchestrator", "llm_gateway_url"],
+        _ => return None,
+    };
+    Some(strings(path))
+}
+
+const PREFIX_ALIASES: &[(&str, &[&str])] = &[
+    ("session_attachment", &["session", "attachments"]),
+    ("cloud_hands", &["cloud", "hands"]),
+    ("turbopuffer", &["memory", "vector", "turbopuffer"]),
+    ("anthropic", &["providers", "anthropic"]),
+    ("openai", &["providers", "openai"]),
+    ("google", &["providers", "google"]),
+    ("cohere", &["providers", "cohere"]),
+    ("zeroentropy", &["providers", "zeroentropy"]),
+    ("nango", &["knowledge", "nango"]),
+    ("merge", &["knowledge", "merge"]),
+    ("llamaparse", &["knowledge", "llamaparse"]),
+    ("unstructured", &["knowledge", "unstructured"]),
+    ("reducto", &["knowledge", "reducto"]),
+];
+
+fn resolve_path(segments: &[&str], value: &Value) -> Option<Vec<String>> {
+    let object = value.as_object()?;
+    for split_at in (1..=segments.len()).rev() {
+        let key = segments[..split_at].join("_");
+        let Some(child) = object.get(&key) else {
+            continue;
+        };
+        if split_at == segments.len() {
+            return Some(vec![key]);
+        }
+        if child.is_object() {
+            let mut path = vec![key];
+            path.extend(resolve_path(&segments[split_at..], child)?);
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn insert_overlay_value(target: &mut Value, path: &[String], value: Value) -> Result<()> {
+    let mut current = target;
+    let mut traversed = Vec::new();
+    for segment in &path[..path.len().saturating_sub(1)] {
+        traversed.push(segment.as_str());
+        let object = current.as_object_mut().ok_or_else(|| {
+            MoaError::ConfigError(format!(
+                "MOA env overlay target `{}` is not an object",
+                traversed.join(".")
+            ))
+        })?;
+        let entry = object.entry(segment.clone()).or_insert(Value::Null);
+        if entry.is_null() {
+            *entry = optional_section_seed(&traversed).unwrap_or_else(|| Value::Object(Map::new()));
+        }
+        current = entry;
+    }
+
+    let leaf = path.last().ok_or_else(|| {
+        MoaError::ConfigError("MOA env overlay resolved an empty config path".to_string())
+    })?;
+    let object = current.as_object_mut().ok_or_else(|| {
+        MoaError::ConfigError(format!(
+            "MOA env overlay target `{}` is not an object",
+            path[..path.len().saturating_sub(1)].join(".")
+        ))
+    })?;
+    object.insert(leaf.clone(), value);
+    Ok(())
+}
+
+fn seed_optional_sections(config: &mut Value) -> Result<()> {
+    for path in [
+        &["auth", "auth0"][..],
+        &["auth", "oidc"],
+        &["authz", "openfga"],
+        &["cloud", "hands"],
+    ] {
+        insert_seed(config, path)?;
+    }
+    Ok(())
+}
+
+fn insert_seed(target: &mut Value, path: &[&str]) -> Result<()> {
+    let mut current = target;
+    for (index, segment) in path.iter().enumerate() {
+        let object = current.as_object_mut().ok_or_else(|| {
+            MoaError::ConfigError(format!(
+                "MOA env overlay schema path `{}` is not an object",
+                path[..index].join(".")
+            ))
+        })?;
+        let entry = object.entry((*segment).to_string()).or_insert(Value::Null);
+        if index == path.len() - 1 {
+            if entry.is_null() {
+                *entry = optional_section_seed(path).ok_or_else(|| {
+                    MoaError::ConfigError(format!(
+                        "MOA env overlay schema path `{}` has no seed",
+                        path.join(".")
+                    ))
+                })?;
+            }
+            return Ok(());
+        }
+        if entry.is_null() {
+            *entry = Value::Object(Map::new());
+        }
+        current = entry;
+    }
+    Ok(())
+}
+
+fn optional_section_seed(path: &[&str]) -> Option<Value> {
+    match path {
+        ["auth", "auth0"] => Some(json!({
+            "domain": "",
+            "audience": "",
+            "client_id": "",
+            "client_secret": "",
+        })),
+        ["auth", "oidc"] => Some(json!({
+            "issuer": "",
+            "audience": "",
+            "jwks_url": "",
+        })),
+        ["authz", "openfga"] => Some(json!({
+            "url": "",
+            "preshared_key": "",
+            "store_id": "",
+            "model_id": "",
+            "timeout_ms": 5000,
+        })),
+        ["cloud", "hands"] => Some(json!({
+            "default_provider": null,
+            "fallback_providers": [],
+            "daytona_api_key": null,
+            "daytona_api_url": null,
+            "daytona_default_image": null,
+            "e2b_api_key": null,
+            "e2b_api_url": null,
+            "e2b_domain": null,
+            "e2b_template": null,
+        })),
+        _ => None,
+    }
+}
+
+fn value_at_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut current = value;
+    for segment in path {
+        current = current.as_object()?.get(*segment)?;
+    }
+    Some(current)
+}
+
+fn split_segments(field: &str) -> Vec<&str> {
+    field.split('_').collect()
+}
+
+fn strings(path: &[&str]) -> Vec<String> {
+    path.iter().map(|segment| (*segment).to_string()).collect()
 }
 
 /// Wraps an `envy` deserialization error as a `MoaError`, restoring the `MOA_`
@@ -699,47 +1049,6 @@ fn split_list(value: String) -> Vec<String> {
         .collect()
 }
 
-/// Replaces a string config value when its env overlay value is present.
-pub(in crate::config) fn set_if_some(target: &mut String, value: &Option<String>) {
-    if let Some(value) = value {
-        *target = value.clone();
-    }
-}
-
-/// Replaces an optional string config value when its env overlay value is present.
-pub(in crate::config) fn set_option_if_some(target: &mut Option<String>, value: &Option<String>) {
-    if let Some(value) = value {
-        *target = Some(value.clone());
-    }
-}
-
-/// Replaces a vector config value when its env overlay value is present.
-pub(in crate::config) fn set_vec_if_some(target: &mut Vec<String>, value: &Option<Vec<String>>) {
-    if let Some(value) = value {
-        *target = value.clone();
-    }
-}
-
-/// Replaces a copyable config value when its env overlay value is present.
-pub(in crate::config) fn set_copy_if_some<T: Copy>(target: &mut T, value: Option<T>) {
-    if let Some(value) = value {
-        *target = value;
-    }
-}
-
-/// Replaces an optional copyable config value when its env overlay value is present.
-///
-/// A `None` overlay leaves the file-configured value (which may itself be `Some`)
-/// untouched, so an env override only sets, never clears.
-pub(in crate::config) fn set_copy_option_if_some<T: Copy>(
-    target: &mut Option<T>,
-    value: Option<T>,
-) {
-    if value.is_some() {
-        *target = value;
-    }
-}
-
 /// Returns whether any field in one nested overlay section was set.
 pub(in crate::config) fn any_present(values: &[bool]) -> bool {
     values.iter().any(|value| *value)
@@ -748,6 +1057,35 @@ pub(in crate::config) fn any_present(values: &[bool]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_flat_overlay_field_resolves_to_a_config_path() {
+        // Pins: adding a flat MOA_* overlay field requires either a matching
+        // serialized MoaConfig path or a deliberate alias entry.
+        let mut schema =
+            serde_json::to_value(MoaConfig::default()).expect("default config should serialize");
+        seed_optional_sections(&mut schema).expect("schema seeds should apply");
+        let Value::Object(fields) = serde_json::to_value(MoaEnvOverlay::default())
+            .expect("default overlay should serialize")
+        else {
+            panic!("overlay should serialize as an object");
+        };
+
+        let unresolved = fields
+            .keys()
+            .filter_map(|field| {
+                overlay_path(field, &schema)
+                    .err()
+                    .map(|error| format!("{field}: {error}"))
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            unresolved.is_empty(),
+            "unmapped overlay fields:\n{}",
+            unresolved.join("\n")
+        );
+    }
 
     #[test]
     fn from_iter_applies_flat_single_underscore_env() {
@@ -785,6 +1123,15 @@ mod tests {
                 lineage_key_hex.as_str(),
             ),
             ("MOA_LINEAGE_AUDIT_SIGNING_KEY_ID", "lineage-key-v2"),
+            ("MOA_LINEAGE_AUDIT_SIGNING_PROVIDER", "http"),
+            (
+                "MOA_LINEAGE_AUDIT_SIGNING_ENDPOINT",
+                "https://signer.example/audit-root",
+            ),
+            (
+                "MOA_LINEAGE_AUDIT_SIGNING_BEARER_TOKEN_ENV",
+                "MOA_AUDIT_SIGNER_TOKEN",
+            ),
             ("MOA_PII_VAULT_SECRET_HEX", pii_vault_secret_hex.as_str()),
             ("MOA_LOCAL_DOCKER_ENABLED", "false"),
             ("MOA_LOCAL_SANDBOX_DIR", "/tmp/moa-sandbox"),
@@ -887,6 +1234,21 @@ mod tests {
             "lineage-key-v2"
         );
         assert_eq!(
+            config.compliance.lineage_audit_signing_provider,
+            LineageAuditSigningProvider::Http
+        );
+        assert_eq!(
+            config.compliance.lineage_audit_signing_endpoint.as_deref(),
+            Some("https://signer.example/audit-root")
+        );
+        assert_eq!(
+            config
+                .compliance
+                .lineage_audit_signing_bearer_token_env
+                .as_deref(),
+            Some("MOA_AUDIT_SIGNER_TOKEN")
+        );
+        assert_eq!(
             config.compliance.pii_vault_secret_hex.as_deref(),
             Some(pii_vault_secret_hex.as_str())
         );
@@ -919,22 +1281,9 @@ mod tests {
         );
         assert_eq!(config.memory.vector.embedder.output_dim, 1536);
         assert_eq!(config.providers.cohere.api_key, "CUSTOM_COHERE_KEY");
-        assert_eq!(config.memory.extraction.api_key, "CUSTOM_COHERE_KEY");
-        assert_eq!(
-            config.memory.vector.embedder.cohere.api_key,
-            "CUSTOM_COHERE_KEY"
-        );
         assert_eq!(config.providers.google.api_key, "CUSTOM_GOOGLE_KEY");
         assert_eq!(
-            config.memory.vector.embedder.gemini.api_key,
-            "CUSTOM_GOOGLE_KEY"
-        );
-        assert_eq!(
             config.providers.zeroentropy.api_key,
-            "CUSTOM_ZEROENTROPY_KEY"
-        );
-        assert_eq!(
-            config.memory.vector.embedder.zeroentropy.api_key,
             "CUSTOM_ZEROENTROPY_KEY"
         );
         assert_eq!(
@@ -1071,7 +1420,6 @@ mod tests {
             ("MOA_REDUCTO_PARSE_MODE", "ocr"),
             ("MOA_REDUCTO_ASYNC_ENABLED", "false"),
             ("MOA_REDUCTO_CHUNK_MODE", "page"),
-            ("MOA_KNOWLEDGE_QUERY_TRACE_ENABLED", "true"),
         ]))
         .expect("knowledge overlay should parse");
         let mut config = MoaConfig::default();
@@ -1141,7 +1489,6 @@ mod tests {
         assert_eq!(config.knowledge.reducto.parse_mode, "ocr");
         assert!(!config.knowledge.reducto.async_enabled);
         assert_eq!(config.knowledge.reducto.chunk_mode, "page");
-        assert!(config.knowledge.observability.query_trace_enabled);
     }
 
     #[test]
@@ -1310,6 +1657,24 @@ mod tests {
                 "anthropic:claude-haiku-4-5".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn cloud_hands_fallback_providers_env_overrides_route_chain() {
+        // Pins: cloud hand fallback can be configured from flat Kubernetes env.
+        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+            ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
+            ("MOA_CLOUD_HANDS_DEFAULT_PROVIDER", "daytona"),
+            ("MOA_CLOUD_HANDS_FALLBACK_PROVIDERS", "e2b"),
+        ]))
+        .expect("overlay should deserialize");
+        let mut config = MoaConfig::default();
+
+        overlay.apply_to(&mut config).expect("overlay should apply");
+
+        let hands = config.cloud.hands.expect("cloud hands config");
+        assert_eq!(hands.default_provider.as_deref(), Some("daytona"));
+        assert_eq!(hands.fallback_providers, vec!["e2b".to_string()]);
     }
 
     fn env_pairs<const N: usize>(pairs: [(&str, &str); N]) -> Vec<(String, String)> {

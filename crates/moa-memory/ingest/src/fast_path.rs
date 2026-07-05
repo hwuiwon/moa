@@ -375,7 +375,7 @@ async fn fast_remember_inner(
         &embedding,
         pii.class,
         confidence,
-        ctx.embedder.model_name(),
+        ctx.embedder.model_id(),
         ctx.embedder.model_version(),
         &redacted_text,
     );

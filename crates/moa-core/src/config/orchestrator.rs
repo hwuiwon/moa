@@ -29,30 +29,3 @@ impl Default for OrchestratorConfig {
         }
     }
 }
-
-impl super::MoaEnvOverlay {
-    /// Applies Restate and orchestrator endpoint environment overrides.
-    pub(in crate::config) fn apply_orchestrator_overlay(&self, config: &mut super::MoaConfig) {
-        use super::env_overlay::set_option_if_some;
-
-        if let Some(restate_ingress_url) = &self.restate_ingress_url {
-            config.orchestrator.restate_ingress_url = Some(restate_ingress_url.clone());
-            config.orchestrator.endpoint = Some(restate_ingress_url.clone());
-        }
-        if let Some(endpoint) = &self.orchestrator_endpoint {
-            config.orchestrator.endpoint = Some(endpoint.clone());
-        }
-        set_option_if_some(
-            &mut config.orchestrator.restate_admin_url,
-            &self.restate_admin_url,
-        );
-        set_option_if_some(
-            &mut config.orchestrator.llm_gateway_url,
-            &self.restate_llm_gateway_url,
-        );
-        set_option_if_some(
-            &mut config.orchestrator.health_url,
-            &self.orchestrator_health_url,
-        );
-    }
-}

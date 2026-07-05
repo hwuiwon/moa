@@ -226,7 +226,7 @@ pub(crate) async fn run_sessions(
     )?;
     let warmup = options.resolved_warmup();
     let recorder = LatencyRecorder::new(WINDOW_LEN, warmup)?;
-    let inspection_files = inspectable_files(None).await?;
+    let inspection_files = inspectable_files();
     let mut tenant_ids: Vec<Uuid> = pool
         .entries()
         .iter()

@@ -454,23 +454,21 @@ impl HybridRetriever {
             return self.dual_read_vector_leg(req).await;
         }
         if state.vector_backend == "turbopuffer" {
-            if let Some(turbopuffer) = &self.turbopuffer {
-                let scoped_turbopuffer = turbopuffer.scoped_to_tenant(tenant_id);
-                return match run_vector_leg(&scoped_turbopuffer, req).await {
-                    Ok(hits) => Ok(hits),
-                    Err(error) if is_turbopuffer_as_of_unsupported(&error) => {
-                        tracing::debug!(
-                            "Turbopuffer does not support as-of vector queries; using pgvector"
-                        );
-                        run_vector_leg(self.vector.as_ref(), req).await
-                    }
-                    Err(error) => Err(error),
-                };
-            }
-            tracing::warn!(
-                tenant_id = %tenant_id,
-                "tenant is configured for Turbopuffer but no client is configured; falling back to pgvector"
-            );
+            let turbopuffer = self
+                .turbopuffer
+                .as_ref()
+                .ok_or_else(|| turbopuffer_unavailable_for_request(req))?;
+            let scoped_turbopuffer = turbopuffer.scoped_to_tenant(tenant_id);
+            return match run_vector_leg(&scoped_turbopuffer, req).await {
+                Ok(hits) => Ok(hits),
+                Err(error) if is_turbopuffer_as_of_unsupported(&error) => {
+                    tracing::debug!(
+                        "Turbopuffer does not support as-of vector queries; using pgvector"
+                    );
+                    run_vector_leg(self.vector.as_ref(), req).await
+                }
+                Err(error) => Err(error),
+            };
         }
 
         run_vector_leg(self.vector.as_ref(), req).await
@@ -485,40 +483,32 @@ impl HybridRetriever {
             && req.as_of.is_none()
             && request_allows_tenant_chunk_bm25(req)
         {
-            if let Some(turbopuffer) = &self.turbopuffer {
-                let scoped_turbopuffer = turbopuffer.scoped_to_tenant(req.scope.tenant_id());
-                match turbopuffer_bm25_leg(&scoped_turbopuffer, req).await {
-                    Ok(hits) => {
-                        if request_is_tenant_chunk_only(req) {
-                            record_lexical_backend(LexicalBackend::TurbopufferBm25, "success");
-                            return Ok(LexicalLegOutput::new(
-                                hits,
-                                LexicalBackend::TurbopufferBm25,
-                            ));
-                        }
-                        let postgres_hits =
-                            lexical_leg(&self.pool, req, self.assume_app_role).await?;
-                        record_lexical_backend(LexicalBackend::Mixed, "success");
-                        return Ok(LexicalLegOutput::new(
-                            merge_lexical_candidates(hits, postgres_hits),
-                            LexicalBackend::Mixed,
-                        ));
+            let turbopuffer = self
+                .turbopuffer
+                .as_ref()
+                .ok_or_else(|| turbopuffer_unavailable_for_request(req))?;
+            let scoped_turbopuffer = turbopuffer.scoped_to_tenant(req.scope.tenant_id());
+            match turbopuffer_bm25_leg(&scoped_turbopuffer, req).await {
+                Ok(hits) => {
+                    if request_is_tenant_chunk_only(req) {
+                        record_lexical_backend(LexicalBackend::TurbopufferBm25, "success");
+                        return Ok(LexicalLegOutput::new(hits, LexicalBackend::TurbopufferBm25));
                     }
-                    Err(error) => {
-                        record_lexical_backend(LexicalBackend::TurbopufferBm25, "fallback");
-                        tracing::warn!(
-                            error = %error,
-                            tenant_id = %req.scope.tenant_id(),
-                            "Turbopuffer BM25 lexical leg failed; falling back to Postgres lexical"
-                        );
-                    }
+                    let postgres_hits = lexical_leg(&self.pool, req, self.assume_app_role).await?;
+                    record_lexical_backend(LexicalBackend::Mixed, "success");
+                    return Ok(LexicalLegOutput::new(
+                        merge_lexical_candidates(hits, postgres_hits),
+                        LexicalBackend::Mixed,
+                    ));
                 }
-            } else {
-                record_lexical_backend(LexicalBackend::TurbopufferBm25, "missing_client");
-                tracing::warn!(
-                    tenant_id = %req.scope.tenant_id(),
-                    "tenant is configured for Turbopuffer BM25 but no client is configured; falling back to Postgres lexical"
-                );
+                Err(error) => {
+                    record_lexical_backend(LexicalBackend::TurbopufferBm25, "fallback");
+                    tracing::warn!(
+                        error = %error,
+                        tenant_id = %req.scope.tenant_id(),
+                        "Turbopuffer BM25 lexical leg failed; falling back to Postgres lexical"
+                    );
+                }
             }
         }
 
@@ -532,8 +522,7 @@ impl HybridRetriever {
 
     async fn dual_read_vector_leg(&self, req: &RetrievalRequest) -> Result<Vec<LegCandidate>> {
         let Some(turbopuffer) = &self.turbopuffer else {
-            tracing::warn!("tenant is in vector dual-read but no Turbopuffer client is configured");
-            return run_vector_leg(self.vector.as_ref(), req).await;
+            return Err(turbopuffer_unavailable_for_request(req));
         };
 
         let scoped_turbopuffer = turbopuffer.scoped_to_tenant(req.scope.tenant_id());
@@ -672,6 +661,17 @@ impl VectorBackendState {
 
 fn retrieval_needs_backend_state(req: &RetrievalRequest) -> bool {
     !req.query_embedding.is_empty() || !req.query_text.trim().is_empty()
+}
+
+fn turbopuffer_unavailable_for_request(req: &RetrievalRequest) -> RetrievalError {
+    VectorError::TurbopufferUnavailable {
+        storage_partition_id: req
+            .scope
+            .to_rls_context()
+            .storage_partition_id()
+            .to_string(),
+    }
+    .into()
 }
 
 fn request_allows_tenant_chunk_bm25(req: &RetrievalRequest) -> bool {
@@ -1445,6 +1445,72 @@ mod tests {
         assert!(hits.is_empty());
     }
 
+    #[tokio::test]
+    async fn turbopuffer_vector_leg_requires_configured_client() {
+        // Pins: a Turbopuffer-selected cloud partition fails closed when the
+        // client is missing instead of silently using pgvector.
+        let retriever = lazy_retriever();
+        let error = retriever
+            .vector_leg(
+                &vector_request(),
+                &VectorBackendState {
+                    vector_backend: "turbopuffer".to_string(),
+                    vector_backend_state: "steady".to_string(),
+                    dual_read_until: None,
+                },
+            )
+            .await
+            .expect_err("Turbopuffer backend selection should require a client");
+
+        assert!(matches!(
+            error,
+            RetrievalError::Vector(VectorError::TurbopufferUnavailable { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn turbopuffer_lexical_leg_requires_configured_client_for_chunk_bm25() {
+        // Pins: tenant knowledge chunk BM25 is a Turbopuffer cloud path and must
+        // not degrade to Postgres lexical when the client is absent.
+        let retriever = lazy_retriever();
+        let mut req = vector_request();
+        req.query_embedding.clear();
+        req.query_text = "deployment runbook".to_string();
+        req.label_filter = Some(vec![NodeLabel::Chunk]);
+        let error = retriever
+            .lexical_leg(
+                &req,
+                &VectorBackendState {
+                    vector_backend: "turbopuffer".to_string(),
+                    vector_backend_state: "steady".to_string(),
+                    dual_read_until: None,
+                },
+            )
+            .await
+            .expect_err("Turbopuffer BM25 backend selection should require a client");
+
+        assert!(matches!(
+            error,
+            RetrievalError::Vector(VectorError::TurbopufferUnavailable { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn turbopuffer_dual_read_requires_configured_client() {
+        // Pins: promotion dual-read is part of the cloud Turbopuffer path and
+        // should fail clearly if the client is missing.
+        let retriever = lazy_retriever();
+        let error = retriever
+            .dual_read_vector_leg(&vector_request())
+            .await
+            .expect_err("dual-read should require a Turbopuffer client");
+
+        assert!(matches!(
+            error,
+            RetrievalError::Vector(VectorError::TurbopufferUnavailable { .. })
+        ));
+    }
+
     #[test]
     fn leg_overlap_measures_top_k_set_intersection() {
         // Pins: dual-read overlap is the top-k uid intersection size over the
@@ -1563,6 +1629,14 @@ mod tests {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
+        }
+    }
+
+    fn vector_request() -> RetrievalRequest {
+        RetrievalRequest {
+            query_text: "deployment runbook".to_string(),
+            query_embedding: vec![0.0; 1024],
+            ..empty_corpus_request(5, false)
         }
     }
 

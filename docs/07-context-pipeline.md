@@ -15,7 +15,7 @@ The implementation lives in `crates/moa-brain/src/pipeline/`.
 
 ## Current Stage Order
 
-The code reports fixed stage numbers through each `ContextProcessor`. With query rewriting and memory digests enabled, the default graph-backed pipeline contains twelve processors:
+The code reports fixed stage numbers through each `ContextProcessor`. With query rewriting and memory digests enabled, the default graph-backed pipeline contains eleven processors:
 
 | Stage | Processor | Cache role | Purpose |
 |---|---|---|---|
@@ -27,10 +27,9 @@ The code reports fixed stage numbers through each `ContextProcessor`. With query
 | 5 | `SkillInjector` | Dynamic tail | budgeted visible skill manifest ranked within pinned agent skill policy |
 | 6 | `DigestProcessor` | Dynamic tail | standing contact digest for contact sessions |
 | 7 | `MemoryRetriever` | Dynamic tail | tenant knowledge plus admitted contact memory filtered by pinned agent knowledge policy |
-| 8 | `HistoryCompiler` | Dynamic/history tail | replayed events, checkpoints, recent turns, errors |
+| 8 | `HistoryCompiler` | Dynamic/history tail | replayed events, checkpoints, recent turns, errors, checkpoint compaction |
 | 8 | `DelegationPlanningProcessor` | Dynamic tail | conservative coordinator DAG candidate for high-confidence multi-workstream tasks |
 | 9 | `RuntimeContextProcessor` | Dynamic tail | current date, tenant, working directory, branch, contact or admin/operator actor |
-| 10 | `Compactor` | Dynamic maintenance | checkpoint/compaction when thresholds are exceeded |
 
 If query rewriting or memory digests are disabled, those processors are omitted; later processors keep their configured stage numbers.
 
@@ -45,6 +44,12 @@ The brain does not emit provider cache breakpoints, TTLs, or cached-content name
 `QueryRewriter` is retrieval-scoped and gated. It only calls the rewrite LLM when graph memory retrieval and a vector leg are available and cheap heuristics indicate that memory search is likely to benefit, such as multi-turn coreference, vague follow-ups, vector-first history/preference/similarity questions, or multi-hop queries without clear seeds. Empty, command-like, exact-identifier, file/path-heavy, URL-heavy, and explicit first-turn queries use the original query.
 
 The stage is fail-open. On timeout, parsing error, circuit-breaker open, or skipped input, it stores an original-query `QueryRewriteResult` and lets the turn continue. A turn execution reuses the same rewrite metadata across repeated compile steps for one user message, so tool-result follow-up requests do not call the rewriter again.
+
+Rewrite calls optimize for latency and cost. By default they use the fastest
+cheap model configured for the provider stack, request the lowest available
+reasoning effort when the provider supports reasoning controls, and do not
+attach MOA tools or provider-native tools such as web search. The rewriter only
+needs a direct structured response for retrieval metadata.
 
 The query-rewrite circuit breaker is shared across rewriter instances inside
 one process. It is a per-pod best-effort cost/latency guard, not a global
@@ -192,6 +197,8 @@ facts and retrieved context do not disturb the stable prefix.
 
 `HistoryCompiler` reads durable events from `SessionStore`, applies checkpoints and context snapshots when available, preserves recent turns, and keeps errors visible. It is segment-aware because `SegmentStarted` and `SegmentCompleted` events remain in the replay stream.
 
+History compilation is the only checkpoint/compaction owner. It uses a cheap session-row watermark before doing a full-log read, emits a cumulative `Checkpoint` event through the configured summarization LLM only when thresholds are crossed, then folds that checkpoint into the same in-memory event list before rendering context. Compaction summaries are emitted as dynamic `user` messages in the history tail so the stable identity/instruction/tool prefix remains byte-stable for provider prompt caching.
+
 ## Runtime Context
 
 `RuntimeContextProcessor` inserts volatile facts at the end of the prompt:
@@ -206,7 +213,7 @@ These values are intentionally outside the stable prefix.
 
 ## Compaction
 
-`Compactor` watches event and token thresholds. When compaction is needed, it can ask an LLM for a checkpoint summary, persist a `Checkpoint` event, and let future history compilation start from a compact representation while preserving durable history.
+There is no separate stage-10 compactor. Threshold checks, checkpoint writes, snapshot reuse, file-read deduplication, recent-turn preservation, and old-error carry-forward are all coordinated by `HistoryCompiler`. Keeping one owner prevents a later processor from rewriting already-budgeted history, mutating snapshots after history has produced them, or issuing a second summarization pass for the same turn.
 
 ## Observability
 

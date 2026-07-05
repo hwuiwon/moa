@@ -17,17 +17,14 @@ use moa_brain::retrieval::{
     RetrievalRequest,
 };
 use moa_core::RlsContext;
-use moa_core::{
-    ContactId, MemoryDigestConfig, UserId, config::MemoryExtractionConfig,
-    traits::EmbeddingProvider,
-};
+use moa_core::{ContactId, MemoryDigestConfig, MoaConfig, UserId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{GraphStore, NodeIndexRow, PiiClass, PostgresGraphStore};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, DeterministicEntityMergeVerifier,
     EXTRACTION_PROMPT_VERSION, EmbeddedFact, EntityMergeFixtureRecord, EntityMergeVerifier,
     EntityResolver, ExtractedFact, ExtractionFixtureRecord, FactExtractor, HeuristicFactExtractor,
-    IngestCtx, IngestError, LlmEntityMergeVerifier, LlmFactExtractor, MERGE_PROMPT_VERSION,
+    IngestCtx, IngestError, MERGE_PROMPT_VERSION, ModelEntityMergeVerifier, ModelFactExtractor,
     RecordedEntityMergeVerifier, RecordedFactExtractor, SessionTurn, TurnChunk, chunk_turn,
     normalize_entity_name,
 };
@@ -36,8 +33,8 @@ use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan, r
 use moa_memory_types::{MemoryScope, ScopeTier};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorStore};
 use moa_providers::{
-    COHERE_DEFAULT_RERANK_MODEL, CohereReranker, CohereV4Embedder, NoopReranker, RerankHit,
-    Reranker,
+    COHERE_DEFAULT_RERANK_MODEL, ConfiguredReranker, EmbedderConstructionRole, NoopReranker,
+    RerankHit, Reranker, build_embedder_from_config, build_reranker_from_config,
 };
 use moa_session::PostgresSessionStore;
 use serde::{Deserialize, Serialize};
@@ -293,10 +290,6 @@ impl MemoryRetrievalEvalOptions {
     }
 
     fn validate(&self) -> Result<()> {
-        self.validate_with_env(|name| env::var(name).ok())
-    }
-
-    fn validate_with_env(&self, env_lookup: impl Fn(&str) -> Option<String>) -> Result<()> {
         if self
             .budget_usd
             .is_some_and(|budget_usd| !budget_usd.is_finite() || budget_usd < 0.0)
@@ -324,17 +317,6 @@ impl MemoryRetrievalEvalOptions {
                 "--extractions and --merges are PR-lane fixture flags; live lane uses live providers"
                     .to_string(),
             ));
-        }
-        const LIVE_MOA_COHERE_API_KEY_ENV: &str = "MOA_COHERE_API_KEY";
-        let api_key = env_lookup(LIVE_MOA_COHERE_API_KEY_ENV).ok_or_else(|| {
-            EvalError::InvalidConfig(format!(
-                "live lane requires {LIVE_MOA_COHERE_API_KEY_ENV} to be set"
-            ))
-        })?;
-        if api_key.trim().is_empty() {
-            return Err(EvalError::InvalidConfig(format!(
-                "live lane requires {LIVE_MOA_COHERE_API_KEY_ENV} to be non-empty"
-            )));
         }
         Ok(())
     }
@@ -401,7 +383,7 @@ pub enum EvalLane {
     /// Hermetic PR lane using cached embeddings and configured extractor fixtures.
     #[default]
     Pr,
-    /// Live provider lane using Cohere embedding, extraction, merge verification, and reranking.
+    /// Live provider lane using provider-backed extraction/merge plus Cohere embedding/reranking.
     Live,
 }
 
@@ -732,22 +714,17 @@ impl MemoryRetrievalEvalOptions {
         &self,
         corpus: &LoadedMemoryEvalCorpus,
     ) -> Result<RunProviders> {
-        const LIVE_MOA_COHERE_API_KEY_ENV: &str = "MOA_COHERE_API_KEY";
-        let api_key = env::var(LIVE_MOA_COHERE_API_KEY_ENV).map_err(|_| {
-            EvalError::InvalidConfig(format!(
-                "live lane requires {LIVE_MOA_COHERE_API_KEY_ENV} to be set"
-            ))
+        let mut config = MoaConfig::load_from_env().map_err(|error| {
+            EvalError::InvalidConfig(format!("failed to load MOA config for live eval: {error}"))
         })?;
-        if api_key.trim().is_empty() {
-            return Err(EvalError::InvalidConfig(format!(
-                "live lane requires {LIVE_MOA_COHERE_API_KEY_ENV} to be non-empty"
-            )));
+        config.memory.extraction.enabled = true;
+        if self.reranker_enabled
+            && config.memory.retrieval.reranker_model.trim() == moa_providers::NOOP_RERANK_MODEL
+        {
+            config.memory.retrieval.reranker_model =
+                format!("cohere:{COHERE_DEFAULT_RERANK_MODEL}");
         }
-        let extraction = MemoryExtractionConfig {
-            enabled: true,
-            api_key: api_key.clone(),
-            ..MemoryExtractionConfig::default()
-        };
+        let extraction = config.memory.extraction.clone();
         let budget = self
             .budget_usd
             .unwrap_or_else(|| default_live_budget_usd(corpus.manifest.profile));
@@ -755,43 +732,51 @@ impl MemoryRetrievalEvalOptions {
         let chat_throttle = Arc::new(LiveChatThrottle::new(Duration::from_millis(3_200)));
         let embed_throttle = Arc::new(LiveChatThrottle::new(Duration::from_millis(700)));
         let rerank_throttle = Arc::new(LiveChatThrottle::new(Duration::from_millis(6_500)));
-        let raw_embedder = CohereV4Embedder::new(api_key).map_err(|error| {
-            EvalError::InvalidConfig(format!("failed to initialize live embedder: {error}"))
-        })?;
+        let raw_embedder = build_embedder_from_config(&config, EmbedderConstructionRole::Retrieval)
+            .map_err(|error| {
+                EvalError::InvalidConfig(format!("failed to initialize live embedder: {error}"))
+            })?;
         let embedding_model = raw_embedder.model_id().to_string();
         let embedding_model_version = raw_embedder.model_version();
         let embedder = Arc::new(ThrottledEmbedder::new(
-            CountingEmbedder::new(raw_embedder, ledger.clone()),
+            CountingEmbedder::new(SharedEmbeddingProvider(raw_embedder), ledger.clone()),
             embed_throttle,
         )) as Arc<dyn EmbeddingProvider>;
-        let live_extractor = LlmFactExtractor::from_config(&extraction).map_err(|error| {
+        let live_extractor = ModelFactExtractor::from_config(&config).map_err(|error| {
             EvalError::InvalidConfig(format!("failed to initialize live fact extractor: {error}"))
         })?;
         let extractor = Arc::new(MemoizedThrottledFactExtractor::new(
             CountingExtractor::new(live_extractor, ledger.clone()),
             chat_throttle.clone(),
         )) as Arc<dyn FactExtractor>;
-        let live_merge_verifier = LlmEntityMergeVerifier::from_api_key(
-            extraction.api_key.clone(),
-            &extraction.model,
-            extraction.timeout_ms,
-        );
+        let live_merge_verifier =
+            ModelEntityMergeVerifier::from_config(&config).map_err(|error| {
+                EvalError::InvalidConfig(format!(
+                    "failed to initialize live merge verifier: {error}"
+                ))
+            })?;
         let entity_merge_verifier = Arc::new(ThrottledMergeVerifier::new(
             CountingMergeVerifier::new(live_merge_verifier, ledger.clone()),
             chat_throttle,
         )) as Arc<dyn EntityMergeVerifier>;
-        let reranker_model = if self.reranker_enabled {
-            COHERE_DEFAULT_RERANK_MODEL
+        let configured_reranker = if self.reranker_enabled {
+            let configured = build_reranker_from_config(&config).map_err(|error| {
+                EvalError::InvalidConfig(format!("failed to initialize live reranker: {error}"))
+            })?;
+            if configured.provider == "noop" {
+                return Err(EvalError::InvalidConfig(
+                    "live eval reranker is enabled but no configured reranker provider is available"
+                        .to_string(),
+                ));
+            }
+            configured
         } else {
-            "noop"
+            ConfiguredReranker::noop()
         };
+        let reranker_model = configured_reranker.model.clone();
         let reranker: Arc<dyn Reranker> = if self.reranker_enabled {
-            let cohere_reranker =
-                CohereReranker::new(extraction.api_key.clone()).map_err(|error| {
-                    EvalError::InvalidConfig(format!("failed to initialize live reranker: {error}"))
-                })?;
             Arc::new(ThrottledReranker::new(
-                CountingReranker::new(cohere_reranker, ledger.clone()),
+                CountingReranker::new(SharedReranker(configured_reranker.reranker), ledger.clone()),
                 rerank_throttle,
             ))
         } else {
@@ -805,7 +790,7 @@ impl MemoryRetrievalEvalOptions {
             extraction_prompt_version: Some(EXTRACTION_PROMPT_VERSION.to_string()),
             merge_verifier_model: extraction.model.clone(),
             merge_prompt_version: Some(MERGE_PROMPT_VERSION.to_string()),
-            reranker_model: reranker_model.to_string(),
+            reranker_model,
         };
         Ok(RunProviders {
             embedder,
@@ -892,6 +877,44 @@ fn extractor_cache_key(chunks: &[TurnChunk]) -> String {
     key
 }
 
+#[derive(Clone)]
+struct SharedEmbeddingProvider(Arc<dyn EmbeddingProvider>);
+
+#[async_trait]
+impl EmbeddingProvider for SharedEmbeddingProvider {
+    fn model_id(&self) -> &str {
+        self.0.model_id()
+    }
+
+    fn dimensions(&self) -> usize {
+        self.0.dimensions()
+    }
+
+    fn model_version(&self) -> i32 {
+        self.0.model_version()
+    }
+
+    async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+        self.0.embed(inputs).await
+    }
+}
+
+#[derive(Clone)]
+struct SharedReranker(Arc<dyn Reranker>);
+
+#[async_trait]
+impl Reranker for SharedReranker {
+    async fn rerank(
+        &self,
+        model: &str,
+        query: &str,
+        documents: &[String],
+        top_n: usize,
+    ) -> moa_core::Result<Vec<RerankHit>> {
+        self.0.rerank(model, query, documents, top_n).await
+    }
+}
+
 struct ThrottledEmbedder<T> {
     inner: T,
     throttle: Arc<LiveChatThrottle>,
@@ -918,10 +941,6 @@ where
 
     fn model_version(&self) -> i32 {
         self.inner.model_version()
-    }
-
-    fn model_name(&self) -> &str {
-        self.inner.model_name()
     }
 
     async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
@@ -2428,7 +2447,6 @@ mod tests {
             seeds: Vec::new(),
             label_hint: None,
             scope: scope.clone(),
-            scope_ancestors: scope.ancestors(),
             temporal_filter,
         }
     }
@@ -2478,17 +2496,14 @@ mod tests {
     }
 
     #[test]
-    fn live_lane_refuses_to_start_without_credentials() {
-        // Pins: live eval cannot silently fall back to recorded or deterministic providers.
+    fn live_lane_validation_defers_credentials_to_configured_provider_builders() {
+        // Pins: live eval option validation checks lane shape only; provider
+        // credentials are loaded through MoaConfig and validated by provider builders.
         let options =
             MemoryRetrievalEvalOptions::new("target/missing-corpus", "target/report.json")
                 .with_lane(EvalLane::Live);
 
-        let error = options
-            .validate_with_env(|_| None)
-            .expect_err("live lane without credentials should fail");
-
-        assert!(error.to_string().contains("MOA_COHERE_API_KEY"));
+        options.validate().expect("lane shape should be valid");
     }
 
     #[test]
@@ -2499,7 +2514,7 @@ mod tests {
                 .with_budget_usd(1.0);
 
         let error = options
-            .validate_with_env(|_| Some("unused".to_string()))
+            .validate()
             .expect_err("PR lane with a live budget should fail");
 
         assert!(error.to_string().contains("--budget-usd"));

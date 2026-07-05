@@ -958,12 +958,24 @@ async fn assert_no_learning_candidates(
 fn scope_parts(scope: &ActionRuleScope) -> (&'static str, Option<String>, Option<String>) {
     match scope {
         ActionRuleScope::Tenant { tenant_id } => ("tenant", Some(tenant_id.to_string()), None),
+        ActionRuleScope::Contact {
+            tenant_id,
+            contact_id,
+        } => (
+            "contact",
+            Some(tenant_id.to_string()),
+            Some(contact_id.to_string()),
+        ),
     }
 }
 
 fn scope_context(scope: &ActionRuleScope) -> RlsContext {
     match scope {
         ActionRuleScope::Tenant { tenant_id } => RlsContext::tenant(*tenant_id),
+        ActionRuleScope::Contact {
+            tenant_id,
+            contact_id,
+        } => RlsContext::contact(*tenant_id, *contact_id),
     }
 }
 

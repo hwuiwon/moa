@@ -64,7 +64,6 @@ pub(crate) fn procedure_handler_error(error: ProcedureError) -> HandlerError {
         | ProcedureError::BlockedNodeNotFound { .. }
         | ProcedureError::NoMatchingOutgoingEdge { .. }
         | ProcedureError::AmbiguousOutgoingEdges { .. }
-        | ProcedureError::UnsupportedConditionExpression { .. }
         | ProcedureError::LoopIterationLimitExceeded { .. }
         | ProcedureError::ParallelFanOutExceeded { .. }
         | ProcedureError::ParallelBranchFailed { .. }

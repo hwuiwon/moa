@@ -5,22 +5,20 @@ use std::path::Path;
 use std::sync::Arc;
 
 use moa_core::{
-    HandProvider, LineageHandle, McpTransportConfig, MoaConfig, MoaError, NullLineageHandle,
-    Result, SandboxTier, SessionStore, ToolBudgetConfig, ToolOutputConfig,
+    CloudHandsConfig, HandProvider, LineageHandle, MoaConfig, MoaError, NullLineageHandle, Result,
+    SandboxTier, SessionStore, ToolBudgetConfig, ToolOutputConfig,
 };
 use moa_security::{
     ActionPolicies, ActionPolicyRuleStore, EnvironmentCredentialVault, MCPCredentialProxy,
 };
 
-#[cfg(feature = "daytona")]
 use crate::adapters::daytona::DaytonaHandProvider;
-#[cfg(feature = "e2b")]
 use crate::adapters::e2b::E2BHandProvider;
 use crate::adapters::local::LocalHandProvider;
 use crate::adapters::mcp::MCPClient;
 
 use super::normalization::expand_local_path;
-use super::{DEFAULT_PROVIDER_NAME, DEFAULT_TOOL_TIMEOUT, ToolRegistry, ToolRouter};
+use super::{DEFAULT_PROVIDER_NAME, DEFAULT_TOOL_TIMEOUT, HandRoute, ToolRegistry, ToolRouter};
 
 impl ToolRouter {
     /// Creates a router from explicit providers and a tool registry.
@@ -33,6 +31,7 @@ impl ToolRouter {
             mcp_servers: HashMap::new(),
             mcp_proxy: None,
             active_hands: tokio::sync::RwLock::new(HashMap::new()),
+            preferred_hand_routes: tokio::sync::RwLock::new(HashMap::new()),
             hand_leases: None,
             trusted_sandbox_files: tokio::sync::RwLock::new(HashMap::new()),
             installed_files: tokio::sync::RwLock::new(HashMap::new()),
@@ -70,8 +69,6 @@ impl ToolRouter {
 
     /// Creates a local router from the loaded MOA config.
     pub async fn from_config(config: &MoaConfig) -> Result<Self> {
-        validate_mcp_transports_for_deployment(config)?;
-
         let sandbox_root = expand_local_path(&config.local.sandbox_dir)?;
         let local_provider = Arc::new(
             LocalHandProvider::new_with_docker_detection(
@@ -85,16 +82,8 @@ impl ToolRouter {
         let mut providers = HashMap::new();
         providers.insert(DEFAULT_PROVIDER_NAME.to_string(), local_provider_trait);
 
-        #[cfg(feature = "daytona")]
         if let Some(hands) = &config.cloud.hands
-            && (hands
-                .default_provider
-                .as_deref()
-                .is_some_and(|provider| provider == "daytona")
-                || hands
-                    .daytona_api_key
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty()))
+            && cloud_provider_requested(hands, "daytona")
         {
             providers.insert(
                 "daytona".to_string(),
@@ -102,16 +91,8 @@ impl ToolRouter {
             );
         }
 
-        #[cfg(feature = "e2b")]
         if let Some(hands) = &config.cloud.hands
-            && (hands
-                .default_provider
-                .as_deref()
-                .is_some_and(|provider| provider == "e2b")
-                || hands
-                    .e2b_api_key
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty()))
+            && cloud_provider_requested(hands, "e2b")
         {
             providers.insert(
                 "e2b".to_string(),
@@ -121,8 +102,17 @@ impl ToolRouter {
 
         let mut registry = ToolRegistry::default_local();
         registry.apply_budgets(&config.tool_budgets);
-        if let Some((provider, tier)) = default_cloud_provider(config)? {
-            registry.retarget_hand_tools(&provider, tier);
+        let hand_routes = configured_hand_routes(config)?;
+        if !is_local_only_route(&hand_routes) {
+            for route in &hand_routes {
+                if !providers.contains_key(&route.provider) {
+                    return Err(MoaError::ConfigError(format!(
+                        "cloud hand route provider {} was selected but not registered",
+                        route.provider
+                    )));
+                }
+            }
+            registry.retarget_hand_tools(hand_routes);
         }
 
         let mut router = Self {
@@ -290,102 +280,147 @@ impl ToolRouter {
     }
 }
 
-fn validate_mcp_transports_for_deployment(config: &MoaConfig) -> Result<()> {
-    if let Some(server) = config
-        .mcp_servers
-        .iter()
-        .find(|server| server.transport == McpTransportConfig::Stdio)
-    {
-        return Err(MoaError::ConfigError(format!(
-            "MCP server {} uses stdio transport, which is only supported for local development; use http or sse in cloud deployments",
-            server.name
-        )));
-    }
-
-    Ok(())
+fn is_local_only_route(routes: &[HandRoute]) -> bool {
+    routes.len() == 1
+        && routes[0].provider == DEFAULT_PROVIDER_NAME
+        && matches!(routes[0].tier, SandboxTier::Local)
 }
 
-fn default_cloud_provider(config: &MoaConfig) -> Result<Option<(String, SandboxTier)>> {
+fn configured_hand_routes(config: &MoaConfig) -> Result<Vec<HandRoute>> {
     let provider = config
         .cloud
         .hands
         .as_ref()
-        .and_then(|hands| hands.default_provider.clone())
+        .and_then(|hands| {
+            hands
+                .default_provider
+                .as_deref()
+                .map(str::trim)
+                .filter(|provider| !provider.is_empty())
+                .map(ToOwned::to_owned)
+        })
         .unwrap_or_else(|| DEFAULT_PROVIDER_NAME.to_string());
-    match provider.as_str() {
-        DEFAULT_PROVIDER_NAME => Ok(None),
-        "daytona" => {
-            #[cfg(feature = "daytona")]
-            {
-                Ok(Some(("daytona".to_string(), SandboxTier::Container)))
-            }
-            #[cfg(not(feature = "daytona"))]
-            {
-                Err(MoaError::Unsupported(
-                    "cloud hands are configured for Daytona but the `daytona` feature is disabled"
-                        .to_string(),
-                ))
-            }
+    let Some(hands) = config.cloud.hands.as_ref() else {
+        return route_for_provider(&provider).map(|route| vec![route]);
+    };
+
+    let mut routes = vec![route_for_provider(&provider)?];
+    if provider == DEFAULT_PROVIDER_NAME {
+        if hands
+            .fallback_providers
+            .iter()
+            .any(|provider| !provider.trim().is_empty())
+        {
+            return Err(MoaError::ConfigError(
+                "cloud hand fallback providers require default_provider to be daytona or e2b"
+                    .to_string(),
+            ));
         }
-        "e2b" => {
-            #[cfg(feature = "e2b")]
-            {
-                Ok(Some(("e2b".to_string(), SandboxTier::MicroVM)))
-            }
-            #[cfg(not(feature = "e2b"))]
-            {
-                Err(MoaError::Unsupported(
-                    "cloud hands are configured for E2B but the `e2b` feature is disabled"
-                        .to_string(),
-                ))
-            }
+        return Ok(routes);
+    }
+
+    for fallback in &hands.fallback_providers {
+        let fallback = fallback.trim();
+        if fallback.is_empty() || routes.iter().any(|route| route.provider == fallback) {
+            continue;
         }
+        let route = route_for_cloud_provider(fallback)?;
+        routes.push(route);
+    }
+    Ok(routes)
+}
+
+fn route_for_provider(provider: &str) -> Result<HandRoute> {
+    match provider {
+        DEFAULT_PROVIDER_NAME => Ok(HandRoute {
+            provider: DEFAULT_PROVIDER_NAME.to_string(),
+            tier: SandboxTier::Local,
+        }),
+        cloud_provider => route_for_cloud_provider(cloud_provider),
+    }
+}
+
+fn route_for_cloud_provider(provider: &str) -> Result<HandRoute> {
+    match provider {
+        "daytona" => Ok(HandRoute {
+            provider: "daytona".to_string(),
+            tier: SandboxTier::Container,
+        }),
+        "e2b" => Ok(HandRoute {
+            provider: "e2b".to_string(),
+            tier: SandboxTier::MicroVM,
+        }),
         other => Err(MoaError::ConfigError(format!(
             "unsupported cloud hand provider configured: {other}"
         ))),
     }
 }
 
+fn cloud_provider_requested(hands: &CloudHandsConfig, provider: &str) -> bool {
+    hands
+        .default_provider
+        .as_deref()
+        .is_some_and(|candidate| candidate.trim() == provider)
+        || hands
+            .fallback_providers
+            .iter()
+            .any(|candidate| candidate.trim() == provider)
+        || match provider {
+            "daytona" => hands
+                .daytona_api_key
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            "e2b" => hands
+                .e2b_api_key
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            _ => false,
+        }
+}
+
 #[cfg(test)]
 mod tests {
-    use moa_core::{McpServerConfig, McpTransportConfig};
+    use moa_core::{CloudHandsConfig, MoaConfig, SandboxTier};
 
-    use super::*;
+    use super::{DEFAULT_PROVIDER_NAME, configured_hand_routes};
 
-    fn config_with_mcp_transport(transport: McpTransportConfig) -> MoaConfig {
-        MoaConfig {
-            mcp_servers: vec![McpServerConfig {
-                name: "github".to_string(),
-                transport,
-                url: Some("http://127.0.0.1:1/mcp".to_string()),
-                command: Some("mock-mcp".to_string()),
-                ..McpServerConfig::default()
-            }],
-            ..MoaConfig::default()
-        }
+    #[test]
+    fn configured_hand_routes_preserve_cloud_fallback_order() {
+        // Pins: cloud hand fallback stays an ordered runtime route list.
+        let mut config = MoaConfig::default();
+        let hands = config
+            .cloud
+            .hands
+            .get_or_insert_with(CloudHandsConfig::default);
+        hands.default_provider = Some("daytona".to_string());
+        hands.fallback_providers = vec!["e2b".to_string(), "daytona".to_string(), " ".to_string()];
+
+        let routes = configured_hand_routes(&config).expect("routes should configure");
+
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].provider, "daytona");
+        assert_eq!(routes[0].tier, SandboxTier::Container);
+        assert_eq!(routes[1].provider, "e2b");
+        assert_eq!(routes[1].tier, SandboxTier::MicroVM);
     }
 
     #[test]
-    fn deployment_rejects_stdio_mcp_transport() {
-        // Pins: Kubernetes startup must not depend on a pod-local MCP child process.
-        let config = config_with_mcp_transport(McpTransportConfig::Stdio);
+    fn configured_hand_routes_reject_local_fallback_chain() {
+        // Pins: local hands remain a single-provider route instead of a cloud chain.
+        let mut config = MoaConfig::default();
+        let hands = config
+            .cloud
+            .hands
+            .get_or_insert_with(CloudHandsConfig::default);
+        hands.default_provider = Some(DEFAULT_PROVIDER_NAME.to_string());
+        hands.fallback_providers = vec!["e2b".to_string()];
 
-        let error = validate_mcp_transports_for_deployment(&config)
-            .expect_err("stdio MCP should fail before client startup");
+        let error = configured_hand_routes(&config).expect_err("local fallback should fail closed");
 
         assert!(
-            matches!(error, MoaError::ConfigError(message) if message.contains("stdio transport") && message.contains("local development"))
+            error
+                .to_string()
+                .contains("fallback providers require default_provider")
         );
-    }
-
-    #[test]
-    fn deployment_allows_remote_mcp_transports() {
-        // Pins: remote MCP transports do not require same-pod child processes.
-        for transport in [McpTransportConfig::Http, McpTransportConfig::Sse] {
-            let config = config_with_mcp_transport(transport);
-
-            validate_mcp_transports_for_deployment(&config)
-                .expect("remote MCP transport should be accepted");
-        }
     }
 }

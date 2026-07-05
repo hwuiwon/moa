@@ -5,7 +5,7 @@ use crate::*;
 /// Runs one load-test scenario and returns the final report.
 pub async fn run_loadtest(options: LoadTestOptions) -> Result<LoadTestReport> {
     options.validate()?;
-    let config = load_config()?;
+    let config = MoaConfig::load()?;
 
     let pool = TenancyPool::generate(options.tenants, options.identities_per_tenant)?;
     let targets = match options.edge_endpoint.as_deref() {

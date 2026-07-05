@@ -679,12 +679,6 @@ fn evaluate_condition(
     match condition {
         ProcedureCondition::Equals { left, right } => Ok(resolve_path(left, state) == Some(right)),
         ProcedureCondition::Exists { path } => Ok(resolve_path(path, state).is_some()),
-        ProcedureCondition::Expression { language, source } => {
-            Err(ProcedureError::UnsupportedConditionExpression {
-                language: language.clone(),
-                expression: source.clone(),
-            })
-        }
     }
 }
 

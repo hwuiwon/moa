@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
     Channel, ContactId, Credential, CredentialVault, MessagingConfig, MoaError, Result,
+    StoredCredentialMetadata,
 };
 use tracing::Instrument;
 use uuid::Uuid;
@@ -113,13 +114,6 @@ pub struct DeliveryReceipt {
     pub provider_message_id: Option<String>,
     /// Provider status when available.
     pub provider_status: Option<String>,
-}
-
-/// Async sink for contact-facing message delivery.
-#[async_trait]
-pub trait DeliverySink: Send + Sync {
-    /// Delivers one already-rendered message through the selected channel.
-    async fn deliver(&self, message: DeliveryMessage) -> Result<DeliveryReceipt>;
 }
 
 /// Delivery sink backed by Postmark email and Twilio SMS clients.
@@ -263,11 +257,8 @@ impl ProviderDeliverySink {
             provider_status: Some(result.status),
         })
     }
-}
-
-#[async_trait]
-impl DeliverySink for ProviderDeliverySink {
-    async fn deliver(&self, message: DeliveryMessage) -> Result<DeliveryReceipt> {
+    /// Delivers one already-rendered message through the selected channel.
+    pub async fn deliver(&self, message: DeliveryMessage) -> Result<DeliveryReceipt> {
         let span = delivery_span(&message);
         async move {
             match message.channel {
@@ -352,46 +343,16 @@ impl CredentialVault for EnvironmentDeliveryCredentialVault {
         ))
     }
 
-    async fn delete(&self, _service: &str, _scope: &str) -> Result<()> {
+    async fn delete(&self, _service: &str, _scope: &str) -> Result<bool> {
         Err(MoaError::StorageError(
             "environment delivery credential vault is read-only".to_string(),
         ))
     }
 
-    async fn list(&self, _scope: &str) -> Result<Vec<String>> {
-        #[cfg(not(any(feature = "postmark", feature = "twilio")))]
-        {
-            Ok(Vec::new())
-        }
-        #[cfg(any(feature = "postmark", feature = "twilio"))]
-        {
-            let mut services = Vec::new();
-            #[cfg(feature = "postmark")]
-            if optional_env(POSTMARK_SERVER_API_TOKEN_ENV).is_some() {
-                services.push(POSTMARK_SERVER_TOKEN_SERVICE.to_string());
-            }
-            #[cfg(feature = "twilio")]
-            {
-                if optional_env(TWILIO_ACCOUNT_SID_ENV).is_some() {
-                    services.push(TWILIO_ACCOUNT_SID_SERVICE.to_string());
-                }
-                for (service, env_name) in [
-                    (TWILIO_AUTH_TOKEN_SERVICE, TWILIO_AUTH_TOKEN_ENV),
-                    (TWILIO_API_KEY_SID_SERVICE, TWILIO_API_KEY_SID_ENV),
-                    (TWILIO_API_KEY_SECRET_SERVICE, TWILIO_API_KEY_SECRET_ENV),
-                    (TWILIO_FROM_NUMBER_SERVICE, TWILIO_FROM_NUMBER_ENV),
-                    (
-                        TWILIO_MESSAGING_SERVICE_SID_SERVICE,
-                        TWILIO_MESSAGING_SERVICE_SID_ENV,
-                    ),
-                ] {
-                    if optional_env(env_name).is_some() {
-                        services.push(service.to_string());
-                    }
-                }
-            }
-            Ok(services)
-        }
+    async fn list(&self, _service_prefix: &str) -> Result<Vec<StoredCredentialMetadata>> {
+        Err(MoaError::StorageError(
+            "environment delivery credential vault does not support listing".to_string(),
+        ))
     }
 }
 

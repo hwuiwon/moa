@@ -20,48 +20,11 @@ pub(crate) struct TurnPlan {
     pub(crate) prompt: String,
 }
 
-pub(crate) async fn inspectable_files(workspace_root: Option<&Path>) -> Result<InspectionFiles> {
-    if let Some(root) = workspace_root {
-        let summary_candidates = [
-            "Cargo.toml",
-            "README.md",
-            "docs/00-direction.md",
-            "docs/02-brain-orchestration.md",
-        ];
-        let detail_candidates = [
-            "docs/02-brain-orchestration.md",
-            "moa-observability/src/runtime_metrics.rs",
-            "Cargo.toml",
-            "README.md",
-        ];
-        let summary_file = first_existing_relative_path(root, &summary_candidates)
-            .await?
-            .unwrap_or_else(|| "Cargo.toml".to_string());
-        let detail_file = first_existing_relative_path(root, &detail_candidates)
-            .await?
-            .unwrap_or_else(|| summary_file.clone());
-        return Ok(InspectionFiles {
-            summary_file,
-            detail_file,
-        });
-    }
-
-    Ok(InspectionFiles {
+pub(crate) fn inspectable_files() -> InspectionFiles {
+    InspectionFiles {
         summary_file: "Cargo.toml".to_string(),
         detail_file: "docs/02-brain-orchestration.md".to_string(),
-    })
-}
-
-pub(crate) async fn first_existing_relative_path(
-    root: &Path,
-    candidates: &[&str],
-) -> Result<Option<String>> {
-    for candidate in candidates {
-        if tokio::fs::try_exists(root.join(candidate)).await? {
-            return Ok(Some((*candidate).to_string()));
-        }
     }
-    Ok(None)
 }
 
 /// Builds a plan whose turn count is sampled geometrically around the

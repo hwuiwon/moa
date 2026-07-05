@@ -18,12 +18,6 @@ use crate::retrieval::{RetrievalHit, RetrievalRequest};
 const DEFAULT_MAX_TENANTS: u64 = 1_000;
 const DEFAULT_TENANT_CAPACITY: u64 = 200;
 const DEFAULT_TTL: Duration = Duration::from_secs(300);
-/// Default changelog-version TTL.
-///
-/// Zero keeps cache freshness exact by re-reading the tenant version before each
-/// retrieval-cache hit. A non-zero value is available for explicit tuning, but
-/// can serve stale graph-memory hits until it expires.
-const DEFAULT_VERSION_TTL: Duration = Duration::ZERO;
 
 type TenantCache = Cache<CacheKey, CachedEntry>;
 
@@ -112,18 +106,13 @@ impl ChangelogVersionReader for PostgresChangelogVersionReader {
 
 /// Configuration for `CachedHybridRetriever`.
 #[derive(Debug, Clone)]
-pub struct CachedHybridRetrieverConfig {
+struct CachedHybridRetrieverConfig {
     /// Maximum number of tenant caches retained by the outer LRU.
-    pub max_tenants: u64,
+    max_tenants: u64,
     /// Maximum retrieval entries retained per tenant.
-    pub tenant_capacity: u64,
+    tenant_capacity: u64,
     /// Time-to-live for each cached retrieval entry.
-    pub ttl: Duration,
-    /// Time-to-live for the per-tenant changelog version. Zero disables version
-    /// caching so every freshness check re-reads the durable graph version.
-    pub version_ttl: Duration,
-    /// Whether user-scope queries may be cached.
-    pub cache_user_scope: bool,
+    ttl: Duration,
 }
 
 impl Default for CachedHybridRetrieverConfig {
@@ -132,8 +121,6 @@ impl Default for CachedHybridRetrieverConfig {
             max_tenants: DEFAULT_MAX_TENANTS,
             tenant_capacity: DEFAULT_TENANT_CAPACITY,
             ttl: DEFAULT_TTL,
-            version_ttl: DEFAULT_VERSION_TTL,
-            cache_user_scope: false,
         }
     }
 }
@@ -164,9 +151,6 @@ pub struct CachedHybridRetriever {
     inner: Arc<dyn RetrievalBackend>,
     version_reader: Arc<dyn ChangelogVersionReader>,
     tenants: Cache<String, TenantCache>,
-    /// Per-tenant changelog version cached for a short TTL so the freshness
-    /// check is not a DB round trip on every cache hit.
-    versions: Cache<String, i64>,
     config: CachedHybridRetrieverConfig,
 }
 
@@ -174,48 +158,23 @@ impl CachedHybridRetriever {
     /// Creates a read-time cache around a production hybrid retriever.
     #[must_use]
     pub fn new(inner: Arc<HybridRetriever>, pool: PgPool) -> Self {
-        Self::with_config(inner, pool, CachedHybridRetrieverConfig::default())
-    }
-
-    /// Creates a read-time cache with explicit configuration.
-    #[must_use]
-    pub fn with_config(
-        inner: Arc<HybridRetriever>,
-        pool: PgPool,
-        config: CachedHybridRetrieverConfig,
-    ) -> Self {
-        Self::with_config_and_role(inner, pool, config, false)
+        Self::with_role(inner, pool, false)
     }
 
     /// Creates a read-time cache that assumes `moa_app` for owner-role integration tests.
     #[must_use]
     pub fn new_for_app_role(inner: Arc<HybridRetriever>, pool: PgPool) -> Self {
-        Self::with_config_for_app_role(inner, pool, CachedHybridRetrieverConfig::default())
+        Self::with_role(inner, pool, true)
     }
 
-    /// Creates an app-role read-time cache with explicit configuration.
-    #[must_use]
-    pub fn with_config_for_app_role(
-        inner: Arc<HybridRetriever>,
-        pool: PgPool,
-        config: CachedHybridRetrieverConfig,
-    ) -> Self {
-        Self::with_config_and_role(inner, pool, config, true)
-    }
-
-    fn with_config_and_role(
-        inner: Arc<HybridRetriever>,
-        pool: PgPool,
-        config: CachedHybridRetrieverConfig,
-        assume_app_role: bool,
-    ) -> Self {
+    fn with_role(inner: Arc<HybridRetriever>, pool: PgPool, assume_app_role: bool) -> Self {
         Self::with_parts(
             inner,
             Arc::new(PostgresChangelogVersionReader {
                 pool,
                 assume_app_role,
             }),
-            config,
+            CachedHybridRetrieverConfig::default(),
         )
     }
 
@@ -228,38 +187,12 @@ impl CachedHybridRetriever {
             .max_capacity(config.max_tenants)
             .time_to_live(config.ttl)
             .build();
-        let versions = Cache::builder()
-            .max_capacity(config.max_tenants)
-            .time_to_live(config.version_ttl)
-            .build();
         Self {
             inner,
             version_reader,
             tenants,
-            versions,
             config,
         }
-    }
-
-    /// Returns the tenant's changelog version, reusing a recent cached value to
-    /// avoid a DB round trip on every retrieval/probe.
-    async fn current_version_cached(
-        &self,
-        scope: &MemoryScope,
-        tenant_cache_id: &str,
-    ) -> Result<i64> {
-        if self.config.version_ttl.is_zero() {
-            return self.version_reader.current_version(scope).await;
-        }
-        if let Some(version) = self.versions.get(tenant_cache_id).await {
-            return Ok(version);
-        }
-
-        let version = self.version_reader.current_version(scope).await?;
-        self.versions
-            .insert(tenant_cache_id.to_string(), version)
-            .await;
-        Ok(version)
     }
 
     /// Retrieves graph-memory hits, using the versioned cache when eligible.
@@ -275,9 +208,7 @@ impl CachedHybridRetriever {
         }
 
         let tenant_cache_id = tenant_cache_id(&req.scope);
-        let current_version = self
-            .current_version_cached(&req.scope, &tenant_cache_id)
-            .await?;
+        let current_version = self.version_reader.current_version(&req.scope).await?;
         let key = CacheKey {
             tenant_cache_id: tenant_cache_id.clone(),
             fingerprint: fingerprint(planned, &req, self.inner.ranking_fingerprint()),
@@ -329,9 +260,7 @@ impl CachedHybridRetriever {
         }
 
         let tenant_cache_id = tenant_cache_id(&req.scope);
-        let current_version = self
-            .current_version_cached(&req.scope, &tenant_cache_id)
-            .await?;
+        let current_version = self.version_reader.current_version(&req.scope).await?;
         let key = CacheKey {
             tenant_cache_id: tenant_cache_id.clone(),
             fingerprint: fingerprint(planned, req, self.inner.ranking_fingerprint()),
@@ -364,7 +293,7 @@ impl CachedHybridRetriever {
     }
 
     fn cacheable_scope(&self, scope: &MemoryScope) -> bool {
-        !matches!(scope.tier(), ScopeTier::Contact) || self.config.cache_user_scope
+        !matches!(scope.tier(), ScopeTier::Contact)
     }
 }
 
@@ -416,11 +345,6 @@ fn canonicalize(
     out.push_str(planned.strategy.as_str());
     out.push_str("|scope=");
     push_scope(&mut out, &req.scope);
-    out.push_str("|layers=");
-    for layer in &planned.scope_ancestors {
-        push_scope(&mut out, layer);
-        out.push(',');
-    }
     out.push_str("|query_hash=");
     out.push_str(&blake3::hash(req.query_text.as_bytes()).to_hex());
     out.push_str("|seeds=");
@@ -568,18 +492,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_check_is_cached_within_ttl() {
-        // Pins: the per-tenant changelog version is read once and reused within
-        // the TTL, so a burst of cache hits does not issue a DB read per hit.
+    async fn cache_hit_rechecks_changelog_version_for_exact_freshness() {
+        // Pins: cache hits re-read the tenant changelog version so graph-memory
+        // writes invalidate cached retrievals immediately.
         let backend = Arc::new(CountingBackend::new());
         let version = Arc::new(MockVersionReader::new(1));
         let cache = CachedHybridRetriever::with_parts(
             backend.clone(),
             version.clone(),
-            CachedHybridRetrieverConfig {
-                version_ttl: std::time::Duration::from_secs(60),
-                ..CachedHybridRetrieverConfig::default()
-            },
+            CachedHybridRetrieverConfig::default(),
         );
         let planned = planned_query(tenant_scope(), "auth service");
         let req = request(&planned, "what owns auth?");
@@ -596,8 +517,8 @@ mod tests {
         assert_eq!(backend.calls(), 1, "second retrieval should be a cache hit");
         assert_eq!(
             version.reads(),
-            1,
-            "changelog version should be read once and reused within the TTL"
+            2,
+            "changelog version should be checked before each retrieval"
         );
     }
 
@@ -888,7 +809,6 @@ mod tests {
             seeds: vec![Uuid::from_bytes(seed_bytes)],
             label_hint: Some(vec![NodeLabel::Fact]),
             scope: scope.clone(),
-            scope_ancestors: scope.ancestors(),
             temporal_filter: None,
         }
     }

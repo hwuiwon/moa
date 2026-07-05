@@ -330,20 +330,14 @@ impl Default for KnowledgeChunkingConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KnowledgeObservabilityConfig {
-    /// Whether sync runs should persist per-step inspection rows.
-    pub store_step_rows: bool,
     /// Maximum object preview characters kept for inspection surfaces.
     pub max_object_preview_chars: usize,
-    /// Whether query trace capture is enabled.
-    pub query_trace_enabled: bool,
 }
 
 impl Default for KnowledgeObservabilityConfig {
     fn default() -> Self {
         Self {
-            store_step_rows: true,
             max_object_preview_chars: 4_000,
-            query_trace_enabled: false,
         }
     }
 }
@@ -365,120 +359,6 @@ fn require_config_secret(kind: &str, selected: &str, value: &str) -> Result<Stri
         )));
     }
     Ok(value.to_string())
-}
-
-impl super::MoaEnvOverlay {
-    /// Applies tenant knowledge provider, parser, and observability environment overrides.
-    pub(in crate::config) fn apply_knowledge_overlay(&self, config: &mut super::MoaConfig) {
-        use super::env_overlay::{
-            set_copy_if_some, set_if_some, set_option_if_some, set_vec_if_some,
-        };
-
-        set_vec_if_some(
-            &mut config.knowledge.providers.enabled,
-            &self.knowledge_providers_enabled,
-        );
-        set_vec_if_some(
-            &mut config.knowledge.parsers.enabled,
-            &self.knowledge_parsers_enabled,
-        );
-        set_if_some(
-            &mut config.knowledge.parser.default,
-            &self.knowledge_parser_default,
-        );
-        set_if_some(
-            &mut config.knowledge.parser.external_default,
-            &self.knowledge_external_parser_default,
-        );
-        set_if_some(
-            &mut config.knowledge.nango.api_base_url,
-            &self.nango_api_base_url,
-        );
-        set_if_some(&mut config.knowledge.nango.api_key, &self.nango_api_key);
-        set_if_some(
-            &mut config.knowledge.nango.webhook_signing_key,
-            &self.nango_webhook_signing_key,
-        );
-        set_if_some(
-            &mut config.knowledge.merge.api_base_url,
-            &self.merge_api_base_url,
-        );
-        set_if_some(&mut config.knowledge.merge.api_key, &self.merge_api_key);
-        set_if_some(
-            &mut config.knowledge.merge.webhook_signature_key,
-            &self.merge_webhook_signature_key,
-        );
-        set_if_some(
-            &mut config.knowledge.llamaparse.api_base_url,
-            &self.llamaparse_api_url,
-        );
-        set_if_some(
-            &mut config.knowledge.llamaparse.api_key,
-            &self.llamaparse_api_key,
-        );
-        set_if_some(
-            &mut config.knowledge.llamaparse.webhook_signing_key,
-            &self.llamaparse_webhook_signing_key,
-        );
-        set_option_if_some(
-            &mut config.knowledge.llamaparse.webhook_header_name,
-            &self.llamaparse_webhook_header_name,
-        );
-        set_option_if_some(
-            &mut config.knowledge.llamaparse.webhook_header_value,
-            &self.llamaparse_webhook_header_value,
-        );
-        set_if_some(&mut config.knowledge.llamaparse.tier, &self.llamaparse_tier);
-        set_if_some(
-            &mut config.knowledge.unstructured.api_base_url,
-            &self.unstructured_api_url,
-        );
-        set_if_some(
-            &mut config.knowledge.unstructured.api_key,
-            &self.unstructured_api_key,
-        );
-        set_if_some(
-            &mut config.knowledge.unstructured.strategy,
-            &self.unstructured_strategy,
-        );
-        set_if_some(
-            &mut config.knowledge.unstructured.chunking_strategy,
-            &self.unstructured_chunking_strategy,
-        );
-        set_if_some(
-            &mut config.knowledge.reducto.api_base_url,
-            &self.reducto_api_url,
-        );
-        set_if_some(&mut config.knowledge.reducto.api_key, &self.reducto_api_key);
-        set_if_some(
-            &mut config.knowledge.reducto.webhook_signing_key,
-            &self.reducto_webhook_signing_key,
-        );
-        set_option_if_some(
-            &mut config.knowledge.reducto.webhook_header_name,
-            &self.reducto_webhook_header_name,
-        );
-        set_option_if_some(
-            &mut config.knowledge.reducto.webhook_header_value,
-            &self.reducto_webhook_header_value,
-        );
-        set_if_some(
-            &mut config.knowledge.reducto.parse_mode,
-            &self.reducto_parse_mode,
-        );
-        set_copy_if_some(
-            &mut config.knowledge.reducto.async_enabled,
-            self.reducto_async_enabled,
-        );
-        set_if_some(
-            &mut config.knowledge.reducto.chunk_mode,
-            &self.reducto_chunk_mode,
-        );
-        set_copy_if_some(
-            &mut config.knowledge.observability.query_trace_enabled,
-            self.knowledge_query_trace_enabled,
-        );
-    }
 }
 
 #[cfg(test)]

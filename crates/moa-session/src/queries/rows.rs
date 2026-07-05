@@ -171,13 +171,28 @@ fn tenant_id_from_storage(value: String) -> TenantId {
 fn action_rule_scope_from_columns(
     scope: &str,
     storage_partition_id: &str,
+    user_id: Option<String>,
 ) -> Result<ActionRuleScope> {
-    match scope {
-        "tenant" => Ok(ActionRuleScope::Tenant {
+    match (scope, user_id) {
+        ("tenant", None) => Ok(ActionRuleScope::Tenant {
             tenant_id: tenant_id_from_storage(storage_partition_id.to_string()),
         }),
+        ("contact", Some(user_id)) => {
+            let contact_id =
+                Uuid::parse_str(&user_id)
+                    .map(moa_core::ContactId)
+                    .map_err(|error| {
+                        MoaError::StorageError(format!(
+                            "invalid action policy contact scope user_id `{user_id}`: {error}"
+                        ))
+                    })?;
+            Ok(ActionRuleScope::Contact {
+                tenant_id: tenant_id_from_storage(storage_partition_id.to_string()),
+                contact_id,
+            })
+        }
         _ => Err(MoaError::StorageError(format!(
-            "unsupported action policy scope `{scope}`; tenant scope is required"
+            "unsupported action policy scope columns for `{scope}`"
         ))),
     }
 }
@@ -358,9 +373,10 @@ fn parse_segment_assessment(value: Option<String>) -> Result<Option<SegmentAsses
 pub(crate) fn action_policy_rule_from_row(row: &PgRow) -> Result<ActionPolicyRule> {
     let storage_partition_id = row.col::<String>("storage_partition_id")?;
     let scope = row.col::<String>("scope")?;
+    let user_id = row.col::<Option<String>>("user_id")?;
     Ok(ActionPolicyRule {
         id: row.col::<Uuid>("id")?,
-        scope: action_rule_scope_from_columns(&scope, &storage_partition_id)?,
+        scope: action_rule_scope_from_columns(&scope, &storage_partition_id, user_id)?,
         tool: row.col::<String>("tool")?,
         pattern: row.col::<String>("pattern")?,
         effect: from_db("action policy effect", &row.col::<String>("effect")?)?,

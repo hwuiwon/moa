@@ -1217,17 +1217,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ct-merkle"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "429ff00feabd0f15f796bfbfae4ef1b24a83a0be78d2a8ae38772637e661ec87"
-dependencies = [
- "digest 0.10.7",
- "generic-array",
- "subtle",
-]
-
-[[package]]
 name = "ctr"
 version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3671,7 +3660,6 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "chrono",
- "ct-merkle",
  "ed25519-dalek",
  "hex",
  "hmac",
@@ -3679,6 +3667,7 @@ dependencies = [
  "moa-memory-pii",
  "object_store",
  "rand 0.8.5",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3689,6 +3678,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "wiremock",
  "workspace-hack",
  "zip",
 ]
@@ -4131,7 +4121,6 @@ dependencies = [
  "moa-observability",
  "moa-test-support",
  "opentelemetry",
- "rand 0.8.5",
  "reqwest 0.13.4",
  "secrecy",
  "serde",
@@ -4140,6 +4129,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-opentelemetry",
+ "webpki-root-certs",
  "wiremock",
  "workspace-hack",
 ]
@@ -4233,7 +4223,6 @@ dependencies = [
  "moa-providers",
  "moa-session",
  "moa-test-support",
- "moka",
  "serde",
  "serde_json",
  "serde_yaml",

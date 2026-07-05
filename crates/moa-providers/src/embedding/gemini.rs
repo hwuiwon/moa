@@ -32,55 +32,11 @@ pub enum EmbedderConstructionRole {
     Retrieval,
 }
 
-/// Task-prefix role for `gemini-embedding-2`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EmbedRole {
-    /// Document side of asymmetric retrieval.
-    Document {
-        /// Optional document title; `none` is used when absent.
-        title: Option<String>,
-    },
-    /// Generic search query side.
-    SearchQuery,
-    /// Question-answering query side.
-    QuestionAnsweringQuery,
-    /// Fact-checking query side.
-    FactCheckingQuery,
-    /// Code-retrieval query side.
-    CodeRetrievalQuery,
-    /// Symmetric classification workload.
-    Classification,
-    /// Symmetric clustering workload.
-    Clustering,
-    /// Symmetric sentence-similarity workload.
-    SentenceSimilarity,
-    /// Pass-through mode for already formatted content.
-    Raw,
-}
-
-impl EmbedRole {
-    /// Formats one text input with the role-specific Gemini v2 prompt prefix.
-    #[must_use]
-    pub fn format(&self, content: &str) -> String {
+impl EmbedderConstructionRole {
+    fn format(self, content: &str) -> String {
         match self {
-            Self::Document { title } => {
-                format!(
-                    "title: {} | text: {content}",
-                    title.as_deref().unwrap_or("none")
-                )
-            }
-            Self::SearchQuery => format!("task: search result | query: {content}"),
-            Self::QuestionAnsweringQuery => {
-                format!("task: question answering | query: {content}")
-            }
-            Self::FactCheckingQuery => format!("task: fact checking | query: {content}"),
-            Self::CodeRetrievalQuery => format!("task: code retrieval | query: {content}"),
-            Self::Classification => format!("task: classification | query: {content}"),
-            Self::Clustering => format!("task: clustering | query: {content}"),
-            Self::SentenceSimilarity => {
-                format!("task: sentence similarity | query: {content}")
-            }
-            Self::Raw => content.to_owned(),
+            Self::Ingestion => format!("title: none | text: {content}"),
+            Self::Retrieval => format!("task: search result | query: {content}"),
         }
     }
 }
@@ -92,7 +48,7 @@ pub struct GeminiEmbeddingEmbedder {
     api_key: String,
     endpoint: String,
     output_dim: usize,
-    default_role: EmbedRole,
+    role: EmbedderConstructionRole,
     pacer: RatePacer,
     limiter: ConcurrencyLimiter,
 }
@@ -102,7 +58,7 @@ impl GeminiEmbeddingEmbedder {
     pub fn new(
         api_key: impl Into<String>,
         output_dim: usize,
-        default_role: EmbedRole,
+        role: EmbedderConstructionRole,
     ) -> Result<Self> {
         validate_gemini_output_dim(output_dim)?;
         Ok(Self {
@@ -110,7 +66,7 @@ impl GeminiEmbeddingEmbedder {
             api_key: api_key.into(),
             endpoint: GEMINI_ENDPOINT.to_string(),
             output_dim,
-            default_role,
+            role,
             // Pacing off by default; Gemini limits are tier-specific.
             pacer: RatePacer::new(PacerConfig::disabled()),
             limiter: ConcurrencyLimiter::new(DEFAULT_EMBEDDING_CONCURRENCY),
@@ -138,24 +94,6 @@ impl GeminiEmbeddingEmbedder {
         self
     }
 
-    /// Embeds one input with a per-call role override.
-    pub async fn embed_as(&self, role: &EmbedRole, text: &str) -> Result<Vec<f32>> {
-        // In-flight slot first, then rate budget (see `ConcurrencyLimiter`).
-        let _permit = self.limiter.acquire().await;
-        self.pacer.acquire(1, 1).await;
-        let body = V2Request {
-            content: GeminiContent {
-                parts: vec![GeminiTextPart {
-                    text: role.format(text),
-                }],
-            },
-            output_dimensionality: Some(self.output_dim),
-        };
-        let response = self.post_embed(GEMINI_V2_MODEL, &body).await?;
-        validate_embedding_dimension(self.output_dim, &response.embedding.values)?;
-        Ok(response.embedding.values)
-    }
-
     /// Embeds one chunk of inputs in a single `:batchEmbedContents` round trip.
     ///
     /// Callers must keep `texts` within [`GEMINI_MAX_BATCH_SIZE`]; the returned
@@ -170,7 +108,7 @@ impl GeminiEmbeddingEmbedder {
                 model: format!("models/{GEMINI_V2_MODEL}"),
                 content: GeminiContent {
                     parts: vec![GeminiTextPart {
-                        text: self.default_role.format(text),
+                        text: self.role.format(text),
                     }],
                 },
                 output_dimensionality: Some(self.output_dim),
@@ -185,11 +123,6 @@ impl GeminiEmbeddingEmbedder {
             out.push(embedding.values);
         }
         Ok(out)
-    }
-
-    async fn post_embed<T: Serialize>(&self, model: &str, body: &T) -> Result<GeminiResponse> {
-        self.post_json(&format!("models/{model}:embedContent"), body)
-            .await
     }
 
     async fn post_batch_embed<T: Serialize>(
@@ -246,13 +179,6 @@ impl EmbeddingProvider for GeminiEmbeddingEmbedder {
 }
 
 #[derive(Serialize)]
-struct V2Request {
-    content: GeminiContent,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    output_dimensionality: Option<usize>,
-}
-
-#[derive(Serialize)]
 struct BatchEmbedRequest {
     requests: Vec<BatchEmbedItem>,
 }
@@ -281,11 +207,6 @@ struct GeminiTextPart {
 }
 
 #[derive(Deserialize)]
-struct GeminiResponse {
-    embedding: GeminiEmbedding,
-}
-
-#[derive(Deserialize)]
 struct GeminiEmbedding {
     values: Vec<f32>,
 }
@@ -302,50 +223,19 @@ fn validate_gemini_output_dim(output_dim: usize) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::EmbedRole;
+    use super::EmbedderConstructionRole;
 
     #[test]
     fn role_prefixes_match_documented_shapes() {
         assert!(
-            EmbedRole::SearchQuery
+            EmbedderConstructionRole::Retrieval
                 .format("oauth")
                 .starts_with("task: search result | query: ")
         );
         assert!(
-            EmbedRole::Document { title: None }
+            EmbedderConstructionRole::Ingestion
                 .format("oauth")
                 .starts_with("title: none | text: ")
         );
-        assert!(
-            EmbedRole::QuestionAnsweringQuery
-                .format("oauth")
-                .starts_with("task: question answering | query: ")
-        );
-        assert!(
-            EmbedRole::FactCheckingQuery
-                .format("oauth")
-                .starts_with("task: fact checking | query: ")
-        );
-        assert!(
-            EmbedRole::CodeRetrievalQuery
-                .format("oauth")
-                .starts_with("task: code retrieval | query: ")
-        );
-        assert!(
-            EmbedRole::Classification
-                .format("oauth")
-                .starts_with("task: classification | query: ")
-        );
-        assert!(
-            EmbedRole::Clustering
-                .format("oauth")
-                .starts_with("task: clustering | query: ")
-        );
-        assert!(
-            EmbedRole::SentenceSimilarity
-                .format("oauth")
-                .starts_with("task: sentence similarity | query: ")
-        );
-        assert_eq!(EmbedRole::Raw.format("oauth"), "oauth");
     }
 }

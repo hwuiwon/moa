@@ -12,42 +12,6 @@ pub struct SessionStatsRequest {
     pub session_id: SessionId,
 }
 
-/// Response payload containing one session analytics summary.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionStatsResponse {
-    /// Session identifier.
-    pub session_id: SessionId,
-    /// Tenant that owns the session.
-    pub tenant_id: TenantId,
-    /// Contact attached to the session, when any.
-    #[serde(default)]
-    pub contact_id: Option<ContactId>,
-    /// Current persisted session status.
-    pub status: SessionStatus,
-    /// Number of completed assistant turns.
-    pub turn_count: u64,
-    /// Total event count for the session.
-    pub event_count: u64,
-    /// Total input tokens across cached and uncached paths.
-    pub total_input_tokens: u64,
-    /// Total output tokens.
-    pub total_output_tokens: u64,
-    /// Total session cost in cents.
-    pub total_cost_cents: u64,
-    /// Total main-loop cost in cents.
-    pub main_cost_cents: u64,
-    /// Total auxiliary-tier cost in cents.
-    pub auxiliary_cost_cents: u64,
-    /// Fraction of input tokens served from cache.
-    pub cache_hit_rate: f64,
-    /// Session wall-clock duration in seconds.
-    pub duration_seconds: f64,
-    /// Number of tool calls recorded for the session.
-    pub tool_call_count: u64,
-    /// Number of error events recorded for the session.
-    pub error_count: u64,
-}
-
 /// Request payload for reading tenant analytics over a recent window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TenantStatsRequest {
@@ -55,29 +19,6 @@ pub struct TenantStatsRequest {
     pub tenant_id: TenantId,
     /// Number of whole days included in the rollup window.
     pub days: u32,
-}
-
-/// Response payload containing tenant analytics over a recent window.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TenantStatsResponse {
-    /// Tenant identifier.
-    pub tenant_id: TenantId,
-    /// Number of whole days included in the rollup window.
-    pub days: u32,
-    /// Session count across the window.
-    pub session_count: u64,
-    /// Turn count across the window.
-    pub turn_count: u64,
-    /// Total input tokens across the window.
-    pub total_input_tokens: u64,
-    /// Cache-read input tokens across the window.
-    pub total_cache_read_tokens: u64,
-    /// Total output tokens across the window.
-    pub total_output_tokens: u64,
-    /// Total cost in cents across the window.
-    pub total_cost_cents: u64,
-    /// Weighted cache-hit rate for the window.
-    pub cache_hit_rate: f64,
 }
 
 /// Request payload for reading per-tool analytics.
@@ -97,24 +38,7 @@ pub struct ToolStatsResponse {
     pub tenant_id: Option<TenantId>,
     /// Per-tool analytics rows ordered for API display.
     #[serde(default)]
-    pub rows: Vec<ToolStatsRow>,
-}
-
-/// One per-tool analytics row.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ToolStatsRow {
-    /// Stable tool name.
-    pub tool_name: String,
-    /// Number of completed calls for the tool.
-    pub call_count: u64,
-    /// Fraction of calls that succeeded.
-    pub success_rate: f64,
-    /// Mean duration in milliseconds.
-    pub avg_duration_ms: f64,
-    /// Median duration in milliseconds.
-    pub p50_ms: f64,
-    /// P95 duration in milliseconds.
-    pub p95_ms: f64,
+    pub rows: Vec<ToolCallSummary>,
 }
 
 /// Request payload for reading tenant cache analytics.
@@ -147,30 +71,7 @@ pub struct CacheStatsResponse {
     pub estimated_savings_cents: Option<u64>,
     /// Daily cache trend rows ordered by day.
     #[serde(default)]
-    pub daily: Vec<CacheDailyMetricRow>,
-}
-
-/// One daily tenant cache trend point.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CacheDailyMetricRow {
-    /// Tenant identifier.
-    pub tenant_id: TenantId,
-    /// UTC day bucket.
-    pub day: DateTime<Utc>,
-    /// Session count on the day.
-    pub session_count: u64,
-    /// Turn count on the day.
-    pub turn_count: u64,
-    /// Total input tokens on the day.
-    pub total_input_tokens: u64,
-    /// Total cache-read tokens on the day.
-    pub total_cache_read_tokens: u64,
-    /// Total output tokens on the day.
-    pub total_output_tokens: u64,
-    /// Total cost in cents on the day.
-    pub total_cost_cents: u64,
-    /// Average cache-hit rate on the day.
-    pub avg_cache_hit_rate: f64,
+    pub daily: Vec<CacheDailyMetric>,
 }
 
 /// Request payload for tenant-scoped live experiment analytics.

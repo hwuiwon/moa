@@ -258,7 +258,7 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        ChannelCapabilities, ChannelRef, InboundMessage, MoaError, Result as MoaResult,
+        ChannelCapabilities, ChannelEvent, ChannelRef, MoaError, Result as MoaResult,
         SessionChannelBindingId,
     };
     use tokio::sync::mpsc;
@@ -325,7 +325,7 @@ mod tests {
             }
         }
 
-        async fn start(&self, _event_tx: mpsc::Sender<InboundMessage>) -> MoaResult<()> {
+        async fn start(&self, _event_tx: mpsc::Sender<ChannelEvent>) -> MoaResult<()> {
             Ok(())
         }
 

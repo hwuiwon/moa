@@ -111,6 +111,26 @@ pub struct KnowledgeUpdateConnectionSourceSelectionResponse {
     pub sync_status: Option<String>,
 }
 
+/// Request payload for disconnecting a linked tenant knowledge connection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeDisconnectConnectionRequest {
+    /// Tenant that owns the linked connection.
+    pub tenant_id: TenantId,
+    /// Tenant-owned connection identifier.
+    pub connection_uid: Uuid,
+}
+
+/// Response payload after a linked tenant knowledge connection is disconnected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeDisconnectConnectionResponse {
+    /// Tenant-owned connection identifier.
+    pub connection_uid: Uuid,
+    /// Current connection status after disconnect.
+    pub status: String,
+    /// Whether MOA revoked host-side credential material for this connection.
+    pub credential_revoked: bool,
+}
+
 /// Request payload for starting a tenant knowledge sync.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeSyncRequest {
@@ -269,6 +289,9 @@ pub struct KnowledgeConnectionSummary {
     /// Provider-native selected source state stored for the connection.
     #[serde(default)]
     pub source_selection: Value,
+    /// Host-side credential status for MOA-managed credential references.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_status: Option<String>,
 }
 
 /// Request payload for listing tenant knowledge connections.

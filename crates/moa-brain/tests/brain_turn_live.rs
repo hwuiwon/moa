@@ -37,9 +37,9 @@ async fn live_brain_turn_completes() -> Result<()> {
     }
 
     let mut config = MoaConfig::default();
-    let selection = resolve_provider_selection(&config, None)?;
-    config.general.default_provider = selection.provider_name;
-    config.models.main = selection.model_id.clone();
+    let (provider_id, model_id) = resolve_provider_selection(&config, None)?;
+    config.general.default_provider = provider_id.as_str().to_string();
+    config.models.main = model_id.as_str().to_string();
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
     let store = Arc::new(store);
     let provider: Arc<dyn LLMProvider> = build_provider_from_config(&config)?;

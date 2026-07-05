@@ -97,7 +97,7 @@ impl TurbopufferStore {
         env: impl Into<String>,
         baa_enabled: bool,
     ) -> Result<Self> {
-        let base_url = base_url.into().trim_end_matches('/').to_string();
+        let base_url = base_url.into().trim().trim_end_matches('/').to_string();
         if base_url.is_empty() {
             return Err(Error::TurbopufferConfig(
                 "base URL must not be empty".to_string(),
@@ -583,6 +583,37 @@ mod tests {
         );
         assert!(requests[0].body.contains("\"upsert_rows\""));
         assert!(requests[0].body.contains("\"valid_to\":\"open\""));
+    }
+
+    #[test]
+    fn from_config_requires_explicit_cloud_api_key() {
+        // Pins: cloud Turbopuffer construction fails closed when the API key is
+        // missing; local pgvector callers can still choose not to construct it.
+        let error = match TurbopufferStore::from_config(&MoaConfig::default()) {
+            Ok(_) => panic!("missing Turbopuffer key should be a config error"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(error, Error::TurbopufferConfig(message) if message == "MOA_TURBOPUFFER_API_KEY is required")
+        );
+    }
+
+    #[test]
+    fn from_config_rejects_blank_base_url() {
+        // Pins: whitespace-only cloud endpoint overrides are rejected before any
+        // HTTP request path can silently build an invalid URL.
+        let mut config = MoaConfig::default();
+        config.memory.vector.turbopuffer.api_key = "test-key".to_string();
+        config.memory.vector.turbopuffer.base_url = Some("   ".to_string());
+        let error = match TurbopufferStore::from_config(&config) {
+            Ok(_) => panic!("blank Turbopuffer endpoint should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(error, Error::TurbopufferConfig(message) if message == "base URL must not be empty")
+        );
     }
 
     #[tokio::test]

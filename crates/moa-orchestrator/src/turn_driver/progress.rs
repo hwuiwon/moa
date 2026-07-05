@@ -1,6 +1,5 @@
 //! Progress and cancellation state helpers shared by turn workflows.
 
-use moa_core::config::SessionLimitsConfig;
 use moa_core::wire::turn::{TurnComplexityClass, TurnPhase, TurnProgress};
 use restate_sdk::prelude::*;
 
@@ -52,28 +51,6 @@ impl RootTurnStateKey {
     /// wait so one never-terminal worker cannot hang the whole session.
     pub(crate) const AUTO_DELEGATION_FAN_IN_STUCK_COUNT: &'static str =
         "auto_delegation_fan_in_stuck_count";
-}
-
-/// Progress cadence derived from session limits.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ProgressCadence {
-    /// Delay before the first progress update may be emitted.
-    pub(crate) first_delay_ms: u64,
-    /// Minimum interval between emitted progress updates.
-    pub(crate) interval_ms: u64,
-}
-
-/// Returns the configured progress cadence for a turn workflow.
-pub(crate) fn cadence_from_limits(limits: &SessionLimitsConfig) -> ProgressCadence {
-    ProgressCadence {
-        first_delay_ms: limits.progress_first_delay_ms,
-        interval_ms: limits.progress_interval_ms,
-    }
-}
-
-/// Returns the current runtime progress cadence.
-pub(crate) fn current_cadence() -> ProgressCadence {
-    cadence_from_limits(&crate::OrchestratorCtx::current_config().session_limits)
 }
 
 /// Returns whether the phase no longer accepts cancellation changes.
@@ -209,10 +186,9 @@ pub(crate) async fn snapshot(
 
 #[cfg(test)]
 mod tests {
-    use moa_core::config::SessionLimitsConfig;
     use moa_core::wire::turn::TurnPhase;
 
-    use super::{cadence_from_limits, is_terminal_phase};
+    use super::is_terminal_phase;
 
     #[test]
     fn terminal_phase_detection_matches_workflow_lifecycle() {
@@ -225,18 +201,5 @@ mod tests {
         assert!(is_terminal_phase(&TurnPhase::Completed));
         assert!(is_terminal_phase(&TurnPhase::Cancelled));
         assert!(is_terminal_phase(&TurnPhase::Failed));
-    }
-
-    #[test]
-    fn progress_cadence_uses_session_limits_directly() {
-        // Pins: workflows expose configured progress cadence without workflow-local constants.
-        let limits = SessionLimitsConfig {
-            progress_first_delay_ms: 123,
-            progress_interval_ms: 456,
-            ..SessionLimitsConfig::default()
-        };
-        let cadence = cadence_from_limits(&limits);
-        assert_eq!(cadence.first_delay_ms, 123);
-        assert_eq!(cadence.interval_ms, 456);
     }
 }

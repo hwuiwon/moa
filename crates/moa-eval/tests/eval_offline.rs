@@ -6,5 +6,3 @@ mod evaluators;
 mod loader;
 #[path = "eval_offline/memory_eval_judge.rs"]
 mod memory_eval_judge;
-#[path = "eval_offline/reporters.rs"]
-mod reporters;

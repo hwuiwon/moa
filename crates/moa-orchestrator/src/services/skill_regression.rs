@@ -1,49 +1,33 @@
 //! Review-boundary regression reporting for proposed skill updates.
 
-#[cfg(feature = "internal-eval-runner")]
 use std::io::ErrorKind;
-#[cfg(feature = "internal-eval-runner")]
 use std::path::{Path, PathBuf};
-#[cfg(feature = "internal-eval-runner")]
 use std::sync::Arc;
-#[cfg(feature = "internal-eval-runner")]
 use std::{future::Future, pin::Pin};
 
 use moa_artifacts::registry::ArtifactFile;
 use moa_core::{ActionRuleScope, LearningCandidate, MoaConfig, Result};
-#[cfg(feature = "internal-eval-runner")]
 use moa_core::{LLMProvider, MoaError, ModelTask};
-#[cfg(feature = "internal-eval-runner")]
 use moa_eval::EvalEngine;
-#[cfg(feature = "internal-eval-runner")]
 use moa_eval_core::engine::EvalRun;
-#[cfg(feature = "internal-eval-runner")]
 use moa_eval_core::{
     ActionPolicyOverride, AgentConfig, EngineOptions, EvalResult, EvalScoreValue, EvalStatus,
     Evaluator, EvaluatorOptions, SkillOverride, TestSuite, build_evaluators, evaluate_run,
 };
-#[cfg(feature = "internal-eval-runner")]
 use moa_providers::ProviderRegistry;
-#[cfg(feature = "internal-eval-runner")]
 use moa_skills::package::{SkillPackage, SkillPackageFile};
 use moa_skills::registry::SkillRegistry;
-#[cfg(feature = "internal-eval-runner")]
 use moa_skills::{
     format::slugify_skill_name,
     regression::{SkillRegressionSummary, compare_scores},
 };
 use serde_json::{Value, json};
-#[cfg(feature = "internal-eval-runner")]
 use tokio::fs;
-#[cfg(feature = "internal-eval-runner")]
 use uuid::Uuid;
 
-#[cfg(feature = "internal-eval-runner")]
 const DEFAULT_SKILL_TEST_BUDGET_DOLLARS: f64 = 0.50;
-#[cfg(feature = "internal-eval-runner")]
 const DEFAULT_SKILL_EVALUATORS: &[&str] = &["trajectory", "output", "tool_success"];
 
-#[cfg(feature = "internal-eval-runner")]
 type LocalBoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 
 /// Outcome of review-time regression evaluation for a skill proposal.
@@ -70,32 +54,16 @@ impl SkillRegressionGate {
 /// Builds the review-time regression report for accepting a skill candidate.
 pub async fn skill_acceptance_regression_report(
     config: MoaConfig,
-    #[cfg(feature = "internal-eval-runner")] providers: Arc<ProviderRegistry>,
+    providers: Arc<ProviderRegistry>,
     registry: SkillRegistry,
     scope: ActionRuleScope,
     candidate: LearningCandidate,
     draft_files: Vec<ArtifactFile>,
 ) -> Result<SkillRegressionGate> {
-    #[cfg(feature = "internal-eval-runner")]
-    {
-        internal_eval_regression_report(config, providers, registry, scope, candidate, draft_files)
-            .await
-    }
-
-    #[cfg(not(feature = "internal-eval-runner"))]
-    {
-        let _ = (config, registry, scope, draft_files);
-        Ok(SkillRegressionGate::non_blocking(json!({
-            "regression_execution": "unavailable",
-            "runner": "moa-eval",
-            "reason": "internal-eval-runner feature disabled",
-            "generated_suite": generated_suite_summary(&candidate.payload),
-            "previous_skill": null,
-        })))
-    }
+    internal_eval_regression_report(config, providers, registry, scope, candidate, draft_files)
+        .await
 }
 
-#[cfg(feature = "internal-eval-runner")]
 async fn internal_eval_regression_report(
     config: MoaConfig,
     providers: Arc<ProviderRegistry>,
@@ -115,7 +83,6 @@ async fn internal_eval_regression_report(
     .await
 }
 
-#[cfg(feature = "internal-eval-runner")]
 async fn internal_eval_regression_report_inner(
     config: MoaConfig,
     providers: Arc<ProviderRegistry>,
@@ -257,14 +224,12 @@ async fn internal_eval_regression_report_inner(
     }
 }
 
-#[cfg(feature = "internal-eval-runner")]
 struct GeneratedSuitePayload<'a> {
     relative_path: Option<&'a str>,
     source_format: Option<&'a str>,
     source_text: &'a str,
 }
 
-#[cfg(feature = "internal-eval-runner")]
 impl GeneratedSuitePayload<'_> {
     fn summary(&self) -> Value {
         json!({
@@ -285,7 +250,6 @@ impl GeneratedSuitePayload<'_> {
     }
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn generated_suite_payload(payload: &Value) -> Option<GeneratedSuitePayload<'_>> {
     let suite = payload.get("generated_regression_suite")?;
     Some(GeneratedSuitePayload {
@@ -295,19 +259,6 @@ fn generated_suite_payload(payload: &Value) -> Option<GeneratedSuitePayload<'_>>
     })
 }
 
-#[cfg(not(feature = "internal-eval-runner"))]
-fn generated_suite_summary(payload: &Value) -> Value {
-    let Some(suite) = payload.get("generated_regression_suite") else {
-        return Value::Null;
-    };
-    json!({
-        "relative_path": suite.get("relative_path").and_then(Value::as_str),
-        "source_format": suite.get("source_format").and_then(Value::as_str),
-        "source_text_present": suite.get("source_text").and_then(Value::as_str).is_some(),
-    })
-}
-
-#[cfg(feature = "internal-eval-runner")]
 fn skill_name(candidate: &LearningCandidate) -> Option<String> {
     candidate
         .payload
@@ -317,13 +268,11 @@ fn skill_name(candidate: &LearningCandidate) -> Option<String> {
         .or_else(|| candidate.target_label.clone())
 }
 
-#[cfg(feature = "internal-eval-runner")]
 struct ExecutedRegressionRuns {
     previous: EvalRun,
     candidate: EvalRun,
 }
 
-#[cfg(feature = "internal-eval-runner")]
 async fn execute_previous_and_candidate(
     config: MoaConfig,
     suite: TestSuite,
@@ -347,7 +296,6 @@ async fn execute_previous_and_candidate(
     join.map_err(MoaError::StorageError)?
 }
 
-#[cfg(feature = "internal-eval-runner")]
 async fn execute_previous_and_candidate_inner(
     config: MoaConfig,
     suite: TestSuite,
@@ -402,7 +350,6 @@ async fn execute_previous_and_candidate_inner(
     candidate
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn block_on_current_thread<T>(future: LocalBoxFuture<T>) -> std::result::Result<T, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -411,7 +358,6 @@ fn block_on_current_thread<T>(future: LocalBoxFuture<T>) -> std::result::Result<
     Ok(runtime.block_on(future))
 }
 
-#[cfg(feature = "internal-eval-runner")]
 async fn execute_skill_suite(
     config: MoaConfig,
     suite: TestSuite,
@@ -441,7 +387,6 @@ async fn execute_skill_suite(
     Ok(run)
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn skill_agent_config(skill_name: &str, skill_dir: &Path, label: &str) -> AgentConfig {
     AgentConfig {
         name: format!("skill-{skill_name}-{label}"),
@@ -455,7 +400,6 @@ fn skill_agent_config(skill_name: &str, skill_dir: &Path, label: &str) -> AgentC
     }
 }
 
-#[cfg(feature = "internal-eval-runner")]
 async fn materialize_skill_dir(
     root: PathBuf,
     skill_name: String,
@@ -468,7 +412,6 @@ async fn materialize_skill_dir(
     Ok(skill_dir)
 }
 
-#[cfg(feature = "internal-eval-runner")]
 async fn remove_dir_if_exists(path: &Path) -> Result<()> {
     match fs::remove_dir_all(path).await {
         Ok(()) => Ok(()),
@@ -477,7 +420,6 @@ async fn remove_dir_if_exists(path: &Path) -> Result<()> {
     }
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn default_skill_evaluators() -> Result<Vec<Box<dyn Evaluator>>> {
     let names = DEFAULT_SKILL_EVALUATORS
         .iter()
@@ -486,7 +428,6 @@ fn default_skill_evaluators() -> Result<Vec<Box<dyn Evaluator>>> {
     build_evaluators(&names, &EvaluatorOptions::default()).map_err(map_eval_error)
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn summarize_regression_run(run: &EvalRun) -> SkillRegressionSummary {
     let total_runs = run.results.len();
     let failed_runs = run
@@ -508,7 +449,6 @@ fn summarize_regression_run(run: &EvalRun) -> SkillRegressionSummary {
     }
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn result_score(result: &EvalResult) -> f64 {
     if result.scores.is_empty() {
         return match result.status {
@@ -540,14 +480,12 @@ fn result_score(result: &EvalResult) -> f64 {
     }
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn run_has_execution_failure(run: &EvalRun) -> bool {
     run.results
         .iter()
         .any(|result| matches!(result.status, EvalStatus::Error | EvalStatus::Timeout))
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn estimate_suite_cost(suite: &TestSuite, llm: &dyn LLMProvider) -> f64 {
     let pricing = llm.capabilities().pricing;
     suite
@@ -563,7 +501,6 @@ fn estimate_suite_cost(suite: &TestSuite, llm: &dyn LLMProvider) -> f64 {
         .sum()
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn previous_skill_payload(skill: &moa_skills::registry::Skill) -> Value {
     json!({
         "skill_uid": skill.skill_uid,
@@ -572,7 +509,6 @@ fn previous_skill_payload(skill: &moa_skills::registry::Skill) -> Value {
     })
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn estimate_tokens(text: &str) -> usize {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -582,7 +518,6 @@ fn estimate_tokens(text: &str) -> usize {
     }
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn regression_summary_to_json(summary: &SkillRegressionSummary) -> Value {
     json!({
         "average_score": summary.average_score,
@@ -592,7 +527,6 @@ fn regression_summary_to_json(summary: &SkillRegressionSummary) -> Value {
     })
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn map_eval_error(error: moa_eval_core::EvalError) -> MoaError {
     MoaError::StorageError(error.to_string())
 }

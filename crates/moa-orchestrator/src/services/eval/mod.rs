@@ -2,15 +2,10 @@
 
 pub mod repository;
 
-#[cfg(feature = "internal-eval-runner")]
 use std::sync::Arc;
-#[cfg(feature = "internal-eval-runner")]
 use std::{future::Future, pin::Pin, result::Result as StdResult};
 
-#[cfg(any(feature = "internal-eval-runner", test))]
 use chrono::Utc;
-use moa_authz_schema::Relation;
-#[cfg(feature = "internal-eval-runner")]
 use moa_core::ActionRuleScope;
 use moa_core::RlsContext;
 use moa_core::wire::eval::{
@@ -23,109 +18,106 @@ use moa_core::wire::eval::{
 };
 use moa_core::{MoaConfig, StoragePartitionId, TenantId};
 use moa_db::ScopedConn;
-#[cfg(feature = "internal-eval-runner")]
 use moa_eval::EvalEngine;
 use moa_eval_core::{AgentConfig, EvalRun as CoreEvalRun, TestSuite, build_eval_plan};
-#[cfg(feature = "internal-eval-runner")]
 use moa_eval_core::{EngineOptions, EvaluatorOptions, build_evaluators, evaluate_run};
-#[cfg(any(feature = "internal-eval-runner", test))]
 use moa_eval_core::{EvalResult, ReplayConfig, token_f1};
-#[cfg(feature = "internal-eval-runner")]
 use moa_eval_core::{EvalStatus, ExpectedOutput, TestCase};
-#[cfg(feature = "internal-eval-runner")]
 use moa_lineage_core::LineageEvent;
-#[cfg(any(feature = "internal-eval-runner", test))]
 use moa_lineage_core::{ScoreRecord, ScoreSource, ScoreTarget, ScoreValue};
-#[cfg(feature = "internal-eval-runner")]
 use moa_lineage_sink::{MpscSink, MpscSinkConfig};
 use moa_observability::restate_observability::annotate_restate_handler_span;
-#[cfg(feature = "internal-eval-runner")]
 use moa_scoring::{SCORE_RUN_SOURCE_EVAL_REPLAY, ensure_score_run_parent};
 use moa_scoring::{
     ScoreCompare, ScoreCompareRef, ScoreRunRef, ScoreSummary, ScoringError,
     compare_score_runs_for_tenant, score_summaries_for_tenant,
 };
-#[cfg(any(feature = "internal-eval-runner", test))]
 use repository::ScopedDatasetItem;
-#[cfg(feature = "internal-eval-runner")]
 use repository::load_dataset_items_for_tenant;
 use repository::{list_datasets_for_tenant, register_dataset_for_tenant};
 use restate_sdk::prelude::*;
-#[cfg(feature = "internal-eval-runner")]
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use crate::OrchestratorCtx;
-use crate::handlers::authz_shim::authorize_tenant;
+use crate::handlers::authz_shim::authorize_tenant_operator_or_admin;
 
-#[cfg(feature = "internal-eval-runner")]
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
+const INTERNAL_EVAL_DISPATCH_TOKEN_HASH_FIELD: &str = "_moa_internal_dispatch_token_sha256";
 
-#[cfg(feature = "internal-eval-runner")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalRunExecutionRequest {
     /// Server-assigned hosted eval run identifier.
     pub run_id: Uuid,
     /// Original client eval run request accepted by `Eval/run`.
     pub request: EvalRunRequest,
+    /// Opaque server-issued token created when `Eval/run` accepts the request.
+    pub dispatch_token: String,
 }
 
-#[cfg(feature = "internal-eval-runner")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct AcceptedEvalRunDispatch {
+    response: EvalRunResponse,
+    dispatch_token: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct StoredEvalRunExecutionState {
     status: EvalRunStatus,
     response: Option<EvalRunResponse>,
+    dispatch_token_hash: Option<String>,
 }
 
 /// Restate service surface for hosted eval operations.
 #[restate_sdk::service]
 #[name = "Eval"]
 pub trait Eval {
-    /// Plans a hosted eval suite after a tenant operator check.
+    /// Plans a hosted eval suite after a tenant operator/admin check.
     async fn plan(request: Json<EvalPlanRequest>) -> Result<Json<EvalPlanResponse>, HandlerError>;
 
-    /// Lists supplied hosted eval suite documents after a tenant operator check.
+    /// Lists supplied hosted eval suite documents after a tenant operator/admin check.
     async fn suites_list(
         request: Json<EvalSuiteListRequest>,
     ) -> Result<Json<EvalSuiteListResponse>, HandlerError>;
 
-    /// Runs a hosted eval suite after a tenant operator check.
+    /// Runs a hosted eval suite after a tenant operator/admin check.
     async fn run(request: Json<EvalRunRequest>) -> Result<Json<EvalRunResponse>, HandlerError>;
 
     /// Executes an already accepted hosted eval run.
-    #[cfg(feature = "internal-eval-runner")]
     async fn execute_run(
         request: Json<EvalRunExecutionRequest>,
     ) -> Result<Json<EvalRunResponse>, HandlerError>;
 
-    /// Reads a hosted eval run status after a tenant operator check.
+    /// Reads a hosted eval run status after a tenant operator/admin check.
     async fn run_status(
         request: Json<EvalRunStatusRequest>,
     ) -> Result<Json<EvalRunStatusResponse>, HandlerError>;
 
-    /// Registers a hosted eval dataset after tenant operator checks.
+    /// Registers a hosted eval dataset after tenant operator/admin checks.
     async fn datasets_register(
         request: Json<EvalDatasetRegisterRequest>,
     ) -> Result<Json<EvalDatasetRegisterResponse>, HandlerError>;
 
-    /// Lists hosted eval datasets after a tenant operator check.
+    /// Lists hosted eval datasets after a tenant operator/admin check.
     async fn datasets_list(
         request: Json<EvalDatasetListRequest>,
     ) -> Result<Json<EvalDatasetListResponse>, HandlerError>;
 
-    /// Replays a hosted eval dataset after a tenant operator check.
+    /// Replays a hosted eval dataset after a tenant operator/admin check.
     async fn replay(
         request: Json<EvalReplayRequest>,
     ) -> Result<Json<EvalReplayResponse>, HandlerError>;
 
-    /// Reads hosted eval score summaries after a tenant operator check.
+    /// Reads hosted eval score summaries after a tenant operator/admin check.
     async fn scores(
         request: Json<EvalScoresRequest>,
     ) -> Result<Json<EvalScoresResponse>, HandlerError>;
 
-    /// Compares hosted eval score summaries after a tenant operator check.
+    /// Compares hosted eval score summaries after a tenant operator/admin check.
     async fn compare(
         request: Json<EvalCompareRequest>,
     ) -> Result<Json<EvalCompareResponse>, HandlerError>;
@@ -144,7 +136,7 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalPlanResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "plan");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let config = OrchestratorCtx::current_config().as_ref().clone();
 
         Ok(ctx
@@ -165,7 +157,7 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalSuiteListResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "suites_list");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
 
         Ok(ctx
             .run(|| async move {
@@ -185,57 +177,49 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalRunResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "run");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
 
-        #[cfg(not(feature = "internal-eval-runner"))]
-        {
-            return Err(TerminalError::new_with_code(
-                501,
-                "hosted eval execution requires the internal-eval-runner feature",
-            )
-            .into());
-        }
-
-        #[cfg(feature = "internal-eval-runner")]
-        {
-            let pool = OrchestratorCtx::current_graph_pool();
-            let acceptance_request = request.clone();
-            let response = ctx
-                .run(|| async move {
-                    let suite = parse_suite_document(
-                        acceptance_request
-                            .suite_source
-                            .as_deref()
-                            .unwrap_or("<inline-suite>"),
-                        &acceptance_request.suite_document,
-                    )
+        let pool = OrchestratorCtx::current_graph_pool();
+        let acceptance_request = request.clone();
+        let accepted = ctx
+            .run(|| async move {
+                let suite = parse_suite_document(
+                    acceptance_request
+                        .suite_source
+                        .as_deref()
+                        .unwrap_or("<inline-suite>"),
+                    &acceptance_request.suite_document,
+                )
+                .map_err(eval_error_to_handler_error)?;
+                let response = accepted_eval_run_response(
+                    acceptance_request.tenant_id,
+                    Uuid::now_v7(),
+                    suite.name,
+                );
+                let dispatch_token = generate_internal_eval_dispatch_token();
+                persist_accepted_eval_run(&pool, &acceptance_request, &response, &dispatch_token)
+                    .await
                     .map_err(eval_error_to_handler_error)?;
-                    let response = accepted_eval_run_response(
-                        acceptance_request.tenant_id,
-                        Uuid::now_v7(),
-                        suite.name,
-                    );
-                    persist_accepted_eval_run(&pool, &acceptance_request, &response)
-                        .await
-                        .map_err(eval_error_to_handler_error)?;
-                    Ok::<_, HandlerError>(Json(response))
-                })
-                .name("eval_run_accept")
-                .await?
-                .into_inner();
-            ctx.service_client::<EvalClient>()
-                .execute_run(Json(EvalRunExecutionRequest {
-                    run_id: response.run_id,
-                    request,
+                Ok::<_, HandlerError>(Json(AcceptedEvalRunDispatch {
+                    response,
+                    dispatch_token,
                 }))
-                .send();
-            Ok(Json(response))
-        }
+            })
+            .name("eval_run_accept")
+            .await?
+            .into_inner();
+        ctx.service_client::<EvalClient>()
+            .execute_run(Json(EvalRunExecutionRequest {
+                run_id: accepted.response.run_id,
+                request,
+                dispatch_token: accepted.dispatch_token,
+            }))
+            .send();
+        Ok(Json(accepted.response))
     }
 
-    #[cfg(feature = "internal-eval-runner")]
     #[tracing::instrument(skip(self, ctx, request))]
-    // SAFETY: internal worker entrypoint; Eval/run performs the tenant operator check before dispatch.
+    // SAFETY: internal worker entrypoint; the dispatch-token guard below must pass before run data is returned or mutated.
     async fn execute_run(
         &self,
         ctx: Context<'_>,
@@ -256,6 +240,13 @@ impl Eval for EvalImpl {
             .name("eval_run_load")
             .await?
             .into_inner();
+
+        verify_internal_eval_dispatch_token(
+            run_id,
+            &request.dispatch_token,
+            existing.dispatch_token_hash.as_deref(),
+        )
+        .map_err(eval_error_to_handler_error)?;
 
         if let Some(response) = existing.response {
             if !eval_run_status_is_terminal(response.status) {
@@ -309,7 +300,7 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalRunStatusResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "run_status");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
         Ok(ctx
             .run(move || async move {
@@ -330,7 +321,7 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalDatasetRegisterResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "datasets_register");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -352,7 +343,7 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalDatasetListResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "datasets_list");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -374,28 +365,16 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalReplayResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "replay");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
 
-        #[cfg(not(feature = "internal-eval-runner"))]
-        {
-            return Err(TerminalError::new_with_code(
-                501,
-                "hosted eval replay requires the internal-eval-runner feature",
-            )
-            .into());
-        }
+        let runtime = OrchestratorCtx::current();
+        let config = runtime.config().as_ref().clone();
+        let pool = runtime.graph_pool();
 
-        #[cfg(feature = "internal-eval-runner")]
-        {
-            let runtime = OrchestratorCtx::current();
-            let config = runtime.config().as_ref().clone();
-            let pool = runtime.graph_pool();
-
-            run_replay_request_isolated(config, pool, request)
-                .await
-                .map(Json::from)
-                .map_err(eval_error_to_handler_error)
-        }
+        run_replay_request_isolated(config, pool, request)
+            .await
+            .map(Json::from)
+            .map_err(eval_error_to_handler_error)
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -406,7 +385,7 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalScoresResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "scores");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -436,7 +415,7 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalCompareResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "compare");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -523,6 +502,12 @@ pub enum EvalServiceError {
         /// Authorized request tenant.
         request_tenant_id: TenantId,
     },
+    /// A hosted eval worker dispatch did not carry the token created by `Eval/run`.
+    #[error("eval run {run_id} was not dispatched by Eval/run")]
+    InvalidInternalDispatch {
+        /// Hosted eval run identifier.
+        run_id: Uuid,
+    },
 }
 
 impl From<moa_eval_core::EvalError> for EvalServiceError {
@@ -579,6 +564,47 @@ pub fn accepted_eval_run_response(
     }
 }
 
+fn generate_internal_eval_dispatch_token() -> String {
+    format!("{}.{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn internal_eval_dispatch_token_hash(dispatch_token: &str) -> String {
+    hex::encode(Sha256::digest(dispatch_token.as_bytes()))
+}
+
+fn eval_run_request_document(
+    request: &EvalRunRequest,
+    dispatch_token: &str,
+) -> Result<Value, EvalServiceError> {
+    let mut document = serde_json::to_value(request)?;
+    let Some(object) = document.as_object_mut() else {
+        return Err(EvalServiceError::Runtime {
+            message: "eval run request did not serialize to an object".to_string(),
+        });
+    };
+    object.insert(
+        INTERNAL_EVAL_DISPATCH_TOKEN_HASH_FIELD.to_string(),
+        Value::String(internal_eval_dispatch_token_hash(dispatch_token)),
+    );
+    Ok(document)
+}
+
+fn verify_internal_eval_dispatch_token(
+    run_id: Uuid,
+    dispatch_token: &str,
+    stored_hash: Option<&str>,
+) -> Result<(), EvalServiceError> {
+    let Some(stored_hash) = stored_hash.filter(|value| !value.trim().is_empty()) else {
+        return Err(EvalServiceError::InvalidInternalDispatch { run_id });
+    };
+    let candidate_hash = internal_eval_dispatch_token_hash(dispatch_token);
+    if bool::from(candidate_hash.as_bytes().ct_eq(stored_hash.as_bytes())) {
+        Ok(())
+    } else {
+        Err(EvalServiceError::InvalidInternalDispatch { run_id })
+    }
+}
+
 /// Builds a failed terminal run response for errors before case-level results exist.
 #[must_use]
 pub fn failed_eval_run_response(
@@ -607,12 +633,13 @@ pub fn failed_eval_run_response(
     }
 }
 
-#[cfg(feature = "internal-eval-runner")]
 async fn persist_accepted_eval_run(
     pool: &PgPool,
     request: &EvalRunRequest,
     response: &EvalRunResponse,
+    dispatch_token: &str,
 ) -> Result<(), EvalServiceError> {
+    let request_document = eval_run_request_document(request, dispatch_token)?;
     let scope_context = RlsContext::tenant(request.tenant_id);
     let mut conn = ScopedConn::begin(pool, &scope_context)
         .await
@@ -640,14 +667,13 @@ async fn persist_accepted_eval_run(
     .bind(response.run_id)
     .bind(response.tenant_id.0)
     .bind(eval_run_status_as_str(response.status))
-    .bind(sqlx::types::Json(request.clone()))
+    .bind(sqlx::types::Json(request_document))
     .execute(conn.as_mut())
     .await?;
     conn.commit().await.map_err(scoped_conn_error)?;
     Ok(())
 }
 
-#[cfg(feature = "internal-eval-runner")]
 async fn load_eval_run_execution_state(
     pool: &PgPool,
     tenant_id: TenantId,
@@ -659,7 +685,7 @@ async fn load_eval_run_execution_state(
         .map_err(scoped_conn_error)?;
     let row = sqlx::query(
         r#"
-        SELECT status, response
+        SELECT status, response, request
         FROM analytics.eval_run_status
         WHERE run_id = $1 AND tenant_id = $2
         "#,
@@ -675,15 +701,20 @@ async fn load_eval_run_execution_state(
 
     let status: String = row.try_get("status")?;
     let response: Option<sqlx::types::Json<EvalRunResponse>> = row.try_get("response")?;
+    let request_document: sqlx::types::Json<Value> = row.try_get("request")?;
     let state = StoredEvalRunExecutionState {
         status: eval_run_status_from_str(&status)?,
         response: response.map(|json| json.0),
+        dispatch_token_hash: request_document
+            .0
+            .get(INTERNAL_EVAL_DISPATCH_TOKEN_HASH_FIELD)
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
     };
     conn.commit().await.map_err(scoped_conn_error)?;
     Ok(state)
 }
 
-#[cfg(feature = "internal-eval-runner")]
 async fn mark_eval_run_running(
     pool: &PgPool,
     tenant_id: TenantId,
@@ -718,7 +749,6 @@ async fn mark_eval_run_running(
     Ok(())
 }
 
-#[cfg(feature = "internal-eval-runner")]
 async fn persist_terminal_eval_run_response(
     pool: &PgPool,
     response: &EvalRunResponse,
@@ -808,7 +838,6 @@ fn scoped_conn_error(error: moa_core::MoaError) -> EvalServiceError {
     }
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn normalize_eval_run_response(
     tenant_id: TenantId,
     run_id: Uuid,
@@ -853,22 +882,10 @@ fn eval_run_status_is_terminal(status: EvalRunStatus) -> bool {
 
 /// Runs an already-authorized eval request inside the hosted eval worker.
 pub async fn execute_eval_run_request(run_id: Uuid, request: EvalRunRequest) -> EvalRunResponse {
-    #[cfg(not(feature = "internal-eval-runner"))]
-    {
-        failed_eval_run_response(
-            request.tenant_id,
-            run_id,
-            "hosted eval execution requires the internal-eval-runner feature",
-        )
-    }
-
-    #[cfg(feature = "internal-eval-runner")]
-    {
-        let tenant_id = request.tenant_id;
-        match Box::pin(execute_eval_run_request_inner(run_id, request)).await {
-            Ok(response) => response,
-            Err(error) => failed_eval_run_response(tenant_id, run_id, error.to_string()),
-        }
+    let tenant_id = request.tenant_id;
+    match Box::pin(execute_eval_run_request_inner(run_id, request)).await {
+        Ok(response) => response,
+        Err(error) => failed_eval_run_response(tenant_id, run_id, error.to_string()),
     }
 }
 
@@ -877,27 +894,15 @@ pub async fn execute_eval_run_request_isolated(
     run_id: Uuid,
     request: EvalRunRequest,
 ) -> EvalRunResponse {
-    #[cfg(not(feature = "internal-eval-runner"))]
-    {
-        failed_eval_run_response(
-            request.tenant_id,
-            run_id,
-            "hosted eval execution requires the internal-eval-runner feature",
-        )
-    }
-
-    #[cfg(feature = "internal-eval-runner")]
-    {
-        let tenant_id = request.tenant_id;
-        let join = tokio::task::spawn_blocking(move || {
-            block_on_current_thread(Box::pin(execute_eval_run_request(run_id, request)))
-        })
-        .await;
-        match join {
-            Ok(Ok(response)) => response,
-            Ok(Err(error)) => failed_eval_run_response(tenant_id, run_id, error),
-            Err(error) => failed_eval_run_response(tenant_id, run_id, error.to_string()),
-        }
+    let tenant_id = request.tenant_id;
+    let join = tokio::task::spawn_blocking(move || {
+        block_on_current_thread(Box::pin(execute_eval_run_request(run_id, request)))
+    })
+    .await;
+    match join {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => failed_eval_run_response(tenant_id, run_id, error),
+        Err(error) => failed_eval_run_response(tenant_id, run_id, error.to_string()),
     }
 }
 
@@ -958,7 +963,6 @@ fn suite_list_response(
     })
 }
 
-#[cfg(feature = "internal-eval-runner")]
 async fn execute_eval_run_request_inner(
     run_id: Uuid,
     request: EvalRunRequest,
@@ -1083,14 +1087,12 @@ fn render_hosted_terminal_report(
     output
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn attach_summary_field(summary: &mut Value, field: &str, value: Value) {
     if let Some(object) = summary.as_object_mut() {
         object.insert(field.to_string(), value);
     }
 }
 
-#[cfg(feature = "internal-eval-runner")]
 async fn replay_dataset_for_tenant(
     config: MoaConfig,
     pool: PgPool,
@@ -1144,7 +1146,6 @@ async fn replay_dataset_for_tenant(
     })
 }
 
-#[cfg(feature = "internal-eval-runner")]
 async fn ensure_eval_replay_score_run_parent(
     pool: &PgPool,
     tenant_id: TenantId,
@@ -1168,7 +1169,6 @@ async fn ensure_eval_replay_score_run_parent(
     Ok(())
 }
 
-#[cfg(feature = "internal-eval-runner")]
 async fn run_replay_request_isolated(
     config: MoaConfig,
     pool: PgPool,
@@ -1184,7 +1184,6 @@ async fn run_replay_request_isolated(
     .map_err(|message| EvalServiceError::Runtime { message })?
 }
 
-#[cfg(feature = "internal-eval-runner")]
 #[derive(Clone, Debug)]
 struct ScopedReplayReport {
     run_id: Uuid,
@@ -1193,7 +1192,6 @@ struct ScopedReplayReport {
     scores: usize,
 }
 
-#[cfg(feature = "internal-eval-runner")]
 async fn replay_items_live(
     config: MoaConfig,
     sink: Arc<MpscSink>,
@@ -1252,7 +1250,6 @@ async fn replay_items_live(
     Ok(report)
 }
 
-#[cfg(any(feature = "internal-eval-runner", test))]
 fn replay_score_records_for_item(
     item: &ScopedDatasetItem,
     result: &EvalResult,
@@ -1301,7 +1298,6 @@ fn replay_score_records_for_item(
     records
 }
 
-#[cfg(any(feature = "internal-eval-runner", test))]
 fn dataset_run_item_score_record(
     item: &ScopedDatasetItem,
     replay_config: &ReplayConfig,
@@ -1372,7 +1368,6 @@ fn parse_agent_config_documents(
         .collect()
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn option_u64_to_usize(
     value: Option<u64>,
     field: &'static str,
@@ -1384,7 +1379,6 @@ fn option_u64_to_usize(
         .transpose()
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn eval_ci_exit_code(ci: bool, results: &[EvalResult]) -> i32 {
     if !ci {
         return 0;
@@ -1404,7 +1398,6 @@ fn eval_ci_exit_code(ci: bool, results: &[EvalResult]) -> i32 {
     0
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn replay_evaluator_name(cfg: &ReplayConfig) -> String {
     match (&cfg.model_override, &cfg.embedder_override) {
         (Some(model), Some(embedder)) => format!("replay-f1:{model}:{embedder}"),
@@ -1420,6 +1413,9 @@ fn eval_error_to_handler_error(error: EvalServiceError) -> HandlerError {
         | EvalServiceError::DatasetTenantMismatch { .. }
         | EvalServiceError::IntegerTooLarge { .. } => {
             TerminalError::new_with_code(400, error.to_string()).into()
+        }
+        EvalServiceError::InvalidInternalDispatch { .. } => {
+            TerminalError::new_with_code(403, error.to_string()).into()
         }
         EvalServiceError::EmptyTenantDataset { .. }
         | EvalServiceError::RunTenantMismatch { .. } => {
@@ -1484,7 +1480,6 @@ fn scoring_error_to_eval_error(error: ScoringError) -> EvalServiceError {
     }
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn block_on_current_thread<T>(future: BoxFuture<T>) -> StdResult<T, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1509,7 +1504,6 @@ mod tests {
         let item = ScopedDatasetItem {
             item_id,
             tenant_id,
-            #[cfg(feature = "internal-eval-runner")]
             query: "alpha?".to_string(),
             expected_answer: Some("alpha beta".to_string()),
             expected_chunk_ids: vec![
@@ -1567,7 +1561,6 @@ mod tests {
         let item = ScopedDatasetItem {
             item_id,
             tenant_id: TenantId::from(uuid("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")),
-            #[cfg(feature = "internal-eval-runner")]
             query: "alpha?".to_string(),
             expected_answer: Some("alpha beta".to_string()),
             expected_chunk_ids: Vec::new(),
@@ -1636,7 +1629,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "internal-eval-runner")]
     #[test]
     fn eval_run_worker_mismatched_run_id_becomes_failed_response() {
         // Pins: terminal persistence never stores a worker response under the wrong accepted run id.
@@ -1664,6 +1656,31 @@ mod tests {
             normalized.error.as_deref(),
             Some("eval worker produced mismatched run id 22222222-2222-2222-2222-222222222222")
         );
+    }
+
+    #[test]
+    fn internal_dispatch_guard_requires_matching_token_hash() {
+        // Pins: Eval/execute_run cannot be used without the dispatch token generated by Eval/run.
+        let run_id = uuid("11111111-1111-1111-1111-111111111111");
+        let token = "server-issued-token";
+        let stored_hash = internal_eval_dispatch_token_hash(token);
+
+        verify_internal_eval_dispatch_token(run_id, token, Some(&stored_hash))
+            .expect("matching dispatch token should pass");
+
+        let missing = verify_internal_eval_dispatch_token(run_id, token, None)
+            .expect_err("missing dispatch token hash should reject");
+        assert!(matches!(
+            missing,
+            EvalServiceError::InvalidInternalDispatch { run_id: actual } if actual == run_id
+        ));
+
+        let wrong = verify_internal_eval_dispatch_token(run_id, "wrong-token", Some(&stored_hash))
+            .expect_err("wrong dispatch token should reject");
+        assert!(matches!(
+            wrong,
+            EvalServiceError::InvalidInternalDispatch { run_id: actual } if actual == run_id
+        ));
     }
 
     fn replay_config(run_id: Uuid, dataset_id: Uuid) -> ReplayConfig {

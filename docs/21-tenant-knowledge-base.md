@@ -55,6 +55,15 @@ Provider credentials and account tokens must never be stored in request
 metadata, tracing fields, graph node properties, graph edge properties,
 knowledge metadata, or query trace rows.
 
+Signed Nango and Merge webhooks are provider CDC/sync signals, not raw data
+ingestion payloads. After signature verification, MOA binds the provider event
+to a tenant `KnowledgeConnection` by signed tenant/connection identifiers or by
+the provider account identity, records the event idempotently, advances the
+active sync run to `provider_synced` when the provider reports completion, and
+dispatches the ingestion workflow. Duplicate deliveries do not enqueue another
+workflow run, and ambiguous or unbound provider account events fail before local
+state is written.
+
 The provider abstraction is:
 
 ```rust
@@ -103,6 +112,16 @@ All parsers emit the same structure:
 Block and chunk hashes are content identities, not database identities. They
 let `moa-knowledge` diff parser output, reuse embeddings, tombstone deleted
 chunks, and produce stable citations across re-syncs.
+
+Signed parser completion webhooks are ingestion signals only after they bind to
+tenant, connection, object, and an active sync run. A valid LlamaParse or
+Reducto callback must include safe binding metadata such as `tenant_id`,
+`connection_uid`, and either `object_uid` or `source_id`; MOA verifies that the
+object belongs to the signed connection before recording the event. Accepted
+completion callbacks record an object-scoped `parser_completion_received` step,
+advance a waiting run to `provider_synced`, and enqueue local ingestion.
+Malformed, ambiguous, or unbound callbacks fail with safe error messages and
+must not echo provider tokens, parser secrets, or raw document content.
 
 ## Graph Contract
 
@@ -200,6 +219,7 @@ provider_records_listed
 object_change_checked
 content_fetched
 parse_submitted
+parser_completion_received
 parse_completed
 normalized
 blocks_diffed

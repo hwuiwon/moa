@@ -27,9 +27,9 @@ pub enum IngestError {
     /// Fact extraction failed.
     #[error("fact extraction: {0}")]
     Extraction(String),
-    /// LLM chat transport failed.
-    #[error(transparent)]
-    LlmChat(#[from] moa_providers::LlmChatError),
+    /// Model-backed memory inference failed.
+    #[error("model inference: {0}")]
+    ModelInference(String),
     /// The process-local ingestion runtime was not installed.
     #[error("ingestion runtime has not been installed")]
     RuntimeNotInstalled,

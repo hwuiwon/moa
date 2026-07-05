@@ -10,7 +10,6 @@ regression = ["dep:moa-eval-core"]
 skill-learning = ["regression", "dep:moa-providers", "dep:moa-session"]
 
 [dependencies]
-async-trait.workspace = true
 chrono.workspace = true
 hex.workspace = true
 moa-artifacts.workspace = true
@@ -21,7 +20,6 @@ moa-memory-graph = { workspace = true }
 moa-memory-types = { workspace = true }
 moa-providers = { workspace = true, optional = true }
 moa-session = { workspace = true, optional = true }
-moka.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

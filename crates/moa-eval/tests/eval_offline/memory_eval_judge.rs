@@ -14,6 +14,58 @@ use moa_eval_core::EvalError;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
+struct PairwiseJudgeEvalCase {
+    name: &'static str,
+    probe_type: ProbeType,
+    query: &'static str,
+    gold_answer: &'static str,
+    candidate_answer: &'static str,
+    baseline_answer: &'static str,
+    verdicts: &'static [&'static str],
+    expected_winner: Option<PairwiseWinner>,
+    expected_answer_faithful: Option<bool>,
+    expected_explanation: &'static str,
+}
+
+const PAIRWISE_JUDGE_EVAL_SET: &[PairwiseJudgeEvalCase] = &[
+    PairwiseJudgeEvalCase {
+        name: "multi-hop candidate wins when swapped orders agree",
+        probe_type: ProbeType::MultiHop,
+        query: "Where should the service deploy and which runbook applies?",
+        gold_answer: "Deploy to prod-us-east and use RUNBOOK-42.",
+        candidate_answer: "Deploy to prod-us-east and use RUNBOOK-42.",
+        baseline_answer: "Deploy to prod-us-east.",
+        verdicts: &[r#"{"winner":"A"}"#, r#"{"winner":"B"}"#],
+        expected_winner: Some(PairwiseWinner::Candidate),
+        expected_answer_faithful: Some(true),
+        expected_explanation: "pairwise_judge_agreed_candidate",
+    },
+    PairwiseJudgeEvalCase {
+        name: "preference baseline wins when swapped orders agree",
+        probe_type: ProbeType::PreferenceApplication,
+        query: "Format the implementation answer the way the user prefers.",
+        gold_answer: "Use terse bullets and Rust examples.",
+        candidate_answer: "Use detailed paragraphs.",
+        baseline_answer: "Use terse bullets and Rust examples.",
+        verdicts: &[r#"{"winner":"B"}"#, r#"{"winner":"A"}"#],
+        expected_winner: Some(PairwiseWinner::Baseline),
+        expected_answer_faithful: Some(false),
+        expected_explanation: "pairwise_judge_agreed_baseline",
+    },
+    PairwiseJudgeEvalCase {
+        name: "no winner when swapped orders disagree",
+        probe_type: ProbeType::MultiHop,
+        query: "Which service owns the library that checkout depends on?",
+        gold_answer: "Checkout depends on lib-payments, owned by Payments Platform.",
+        candidate_answer: "Checkout depends on lib-payments, owned by Payments Platform.",
+        baseline_answer: "Checkout depends on lib-auth.",
+        verdicts: &[r#"{"winner":"A"}"#, r#"{"winner":"A"}"#],
+        expected_winner: None,
+        expected_answer_faithful: None,
+        expected_explanation: "pairwise_judge_no_agreement",
+    },
+];
+
 #[tokio::test]
 async fn deterministic_judge_scores_closed_form_probe_types() -> TestResult {
     // Pins: closed-form memory eval probes are scored deterministically from gold text and flags.
@@ -119,7 +171,7 @@ async fn deterministic_judge_scores_closed_form_probe_types() -> TestResult {
 
 #[tokio::test]
 async fn deterministic_judge_rejects_open_ended_probe_types() {
-    // Pins: multi-hop and preference-application probes must be judged by the LLM path.
+    // Pins: multi-hop and preference-application probes must use pairwise judging.
     let judge = DeterministicJudge::new();
 
     for probe_type in [ProbeType::MultiHop, ProbeType::PreferenceApplication] {
@@ -140,85 +192,73 @@ async fn deterministic_judge_rejects_open_ended_probe_types() {
 }
 
 #[tokio::test]
-async fn pairwise_llm_judge_declares_candidate_win_only_when_swapped_orders_agree() -> TestResult {
-    // Pins: pairwise judging maps swapped A/B labels back before declaring the candidate winner.
-    let provider = ScriptedJudgeProvider::new([r#"{"winner":"A"}"#, r#"{"winner":"B"}"#]);
-    let judge = PairwiseLlmJudge::new(Arc::new(provider.clone()));
-    let input = JudgeInput::new(
-        ProbeType::MultiHop,
-        "Deploy to prod-us-east and use RUNBOOK-42.",
-        "Deploy to prod-us-east and use RUNBOOK-42.",
-    )
-    .with_query("Where should the service deploy and which runbook applies?")
-    .with_baseline_answer("Deploy to prod-us-east.");
+async fn pairwise_memory_eval_set_scores_open_ended_probes() -> TestResult {
+    // Pins: the pairwise judge is exercised by an eval-style case set, not only by one-off calls.
+    for case in PAIRWISE_JUDGE_EVAL_SET {
+        let provider = ScriptedJudgeProvider::new(case.verdicts.iter().copied());
+        let judge = PairwiseLlmJudge::new(Arc::new(provider.clone()));
+        let input = JudgeInput::new(case.probe_type, case.gold_answer, case.candidate_answer)
+            .with_query(case.query)
+            .with_baseline_answer(case.baseline_answer);
 
-    let outcome = judge.judge(&input).await?;
+        let outcome = judge.judge(&input).await?;
 
-    assert_eq!(outcome.pairwise_winner, Some(PairwiseWinner::Candidate));
-    assert_eq!(outcome.answer_faithful, Some(true));
-    assert_eq!(
-        outcome.explanation, "pairwise_judge_agreed_candidate",
-        "outcome should identify the agreed pairwise path"
-    );
+        assert_eq!(
+            outcome.pairwise_winner, case.expected_winner,
+            "{}: winner should match swapped-order agreement",
+            case.name
+        );
+        assert_eq!(
+            outcome.answer_faithful, case.expected_answer_faithful,
+            "{}: answer_faithful should follow the agreed pairwise winner",
+            case.name
+        );
+        assert_eq!(
+            outcome.explanation, case.expected_explanation,
+            "{}: explanation should identify the scoring path",
+            case.name
+        );
 
-    let requests = provider.requests();
-    assert_eq!(
-        requests.len(),
-        2,
-        "pairwise judge should make two LLM calls"
-    );
-    assert!(
-        requests[0]
-            .messages
-            .get(1)
-            .expect("first judge request has a dynamic user prompt")
-            .content
-            .contains("Answer A:\nDeploy to prod-us-east and use RUNBOOK-42."),
-        "first request should put candidate answer in slot A"
-    );
-    assert!(
-        requests[1]
-            .messages
-            .get(1)
-            .expect("second judge request has a dynamic user prompt")
-            .content
-            .contains("Answer B:\nDeploy to prod-us-east and use RUNBOOK-42."),
-        "swapped request should put candidate answer in slot B"
-    );
-    assert_eq!(
-        requests[0].messages[0].content, requests[1].messages[0].content,
-        "pairwise judge should reuse a stable system prompt across A/B orderings"
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn pairwise_llm_judge_returns_no_winner_when_swapped_orders_disagree() -> TestResult {
-    // Pins: pairwise judging does not declare a win when A/B and B/A verdicts conflict.
-    let provider = ScriptedJudgeProvider::new([r#"{"winner":"A"}"#, r#"{"winner":"A"}"#]);
-    let judge = PairwiseLlmJudge::new(Arc::new(provider));
-    let input = JudgeInput::new(
-        ProbeType::PreferenceApplication,
-        "Use terse bullets and Rust examples.",
-        "Use terse bullets and Rust examples.",
-    )
-    .with_query("Format your next implementation answer the way I prefer.")
-    .with_baseline_answer("Use detailed paragraphs.");
-
-    let outcome = judge.judge(&input).await?;
-
-    assert_eq!(outcome.pairwise_winner, None);
-    assert_eq!(outcome.answer_faithful, None);
-    assert_eq!(outcome.explanation, "pairwise_judge_no_agreement");
+        let requests = provider.requests();
+        assert_eq!(
+            requests.len(),
+            2,
+            "{}: pairwise judge should make one A/B and one B/A call",
+            case.name
+        );
+        assert!(
+            requests[0]
+                .messages
+                .get(1)
+                .expect("first judge request has a dynamic user prompt")
+                .content
+                .contains(&format!("Answer A:\n{}", case.candidate_answer)),
+            "{}: first request should put candidate answer in slot A",
+            case.name
+        );
+        assert!(
+            requests[1]
+                .messages
+                .get(1)
+                .expect("second judge request has a dynamic user prompt")
+                .content
+                .contains(&format!("Answer B:\n{}", case.candidate_answer)),
+            "{}: swapped request should put candidate answer in slot B",
+            case.name
+        );
+        assert_eq!(
+            requests[0].messages[0].content, requests[1].messages[0].content,
+            "{}: pairwise judge should reuse a stable system prompt across A/B orderings",
+            case.name
+        );
+    }
 
     Ok(())
 }
 
 #[tokio::test]
 async fn pairwise_llm_judge_rejects_unrecognized_verdict_responses() {
-    // Pins: a garbage or empty judge response surfaces as InvalidConfig with the offending text,
-    // instead of being silently treated as a tie or a winner.
+    // Pins: garbage or empty judge responses surface as InvalidConfig instead of silent ties.
     for unparseable in ["", "totally unrelated prose", r#"{"choice":"maybe"}"#] {
         let provider = ScriptedJudgeProvider::new([unparseable]);
         let judge = PairwiseLlmJudge::new(Arc::new(provider.clone()));
@@ -285,39 +325,6 @@ async fn pairwise_llm_judge_rejects_closed_form_probes_without_provider_calls() 
     );
 }
 
-#[test]
-fn live_judge_credential_helper_fails_clearly_when_opted_in_without_key() {
-    // Pins: live memory judge opt-in requires a non-empty OpenAI key with a clear failure.
-    let error = live_judge_credentials_enabled(Some("1"), None)
-        .expect_err("opted-in live judge should require MOA_OPENAI_API_KEY");
-    assert!(
-        error.contains("MOA_RUN_LIVE_MEMORY_EVAL_JUDGE=1") && error.contains("MOA_OPENAI_API_KEY"),
-        "credential error should name both the flag and missing key: {error}"
-    );
-
-    assert!(!live_judge_credentials_enabled(None, None).expect("unset flag skips live judge"));
-    assert!(
-        !live_judge_credentials_enabled(Some("0"), None).expect("disabled flag skips live judge")
-    );
-    assert!(
-        live_judge_credentials_enabled(Some("1"), Some("sk-test"))
-            .expect("non-empty key enables live judge")
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires MOA_RUN_LIVE_MEMORY_EVAL_JUDGE=1 and MOA_OPENAI_API_KEY"]
-async fn live_memory_eval_judge_validates_openai_credentials() {
-    // Pins: ignored live judge scaffold fails clearly when explicitly opted in without credentials.
-    let run_flag = std::env::var("MOA_RUN_LIVE_MEMORY_EVAL_JUDGE").ok();
-    let openai_api_key = std::env::var("MOA_OPENAI_API_KEY").ok();
-    match live_judge_credentials_enabled(run_flag.as_deref(), openai_api_key.as_deref()) {
-        Ok(true) => {}
-        Ok(false) => return,
-        Err(message) => panic!("{message}"),
-    }
-}
-
 #[derive(Clone)]
 struct ScriptedJudgeProvider {
     responses: Arc<Mutex<VecDeque<String>>>,
@@ -325,7 +332,7 @@ struct ScriptedJudgeProvider {
 }
 
 impl ScriptedJudgeProvider {
-    fn new<const N: usize>(responses: [&str; N]) -> Self {
+    fn new(responses: impl IntoIterator<Item = &'static str>) -> Self {
         Self {
             responses: Arc::new(Mutex::new(
                 responses
@@ -389,34 +396,4 @@ impl LLMProvider for ScriptedJudgeProvider {
             thought_signature: None,
         }))
     }
-}
-
-fn live_judge_credentials_enabled(
-    run_flag: Option<&str>,
-    openai_api_key: Option<&str>,
-) -> std::result::Result<bool, String> {
-    // Accept the common truthy spellings (`1`, `true`, `yes`, `on`) so a
-    // developer's `.env` enables the live judge regardless of casing/spacing.
-    let flag_enabled = run_flag
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false);
-    if !flag_enabled {
-        return Ok(false);
-    }
-
-    let Some(_api_key) = openai_api_key
-        .map(str::trim)
-        .filter(|api_key| !api_key.is_empty())
-    else {
-        return Err(
-            "MOA_RUN_LIVE_MEMORY_EVAL_JUDGE=1 requires non-empty MOA_OPENAI_API_KEY".to_string(),
-        );
-    };
-
-    Ok(true)
 }

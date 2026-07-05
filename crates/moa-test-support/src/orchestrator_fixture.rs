@@ -29,7 +29,7 @@ use serde::Deserialize;
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use tempfile::TempDir;
-use testcontainers::core::{Host, IntoContainerPort, WaitFor};
+use testcontainers::core::{ContainerPort, Host, IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::sync::{Mutex, OnceCell};
@@ -61,7 +61,10 @@ mod scripted_provider;
 pub use client::{TestApiClient, TestSessionHandle};
 pub use conversation::{ConversationOptions, drive_conversation};
 
-use openfga::{bootstrap_openfga, external_fga_client, start_openfga_container, wait_for_openfga};
+use openfga::{
+    bootstrap_openfga, external_fga_client, fixture_fga_endpoint_from_env, start_openfga_container,
+    wait_for_openfga,
+};
 use postgres::{ensure_postgres_image, start_postgres_container, wait_for_postgres};
 use process::{
     OrchestratorSpawnConfig, locate_orchestrator_binary, pick_free_port, repo_root,
@@ -183,24 +186,36 @@ impl OrchestratorTestFixture {
         let repo_root = repo_root();
         ensure_postgres_image(&repo_root).await?;
         let postgres = start_postgres_container().await?;
-        let postgres_port = postgres.get_host_port_ipv4(5432.tcp()).await?;
+        let postgres_port =
+            fixture_host_port_ipv4(&postgres, "postgres database", 5432.tcp()).await?;
         let postgres_url = format!(
             "postgres://{POSTGRES_USER}:{POSTGRES_PASSWORD}@127.0.0.1:{postgres_port}/{POSTGRES_DB}"
         );
         wait_for_postgres(&postgres_url).await?;
 
         let restate = start_restate_container().await?;
-        let ingress_port = restate.get_host_port_ipv4(8080.tcp()).await?;
-        let admin_port = restate.get_host_port_ipv4(9070.tcp()).await?;
+        let ingress_port = fixture_host_port_ipv4(&restate, "restate ingress", 8080.tcp()).await?;
+        let admin_port = fixture_host_port_ipv4(&restate, "restate admin", 9070.tcp()).await?;
         let ingress_url = format!("http://127.0.0.1:{ingress_port}");
         let admin_url = format!("http://127.0.0.1:{admin_port}");
         wait_for_restate_admin(&admin_url).await?;
 
-        let openfga = start_openfga_container().await?;
-        let openfga_port = openfga.get_host_port_ipv4(8080.tcp()).await?;
-        let openfga_url = format!("http://127.0.0.1:{openfga_port}");
+        let (openfga_url, openfga_container, openfga_preshared_key) =
+            match fixture_fga_endpoint_from_env() {
+                Some(endpoint) => (endpoint.url, None, endpoint.preshared_key),
+                None => {
+                    let openfga = start_openfga_container().await?;
+                    let openfga_port =
+                        fixture_host_port_ipv4(&openfga, "openfga api", 8080.tcp()).await?;
+                    (
+                        format!("http://127.0.0.1:{openfga_port}"),
+                        Some(openfga),
+                        OPENFGA_PRESHARED_KEY.to_string(),
+                    )
+                }
+            };
         wait_for_openfga(&openfga_url).await?;
-        let fga_config = bootstrap_openfga(&openfga_url, OPENFGA_PRESHARED_KEY).await?;
+        let fga_config = bootstrap_openfga(&openfga_url, &openfga_preshared_key).await?;
         let fga_client =
             FgaClient::new(fga_config.clone()).context("build fixture OpenFGA client")?;
 
@@ -216,7 +231,7 @@ impl OrchestratorTestFixture {
             }
             _ => {
                 let redis = start_redis_container().await?;
-                let redis_port = redis.get_host_port_ipv4(6379.tcp()).await?;
+                let redis_port = fixture_host_port_ipv4(&redis, "valkey redis", 6379.tcp()).await?;
                 let redis_url = format!("redis://127.0.0.1:{redis_port}/0");
                 wait_for_redis(&redis_url).await?;
                 (redis_url, Some(redis))
@@ -273,7 +288,7 @@ impl OrchestratorTestFixture {
             _script_dir: Some(script_dir),
             _postgres: Some(postgres),
             _restate: Some(restate),
-            _openfga: Some(openfga),
+            _openfga: openfga_container,
             _redis: redis_container,
             orchestrator: Mutex::new(Some(orchestrator)),
         })
@@ -355,6 +370,44 @@ impl OrchestratorTestFixture {
         };
         fga.apply_raw(body).await.context("apply OpenFGA tuple")
     }
+}
+
+async fn fixture_host_port_ipv4(
+    container: &ContainerAsync<GenericImage>,
+    label: &'static str,
+    port: ContainerPort,
+) -> Result<u16> {
+    let mut last_error = None;
+    for attempt in 1..=10 {
+        match container.get_host_port_ipv4(port).await {
+            Ok(host_port) => return Ok(host_port),
+            Err(error) => {
+                let error = error.to_string();
+                tracing::debug!(
+                    mapping = label,
+                    container_id = %container.id(),
+                    requested_port = %port,
+                    attempt,
+                    error = %error,
+                    "fixture container host-port mapping unavailable"
+                );
+                last_error = Some(error);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let available_ports = match container.ports().await {
+        Ok(ports) => format!("{ports:?}"),
+        Err(error) => format!("unavailable: {error}"),
+    };
+    let last_error = last_error
+        .as_deref()
+        .unwrap_or("no get_host_port_ipv4 error recorded");
+    bail!(
+        "fixture container host-port mapping `{label}` failed after retries; container_id={}; requested_port={port}; available_ports={available_ports}; last_error={last_error}",
+        container.id()
+    )
 }
 
 impl Drop for OrchestratorTestFixture {

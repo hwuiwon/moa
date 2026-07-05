@@ -19,6 +19,7 @@ use moa_orchestrator::{
         skip_fga_from_env,
     },
     runtime::{
+        channel_ingress::spawn_channel_ingress,
         database::{apply_database_migrations, build_database_pool, database_search_path},
         deps::RuntimeDeps,
         endpoint::{
@@ -156,6 +157,12 @@ async fn async_main() -> anyhow::Result<()> {
     let mut health_server =
         spawn_health_server(health_listener, probe_state.clone(), shutdown.clone());
     let mut scim_server = spawn_scim_server(scim_listener, scim_state, shutdown.clone());
+    let mut channel_ingress = spawn_channel_ingress(
+        runtime_deps.channel_adapters.clone(),
+        runtime_deps.session_store.clone(),
+        restate_ingress_url.clone(),
+        shutdown.clone(),
+    );
 
     tracing::info!(
         port = args.port,
@@ -183,6 +190,9 @@ async fn async_main() -> anyhow::Result<()> {
             shutdown.cancel();
             health_server.abort();
             scim_server.abort();
+            if let Some(handle) = channel_ingress.take() {
+                handle.abort();
+            }
             result.context("join Restate handler server")?;
             bail!("Restate handler server exited unexpectedly");
         }
@@ -191,6 +201,9 @@ async fn async_main() -> anyhow::Result<()> {
             shutdown.cancel();
             restate_server.abort();
             scim_server.abort();
+            if let Some(handle) = channel_ingress.take() {
+                handle.abort();
+            }
             result.context("join health probe server")??;
             bail!("health probe server exited unexpectedly");
         }
@@ -199,6 +212,9 @@ async fn async_main() -> anyhow::Result<()> {
             shutdown.cancel();
             restate_server.abort();
             health_server.abort();
+            if let Some(handle) = channel_ingress.take() {
+                handle.abort();
+            }
             result.context("join SCIM server")??;
             bail!("SCIM server exited unexpectedly");
         }
@@ -242,6 +258,11 @@ async fn async_main() -> anyhow::Result<()> {
             scim_server
                 .await
                 .context("join SCIM server during shutdown")??;
+            if let Some(handle) = channel_ingress.take() {
+                handle
+                    .await
+                    .context("join channel ingress during shutdown")?;
+            }
         }
     }
 

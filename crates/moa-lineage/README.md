@@ -13,7 +13,7 @@ owns the opt-in compliance tier.
 | `citation/` | `moa-lineage-citation` | Provider citation adapters plus BM25/NLI answer-source verification |
 | `sink/` | `moa-lineage-sink` | mpsc + fjall durable journal + TimescaleDB writer + worker lifecycle |
 | `otel/` | `moa-lineage-otel` | OTel GenAI v1.38 + OpenInference attribute emitters; tracing bridge |
-| `audit/` | `moa-lineage-audit` | BLAKE3 hash chain + ct-merkle + Object Lock + PII HMAC vault |
+| `audit/` | `moa-lineage-audit` | BLAKE3 hash chain + Object Lock + PII HMAC vault |
 
 ## Public surface
 
