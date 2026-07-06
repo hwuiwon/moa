@@ -52,6 +52,8 @@ fn memory_budget_probe_results(cross_user_leak: bool) -> Vec<ProbeResult> {
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
             preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
         },
         ProbeResult {
             probe_id: "probe-cross-user-leak".to_string(),
@@ -69,6 +71,8 @@ fn memory_budget_probe_results(cross_user_leak: bool) -> Vec<ProbeResult> {
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
             preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
         },
         ProbeResult {
             probe_id: "probe-pii-redacted".to_string(),
@@ -92,6 +96,8 @@ fn memory_budget_probe_results(cross_user_leak: bool) -> Vec<ProbeResult> {
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
             preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
         },
     ]
 }
@@ -125,6 +131,8 @@ fn reranker_recall_regression_probe_results() -> Vec<ProbeResult> {
         temporal_filter_parsed: None,
         temporal_filter_matches_as_of: None,
         preference_context_hit: None,
+        graph_diagnostics: None,
+        graph_comparison: None,
     }]
 }
 
@@ -157,6 +165,8 @@ fn reranker_latency_without_gain_probe_results() -> Vec<ProbeResult> {
         temporal_filter_parsed: None,
         temporal_filter_matches_as_of: None,
         preference_context_hit: None,
+        graph_diagnostics: None,
+        graph_comparison: None,
     }]
 }
 
@@ -202,6 +212,8 @@ fn memory_budget_regression_probe_results(full_recall: bool) -> Vec<ProbeResult>
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
             preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
         },
         ProbeResult {
             probe_id: "probe-regression-cross-user-clean".to_string(),
@@ -219,6 +231,8 @@ fn memory_budget_regression_probe_results(full_recall: bool) -> Vec<ProbeResult>
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
             preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
         },
     ]
 }

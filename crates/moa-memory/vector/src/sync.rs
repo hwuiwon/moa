@@ -227,12 +227,23 @@ pub(crate) async fn fetch_current_vector_items(
     }
     let rows = sqlx::query(
         r#"
-        SELECT uid, user_id, label, pii_class, embedding,
-               embedding_model, embedding_model_version, valid_to
-          FROM moa.embeddings
-         WHERE storage_partition_id = $1
-           AND uid = ANY($2::uuid[])
-         ORDER BY uid
+        SELECT embedding.uid,
+               embedding.user_id,
+               embedding.label,
+               embedding.pii_class,
+               embedding.embedding,
+               embedding.embedding_model,
+               embedding.embedding_model_version,
+               knowledge_chunk.text AS search_text,
+               embedding.valid_to
+          FROM moa.embeddings AS embedding
+          LEFT JOIN moa.knowledge_chunks AS knowledge_chunk
+            ON knowledge_chunk.storage_partition_id = embedding.storage_partition_id
+           AND knowledge_chunk.graph_node_uid = embedding.uid
+           AND embedding.label = 'Chunk'
+         WHERE embedding.storage_partition_id = $1
+           AND embedding.uid = ANY($2::uuid[])
+         ORDER BY embedding.uid
         "#,
     )
     .bind(storage_partition_id)

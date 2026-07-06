@@ -45,12 +45,13 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         .map(str::to_string)
         .unwrap_or_else(|| format!("{:?}", options.extractor_mode));
     println!(
-        "wrote memory retrieval eval report: output={} probes={} lane={:?} rewrite_policy={:?} graph_expansion_policy={} rewrite_calls={} rewrite_skips={} rewrite_call_rate={:.3} reranker={} extractor={} consolidate={} digests={} merged={} duplicates_remaining={} digests_rebuilt={} est_usd={:.4} aborted_over_budget={} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} preference_context_rate={:.3} p95_retrieval_latency_ms={} retrieval_plus_rewrite_p95_latency_ms={}",
+        "wrote memory retrieval eval report: output={} probes={} lane={:?} rewrite_policy={:?} graph_expansion_policy={} graph_policy={} rewrite_calls={} rewrite_skips={} rewrite_call_rate={:.3} reranker={} extractor={} consolidate={} digests={} merged={} duplicates_remaining={} digests_rebuilt={} est_usd={:.4} aborted_over_budget={} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} preference_context_rate={:.3} p95_retrieval_latency_ms={} retrieval_plus_rewrite_p95_latency_ms={}",
         options.output.display(),
         report.probe_results.len(),
         options.lane,
         options.rewrite_policy,
         options.graph_expansion_policy.as_str(),
+        report.graph_retrieval_policy.as_str(),
         report.query_rewrite_call_count,
         report.query_rewrite_skip_count,
         report.query_rewrite_call_rate,
@@ -162,7 +163,7 @@ impl Options {
                 "--graph-expansion-policy" => {
                     let value = args
                         .next()
-                        .context("--graph-expansion-policy requires current|skip-exact-direct")?;
+                        .context("--graph-expansion-policy requires current|skip-exact-direct|legacy-broad-expansion")?;
                     graph_expansion_policy = parse_graph_expansion_policy(&value)?;
                 }
                 "--extractor" => {
@@ -269,7 +270,7 @@ impl Options {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--consolidate] [--digests] [--invert-quality-priors] [--graph-expansion-policy current|skip-exact-direct] [--rewrite-policy off|always|gated] [--reranker off|on] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--quality-weight N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
+    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--consolidate] [--digests] [--invert-quality-priors] [--graph-expansion-policy current|skip-exact-direct|legacy-broad-expansion] [--rewrite-policy off|always|gated] [--reranker off|on] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--quality-weight N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
 }
 
 fn parse_reranker(value: &str) -> Result<bool> {
@@ -301,8 +302,9 @@ fn parse_graph_expansion_policy(value: &str) -> Result<GraphExpansionEvalPolicy>
     match value {
         "current" => Ok(GraphExpansionEvalPolicy::Current),
         "skip-exact-direct" => Ok(GraphExpansionEvalPolicy::SkipExactDirect),
+        "legacy-broad-expansion" => Ok(GraphExpansionEvalPolicy::LegacyBroadExpansion),
         other => bail!(
-            "unsupported --graph-expansion-policy value `{other}`; expected current|skip-exact-direct"
+            "unsupported --graph-expansion-policy value `{other}`; expected current|skip-exact-direct|legacy-broad-expansion"
         ),
     }
 }

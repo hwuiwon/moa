@@ -3,6 +3,7 @@
 //! This remains one module because `HybridRetriever` owns the graph, vector,
 //! and reranker boundary while individual retrieval legs live in `legs`.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -12,29 +13,42 @@ use moa_core::RlsContext;
 use moa_core::{MoaConfig, SessionId};
 use moa_db::ScopedConn;
 use moa_lineage_core::TurnId;
-use moa_memory_graph::{GraphError, GraphStore, NodeIndexRow, NodeLabel, PiiClass};
+use moa_memory_graph::{
+    GraphError, GraphStore, NodeIndexRow, NodeLabel, PiiClass, push_validity_filter,
+};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{Error as VectorError, PgvectorStore, TurbopufferStore};
 use moa_providers::{ConfiguredReranker, Reranker, build_reranker_from_config};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::planning::Strategy;
 use crate::retrieval::legs::{
     GRAPH_BUDGET, GRAPH_WEIGHT, LEXICAL_BUDGET, LEXICAL_WEIGHT, LegCandidate, RRF_K, VECTOR_BUDGET,
-    VECTOR_WEIGHT, bump_last_accessed, graph_expansion_leg, hydrate_nodes, lexical_leg, rrf_fuse,
-    timed_leg, turbopuffer_bm25_leg, vector_leg as run_vector_leg, write_retrieval_lineage,
+    VECTOR_WEIGHT, begin_scoped, bump_last_accessed, graph_expansion_leg_with_diagnostics,
+    hydrate_nodes, lexical_leg, rrf_fuse, timed_leg, turbopuffer_bm25_leg,
+    vector_leg as run_vector_leg, write_retrieval_lineage,
 };
 use crate::retrieval::ranking::{
     FeatureRanker, RankingConfig, normalize_tokens, ranking_fingerprint,
 };
 
-const FUSED_CANDIDATE_LIMIT: usize = 26;
-const PHASE_ONE_GRAPH_SEED_LIMIT: usize = FUSED_CANDIDATE_LIMIT;
+const MIN_FUSED_CANDIDATE_LIMIT: usize = 26;
+const MAX_FUSED_CANDIDATE_LIMIT: usize = 100;
+const FUSED_CANDIDATE_MULTIPLIER: usize = 2;
+const PHASE_ONE_GRAPH_SEED_LIMIT: usize = MIN_FUSED_CANDIDATE_LIMIT;
 const PHASE_ONE_SEED_DECAY: f64 = 0.85;
+const SEMANTIC_ENTITY_GRAPH_SEED_LIMIT: usize = 8;
+const SEMANTIC_ENTITY_EXACT_SEED_LIMIT: usize = 3;
+const SEMANTIC_ENTITY_SEED_STRENGTH: f64 = 0.90;
 const MAX_FINAL_HITS_PER_KNOWLEDGE_OBJECT: usize = 2;
+const ARTICLE_GRAPH_DIAGNOSTIC_LIMIT: usize = 10;
+const ARTICLE_GRAPH_MAX_REPEAT_CONTRIBUTION: f64 = 0.06;
+const ARTICLE_GRAPH_MAX_GRAPH_CONTRIBUTION: f64 = 0.09;
+const ARTICLE_GRAPH_MAX_ADJACENT_CONTRIBUTION: f64 = 0.04;
+const TURBOPUFFER_BM25_BOOST_MULTIPLIER: f64 = 0.10;
 
 /// Result type returned by hybrid retrieval.
 pub type Result<T> = std::result::Result<T, RetrievalError>;
@@ -90,6 +104,300 @@ pub struct RetrievalRequest {
     pub disable_leg_timeouts: bool,
     /// Whether graph expansion should be skipped for this request.
     pub disable_graph_expansion: bool,
+}
+
+/// Graph retrieval policy selected for one retriever or diagnostic run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GraphRetrievalPolicy {
+    /// Do not run graph expansion as a ranking leg.
+    Off,
+    /// Reserve graph structure for post-selection context organization.
+    ContextOnly,
+    /// Preserve the pre-guardrail broad phase-one graph expansion behavior for A/B reports.
+    LegacyBroadExpansion,
+    /// Use graph only to rescue candidates from precise anchors.
+    #[default]
+    AnchoredRescue,
+    /// Use graph evidence at article/document ranking time.
+    ArticleGraph,
+    /// Use entity-local graph search for anchored queries.
+    EntityLocalSearch,
+    /// Use bounded graph propagation for multi-hop retrieval.
+    Propagation,
+    /// Use precomputed graph community evidence for broad queries.
+    Community,
+}
+
+impl GraphRetrievalPolicy {
+    /// Returns the stable report and CLI label for this policy.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::ContextOnly => "context-only",
+            Self::LegacyBroadExpansion => "legacy-broad-expansion",
+            Self::AnchoredRescue => "anchored-rescue",
+            Self::ArticleGraph => "article-graph",
+            Self::EntityLocalSearch => "entity-local-search",
+            Self::Propagation => "propagation",
+            Self::Community => "community",
+        }
+    }
+
+    /// Parses the stable CLI label for this policy.
+    #[must_use]
+    pub fn from_str_label(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "context-only" => Some(Self::ContextOnly),
+            "legacy-broad-expansion" => Some(Self::LegacyBroadExpansion),
+            "anchored-rescue" => Some(Self::AnchoredRescue),
+            "article-graph" => Some(Self::ArticleGraph),
+            "entity-local-search" => Some(Self::EntityLocalSearch),
+            "propagation" => Some(Self::Propagation),
+            "community" => Some(Self::Community),
+            _ => None,
+        }
+    }
+
+    const fn disables_graph_ranking(self) -> bool {
+        matches!(self, Self::Off | Self::ContextOnly)
+    }
+
+    const fn allows_broad_phase_one_fallback(self) -> bool {
+        matches!(self, Self::LegacyBroadExpansion)
+    }
+
+    const fn allows_semantic_entity_seeds(self) -> bool {
+        matches!(
+            self,
+            Self::EntityLocalSearch | Self::Propagation | Self::Community
+        )
+    }
+
+    const fn allows_graph_only_rescue_bonus(self) -> bool {
+        matches!(self, Self::LegacyBroadExpansion)
+    }
+}
+
+/// Source that admitted a graph traversal seed for one retrieval request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphSeedSource {
+    /// Planner-provided seed from query analysis.
+    Planner,
+    /// Exact phase-one vector or lexical seed.
+    ExactPhaseOne,
+    /// Broad top phase-one fallback seed.
+    BroadFallback,
+    /// Semantic entity seed.
+    SemanticEntity,
+}
+
+/// Seed counts grouped by graph seed source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphSeedDiagnostics {
+    /// Planner-provided seed count.
+    pub planner: usize,
+    /// Exact phase-one vector or lexical seed count.
+    pub exact_phase_one: usize,
+    /// Broad top phase-one fallback seed count.
+    pub broad_fallback: usize,
+    /// Semantic entity seed count.
+    pub semantic_entity: usize,
+}
+
+/// Candidate counts grouped by graph leg overlap.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphCandidateCounts {
+    /// Candidates found only by graph.
+    pub graph_only: usize,
+    /// Candidates found by graph and vector, but not lexical.
+    pub vector_graph: usize,
+    /// Candidates found by graph and lexical, but not vector.
+    pub lexical_graph: usize,
+    /// Candidates found by graph, vector, and lexical.
+    pub all_legs: usize,
+}
+
+impl GraphCandidateCounts {
+    /// Adds another count bucket into this one.
+    pub fn add(&mut self, other: Self) {
+        self.graph_only += other.graph_only;
+        self.vector_graph += other.vector_graph;
+        self.lexical_graph += other.lexical_graph;
+        self.all_legs += other.all_legs;
+    }
+}
+
+/// Per-feature contribution that produced one article-level score.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct ArticleFeatureContributions {
+    /// Highest hydrated chunk score before article-level aggregation.
+    pub max_fused_score: f64,
+    /// Lexical hit and title/heading token overlap contribution.
+    pub lexical_title: f64,
+    /// Contribution from multiple chunks from the same article.
+    pub same_article_repeat: f64,
+    /// Contribution from an exact title-like query match.
+    pub exact_title_match: f64,
+    /// Contribution from non-structural graph paths into article chunks.
+    pub typed_graph_evidence: f64,
+    /// Contribution from chunks near the best same-article chunk.
+    pub adjacent_chunk_support: f64,
+    /// Negative contribution for graph paths that are only structural.
+    pub structural_only_penalty: f64,
+}
+
+impl ArticleFeatureContributions {
+    /// Adds another feature contribution set into this one.
+    pub fn add(&mut self, other: Self) {
+        self.max_fused_score += other.max_fused_score;
+        self.lexical_title += other.lexical_title;
+        self.same_article_repeat += other.same_article_repeat;
+        self.exact_title_match += other.exact_title_match;
+        self.typed_graph_evidence += other.typed_graph_evidence;
+        self.adjacent_chunk_support += other.adjacent_chunk_support;
+        self.structural_only_penalty += other.structural_only_penalty;
+    }
+
+    fn total(self) -> f64 {
+        self.max_fused_score
+            + self.lexical_title
+            + self.same_article_repeat
+            + self.exact_title_match
+            + self.typed_graph_evidence
+            + self.adjacent_chunk_support
+            + self.structural_only_penalty
+    }
+}
+
+/// Article-level score explanation emitted by `ArticleGraph` retrieval.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArticleFeatureContribution {
+    /// Tenant knowledge object that represents the article or document.
+    pub object_uid: Uuid,
+    /// Citation URI for the article when available.
+    pub source_uri: Option<String>,
+    /// Renderer-safe article title when available.
+    pub source_title: Option<String>,
+    /// Candidate chunk count grouped into this article.
+    pub chunk_count: usize,
+    /// First article rank before article-level aggregation.
+    pub rank_before_article_graph: Option<usize>,
+    /// Article rank after article-level aggregation.
+    pub rank_after_article_graph: usize,
+    /// Rank movement where negative means the article moved earlier.
+    pub rank_delta_after_minus_before: Option<i64>,
+    /// Final article score.
+    pub score: f64,
+    /// Feature contribution breakdown.
+    pub features: ArticleFeatureContributions,
+    /// Non-structural graph path count into article chunks.
+    pub typed_graph_evidence_count: usize,
+    /// Structural-only graph path count into article chunks.
+    pub structural_only_graph_count: usize,
+}
+
+/// Article-level diagnostics emitted when `ArticleGraph` ranking runs.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ArticleRankingDiagnostics {
+    /// Whether article-level ranking ran for this request.
+    pub enabled: bool,
+    /// Number of grouped tenant knowledge articles.
+    pub ranked_article_count: usize,
+    /// Sum of feature contributions across ranked articles.
+    pub feature_totals: ArticleFeatureContributions,
+    /// Top article explanations after ranking.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub top_articles: Vec<ArticleFeatureContribution>,
+}
+
+/// One raw graph traversal path used to explain graph retrieval impact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphPathTrace {
+    /// Seed node that produced the path.
+    pub seed_uid: Uuid,
+    /// Source that admitted the seed into graph expansion.
+    pub seed_source: Option<GraphSeedSource>,
+    /// Candidate node reached by the path.
+    pub candidate_uid: Uuid,
+    /// One-based graph distance from seed to candidate.
+    pub hop: u8,
+    /// Edge labels along the discovered path in traversal order.
+    pub edge_labels: Vec<String>,
+    /// Traversal directions aligned with `edge_labels`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edge_directions: Vec<String>,
+}
+
+/// Request-local graph diagnostics emitted by hybrid retrieval.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphRetrievalDiagnostics {
+    /// Effective graph policy used by the request.
+    pub policy: GraphRetrievalPolicy,
+    /// Seed counts grouped by source.
+    pub seed_counts: GraphSeedDiagnostics,
+    /// Edge-label histogram across raw graph expansion paths.
+    pub path_label_histogram: BTreeMap<String, usize>,
+    /// Hop-count histogram across raw graph expansion paths.
+    pub hop_histogram: BTreeMap<u8, usize>,
+    /// Raw graph expansion paths with seed and candidate identity for harm analysis.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_traces: Vec<GraphPathTrace>,
+    /// Candidate counts grouped by graph leg overlap after fusion.
+    pub candidate_counts: GraphCandidateCounts,
+    /// Graph leg latency in milliseconds, excluding vector and lexical legs.
+    pub graph_latency_ms: u64,
+    /// Raw graph path count returned by the graph store before scoring.
+    pub raw_path_count: usize,
+    /// Article-level ranking diagnostics when `ArticleGraph` is active.
+    pub article_ranking: ArticleRankingDiagnostics,
+}
+
+impl Default for GraphRetrievalDiagnostics {
+    fn default() -> Self {
+        Self::new(GraphRetrievalPolicy::default())
+    }
+}
+
+impl GraphRetrievalDiagnostics {
+    /// Creates empty diagnostics for the selected graph policy.
+    #[must_use]
+    pub fn new(policy: GraphRetrievalPolicy) -> Self {
+        Self {
+            policy,
+            seed_counts: GraphSeedDiagnostics::default(),
+            path_label_histogram: BTreeMap::new(),
+            hop_histogram: BTreeMap::new(),
+            path_traces: Vec::new(),
+            candidate_counts: GraphCandidateCounts::default(),
+            graph_latency_ms: 0,
+            raw_path_count: 0,
+            article_ranking: ArticleRankingDiagnostics::default(),
+        }
+    }
+
+    pub(crate) fn record_paths(&mut self, paths: GraphRetrievalDiagnostics) {
+        self.raw_path_count += paths.raw_path_count;
+        self.path_traces.extend(paths.path_traces);
+        for (label, count) in paths.path_label_histogram {
+            *self.path_label_histogram.entry(label).or_default() += count;
+        }
+        for (hop, count) in paths.hop_histogram {
+            *self.hop_histogram.entry(hop).or_default() += count;
+        }
+    }
+}
+
+/// Retrieval hits plus request-local diagnostics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RetrievalOutput {
+    /// Final ranked retrieval hits.
+    pub hits: Vec<RetrievalHit>,
+    /// Diagnostics for graph policy, seeds, paths, candidates, and latency.
+    pub diagnostics: GraphRetrievalDiagnostics,
 }
 
 /// Per-turn context needed to record retrieved facts for quality scoring.
@@ -219,6 +527,7 @@ pub struct HybridRetriever {
     ranking_config: RankingConfig,
     assume_app_role: bool,
     lineage_enabled: bool,
+    graph_policy: GraphRetrievalPolicy,
 }
 
 impl HybridRetriever {
@@ -240,6 +549,7 @@ impl HybridRetriever {
             ranking_config: RankingConfig::default(),
             assume_app_role: false,
             lineage_enabled: false,
+            graph_policy: GraphRetrievalPolicy::default(),
         }
     }
 
@@ -296,6 +606,13 @@ impl HybridRetriever {
         self
     }
 
+    /// Overrides the graph retrieval policy used when requests do not explicitly disable graph expansion.
+    #[must_use]
+    pub fn with_graph_policy(mut self, graph_policy: GraphRetrievalPolicy) -> Self {
+        self.graph_policy = graph_policy;
+        self
+    }
+
     /// Enables or disables fire-and-forget retrieval lineage sidecar writes.
     #[must_use]
     pub fn with_lineage_enabled(mut self, enabled: bool) -> Self {
@@ -306,7 +623,10 @@ impl HybridRetriever {
     /// Returns the cache fingerprint for the configured ranking stage.
     #[must_use]
     pub fn ranking_fingerprint(&self) -> [u8; 32] {
-        ranking_fingerprint(&self.ranking_config)
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&ranking_fingerprint(&self.ranking_config));
+        hasher.update(self.graph_policy.as_str().as_bytes());
+        *hasher.finalize().as_bytes()
     }
 
     /// Assumes the `moa_app` role inside sidecar transactions.
@@ -320,8 +640,21 @@ impl HybridRetriever {
 
     /// Retrieves graph-memory candidates through graph, vector, and lexical legs.
     pub async fn retrieve(&self, req: RetrievalRequest) -> Result<Vec<RetrievalHit>> {
+        Ok(self.retrieve_with_diagnostics(req).await?.hits)
+    }
+
+    /// Retrieves graph-memory candidates and request-local diagnostics.
+    pub async fn retrieve_with_diagnostics(
+        &self,
+        req: RetrievalRequest,
+    ) -> Result<RetrievalOutput> {
+        let graph_policy = effective_graph_policy(self.graph_policy, &req);
+        let mut diagnostics = GraphRetrievalDiagnostics::new(graph_policy);
         if req.k_final == 0 {
-            return Ok(Vec::new());
+            return Ok(RetrievalOutput {
+                hits: Vec::new(),
+                diagnostics,
+            });
         }
 
         let strategy = req.strategy.unwrap_or(Strategy::Both);
@@ -344,32 +677,68 @@ impl HybridRetriever {
         );
         let (vector_hits, lexical_hits) = tokio::join!(vector_future, lexical_future);
         let vector_hits = vector_hits?;
-        let lexical_hits = lexical_hits?;
+        let mut lexical_hits = lexical_hits?;
+        apply_lexical_boost_only_policy(&req, &vector_hits, &mut lexical_hits);
         let interim = rrf_fuse(
             &[],
             &vector_hits,
             &lexical_hits.candidates,
             weights_for(strategy),
         );
-        let graph_seed_rows =
-            hydrate_graph_seed_rows(&self.pool, &req, &interim, self.assume_app_role).await?;
-        let graph_seed_strengths = if req.disable_graph_expansion {
+        let semantic_entity_seed_uids = if graph_policy.allows_semantic_entity_seeds() {
+            semantic_entity_seed_uids(&self.pool, &req, self.assume_app_role).await?
+        } else {
+            Vec::new()
+        };
+        let graph_seed_rows = if graph_policy.disables_graph_ranking() {
             Vec::new()
         } else {
-            interim_graph_seed_strengths(&req.seeds, &interim, &graph_seed_rows, &req.query_text)
-        };
-        let graph_hits = run_leg(
-            req.disable_leg_timeouts,
-            "graph",
-            GRAPH_BUDGET,
-            graph_expansion_leg(
-                self.graph.as_ref(),
+            hydrate_graph_seed_rows(
+                &self.pool,
                 &req,
-                &graph_seed_strengths,
+                &interim,
+                &semantic_entity_seed_uids,
+                self.assume_app_role,
+            )
+            .await?
+        };
+        let graph_seed_plan = if graph_policy.disables_graph_ranking() {
+            GraphSeedPlan::default()
+        } else {
+            interim_graph_seed_plan(
+                graph_policy,
+                &req.seeds,
+                &semantic_entity_seed_uids,
+                &interim,
                 &graph_seed_rows,
-            ),
-        )
-        .await?;
+                &req.query_text,
+            )
+        };
+        diagnostics.seed_counts = graph_seed_plan.seed_counts;
+        let graph_output = if graph_seed_plan.strengths.is_empty() {
+            Default::default()
+        } else {
+            let graph_started = std::time::Instant::now();
+            let mut output = run_leg(
+                req.disable_leg_timeouts,
+                "graph",
+                GRAPH_BUDGET,
+                graph_expansion_leg_with_diagnostics(
+                    self.graph.as_ref(),
+                    &req,
+                    &graph_seed_plan.strengths,
+                    &graph_seed_rows,
+                    &graph_seed_plan.seed_sources,
+                    graph_policy,
+                ),
+            )
+            .await?;
+            output.diagnostics.graph_latency_ms = duration_ms_u64(graph_started.elapsed());
+            output
+        };
+        diagnostics.graph_latency_ms = graph_output.diagnostics.graph_latency_ms;
+        diagnostics.record_paths(graph_output.diagnostics);
+        let graph_hits = graph_output.candidates;
         let fusion_started = std::time::Instant::now();
         let mut fused = rrf_fuse(
             &graph_hits,
@@ -377,9 +746,13 @@ impl HybridRetriever {
             &lexical_hits.candidates,
             weights_for(strategy),
         );
-        fused.truncate(FUSED_CANDIDATE_LIMIT);
+        fused.truncate(fused_candidate_limit(req.k_final));
+        diagnostics.candidate_counts = graph_candidate_counts(&fused);
         if fused.is_empty() {
-            return Ok(Vec::new());
+            return Ok(RetrievalOutput {
+                hits: Vec::new(),
+                diagnostics,
+            });
         }
 
         let fused_uids = fused.iter().map(|(uid, _, _)| *uid).collect::<Vec<_>>();
@@ -394,7 +767,21 @@ impl HybridRetriever {
         let mut hits = build_hits(fused, nodes);
         annotate_lexical_backend(&mut hits, lexical_hits.backend);
         hydrate_knowledge_chunks(&self.pool, &req.scope, &mut hits, self.assume_app_role).await?;
-        rank_hydrated_hits(&mut hits, &self.ranking_config, &req);
+        rank_hydrated_hits_for_policy(
+            &mut hits,
+            &self.ranking_config,
+            &req,
+            graph_policy,
+            vector_hits.first().map(|candidate| candidate.uid),
+        );
+        if graph_policy == GraphRetrievalPolicy::ArticleGraph {
+            diagnostics.article_ranking = apply_article_graph_ranking(
+                &mut hits,
+                &req,
+                &diagnostics.path_traces,
+                vector_hits.first().map(|candidate| candidate.uid),
+            );
+        }
         let final_hits = if req.use_reranker && hits.len() > req.k_final {
             let reranked = self.rerank_hits(&req, &hits).await?;
             select_final_hits(reranked, &hits, req.k_final)
@@ -441,7 +828,10 @@ impl HybridRetriever {
             });
         }
 
-        Ok(final_hits)
+        Ok(RetrievalOutput {
+            hits: final_hits,
+            diagnostics,
+        })
     }
 
     async fn vector_leg(
@@ -579,10 +969,7 @@ impl HybridRetriever {
         req: &RetrievalRequest,
         hits: &[RetrievalHit],
     ) -> Result<Vec<RetrievalHit>> {
-        let documents = hits
-            .iter()
-            .map(|hit| hit.node.name.clone())
-            .collect::<Vec<_>>();
+        let documents = hits.iter().map(rerank_document).collect::<Vec<_>>();
         let reranked = self
             .reranker
             .rerank(&self.rerank_model, &req.query_text, &documents, req.k_final)
@@ -600,6 +987,35 @@ impl HybridRetriever {
             Ok(out)
         }
     }
+}
+
+fn fused_candidate_limit(k_final: usize) -> usize {
+    if k_final == 0 {
+        return 0;
+    }
+    k_final
+        .saturating_mul(FUSED_CANDIDATE_MULTIPLIER)
+        .clamp(MIN_FUSED_CANDIDATE_LIMIT, MAX_FUSED_CANDIDATE_LIMIT)
+}
+
+fn rerank_document(hit: &RetrievalHit) -> String {
+    let Some(chunk) = &hit.knowledge_chunk else {
+        return hit.node.name.clone();
+    };
+    let mut parts = Vec::new();
+    if let Some(title) = chunk
+        .source_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+    {
+        parts.push(format!("Title: {title}"));
+    }
+    if !chunk.heading_path.is_empty() {
+        parts.push(format!("Section: {}", chunk.heading_path.join(" > ")));
+    }
+    parts.push(chunk.text.clone());
+    parts.join("\n")
 }
 
 fn configured_reranker_or_noop(config: &MoaConfig) -> ConfiguredReranker {
@@ -671,6 +1087,9 @@ fn turbopuffer_unavailable_for_request(req: &RetrievalRequest) -> RetrievalError
 }
 
 fn request_allows_tenant_chunk_bm25(req: &RetrievalRequest) -> bool {
+    if req.strategy == Some(Strategy::VectorFirst) {
+        return false;
+    }
     req.label_filter
         .as_deref()
         .is_some_and(|labels| labels.contains(&NodeLabel::Chunk))
@@ -708,6 +1127,29 @@ fn record_lexical_backend(backend: LexicalBackend, outcome: &'static str) {
     .increment(1);
 }
 
+fn apply_lexical_boost_only_policy(
+    req: &RetrievalRequest,
+    vector_hits: &[LegCandidate],
+    lexical_hits: &mut LexicalLegOutput,
+) {
+    if lexical_hits.backend != Some(LexicalBackend::TurbopufferBm25)
+        || !request_is_tenant_chunk_only(req)
+        || vector_hits.is_empty()
+    {
+        return;
+    }
+    let vector_uids = vector_hits
+        .iter()
+        .map(|candidate| candidate.uid)
+        .collect::<HashSet<_>>();
+    lexical_hits
+        .candidates
+        .retain(|candidate| vector_uids.contains(&candidate.uid));
+    for candidate in &mut lexical_hits.candidates {
+        candidate.score *= TURBOPUFFER_BM25_BOOST_MULTIPLIER;
+    }
+}
+
 fn leg_overlap(left: &[LegCandidate], right: &[LegCandidate], k: usize) -> f64 {
     let left_set = left
         .iter()
@@ -730,22 +1172,75 @@ fn weights_for(strategy: Strategy) -> (f64, f64, f64) {
     }
 }
 
+fn effective_graph_policy(
+    retriever_policy: GraphRetrievalPolicy,
+    req: &RetrievalRequest,
+) -> GraphRetrievalPolicy {
+    if req.disable_graph_expansion {
+        GraphRetrievalPolicy::Off
+    } else {
+        retriever_policy
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct GraphSeedPlan {
+    strengths: Vec<(Uuid, f64)>,
+    seed_counts: GraphSeedDiagnostics,
+    seed_sources: HashMap<Uuid, GraphSeedSource>,
+}
+
+#[cfg(test)]
 fn interim_graph_seed_strengths(
     planner_seeds: &[Uuid],
     interim: &[(Uuid, f64, LegSources)],
     phase_one_rows: &[NodeIndexRow],
     query_text: &str,
 ) -> Vec<(Uuid, f64)> {
+    interim_graph_seed_plan(
+        GraphRetrievalPolicy::LegacyBroadExpansion,
+        planner_seeds,
+        &[],
+        interim,
+        phase_one_rows,
+        query_text,
+    )
+    .strengths
+}
+
+fn interim_graph_seed_plan(
+    policy: GraphRetrievalPolicy,
+    planner_seeds: &[Uuid],
+    semantic_entity_seed_uids: &[Uuid],
+    interim: &[(Uuid, f64, LegSources)],
+    phase_one_rows: &[NodeIndexRow],
+    query_text: &str,
+) -> GraphSeedPlan {
     let mut seen = HashSet::new();
     let mut strengths = Vec::new();
+    let mut seed_counts = GraphSeedDiagnostics::default();
+    let mut seed_sources = HashMap::new();
     for seed in planner_seeds {
         if seen.insert(*seed) {
             strengths.push((*seed, 1.0));
+            seed_counts.planner += 1;
+            seed_sources.insert(*seed, GraphSeedSource::Planner);
+        }
+    }
+    for seed in
+        exact_semantic_entity_seed_uids(semantic_entity_seed_uids, phase_one_rows, query_text)
+    {
+        if seen.insert(seed) {
+            strengths.push((seed, SEMANTIC_ENTITY_SEED_STRENGTH));
+            seed_counts.semantic_entity += 1;
+            seed_sources.insert(seed, GraphSeedSource::SemanticEntity);
         }
     }
 
     let exact_seed_uids = exact_phase_one_seed_uids(phase_one_rows, query_text);
-    let use_broad_phase_one = planner_seeds.is_empty() && exact_seed_uids.is_empty();
+    let use_broad_phase_one = policy.allows_broad_phase_one_fallback()
+        && planner_seeds.is_empty()
+        && exact_seed_uids.is_empty();
     let mut phase_one = interim
         .iter()
         .take(PHASE_ONE_GRAPH_SEED_LIMIT)
@@ -756,18 +1251,30 @@ fn interim_graph_seed_strengths(
         })
         .collect::<Vec<_>>();
     phase_one.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.1.cmp(&right.1)));
-    for (index, (uid, _, _)) in phase_one.into_iter().enumerate() {
+    for (index, (uid, _, is_exact)) in phase_one.into_iter().enumerate() {
         if seen.insert(uid) {
             strengths.push((uid, PHASE_ONE_SEED_DECAY.powi(index as i32)));
+            if is_exact {
+                seed_counts.exact_phase_one += 1;
+                seed_sources.insert(uid, GraphSeedSource::ExactPhaseOne);
+            } else {
+                seed_counts.broad_fallback += 1;
+                seed_sources.insert(uid, GraphSeedSource::BroadFallback);
+            }
         }
     }
-    strengths
+    GraphSeedPlan {
+        strengths,
+        seed_counts,
+        seed_sources,
+    }
 }
 
 async fn hydrate_graph_seed_rows(
     pool: &PgPool,
     req: &RetrievalRequest,
     interim: &[(Uuid, f64, LegSources)],
+    semantic_entity_seed_uids: &[Uuid],
     assume_app_role: bool,
 ) -> Result<Vec<NodeIndexRow>> {
     let mut seen = HashSet::new();
@@ -778,6 +1285,12 @@ async fn hydrate_graph_seed_rows(
         .filter(|uid| seen.insert(*uid))
         .collect::<Vec<_>>();
     uids.extend(
+        semantic_entity_seed_uids
+            .iter()
+            .copied()
+            .filter(|uid| seen.insert(*uid)),
+    );
+    uids.extend(
         interim
             .iter()
             .take(PHASE_ONE_GRAPH_SEED_LIMIT)
@@ -785,6 +1298,105 @@ async fn hydrate_graph_seed_rows(
             .filter(|uid| seen.insert(*uid)),
     );
     hydrate_nodes(pool, &req.scope, &uids, assume_app_role, req.as_of).await
+}
+
+async fn semantic_entity_seed_uids(
+    pool: &PgPool,
+    req: &RetrievalRequest,
+    assume_app_role: bool,
+) -> Result<Vec<Uuid>> {
+    if !request_is_tenant_chunk_query(req) {
+        return Ok(Vec::new());
+    }
+    let terms = semantic_entity_seed_terms(&req.query_text);
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tsquery = terms
+        .iter()
+        .map(|term| format!("'{}':*", term.replace('\'', "")))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if tsquery.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut conn = begin_scoped(pool, &req.scope, assume_app_role).await?;
+    let mut builder = QueryBuilder::<Postgres>::new(
+        r#"
+        SELECT uid
+        FROM moa.node_index
+        WHERE "#,
+    );
+    push_validity_filter(&mut builder, None, req.as_of);
+    builder.push(" AND scope = 'tenant' AND label = ");
+    builder.push_bind(NodeLabel::Entity.as_str());
+    builder.push(r#" AND (name_tsv @@ to_tsquery('simple', "#);
+    builder.push_bind(tsquery.clone());
+    builder.push(") OR properties_tsv @@ to_tsquery('simple', ");
+    builder.push_bind(tsquery.clone());
+    builder.push(
+        r#"))
+          AND CASE pii_class
+                WHEN 'none' THEN 0
+                WHEN 'pii' THEN 1
+                WHEN 'phi' THEN 2
+                WHEN 'restricted' THEN 3
+                ELSE 4
+              END <= "#,
+    );
+    builder.push_bind(semantic_seed_pii_rank(req.max_pii_class));
+    builder.push(
+        r#"
+        ORDER BY (
+            ts_rank(name_tsv, to_tsquery('simple', "#,
+    );
+    builder.push_bind(tsquery.clone());
+    builder.push(")) + ts_rank(properties_tsv, to_tsquery('simple', ");
+    builder.push_bind(tsquery);
+    builder.push(
+        r#"))
+        ) DESC,
+        uid ASC
+        LIMIT "#,
+    );
+    builder.push_bind(SEMANTIC_ENTITY_GRAPH_SEED_LIMIT as i64);
+    let rows = builder
+        .build_query_scalar::<Uuid>()
+        .fetch_all(conn.as_mut())
+        .await?;
+    conn.commit().await?;
+    Ok(rows)
+}
+
+fn request_is_tenant_chunk_query(req: &RetrievalRequest) -> bool {
+    matches!(req.scope, MemoryScope::Tenant { .. })
+        && req
+            .label_filter
+            .as_deref()
+            .is_some_and(|labels| labels == [NodeLabel::Chunk])
+}
+
+fn semantic_entity_seed_terms(query_text: &str) -> Vec<String> {
+    const STOP_WORDS: &[&str] = &[
+        "about", "after", "also", "before", "between", "could", "does", "from", "have", "help",
+        "into", "make", "need", "should", "that", "their", "there", "these", "this", "using",
+        "what", "when", "where", "which", "with", "your",
+    ];
+    normalize_tokens(query_text)
+        .into_iter()
+        .filter(|term| !STOP_WORDS.contains(&term.as_str()))
+        .take(SEMANTIC_ENTITY_GRAPH_SEED_LIMIT)
+        .collect()
+}
+
+const fn semantic_seed_pii_rank(class: PiiClass) -> i32 {
+    match class {
+        PiiClass::None => 0,
+        PiiClass::Pii => 1,
+        PiiClass::Phi => 2,
+        PiiClass::Restricted => 3,
+    }
 }
 
 fn exact_phase_one_seed_uids(rows: &[NodeIndexRow], query_text: &str) -> HashSet<Uuid> {
@@ -795,6 +1407,29 @@ fn exact_phase_one_seed_uids(rows: &[NodeIndexRow], query_text: &str) -> HashSet
             !name_tokens.is_empty() && name_tokens.iter().all(|token| query_tokens.contains(token))
         })
         .map(|row| row.uid)
+        .collect()
+}
+
+fn exact_semantic_entity_seed_uids(
+    semantic_entity_seed_uids: &[Uuid],
+    rows: &[NodeIndexRow],
+    query_text: &str,
+) -> Vec<Uuid> {
+    let query_tokens = normalize_tokens(query_text);
+    let rows_by_uid = rows
+        .iter()
+        .map(|row| (row.uid, row))
+        .collect::<HashMap<_, _>>();
+    semantic_entity_seed_uids
+        .iter()
+        .filter_map(|uid| rows_by_uid.get(uid).copied())
+        .filter(|row| row.label == NodeLabel::Entity)
+        .filter(|row| {
+            let name_tokens = normalize_tokens(&row.name);
+            name_tokens.len() >= 2 && name_tokens.iter().all(|token| query_tokens.contains(token))
+        })
+        .map(|row| row.uid)
+        .take(SEMANTIC_ENTITY_EXACT_SEED_LIMIT)
         .collect()
 }
 
@@ -858,6 +1493,20 @@ fn annotate_lexical_backend(hits: &mut [RetrievalHit], backend: Option<LexicalBa
             hit.lexical_backend = backend;
         }
     }
+}
+
+fn graph_candidate_counts(fused: &[(Uuid, f64, LegSources)]) -> GraphCandidateCounts {
+    let mut counts = GraphCandidateCounts::default();
+    for (_, _, sources) in fused {
+        match (sources.graph, sources.vector, sources.lexical) {
+            (true, false, false) => counts.graph_only += 1,
+            (true, true, false) => counts.vector_graph += 1,
+            (true, false, true) => counts.lexical_graph += 1,
+            (true, true, true) => counts.all_legs += 1,
+            _ => {}
+        }
+    }
+    counts
 }
 
 async fn hydrate_knowledge_chunks(
@@ -978,8 +1627,388 @@ fn is_tenant_knowledge_label(label: NodeLabel) -> bool {
     )
 }
 
+#[cfg(test)]
 fn rank_hydrated_hits(hits: &mut [RetrievalHit], config: &RankingConfig, req: &RetrievalRequest) {
-    apply_feature_ranking(hits, config, req);
+    rank_hydrated_hits_for_policy(
+        hits,
+        config,
+        req,
+        GraphRetrievalPolicy::LegacyBroadExpansion,
+        None,
+    );
+}
+
+fn rank_hydrated_hits_for_policy(
+    hits: &mut [RetrievalHit],
+    config: &RankingConfig,
+    req: &RetrievalRequest,
+    graph_policy: GraphRetrievalPolicy,
+    vector_rank_one: Option<Uuid>,
+) {
+    apply_feature_ranking(hits, config, req, graph_policy);
+    preserve_vector_rank_one_for_policy(hits, graph_policy, vector_rank_one);
+}
+
+#[derive(Debug)]
+struct ArticleAccumulator {
+    object_uid: Uuid,
+    source_uri: Option<String>,
+    source_title: Option<String>,
+    chunks: Vec<RetrievalHit>,
+    rank_before_article_graph: usize,
+    max_fused_score: f64,
+    lexical_hit_count: usize,
+    typed_graph_evidence_count: usize,
+    structural_only_graph_count: usize,
+    adjacent_support_count: usize,
+    features: ArticleFeatureContributions,
+    score: f64,
+}
+
+impl ArticleAccumulator {
+    fn from_hit(hit: RetrievalHit, rank_before_article_graph: usize) -> Self {
+        let chunk = hit
+            .knowledge_chunk
+            .as_ref()
+            .expect("article accumulator is only built from hydrated knowledge chunks");
+        Self {
+            object_uid: chunk.object_uid,
+            source_uri: chunk.source_uri.clone(),
+            source_title: chunk.source_title.clone(),
+            chunks: vec![hit],
+            rank_before_article_graph,
+            max_fused_score: f64::NEG_INFINITY,
+            lexical_hit_count: 0,
+            typed_graph_evidence_count: 0,
+            structural_only_graph_count: 0,
+            adjacent_support_count: 0,
+            features: ArticleFeatureContributions::default(),
+            score: 0.0,
+        }
+    }
+
+    fn push(&mut self, hit: RetrievalHit, rank_before_article_graph: usize) {
+        self.rank_before_article_graph = self
+            .rank_before_article_graph
+            .min(rank_before_article_graph);
+        self.chunks.push(hit);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct CandidateGraphEvidence {
+    typed_paths: usize,
+    structural_only_paths: usize,
+}
+
+fn apply_article_graph_ranking(
+    hits: &mut Vec<RetrievalHit>,
+    req: &RetrievalRequest,
+    path_traces: &[GraphPathTrace],
+    vector_rank_one: Option<Uuid>,
+) -> ArticleRankingDiagnostics {
+    if !request_is_tenant_chunk_article_graph(req) || hits.is_empty() {
+        return ArticleRankingDiagnostics::default();
+    }
+
+    let graph_evidence = graph_evidence_by_candidate(path_traces);
+    let mut articles = HashMap::<Uuid, ArticleAccumulator>::new();
+    let mut article_by_uid = HashMap::<Uuid, Uuid>::new();
+    let mut passthrough = Vec::new();
+    for (index, hit) in hits.drain(..).enumerate() {
+        let rank = index + 1;
+        let Some(chunk) = hit.knowledge_chunk.as_ref() else {
+            passthrough.push((rank, hit));
+            continue;
+        };
+        let object_uid = chunk.object_uid;
+        article_by_uid.insert(hit.uid, object_uid);
+        match articles.entry(object_uid) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().push(hit, rank);
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(ArticleAccumulator::from_hit(hit, rank));
+            }
+        }
+    }
+
+    if articles.is_empty() {
+        hits.extend(
+            passthrough
+                .into_iter()
+                .map(|(_, passthrough_hit)| passthrough_hit),
+        );
+        return ArticleRankingDiagnostics::default();
+    }
+
+    let query_tokens = normalize_tokens(&req.query_text);
+    let mut ranked_articles = articles.into_values().collect::<Vec<_>>();
+    for article in &mut ranked_articles {
+        score_article(article, &query_tokens, &graph_evidence);
+    }
+    ranked_articles.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| {
+                left.rank_before_article_graph
+                    .cmp(&right.rank_before_article_graph)
+            })
+            .then_with(|| left.object_uid.cmp(&right.object_uid))
+    });
+    preserve_vector_article_rank_one(&mut ranked_articles, vector_rank_one, &article_by_uid);
+
+    let mut diagnostics = ArticleRankingDiagnostics {
+        enabled: true,
+        ranked_article_count: ranked_articles.len(),
+        feature_totals: ArticleFeatureContributions::default(),
+        top_articles: Vec::new(),
+    };
+    let mut ordered_hits = Vec::new();
+    for (index, mut article) in ranked_articles.into_iter().enumerate() {
+        let article_rank = index + 1;
+        diagnostics.feature_totals.add(article.features);
+        if diagnostics.top_articles.len() < ARTICLE_GRAPH_DIAGNOSTIC_LIMIT {
+            diagnostics
+                .top_articles
+                .push(article_feature_contribution(&article, article_rank));
+        }
+        order_article_chunks(&mut article);
+        ordered_hits.extend(article.chunks);
+    }
+    passthrough.sort_by_key(|(rank, _)| *rank);
+    ordered_hits.extend(
+        passthrough
+            .into_iter()
+            .map(|(_, passthrough_hit)| passthrough_hit),
+    );
+    *hits = ordered_hits;
+    diagnostics
+}
+
+fn request_is_tenant_chunk_article_graph(req: &RetrievalRequest) -> bool {
+    matches!(req.scope, MemoryScope::Tenant { .. })
+        && req
+            .label_filter
+            .as_deref()
+            .is_some_and(|labels| labels == [NodeLabel::Chunk])
+}
+
+fn score_article(
+    article: &mut ArticleAccumulator,
+    query_tokens: &std::collections::BTreeSet<String>,
+    graph_evidence: &HashMap<Uuid, CandidateGraphEvidence>,
+) {
+    article.max_fused_score = article
+        .chunks
+        .iter()
+        .map(|hit| hit.score)
+        .fold(f64::NEG_INFINITY, f64::max);
+    article.lexical_hit_count = article.chunks.iter().filter(|hit| hit.legs.lexical).count();
+    article.typed_graph_evidence_count = article
+        .chunks
+        .iter()
+        .filter_map(|hit| graph_evidence.get(&hit.uid))
+        .map(|evidence| evidence.typed_paths)
+        .sum();
+    article.structural_only_graph_count = article
+        .chunks
+        .iter()
+        .filter_map(|hit| graph_evidence.get(&hit.uid))
+        .map(|evidence| evidence.structural_only_paths)
+        .sum();
+    article.adjacent_support_count = adjacent_support_count(&article.chunks);
+    article.features = article_feature_contributions(article, query_tokens);
+    article.score = article.features.total();
+}
+
+fn article_feature_contributions(
+    article: &ArticleAccumulator,
+    query_tokens: &std::collections::BTreeSet<String>,
+) -> ArticleFeatureContributions {
+    let repeat_count = article.chunks.len().saturating_sub(1) as f64;
+    let typed_graph_count = article.typed_graph_evidence_count as f64;
+    let adjacent_support = article.adjacent_support_count as f64;
+    let title_overlap = article_title_overlap(article, query_tokens);
+    let lexical_bonus = if article.lexical_hit_count > 0 {
+        0.025
+    } else {
+        0.0
+    };
+    let exact_title_match = if title_overlap >= 0.999 { 0.04 } else { 0.0 };
+    let structural_penalty =
+        if article.structural_only_graph_count > 0 && article.typed_graph_evidence_count == 0 {
+            -0.04 * article.structural_only_graph_count.min(3) as f64
+        } else {
+            0.0
+        };
+    ArticleFeatureContributions {
+        max_fused_score: article.max_fused_score,
+        lexical_title: lexical_bonus + 0.05 * title_overlap,
+        same_article_repeat: (0.015 * repeat_count).min(ARTICLE_GRAPH_MAX_REPEAT_CONTRIBUTION),
+        exact_title_match,
+        typed_graph_evidence: (0.03 * typed_graph_count).min(ARTICLE_GRAPH_MAX_GRAPH_CONTRIBUTION),
+        adjacent_chunk_support: (0.01 * adjacent_support)
+            .min(ARTICLE_GRAPH_MAX_ADJACENT_CONTRIBUTION),
+        structural_only_penalty: structural_penalty,
+    }
+}
+
+fn article_title_overlap(
+    article: &ArticleAccumulator,
+    query_tokens: &std::collections::BTreeSet<String>,
+) -> f64 {
+    if query_tokens.is_empty() {
+        return 0.0;
+    }
+    let mut title_tokens = article
+        .source_title
+        .as_deref()
+        .map(normalize_tokens)
+        .unwrap_or_default();
+    for chunk in article
+        .chunks
+        .iter()
+        .filter_map(|hit| hit.knowledge_chunk.as_ref())
+    {
+        for heading in &chunk.heading_path {
+            title_tokens.extend(normalize_tokens(heading));
+        }
+    }
+    if title_tokens.is_empty() {
+        return 0.0;
+    }
+    let overlap = title_tokens
+        .iter()
+        .filter(|token| query_tokens.contains(*token))
+        .count();
+    overlap as f64 / title_tokens.len() as f64
+}
+
+fn adjacent_support_count(chunks: &[RetrievalHit]) -> usize {
+    let Some(best) = chunks
+        .iter()
+        .filter_map(|hit| hit.knowledge_chunk.as_ref().map(|chunk| (hit.score, chunk)))
+        .max_by(|left, right| left.0.total_cmp(&right.0))
+        .map(|(_, chunk)| chunk)
+    else {
+        return 0;
+    };
+    chunks
+        .iter()
+        .filter_map(|hit| hit.knowledge_chunk.as_ref())
+        .filter(|chunk| chunk.chunk_uid != best.chunk_uid)
+        .filter(|chunk| {
+            (chunk.ordinal - best.ordinal).abs() <= 1 || chunk.heading_path == best.heading_path
+        })
+        .count()
+}
+
+fn graph_evidence_by_candidate(
+    path_traces: &[GraphPathTrace],
+) -> HashMap<Uuid, CandidateGraphEvidence> {
+    let mut evidence = HashMap::<Uuid, CandidateGraphEvidence>::new();
+    for trace in path_traces {
+        let entry = evidence.entry(trace.candidate_uid).or_default();
+        if graph_path_is_structural_only(&trace.edge_labels) {
+            entry.structural_only_paths += 1;
+        } else {
+            entry.typed_paths += 1;
+        }
+    }
+    evidence
+}
+
+fn graph_path_is_structural_only(edge_labels: &[String]) -> bool {
+    !edge_labels.is_empty()
+        && edge_labels.iter().all(|label| {
+            matches!(
+                label.as_str(),
+                "CONTAINS" | "HAS_DOCUMENT" | "HAS_CHUNK" | "contains"
+            )
+        })
+}
+
+fn preserve_vector_article_rank_one(
+    ranked_articles: &mut [ArticleAccumulator],
+    vector_rank_one: Option<Uuid>,
+    article_by_uid: &HashMap<Uuid, Uuid>,
+) {
+    let Some(vector_rank_one) = vector_rank_one else {
+        return;
+    };
+    let Some(vector_article) = article_by_uid.get(&vector_rank_one).copied() else {
+        return;
+    };
+    let Some(top_article) = ranked_articles.first() else {
+        return;
+    };
+    if top_article.object_uid == vector_article || top_article.typed_graph_evidence_count > 0 {
+        return;
+    }
+    let Some(vector_index) = ranked_articles
+        .iter()
+        .position(|article| article.object_uid == vector_article)
+    else {
+        return;
+    };
+    ranked_articles[..=vector_index].rotate_right(1);
+}
+
+fn article_feature_contribution(
+    article: &ArticleAccumulator,
+    rank_after_article_graph: usize,
+) -> ArticleFeatureContribution {
+    ArticleFeatureContribution {
+        object_uid: article.object_uid,
+        source_uri: article.source_uri.clone(),
+        source_title: article.source_title.clone(),
+        chunk_count: article.chunks.len(),
+        rank_before_article_graph: Some(article.rank_before_article_graph),
+        rank_after_article_graph,
+        rank_delta_after_minus_before: Some(
+            rank_after_article_graph as i64 - article.rank_before_article_graph as i64,
+        ),
+        score: article.score,
+        features: article.features,
+        typed_graph_evidence_count: article.typed_graph_evidence_count,
+        structural_only_graph_count: article.structural_only_graph_count,
+    }
+}
+
+fn order_article_chunks(article: &mut ArticleAccumulator) {
+    let best_ordinal = article
+        .chunks
+        .iter()
+        .filter_map(|hit| {
+            hit.knowledge_chunk
+                .as_ref()
+                .map(|chunk| (hit.score, chunk.ordinal))
+        })
+        .max_by(|left, right| left.0.total_cmp(&right.0))
+        .map(|(_, ordinal)| ordinal)
+        .unwrap_or_default();
+    article.chunks.sort_by(|left, right| {
+        article_chunk_order_key(left, best_ordinal)
+            .cmp(&article_chunk_order_key(right, best_ordinal))
+            .then_with(|| right.score.total_cmp(&left.score))
+            .then_with(|| left.uid.cmp(&right.uid))
+    });
+}
+
+fn article_chunk_order_key(hit: &RetrievalHit, best_ordinal: i32) -> (u8, i32) {
+    let Some(chunk) = &hit.knowledge_chunk else {
+        return (2, i32::MAX);
+    };
+    let distance = (chunk.ordinal - best_ordinal).abs();
+    if distance == 0 {
+        (0, 0)
+    } else if distance == 1 {
+        (1, distance)
+    } else {
+        (2, distance)
+    }
 }
 
 fn select_final_hits(
@@ -1042,6 +2071,7 @@ fn apply_feature_ranking(
     hits: &mut [RetrievalHit],
     config: &RankingConfig,
     req: &RetrievalRequest,
+    graph_policy: GraphRetrievalPolicy,
 ) {
     let max_fused_score = hits.iter().map(|hit| hit.score).fold(0.0_f64, f64::max);
     let query_tokens = normalize_tokens(&req.query_text);
@@ -1058,7 +2088,11 @@ fn apply_feature_ranking(
         if hit.legs.lexical && !hit.legs.vector && !hit.legs.graph {
             hit.score += config.weights.overlap;
         }
-        if hit.legs.graph && !hit.legs.vector && !hit.legs.lexical {
+        if graph_policy.allows_graph_only_rescue_bonus()
+            && hit.legs.graph
+            && !hit.legs.vector
+            && !hit.legs.lexical
+        {
             hit.score += config.weights.graph_rescue;
         }
     }
@@ -1070,15 +2104,43 @@ fn apply_feature_ranking(
     });
 }
 
+fn preserve_vector_rank_one_for_policy(
+    hits: &mut [RetrievalHit],
+    graph_policy: GraphRetrievalPolicy,
+    vector_rank_one: Option<Uuid>,
+) {
+    if graph_policy != GraphRetrievalPolicy::AnchoredRescue || hits.len() < 2 {
+        return;
+    }
+    let Some(vector_rank_one) = vector_rank_one else {
+        return;
+    };
+    let Some(top) = hits.first() else {
+        return;
+    };
+    if top.uid == vector_rank_one || !top.legs.graph || top.legs.vector || top.legs.lexical {
+        return;
+    }
+    let Some(vector_index) = hits.iter().position(|hit| hit.uid == vector_rank_one) else {
+        return;
+    };
+    hits[..=vector_index].rotate_right(1);
+}
+
+fn duration_ms_u64(elapsed: std::time::Duration) -> u64 {
+    elapsed.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use chrono::Utc;
     use moa_core::TenantId;
     use moa_memory_graph::PiiClass;
     use moa_providers::{RerankHit, Reranker};
+    use serde_json::Value;
     use uuid::Uuid;
 
     use super::*;
@@ -1131,6 +2193,61 @@ mod tests {
             .expect("rerank should succeed");
 
         assert_eq!(reranked, vec![second]);
+    }
+
+    #[tokio::test]
+    async fn reranker_receives_hydrated_chunk_text_for_knowledge_hits() {
+        // Pins: provider rerankers see the full hydrated knowledge chunk rather
+        // than the graph sidecar name, which is too thin for document reranking.
+        let pool = PgPool::connect_lazy("postgres://unused")
+            .expect("lazy pool construction should not connect");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let retriever = HybridRetriever::new(
+            pool.clone(),
+            Arc::new(EmptyGraph),
+            lazy_pgvector_source(&pool),
+        )
+        .with_reranker(Arc::new(RecordingReranker {
+            documents: Arc::clone(&observed),
+        }));
+        let req = RetrievalRequest {
+            seeds: Vec::new(),
+            query_text: "how do I connect a custom domain?".to_string(),
+            query_embedding: Vec::new(),
+            scope: tenant_scope(),
+            label_filter: None,
+            max_pii_class: PiiClass::Restricted,
+            k_final: 1,
+            use_reranker: true,
+            strategy: None,
+            as_of: None,
+            ranking_reference_time: None,
+            lineage: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: false,
+        };
+        let mut candidate = hit(Uuid::now_v7(), "tenant", 1.0);
+        candidate.node.name = "thin sidecar name".to_string();
+        candidate.knowledge_chunk = Some(knowledge_chunk(
+            "Custom domains connect through DNS records in your site dashboard.",
+        ));
+
+        retriever
+            .rerank_hits(&req, &[candidate])
+            .await
+            .expect("rerank should receive hydrated documents");
+
+        let documents = observed.lock().expect("observed rerank documents");
+        assert_eq!(documents.len(), 1);
+        assert!(
+            documents[0].contains("Custom domains connect through DNS records"),
+            "reranker document should include chunk text: {}",
+            documents[0]
+        );
+        assert!(
+            !documents[0].contains("thin sidecar name"),
+            "reranker document should not fall back to sidecar name when chunk text exists"
+        );
     }
 
     #[test]
@@ -1302,6 +2419,287 @@ mod tests {
     }
 
     #[test]
+    fn anchored_rescue_preserves_vector_rank_one_over_graph_only_hit() {
+        // Pins: AnchoredRescue graph-only evidence is not enough to demote the
+        // vector winner; later graph policies must add an explicit threshold.
+        let reference_time = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
+            .expect("test timestamp should parse")
+            .with_timezone(&Utc);
+        let graph_uid = Uuid::from_u128(10);
+        let vector_uid = Uuid::from_u128(20);
+        let mut graph_hit = hit(graph_uid, "tenant", 1.0);
+        graph_hit.legs = LegSources {
+            graph: true,
+            vector: false,
+            lexical: false,
+        };
+        graph_hit.node.valid_from = reference_time;
+        graph_hit.node.last_accessed_at = reference_time;
+        let mut vector_hit = hit(vector_uid, "tenant", 0.1);
+        vector_hit.legs = LegSources {
+            graph: false,
+            vector: true,
+            lexical: false,
+        };
+        vector_hit.node.valid_from = reference_time;
+        vector_hit.node.last_accessed_at = reference_time;
+        let mut config = RankingConfig::default();
+        config.weights.recency = 0.0;
+        config.weights.access = 0.0;
+        config.weights.subject_match = 0.0;
+        config.weights.overlap = 0.0;
+        config.weights.quality = 0.0;
+        config.weights.scope_tenant = 0.0;
+        let mut hits = vec![graph_hit, vector_hit];
+
+        rank_hydrated_hits_for_policy(
+            &mut hits,
+            &config,
+            &RetrievalRequest {
+                seeds: Vec::new(),
+                query_text: "library owner".to_string(),
+                query_embedding: Vec::new(),
+                scope: tenant_scope(),
+                label_filter: Some(vec![NodeLabel::Chunk]),
+                max_pii_class: PiiClass::Restricted,
+                k_final: 2,
+                use_reranker: false,
+                strategy: None,
+                as_of: None,
+                ranking_reference_time: Some(reference_time),
+                lineage: None,
+                disable_leg_timeouts: false,
+                disable_graph_expansion: false,
+            },
+            GraphRetrievalPolicy::AnchoredRescue,
+            Some(vector_uid),
+        );
+
+        assert_eq!(hits[0].uid, vector_uid);
+        assert_eq!(hits[1].uid, graph_uid);
+    }
+
+    #[test]
+    fn article_graph_ranking_groups_chunks_and_reports_typed_graph_features() {
+        // Pins: ArticleGraph ranks tenant knowledge at article level and reports
+        // the feature movement that allowed typed graph evidence to beat the
+        // initial vector article.
+        let vector_uid = Uuid::from_u128(1);
+        let graph_uid = Uuid::from_u128(2);
+        let support_uid = Uuid::from_u128(3);
+        let vector_article = Uuid::from_u128(10);
+        let graph_article = Uuid::from_u128(20);
+        let mut vector_hit = tenant_chunk_hit(
+            vector_uid,
+            vector_article,
+            "Generic site settings",
+            0,
+            1.00,
+            LegSources {
+                graph: false,
+                vector: true,
+                lexical: false,
+            },
+        );
+        let mut graph_hit = tenant_chunk_hit(
+            graph_uid,
+            graph_article,
+            "Custom domain DNS records",
+            4,
+            0.98,
+            LegSources {
+                graph: true,
+                vector: true,
+                lexical: true,
+            },
+        );
+        graph_hit
+            .knowledge_chunk
+            .as_mut()
+            .expect("chunk")
+            .heading_path = vec!["Custom domain DNS records".to_string()];
+        let support_hit = tenant_chunk_hit(
+            support_uid,
+            graph_article,
+            "Custom domain DNS records",
+            5,
+            0.75,
+            LegSources {
+                graph: false,
+                vector: true,
+                lexical: false,
+            },
+        );
+        vector_hit
+            .knowledge_chunk
+            .as_mut()
+            .expect("chunk")
+            .heading_path = vec!["Generic site settings".to_string()];
+        let mut hits = vec![vector_hit, graph_hit, support_hit];
+        let diagnostics = apply_article_graph_ranking(
+            &mut hits,
+            &RetrievalRequest {
+                seeds: Vec::new(),
+                query_text: "custom domain dns records".to_string(),
+                query_embedding: Vec::new(),
+                scope: tenant_scope(),
+                label_filter: Some(vec![NodeLabel::Chunk]),
+                max_pii_class: PiiClass::Restricted,
+                k_final: 3,
+                use_reranker: false,
+                strategy: None,
+                as_of: None,
+                ranking_reference_time: None,
+                lineage: None,
+                disable_leg_timeouts: false,
+                disable_graph_expansion: false,
+            },
+            &[GraphPathTrace {
+                seed_uid: Uuid::from_u128(99),
+                seed_source: Some(GraphSeedSource::ExactPhaseOne),
+                candidate_uid: graph_uid,
+                hop: 1,
+                edge_labels: vec!["MENTIONED_IN".to_string()],
+                edge_directions: vec!["incoming".to_string()],
+            }],
+            Some(vector_uid),
+        );
+
+        assert_eq!(hits[0].uid, graph_uid);
+        assert_eq!(hits[1].uid, support_uid);
+        assert_eq!(hits[2].uid, vector_uid);
+        assert!(diagnostics.enabled);
+        assert_eq!(diagnostics.ranked_article_count, 2);
+        assert_eq!(diagnostics.top_articles[0].object_uid, graph_article);
+        assert_eq!(
+            diagnostics.top_articles[0].rank_before_article_graph,
+            Some(2)
+        );
+        assert_eq!(diagnostics.top_articles[0].rank_after_article_graph, 1);
+        assert_eq!(
+            diagnostics.top_articles[0].rank_delta_after_minus_before,
+            Some(-1)
+        );
+        assert_eq!(diagnostics.top_articles[0].typed_graph_evidence_count, 1);
+        assert!(diagnostics.feature_totals.typed_graph_evidence > 0.0);
+        assert!(diagnostics.feature_totals.adjacent_chunk_support > 0.0);
+    }
+
+    #[test]
+    fn article_graph_preserves_vector_article_without_typed_graph_evidence() {
+        // Pins: ArticleGraph title and repeat signals are context organization
+        // evidence, not enough by themselves to demote the vector rank-1 article.
+        let vector_uid = Uuid::from_u128(11);
+        let repeated_uid = Uuid::from_u128(12);
+        let vector_article = Uuid::from_u128(110);
+        let repeated_article = Uuid::from_u128(120);
+        let vector_hit = tenant_chunk_hit(
+            vector_uid,
+            vector_article,
+            "Vector winner",
+            0,
+            1.0,
+            LegSources {
+                graph: false,
+                vector: true,
+                lexical: false,
+            },
+        );
+        let repeated_hit = tenant_chunk_hit(
+            repeated_uid,
+            repeated_article,
+            "Custom domain DNS records",
+            0,
+            2.0,
+            LegSources {
+                graph: false,
+                vector: true,
+                lexical: true,
+            },
+        );
+        let mut hits = vec![vector_hit, repeated_hit];
+
+        let diagnostics = apply_article_graph_ranking(
+            &mut hits,
+            &RetrievalRequest {
+                seeds: Vec::new(),
+                query_text: "custom domain dns records".to_string(),
+                query_embedding: Vec::new(),
+                scope: tenant_scope(),
+                label_filter: Some(vec![NodeLabel::Chunk]),
+                max_pii_class: PiiClass::Restricted,
+                k_final: 2,
+                use_reranker: false,
+                strategy: None,
+                as_of: None,
+                ranking_reference_time: None,
+                lineage: None,
+                disable_leg_timeouts: false,
+                disable_graph_expansion: false,
+            },
+            &[],
+            Some(vector_uid),
+        );
+
+        assert_eq!(hits[0].uid, vector_uid);
+        assert_eq!(hits[1].uid, repeated_uid);
+        assert_eq!(diagnostics.top_articles[0].object_uid, vector_article);
+    }
+
+    #[test]
+    fn anchored_rescue_seed_selection_suppresses_broad_phase_one_fallback() {
+        // Pins: AnchoredRescue does not seed graph traversal from generic top
+        // vector or lexical candidates when there is no exact anchor.
+        let interim = (1_u128..=3)
+            .map(|value| (Uuid::from_u128(value), 1.0, LegSources::default()))
+            .collect::<Vec<_>>();
+
+        let plan = interim_graph_seed_plan(
+            GraphRetrievalPolicy::AnchoredRescue,
+            &[],
+            &[],
+            &interim,
+            &[],
+            "generic query",
+        );
+
+        assert!(plan.strengths.is_empty());
+        assert_eq!(plan.seed_counts, GraphSeedDiagnostics::default());
+    }
+
+    #[test]
+    fn entity_local_search_seed_selection_accepts_semantic_entity_seeds() {
+        // Pins: semantic entity anchors can start graph traversal without
+        // re-enabling generic broad phase-one fallback.
+        let semantic_seed = Uuid::from_u128(42);
+        let interim = (1_u128..=3)
+            .map(|value| (Uuid::from_u128(value), 1.0, LegSources::default()))
+            .collect::<Vec<_>>();
+        let mut semantic_row = node_row(semantic_seed, "custom domain");
+        semantic_row.label = NodeLabel::Entity;
+
+        let plan = interim_graph_seed_plan(
+            GraphRetrievalPolicy::EntityLocalSearch,
+            &[],
+            &[semantic_seed],
+            &interim,
+            &[semantic_row],
+            "custom domain",
+        );
+
+        assert_eq!(
+            plan.strengths,
+            vec![(semantic_seed, SEMANTIC_ENTITY_SEED_STRENGTH)]
+        );
+        assert_eq!(plan.seed_counts.semantic_entity, 1);
+        assert_eq!(plan.seed_counts.broad_fallback, 0);
+        assert_eq!(
+            plan.seed_sources.get(&semantic_seed),
+            Some(&GraphSeedSource::SemanticEntity)
+        );
+    }
+
+    #[test]
     fn interim_seed_selection_keeps_planner_strength_without_broad_phase_one_fallback() {
         // Pins: planner NER seeds keep strength 1.0 and suppress broad phase-one fallback.
         let collision = Uuid::from_u128(1);
@@ -1335,6 +2733,130 @@ mod tests {
             (*last_strength - PHASE_ONE_SEED_DECAY.powi((PHASE_ONE_GRAPH_SEED_LIMIT - 1) as i32))
                 .abs()
                 < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn default_graph_policy_suppresses_broad_phase_one_fallback() {
+        // Pins: the production default uses AnchoredRescue guardrails and does
+        // not seed graph traversal from generic phase-one vector/lexical hits.
+        let interim = (1_u128..=3)
+            .map(|value| (Uuid::from_u128(value), 1.0, LegSources::default()))
+            .collect::<Vec<_>>();
+
+        let plan = interim_graph_seed_plan(
+            GraphRetrievalPolicy::default(),
+            &[],
+            &[],
+            &interim,
+            &[],
+            "generic query",
+        );
+
+        assert_eq!(
+            GraphRetrievalPolicy::default(),
+            GraphRetrievalPolicy::AnchoredRescue
+        );
+        assert!(plan.strengths.is_empty());
+        assert_eq!(plan.seed_counts, GraphSeedDiagnostics::default());
+    }
+
+    #[test]
+    fn explicit_legacy_graph_policy_preserves_broad_phase_one_fallback() {
+        // Pins: the legacy A/B policy still exposes the old broad fallback
+        // behavior without making it the default.
+        let interim = (1_u128..=3)
+            .map(|value| (Uuid::from_u128(value), 1.0, LegSources::default()))
+            .collect::<Vec<_>>();
+
+        let plan = interim_graph_seed_plan(
+            GraphRetrievalPolicy::LegacyBroadExpansion,
+            &[],
+            &[],
+            &interim,
+            &[],
+            "generic query",
+        );
+
+        assert_eq!(
+            plan.strengths,
+            vec![
+                (Uuid::from_u128(1), 1.0),
+                (Uuid::from_u128(2), PHASE_ONE_SEED_DECAY),
+                (Uuid::from_u128(3), PHASE_ONE_SEED_DECAY.powi(2)),
+            ]
+        );
+        assert_eq!(
+            plan.seed_counts,
+            GraphSeedDiagnostics {
+                planner: 0,
+                exact_phase_one: 0,
+                broad_fallback: 3,
+                semantic_entity: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn graph_candidate_counts_split_graph_overlap_buckets() {
+        // Pins: report diagnostics distinguish graph-only, pairwise overlap,
+        // and all-leg candidates instead of reporting one aggregate graph count.
+        let fused = vec![
+            (
+                Uuid::from_u128(1),
+                1.0,
+                LegSources {
+                    graph: true,
+                    vector: false,
+                    lexical: false,
+                },
+            ),
+            (
+                Uuid::from_u128(2),
+                1.0,
+                LegSources {
+                    graph: true,
+                    vector: true,
+                    lexical: false,
+                },
+            ),
+            (
+                Uuid::from_u128(3),
+                1.0,
+                LegSources {
+                    graph: true,
+                    vector: false,
+                    lexical: true,
+                },
+            ),
+            (
+                Uuid::from_u128(4),
+                1.0,
+                LegSources {
+                    graph: true,
+                    vector: true,
+                    lexical: true,
+                },
+            ),
+            (
+                Uuid::from_u128(5),
+                1.0,
+                LegSources {
+                    graph: false,
+                    vector: true,
+                    lexical: true,
+                },
+            ),
+        ];
+
+        assert_eq!(
+            graph_candidate_counts(&fused),
+            GraphCandidateCounts {
+                graph_only: 1,
+                vector_graph: 1,
+                lexical_graph: 1,
+                all_legs: 1,
+            }
         );
     }
 
@@ -1402,6 +2924,86 @@ mod tests {
             weights_for(Strategy::Both),
             (GRAPH_WEIGHT, VECTOR_WEIGHT, LEXICAL_WEIGHT)
         );
+    }
+
+    #[test]
+    fn turbopuffer_bm25_chunk_leg_is_boost_only() {
+        // Pins: tenant knowledge BM25 may boost vector candidates, but it cannot
+        // flood final chunk retrieval with BM25-only candidates.
+        let shared = Uuid::from_u128(1);
+        let lexical_only = Uuid::from_u128(2);
+        let vector_hits = vec![leg_candidate(shared)];
+        let mut lexical_hits = LexicalLegOutput::new(
+            vec![leg_candidate(lexical_only), leg_candidate(shared)],
+            LexicalBackend::TurbopufferBm25,
+        );
+        let mut req = vector_request();
+        req.label_filter = Some(vec![NodeLabel::Chunk]);
+
+        apply_lexical_boost_only_policy(&req, &vector_hits, &mut lexical_hits);
+
+        assert_eq!(lexical_hits.candidates.len(), 1);
+        assert_eq!(lexical_hits.candidates[0].uid, shared);
+        assert_eq!(
+            lexical_hits.candidates[0].score,
+            leg_candidate(shared).score * TURBOPUFFER_BM25_BOOST_MULTIPLIER
+        );
+    }
+
+    #[test]
+    fn turbopuffer_bm25_lexical_only_request_keeps_candidates() {
+        // Pins: exact lexical tenant-chunk requests without a query embedding do
+        // not drop all BM25 candidates just because the vector leg is empty.
+        let lexical_only = Uuid::from_u128(2);
+        let mut lexical_hits = LexicalLegOutput::new(
+            vec![leg_candidate(lexical_only)],
+            LexicalBackend::TurbopufferBm25,
+        );
+        let mut req = vector_request();
+        req.query_embedding.clear();
+        req.label_filter = Some(vec![NodeLabel::Chunk]);
+
+        apply_lexical_boost_only_policy(&req, &[], &mut lexical_hits);
+
+        assert_eq!(lexical_hits.candidates, vec![leg_candidate(lexical_only)]);
+    }
+
+    #[test]
+    fn postgres_lexical_leg_can_still_add_candidates() {
+        // Pins: the boost-only rule is scoped to Turbopuffer BM25 tenant chunks;
+        // existing Postgres lexical behavior for memory/exact matches is unchanged.
+        let lexical_only = Uuid::from_u128(2);
+        let mut lexical_hits = LexicalLegOutput::new(
+            vec![leg_candidate(lexical_only)],
+            LexicalBackend::PostgresTsvector,
+        );
+        let req = vector_request();
+
+        apply_lexical_boost_only_policy(&req, &[], &mut lexical_hits);
+
+        assert_eq!(lexical_hits.candidates, vec![leg_candidate(lexical_only)]);
+    }
+
+    #[test]
+    fn vector_first_strategy_disables_turbopuffer_bm25() {
+        // Pins: tenant-KB vector-first retrieval does not pay for, or fuse in,
+        // the Turbopuffer BM25 leg after WixQA showed it hurts rank quality.
+        let mut req = vector_request();
+        req.label_filter = Some(vec![NodeLabel::Chunk]);
+        req.strategy = Some(Strategy::VectorFirst);
+
+        assert!(!request_allows_tenant_chunk_bm25(&req));
+    }
+
+    #[test]
+    fn fused_candidate_limit_scales_with_requested_final_count() {
+        // Pins: widened retrieval cutoffs are not silently capped at the old
+        // fixed candidate pool, but production requests still have a hard cap.
+        assert_eq!(fused_candidate_limit(0), 0);
+        assert_eq!(fused_candidate_limit(5), MIN_FUSED_CANDIDATE_LIMIT);
+        assert_eq!(fused_candidate_limit(25), 50);
+        assert_eq!(fused_candidate_limit(50), 100);
+        assert_eq!(fused_candidate_limit(500), 100);
     }
 
     #[tokio::test]
@@ -1655,6 +3257,32 @@ mod tests {
         }
     }
 
+    struct RecordingReranker {
+        documents: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Reranker for RecordingReranker {
+        async fn rerank(
+            &self,
+            _model: &str,
+            _query: &str,
+            documents: &[String],
+            top_n: usize,
+        ) -> moa_core::Result<Vec<RerankHit>> {
+            *self
+                .documents
+                .lock()
+                .expect("recording reranker document lock") = documents.to_vec();
+            Ok((0..documents.len().min(top_n))
+                .map(|index| RerankHit {
+                    index,
+                    relevance_score: 1.0,
+                })
+                .collect())
+        }
+    }
+
     fn hit(uid: Uuid, scope: &str, score: f64) -> RetrievalHit {
         RetrievalHit {
             uid,
@@ -1682,6 +3310,52 @@ mod tests {
                 quality_score: 0.5,
             },
         }
+    }
+
+    fn knowledge_chunk(text: &str) -> KnowledgeChunkHydration {
+        KnowledgeChunkHydration {
+            chunk_uid: Uuid::now_v7(),
+            document_version_uid: Uuid::now_v7(),
+            object_uid: Uuid::now_v7(),
+            chunk_hash: "chunk-hash".to_string(),
+            ordinal: 0,
+            heading_path: vec!["Domains".to_string()],
+            text: text.to_string(),
+            token_count: 16,
+            metadata: Value::Null,
+            source_uri: Some("https://support.example.invalid/domain".to_string()),
+            source_title: Some("Custom domains".to_string()),
+            object_type: "article".to_string(),
+        }
+    }
+
+    fn tenant_chunk_hit(
+        uid: Uuid,
+        object_uid: Uuid,
+        source_title: &str,
+        ordinal: i32,
+        score: f64,
+        legs: LegSources,
+    ) -> RetrievalHit {
+        let mut hit = hit(uid, "tenant", score);
+        hit.legs = legs;
+        hit.source_tier = SourceTier::TenantKnowledge;
+        hit.node.label = NodeLabel::Chunk;
+        hit.knowledge_chunk = Some(KnowledgeChunkHydration {
+            chunk_uid: Uuid::from_u128(10_000 + uid.as_u128()),
+            document_version_uid: Uuid::from_u128(20_000 + object_uid.as_u128()),
+            object_uid,
+            chunk_hash: format!("chunk-{uid}"),
+            ordinal,
+            heading_path: vec![source_title.to_string()],
+            text: format!("{source_title} body"),
+            token_count: 16,
+            metadata: Value::Null,
+            source_uri: Some(format!("https://support.example.invalid/{object_uid}")),
+            source_title: Some(source_title.to_string()),
+            object_type: "article".to_string(),
+        });
+        hit
     }
 
     fn node_row(uid: Uuid, name: &str) -> NodeIndexRow {

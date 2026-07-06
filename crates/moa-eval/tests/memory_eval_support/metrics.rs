@@ -41,6 +41,8 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
             preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
         },
         ProbeResult {
             probe_id: "probe-rank-five".to_string(),
@@ -82,6 +84,8 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
             preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
         },
         ProbeResult {
             probe_id: "probe-multi-hop".to_string(),
@@ -119,6 +123,8 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
             preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
         },
         ProbeResult {
             probe_id: "probe-temporal-miss".to_string(),
@@ -142,6 +148,8 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             temporal_filter_parsed: Some(true),
             temporal_filter_matches_as_of: Some(true),
             preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
         },
         ProbeResult {
             probe_id: "probe-pii-redacted".to_string(),
@@ -165,6 +173,8 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
             preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
         },
         ProbeResult {
             probe_id: "probe-abstains".to_string(),
@@ -182,6 +192,8 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
             preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
         },
         ProbeResult {
             probe_id: "probe-cross-user-leak".to_string(),
@@ -205,6 +217,8 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
             preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
         },
     ]
 }
@@ -237,6 +251,8 @@ fn parse_metric_probe(
         temporal_filter_parsed,
         temporal_filter_matches_as_of,
         preference_context_hit: None,
+        graph_diagnostics: None,
+        graph_comparison: None,
     }
 }
 

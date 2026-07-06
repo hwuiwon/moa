@@ -43,11 +43,11 @@ pub use judge::{
     AnswerJudge, DeterministicJudge, JudgeInput, JudgeOutcome, PairwiseLlmJudge, PairwiseWinner,
 };
 pub use metrics::{
-    CandidateLegs, EntityFragmentationCounts, ExtractionPrecisionCounts, ProbeResult,
-    RetrievalEvalReport, RetrievalMetrics, RetrievedCandidate,
-    aggregate_retrieval_eval_from_counts, aggregate_retrieval_eval_from_diagnostic_counts,
-    aggregate_retrieval_eval_with_diagnostics, aggregate_retrieval_eval_with_extraction_precision,
-    candidates_from_retrieval_hits,
+    CandidateLegs, EntityFragmentationCounts, ExtractionPrecisionCounts, GraphImpact,
+    ProbeGraphComparison, ProbeGraphPathDiagnostic, ProbeResult, RetrievalEvalReport,
+    RetrievalMetrics, RetrievedCandidate, aggregate_retrieval_eval_from_counts,
+    aggregate_retrieval_eval_from_diagnostic_counts, aggregate_retrieval_eval_with_diagnostics,
+    aggregate_retrieval_eval_with_extraction_precision, candidates_from_retrieval_hits,
 };
 pub use moa_brain::retrieval::RankingConfig;
 pub use recording::{
@@ -55,9 +55,9 @@ pub use recording::{
     MemoryMergeRecordingReport, record_memory_extractions, record_memory_merges,
 };
 pub use runner::{
-    EvalLane, GraphExpansionEvalPolicy, MemoryEvalExtractorMode, MemoryRetrievalEvalOptions,
-    MemoryRetrievalEvalReport, QueryRewritePolicy, RETRIEVAL_EVAL_CANDIDATE_K,
-    RETRIEVAL_EVAL_FINAL_K, run_memory_retrieval_eval,
+    EvalLane, GraphExpansionEvalPolicy, MemoryEvalExtractorMode, MemoryGraphDiagnostics,
+    MemoryRetrievalEvalOptions, MemoryRetrievalEvalReport, QueryRewritePolicy,
+    RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K, run_memory_retrieval_eval,
 };
 pub use scope::{
     stable_uuid_from_label, tenant_id_from_label, tenant_id_from_storage_partition,

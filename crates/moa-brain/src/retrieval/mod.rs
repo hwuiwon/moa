@@ -7,8 +7,11 @@ pub mod ranking;
 
 pub use cache::{CacheKey, CachedEntry, CachedHybridRetriever, PlannedRetriever, RetrievalBackend};
 pub use hybrid::{
-    HybridRetriever, KnowledgeChunkHydration, LegSources, LexicalBackend, LineageContext, Result,
-    RetrievalError, RetrievalHit, RetrievalRequest, SourceTier,
+    ArticleFeatureContribution, ArticleFeatureContributions, ArticleRankingDiagnostics,
+    GraphCandidateCounts, GraphPathTrace, GraphRetrievalDiagnostics, GraphRetrievalPolicy,
+    GraphSeedDiagnostics, GraphSeedSource, HybridRetriever, KnowledgeChunkHydration, LegSources,
+    LexicalBackend, LineageContext, Result, RetrievalError, RetrievalHit, RetrievalOutput,
+    RetrievalRequest, SourceTier,
 };
 pub use legs::{GRAPH_WEIGHT, LEXICAL_WEIGHT, RRF_K, VECTOR_WEIGHT, rrf_fuse};
 pub use ranking::{

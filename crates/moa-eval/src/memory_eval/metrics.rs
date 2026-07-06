@@ -3,7 +3,10 @@
 use std::collections::{BTreeSet, HashMap};
 use std::ops::{Deref, DerefMut};
 
-use moa_brain::retrieval::{LegSources, LexicalBackend, RetrievalHit};
+use moa_brain::retrieval::{
+    GraphPathTrace, GraphRetrievalDiagnostics, GraphSeedSource, LegSources, LexicalBackend,
+    RetrievalHit,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -117,6 +120,77 @@ pub struct ProbeResult {
     /// Whether preference context was present in digest content or the top-4 retrieval window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preference_context_hit: Option<bool>,
+    /// Request-local graph diagnostics captured during the primary pre-rerank retrieval pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_diagnostics: Option<GraphRetrievalDiagnostics>,
+    /// Optional graph-on/off comparison for this probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_comparison: Option<ProbeGraphComparison>,
+}
+
+/// Per-probe graph-on/off retrieval impact.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProbeGraphComparison {
+    /// Rank impact of graph expansion for the first relevant fact.
+    pub impact: GraphImpact,
+    /// First relevant rank from the primary graph-enabled candidate list.
+    pub relevant_rank_with_graph: Option<usize>,
+    /// First relevant rank from the graph-disabled candidate list.
+    pub relevant_rank_without_graph: Option<usize>,
+    /// Rank delta where positive means graph moved relevance later.
+    pub rank_delta_with_minus_without: Option<i64>,
+    /// Graph-disabled pre-rerank candidates used for the comparison.
+    pub graph_off_candidates: Vec<RetrievedCandidate>,
+    /// Most useful graph paths for diagnosing hurt probes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub top_harmful_graph_paths: Vec<ProbeGraphPathDiagnostic>,
+    /// Graph-disabled retrieval latency in milliseconds.
+    pub graph_off_retrieval_latency_ms: u64,
+}
+
+/// Graph impact category for a probe-level graph-on/off comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphImpact {
+    /// Graph expansion worsened the first relevant rank.
+    Hurt,
+    /// Graph expansion improved the first relevant rank.
+    Rescue,
+    /// Graph expansion left the first relevant rank unchanged.
+    Neutral,
+}
+
+/// One graph path selected to explain a hurt probe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbeGraphPathDiagnostic {
+    /// Seed node that produced the path.
+    pub seed_uid: Uuid,
+    /// Source that admitted the seed into graph expansion.
+    pub seed_source: Option<GraphSeedSource>,
+    /// Candidate node reached by the path.
+    pub candidate_uid: Uuid,
+    /// Candidate rank in the graph-enabled pre-rerank list.
+    pub candidate_rank_with_graph: Option<usize>,
+    /// Ledger fact represented by the candidate, when known.
+    pub candidate_fact_id: Option<String>,
+    /// One-based graph distance from seed to candidate.
+    pub hop: u8,
+    /// Edge labels along the discovered path in traversal order.
+    pub edge_labels: Vec<String>,
+}
+
+impl From<&GraphPathTrace> for ProbeGraphPathDiagnostic {
+    fn from(trace: &GraphPathTrace) -> Self {
+        Self {
+            seed_uid: trace.seed_uid,
+            seed_source: trace.seed_source,
+            candidate_uid: trace.candidate_uid,
+            candidate_rank_with_graph: None,
+            candidate_fact_id: None,
+            hop: trace.hop,
+            edge_labels: trace.edge_labels.clone(),
+        }
+    }
 }
 
 impl ProbeResult {
@@ -834,6 +908,8 @@ mod tests {
                     probe_id: "point".to_string(),
                     probe_type: ProbeType::PointRecall,
                     preference_context_hit: None,
+                    graph_diagnostics: None,
+                    graph_comparison: None,
                     ..probe_result("point", None)
                 },
             ],
@@ -874,6 +950,8 @@ mod tests {
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
             preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
         };
 
         assert_eq!(probe.recall_at(4), Some(1.0));
@@ -910,6 +988,8 @@ mod tests {
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
             preference_context_hit,
+            graph_diagnostics: None,
+            graph_comparison: None,
         }
     }
 }

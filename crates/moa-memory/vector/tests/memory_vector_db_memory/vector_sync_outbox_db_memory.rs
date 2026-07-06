@@ -36,6 +36,12 @@ fn vector_item(uid: Uuid, embedding_model: &str) -> VectorItem {
     }
 }
 
+fn chunk_vector_item(uid: Uuid, embedding_model: &str) -> VectorItem {
+    let mut item = vector_item(uid, embedding_model);
+    item.label = "Chunk".to_string();
+    item
+}
+
 async fn scoped_conn<'a>(pool: &'a PgPool, storage_partition_id: &str) -> ScopedConn<'a> {
     let ctx = tenant_scope(storage_partition_id);
     let mut conn = ScopedConn::begin(pool, &ctx)
@@ -98,6 +104,91 @@ async fn insert_node_index_row(pool: &PgPool, storage_partition_id: &str, item: 
     .await
     .expect("insert node_index row");
     conn.commit().await.expect("commit node_index row");
+}
+
+async fn insert_knowledge_chunk(
+    pool: &PgPool,
+    storage_partition_id: &str,
+    graph_node_uid: Uuid,
+    text: &str,
+) {
+    let tenant_id =
+        Uuid::parse_str(storage_partition_id).expect("test storage partition id is a tenant UUID");
+    let connection_uid = Uuid::now_v7();
+    let object_uid = Uuid::now_v7();
+    let version_uid = Uuid::now_v7();
+    let chunk_uid = Uuid::now_v7();
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_connections (
+            connection_uid, tenant_id, storage_partition_id, provider,
+            provider_config_key, provider_connection_id, connector,
+            credential_ref, status
+        )
+        VALUES ($1, $2, $3, 'test-provider', 'default', $4, 'test-connector',
+                'test-credential', 'active')
+        "#,
+    )
+    .bind(connection_uid)
+    .bind(tenant_id)
+    .bind(storage_partition_id)
+    .bind(format!("account-{connection_uid}"))
+    .execute(conn.as_mut())
+    .await
+    .expect("insert knowledge connection");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_objects (
+            object_uid, tenant_id, storage_partition_id, connection_id,
+            object_type, external_object_id, title, status, metadata
+        )
+        VALUES ($1, $2, $3, $4, 'article', 'article-1', 'Article 1', 'active', '{}')
+        "#,
+    )
+    .bind(object_uid)
+    .bind(tenant_id)
+    .bind(storage_partition_id)
+    .bind(connection_uid)
+    .execute(conn.as_mut())
+    .await
+    .expect("insert knowledge object");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_document_versions (
+            document_version_uid, tenant_id, storage_partition_id, object_id,
+            parser_provider, content_hash, metadata
+        )
+        VALUES ($1, $2, $3, $4, 'native', 'content-hash-1', '{}')
+        "#,
+    )
+    .bind(version_uid)
+    .bind(tenant_id)
+    .bind(storage_partition_id)
+    .bind(object_uid)
+    .execute(conn.as_mut())
+    .await
+    .expect("insert knowledge document version");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_chunks (
+            chunk_uid, tenant_id, storage_partition_id, document_version_id,
+            graph_node_uid, chunk_hash, block_hashes, text, ordinal, token_count, metadata
+        )
+        VALUES ($1, $2, $3, $4, $5, 'chunk-hash-1', ARRAY['block-hash-1']::TEXT[],
+                $6, 0, 12, '{}')
+        "#,
+    )
+    .bind(chunk_uid)
+    .bind(tenant_id)
+    .bind(storage_partition_id)
+    .bind(version_uid)
+    .bind(graph_node_uid)
+    .bind(text)
+    .execute(conn.as_mut())
+    .await
+    .expect("insert knowledge chunk");
+    conn.commit().await.expect("commit knowledge chunk");
 }
 
 async fn pending_outbox_count(pool: &PgPool) -> i64 {
@@ -306,7 +397,7 @@ async fn vector_sync_outbox_drains_turbopuffer_upsert_and_delete_db_memory() {
     let storage_partition_id = Uuid::now_v7().to_string();
     let embedding_model = "test-embed";
     let items = vec![
-        vector_item(Uuid::now_v7(), embedding_model),
+        chunk_vector_item(Uuid::now_v7(), embedding_model),
         vector_item(Uuid::now_v7(), embedding_model),
         vector_item(Uuid::now_v7(), embedding_model),
     ];
@@ -315,6 +406,13 @@ async fn vector_sync_outbox_drains_turbopuffer_upsert_and_delete_db_memory() {
     for item in &items {
         insert_node_index_row(&pool, &storage_partition_id, item).await;
     }
+    insert_knowledge_chunk(
+        &pool,
+        &storage_partition_id,
+        items[0].uid,
+        "deployment runbook abc-123",
+    )
+    .await;
 
     let mut config = MoaConfig::default();
     config.memory.vector.turbopuffer.api_key = "test-key".to_string();
@@ -397,6 +495,14 @@ async fn vector_sync_outbox_drains_turbopuffer_upsert_and_delete_db_memory() {
             "batched delete body missing {uid}: {delete_body}"
         );
     }
+    assert!(
+        upsert_body.contains("\"schema\""),
+        "chunk text projection should configure Turbopuffer BM25 schema: {upsert_body}"
+    );
+    assert!(
+        upsert_body.contains("deployment runbook abc-123"),
+        "chunk text should be preserved across pgvector source reload: {upsert_body}"
+    );
 
     drop(store);
     testing::cleanup_test_schema(&database_url, &schema_name)

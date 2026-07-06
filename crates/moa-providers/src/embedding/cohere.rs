@@ -15,7 +15,9 @@ use crate::core::pacer::{PacerConfig, RatePacer};
 
 const COHERE_EMBEDDINGS_URL: &str = "https://api.cohere.com/v2/embed";
 pub(super) const COHERE_DEFAULT_MODEL: &str = "embed-v4.0";
-const COHERE_DEFAULT_INPUT_TYPE: &str = "search_document";
+const COHERE_DOCUMENT_INPUT_TYPE: &str = "search_document";
+const COHERE_QUERY_INPUT_TYPE: &str = "search_query";
+const COHERE_DEFAULT_INPUT_TYPE: &str = COHERE_DOCUMENT_INPUT_TYPE;
 const COHERE_FLOAT_EMBEDDING_TYPE: &str = "float";
 const COHERE_MAX_TEXTS: usize = 96;
 /// Maximum embedding chunks Cohere requests are allowed to have in flight at once.
@@ -57,6 +59,13 @@ impl CohereEmbedding {
     #[must_use]
     pub fn with_embeddings_url(mut self, embeddings_url: impl Into<String>) -> Self {
         self.embeddings_url = embeddings_url.into();
+        self
+    }
+
+    /// Overrides the Cohere retrieval role for this embedder.
+    #[must_use]
+    pub fn with_input_type(mut self, input_type: impl Into<String>) -> Self {
+        self.input_type = input_type.into();
         self
     }
 
@@ -167,6 +176,13 @@ impl CohereV4Embedder {
         self
     }
 
+    /// Overrides the Cohere retrieval role for this embedder.
+    #[must_use]
+    pub fn with_input_type(mut self, input_type: impl Into<String>) -> Self {
+        self.inner = self.inner.with_input_type(input_type);
+        self
+    }
+
     /// Overrides the request/input pacing, e.g. to apply trial-tier limits.
     #[must_use]
     pub fn with_rate_limits(mut self, config: PacerConfig) -> Self {
@@ -218,4 +234,15 @@ struct CohereEmbeddingResponse {
 #[derive(Debug, Clone, Deserialize)]
 struct CohereEmbeddings {
     float: Vec<Vec<f32>>,
+}
+
+/// Returns the Cohere input type for a graph-memory embedder role.
+#[must_use]
+pub(super) const fn cohere_input_type_for_role(
+    role: super::EmbedderConstructionRole,
+) -> &'static str {
+    match role {
+        super::EmbedderConstructionRole::Ingestion => COHERE_DOCUMENT_INPUT_TYPE,
+        super::EmbedderConstructionRole::Retrieval => COHERE_QUERY_INPUT_TYPE,
+    }
 }

@@ -16,6 +16,7 @@ pub(crate) struct EmbeddingRow {
     embedding: HalfVector,
     embedding_model: String,
     embedding_model_version: i32,
+    search_text: Option<String>,
     valid_to: Option<DateTime<Utc>>,
 }
 
@@ -29,6 +30,7 @@ impl EmbeddingRow {
             embedding: row.try_get("embedding")?,
             embedding_model: row.try_get("embedding_model")?,
             embedding_model_version: row.try_get("embedding_model_version")?,
+            search_text: optional_column(&row, "search_text")?,
             valid_to: row.try_get("valid_to")?,
         })
     }
@@ -45,7 +47,7 @@ impl EmbeddingRow {
             embedding,
             embedding_model: self.embedding_model.clone(),
             embedding_model_version: self.embedding_model_version,
-            search_text: None,
+            search_text: self.search_text.clone(),
             valid_to: self.valid_to,
         })
     }
@@ -69,5 +71,16 @@ impl EmbeddingRow {
             .into_iter()
             .map(|value| value.to_f32())
             .collect()
+    }
+}
+
+fn optional_column<T>(row: &sqlx::postgres::PgRow, name: &'static str) -> Result<Option<T>>
+where
+    T: for<'a> sqlx::Decode<'a, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+{
+    match row.try_get(name) {
+        Ok(value) => Ok(value),
+        Err(sqlx::Error::ColumnNotFound(_)) => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }

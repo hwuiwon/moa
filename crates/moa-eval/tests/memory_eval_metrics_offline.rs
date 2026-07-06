@@ -171,7 +171,136 @@ fn backend_probe(probe_id: &str, fact_id: &str, backend: LexicalBackend, uid: u1
         temporal_filter_parsed: None,
         temporal_filter_matches_as_of: None,
         preference_context_hit: None,
+        graph_diagnostics: None,
+        graph_comparison: None,
     }
+}
+
+#[test]
+fn memory_eval_report_serializes_probe_graph_harm_path() -> TestResult {
+    // Pins: memory eval reports explain graph harm per probe with seed and path identity.
+    use std::collections::BTreeMap;
+
+    use moa_brain::retrieval::{
+        GraphCandidateCounts, GraphPathTrace, GraphRetrievalDiagnostics, GraphRetrievalPolicy,
+        GraphSeedDiagnostics, GraphSeedSource,
+    };
+    use moa_eval::memory_eval::{
+        GraphImpact, MemoryGraphDiagnostics, ProbeGraphComparison, ProbeGraphPathDiagnostic,
+    };
+
+    let seed_uid = Uuid::from_u128(0x6_0000);
+    let harmful_uid = Uuid::from_u128(0x7_0001);
+    let graph_candidates = metric_candidates(
+        0x7_0000,
+        &[
+            CandidateSpec {
+                fact_id: Some("fact-wrong"),
+                legs: legs(true, false, false),
+            },
+            CandidateSpec {
+                fact_id: Some("fact-right"),
+                legs: legs(false, true, false),
+            },
+        ],
+    );
+    let graph_off_candidates = metric_candidates(
+        0x8_0000,
+        &[CandidateSpec {
+            fact_id: Some("fact-right"),
+            legs: legs(false, true, false),
+        }],
+    );
+    let graph_diagnostics = GraphRetrievalDiagnostics {
+        policy: GraphRetrievalPolicy::LegacyBroadExpansion,
+        seed_counts: GraphSeedDiagnostics {
+            broad_fallback: 1,
+            ..GraphSeedDiagnostics::default()
+        },
+        path_label_histogram: BTreeMap::from([("RELATED_TO".to_string(), 1)]),
+        hop_histogram: BTreeMap::from([(1, 1)]),
+        path_traces: vec![GraphPathTrace {
+            seed_uid,
+            seed_source: Some(GraphSeedSource::BroadFallback),
+            candidate_uid: harmful_uid,
+            hop: 1,
+            edge_labels: vec!["RELATED_TO".to_string()],
+            edge_directions: vec!["outgoing".to_string()],
+        }],
+        candidate_counts: GraphCandidateCounts {
+            graph_only: 1,
+            ..GraphCandidateCounts::default()
+        },
+        article_ranking: moa_brain::retrieval::ArticleRankingDiagnostics::default(),
+        graph_latency_ms: 7,
+        raw_path_count: 1,
+    };
+    let mut report = memory_budget_report(vec![ProbeResult {
+        probe_id: "probe-graph-hurt".to_string(),
+        user_id: "user-graph".to_string(),
+        probe_type: ProbeType::PointRecall,
+        expected_fact_ids: fact_ids(&["fact-right"]),
+        blocked_fact_ids: Vec::new(),
+        candidates: graph_candidates,
+        post_rerank_candidates: None,
+        retrieval_latency_ms: 11,
+        answer_faithful: Some(false),
+        abstention_correct: None,
+        pii_redacted: None,
+        temporal_as_of_correct: None,
+        temporal_filter_parsed: None,
+        temporal_filter_matches_as_of: None,
+        preference_context_hit: None,
+        graph_diagnostics: Some(graph_diagnostics),
+        graph_comparison: Some(ProbeGraphComparison {
+            impact: GraphImpact::Hurt,
+            relevant_rank_with_graph: Some(2),
+            relevant_rank_without_graph: Some(1),
+            rank_delta_with_minus_without: Some(1),
+            graph_off_candidates,
+            top_harmful_graph_paths: vec![ProbeGraphPathDiagnostic {
+                seed_uid,
+                seed_source: Some(GraphSeedSource::BroadFallback),
+                candidate_uid: harmful_uid,
+                candidate_rank_with_graph: Some(1),
+                candidate_fact_id: Some("fact-wrong".to_string()),
+                hop: 1,
+                edge_labels: vec!["RELATED_TO".to_string()],
+            }],
+            graph_off_retrieval_latency_ms: 3,
+        }),
+    }]);
+    report.graph_diagnostics = MemoryGraphDiagnostics::from_probe_results(&report.probe_results);
+
+    let value = serde_json::to_value(&report)?;
+
+    assert_eq!(value["graph_diagnostics"]["raw_path_count"], 1);
+    assert_eq!(value["graph_diagnostics"]["graph_hurt_count"], 1);
+    assert_eq!(
+        value["probe_results"][0]["graph_comparison"]["impact"],
+        "hurt"
+    );
+    assert_eq!(
+        value["probe_results"][0]["graph_comparison"]["top_harmful_graph_paths"][0]["seed_uid"],
+        seed_uid.to_string()
+    );
+    assert_eq!(
+        value["probe_results"][0]["graph_comparison"]["top_harmful_graph_paths"][0]["seed_source"],
+        "broad_fallback"
+    );
+    assert_eq!(
+        value["probe_results"][0]["graph_comparison"]["top_harmful_graph_paths"][0]["candidate_uid"],
+        harmful_uid.to_string()
+    );
+    assert_eq!(
+        value["probe_results"][0]["graph_comparison"]["top_harmful_graph_paths"][0]["candidate_fact_id"],
+        "fact-wrong"
+    );
+    assert_eq!(
+        value["probe_results"][0]["graph_diagnostics"]["path_traces"][0]["edge_labels"][0],
+        "RELATED_TO"
+    );
+    Ok(())
 }
 
 #[test]
@@ -333,6 +462,8 @@ fn reranker_metrics_track_pre_post_windows_and_p95_latency() {
                 temporal_filter_parsed: None,
                 temporal_filter_matches_as_of: None,
                 preference_context_hit: None,
+                graph_diagnostics: None,
+                graph_comparison: None,
             },
             ProbeResult {
                 probe_id: "probe-stable-top-hit".to_string(),
@@ -362,6 +493,8 @@ fn reranker_metrics_track_pre_post_windows_and_p95_latency() {
                 temporal_filter_parsed: None,
                 temporal_filter_matches_as_of: None,
                 preference_context_hit: None,
+                graph_diagnostics: None,
+                graph_comparison: None,
             },
         ],
         BootstrapConfig {
@@ -481,6 +614,8 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
                 temporal_filter_parsed: None,
                 temporal_filter_matches_as_of: None,
                 preference_context_hit: None,
+                graph_diagnostics: None,
+                graph_comparison: None,
             },
             ProbeResult {
                 probe_id: "probe-cross-user-clean".to_string(),
@@ -498,6 +633,8 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
                 temporal_filter_parsed: None,
                 temporal_filter_matches_as_of: None,
                 preference_context_hit: None,
+                graph_diagnostics: None,
+                graph_comparison: None,
             },
             ProbeResult {
                 probe_id: "probe-pii-unredacted".to_string(),
@@ -521,6 +658,8 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
                 temporal_filter_parsed: None,
                 temporal_filter_matches_as_of: None,
                 preference_context_hit: None,
+                graph_diagnostics: None,
+                graph_comparison: None,
             },
         ],
         BootstrapConfig {

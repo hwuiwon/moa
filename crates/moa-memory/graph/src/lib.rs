@@ -2,6 +2,8 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use uuid::Uuid;
 
 pub mod changelog;
@@ -49,6 +51,43 @@ pub struct GraphExpansionHit {
     pub hop: u8,
     /// Edge labels along the shortest discovered path.
     pub edges: Vec<EdgeLabel>,
+    /// Traversal direction for each edge in `edges`.
+    pub directions: Vec<GraphTraversalDirection>,
+}
+
+/// Direction used to traverse one edge in an expansion path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphTraversalDirection {
+    /// The walk followed `start_uid -> end_uid`.
+    Outgoing,
+    /// The walk followed `end_uid -> start_uid`.
+    Incoming,
+}
+
+impl GraphTraversalDirection {
+    /// Returns the stable report label for this direction.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Outgoing => "outgoing",
+            Self::Incoming => "incoming",
+        }
+    }
+}
+
+impl FromStr for GraphTraversalDirection {
+    type Err = GraphError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "outgoing" => Ok(Self::Outgoing),
+            "incoming" => Ok(Self::Incoming),
+            other => Err(GraphError::GraphQuery(format!(
+                "unknown graph traversal direction `{other}`"
+            ))),
+        }
+    }
 }
 
 /// Canonical graph-memory persistence interface.

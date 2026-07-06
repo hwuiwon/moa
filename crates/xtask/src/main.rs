@@ -16,6 +16,7 @@ mod generate_memory_eval_corpus;
 mod record_memory_extractions;
 mod record_memory_merges;
 mod run_memory_retrieval_eval;
+mod wixqa_rag_eval;
 
 const CENTRAL_MIGRATIONS_DIR: &str = "crates/moa-migrations/migrations/postgres";
 const CENTRAL_MIGRATIONS_ROOT: &str = "crates/moa-migrations/migrations";
@@ -33,6 +34,7 @@ fn main() -> Result<()> {
         Some("record-memory-extractions") => record_memory_extractions::run(args),
         Some("record-memory-merges") => record_memory_merges::run(args),
         Some("run-memory-retrieval-eval") => run_memory_retrieval_eval::run(args),
+        Some("wixqa-rag-eval") => wixqa_rag_eval::run(args),
         Some(command) => bail!("unknown xtask command: {command}"),
         None => bail!("missing xtask command; try `cargo xtask audit-paths`"),
     }

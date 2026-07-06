@@ -18,7 +18,7 @@ use std::sync::Arc;
 use moa_core::traits::EmbeddingProvider;
 use moa_core::{MoaConfig, MoaError, Result};
 
-use super::cohere::COHERE_DEFAULT_MODEL;
+use super::cohere::{COHERE_DEFAULT_MODEL, cohere_input_type_for_role};
 use super::gemini::GEMINI_V2_MODEL;
 #[cfg(test)]
 use super::zeroentropy::ZEROENTROPY_DEFAULT_MODEL;
@@ -98,7 +98,8 @@ impl EmbeddingProviderKind {
             }
             Self::Cohere => {
                 let api_key = read_api_key("MOA_COHERE_API_KEY", &config.providers.cohere.api_key)?;
-                let mut provider = CohereEmbedding::new(api_key, model)?;
+                let mut provider = CohereEmbedding::new(api_key, model)?
+                    .with_input_type(cohere_input_type_for_role(role));
                 if let Some(output_dim) = output_dim {
                     provider = provider.with_dimensions(output_dim)?;
                 }
