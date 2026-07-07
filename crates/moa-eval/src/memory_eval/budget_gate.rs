@@ -692,6 +692,8 @@ mod tests {
             reranker_enabled: false,
             query_rewrite_policy: policy,
             graph_expansion_policy: GraphExpansionEvalPolicy::Current,
+            graph_retrieval_policy: GraphExpansionEvalPolicy::Current.graph_retrieval_policy(),
+            graph_diagnostics: Default::default(),
             query_rewrite_call_count: call_count,
             query_rewrite_skip_count: skip_count,
             query_rewrite_call_rate: if call_count + skip_count == 0 {

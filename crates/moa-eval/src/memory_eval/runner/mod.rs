@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_brain::planning::{
-    PlannedQuery, PlanningCtx, QueryPlanner, QueryRetrievalCtx, parse_temporal, retrieve_for_query,
+    PlannedQuery, PlanningCtx, QueryPlanner, parse_temporal,
     should_skip_graph_expansion_for_direct_lookup,
 };
 use moa_brain::retrieval::{
-    CachedHybridRetriever, HybridRetriever, PlannedRetriever, RankingConfig, RetrievalHit,
-    RetrievalRequest,
+    GraphPathTrace, GraphRetrievalDiagnostics, GraphRetrievalPolicy, HybridRetriever,
+    RankingConfig, RetrievalHit, RetrievalOutput, RetrievalRequest,
 };
 use moa_core::RlsContext;
 use moa_core::{ContactId, MemoryDigestConfig, MoaConfig, UserId, traits::EmbeddingProvider};
@@ -49,11 +49,11 @@ use super::scope::{
 use super::{
     BootstrapConfig, CachedEmbeddingFixture, CachedEmbeddingProvider, CorpusManifest,
     DEFAULT_BOOTSTRAP_RESAMPLES, DeterministicJudge, EmbeddingInput, ExtractionPrecisionCounts,
-    GoldPiiStatus, GoldResolutionReport, JudgeInput, JudgeOutcome, LedgerFact, Probe, ProbeResult,
-    ProbeType, RetrievedCandidate, SyntheticSession, candidates_from_retrieval_hits,
-    embedding_text_hash, read_embedding_inputs_jsonl, read_embeddings_jsonl, read_ledger_jsonl,
-    read_manifest_json, read_probes_jsonl, read_sessions_jsonl, resolve_gold_nodes,
-    validate_corpus,
+    GoldPiiStatus, GoldResolutionReport, GraphImpact, JudgeInput, JudgeOutcome, LedgerFact, Probe,
+    ProbeGraphComparison, ProbeGraphPathDiagnostic, ProbeResult, ProbeType, RetrievedCandidate,
+    SyntheticSession, candidates_from_retrieval_hits, embedding_text_hash,
+    read_embedding_inputs_jsonl, read_embeddings_jsonl, read_ledger_jsonl, read_manifest_json,
+    read_probes_jsonl, read_sessions_jsonl, resolve_gold_nodes, validate_corpus,
 };
 use crate::kernel::{
     CostLedger, CountingEmbedder, CountingExtractor, CountingMergeVerifier, CountingReranker,
@@ -66,7 +66,7 @@ use super::io::io_error;
 mod report;
 mod rewrite;
 
-pub use report::{MemoryRetrievalEvalReport, QueryRewriteClassMetrics};
+pub use report::{MemoryGraphDiagnostics, MemoryRetrievalEvalReport, QueryRewriteClassMetrics};
 
 use report::{ReportBuildInput, build_eval_report};
 use rewrite::{QueryRewriteAccounting, QueryRewriteSummary, probe_for_rewrite_policy};
@@ -104,11 +104,13 @@ pub struct MemoryRetrievalEvalOptions {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GraphExpansionEvalPolicy {
-    /// Preserve production retrieval behavior.
+    /// Use the production graph retrieval policy.
     #[default]
     Current,
     /// Disable graph expansion only for direct exact-anchor non-temporal probes.
     SkipExactDirect,
+    /// Preserve the pre-guardrail broad graph expansion behavior for A/B reports.
+    LegacyBroadExpansion,
 }
 
 impl GraphExpansionEvalPolicy {
@@ -118,6 +120,16 @@ impl GraphExpansionEvalPolicy {
         match self {
             Self::Current => "current",
             Self::SkipExactDirect => "skip-exact-direct",
+            Self::LegacyBroadExpansion => "legacy-broad-expansion",
+        }
+    }
+
+    /// Returns the production graph retrieval policy used by this eval lane.
+    #[must_use]
+    pub const fn graph_retrieval_policy(self) -> GraphRetrievalPolicy {
+        match self {
+            Self::Current | Self::SkipExactDirect => GraphRetrievalPolicy::AnchoredRescue,
+            Self::LegacyBroadExpansion => GraphRetrievalPolicy::LegacyBroadExpansion,
         }
     }
 }
@@ -564,6 +576,23 @@ async fn run_memory_retrieval_eval_in_store(
             &fact_ids_by_uid,
             &equivalent_fact_ids_by_uid,
         );
+        let graph_comparison =
+            retrieval
+                .graph_off_retrieval_latency_ms
+                .map(|graph_off_retrieval_latency_ms| {
+                    let graph_off_candidates = candidates_from_retrieval_hits(
+                        &retrieval.graph_off_hits,
+                        &fact_ids_by_uid,
+                        &equivalent_fact_ids_by_uid,
+                    );
+                    probe_graph_comparison(
+                        &probe.expected_fact_ids,
+                        candidates.as_slice(),
+                        graph_off_candidates,
+                        &retrieval.graph_diagnostics,
+                        graph_off_retrieval_latency_ms,
+                    )
+                });
         let post_rerank_candidates = candidates_from_retrieval_hits(
             &retrieval.post_rerank_hits,
             &fact_ids_by_uid,
@@ -575,14 +604,16 @@ async fn run_memory_retrieval_eval_in_store(
             &digest_context,
             &ledger_by_fact_id,
         );
-        probe_results.push(probe_result_for(
+        probe_results.push(probe_result_for(ProbeResultInput {
             probe,
             candidates,
-            Some(post_rerank_candidates),
-            retrieval.retrieval_latency_ms,
-            &gold_records_by_fact_id,
+            post_rerank_candidates: Some(post_rerank_candidates),
+            retrieval_latency_ms: retrieval.retrieval_latency_ms,
+            gold_records_by_fact_id: &gold_records_by_fact_id,
             preference_context_hit,
-        )?);
+            graph_diagnostics: Some(retrieval.graph_diagnostics),
+            graph_comparison,
+        })?);
         if options.lane == EvalLane::Live
             && (probe_index + 1) % 10 == 0
             && let Err(error) = check_budget(&providers.ledger).await
@@ -1227,65 +1258,96 @@ async fn retrieve_probe(
     let graph_store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_context)
         .with_vector_store(graph_vector);
     let graph: Arc<dyn GraphStore> = Arc::new(graph_store);
-    let hybrid = Arc::new(
-        HybridRetriever::new(pool.clone(), graph.clone(), vector)
-            .with_ranking_config(ranking_config)
-            .with_reranker(reranker)
-            .with_assume_app_role(true),
-    );
-    let cached = Arc::new(CachedHybridRetriever::new_for_app_role(
-        hybrid,
-        pool.clone(),
-    ));
-    let retrieval = GraphExpansionPolicyRetriever {
-        inner: cached,
-        policy: graph_expansion_policy,
-    };
+    let hybrid = HybridRetriever::new(pool.clone(), graph.clone(), vector)
+        .with_ranking_config(ranking_config)
+        .with_reranker(reranker)
+        .with_assume_app_role(true);
     let planning = PlanningCtx::new(scope, graph);
+    let planned = planner
+        .plan(&probe.query, &planning)
+        .await
+        .map_err(|error| memory_retrieval_error(probe, error))?;
+    let query_embedding = embed_probe_query(embedder, probe).await?;
 
-    let pre_rerank_hits = retrieve_probe_hits(
-        planner,
-        &planning,
-        embedder,
-        &retrieval,
+    let pre_rerank_output = retrieve_probe_output(
+        &hybrid,
+        &planned,
         probe,
+        query_embedding.clone(),
         ProbeHitOptions {
             k_final: RETRIEVAL_EVAL_CANDIDATE_K,
             use_reranker: false,
             ranking_reference_time,
+            graph_expansion_policy,
+            force_graph_off: false,
         },
     )
     .await?;
     let post_rerank_hits = if use_reranker {
-        retrieve_probe_hits(
-            planner,
-            &planning,
-            embedder,
-            &retrieval,
+        retrieve_probe_output(
+            &hybrid,
+            &planned,
             probe,
+            query_embedding.clone(),
             ProbeHitOptions {
                 k_final: RETRIEVAL_EVAL_FINAL_K,
                 use_reranker: true,
                 ranking_reference_time,
+                graph_expansion_policy,
+                force_graph_off: false,
             },
         )
         .await?
+        .hits
     } else {
-        pre_rerank_hits
+        pre_rerank_output
+            .hits
             .iter()
             .take(RETRIEVAL_EVAL_FINAL_K)
             .cloned()
             .collect()
     };
+    let primary_retrieval_latency_ms = if deterministic_replay {
+        0
+    } else {
+        duration_ms_u64(started.elapsed())
+    };
+    let (graph_off_hits, graph_off_retrieval_latency_ms) =
+        if should_compare_graph(pre_rerank_output.diagnostics.policy) {
+            let graph_off_started = Instant::now();
+            let graph_off_output = retrieve_probe_output(
+                &hybrid,
+                &planned,
+                probe,
+                query_embedding,
+                ProbeHitOptions {
+                    k_final: RETRIEVAL_EVAL_CANDIDATE_K,
+                    use_reranker: false,
+                    ranking_reference_time,
+                    graph_expansion_policy,
+                    force_graph_off: true,
+                },
+            )
+            .await?;
+            (
+                graph_off_output.hits,
+                Some(if deterministic_replay {
+                    0
+                } else {
+                    duration_ms_u64(graph_off_started.elapsed())
+                }),
+            )
+        } else {
+            (Vec::new(), None)
+        };
 
     Ok(ProbeRetrieval {
-        pre_rerank_hits,
+        pre_rerank_hits: pre_rerank_output.hits,
         post_rerank_hits,
-        retrieval_latency_ms: if deterministic_replay {
-            0
-        } else {
-            duration_ms_u64(started.elapsed())
-        },
+        graph_diagnostics: pre_rerank_output.diagnostics,
+        graph_off_hits,
+        graph_off_retrieval_latency_ms,
+        retrieval_latency_ms: primary_retrieval_latency_ms,
     })
 }
 
@@ -1297,27 +1359,6 @@ struct ProbeRetrieveOptions {
     graph_expansion_policy: GraphExpansionEvalPolicy,
 }
 
-struct GraphExpansionPolicyRetriever {
-    inner: Arc<CachedHybridRetriever>,
-    policy: GraphExpansionEvalPolicy,
-}
-
-#[async_trait]
-impl PlannedRetriever for GraphExpansionPolicyRetriever {
-    async fn retrieve(
-        &self,
-        planned: &PlannedQuery,
-        mut req: RetrievalRequest,
-    ) -> moa_brain::retrieval::Result<Vec<RetrievalHit>> {
-        if self.policy == GraphExpansionEvalPolicy::SkipExactDirect
-            && should_skip_graph_expansion_for_exact_direct_probe(planned, &req)
-        {
-            req.disable_graph_expansion = true;
-        }
-        self.inner.retrieve(planned, req).await
-    }
-}
-
 fn should_skip_graph_expansion_for_exact_direct_probe(
     planned: &PlannedQuery,
     req: &RetrievalRequest,
@@ -1325,31 +1366,246 @@ fn should_skip_graph_expansion_for_exact_direct_probe(
     req.as_of.is_none() && should_skip_graph_expansion_for_direct_lookup(planned, &req.query_text)
 }
 
-async fn retrieve_probe_hits(
-    planner: &QueryPlanner,
-    planning: &PlanningCtx,
-    embedder: &dyn EmbeddingProvider,
-    retriever: &dyn PlannedRetriever,
-    probe: &Probe,
-    options: ProbeHitOptions,
-) -> Result<Vec<RetrievalHit>> {
-    let mut retrieval_ctx =
-        QueryRetrievalCtx::new(planner, planning, embedder, retriever, PiiClass::Restricted)
-            .with_k_final(options.k_final)
-            .with_reranker(options.use_reranker);
-    if let Some(ranking_reference_time) = options.ranking_reference_time {
-        retrieval_ctx = retrieval_ctx.with_ranking_reference_time(ranking_reference_time);
-    }
-    retrieval_ctx = retrieval_ctx.with_leg_timeouts_disabled();
+async fn embed_probe_query(embedder: &dyn EmbeddingProvider, probe: &Probe) -> Result<Vec<f32>> {
+    let query_input = vec![probe.query.clone()];
+    let mut embeddings = embedder.embed(&query_input).await.map_err(|error| {
+        EvalError::InvalidConfig(format!(
+            "memory query embedding failed for probe {}: {error}",
+            probe.probe_id
+        ))
+    })?;
+    embeddings.pop().ok_or_else(|| {
+        EvalError::InvalidConfig(format!(
+            "memory query embedding returned no vector for probe {}",
+            probe.probe_id
+        ))
+    })
+}
 
-    retrieve_for_query(&probe.query, &retrieval_ctx)
+async fn retrieve_probe_output(
+    hybrid: &HybridRetriever,
+    planned: &PlannedQuery,
+    probe: &Probe,
+    query_embedding: Vec<f32>,
+    options: ProbeHitOptions,
+) -> Result<RetrievalOutput> {
+    let request = probe_retrieval_request(planned, probe, query_embedding, options);
+    hybrid
+        .retrieve_with_diagnostics(request)
         .await
-        .map_err(|error| {
-            EvalError::InvalidConfig(format!(
-                "memory retrieval failed for probe {}: {error}",
-                probe.probe_id
-            ))
+        .map_err(|error| memory_retrieval_error(probe, error))
+}
+
+fn probe_retrieval_request(
+    planned: &PlannedQuery,
+    probe: &Probe,
+    query_embedding: Vec<f32>,
+    options: ProbeHitOptions,
+) -> RetrievalRequest {
+    let mut request = planned.clone().into_retrieval_request(
+        &probe.query,
+        query_embedding,
+        PiiClass::Restricted,
+        options.k_final,
+        options.use_reranker,
+    );
+    request.ranking_reference_time = options.ranking_reference_time;
+    request.disable_leg_timeouts = true;
+    request.disable_graph_expansion = options.force_graph_off
+        || should_skip_graph_expansion_for_direct_lookup(planned, &request.query_text)
+        || (options.graph_expansion_policy == GraphExpansionEvalPolicy::SkipExactDirect
+            && should_skip_graph_expansion_for_exact_direct_probe(planned, &request));
+    request
+}
+
+fn memory_retrieval_error(
+    probe: &Probe,
+    error: impl std::fmt::Display,
+) -> moa_eval_core::EvalError {
+    EvalError::InvalidConfig(format!(
+        "memory retrieval failed for probe {}: {error}",
+        probe.probe_id
+    ))
+}
+
+fn should_compare_graph(policy: GraphRetrievalPolicy) -> bool {
+    !matches!(
+        policy,
+        GraphRetrievalPolicy::Off | GraphRetrievalPolicy::ContextOnly
+    )
+}
+
+fn probe_graph_comparison(
+    expected_fact_ids: &[String],
+    graph_candidates: &[RetrievedCandidate],
+    graph_off_candidates: Vec<RetrievedCandidate>,
+    graph_diagnostics: &GraphRetrievalDiagnostics,
+    graph_off_retrieval_latency_ms: u64,
+) -> ProbeGraphComparison {
+    let relevant_rank_with_graph = first_relevant_rank(graph_candidates, expected_fact_ids);
+    let relevant_rank_without_graph = first_relevant_rank(&graph_off_candidates, expected_fact_ids);
+    let impact = classify_graph_impact(relevant_rank_with_graph, relevant_rank_without_graph);
+    let top_harmful_graph_paths = if impact == GraphImpact::Hurt {
+        top_harmful_graph_paths(graph_diagnostics, graph_candidates, expected_fact_ids)
+    } else {
+        Vec::new()
+    };
+    ProbeGraphComparison {
+        impact,
+        relevant_rank_with_graph,
+        relevant_rank_without_graph,
+        rank_delta_with_minus_without: rank_delta(
+            relevant_rank_with_graph,
+            relevant_rank_without_graph,
+        ),
+        graph_off_candidates,
+        top_harmful_graph_paths,
+        graph_off_retrieval_latency_ms,
+    }
+}
+
+fn classify_graph_impact(
+    rank_with_graph: Option<usize>,
+    rank_without_graph: Option<usize>,
+) -> GraphImpact {
+    match rank_order_value(rank_with_graph).cmp(&rank_order_value(rank_without_graph)) {
+        std::cmp::Ordering::Less => GraphImpact::Rescue,
+        std::cmp::Ordering::Equal => GraphImpact::Neutral,
+        std::cmp::Ordering::Greater => GraphImpact::Hurt,
+    }
+}
+
+fn rank_order_value(rank: Option<usize>) -> usize {
+    rank.unwrap_or(usize::MAX)
+}
+
+fn rank_delta(rank_with_graph: Option<usize>, rank_without_graph: Option<usize>) -> Option<i64> {
+    match (rank_with_graph, rank_without_graph) {
+        (Some(with_graph), Some(without_graph)) => Some(with_graph as i64 - without_graph as i64),
+        _ => None,
+    }
+}
+
+fn first_relevant_rank(
+    candidates: &[RetrievedCandidate],
+    expected_fact_ids: &[String],
+) -> Option<usize> {
+    let expected = expected_fact_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    if expected.is_empty() {
+        return None;
+    }
+    candidates
+        .iter()
+        .filter(|candidate| candidate_matches_expected(candidate, &expected))
+        .map(|candidate| candidate.rank)
+        .min()
+}
+
+fn candidate_matches_expected(
+    candidate: &RetrievedCandidate,
+    expected: &std::collections::BTreeSet<&str>,
+) -> bool {
+    candidate
+        .fact_id
+        .as_deref()
+        .is_some_and(|fact_id| expected.contains(fact_id))
+        || candidate
+            .equivalent_fact_ids
+            .iter()
+            .any(|fact_id| expected.contains(fact_id.as_str()))
+}
+
+fn top_harmful_graph_paths(
+    diagnostics: &GraphRetrievalDiagnostics,
+    graph_candidates: &[RetrievedCandidate],
+    expected_fact_ids: &[String],
+) -> Vec<ProbeGraphPathDiagnostic> {
+    let expected = expected_fact_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let contexts = graph_candidate_contexts(graph_candidates);
+    let harmful_uids = graph_candidates
+        .iter()
+        .filter(|candidate| candidate.legs.graph)
+        .filter(|candidate| !candidate_matches_expected(candidate, &expected))
+        .map(|candidate| candidate.uid)
+        .collect::<std::collections::HashSet<_>>();
+    let graph_uids = graph_candidates
+        .iter()
+        .filter(|candidate| candidate.legs.graph)
+        .map(|candidate| candidate.uid)
+        .collect::<std::collections::HashSet<_>>();
+    let mut paths =
+        graph_path_diagnostics_for_candidates(&diagnostics.path_traces, &contexts, &harmful_uids);
+    if paths.is_empty() {
+        paths =
+            graph_path_diagnostics_for_candidates(&diagnostics.path_traces, &contexts, &graph_uids);
+    }
+    if paths.is_empty() {
+        paths = diagnostics
+            .path_traces
+            .iter()
+            .map(ProbeGraphPathDiagnostic::from)
+            .collect();
+    }
+    paths.sort_by(|left, right| {
+        left.candidate_rank_with_graph
+            .unwrap_or(usize::MAX)
+            .cmp(&right.candidate_rank_with_graph.unwrap_or(usize::MAX))
+            .then_with(|| left.hop.cmp(&right.hop))
+            .then_with(|| left.seed_uid.cmp(&right.seed_uid))
+            .then_with(|| left.candidate_uid.cmp(&right.candidate_uid))
+            .then_with(|| left.edge_labels.cmp(&right.edge_labels))
+    });
+    paths.truncate(5);
+    paths
+}
+
+fn graph_candidate_contexts(
+    candidates: &[RetrievedCandidate],
+) -> HashMap<Uuid, ProbeGraphCandidateContext> {
+    let mut contexts = HashMap::new();
+    for candidate in candidates.iter().filter(|candidate| candidate.legs.graph) {
+        contexts
+            .entry(candidate.uid)
+            .or_insert(ProbeGraphCandidateContext {
+                rank: candidate.rank,
+                fact_id: candidate.fact_id.clone(),
+            });
+    }
+    contexts
+}
+
+fn graph_path_diagnostics_for_candidates(
+    traces: &[GraphPathTrace],
+    contexts: &HashMap<Uuid, ProbeGraphCandidateContext>,
+    candidate_uids: &std::collections::HashSet<Uuid>,
+) -> Vec<ProbeGraphPathDiagnostic> {
+    traces
+        .iter()
+        .filter(|trace| candidate_uids.contains(&trace.candidate_uid))
+        .map(|trace| {
+            let context = contexts.get(&trace.candidate_uid);
+            ProbeGraphPathDiagnostic {
+                seed_uid: trace.seed_uid,
+                seed_source: trace.seed_source,
+                candidate_uid: trace.candidate_uid,
+                candidate_rank_with_graph: context.map(|context| context.rank),
+                candidate_fact_id: context.and_then(|context| context.fact_id.clone()),
+                hop: trace.hop,
+                edge_labels: trace.edge_labels.clone(),
+            }
         })
+        .collect()
+}
+
+struct ProbeGraphCandidateContext {
+    rank: usize,
+    fact_id: Option<String>,
 }
 
 fn deterministic_ranking_reference_time(ledger: &[LedgerFact]) -> DateTime<Utc> {
@@ -1373,6 +1629,9 @@ fn deterministic_consolidation_reference_time(ledger: &[LedgerFact]) -> DateTime
 struct ProbeRetrieval {
     pre_rerank_hits: Vec<RetrievalHit>,
     post_rerank_hits: Vec<RetrievalHit>,
+    graph_diagnostics: GraphRetrievalDiagnostics,
+    graph_off_hits: Vec<RetrievalHit>,
+    graph_off_retrieval_latency_ms: Option<u64>,
     retrieval_latency_ms: u64,
 }
 
@@ -1381,20 +1640,36 @@ struct ProbeHitOptions {
     k_final: usize,
     use_reranker: bool,
     ranking_reference_time: Option<DateTime<Utc>>,
+    graph_expansion_policy: GraphExpansionEvalPolicy,
+    force_graph_off: bool,
 }
 
 fn duration_ms_u64(elapsed: std::time::Duration) -> u64 {
     elapsed.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
-fn probe_result_for(
-    probe: &Probe,
+struct ProbeResultInput<'a> {
+    probe: &'a Probe,
     candidates: Vec<RetrievedCandidate>,
     post_rerank_candidates: Option<Vec<RetrievedCandidate>>,
     retrieval_latency_ms: u64,
-    gold_records_by_fact_id: &HashMap<String, super::GoldNodeRecord>,
+    gold_records_by_fact_id: &'a HashMap<String, super::GoldNodeRecord>,
     preference_context_hit: Option<bool>,
-) -> Result<ProbeResult> {
+    graph_diagnostics: Option<GraphRetrievalDiagnostics>,
+    graph_comparison: Option<ProbeGraphComparison>,
+}
+
+fn probe_result_for(input: ProbeResultInput<'_>) -> Result<ProbeResult> {
+    let ProbeResultInput {
+        probe,
+        candidates,
+        post_rerank_candidates,
+        retrieval_latency_ms,
+        gold_records_by_fact_id,
+        preference_context_hit,
+        graph_diagnostics,
+        graph_comparison,
+    } = input;
     let final_candidates = post_rerank_candidates.as_deref().unwrap_or(&candidates);
     let expected_found_at_4 = all_expected_found_at_k(
         final_candidates,
@@ -1445,6 +1720,8 @@ fn probe_result_for(
         temporal_filter_parsed,
         temporal_filter_matches_as_of,
         preference_context_hit,
+        graph_diagnostics,
+        graph_comparison,
     })
 }
 
@@ -2392,6 +2669,24 @@ mod tests {
     }
 
     #[test]
+    fn graph_expansion_current_uses_guarded_default_and_legacy_is_explicit() {
+        // Pins: memory-eval reports can still request legacy broad expansion,
+        // but the ambient current lane follows the guarded production default.
+        assert_eq!(
+            GraphExpansionEvalPolicy::Current.graph_retrieval_policy(),
+            GraphRetrievalPolicy::AnchoredRescue
+        );
+        assert_eq!(
+            GraphExpansionEvalPolicy::SkipExactDirect.graph_retrieval_policy(),
+            GraphRetrievalPolicy::AnchoredRescue
+        );
+        assert_eq!(
+            GraphExpansionEvalPolicy::LegacyBroadExpansion.graph_retrieval_policy(),
+            GraphRetrievalPolicy::LegacyBroadExpansion
+        );
+    }
+
+    #[test]
     fn graph_expansion_policy_skips_only_exact_direct_non_temporal_probes() {
         // Pins: the A/B policy only disables graph expansion for direct exact-anchor lookups.
         let planned = planned_for_policy(Strategy::Both, None);
@@ -2434,6 +2729,106 @@ mod tests {
         assert!(!should_skip_graph_expansion_for_exact_direct_probe(
             &planned, &req
         ));
+    }
+
+    #[test]
+    fn probe_graph_comparison_classifies_hurt_and_keeps_path_identity() {
+        // Pins: memory eval graph A/B diagnostics keep the seed and path behind hurt probes.
+        use crate::memory_eval::CandidateLegs;
+        use moa_brain::retrieval::{
+            GraphCandidateCounts, GraphPathTrace, GraphSeedDiagnostics, GraphSeedSource,
+        };
+
+        let seed_uid = Uuid::from_u128(0x4_0000);
+        let harmful_uid = Uuid::from_u128(0x5_0001);
+        let relevant_uid = Uuid::from_u128(0x5_0002);
+        let graph_candidates = vec![
+            RetrievedCandidate {
+                uid: harmful_uid,
+                rank: 1,
+                score: 0.9,
+                fact_id: Some("fact-wrong".to_string()),
+                equivalent_fact_ids: Vec::new(),
+                legs: CandidateLegs {
+                    graph: true,
+                    vector: false,
+                    lexical: false,
+                    lexical_backend: None,
+                },
+            },
+            RetrievedCandidate {
+                uid: relevant_uid,
+                rank: 2,
+                score: 0.8,
+                fact_id: Some("fact-right".to_string()),
+                equivalent_fact_ids: Vec::new(),
+                legs: CandidateLegs {
+                    graph: false,
+                    vector: true,
+                    lexical: false,
+                    lexical_backend: None,
+                },
+            },
+        ];
+        let graph_off_candidates = vec![RetrievedCandidate {
+            uid: relevant_uid,
+            rank: 1,
+            score: 1.0,
+            fact_id: Some("fact-right".to_string()),
+            equivalent_fact_ids: Vec::new(),
+            legs: CandidateLegs {
+                graph: false,
+                vector: true,
+                lexical: false,
+                lexical_backend: None,
+            },
+        }];
+        let diagnostics = GraphRetrievalDiagnostics {
+            policy: GraphRetrievalPolicy::LegacyBroadExpansion,
+            seed_counts: GraphSeedDiagnostics {
+                broad_fallback: 1,
+                ..GraphSeedDiagnostics::default()
+            },
+            path_label_histogram: BTreeMap::from([("RELATED_TO".to_string(), 1)]),
+            hop_histogram: BTreeMap::from([(1, 1)]),
+            path_traces: vec![GraphPathTrace {
+                seed_uid,
+                seed_source: Some(GraphSeedSource::BroadFallback),
+                candidate_uid: harmful_uid,
+                hop: 1,
+                edge_labels: vec!["RELATED_TO".to_string()],
+                edge_directions: vec!["outgoing".to_string()],
+            }],
+            candidate_counts: GraphCandidateCounts {
+                graph_only: 1,
+                ..GraphCandidateCounts::default()
+            },
+            source_object_ranking: moa_brain::retrieval::SourceObjectRankingDiagnostics::default(),
+            graph_latency_ms: 9,
+            raw_path_count: 1,
+        };
+
+        let comparison = probe_graph_comparison(
+            &["fact-right".to_string()],
+            &graph_candidates,
+            graph_off_candidates,
+            &diagnostics,
+            4,
+        );
+
+        assert_eq!(comparison.impact, GraphImpact::Hurt);
+        assert_eq!(comparison.relevant_rank_with_graph, Some(2));
+        assert_eq!(comparison.relevant_rank_without_graph, Some(1));
+        assert_eq!(comparison.rank_delta_with_minus_without, Some(1));
+        assert_eq!(comparison.top_harmful_graph_paths.len(), 1);
+        let path = &comparison.top_harmful_graph_paths[0];
+        assert_eq!(path.seed_uid, seed_uid);
+        assert_eq!(path.seed_source, Some(GraphSeedSource::BroadFallback));
+        assert_eq!(path.candidate_uid, harmful_uid);
+        assert_eq!(path.candidate_rank_with_graph, Some(1));
+        assert_eq!(path.candidate_fact_id.as_deref(), Some("fact-wrong"));
+        assert_eq!(path.hop, 1);
+        assert_eq!(path.edge_labels, vec!["RELATED_TO".to_string()]);
     }
 
     fn planned_for_policy(

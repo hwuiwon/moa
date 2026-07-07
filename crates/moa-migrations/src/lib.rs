@@ -169,6 +169,12 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         name: "V000326__analytics_query_read_models.sql",
         sql: include_str!("../migrations/postgres/V000326__analytics_query_read_models.sql"),
     },
+    SchemaMigration {
+        name: "V000327__knowledge_semantic_graph_extractions.sql",
+        sql: include_str!(
+            "../migrations/postgres/V000327__knowledge_semantic_graph_extractions.sql"
+        ),
+    },
 ];
 
 const AUTH_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[

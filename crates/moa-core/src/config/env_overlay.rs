@@ -272,6 +272,8 @@ pub struct MoaEnvOverlay {
     pub turbopuffer_environment: Option<String>,
     /// `MOA_TURBOPUFFER_BAA`.
     pub turbopuffer_baa: Option<bool>,
+    /// `MOA_TURBOPUFFER_VECTOR_TYPE`.
+    pub turbopuffer_vector_type: Option<String>,
     /// `MOA_CLOUD_MEMORY_DIR`.
     pub cloud_memory_dir: Option<String>,
     /// `MOA_CLOUD_HANDS_DEFAULT_PROVIDER`.
@@ -1041,6 +1043,7 @@ pub(in crate::config) fn any_present(values: &[bool]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::TurbopufferVectorType;
 
     #[test]
     fn every_flat_overlay_field_resolves_to_a_config_path() {
@@ -1133,6 +1136,7 @@ mod tests {
             ("MOA_TURBOPUFFER_BASE_URL", "https://tpuf.example"),
             ("MOA_TURBOPUFFER_ENVIRONMENT", "prod"),
             ("MOA_TURBOPUFFER_BAA", "true"),
+            ("MOA_TURBOPUFFER_VECTOR_TYPE", "f32"),
             ("MOA_MESSAGING_SLACK_TOKEN", "CUSTOM_SLACK_BOT_TOKEN"),
             ("MOA_MESSAGING_SLACK_APP_TOKEN", "CUSTOM_SLACK_APP_TOKEN"),
             (
@@ -1255,6 +1259,10 @@ mod tests {
             Some("prod")
         );
         assert!(config.memory.vector.turbopuffer.baa_enabled);
+        assert_eq!(
+            config.memory.vector.turbopuffer.vector_type,
+            TurbopufferVectorType::F32
+        );
         assert_eq!(config.messaging.slack_token, "CUSTOM_SLACK_BOT_TOKEN");
         assert_eq!(config.messaging.slack_app_token, "CUSTOM_SLACK_APP_TOKEN");
         assert_eq!(

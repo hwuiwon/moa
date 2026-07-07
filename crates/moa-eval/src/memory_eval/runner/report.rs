@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use moa_brain::retrieval::{GraphCandidateCounts, GraphRetrievalPolicy};
 use moa_memory_lifecycle::ConsolidationOutcome;
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +14,7 @@ use super::{
 use crate::kernel::{CostLedger, ProviderProvenance};
 use crate::memory_eval::{
     BootstrapConfig, ClusterBootstrapReport, CorpusManifest, EntityFragmentationCounts,
-    ExtractionPrecisionCounts, GoldResolutionReport, ProbeResult, RetrievalMetrics,
+    ExtractionPrecisionCounts, GoldResolutionReport, GraphImpact, ProbeResult, RetrievalMetrics,
 };
 
 /// JSON report written by `run-memory-retrieval-eval`.
@@ -34,6 +35,12 @@ pub struct MemoryRetrievalEvalReport {
     /// Eval-only graph expansion policy used by this run.
     #[serde(default)]
     pub graph_expansion_policy: GraphExpansionEvalPolicy,
+    /// Effective graph retrieval policy selected by the run.
+    #[serde(default, skip_serializing_if = "is_default_graph_retrieval_policy")]
+    pub graph_retrieval_policy: GraphRetrievalPolicy,
+    /// Cheap graph diagnostics derived from eval retrieval candidates.
+    #[serde(default, skip_serializing_if = "is_default_memory_graph_diagnostics")]
+    pub graph_diagnostics: MemoryGraphDiagnostics,
     /// Number of probes whose retrieval query came from a rewrite fixture.
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub query_rewrite_call_count: usize,
@@ -101,6 +108,74 @@ pub struct QueryRewriteClassMetrics {
     pub call_rate: f64,
 }
 
+/// Graph diagnostics included in memory-retrieval eval reports.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryGraphDiagnostics {
+    /// Candidate counts before optional reranking.
+    pub pre_rerank_candidate_counts: GraphCandidateCounts,
+    /// Candidate counts after optional reranking or top-k truncation.
+    pub post_rerank_candidate_counts: GraphCandidateCounts,
+    /// Probes whose pre-rerank candidate set included at least one graph candidate.
+    pub probes_with_graph_candidates: usize,
+    /// Raw graph path count returned across primary probe retrievals.
+    pub raw_path_count: usize,
+    /// Edge-label histogram across primary probe graph paths.
+    pub path_label_histogram: BTreeMap<String, usize>,
+    /// Hop-count histogram across primary probe graph paths.
+    pub hop_histogram: BTreeMap<u8, usize>,
+    /// Probes with graph-on/off comparison results.
+    pub compared_probe_count: usize,
+    /// Probes where graph worsened first relevant rank.
+    pub graph_hurt_count: usize,
+    /// Probes where graph improved first relevant rank.
+    pub graph_rescue_count: usize,
+    /// Probes where graph left first relevant rank unchanged.
+    pub graph_neutral_count: usize,
+}
+
+impl MemoryGraphDiagnostics {
+    /// Aggregates graph diagnostics from per-probe memory eval results.
+    #[must_use]
+    pub fn from_probe_results(probe_results: &[ProbeResult]) -> Self {
+        let mut diagnostics = Self::default();
+        for probe in probe_results {
+            let pre = graph_candidate_counts_from_candidates(&probe.candidates);
+            if pre.graph_only + pre.vector_graph + pre.lexical_graph + pre.all_legs > 0 {
+                diagnostics.probes_with_graph_candidates += 1;
+            }
+            diagnostics.pre_rerank_candidate_counts.add(pre);
+            let post_candidates = probe
+                .post_rerank_candidates
+                .as_deref()
+                .unwrap_or(probe.candidates.as_slice());
+            diagnostics
+                .post_rerank_candidate_counts
+                .add(graph_candidate_counts_from_candidates(post_candidates));
+            if let Some(graph) = &probe.graph_diagnostics {
+                diagnostics.raw_path_count += graph.raw_path_count;
+                for (label, count) in &graph.path_label_histogram {
+                    *diagnostics
+                        .path_label_histogram
+                        .entry(label.clone())
+                        .or_default() += count;
+                }
+                for (hop, count) in &graph.hop_histogram {
+                    *diagnostics.hop_histogram.entry(*hop).or_default() += count;
+                }
+            }
+            if let Some(comparison) = &probe.graph_comparison {
+                diagnostics.compared_probe_count += 1;
+                match comparison.impact {
+                    GraphImpact::Hurt => diagnostics.graph_hurt_count += 1,
+                    GraphImpact::Rescue => diagnostics.graph_rescue_count += 1,
+                    GraphImpact::Neutral => diagnostics.graph_neutral_count += 1,
+                }
+            }
+        }
+        diagnostics
+    }
+}
+
 pub(super) struct ReportBuildInput {
     pub(super) manifest: CorpusManifest,
     pub(super) gold_resolution: GoldResolutionReport,
@@ -131,6 +206,7 @@ pub(super) fn build_eval_report(input: ReportBuildInput) -> MemoryRetrievalEvalR
         .metrics
         .p95_retrieval_latency_ms
         .saturating_add(rewrite_p95_latency_ms);
+    let graph_diagnostics = MemoryGraphDiagnostics::from_probe_results(&retrieval.probe_results);
     MemoryRetrievalEvalReport {
         manifest: input.manifest,
         candidate_k: RETRIEVAL_EVAL_CANDIDATE_K,
@@ -138,6 +214,8 @@ pub(super) fn build_eval_report(input: ReportBuildInput) -> MemoryRetrievalEvalR
         reranker_enabled: input.reranker_enabled,
         query_rewrite_policy: input.rewrite_summary.policy,
         graph_expansion_policy: input.graph_expansion_policy,
+        graph_retrieval_policy: input.graph_expansion_policy.graph_retrieval_policy(),
+        graph_diagnostics,
         query_rewrite_call_count: input.rewrite_summary.call_count,
         query_rewrite_skip_count: input.rewrite_summary.skip_count,
         query_rewrite_call_rate: input.rewrite_summary.call_rate(),
@@ -160,6 +238,26 @@ pub(super) fn build_eval_report(input: ReportBuildInput) -> MemoryRetrievalEvalR
     }
 }
 
+fn graph_candidate_counts_from_candidates(
+    candidates: &[crate::memory_eval::RetrievedCandidate],
+) -> GraphCandidateCounts {
+    let mut counts = GraphCandidateCounts::default();
+    for candidate in candidates {
+        match (
+            candidate.legs.graph,
+            candidate.legs.vector,
+            candidate.legs.lexical,
+        ) {
+            (true, false, false) => counts.graph_only += 1,
+            (true, true, false) => counts.vector_graph += 1,
+            (true, false, true) => counts.lexical_graph += 1,
+            (true, true, true) => counts.all_legs += 1,
+            _ => {}
+        }
+    }
+    counts
+}
+
 fn deterministic_rewrite_latency_ms(call_count: usize) -> u64 {
     if call_count == 0 { 0 } else { 1 }
 }
@@ -178,4 +276,12 @@ fn is_zero_u64(value: &u64) -> bool {
 
 fn is_zero_f64(value: &f64) -> bool {
     *value == 0.0
+}
+
+fn is_default_graph_retrieval_policy(value: &GraphRetrievalPolicy) -> bool {
+    *value == GraphRetrievalPolicy::default()
+}
+
+fn is_default_memory_graph_diagnostics(value: &MemoryGraphDiagnostics) -> bool {
+    *value == MemoryGraphDiagnostics::default()
 }

@@ -62,6 +62,37 @@ async fn cohere_embedding_offline_empty_batch_skips_http_call() {
 }
 
 #[tokio::test]
+async fn cohere_embedding_offline_allows_query_input_type() {
+    // Pins: retrieval-side Cohere embedders can send `search_query`, while
+    // ingestion keeps the default `search_document` role.
+    let server = MockServer::start().await;
+    let inputs = texts(0..1);
+    mount_embed_response_for_input_type(
+        &server,
+        &inputs,
+        embeddings(inputs.len(), 4),
+        "search_query",
+    )
+    .await;
+    let provider = provider(&server, 4).with_input_type("search_query");
+
+    let embeddings = provider
+        .embed(&inputs)
+        .await
+        .expect("wiremock Cohere query embed request should succeed");
+
+    assert_eq!(embeddings.len(), inputs.len());
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose Cohere embed requests");
+    assert_eq!(requests.len(), 1);
+    let body: Value =
+        serde_json::from_slice(&requests[0].body).expect("Cohere request body should be JSON");
+    assert_eq!(body["input_type"], json!("search_query"));
+}
+
+#[tokio::test]
 async fn cohere_embedding_offline_http_error_surfaces_status() {
     // Pins: upstream Cohere failures preserve HTTP status for retry/failure classification.
     let server = MockServer::start().await;
@@ -136,12 +167,21 @@ async fn cohere_embedding_offline_preserves_input_order_across_concurrent_chunks
 }
 
 async fn mount_embed_response(server: &MockServer, texts: &[String], embeddings: Vec<Vec<f32>>) {
+    mount_embed_response_for_input_type(server, texts, embeddings, "search_document").await;
+}
+
+async fn mount_embed_response_for_input_type(
+    server: &MockServer,
+    texts: &[String],
+    embeddings: Vec<Vec<f32>>,
+    input_type: &str,
+) {
     Mock::given(method("POST"))
         .and(header("authorization", "Bearer test-key"))
         .and(body_partial_json(json!({
             "model": "embed-v4.0",
             "texts": texts,
-            "input_type": "search_document",
+            "input_type": input_type,
             "embedding_types": ["float"],
             "output_dimension": 4
         })))

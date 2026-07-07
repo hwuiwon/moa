@@ -1,5 +1,6 @@
 //! Wiremock offline counterpart for Turbopuffer vector-store live coverage.
 
+use moa_core::config::TurbopufferVectorType;
 use moa_memory_vector::{
     Error, TurbopufferStore, TurbopufferTextQuery, VECTOR_DIMENSION, VectorItem, VectorQuery,
     VectorStore,
@@ -208,16 +209,7 @@ async fn turbopuffer_bm25_upsert_indexes_only_admitted_chunk_text() {
         .expect("wiremock should expose captured requests");
     let body: serde_json::Value =
         serde_json::from_slice(&requests[0].body).expect("upsert body is JSON");
-    assert_eq!(
-        body.get("schema"),
-        Some(&json!({
-            "content": {
-                "type": "string",
-                "full_text_search": true
-            }
-        })),
-        "upsert body should enable FTS only when admitted content exists"
-    );
+    assert_eq!(body.get("schema"), Some(&bm25_schema()));
     let rows = body["upsert_rows"]
         .as_array()
         .expect("upsert rows should be an array");
@@ -320,6 +312,86 @@ async fn turbopuffer_bm25_empty_query_returns_empty_without_http_request() {
         .await
         .expect("wiremock should expose captured requests");
     assert_eq!(requests.len(), 0);
+}
+
+#[tokio::test]
+async fn turbopuffer_default_upsert_declares_f16_vector_schema() {
+    // Pins: the default Turbopuffer projection stores vectors as f16 in a typed
+    // namespace while continuing to send f32 JSON query vectors to the API.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("upsert_rows"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rows_affected": 1,
+            "rows_upserted": 1
+        })))
+        .mount(&server)
+        .await;
+
+    let storage_partition_id = Uuid::now_v7().to_string();
+    let store = TurbopufferStore::new(server.uri(), SecretString::from("test-key"), "test", false)
+        .expect("store")
+        .with_storage_partition_id(storage_partition_id.clone());
+
+    store
+        .upsert(&[test_item(Uuid::now_v7())])
+        .await
+        .expect("upsert");
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose captured requests");
+    assert_eq!(
+        requests[0].url.path(),
+        format!("/v2/namespaces/moa-test-f16-{storage_partition_id}")
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("upsert body is JSON");
+    assert_eq!(
+        body.get("schema"),
+        Some(&json!({
+            "vector": {
+                "type": "[1024]f16",
+                "ann": true
+            }
+        }))
+    );
+}
+
+#[test]
+fn turbopuffer_f32_override_preserves_legacy_namespace_shape() {
+    // Pins: operators can still target an existing f32 namespace explicitly
+    // after the f16 default takes over for new projections.
+    let storage_partition_id = Uuid::now_v7().to_string();
+    let store = TurbopufferStore::new_with_vector_type(
+        "https://example.test",
+        SecretString::from("test-key"),
+        "test",
+        false,
+        TurbopufferVectorType::F32,
+    )
+    .expect("store");
+
+    assert_eq!(
+        store
+            .namespace_for_storage_partition(&storage_partition_id)
+            .expect("namespace"),
+        format!("moa-test-{storage_partition_id}")
+    );
+}
+
+fn bm25_schema() -> serde_json::Value {
+    json!({
+        "vector": {
+            "type": "[1024]f16",
+            "ann": true
+        },
+        "content": {
+            "type": "string",
+            "full_text_search": true
+        }
+    })
 }
 
 fn test_item(uid: Uuid) -> VectorItem {

@@ -20,6 +20,7 @@ use crate::{
     },
     error::{Error, Result},
     normalize::{normalize_source_selection, redact_provider_metadata},
+    semantic_graph::SemanticGraphExtraction,
 };
 
 const LIST_CONNECTIONS_LIMIT: i64 = 100;
@@ -246,6 +247,27 @@ pub trait KnowledgeRepository: Send + Sync {
 
     /// Saves normalized chunks for a document version.
     async fn replace_chunks(&self, version_uid: Uuid, chunks: Vec<KnowledgeChunk>) -> Result<()>;
+
+    /// Loads cached semantic graph extractions for chunk hashes.
+    async fn cached_semantic_graph_extractions(
+        &self,
+        _tenant_id: TenantId,
+        _chunk_hashes: &[String],
+        _schema_version: &str,
+        _model: &str,
+        _prompt_version: &str,
+    ) -> Result<Vec<SemanticGraphExtraction>> {
+        Ok(Vec::new())
+    }
+
+    /// Saves completed semantic graph extractions.
+    async fn upsert_semantic_graph_extractions(
+        &self,
+        _tenant_id: TenantId,
+        _extractions: Vec<SemanticGraphExtraction>,
+    ) -> Result<()> {
+        Ok(())
+    }
 
     /// Tombstones chunks in knowledge storage and removes them from active retrieval.
     async fn tombstone_chunks(&self, chunk_uids: &[Uuid]) -> Result<()>;
@@ -1681,6 +1703,93 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             expected,
             "replace chunks parent version",
         )?;
+        conn.commit().await.map_err(map_moa_error)
+    }
+
+    async fn cached_semantic_graph_extractions(
+        &self,
+        tenant_id: TenantId,
+        chunk_hashes: &[String],
+        schema_version: &str,
+        model: &str,
+        prompt_version: &str,
+    ) -> Result<Vec<SemanticGraphExtraction>> {
+        if chunk_hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut conn = self.begin().await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT extraction
+            FROM moa.knowledge_semantic_graph_extractions
+            WHERE tenant_id = $1
+              AND chunk_hash = ANY($2::TEXT[])
+              AND schema_version = $3
+              AND model = $4
+              AND prompt_version = $5
+              AND status = 'completed'
+            "#,
+        )
+        .bind(tenant_id.0)
+        .bind(chunk_hashes)
+        .bind(schema_version)
+        .bind(model)
+        .bind(prompt_version)
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await.map_err(map_moa_error)?;
+        rows.iter()
+            .map(|row| {
+                let value: serde_json::Value = row.try_get("extraction").map_err(map_sqlx_error)?;
+                serde_json::from_value(value).map_err(|error| {
+                    Error::Repository(format!("decode semantic graph cache: {error}"))
+                })
+            })
+            .collect()
+    }
+
+    async fn upsert_semantic_graph_extractions(
+        &self,
+        tenant_id: TenantId,
+        extractions: Vec<SemanticGraphExtraction>,
+    ) -> Result<()> {
+        if extractions.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.begin().await?;
+        for extraction in extractions {
+            let extraction_value = serde_json::to_value(&extraction).map_err(|error| {
+                Error::Repository(format!("encode semantic graph cache: {error}"))
+            })?;
+            sqlx::query(
+                r#"
+                INSERT INTO moa.knowledge_semantic_graph_extractions (
+                    tenant_id, storage_partition_id, chunk_hash, content_hash,
+                    schema_version, model, prompt_version, status, extraction, error_code
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, 'completed', $8, NULL)
+                ON CONFLICT (tenant_id, chunk_hash, schema_version, model, prompt_version)
+                DO UPDATE SET
+                    content_hash = EXCLUDED.content_hash,
+                    status = 'completed',
+                    extraction = EXCLUDED.extraction,
+                    error_code = NULL,
+                    updated_at = now()
+                "#,
+            )
+            .bind(tenant_id.0)
+            .bind(storage_partition_id(tenant_id))
+            .bind(&extraction.chunk_hash)
+            .bind(&extraction.content_hash)
+            .bind(&extraction.schema_version)
+            .bind(&extraction.model)
+            .bind(&extraction.prompt_version)
+            .bind(extraction_value)
+            .execute(conn.as_mut())
+            .await
+            .map_err(map_sqlx_error)?;
+        }
         conn.commit().await.map_err(map_moa_error)
     }
 

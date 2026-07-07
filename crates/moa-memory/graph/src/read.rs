@@ -7,7 +7,7 @@ use sqlx::{Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::{
-    GraphError, GraphExpansionHit, GraphStore, PostgresGraphStore,
+    GraphError, GraphExpansionHit, GraphStore, GraphTraversalDirection, PostgresGraphStore,
     edge::{EdgeLabel, EdgeWriteIntent},
     node::{NODE_INDEX_COLUMNS, NodeIndexRow, NodeLabel, NodeWriteIntent},
 };
@@ -162,6 +162,7 @@ impl GraphStore for PostgresGraphStore {
                 valid_from: hit.valid_from,
                 hop: hit.hop,
                 edges: hit.edges,
+                directions: hit.directions,
             })
             .collect::<Vec<_>>();
         hits.sort_by(|left, right| {
@@ -234,6 +235,7 @@ struct RawExpansionHit {
     valid_from: DateTime<Utc>,
     hop: u8,
     edges: Vec<EdgeLabel>,
+    directions: Vec<GraphTraversalDirection>,
 }
 
 fn build_neighbors_query<'a>(
@@ -339,13 +341,14 @@ fn build_expansion_query<'a>(
     builder.push_bind(seeds);
     builder.push(
         r#"::uuid[])),
-        walk(seed, uid, label, seed_valid_from, valid_from, hop, edges, path_uids) AS (
+        walk(seed, uid, label, seed_valid_from, valid_from, hop, edges, directions, path_uids) AS (
             SELECT seed_uids.uid,
                    seed_node.uid,
                    seed_node.label,
                    seed_node.valid_from,
                    seed_node.valid_from,
                    0::int,
+                   ARRAY[]::text[],
                    ARRAY[]::text[],
                    ARRAY[seed_node.uid]
             FROM seed_uids
@@ -364,14 +367,19 @@ fn build_expansion_query<'a>(
                    next_node.valid_from,
                    walk.hop + 1,
                    array_append(walk.edges, step.label),
+                   array_append(walk.directions, step.direction),
                    array_append(walk.path_uids, next_node.uid)
             FROM walk
             JOIN LATERAL (
-                SELECT edge_row.end_uid AS neighbor_uid, edge_row.label AS label
+                SELECT edge_row.end_uid AS neighbor_uid,
+                       edge_row.label AS label,
+                       'outgoing'::text AS direction
                 FROM moa.edge_index AS edge_row
                 WHERE edge_row.start_uid = walk.uid
                 UNION ALL
-                SELECT edge_row.start_uid AS neighbor_uid, edge_row.label AS label
+                SELECT edge_row.start_uid AS neighbor_uid,
+                       edge_row.label AS label,
+                       'incoming'::text AS direction
                 FROM moa.edge_index AS edge_row
                 WHERE edge_row.end_uid = walk.uid
             ) AS step ON true
@@ -386,7 +394,7 @@ fn build_expansion_query<'a>(
         r#"
               AND NOT next_node.uid = ANY(walk.path_uids)
         )
-        SELECT seed, uid, label, seed_valid_from, valid_from, hop, edges
+        SELECT seed, uid, label, seed_valid_from, valid_from, hop, edges, directions
         FROM walk
         WHERE hop > 0
         ORDER BY seed, uid, hop, edges
@@ -418,6 +426,11 @@ fn expansion_hits_from_rows(
                 .into_iter()
                 .map(|label| label.parse())
                 .collect::<Result<Vec<_>, _>>()?;
+            let direction_texts: Vec<String> = row.try_get("directions")?;
+            let directions = direction_texts
+                .into_iter()
+                .map(|direction| direction.parse())
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(RawExpansionHit {
                 seed,
                 uid,
@@ -426,6 +439,7 @@ fn expansion_hits_from_rows(
                 valid_from,
                 hop,
                 edges,
+                directions,
             })
         })
         .collect()

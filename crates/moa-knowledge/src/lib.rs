@@ -11,5 +11,6 @@ pub mod observability;
 pub mod parser;
 pub mod providers;
 pub mod repository;
+pub mod semantic_graph;
 
 pub use error::{Error, Result};

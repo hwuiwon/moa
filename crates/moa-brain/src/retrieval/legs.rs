@@ -8,16 +8,20 @@ use chrono::{DateTime, Utc};
 use moa_core::RlsContext;
 use moa_db::ScopedConn;
 use moa_memory_graph::{
-    EdgeLabel, GraphExpansionHit, GraphStore, NodeIndexRow, NodeLabel, PiiClass,
-    push_validity_filter,
+    EdgeLabel, GraphExpansionHit, GraphStore, GraphTraversalDirection, NodeIndexRow, NodeLabel,
+    PiiClass, push_validity_filter,
 };
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{TurbopufferStore, TurbopufferTextQuery, VectorQuery, VectorStore};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
-use crate::retrieval::hybrid::{LegSources, LineageContext, Result, RetrievalRequest};
+use crate::retrieval::policy::GraphRetrievalPolicy;
 use crate::retrieval::ranking::normalize_tokens;
+use crate::retrieval::types::{
+    GraphPathTrace, GraphRetrievalDiagnostics, GraphSeedSource, LegSources, LineageContext, Result,
+    RetrievalRequest,
+};
 
 /// Reciprocal-rank fusion denominator offset.
 pub const RRF_K: f64 = 60.0;
@@ -36,10 +40,11 @@ pub const LEXICAL_BUDGET: Duration = Duration::from_secs(1);
 
 const GRAPH_HOPS: u8 = 3;
 const GRAPH_EXPANSION_DECAY: f64 = 0.5;
+const ANCHORED_RESCUE_MIN_GRAPH_EVIDENCE: f64 = 0.35;
 const GRAPH_TEMPORAL_HALF_LIFE_DAYS: f64 = 30.0;
-const VECTOR_LIMIT: usize = 20;
-const LEXICAL_LIMIT: i64 = 20;
-const LEXICAL_LIMIT_USIZE: usize = 20;
+const MIN_LEG_CANDIDATE_LIMIT: usize = 20;
+const MAX_LEG_CANDIDATE_LIMIT: usize = 100;
+const LEG_CANDIDATE_MULTIPLIER: usize = 2;
 
 /// One ranked candidate from an individual retrieval leg.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -50,6 +55,15 @@ pub struct LegCandidate {
     pub score: f64,
 }
 
+/// Graph-leg candidates and raw traversal diagnostics.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct GraphLegOutput {
+    /// Ranked graph candidates.
+    pub(crate) candidates: Vec<LegCandidate>,
+    /// Raw graph traversal diagnostics.
+    pub(crate) diagnostics: GraphRetrievalDiagnostics,
+}
+
 /// Runs the graph expansion leg from weighted planner and phase-one seeds.
 pub async fn graph_expansion_leg(
     graph: &dyn GraphStore,
@@ -57,8 +71,30 @@ pub async fn graph_expansion_leg(
     seed_strengths: &[(Uuid, f64)],
     seed_rows: &[NodeIndexRow],
 ) -> Result<Vec<LegCandidate>> {
+    let seed_sources = HashMap::new();
+    Ok(graph_expansion_leg_with_diagnostics(
+        graph,
+        req,
+        seed_strengths,
+        seed_rows,
+        &seed_sources,
+        GraphRetrievalPolicy::LegacyBroadExpansion,
+    )
+    .await?
+    .candidates)
+}
+
+/// Runs the graph expansion leg and returns raw path diagnostics for reports.
+pub(crate) async fn graph_expansion_leg_with_diagnostics(
+    graph: &dyn GraphStore,
+    req: &RetrievalRequest,
+    seed_strengths: &[(Uuid, f64)],
+    seed_rows: &[NodeIndexRow],
+    seed_sources: &HashMap<Uuid, GraphSeedSource>,
+    policy: GraphRetrievalPolicy,
+) -> Result<GraphLegOutput> {
     if seed_strengths.is_empty() {
-        return Ok(Vec::new());
+        return Ok(GraphLegOutput::default());
     }
 
     let seeds = seed_strengths
@@ -69,7 +105,15 @@ pub async fn graph_expansion_leg(
         .iter()
         .copied()
         .collect::<HashMap<Uuid, f64>>();
-    let hits = graph.expand_seeds(&seeds, GRAPH_HOPS, req.as_of).await?;
+    let seed_labels = seed_rows
+        .iter()
+        .filter(|row| strengths.contains_key(&row.uid))
+        .map(|row| (row.uid, row.label))
+        .collect::<HashMap<_, _>>();
+    let hits = graph
+        .expand_seeds(&seeds, graph_hops_for_policy(policy, req), req.as_of)
+        .await?;
+    let diagnostics = graph_path_diagnostics(&hits, seed_sources);
     let seed_candidates = exact_seed_candidates(
         seed_rows,
         &strengths,
@@ -78,9 +122,56 @@ pub async fn graph_expansion_leg(
     );
     let candidates = merge_ordered_uids(
         seed_candidates,
-        score_expansion(&hits, &strengths, req.as_of, req.label_filter.as_deref()),
+        score_expansion_for_policy(
+            &hits,
+            &strengths,
+            req.as_of,
+            req.label_filter.as_deref(),
+            policy,
+            seed_sources,
+            &seed_labels,
+        ),
     );
-    Ok(rank_uids(candidates))
+    Ok(GraphLegOutput {
+        candidates: rank_uids(candidates),
+        diagnostics,
+    })
+}
+
+fn graph_path_diagnostics(
+    hits: &[GraphExpansionHit],
+    seed_sources: &HashMap<Uuid, GraphSeedSource>,
+) -> GraphRetrievalDiagnostics {
+    let mut diagnostics = GraphRetrievalDiagnostics {
+        raw_path_count: hits.len(),
+        ..GraphRetrievalDiagnostics::default()
+    };
+    for hit in hits {
+        *diagnostics.hop_histogram.entry(hit.hop).or_default() += 1;
+        diagnostics.path_traces.push(GraphPathTrace {
+            seed_uid: hit.seed,
+            seed_source: seed_sources.get(&hit.seed).copied(),
+            candidate_uid: hit.uid,
+            hop: hit.hop,
+            edge_labels: hit
+                .edges
+                .iter()
+                .map(|edge| edge.as_str().to_string())
+                .collect(),
+            edge_directions: hit
+                .directions
+                .iter()
+                .map(|direction| direction.as_str().to_string())
+                .collect(),
+        });
+        for edge in &hit.edges {
+            *diagnostics
+                .path_label_histogram
+                .entry(edge.as_str().to_string())
+                .or_default() += 1;
+        }
+    }
+    diagnostics
 }
 
 fn label_allowed_by_filter(label_filter: Option<&[NodeLabel]>, label: &NodeLabel) -> bool {
@@ -102,6 +193,26 @@ pub fn score_expansion(
     as_of: Option<DateTime<Utc>>,
     label_filter: Option<&[NodeLabel]>,
 ) -> Vec<Uuid> {
+    score_expansion_for_policy(
+        hits,
+        strengths,
+        as_of,
+        label_filter,
+        GraphRetrievalPolicy::LegacyBroadExpansion,
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+}
+
+fn score_expansion_for_policy(
+    hits: &[GraphExpansionHit],
+    strengths: &HashMap<Uuid, f64>,
+    as_of: Option<DateTime<Utc>>,
+    label_filter: Option<&[NodeLabel]>,
+    policy: GraphRetrievalPolicy,
+    seed_sources: &HashMap<Uuid, GraphSeedSource>,
+    seed_labels: &HashMap<Uuid, NodeLabel>,
+) -> Vec<Uuid> {
     let entity_explicitly_allowed =
         label_filter.is_some_and(|labels| labels.contains(&NodeLabel::Entity));
     let mut activation_by_uid = HashMap::<Uuid, (f64, NodeLabel)>::new();
@@ -114,6 +225,9 @@ pub fn score_expansion(
             continue;
         }
         if !label_allowed_by_filter(label_filter, &hit.label) {
+            continue;
+        }
+        if !policy_allows_expansion_hit(policy, hit, seed_sources, seed_labels) {
             continue;
         }
         let Some(seed_strength) = strengths.get(&hit.seed).copied() else {
@@ -134,8 +248,12 @@ pub fn score_expansion(
         entry.0 += activation;
     }
 
+    let evidence_threshold = graph_evidence_threshold(policy);
     let mut scored = activation_by_uid
         .into_iter()
+        .filter_map(|(uid, (activation, label))| {
+            (activation >= evidence_threshold).then_some((uid, (activation, label)))
+        })
         .map(|(uid, (activation, _))| (uid, activation))
         .collect::<Vec<_>>();
     scored.sort_by(|left, right| {
@@ -145,6 +263,200 @@ pub fn score_expansion(
             .then_with(|| left.0.cmp(&right.0))
     });
     scored.into_iter().map(|(uid, _)| uid).collect()
+}
+
+fn policy_allows_expansion_hit(
+    policy: GraphRetrievalPolicy,
+    hit: &GraphExpansionHit,
+    seed_sources: &HashMap<Uuid, GraphSeedSource>,
+    seed_labels: &HashMap<Uuid, NodeLabel>,
+) -> bool {
+    match policy {
+        GraphRetrievalPolicy::Off | GraphRetrievalPolicy::ContextOnly => false,
+        GraphRetrievalPolicy::AnchoredRescue => {
+            let Some(seed_source) = seed_sources.get(&hit.seed).copied() else {
+                return false;
+            };
+            if seed_source == GraphSeedSource::BroadFallback {
+                return false;
+            }
+            anchored_rescue_allows_path(hit, seed_labels.get(&hit.seed).copied())
+        }
+        GraphRetrievalPolicy::EntityLocalSearch => {
+            let Some(seed_source) = seed_sources.get(&hit.seed).copied() else {
+                return false;
+            };
+            if seed_source == GraphSeedSource::BroadFallback {
+                return false;
+            }
+            entity_local_search_allows_path(hit, seed_labels.get(&hit.seed).copied())
+        }
+        GraphRetrievalPolicy::LegacyBroadExpansion
+        | GraphRetrievalPolicy::SourceGraph
+        | GraphRetrievalPolicy::Propagation
+        | GraphRetrievalPolicy::Community => true,
+    }
+}
+
+fn entity_local_search_allows_path(hit: &GraphExpansionHit, seed_label: Option<NodeLabel>) -> bool {
+    if hit.edges.is_empty()
+        || hit.edges.len() != hit.directions.len()
+        || hit.hop > 2
+        || seed_label != Some(NodeLabel::Entity)
+        || hit.label != NodeLabel::Chunk
+    {
+        return false;
+    }
+    if hit.hop == 1 && hit.edges.len() == 1 {
+        return hit.edges[0] == EdgeLabel::MentionedIn
+            && hit.directions[0] == GraphTraversalDirection::Incoming;
+    }
+    hit.hop == 2
+        && hit.edges.len() == 2
+        && entity_local_search_allows_semantic_step(hit.edges[0], hit.directions[0])
+        && hit.edges[1] == EdgeLabel::MentionedIn
+        && hit.directions[1] == GraphTraversalDirection::Incoming
+}
+
+fn entity_local_search_allows_semantic_step(
+    edge: EdgeLabel,
+    direction: GraphTraversalDirection,
+) -> bool {
+    direction == GraphTraversalDirection::Outgoing
+        && matches!(
+            edge,
+            EdgeLabel::RelatesTo
+                | EdgeLabel::DependsOn
+                | EdgeLabel::OwnedBy
+                | EdgeLabel::Caused
+                | EdgeLabel::LearnedFrom
+                | EdgeLabel::AppliesTo
+        )
+}
+
+fn anchored_rescue_allows_path(hit: &GraphExpansionHit, seed_label: Option<NodeLabel>) -> bool {
+    if hit.edges.is_empty() || hit.edges.len() != hit.directions.len() || hit.hop > 2 {
+        return false;
+    }
+    if hit.hop == 1 && hit.edges.len() == 1 && hit.directions.len() == 1 {
+        return anchored_rescue_allows_one_hop_path(
+            hit.edges[0],
+            hit.directions[0],
+            seed_label,
+            hit.label,
+        );
+    }
+    hit.edges
+        .iter()
+        .zip(hit.directions.iter())
+        .all(|(edge, direction)| anchored_rescue_allows_semantic_step(*edge, *direction))
+}
+
+fn anchored_rescue_allows_one_hop_path(
+    edge: EdgeLabel,
+    direction: GraphTraversalDirection,
+    seed_label: Option<NodeLabel>,
+    candidate_label: NodeLabel,
+) -> bool {
+    match edge {
+        EdgeLabel::Contains => {
+            anchored_rescue_allows_contains(seed_label, candidate_label, direction)
+        }
+        EdgeLabel::MentionedIn => {
+            seed_label == Some(NodeLabel::Entity)
+                && candidate_label == NodeLabel::Chunk
+                && direction == GraphTraversalDirection::Incoming
+        }
+        EdgeLabel::DerivedFrom => {
+            seed_label == Some(NodeLabel::Fact)
+                && candidate_label == NodeLabel::Chunk
+                && direction == GraphTraversalDirection::Incoming
+        }
+        edge => anchored_rescue_allows_semantic_step(edge, direction),
+    }
+}
+
+fn anchored_rescue_allows_contains(
+    seed_label: Option<NodeLabel>,
+    candidate_label: NodeLabel,
+    direction: GraphTraversalDirection,
+) -> bool {
+    matches!(
+        (seed_label, candidate_label, direction),
+        (
+            Some(NodeLabel::Source),
+            NodeLabel::Document,
+            GraphTraversalDirection::Outgoing
+        ) | (
+            Some(NodeLabel::Document),
+            NodeLabel::Chunk,
+            GraphTraversalDirection::Outgoing
+        ) | (
+            Some(NodeLabel::Document),
+            NodeLabel::Source,
+            GraphTraversalDirection::Incoming
+        ) | (
+            Some(NodeLabel::Chunk),
+            NodeLabel::Document,
+            GraphTraversalDirection::Incoming
+        )
+    )
+}
+
+fn anchored_rescue_allows_semantic_step(
+    edge: EdgeLabel,
+    direction: GraphTraversalDirection,
+) -> bool {
+    direction == GraphTraversalDirection::Outgoing
+        && matches!(
+            edge,
+            EdgeLabel::RelatesTo
+                | EdgeLabel::DependsOn
+                | EdgeLabel::OwnedBy
+                | EdgeLabel::Caused
+                | EdgeLabel::LearnedFrom
+                | EdgeLabel::AppliesTo
+        )
+}
+
+fn graph_hops_for_policy(policy: GraphRetrievalPolicy, req: &RetrievalRequest) -> u8 {
+    let tenant_chunk_only = request_is_tenant_chunk_only(req);
+    if matches!(
+        policy,
+        GraphRetrievalPolicy::AnchoredRescue | GraphRetrievalPolicy::SourceGraph
+    ) && tenant_chunk_only
+    {
+        1
+    } else if matches!(
+        policy,
+        GraphRetrievalPolicy::AnchoredRescue | GraphRetrievalPolicy::SourceGraph
+    ) || (policy == GraphRetrievalPolicy::EntityLocalSearch && tenant_chunk_only)
+    {
+        2
+    } else {
+        GRAPH_HOPS
+    }
+}
+
+fn request_is_tenant_chunk_only(req: &RetrievalRequest) -> bool {
+    matches!(req.scope, MemoryScope::Tenant { .. })
+        && req
+            .label_filter
+            .as_deref()
+            .is_some_and(|labels| labels == [NodeLabel::Chunk])
+}
+
+const fn graph_evidence_threshold(policy: GraphRetrievalPolicy) -> f64 {
+    match policy {
+        GraphRetrievalPolicy::AnchoredRescue => ANCHORED_RESCUE_MIN_GRAPH_EVIDENCE,
+        GraphRetrievalPolicy::Off
+        | GraphRetrievalPolicy::ContextOnly
+        | GraphRetrievalPolicy::LegacyBroadExpansion
+        | GraphRetrievalPolicy::SourceGraph
+        | GraphRetrievalPolicy::EntityLocalSearch
+        | GraphRetrievalPolicy::Propagation
+        | GraphRetrievalPolicy::Community => 0.0,
+    }
 }
 
 fn path_weight(edges: &[EdgeLabel], as_of: Option<DateTime<Utc>>) -> f64 {
@@ -235,7 +547,7 @@ pub async fn vector_leg(
     let hits = vector
         .knn(&VectorQuery {
             embedding: req.query_embedding.clone(),
-            k: VECTOR_LIMIT,
+            k: leg_candidate_limit(req.k_final),
             label_filter: Some(effective_label_filter_values(req.label_filter.as_deref())),
             max_pii_class: req.max_pii_class.as_str().to_string(),
             include_global: true,
@@ -257,7 +569,7 @@ pub async fn turbopuffer_bm25_leg(
     let hits = turbopuffer
         .bm25(&TurbopufferTextQuery {
             query_text: req.query_text.clone(),
-            k: LEXICAL_LIMIT_USIZE,
+            k: leg_candidate_limit(req.k_final),
             label_filter: Some(effective_label_filter_values(req.label_filter.as_deref())),
             max_pii_class: req.max_pii_class.as_str().to_string(),
             include_global: true,
@@ -316,7 +628,7 @@ pub async fn lexical_leg(
     builder.push(")) DESC, ");
     push_accessed_ordering(&mut builder, None, req.ranking_reference_time);
     builder.push(" LIMIT ");
-    builder.push_bind(LEXICAL_LIMIT);
+    builder.push_bind(leg_candidate_limit(req.k_final) as i64);
 
     let rows = builder
         .build_query_scalar::<Uuid>()
@@ -442,7 +754,7 @@ async fn lexical_fallback_leg(
     builder.push("))) DESC, ");
     push_accessed_ordering(&mut builder, None, req.ranking_reference_time);
     builder.push(" LIMIT ");
-    builder.push_bind(LEXICAL_LIMIT);
+    builder.push_bind(leg_candidate_limit(req.k_final) as i64);
 
     let rows = builder
         .build_query_scalar::<Uuid>()
@@ -723,6 +1035,15 @@ fn rank_uids(uids: Vec<Uuid>) -> Vec<LegCandidate> {
         .collect()
 }
 
+fn leg_candidate_limit(k_final: usize) -> usize {
+    if k_final == 0 {
+        return 0;
+    }
+    k_final
+        .saturating_mul(LEG_CANDIDATE_MULTIPLIER)
+        .clamp(MIN_LEG_CANDIDATE_LIMIT, MAX_LEG_CANDIDATE_LIMIT)
+}
+
 fn add_leg_scores(
     scores: &mut HashMap<Uuid, (f64, LegSources)>,
     candidates: &[LegCandidate],
@@ -775,18 +1096,36 @@ mod tests {
     use async_trait::async_trait;
     use chrono::TimeZone;
     use moa_core::TenantId;
-    use moa_memory_graph::{EdgeLabel, GraphExpansionHit, NodeIndexRow, NodeLabel, PiiClass};
+    use moa_memory_graph::{
+        EdgeLabel, GraphExpansionHit, GraphTraversalDirection, NodeIndexRow, NodeLabel, PiiClass,
+    };
     use moa_memory_types::MemoryScope;
     use moa_memory_vector::{Error as VectorError, VectorItem, VectorMatch, VectorQuery};
     use sqlx::PgConnection;
     use uuid::Uuid;
 
+    use crate::retrieval::policy::GraphRetrievalPolicy;
+    use crate::retrieval::types::{GraphPathTrace, GraphSeedSource};
+
     use super::{
-        GRAPH_WEIGHT, LEXICAL_WEIGHT, LegCandidate, RetrievalRequest, VECTOR_WEIGHT,
-        exact_seed_candidates, lexical_fallback_terms, lexical_or_tsquery, lexical_prefix_tsquery,
-        merge_ordered_uids, prefer_lexical_fallback_first, rrf_fuse, score_expansion,
+        GRAPH_HOPS, GRAPH_WEIGHT, LEXICAL_WEIGHT, LegCandidate, RetrievalRequest, VECTOR_WEIGHT,
+        exact_seed_candidates, graph_hops_for_policy, graph_path_diagnostics, leg_candidate_limit,
+        lexical_fallback_terms, lexical_or_tsquery, lexical_prefix_tsquery, merge_ordered_uids,
+        prefer_lexical_fallback_first, rrf_fuse, score_expansion, score_expansion_for_policy,
         should_run_lexical_fallback, vector_leg,
     };
+
+    #[test]
+    fn leg_candidate_limit_scales_with_requested_final_count() {
+        // Pins: wider retrieval cutoffs get enough per-leg supply to make
+        // recall@25/50 meaningful, while normal chat-sized requests keep the
+        // previous small candidate pool and large requests stay capped.
+        assert_eq!(leg_candidate_limit(0), 0);
+        assert_eq!(leg_candidate_limit(5), 20);
+        assert_eq!(leg_candidate_limit(25), 50);
+        assert_eq!(leg_candidate_limit(50), 100);
+        assert_eq!(leg_candidate_limit(500), 100);
+    }
 
     #[test]
     fn lexical_prefix_tsquery_builds_sargable_prefix_disjunction() {
@@ -935,6 +1274,321 @@ mod tests {
         );
 
         assert_eq!(ordered[0], summed);
+    }
+
+    #[test]
+    fn anchored_rescue_rejects_broad_fallback_paths() {
+        // Pins: AnchoredRescue only admits planner, exact, or semantic anchors;
+        // broad phase-one fallback paths remain available only to legacy policy.
+        let seed = uid(1);
+        let candidate = uid(2);
+        let hit = expansion_hit(seed, candidate, 1, vec![EdgeLabel::RelatesTo]);
+        let strengths = strengths(&[(seed, 1.0)]);
+        let seed_sources = HashMap::from([(seed, GraphSeedSource::BroadFallback)]);
+        let seed_labels = HashMap::from([(seed, NodeLabel::Fact)]);
+
+        let ordered = score_expansion_for_policy(
+            &[hit],
+            &strengths,
+            None,
+            None,
+            GraphRetrievalPolicy::AnchoredRescue,
+            &seed_sources,
+            &seed_labels,
+        );
+
+        assert!(ordered.is_empty());
+    }
+
+    #[test]
+    fn anchored_rescue_requires_mentioned_in_entity_to_chunk_direction() {
+        // Pins: MentionedIn can only rescue chunks from an anchored Entity
+        // through the stored chunk -> entity mention edge in reverse.
+        let seed = uid(1);
+        let candidate = uid(2);
+        let strengths = strengths(&[(seed, 1.0)]);
+        let seed_sources = HashMap::from([(seed, GraphSeedSource::ExactPhaseOne)]);
+        let seed_labels = HashMap::from([(seed, NodeLabel::Entity)]);
+        let mut wrong_direction = expansion_hit(seed, candidate, 1, vec![EdgeLabel::MentionedIn]);
+        wrong_direction.label = NodeLabel::Chunk;
+        let mut anchored_direction = wrong_direction.clone();
+        anchored_direction.directions = vec![GraphTraversalDirection::Incoming];
+
+        let rejected = score_expansion_for_policy(
+            &[wrong_direction],
+            &strengths,
+            None,
+            Some(&[NodeLabel::Chunk]),
+            GraphRetrievalPolicy::AnchoredRescue,
+            &seed_sources,
+            &seed_labels,
+        );
+        let admitted = score_expansion_for_policy(
+            &[anchored_direction],
+            &strengths,
+            None,
+            Some(&[NodeLabel::Chunk]),
+            GraphRetrievalPolicy::AnchoredRescue,
+            &seed_sources,
+            &seed_labels,
+        );
+
+        assert!(rejected.is_empty());
+        assert_eq!(admitted, vec![candidate]);
+    }
+
+    #[test]
+    fn anchored_rescue_requires_derived_from_fact_to_evidence_direction() {
+        // Pins: DerivedFrom can connect a fact anchor back to its evidence
+        // chunk, but not use the opposite direction as a generic fact boost.
+        let seed = uid(1);
+        let evidence = uid(2);
+        let strengths = strengths(&[(seed, 1.0)]);
+        let seed_sources = HashMap::from([(seed, GraphSeedSource::ExactPhaseOne)]);
+        let seed_labels = HashMap::from([(seed, NodeLabel::Fact)]);
+        let mut wrong_direction = expansion_hit(seed, evidence, 1, vec![EdgeLabel::DerivedFrom]);
+        wrong_direction.label = NodeLabel::Chunk;
+        let mut evidence_direction = wrong_direction.clone();
+        evidence_direction.directions = vec![GraphTraversalDirection::Incoming];
+
+        let rejected = score_expansion_for_policy(
+            &[wrong_direction],
+            &strengths,
+            None,
+            Some(&[NodeLabel::Chunk]),
+            GraphRetrievalPolicy::AnchoredRescue,
+            &seed_sources,
+            &seed_labels,
+        );
+        let admitted = score_expansion_for_policy(
+            &[evidence_direction],
+            &strengths,
+            None,
+            Some(&[NodeLabel::Chunk]),
+            GraphRetrievalPolicy::AnchoredRescue,
+            &seed_sources,
+            &seed_labels,
+        );
+
+        assert!(rejected.is_empty());
+        assert_eq!(admitted, vec![evidence]);
+    }
+
+    #[test]
+    fn anchored_rescue_filters_paths_below_evidence_threshold() {
+        // Pins: an anchored graph path must clear an explicit evidence floor
+        // before it can contribute a ranking candidate.
+        let seed = uid(1);
+        let weak = uid(2);
+        let strong = uid(3);
+        let seed_sources = HashMap::from([(seed, GraphSeedSource::ExactPhaseOne)]);
+        let seed_labels = HashMap::from([(seed, NodeLabel::Fact)]);
+
+        let weak_ordered = score_expansion_for_policy(
+            &[expansion_hit(seed, weak, 1, vec![EdgeLabel::RelatesTo])],
+            &strengths(&[(seed, 0.5)]),
+            None,
+            None,
+            GraphRetrievalPolicy::AnchoredRescue,
+            &seed_sources,
+            &seed_labels,
+        );
+        let strong_ordered = score_expansion_for_policy(
+            &[expansion_hit(seed, strong, 1, vec![EdgeLabel::RelatesTo])],
+            &strengths(&[(seed, 1.0)]),
+            None,
+            None,
+            GraphRetrievalPolicy::AnchoredRescue,
+            &seed_sources,
+            &seed_labels,
+        );
+
+        assert!(weak_ordered.is_empty());
+        assert_eq!(strong_ordered, vec![strong]);
+    }
+
+    #[test]
+    fn entity_local_search_admits_only_precise_entity_chunk_paths() {
+        // Pins: entity-local retrieval uses semantic entity anchors to find
+        // chunks directly mentioning the entity or chunks mentioning one
+        // semantically-related entity, without admitting structural fanout.
+        let seed = uid(1);
+        let direct_chunk = uid(2);
+        let related_chunk = uid(3);
+        let wrong_direction_chunk = uid(4);
+        let sibling_chunk = uid(5);
+        let strengths = strengths(&[(seed, 1.0)]);
+        let seed_sources = HashMap::from([(seed, GraphSeedSource::SemanticEntity)]);
+        let seed_labels = HashMap::from([(seed, NodeLabel::Entity)]);
+
+        let mut direct_path = expansion_hit(seed, direct_chunk, 1, vec![EdgeLabel::MentionedIn]);
+        direct_path.label = NodeLabel::Chunk;
+        direct_path.directions = vec![GraphTraversalDirection::Incoming];
+        let mut related_path = expansion_hit(
+            seed,
+            related_chunk,
+            2,
+            vec![EdgeLabel::RelatesTo, EdgeLabel::MentionedIn],
+        );
+        related_path.label = NodeLabel::Chunk;
+        related_path.directions = vec![
+            GraphTraversalDirection::Outgoing,
+            GraphTraversalDirection::Incoming,
+        ];
+        let mut wrong_direction =
+            expansion_hit(seed, wrong_direction_chunk, 1, vec![EdgeLabel::MentionedIn]);
+        wrong_direction.label = NodeLabel::Chunk;
+        let mut structural_path = expansion_hit(
+            seed,
+            sibling_chunk,
+            2,
+            vec![EdgeLabel::Contains, EdgeLabel::Contains],
+        );
+        structural_path.label = NodeLabel::Chunk;
+        structural_path.directions = vec![
+            GraphTraversalDirection::Incoming,
+            GraphTraversalDirection::Outgoing,
+        ];
+
+        let ordered = score_expansion_for_policy(
+            &[direct_path, related_path, wrong_direction, structural_path],
+            &strengths,
+            None,
+            Some(&[NodeLabel::Chunk]),
+            GraphRetrievalPolicy::EntityLocalSearch,
+            &seed_sources,
+            &seed_labels,
+        );
+
+        assert_eq!(ordered, vec![direct_chunk, related_chunk]);
+    }
+
+    #[test]
+    fn entity_local_search_rejects_non_entity_anchors() {
+        // Pins: exact entity-local search is not another way to revive generic
+        // chunk-neighbor graph expansion from phase-one chunk seeds.
+        let seed = uid(1);
+        let sibling_chunk = uid(2);
+        let strengths = strengths(&[(seed, 1.0)]);
+        let seed_sources = HashMap::from([(seed, GraphSeedSource::ExactPhaseOne)]);
+        let seed_labels = HashMap::from([(seed, NodeLabel::Chunk)]);
+        let mut path = expansion_hit(seed, sibling_chunk, 1, vec![EdgeLabel::MentionedIn]);
+        path.label = NodeLabel::Chunk;
+        path.directions = vec![GraphTraversalDirection::Incoming];
+
+        let ordered = score_expansion_for_policy(
+            &[path],
+            &strengths,
+            None,
+            Some(&[NodeLabel::Chunk]),
+            GraphRetrievalPolicy::EntityLocalSearch,
+            &seed_sources,
+            &seed_labels,
+        );
+
+        assert!(ordered.is_empty());
+    }
+
+    #[test]
+    fn anchored_rescue_rejects_contains_contains_sibling_chunk_paths() {
+        // Pins: a chunk -> document -> sibling chunk structural walk is not
+        // graph evidence for AnchoredRescue tenant chunk ranking.
+        let seed = uid(1);
+        let sibling = uid(2);
+        let mut sibling_path = expansion_hit(
+            seed,
+            sibling,
+            2,
+            vec![EdgeLabel::Contains, EdgeLabel::Contains],
+        );
+        sibling_path.label = NodeLabel::Chunk;
+        sibling_path.directions = vec![
+            GraphTraversalDirection::Incoming,
+            GraphTraversalDirection::Outgoing,
+        ];
+        let strengths = strengths(&[(seed, 1.0)]);
+        let seed_sources = HashMap::from([(seed, GraphSeedSource::ExactPhaseOne)]);
+        let seed_labels = HashMap::from([(seed, NodeLabel::Chunk)]);
+
+        let ordered = score_expansion_for_policy(
+            &[sibling_path.clone()],
+            &strengths,
+            None,
+            Some(&[NodeLabel::Chunk]),
+            GraphRetrievalPolicy::AnchoredRescue,
+            &seed_sources,
+            &seed_labels,
+        );
+
+        assert!(ordered.is_empty());
+        assert_eq!(
+            score_expansion(&[sibling_path], &strengths, None, Some(&[NodeLabel::Chunk])),
+            vec![sibling],
+            "legacy broad expansion still scores the historical structural path"
+        );
+    }
+
+    #[test]
+    fn anchored_rescue_tenant_chunk_requests_use_one_hop() {
+        // Pins: tenant knowledge chunk retrieval does not run three-hop graph
+        // expansion under guarded graph policies.
+        let mut request = retrieval_request();
+        request.scope = MemoryScope::Tenant {
+            tenant_id: TenantId::from(Uuid::from_u128(0x100)),
+        };
+        request.label_filter = Some(vec![NodeLabel::Chunk]);
+
+        assert_eq!(
+            graph_hops_for_policy(GraphRetrievalPolicy::AnchoredRescue, &request),
+            1
+        );
+        assert_eq!(
+            graph_hops_for_policy(GraphRetrievalPolicy::SourceGraph, &request),
+            1
+        );
+        assert_eq!(
+            graph_hops_for_policy(GraphRetrievalPolicy::EntityLocalSearch, &request),
+            2
+        );
+        assert_eq!(
+            graph_hops_for_policy(GraphRetrievalPolicy::LegacyBroadExpansion, &request),
+            GRAPH_HOPS
+        );
+    }
+
+    #[test]
+    fn graph_path_diagnostics_keeps_seed_candidate_path_identity() {
+        // Pins: graph-harm reports need the exact seed, seed source, candidate, hop,
+        // and path labels rather than an aggregate edge-label histogram alone.
+        let seed = uid(1);
+        let candidate = uid(2);
+        let seed_sources = HashMap::from([(seed, GraphSeedSource::ExactPhaseOne)]);
+
+        let diagnostics = graph_path_diagnostics(
+            &[expansion_hit(
+                seed,
+                candidate,
+                2,
+                vec![EdgeLabel::DependsOn, EdgeLabel::RelatesTo],
+            )],
+            &seed_sources,
+        );
+
+        assert_eq!(diagnostics.raw_path_count, 1);
+        assert_eq!(diagnostics.hop_histogram.get(&2), Some(&1));
+        assert_eq!(diagnostics.path_label_histogram.get("DEPENDS_ON"), Some(&1));
+        assert_eq!(diagnostics.path_label_histogram.get("RELATES_TO"), Some(&1));
+        assert_eq!(
+            diagnostics.path_traces,
+            vec![GraphPathTrace {
+                seed_uid: seed,
+                seed_source: Some(GraphSeedSource::ExactPhaseOne),
+                candidate_uid: candidate,
+                hop: 2,
+                edge_labels: vec!["DEPENDS_ON".to_string(), "RELATES_TO".to_string()],
+                edge_directions: vec!["outgoing".to_string(), "outgoing".to_string()],
+            }]
+        );
     }
 
     #[test]
@@ -1288,6 +1942,7 @@ mod tests {
             seed_valid_from,
             valid_from,
             hop,
+            directions: vec![GraphTraversalDirection::Outgoing; edges.len()],
             edges,
         }
     }

@@ -50,7 +50,7 @@ pub use lineage::LineageConfig;
 pub use memory::{
     MemoryConfig, MemoryDigestConfig, MemoryExtractionConfig, MemoryRankingConfig,
     MemoryRankingWeights, MemoryRetrievalConfig, MemoryVectorConfig, TurbopufferVectorConfig,
-    VectorEmbedderConfig,
+    TurbopufferVectorType, VectorEmbedderConfig,
 };
 pub use messaging::MessagingConfig;
 pub use orchestrator::OrchestratorConfig;

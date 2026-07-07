@@ -18,7 +18,7 @@ use moa_memory_types::MemoryScope;
 use moa_memory_vector::VectorStoreFactory;
 use sqlx::PgPool;
 
-use crate::planning::PlannedQuery;
+use crate::planning::{PlannedQuery, Strategy};
 use crate::retrieval::{PlannedRetriever, RetrievalHit, RetrievalRequest};
 
 /// Maximum number of scope-keyed retrieval runtimes retained process-wide.
@@ -410,6 +410,13 @@ impl GraphMemoryRetriever {
         if let Some(label_filter) = &scope_plan.label_filter {
             request.label_filter = Some(label_filter.clone());
         }
+        request.disable_graph_expansion = should_disable_graph_expansion(scope_plan);
+        if matches!(
+            scope_plan.source_tier,
+            crate::retrieval::SourceTier::TenantKnowledge
+        ) {
+            request.strategy = Some(Strategy::VectorFirst);
+        }
         if emit_storage_lineage {
             request.lineage = Some(lineage_context_from_context(ctx));
         }
@@ -565,6 +572,13 @@ fn extract_search_query(ctx: &WorkingContext) -> Option<String> {
     extract_search_query_from_messages(&ctx.messages)
 }
 
+fn should_disable_graph_expansion(scope_plan: &RetrievalScopePlan) -> bool {
+    matches!(
+        scope_plan.source_tier,
+        crate::retrieval::SourceTier::TenantKnowledge
+    )
+}
+
 fn query_from_rewrite_metadata(value: &serde_json::Value) -> Option<String> {
     let result = serde_json::from_value::<QueryRewriteResult>(value.clone()).ok()?;
     let query = result.retrieval_query.trim();
@@ -638,10 +652,12 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
 
+    use crate::planning::Strategy;
+
     use super::{
         GraphMemoryRetriever, ScopedRetrievalRuntime, ScopedRetrievalRuntimeFactory,
         SharedGraphMemoryRetriever, extract_search_keywords, extract_search_query,
-        retrieval_scopes_from_context,
+        retrieval_scopes_from_context, should_disable_graph_expansion,
     };
 
     #[derive(Debug)]
@@ -750,6 +766,7 @@ mod tests {
     struct RecordedRetrievalRequest {
         scope: MemoryScope,
         label_filter: Option<Vec<NodeLabel>>,
+        strategy: Option<Strategy>,
     }
 
     #[derive(Debug)]
@@ -771,6 +788,7 @@ mod tests {
                 .push(RecordedRetrievalRequest {
                     scope: req.scope.clone(),
                     label_filter: req.label_filter.clone(),
+                    strategy: req.strategy,
                 });
             Ok(self
                 .hits_by_scope
@@ -1201,6 +1219,31 @@ mod tests {
     }
 
     #[test]
+    fn tenant_knowledge_retrieval_disables_graph_expansion() {
+        // Pins: tenant KB retrieval stays on direct vector/lexical hits; graph
+        // expansion remains available for contact memory where fact-neighbor
+        // traversal is part of the retrieval model.
+        let contact_id = ContactId::new();
+        let session = contact_session(contact_id, ContactVerificationState::Verified, Vec::new());
+        let ctx = WorkingContext::new(&session, capabilities());
+        let plan = retrieval_scopes_from_context(&ctx, &AgentKnowledgePolicy::default());
+
+        let tenant_plan = plan
+            .iter()
+            .find(|scope_plan| {
+                scope_plan.source_tier == crate::retrieval::SourceTier::TenantKnowledge
+            })
+            .expect("tenant knowledge plan should exist");
+        let contact_plan = plan
+            .iter()
+            .find(|scope_plan| scope_plan.source_tier == crate::retrieval::SourceTier::UserMemory)
+            .expect("contact memory plan should exist");
+
+        assert!(should_disable_graph_expansion(tenant_plan));
+        assert!(!should_disable_graph_expansion(contact_plan));
+    }
+
+    #[test]
     fn tenant_contact_knowledge_retrieval_no_contact_plans_tenant_only() {
         // Pins: sessions without an admitted contact retrieve tenant knowledge only.
         let session = SessionMeta {
@@ -1355,6 +1398,7 @@ mod tests {
                         NodeLabel::Chunk,
                         NodeLabel::ContactGroup,
                     ]),
+                    strategy: Some(Strategy::VectorFirst),
                 },
                 RecordedRetrievalRequest {
                     scope: MemoryScope::Contact {
@@ -1362,6 +1406,7 @@ mod tests {
                         contact_id,
                     },
                     label_filter: None,
+                    strategy: Some(Strategy::Both),
                 },
             ],
             "retriever should call tenant knowledge and current-contact scopes only"

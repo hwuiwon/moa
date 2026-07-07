@@ -25,7 +25,10 @@ use crate::{
         RecordPage, SyncRunStatus,
     },
     error::{Error, Result},
-    graph_delta::{GraphEdgeUpsert, KnowledgeGraphDelta, document_chunk_delta, stable_uid},
+    graph_delta::{
+        GraphEdgeUpsert, KnowledgeGraphDelta, document_chunk_delta_with_semantics,
+        semantic_chunk_link_count, stable_uid,
+    },
     normalize::{normalize_text, redact_provider_metadata},
     observability::{
         FailureClassification, StepLabels, StepOutcome, build_step_row, classify_failure,
@@ -34,6 +37,10 @@ use crate::{
     parser::DocumentParser,
     providers::RecordContentFetcher,
     repository::{DocumentVersionIngestionClaim, KnowledgeRepository},
+    semantic_graph::{
+        SEMANTIC_GRAPH_MODEL, SEMANTIC_GRAPH_PROMPT_VERSION, SEMANTIC_GRAPH_SCHEMA_VERSION,
+        SemanticGraphExtraction, extract_chunk_semantics,
+    },
 };
 
 /// Maximum objects fetched and tombstoned per source-selection prune page.
@@ -145,7 +152,7 @@ where
                 name: node_name(&node.label, &properties),
                 properties,
                 pii_class: PiiClass::None,
-                confidence: Some(0.95),
+                confidence: Some(node.confidence.unwrap_or(0.95)),
                 valid_from: Utc::now(),
                 embedding,
                 embedding_model: embeddings
@@ -735,7 +742,43 @@ where
         .await?;
 
         let mut chunks = blocks_to_chunks(version.version_uid, &blocks, self.chunking);
-        let delta = document_chunk_delta(&object, &version, &chunks);
+        let semantic_report = match self
+            .semantic_graph_extractions(object.tenant_id, &object, &chunks)
+            .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                self.record_failure_step(
+                    sync_run_uid,
+                    Some(object.object_uid),
+                    "semantic_graph_extracted",
+                    &error,
+                )
+                .await?;
+                return Err(error);
+            }
+        };
+        self.record_step(
+            sync_run_uid,
+            Some(object.object_uid),
+            "semantic_graph_extracted",
+            StepOutcome::completed_with_counters(json!({
+                "chunks_total": chunks.len(),
+                "cache_hits": semantic_report.cache_hits,
+                "cache_misses": semantic_report.cache_misses,
+                "entities_extracted": semantic_report.entities_extracted,
+                "relations_extracted": semantic_report.relations_extracted,
+                "semantic_chunk_links": semantic_report.semantic_chunk_links,
+                "failures": 0,
+            })),
+        )
+        .await?;
+        let delta = document_chunk_delta_with_semantics(
+            &object,
+            &version,
+            &chunks,
+            &semantic_report.extractions,
+        );
         // Fold each chunk's graph node UID and the `active` retrieval marker into
         // the rows before the batch insert. Persisting them up front makes chunk
         // storage a single multi-row write.
@@ -1311,6 +1354,66 @@ where
         Ok(input)
     }
 
+    async fn semantic_graph_extractions(
+        &self,
+        tenant_id: moa_core::TenantId,
+        object: &KnowledgeObject,
+        chunks: &[KnowledgeChunk],
+    ) -> Result<SemanticGraphExtractionReport> {
+        let chunk_hashes = chunks
+            .iter()
+            .map(|chunk| chunk.chunk_hash.clone())
+            .collect::<Vec<_>>();
+        let cached = self
+            .repository
+            .cached_semantic_graph_extractions(
+                tenant_id,
+                &chunk_hashes,
+                SEMANTIC_GRAPH_SCHEMA_VERSION,
+                SEMANTIC_GRAPH_MODEL,
+                SEMANTIC_GRAPH_PROMPT_VERSION,
+            )
+            .await?;
+        let mut cached_by_hash = cached
+            .into_iter()
+            .map(|extraction| (extraction.chunk_hash.clone(), extraction))
+            .collect::<HashMap<_, _>>();
+        let mut cache_hits = 0_u64;
+        let mut cache_misses = 0_u64;
+        let mut extracted = Vec::with_capacity(chunks.len());
+        let mut new_extractions = Vec::new();
+
+        for chunk in chunks {
+            if let Some(extraction) = cached_by_hash.remove(&chunk.chunk_hash) {
+                cache_hits = cache_hits.saturating_add(1);
+                extracted.push(extraction);
+            } else {
+                cache_misses = cache_misses.saturating_add(1);
+                let extraction = extract_chunk_semantics(object, chunk);
+                new_extractions.push(extraction.clone());
+                extracted.push(extraction);
+            }
+        }
+        self.repository
+            .upsert_semantic_graph_extractions(tenant_id, new_extractions)
+            .await?;
+
+        Ok(SemanticGraphExtractionReport {
+            cache_hits,
+            cache_misses,
+            entities_extracted: extracted
+                .iter()
+                .map(|extraction| extraction.entities.len() as u64)
+                .sum(),
+            relations_extracted: extracted
+                .iter()
+                .map(|extraction| extraction.relations.len() as u64)
+                .sum(),
+            semantic_chunk_links: semantic_chunk_link_count(chunks, &extracted) as u64,
+            extractions: extracted,
+        })
+    }
+
     async fn record_step(
         &self,
         sync_run_uid: Uuid,
@@ -1442,6 +1545,16 @@ struct PersistedIngestion {
     delta: KnowledgeGraphDelta,
     embeddings_created: u64,
     ingested: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SemanticGraphExtractionReport {
+    extractions: Vec<SemanticGraphExtraction>,
+    cache_hits: u64,
+    cache_misses: u64,
+    entities_extracted: u64,
+    relations_extracted: u64,
+    semantic_chunk_links: u64,
 }
 
 /// Returns `metadata` as a JSON object with the `active` retrieval flag set.
@@ -1647,6 +1760,10 @@ fn edge_label(relationship: &str) -> Result<EdgeLabel> {
         "HAS_DOCUMENT" | "HAS_CHUNK" => Ok(EdgeLabel::Contains),
         "EVIDENCES" | "DERIVED_FROM" => Ok(EdgeLabel::DerivedFrom),
         "MENTIONS" => Ok(EdgeLabel::MentionedIn),
+        "RELATES_TO" => Ok(EdgeLabel::RelatesTo),
+        "DEPENDS_ON" => Ok(EdgeLabel::DependsOn),
+        "CAUSED" => Ok(EdgeLabel::Caused),
+        "APPLIES_TO" => Ok(EdgeLabel::AppliesTo),
         other => Err(Error::Repository(format!(
             "unsupported knowledge graph edge relationship `{other}`"
         ))),

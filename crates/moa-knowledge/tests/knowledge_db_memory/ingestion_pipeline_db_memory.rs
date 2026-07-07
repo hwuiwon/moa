@@ -212,7 +212,7 @@ impl EmbeddingProvider for CountingEmbedder {
 #[derive(Debug, Default)]
 struct FakeGraphWriter {
     nodes: Mutex<HashMap<Uuid, Value>>,
-    edges: Mutex<HashSet<Uuid>>,
+    edges: Mutex<HashMap<Uuid, (String, Value)>>,
     vectors: Mutex<HashSet<Uuid>>,
     invalidated: Mutex<Vec<Uuid>>,
 }
@@ -240,6 +240,16 @@ impl FakeGraphWriter {
                 .expect("node mutex should not be poisoned"),
         )
         .expect("serialize graph node properties")
+    }
+
+    fn edge_properties_json(&self) -> String {
+        serde_json::to_string(
+            &*self
+                .edges
+                .lock()
+                .expect("edge mutex should not be poisoned"),
+        )
+        .expect("serialize graph edge properties")
     }
 }
 
@@ -270,7 +280,13 @@ impl KnowledgeGraphWriter for FakeGraphWriter {
             .expect("edge mutex should not be poisoned");
         let mut edge_count = 0_u64;
         for edge in &delta.edges {
-            if edges.insert(edge.uid) {
+            if edges
+                .insert(
+                    edge.uid,
+                    (edge.relationship.clone(), edge.properties.clone()),
+                )
+                .is_none()
+            {
                 edge_count += 1;
             }
         }
@@ -485,6 +501,7 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
             "parse_completed",
             "normalized",
             "blocks_diffed",
+            "semantic_graph_extracted",
             "chunks_diffed",
             "embedded",
             "graph_upserted",
@@ -510,6 +527,103 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
 
     let graph_json = graph.properties_json();
     assert_no_secret_text(&graph_json);
+}
+
+#[tokio::test]
+async fn semantic_graph_extraction_is_cached_reported_and_written_db_memory() {
+    // Pins: semantic graph extraction is a persisted ingestion-time cache with
+    // reported hit/miss counters and graph-visible typed edges.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated Postgres");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let scope = RlsContext::tenant(tenant_id);
+    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        scope,
+    ));
+    let parser = Arc::new(ParagraphParser);
+    let embedder = Arc::new(CountingEmbedder::default());
+    let graph = Arc::new(FakeGraphWriter::default());
+    let pipeline = KnowledgeIngestionPipeline::new(
+        repository.clone(),
+        parser,
+        embedder,
+        graph.clone(),
+        KnowledgeIngestionPipelineConfig {
+            chunking: ChunkingConfig {
+                target_tokens: 1,
+                max_tokens: 16,
+                min_tokens: 1,
+            },
+            provider: "test_provider".to_string(),
+            parser_label: "test_parser".to_string(),
+        },
+    );
+    repository
+        .upsert_connection(KnowledgeConnection {
+            connection_uid,
+            tenant_id,
+            provider: "test_provider".to_string(),
+            connector: "docs".to_string(),
+            provider_account_id: "acct_semantic".to_string(),
+            credential_ref: "vault://knowledge/semantic".to_string(),
+            status: ConnectionStatus::Active,
+            metadata: json!({}),
+            source_selection: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_synced_at: None,
+        })
+        .await
+        .expect("upsert connection");
+    let text = "Connecting a custom domain requires a premium plan and DNS records.\n\nTroubleshoot domain not working by checking DNS.";
+    let sync_run_uid = create_run(&repository, tenant_id, connection_uid).await;
+
+    let result = pipeline
+        .ingest_record_page(
+            sync_run_uid,
+            connection_uid,
+            tenant_id,
+            RecordPage {
+                records: vec![
+                    record_with_source("semantic-a", "v1", false, text),
+                    record_with_source("semantic-b", "v1", false, text),
+                ],
+                next_cursor: None,
+            },
+        )
+        .await
+        .expect("ingest semantic records");
+
+    assert_eq!(result.records_ingested, 2);
+    let first_object_uid = object_uid_for_source(connection_uid, "semantic-a");
+    let second_object_uid = object_uid_for_source(connection_uid, "semantic-b");
+    let first_counters = semantic_graph_step_counters(&pool, sync_run_uid, first_object_uid).await;
+    let second_counters =
+        semantic_graph_step_counters(&pool, sync_run_uid, second_object_uid).await;
+    assert_eq!(first_counters["chunks_total"], 2);
+    assert_eq!(first_counters["cache_hits"], 0);
+    assert_eq!(first_counters["cache_misses"], 2);
+    assert_eq!(second_counters["chunks_total"], 2);
+    assert_eq!(second_counters["cache_hits"], 2);
+    assert_eq!(second_counters["cache_misses"], 0);
+    assert!(first_counters["entities_extracted"].as_u64().unwrap_or(0) > 0);
+    assert!(first_counters["relations_extracted"].as_u64().unwrap_or(0) > 0);
+    assert!(first_counters["semantic_chunk_links"].as_u64().unwrap_or(0) > 0);
+    assert_eq!(semantic_graph_cache_row_count(&pool, tenant_id).await, 2);
+
+    let edge_json = graph.edge_properties_json();
+    assert!(
+        edge_json.contains("semantic_graph"),
+        "semantic graph edge metadata should be written: {edge_json}"
+    );
+    assert!(
+        edge_json.contains("RELATES_TO"),
+        "same-document semantic chunk links should be graph-visible: {edge_json}"
+    );
 }
 
 #[tokio::test]
@@ -2227,6 +2341,41 @@ async fn sync_counters(pool: &sqlx::PgPool, sync_run_uid: Uuid) -> Counters {
         graph_nodes_upserted: row.7,
         graph_edges_upserted: row.8,
     }
+}
+
+async fn semantic_graph_step_counters(
+    pool: &sqlx::PgPool,
+    sync_run_uid: Uuid,
+    object_uid: Uuid,
+) -> Value {
+    sqlx::query_scalar::<_, Value>(
+        r#"
+        SELECT counters
+        FROM moa.knowledge_ingestion_steps
+        WHERE sync_run_id = $1
+          AND object_id = $2
+          AND stage = 'semantic_graph_extracted'
+        "#,
+    )
+    .bind(sync_run_uid)
+    .bind(object_uid)
+    .fetch_one(pool)
+    .await
+    .expect("read semantic graph extraction counters")
+}
+
+async fn semantic_graph_cache_row_count(pool: &sqlx::PgPool, tenant_id: TenantId) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM moa.knowledge_semantic_graph_extractions
+        WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_id.0)
+    .fetch_one(pool)
+    .await
+    .expect("count semantic graph extraction cache rows")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

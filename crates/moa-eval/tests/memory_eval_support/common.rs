@@ -128,6 +128,8 @@ pub(crate) fn memory_budget_report_with_reranker(
         reranker_enabled,
         query_rewrite_policy: QueryRewritePolicy::Gated,
         graph_expansion_policy: GraphExpansionEvalPolicy::Current,
+        graph_retrieval_policy: GraphExpansionEvalPolicy::Current.graph_retrieval_policy(),
+        graph_diagnostics: Default::default(),
         query_rewrite_call_count: 0,
         query_rewrite_skip_count: 0,
         query_rewrite_call_rate: 0.0,

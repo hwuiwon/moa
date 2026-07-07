@@ -7,9 +7,20 @@ default-run = "xtask"
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
+blake3.workspace = true
+chrono.workspace = true
 moa-core = { workspace = true }
+moa-brain = { workspace = true }
+moa-db = { workspace = true }
 moa-eval = { workspace = true }
+moa-knowledge = { workspace = true }
+moa-memory-graph = { workspace = true }
 moa-memory-lifecycle = { workspace = true }
+moa-memory-types = { workspace = true }
+moa-memory-vector = { workspace = true }
+moa-providers = { workspace = true }
+pgvector = { version = "0.4.1", features = ["sqlx", "halfvec"] }
 serde.workspace = true
 serde_json.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "runtime-tokio-rustls", "postgres"] }
