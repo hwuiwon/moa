@@ -4,3 +4,5 @@
 mod local_tools_offline;
 #[path = "hands_offline/mcp_router.rs"]
 mod mcp_router;
+#[path = "hands_offline/security_defaults.rs"]
+mod security_defaults;

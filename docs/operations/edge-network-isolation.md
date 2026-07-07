@@ -18,15 +18,33 @@ handler debugging, bind `127.0.0.1:10020:9080` in a developer-only override.
 
 - The orchestrator Service is `ClusterIP` or internal, never `LoadBalancer` or
   `NodePort`.
-- Deployment manifests must restrict Restate ingress to `moa-edge` and
-  orchestrator port 9080 to Restate. Current Restate deployment config uses
-  `networkPeers` for this service-level boundary; add Kubernetes
-  `NetworkPolicy` objects in environments that enforce them.
-- If a service mesh is in use, require mTLS between `moa-edge` and the
-  orchestrator.
+- Clusters must enforce Kubernetes `NetworkPolicy`, or an equivalent service
+  mesh authorization policy. The network boundary is the only production
+  defense for the trusted Restate handler surface.
+- The Restate ingress boundary is covered by
+  `RestateCluster.spec.security.networkPeers`: Restate ingress accepts
+  `moa-edge`, and Restate admin accepts `moa-orchestrator`.
+- The base Kubernetes manifests add a `NetworkPolicy` for
+  `moa-orchestrator` pods. Port 9080 accepts traffic only from Restate pods in
+  `moa-restate` labeled `moa.hwuiwon.com/restate-cluster: moa-restate`; edge
+  pods must not call 9080 directly.
+- Health port 9081 remains reachable for Kubernetes probes and local overlay
+  readiness checks. Metrics port 9090 is allowed from the Alloy pods in the
+  `observability` namespace. The SCIM listener default port 10022 is not
+  exposed by the Kubernetes Service and has no NetworkPolicy allow rule; add a
+  Service and a targeted allow rule before exposing SCIM in Kubernetes.
+- If a service mesh is in use, require mTLS and enforce the same source/port
+  policy between `moa-edge`, Restate, and `moa-orchestrator`.
 - Verify exposure on deploy:
   `kubectl get svc moa-orchestrator -o jsonpath='{.spec.type}'` returns
   `ClusterIP`.
+- Verify during deploy that the base render includes the orchestrator
+  NetworkPolicy before applying:
+
+  ```bash
+  kubectl kustomize k8s/base >/tmp/moa-k8s-render.yaml
+  rg -n "kind: NetworkPolicy|moa-orchestrator|part-of: moa" /tmp/moa-k8s-render.yaml
+  ```
 
 ## Failure mode
 

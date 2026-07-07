@@ -32,6 +32,8 @@ const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 const DOCKER_DETECTION_TIMEOUT: Duration = Duration::from_secs(2);
 const DOCKER_TMPFS_OPTIONS: &str = "rw,nosuid,nodev,size=64m";
 const DEFAULT_DOCKER_WORKSPACE: &str = "/workspace";
+const TOOL_ERROR_OUTPUT_STATUS: &str = "tool returned error output";
+const TOOL_EXECUTION_FAILED_STATUS: &str = "tool execution failed";
 
 /// Optional Docker seccomp profile path, resolved from the environment once.
 static DOCKER_SECCOMP_PROFILE: LazyLock<Option<String>> =
@@ -507,11 +509,11 @@ impl LocalHandProvider {
 
             match &result {
                 Ok(output) if output.is_error => {
-                    hand_span.set_status(Status::error(output.to_text()));
+                    hand_span.set_status(Status::error(TOOL_ERROR_OUTPUT_STATUS));
                 }
                 Ok(_) | Err(MoaError::Cancelled) => {}
-                Err(error) => {
-                    hand_span.set_status(Status::error(error.to_string()));
+                Err(_) => {
+                    hand_span.set_status(Status::error(TOOL_EXECUTION_FAILED_STATUS));
                 }
             }
 

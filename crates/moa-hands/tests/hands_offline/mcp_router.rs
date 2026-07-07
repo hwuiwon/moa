@@ -17,6 +17,15 @@ fn session() -> SessionMeta {
     }
 }
 
+fn opt_into_development_local_hands(config: &mut MoaConfig) {
+    config.local.docker_enabled = false;
+    config
+        .cloud
+        .hands
+        .get_or_insert_with(Default::default)
+        .allow_local_provider = true;
+}
+
 #[tokio::test]
 async fn router_injects_mcp_credentials_via_proxy() {
     let token_env = format!("MOA_TEST_MCP_TOKEN_{}", Uuid::now_v7().simple());
@@ -61,6 +70,7 @@ async fn router_injects_mcp_credentials_via_proxy() {
     let dir = tempdir().unwrap();
     let mut config = MoaConfig::default();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
+    opt_into_development_local_hands(&mut config);
     config.mcp_servers = vec![McpServerConfig {
         name: "secure-api".to_string(),
         transport: McpTransportConfig::Http,
@@ -105,6 +115,7 @@ async fn router_fails_closed_when_credentialed_mcp_token_env_is_unset() {
     let dir = tempdir().unwrap();
     let mut config = MoaConfig::default();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
+    opt_into_development_local_hands(&mut config);
     config.mcp_servers = vec![McpServerConfig {
         name: "secure-api".to_string(),
         transport: McpTransportConfig::Http,
@@ -169,6 +180,7 @@ async fn router_calls_http_mcp_server_and_surfaces_jsonrpc_errors() {
     let dir = tempdir().unwrap();
     let mut config = MoaConfig::default();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
+    opt_into_development_local_hands(&mut config);
     config.mcp_servers = vec![McpServerConfig {
         name: "http-api".to_string(),
         transport: McpTransportConfig::Http,
@@ -229,6 +241,7 @@ async fn from_config_rejects_mcp_tool_name_that_collides_with_local_tool() {
     let dir = tempdir().unwrap();
     let mut config = MoaConfig::default();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
+    opt_into_development_local_hands(&mut config);
     config.mcp_servers = vec![McpServerConfig {
         name: "shadow-api".to_string(),
         transport: McpTransportConfig::Http,
@@ -296,6 +309,7 @@ async fn router_discovers_and_calls_streamable_http_tools_with_sse_responses() {
     let dir = tempdir().unwrap();
     let mut config = MoaConfig::default();
     config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
+    opt_into_development_local_hands(&mut config);
     config.mcp_servers = vec![McpServerConfig {
         name: "sse-api".to_string(),
         transport: McpTransportConfig::Http,

@@ -5,6 +5,7 @@ resources:
   - 10-restate-cluster.yaml
   - 20-orchestrator-deployment.yaml
   - 25-orchestrator-service.yaml
+  - 26-orchestrator-network-policy.yaml
   - 30-orchestrator-hpa.yaml
   - 40-orchestrator-pdb.yaml
   - 50-edge-deployment.yaml

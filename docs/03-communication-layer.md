@@ -50,8 +50,11 @@ MOA contact JWTs for agent-facing contacts. Contacts are end users inside one
 tenant; users are admin/operator principals. Initial contact tokens are low
 assurance: they can create a contact-bound session, but their scopes and
 structured permissions bound them to the configured tenant, agent/session
-allowlists, and low-assurance memory operations. A dedicated contact message
-route must exist before contact tokens receive a message-send scope.
+allowlists, and low-assurance memory operations. Token issuance must request an
+explicit non-empty low-assurance scope list and an explicit non-empty agent
+allowlist; omitted values fail closed instead of expanding to wildcard access. A
+dedicated contact message route must exist before contact tokens receive a
+message-send scope.
 
 `Contacts/init_session` creates the durable session with a `contact_id` in
 session metadata and a required initial `ChannelRef` route. The

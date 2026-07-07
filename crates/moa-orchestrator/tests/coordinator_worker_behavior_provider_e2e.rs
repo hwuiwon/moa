@@ -56,8 +56,10 @@ struct CaseObservation {
     spawned: Vec<(u64, String)>,
     spawn_calls: Vec<(u64, ToolCallId)>,
     wait_calls: Vec<(u64, ToolCallId)>,
+    worker_notifications: Vec<(u64, String)>,
+    worker_result_bundles: Vec<(u64, usize)>,
     tool_results: HashMap<ToolCallId, bool>,
-    final_text_after_wait: Option<String>,
+    final_text_after_result: Option<String>,
 }
 
 fn spawn_orchestrator(
@@ -360,32 +362,44 @@ fn verify_case(case: LiveDelegationCase, events: &[EventRecord]) -> Result<()> {
         observation.spawned.len(),
         describe_events(events)
     );
+    let observed_worker_results = observation
+        .wait_calls
+        .len()
+        .max(observation.worker_notifications.len())
+        .max(
+            observation
+                .worker_result_bundles
+                .iter()
+                .map(|(_, result_count)| *result_count)
+                .sum(),
+        );
     assert!(
-        observation.wait_calls.len() >= case.min_wait_calls,
-        "case {} should call wait_worker at least {} times, got {}\n{}",
+        observed_worker_results >= case.min_wait_calls,
+        "case {} should observe at least {} worker results through wait_worker calls, terminal notifications, or result bundles; got {} waits, {} notifications, and {:?} bundles\n{}",
         case.name,
         case.min_wait_calls,
         observation.wait_calls.len(),
+        observation.worker_notifications.len(),
+        observation.worker_result_bundles,
         describe_events(events)
     );
 
-    let first_wait_seq = observation
-        .wait_calls
-        .iter()
-        .map(|(seq, _)| *seq)
+    let first_result_seq = observation
+        .result_observation_sequences()
+        .into_iter()
         .min()
-        .with_context(|| format!("case {} should call wait_worker", case.name))?;
-    let spawns_before_first_wait = observation
+        .with_context(|| format!("case {} should observe a worker result", case.name))?;
+    let spawns_before_first_result = observation
         .spawn_calls
         .iter()
-        .filter(|(seq, _)| *seq < first_wait_seq)
+        .filter(|(seq, _)| *seq < first_result_seq)
         .count();
     assert!(
-        spawns_before_first_wait >= case.min_spawns_before_first_wait,
-        "case {} should spawn at least {} ready workers before first wait, got {}\n{}",
+        spawns_before_first_result >= case.min_spawns_before_first_wait,
+        "case {} should spawn at least {} ready workers before observing the first worker result, got {}\n{}",
         case.name,
         case.min_spawns_before_first_wait,
-        spawns_before_first_wait,
+        spawns_before_first_result,
         describe_events(events)
     );
 
@@ -394,16 +408,16 @@ fn verify_case(case: LiveDelegationCase, events: &[EventRecord]) -> Result<()> {
             observation
                 .spawn_calls
                 .iter()
-                .any(|(seq, _)| *seq > first_wait_seq),
-            "case {} should spawn a dependent worker after first wait\n{}",
+                .any(|(seq, _)| *seq > first_result_seq),
+            "case {} should spawn a dependent worker after observing the prerequisite worker result\n{}",
             case.name,
             describe_events(events)
         );
     }
 
-    let final_text = observation.final_text_after_wait.with_context(|| {
+    let final_text = observation.final_text_after_result.with_context(|| {
         format!(
-            "case {} should produce a final BrainResponse after wait_worker containing {:?}\n{}",
+            "case {} should produce a final BrainResponse after observing worker results containing {:?}\n{}",
             case.name,
             case.expected_markers,
             describe_events(events)
@@ -460,31 +474,51 @@ fn observe_case(case: LiveDelegationCase, events: &[EventRecord]) -> CaseObserva
             } if tool_name == "wait_worker" => {
                 observation.wait_calls.push((record.sequence_num, *tool_id));
             }
+            Event::WorkerNotificationDelivered { worker_id, .. } => {
+                observation
+                    .worker_notifications
+                    .push((record.sequence_num, worker_id.clone()));
+            }
+            Event::WorkerResultBundle { results, .. } => {
+                observation
+                    .worker_result_bundles
+                    .push((record.sequence_num, results.len()));
+            }
             Event::ToolResult {
                 tool_id, success, ..
             } => {
                 observation.tool_results.insert(*tool_id, *success);
             }
             Event::BrainResponse { text, .. } => {
-                let last_wait_seq = observation
-                    .wait_calls
-                    .iter()
-                    .map(|(seq, _)| *seq)
+                let last_result_seq = observation
+                    .result_observation_sequences()
+                    .into_iter()
                     .max()
                     .unwrap_or(0);
-                if record.sequence_num > last_wait_seq
+                if record.sequence_num > last_result_seq
                     && case
                         .expected_markers
                         .iter()
                         .all(|marker| text.contains(marker))
                 {
-                    observation.final_text_after_wait = Some(text.clone());
+                    observation.final_text_after_result = Some(text.clone());
                 }
             }
             _ => {}
         }
     }
     observation
+}
+
+impl CaseObservation {
+    fn result_observation_sequences(&self) -> Vec<u64> {
+        self.wait_calls
+            .iter()
+            .map(|(seq, _)| *seq)
+            .chain(self.worker_notifications.iter().map(|(seq, _)| *seq))
+            .chain(self.worker_result_bundles.iter().map(|(seq, _)| *seq))
+            .collect()
+    }
 }
 
 fn describe_events(events: &[EventRecord]) -> String {

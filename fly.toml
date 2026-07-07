@@ -8,7 +8,8 @@ kill_timeout = "30s"
 
 [env]
   MOA_CLOUD_ENABLED = "true"
-  MOA_CLOUD_HANDS_DEFAULT_PROVIDER = "local"
+  MOA_CLOUD_HANDS_DEFAULT_PROVIDER = "e2b"
+  MOA_CLOUD_HANDS_ALLOW_LOCAL = "false"
   MOA_LOCAL_MEMORY_DIR = "/data/memory"
   MOA_LOCAL_SANDBOX_DIR = "/data/sandbox"
   MOA_CLOUD_MEMORY_DIR = "/data/memory"

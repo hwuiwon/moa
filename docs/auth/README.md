@@ -73,7 +73,10 @@ logic.
 
 Contacts use MOA-issued contact JWTs for bounded agent/session routes. A
 contact token cannot become a workspace admin, tenant admin, or tenant
-operator identity and cannot call platform-internal control-plane APIs.
+operator identity and cannot call platform-internal control-plane APIs. Contact
+token issuance requires explicit non-empty `requested_scopes` and `agent_ids`;
+empty values are rejected so public contact credentials do not inherit implicit
+low-assurance scopes or wildcard agent access.
 
 ## Tuple Consistency
 

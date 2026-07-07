@@ -281,6 +281,8 @@ pub struct MoaEnvOverlay {
     /// `MOA_CLOUD_HANDS_FALLBACK_PROVIDERS`.
     #[serde(deserialize_with = "deserialize_optional_list")]
     pub cloud_hands_fallback_providers: Option<Vec<String>>,
+    /// `MOA_CLOUD_HANDS_ALLOW_LOCAL`.
+    pub cloud_hands_allow_local: Option<bool>,
     /// `MOA_CLOUD_HANDS_DAYTONA_API_KEY`.
     pub cloud_hands_daytona_api_key: Option<String>,
     /// `MOA_CLOUD_HANDS_DAYTONA_API_URL`.
@@ -780,6 +782,7 @@ fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
         "unstructured_api_url" => &["knowledge", "unstructured", "api_base_url"],
         "reducto_api_url" => &["knowledge", "reducto", "api_base_url"],
         "turbopuffer_baa" => &["memory", "vector", "turbopuffer", "baa_enabled"],
+        "cloud_hands_allow_local" => &["cloud", "hands", "allow_local_provider"],
         "restate_ingress_url" => &["orchestrator", "restate_ingress_url"],
         "restate_admin_url" => &["orchestrator", "restate_admin_url"],
         "restate_llm_gateway_url" => &["orchestrator", "llm_gateway_url"],
@@ -918,6 +921,7 @@ fn optional_section_seed(path: &[&str]) -> Option<Value> {
         ["cloud", "hands"] => Some(json!({
             "default_provider": null,
             "fallback_providers": [],
+            "allow_local_provider": false,
             "daytona_api_key": null,
             "daytona_api_url": null,
             "daytona_default_image": null,
@@ -1634,6 +1638,7 @@ mod tests {
             ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
             ("MOA_CLOUD_HANDS_DEFAULT_PROVIDER", "daytona"),
             ("MOA_CLOUD_HANDS_FALLBACK_PROVIDERS", "e2b"),
+            ("MOA_CLOUD_HANDS_ALLOW_LOCAL", "true"),
         ]))
         .expect("overlay should deserialize");
         let mut config = MoaConfig::default();
@@ -1643,6 +1648,7 @@ mod tests {
         let hands = config.cloud.hands.expect("cloud hands config");
         assert_eq!(hands.default_provider.as_deref(), Some("daytona"));
         assert_eq!(hands.fallback_providers, vec!["e2b".to_string()]);
+        assert!(hands.allow_local_provider);
     }
 
     fn env_pairs<const N: usize>(pairs: [(&str, &str); N]) -> Vec<(String, String)> {

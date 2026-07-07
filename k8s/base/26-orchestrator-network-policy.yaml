@@ -1,0 +1,37 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: moa-orchestrator-ingress
+  namespace: moa-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: moa-orchestrator
+      app.kubernetes.io/part-of: moa
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: moa-restate
+          podSelector:
+            matchLabels:
+              moa.hwuiwon.com/restate-cluster: moa-restate
+      ports:
+        - protocol: TCP
+          port: 9080
+    - ports:
+        - protocol: TCP
+          port: 9081
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alloy
+              app.kubernetes.io/part-of: moa
+      ports:
+        - protocol: TCP
+          port: 9090

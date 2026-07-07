@@ -103,10 +103,18 @@ async fn scripted_provider_repeated_tool_loop_stops_before_unbounded_dispatch() 
 async fn action_policy_auto_mode_executes_shell_without_user_approval(
     fixture: &OrchestratorTestFixture,
 ) -> Result<()> {
-    // Pins: with no review rule, a delegated worker's bash action executes
-    // without approval; the sandbox-free coordinator only spawns the worker.
+    // Pins: high-risk command execution defaults to review, so only an
+    // explicit tenant allow rule lets a delegated worker's known bash action
+    // execute without approval.
     let test = fixture.isolated().await;
     let session_id = test.create_session("auto-mode").await?;
+    let meta = test.client().get_session(session_id).await?;
+    initialize_tenant(test.client(), meta.tenant_id).await?;
+    fixture
+        .grant_default_tenant_admin(meta.tenant_id)
+        .await
+        .context("grant admin before adding explicit allow rule")?;
+    add_bash_allow_rule(test.client(), meta.tenant_id, "printf auto-mode-ok").await?;
 
     run_scripted_turn(&test, session_id, "Run the auto-mode bash command.").await?;
 
@@ -538,6 +546,25 @@ async fn add_bash_admin_review_rule(client: &TestApiClient, tenant_id: TenantId)
                 pattern: "*".to_string(),
                 effect: ActionPolicyEffect::AdminReview,
                 reason: Some("E2E admin-review rule for bash".to_string()),
+            },
+        )
+        .await
+}
+
+async fn add_bash_allow_rule(
+    client: &TestApiClient,
+    tenant_id: TenantId,
+    pattern: &str,
+) -> Result<()> {
+    client
+        .post_void(
+            "/ActionPolicy/upsert_rule",
+            &TestRuleRequest {
+                tenant_id,
+                tool_name: "bash".to_string(),
+                pattern: pattern.to_string(),
+                effect: ActionPolicyEffect::Allow,
+                reason: Some("E2E explicit allow rule for known bash command".to_string()),
             },
         )
         .await

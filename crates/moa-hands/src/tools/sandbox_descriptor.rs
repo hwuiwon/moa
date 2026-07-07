@@ -166,7 +166,7 @@ pub(crate) fn unsupported_tool(provider: &str, tool: &str) -> moa_core::MoaError
 const fn execute_policy(input_shape: ToolInputShape) -> ToolPolicySpec {
     ToolPolicySpec {
         risk_level: RiskLevel::High,
-        default_effect: ActionPolicyEffect::Allow,
+        default_effect: ActionPolicyEffect::AdminReview,
         action_class: ActionClass::CommandExecution,
         input_shape,
         diff_strategy: ToolDiffStrategy::None,

@@ -55,7 +55,7 @@ impl ApiKeys for ApiKeysImpl {
         let pool = OrchestratorCtx::current_graph_pool();
         Ok(ctx
             .run(|| async move {
-                key_admin::create_key(pool, identity, request)
+                create_key_for_identity(pool, identity, request)
                     .await
                     .map(Json::from)
             })
@@ -70,7 +70,7 @@ impl ApiKeys for ApiKeysImpl {
         let identity = require_identity(&ctx)?;
         let pool = OrchestratorCtx::current_graph_pool();
         Ok(ctx
-            .run(|| async move { key_admin::list_keys(pool, identity).await.map(Json::from) })
+            .run(|| async move { list_keys_for_identity(pool, identity).await.map(Json::from) })
             .name("api_keys_list")
             .await?)
     }
@@ -90,7 +90,7 @@ impl ApiKeys for ApiKeysImpl {
 
         Ok(ctx
             .run(|| async move {
-                key_admin::rotate_key(pool, fga, identity, key_id)
+                rotate_key_for_identity(pool, fga, identity, key_id)
                     .await
                     .map(Json::from)
             })
@@ -109,11 +109,49 @@ impl ApiKeys for ApiKeysImpl {
 
         Ok(ctx
             .run(|| async move {
-                key_admin::revoke_key(pool, fga, identity, key_id, "user_requested").await
+                revoke_key_for_identity(pool, fga, identity, key_id, "user_requested").await
             })
             .name("api_keys_revoke")
             .await?)
     }
+}
+
+/// Create an API key for an already authenticated identity.
+pub async fn create_key_for_identity(
+    pool: sqlx::PgPool,
+    identity: Identity,
+    request: CreateApiKeyRequest,
+) -> Result<CreateApiKeyResponse, HandlerError> {
+    key_admin::create_key(pool, identity, request).await
+}
+
+/// List API keys visible to an already authenticated identity.
+pub async fn list_keys_for_identity(
+    pool: sqlx::PgPool,
+    identity: Identity,
+) -> Result<Vec<KeyListItem>, HandlerError> {
+    key_admin::list_keys(pool, identity).await
+}
+
+/// Rotate an API key for an already authenticated identity.
+pub async fn rotate_key_for_identity(
+    pool: sqlx::PgPool,
+    fga: Option<moa_authz::FgaClient>,
+    identity: Identity,
+    key_id: Uuid,
+) -> Result<CreateApiKeyResponse, HandlerError> {
+    key_admin::rotate_key(pool, fga, identity, key_id).await
+}
+
+/// Revoke an API key for an already authenticated identity.
+pub async fn revoke_key_for_identity(
+    pool: sqlx::PgPool,
+    fga: Option<moa_authz::FgaClient>,
+    identity: Identity,
+    key_id: Uuid,
+    reason: &str,
+) -> Result<(), HandlerError> {
+    key_admin::revoke_key(pool, fga, identity, key_id, reason).await
 }
 
 fn validate_key_name(name: &str) -> Result<(), HandlerError> {

@@ -4,7 +4,9 @@ use chrono::{DateTime, Utc};
 use moa_auth_providers::api_keys::{
     self, CreateApiKeyRequest, CreateApiKeyResponse, Env, KeyListItem, KeyOwner, NewApiKey,
 };
-use moa_authz::{FgaClient, enqueue_raw, fga_subject, require_authz_with_delegation};
+use moa_authz::{
+    FgaClient, enqueue_raw, fga_subject, require_authz, require_authz_with_delegation,
+};
 use moa_authz_schema::{ObjectType, Relation, TupleOp};
 use moa_core::traits::{Identity, IdentityType};
 use moa_ocsf::ActorInput;
@@ -79,6 +81,26 @@ pub(crate) async fn list_keys(
     pool: PgPool,
     identity: Identity,
 ) -> Result<Vec<KeyListItem>, HandlerError> {
+    if let Some(api_key_id) = identity.api_key_id {
+        let rows: Vec<KeyListRow> = sqlx::query_as(
+            r#"
+            SELECT id, name, prefix, env, created_at, last_used_at
+            FROM api_keys
+            WHERE id = $1
+              AND tenant_id = $2
+              AND revoked_at IS NULL
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(identity.tenant_id)
+        .fetch_all(&pool)
+        .await
+        .map_err(|error| TerminalError::new(format!("list presenting api key: {error}")))?;
+
+        return Ok(key_list_items(rows));
+    }
+
     let (owner_user_id, owner_agent_id) = match identity.identity_type {
         IdentityType::Operator => (Some(identity.id), None),
         IdentityType::Agent => (None, Some(identity.id)),
@@ -105,8 +127,11 @@ pub(crate) async fn list_keys(
     .await
     .map_err(|error| TerminalError::new(format!("list api keys: {error}")))?;
 
-    Ok(rows
-        .into_iter()
+    Ok(key_list_items(rows))
+}
+
+fn key_list_items(rows: Vec<KeyListRow>) -> Vec<KeyListItem> {
+    rows.into_iter()
         .map(
             |(id, name, prefix, env, created_at, last_used_at)| KeyListItem {
                 id,
@@ -117,7 +142,7 @@ pub(crate) async fn list_keys(
                 last_used_at,
             },
         )
-        .collect())
+        .collect()
 }
 
 /// Rotate one API key after loading it through a management-safe scope.
@@ -262,6 +287,29 @@ async fn load_manageable_active_key(
     identity: &Identity,
     key_id: Uuid,
 ) -> Result<ApiKeyRow, HandlerError> {
+    if let Some(presenting_key_id) = identity.api_key_id {
+        if key_id == presenting_key_id {
+            return load_active_key_for_tenant(pool, key_id, identity.tenant_id.0).await;
+        }
+
+        let row = load_active_key_by_id(pool, key_id).await?;
+        let Some(fga) = fga else {
+            return Err(
+                TerminalError::new_with_code(503, "authorization engine unavailable").into(),
+            );
+        };
+        require_authz(
+            fga,
+            identity,
+            ObjectType::Tenant,
+            row.tenant_id,
+            Relation::Admin,
+        )
+        .await
+        .map_err(translate_authz_error)?;
+        return Ok(row);
+    }
+
     if let Some(row) = load_direct_owner_key(pool, key_id, identity).await? {
         return Ok(row);
     }
@@ -282,6 +330,21 @@ async fn load_manageable_active_key(
     .await
     .map_err(translate_authz_error)?;
     load_active_key_for_tenant(pool, key_id, identity.tenant_id.0).await
+}
+
+async fn load_active_key_by_id(pool: &PgPool, key_id: Uuid) -> Result<ApiKeyRow, HandlerError> {
+    sqlx::query_as(
+        r#"
+        SELECT id, owner_user_id, owner_agent_id, tenant_id, name, description, env
+        FROM api_keys
+        WHERE id = $1 AND revoked_at IS NULL
+        "#,
+    )
+    .bind(key_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| TerminalError::new(format!("load api key by id: {error}")))?
+    .ok_or_else(|| TerminalError::new_with_code(404, "API key not found").into())
 }
 
 async fn load_direct_owner_key(
@@ -417,6 +480,33 @@ async fn enqueue_key_scope_tuples(
     )
     .await
     .map_err(|error| TerminalError::new(format!("api key tenant outbox: {error}")))?;
+    if op == TupleOp::Delete {
+        enqueue_key_tenant_role_deletes(transaction, key_id, tenant_id).await?;
+    }
+    Ok(())
+}
+
+async fn enqueue_key_tenant_role_deletes(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    key_id: Uuid,
+    tenant_id: Uuid,
+) -> Result<(), HandlerError> {
+    let key_wire = format!("api_key:{key_id}");
+    let tenant_wire = format!("tenant:{tenant_id}");
+    for relation in ["admin", "operator"] {
+        enqueue_raw(
+            &mut **transaction,
+            TupleOp::Delete,
+            &key_wire,
+            relation,
+            &tenant_wire,
+            Some(tenant_id),
+        )
+        .await
+        .map_err(|error| {
+            TerminalError::new(format!("api key tenant role {relation} outbox: {error}"))
+        })?;
+    }
     Ok(())
 }
 

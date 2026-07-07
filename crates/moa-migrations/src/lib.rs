@@ -166,6 +166,10 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         sql: include_str!("../migrations/postgres/V000321__vector_sync_outbox.sql"),
     },
     SchemaMigration {
+        name: "V000322__contact_action_policy_rules.sql",
+        sql: include_str!("../migrations/postgres/V000322__contact_action_policy_rules.sql"),
+    },
+    SchemaMigration {
         name: "V000326__analytics_query_read_models.sql",
         sql: include_str!("../migrations/postgres/V000326__analytics_query_read_models.sql"),
     },
@@ -293,7 +297,7 @@ pub fn session_schema_fingerprint() -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     // Version tag so behavioral changes to the helper (extensions, schema
     // layout) invalidate previously cached templates even if the SQL is equal.
-    "session-template-v3".hash(&mut hasher);
+    "session-template-v5".hash(&mut hasher);
     for migration in SESSION_SCHEMA_MIGRATIONS {
         migration.name.hash(&mut hasher);
         migration.sql.hash(&mut hasher);
@@ -425,7 +429,9 @@ async fn apply_schema_migrations(
         .begin()
         .await
         .context("begin schema migration transaction")?;
-    let search_path = format!("{}, public", quote_identifier(schema_name));
+    // Keep destructive unqualified DDL from resolving to public objects before
+    // the isolated schema has created its own relation of the same name.
+    let search_path = quote_identifier(schema_name);
     for migration in migrations {
         sqlx::query("SELECT pg_catalog.set_config('search_path', $1, true)")
             .bind(&search_path)

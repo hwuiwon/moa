@@ -227,26 +227,6 @@ pub(super) fn translate(
             "/AdminMaintenance/finalize_promotion",
             tenant_id,
         ),
-        "/v1/admin-maintenance/checkpoints/create" => RouteTranslation::Forward {
-            method: Method::POST,
-            path: "/AdminMaintenance/checkpoint_create".to_string(),
-            body: body.to_vec(),
-        },
-        "/v1/admin-maintenance/checkpoints/list" => RouteTranslation::Forward {
-            method: Method::POST,
-            path: "/AdminMaintenance/checkpoint_list".to_string(),
-            body: body.to_vec(),
-        },
-        "/v1/admin-maintenance/checkpoints/rollback" => RouteTranslation::Forward {
-            method: Method::POST,
-            path: "/AdminMaintenance/checkpoint_rollback".to_string(),
-            body: body.to_vec(),
-        },
-        "/v1/admin-maintenance/checkpoints/cleanup" => RouteTranslation::Forward {
-            method: Method::POST,
-            path: "/AdminMaintenance/checkpoint_cleanup".to_string(),
-            body: body.to_vec(),
-        },
         "/v1/privacy/export" => {
             translate_json_object_with_tenant_id(body, "/Privacy/export", tenant_id)
         }
@@ -389,8 +369,8 @@ mod tests {
     }
 
     #[test]
-    fn admin_maintenance_public_routes_translate_to_restate_handlers() {
-        // Pins: hosted admin-maintenance routes forward to the internal AdminMaintenance service paths.
+    fn admin_maintenance_vector_public_routes_translate_to_restate_handlers() {
+        // Pins: hosted vector maintenance stays tenant-scoped through the public edge translator.
         let cases = [
             (
                 "/v1/admin-maintenance/vector/promote",
@@ -418,34 +398,12 @@ mod tests {
                     "action": "finalize"
                 }),
             ),
-            (
-                "/v1/admin-maintenance/checkpoints/create",
-                "/AdminMaintenance/checkpoint_create",
-                serde_json::json!({ "label": "before-deploy", "session_id": null }),
-            ),
-            (
-                "/v1/admin-maintenance/checkpoints/list",
-                "/AdminMaintenance/checkpoint_list",
-                serde_json::json!({}),
-            ),
-            (
-                "/v1/admin-maintenance/checkpoints/rollback",
-                "/AdminMaintenance/checkpoint_rollback",
-                serde_json::json!({ "id": "br-checkpoint" }),
-            ),
-            (
-                "/v1/admin-maintenance/checkpoints/cleanup",
-                "/AdminMaintenance/checkpoint_cleanup",
-                serde_json::json!({}),
-            ),
         ];
 
         for (public_path, internal_path, expected_body) in cases {
             let uri = public_path.parse::<Uri>().expect("route path should parse");
             let mut input_body = expected_body.clone();
-            if public_path.contains("/vector/")
-                && let Some(object) = input_body.as_object_mut()
-            {
+            if let Some(object) = input_body.as_object_mut() {
                 object.remove("tenant_id");
             }
             let body = Bytes::from(input_body.to_string());
@@ -462,20 +420,41 @@ mod tests {
                     assert_eq!(path, internal_path, "{public_path} target changed");
                     let forwarded: serde_json::Value =
                         serde_json::from_slice(&forwarded_body).expect("forwarded body is JSON");
-                    if public_path.contains("/vector/") {
-                        assert_eq!(forwarded, expected_body, "{public_path} body changed");
-                    } else {
-                        assert_eq!(
-                            forwarded, input_body,
-                            "{public_path} body should pass through"
-                        );
-                    }
+                    assert_eq!(forwarded, expected_body, "{public_path} body changed");
                 }
                 RouteTranslation::NoChange => {
                     panic!("{public_path} should translate to {internal_path}")
                 }
                 RouteTranslation::BadRequest(message) => {
                     panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn admin_maintenance_checkpoint_public_routes_do_not_translate() {
+        // Pins: deployment-global checkpoint maintenance is not exposed through tenant public routes.
+        let paths = [
+            "/v1/admin-maintenance/checkpoints/create",
+            "/v1/admin-maintenance/checkpoints/list",
+            "/v1/admin-maintenance/checkpoints/rollback",
+            "/v1/admin-maintenance/checkpoints/cleanup",
+        ];
+
+        for public_path in paths {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+            let body = Bytes::from_static(br#"{}"#);
+
+            let translation = translate(&Method::POST, &uri, &body);
+
+            match translation {
+                RouteTranslation::NoChange => {}
+                RouteTranslation::Forward { method, path, .. } => {
+                    panic!("{public_path} must not translate, got {method} {path}")
+                }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should fall through unchanged, got: {message}")
                 }
             }
         }

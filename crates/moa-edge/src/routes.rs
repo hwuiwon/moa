@@ -242,11 +242,6 @@ async fn handle_proxy(
         Err(response) => return response,
     };
 
-    let original_path = uri
-        .path_and_query()
-        .map(|path| path.as_str())
-        .unwrap_or(uri.path())
-        .to_string();
     let (method, path, body) =
         match translate_public_route(&method, &uri, &body, identity.tenant_id) {
             // Every catch-all route reaching the proxy is a read, status poll, or
@@ -255,7 +250,10 @@ async fn handle_proxy(
             RouteTranslation::Forward { method, path, body } => {
                 (method, call_path(&IngressScope::Unscoped, &path), body)
             }
-            RouteTranslation::NoChange => (method, original_path, body.to_vec()),
+            RouteTranslation::NotFound => {
+                span.record("http.status_code", 404_i64);
+                return (StatusCode::NOT_FOUND, "not found").into_response();
+            }
             RouteTranslation::BadRequest(message) => {
                 span.record("http.status_code", 400_i64);
                 return (StatusCode::BAD_REQUEST, message).into_response();
@@ -1090,14 +1088,21 @@ fn user_session_token_from_cookie(headers: &HeaderMap) -> Option<String> {
         })
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum RouteTranslation {
-    NoChange,
+    NotFound,
     Forward {
         method: Method,
         path: String,
         body: Vec<u8>,
     },
     BadRequest(&'static str),
+}
+
+#[cfg(test)]
+impl RouteTranslation {
+    #[allow(non_upper_case_globals)]
+    const NoChange: Self = Self::NotFound;
 }
 
 fn translate_public_route(
@@ -1120,7 +1125,7 @@ fn translate_public_route(
             return translation;
         }
     }
-    RouteTranslation::NoChange
+    RouteTranslation::NotFound
 }
 
 fn tenant_id_field(tenant_id: TenantId) -> (&'static str, serde_json::Value) {
@@ -1642,6 +1647,68 @@ mod tests {
                 contacts_scope(read_handler, tenant),
                 IngressScope::Unscoped,
                 "{read_handler} must not consume tenant concurrency"
+            );
+        }
+    }
+
+    #[test]
+    fn edge_proxy_security_rejects_unknown_v1_route() {
+        // Pins: the public catch-all is an allowlist; unknown /v1 paths return 404 instead of
+        // forwarding the caller's path unchanged to Restate.
+        let unknown = "/v1/internal/restate/call/SessionStore/append_event"
+            .parse::<Uri>()
+            .expect("unknown route URI should parse");
+
+        assert_eq!(
+            translate_public_route(
+                &Method::POST,
+                &unknown,
+                &Bytes::new(),
+                test_support::test_tenant_id()
+            ),
+            RouteTranslation::NotFound
+        );
+
+        let session_id = "11111111-1111-1111-1111-111111111111";
+        let known = format!("/v1/sessions/{session_id}/progress")
+            .parse::<Uri>()
+            .expect("known route URI should parse");
+        match translate_public_route(
+            &Method::POST,
+            &known,
+            &Bytes::from_static(br#"{}"#),
+            test_support::test_tenant_id(),
+        ) {
+            RouteTranslation::Forward { method, path, .. } => {
+                assert_eq!(method, Method::POST);
+                assert_eq!(path, format!("/Session/{session_id}/progress"));
+            }
+            RouteTranslation::NotFound => panic!("known session route should still translate"),
+            RouteTranslation::BadRequest(message) => {
+                panic!("known session route should not fail translation: {message}")
+            }
+        }
+    }
+
+    #[test]
+    fn edge_proxy_security_rejects_literal_dot_segment_internal_route() {
+        // Pins: literal and encoded dot-segment attempts do not translate to an internal
+        // Restate service path before the proxy gets a chance to normalize the URL.
+        for path in [
+            "/v1/../../restate/call/SessionStore/append_event",
+            "/v1/%2e%2e/%2e%2e/restate/call/SessionStore/append_event",
+        ] {
+            let uri = path.parse::<Uri>().expect("attack route URI should parse");
+
+            assert_eq!(
+                translate_public_route(
+                    &Method::POST,
+                    &uri,
+                    &Bytes::new(),
+                    test_support::test_tenant_id(),
+                ),
+                RouteTranslation::NotFound,
+                "{path} must not translate to an upstream service path"
             );
         }
     }

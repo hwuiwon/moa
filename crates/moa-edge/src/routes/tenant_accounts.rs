@@ -6,7 +6,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Duration, Utc};
-use moa_authz::enqueue_raw;
+use moa_authz::{FgaClient, FgaTuple, enqueue_raw};
 use moa_authz_schema::{ObjectType, Relation, TupleOp};
 use moa_core::{StoragePartitionId, TenantId};
 use moa_messaging::{DeliveryMessage, ProviderDeliverySink};
@@ -14,6 +14,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use sqlx::PgExecutor;
 use uuid::Uuid;
 
 use super::auth_accounts::{
@@ -806,7 +807,14 @@ pub async fn delete_tenant(
         )
             .into_response();
     }
-    match purge_tenant_account(&state.pool, tenant.id).await {
+    let Some(fga) = state.fga.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "authorization engine unavailable",
+        )
+            .into_response();
+    };
+    match purge_tenant_account(&state.pool, fga, tenant.id).await {
         Ok(()) => Json(DeletedTenantResponse {
             deleted: true,
             tenant_id: tenant.id,
@@ -1030,7 +1038,23 @@ async fn deliver_tenant_invitation(
     Ok(())
 }
 
-async fn purge_tenant_account(pool: &sqlx::PgPool, tenant_id: Uuid) -> Result<(), String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::FromRow)]
+struct ContactSessionTupleTarget {
+    session_id: Uuid,
+    contact_id: Uuid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::FromRow)]
+struct AgentTupleTarget {
+    agent_id: Uuid,
+    operator_user_id: Option<Uuid>,
+}
+
+async fn purge_tenant_account(
+    pool: &sqlx::PgPool,
+    fga: &FgaClient,
+    tenant_id: Uuid,
+) -> Result<(), String> {
     let storage_partition_id = format!("tenant:{tenant_id}");
     let mut tx = pool
         .begin()
@@ -1051,11 +1075,13 @@ async fn purge_tenant_account(pool: &sqlx::PgPool, tenant_id: Uuid) -> Result<()
         .fetch_all(&mut *tx)
         .await
         .map_err(|error| format!("load tenant sessions: {error}"))?;
-    let contact_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM contacts WHERE tenant_id = $1")
-        .bind(tenant_id)
-        .fetch_all(&mut *tx)
+    let contact_session_targets = load_contact_session_tuple_targets(&mut *tx, tenant_id)
         .await
-        .map_err(|error| format!("load tenant contacts: {error}"))?;
+        .map_err(|error| format!("load tenant contact session tuples: {error}"))?;
+    let agent_targets = load_agent_tuple_targets(&mut *tx, tenant_id)
+        .await
+        .map_err(|error| format!("load tenant agent tuples: {error}"))?;
+    let agent_can_act_as_tuples = load_agent_can_act_as_tuples(fga, &agent_targets).await?;
 
     enqueue_workspace_tuple(&mut tx, tenant_id, TupleOp::Delete)
         .await
@@ -1095,18 +1121,23 @@ async fn purge_tenant_account(pool: &sqlx::PgPool, tenant_id: Uuid) -> Result<()
                 .map_err(|error| format!("session user tuple delete: {error}"))?;
             }
         }
-        for contact_id in &contact_ids {
+    }
+    for target in &contact_session_targets {
+        for relation in ["owner", "contact"] {
             enqueue_raw(
                 &mut *tx,
                 TupleOp::Delete,
-                &format!("contact:{contact_id}"),
-                "contact",
-                &format!("session:{session_id}"),
+                &format!("contact:{}", target.contact_id),
+                relation,
+                &format!("session:{}", target.session_id),
                 Some(tenant_id),
             )
             .await
             .map_err(|error| format!("session contact tuple delete: {error}"))?;
         }
+    }
+    for target in &agent_targets {
+        enqueue_agent_tuple_deletes(&mut tx, tenant_id, target, &agent_can_act_as_tuples).await?;
     }
 
     delete_tenant_rows(&mut tx, tenant_id, &storage_partition_id).await?;
@@ -1134,6 +1165,65 @@ async fn purge_tenant_account(pool: &sqlx::PgPool, tenant_id: Uuid) -> Result<()
     tx.commit()
         .await
         .map_err(|error| format!("db commit: {error}"))
+}
+
+async fn load_contact_session_tuple_targets<'executor, Executor>(
+    executor: Executor,
+    tenant_id: Uuid,
+) -> Result<Vec<ContactSessionTupleTarget>, sqlx::Error>
+where
+    Executor: PgExecutor<'executor>,
+{
+    sqlx::query_as(
+        r#"
+        SELECT id AS session_id, contact_id
+        FROM sessions
+        WHERE tenant_id = $1
+          AND contact_id IS NOT NULL
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_all(executor)
+    .await
+}
+
+async fn load_agent_tuple_targets<'executor, Executor>(
+    executor: Executor,
+    tenant_id: Uuid,
+) -> Result<Vec<AgentTupleTarget>, sqlx::Error>
+where
+    Executor: PgExecutor<'executor>,
+{
+    sqlx::query_as(
+        r#"
+        SELECT id AS agent_id, operator_user_id
+        FROM agents
+        WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_all(executor)
+    .await
+}
+
+async fn load_agent_can_act_as_tuples(
+    fga: &FgaClient,
+    targets: &[AgentTupleTarget],
+) -> Result<Vec<FgaTuple>, String> {
+    let mut tuples = Vec::new();
+    for target in targets {
+        let object = format!("agent:{}", target.agent_id);
+        let current = fga
+            .read(None, Some("can_act_as"), Some(&object))
+            .await
+            .map_err(|error| format!("load agent can_act_as tuples: {error}"))?;
+        tuples.extend(
+            current
+                .into_iter()
+                .filter(|tuple| tuple.relation == "can_act_as" && tuple.object == object),
+        );
+    }
+    Ok(tuples)
 }
 
 async fn delete_tenant_rows(
@@ -1300,6 +1390,53 @@ async fn enqueue_user_role_tuple(
     .await
 }
 
+async fn enqueue_agent_tuple_deletes(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+    target: &AgentTupleTarget,
+    can_act_as_tuples: &[FgaTuple],
+) -> Result<(), String> {
+    let agent_object = format!("agent:{}", target.agent_id);
+    for tuple in can_act_as_tuples
+        .iter()
+        .filter(|tuple| tuple.relation == "can_act_as" && tuple.object == agent_object)
+    {
+        enqueue_raw(
+            &mut **tx,
+            TupleOp::Delete,
+            &tuple.user,
+            &tuple.relation,
+            &tuple.object,
+            Some(tenant_id),
+        )
+        .await
+        .map_err(|error| format!("agent delegation tuple delete: {error}"))?;
+    }
+    enqueue_raw(
+        &mut **tx,
+        TupleOp::Delete,
+        &format!("tenant:{tenant_id}"),
+        "tenant",
+        &agent_object,
+        Some(tenant_id),
+    )
+    .await
+    .map_err(|error| format!("agent tenant tuple delete: {error}"))?;
+    if let Some(operator_user_id) = target.operator_user_id {
+        enqueue_raw(
+            &mut **tx,
+            TupleOp::Delete,
+            &format!("operator:{operator_user_id}"),
+            "operator",
+            &agent_object,
+            Some(tenant_id),
+        )
+        .await
+        .map_err(|error| format!("agent operator tuple delete: {error}"))?;
+    }
+    Ok(())
+}
+
 async fn enqueue_api_key_tuples(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: Uuid,
@@ -1378,9 +1515,27 @@ fn looks_like_email(email: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
     use axum::http::StatusCode;
+    use moa_authz_schema::MODEL_VERSION;
+    use moa_core::{
+        ContactId, ContactRef, ContactVerificationState, ModelId, SessionActorRef, SessionMeta,
+        SessionStore, TenantId,
+    };
+    use moa_session::testing;
 
     use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+    struct AuthzOutboxTupleRow {
+        idempotency_key: String,
+        op: String,
+        tuple_user: String,
+        tuple_relation: String,
+        tuple_object: String,
+        model_version: i32,
+        tenant_id: Option<Uuid>,
+    }
 
     #[test]
     fn normalize_slug_accepts_dashboard_safe_slugs() {
@@ -1433,5 +1588,210 @@ mod tests {
         assert_ne!(digest, token);
         assert_eq!(digest.len(), 64);
         assert_eq!(digest, invitation_token_hash(token));
+    }
+
+    #[tokio::test]
+    async fn purge_contact_session_targets_use_actual_session_contact_pairs_db() -> Result<()> {
+        // Pins: tenant purge must plan contact tuple deletes from session rows,
+        // not from all tenant contacts crossed with all tenant sessions.
+        let (store, database_url, schema_name) = testing::create_isolated_test_store().await?;
+        let pool = store.pool().clone();
+        let tenant_id = TenantId::new();
+        let session_contact_id = ContactId::new();
+        let unrelated_contact_id = ContactId::new();
+        insert_contact(&pool, tenant_id, session_contact_id).await?;
+        insert_contact(&pool, tenant_id, unrelated_contact_id).await?;
+        let contact_session_id = store
+            .create_session(SessionMeta {
+                tenant_id,
+                contact: Some(contact_ref(tenant_id, session_contact_id)),
+                created_by: Some(SessionActorRef::Contact {
+                    id: session_contact_id,
+                }),
+                model: ModelId::new("test-model"),
+                ..SessionMeta::default()
+            })
+            .await?;
+        store
+            .create_session(SessionMeta {
+                tenant_id,
+                created_by: Some(SessionActorRef::Identity { id: Uuid::new_v4() }),
+                model: ModelId::new("test-model"),
+                ..SessionMeta::default()
+            })
+            .await?;
+
+        let targets = load_contact_session_tuple_targets(&pool, tenant_id.0).await?;
+        assert_eq!(
+            targets,
+            vec![ContactSessionTupleTarget {
+                session_id: contact_session_id.0,
+                contact_id: session_contact_id.0,
+            }]
+        );
+        assert!(
+            targets
+                .iter()
+                .all(|target| target.contact_id != unrelated_contact_id.0),
+            "unrelated tenant contacts must not receive phantom session tuple deletes"
+        );
+
+        testing::cleanup_test_schema(&database_url, &schema_name).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn purge_agent_tuple_deletes_are_enqueued_with_tenant_scope_db() -> Result<()> {
+        // Pins: tenant purge queues inverse agent tenant/operator tuples before
+        // deleting the agent rows, preserving outbox-driven FGA cleanup.
+        let (store, database_url, schema_name) = testing::create_isolated_test_store().await?;
+        let pool = store.pool().clone();
+        let tenant_id = Uuid::new_v4();
+        let operator_user_id = Uuid::new_v4();
+        let delegate_user_id = Uuid::new_v4();
+        let agent_with_operator_id = Uuid::new_v4();
+        let agent_without_operator_id = Uuid::new_v4();
+        let agent_with_operator = AgentTupleTarget {
+            agent_id: agent_with_operator_id,
+            operator_user_id: Some(operator_user_id),
+        };
+        let agent_without_operator = AgentTupleTarget {
+            agent_id: agent_without_operator_id,
+            operator_user_id: None,
+        };
+        let can_act_as_tuple = FgaTuple {
+            user: format!("operator:{delegate_user_id}"),
+            relation: "can_act_as".to_string(),
+            object: format!("agent:{agent_with_operator_id}"),
+        };
+        let mut tx = pool.begin().await?;
+
+        enqueue_agent_tuple_deletes(
+            &mut tx,
+            tenant_id,
+            &agent_with_operator,
+            std::slice::from_ref(&can_act_as_tuple),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        enqueue_agent_tuple_deletes(&mut tx, tenant_id, &agent_without_operator, &[])
+            .await
+            .map_err(anyhow::Error::msg)?;
+        tx.commit().await?;
+
+        let agent_objects = vec![
+            format!("agent:{agent_with_operator_id}"),
+            format!("agent:{agent_without_operator_id}"),
+        ];
+        let rows: Vec<AuthzOutboxTupleRow> = sqlx::query_as(
+            r#"
+            SELECT idempotency_key, op, tuple_user, tuple_relation, tuple_object,
+                   model_version, tenant_id
+            FROM authz_outbox
+            WHERE tuple_object = ANY($1)
+            ORDER BY tuple_object, tuple_relation, tuple_user
+            "#,
+        )
+        .bind(&agent_objects)
+        .fetch_all(&pool)
+        .await?;
+
+        let mut expected = vec![
+            AuthzOutboxTupleRow {
+                idempotency_key: format!(
+                    "delete-agent:{agent_with_operator_id}-can_act_as-operator:{delegate_user_id}-v{MODEL_VERSION}"
+                ),
+                op: "delete".to_string(),
+                tuple_user: format!("operator:{delegate_user_id}"),
+                tuple_relation: "can_act_as".to_string(),
+                tuple_object: format!("agent:{agent_with_operator_id}"),
+                model_version: MODEL_VERSION as i32,
+                tenant_id: Some(tenant_id),
+            },
+            AuthzOutboxTupleRow {
+                idempotency_key: format!(
+                    "delete-agent:{agent_with_operator_id}-operator-operator:{operator_user_id}-v{MODEL_VERSION}"
+                ),
+                op: "delete".to_string(),
+                tuple_user: format!("operator:{operator_user_id}"),
+                tuple_relation: "operator".to_string(),
+                tuple_object: format!("agent:{agent_with_operator_id}"),
+                model_version: MODEL_VERSION as i32,
+                tenant_id: Some(tenant_id),
+            },
+            AuthzOutboxTupleRow {
+                idempotency_key: format!(
+                    "delete-agent:{agent_with_operator_id}-tenant-tenant:{tenant_id}-v{MODEL_VERSION}"
+                ),
+                op: "delete".to_string(),
+                tuple_user: format!("tenant:{tenant_id}"),
+                tuple_relation: "tenant".to_string(),
+                tuple_object: format!("agent:{agent_with_operator_id}"),
+                model_version: MODEL_VERSION as i32,
+                tenant_id: Some(tenant_id),
+            },
+            AuthzOutboxTupleRow {
+                idempotency_key: format!(
+                    "delete-agent:{agent_without_operator_id}-tenant-tenant:{tenant_id}-v{MODEL_VERSION}"
+                ),
+                op: "delete".to_string(),
+                tuple_user: format!("tenant:{tenant_id}"),
+                tuple_relation: "tenant".to_string(),
+                tuple_object: format!("agent:{agent_without_operator_id}"),
+                model_version: MODEL_VERSION as i32,
+                tenant_id: Some(tenant_id),
+            },
+        ];
+        expected.sort_by(|left, right| {
+            (&left.tuple_object, &left.tuple_relation, &left.tuple_user).cmp(&(
+                &right.tuple_object,
+                &right.tuple_relation,
+                &right.tuple_user,
+            ))
+        });
+        assert_eq!(rows, expected);
+        assert!(
+            rows.iter()
+                .all(|row| row.idempotency_key.ends_with(&format!("-v{MODEL_VERSION}"))),
+            "agent tuple deletes must use the current authz model suffix"
+        );
+
+        testing::cleanup_test_schema(&database_url, &schema_name).await?;
+        Ok(())
+    }
+
+    fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
+        ContactRef {
+            contact_id,
+            tenant_id,
+            state: ContactVerificationState::Unverified,
+            canonical_contact_id: None,
+            linked_contact_ids: Vec::new(),
+            scopes: Vec::new(),
+            permissions: serde_json::Value::Null,
+            agent_ids: Vec::new(),
+            session_ids: Vec::new(),
+            verified_contact_point_ids: Vec::new(),
+        }
+    }
+
+    async fn insert_contact(
+        pool: &sqlx::PgPool,
+        tenant_id: TenantId,
+        contact_id: ContactId,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO contacts (id, tenant_id, storage_partition_id, contact_id, state)
+            VALUES ($1, $2, $3, $4, 'unverified')
+            "#,
+        )
+        .bind(contact_id.0)
+        .bind(tenant_id.0)
+        .bind(format!("tenant:{tenant_id}"))
+        .bind(contact_id.0)
+        .execute(pool)
+        .await?;
+        Ok(())
     }
 }

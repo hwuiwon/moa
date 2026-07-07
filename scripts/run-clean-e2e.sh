@@ -442,7 +442,7 @@ bootstrap_openfga_smoke() {
   local tenant_id="00000000-0000-0000-0000-00000000ffff"
   local user_id="00000000-0000-0000-0000-00000000fffd"
   local tenant="tenant:${tenant_id}"
-  local user="user:${user_id}"
+  local user="operator:${user_id}"
   local smoke_tuple
   smoke_tuple="$(jq -n --arg user "${user}" --arg object "${tenant}" \
     '{user: $user, relation: "admin", object: $object}')"
@@ -650,6 +650,9 @@ run cargo test -p moa-brain --features eval-harness --test brain_turn_cache_repl
 run cargo test -p moa-eval --test golden_eval --locked
 
 if [[ "${LIVE}" -eq 1 ]]; then
+  # Live local E2Es spawn host-local hands; production defaults keep this disabled.
+  export MOA_CLOUD_HANDS_ALLOW_LOCAL=true
+
   run cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile restate-service-e2e --run-ignored ignored-only
 
   run cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features "${ORCH_FEATURES}" --locked

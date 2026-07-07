@@ -1710,8 +1710,8 @@ async fn mock_connector_end_to_end_db_memory() {
         })
         .await
         .expect("nango status should render");
-    assert_sync_status_counters(&merge_status, 3, 16, 13);
-    assert_sync_status_counters(&nango_status, 3, 15, 12);
+    assert_sync_status_counters(&merge_status, 3, 20, 17);
+    assert_sync_status_counters(&nango_status, 3, 18, 15);
     assert_eq!(
         merge_status
             .steps
@@ -2032,7 +2032,7 @@ async fn mock_connector_end_to_end_db_memory() {
     assert_eq!(label_counts.get("Document"), Some(&6));
     assert_eq!(label_counts.get("Chunk"), Some(&6));
     assert_eq!(label_counts.get("Fact"), Some(&6));
-    assert_eq!(label_counts.get("Entity"), Some(&7));
+    assert_eq!(label_counts.get("Entity"), Some(&14));
     assert_eq!(label_counts.get("ContactGroup"), Some(&1));
     assert_eq!(chunk_vector_row_count(&pool, tenant_id).await, 6);
 
@@ -3482,6 +3482,7 @@ fn object_ingestion_steps() -> Vec<&'static str> {
         "parse_completed",
         "normalized",
         "blocks_diffed",
+        "semantic_graph_extracted",
         "chunks_diffed",
         "embedded",
         "graph_upserted",

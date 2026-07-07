@@ -18,14 +18,21 @@ curl -X POST http://localhost:10010/ApiKeys/create \
   -H "x-moa-identity-id: <admin-user-id>" \
   -H "x-moa-tenant-id: <tenant-id>" \
   --data '{"name":"okta-scim","env":"prod","description":null,"for_agent_id":null}'
-curl -X POST http://localhost:10000/v1/authz/tuple-write \
+curl -X POST http://localhost:10000/v1/authz/api-key-tenant-roles \
   -H "Authorization: Bearer <admin-key>" \
   -H "Content-Type: application/json" \
-  --data '{"user":"api_key:<scim-key-id>","relation":"admin","object":"tenant:<tenant-id>"}'
+  --data '{"operation":"grant_api_key_tenant_role","api_key_id":"<scim-key-id>","tenant_id":"<tenant-id>","relation":"admin"}'
 ```
 
 Configure the IdP SCIM base URL as `https://<edge-or-orchestrator>/scim/v2`
 and present the SCIM API key as `Authorization: Bearer <key>`.
+
+The public authz administration endpoint is intentionally typed. It can grant
+or revoke only `api_key:<id> admin|operator tenant:<tenant-id>` after verifying
+the API key belongs to that tenant; it cannot write raw OpenFGA tuple strings.
+Those API-key tenant-role grants are manual grants. Revoking or rotating an API
+key deletes the old key's `admin` and `operator` tenant-role tuples; rotation
+does not copy them to the replacement key.
 
 SCIM users are MOA operator/admin identities: tenant admins and service users
 that need authenticated access to MOA control-plane APIs.
@@ -69,7 +76,8 @@ Postgres transaction:
 - cancels active sessions
 - revokes local API keys with reason `deactivation_cascade`
 - enqueues OpenFGA tuple deletes for tenant, session, API-key, and
-  agent-operator edges
+  agent-operator edges, including API-key `admin` and `operator` tenant-role
+  grants
 - removes SCIM group memberships
 - leaves agent-facing contacts unchanged unless a separate privacy erasure
   request explicitly targets those contacts

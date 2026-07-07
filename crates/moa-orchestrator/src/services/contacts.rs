@@ -1,10 +1,12 @@
 //! Restate service for agent-facing contact identity operations.
 
-use moa_authz_schema::Relation;
+use moa_authz::{enqueue, enqueue_raw};
+use moa_authz_schema::{ObjectType, Relation, TupleKey, TupleOp, UserType};
 use moa_contacts::ContactError;
 use moa_contacts::domain::{
-    contact_id_from_claims, low_assurance_scopes, require_contact_agent_permission,
-    require_contact_scope, require_contact_session_permission, verified_scopes,
+    contact_id_from_claims, low_assurance_scopes, require_contact_agent_allowlist,
+    require_contact_agent_permission, require_contact_scope, require_contact_session_permission,
+    verified_scopes,
 };
 use moa_contacts::repository::{
     ContactVerificationStartCommand, complete_contact_verification, create_contact_token_grant,
@@ -35,7 +37,9 @@ use crate::OrchestratorCtx;
 use crate::handlers::authz_shim::authorize_tenant;
 use crate::objects::session::SessionClient;
 use crate::restate_identity::with_identity_headers;
-use crate::services::session_store::inner::resolve_agent_context_for_session;
+use crate::services::session_store::inner::{
+    create_session_for_identity, resolve_agent_context_for_session,
+};
 
 /// Restate surface for contact identity and contact-scoped sessions.
 #[restate_sdk::service]
@@ -110,6 +114,9 @@ impl Contacts for ContactsImpl {
             .contact_point_hash_key_hex
             .clone();
         let requested_scopes = request.requested_scopes.clone();
+        let granted_scopes =
+            low_assurance_scopes(&requested_scopes).map_err(contact_error_handler_error)?;
+        require_contact_agent_allowlist(&request.agent_ids).map_err(contact_error_handler_error)?;
 
         let (contact, contact_points) = ctx
             .run(|| async move {
@@ -121,7 +128,7 @@ impl Contacts for ContactsImpl {
             .name("contacts_issue_contact")
             .await?
             .into_inner();
-        let contact = contact.with_scopes(low_assurance_scopes(&requested_scopes));
+        let contact = contact.with_scopes(granted_scopes);
         annotate_contact_operation_span(&contact, None);
         let issued = token_issuer
             .issue_with_claims(&contact)
@@ -322,6 +329,7 @@ impl Contacts for ContactsImpl {
         let tenant_id = claims.tenant_id;
         let pool = OrchestratorCtx::current_graph_pool();
         let store = OrchestratorCtx::current_session_store();
+        let store_backend = OrchestratorCtx::current().session_store_backend();
         let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
         let model = ModelId::new(request.model);
         let channel_request = request.channel;
@@ -386,6 +394,7 @@ impl Contacts for ContactsImpl {
         let event_channel = meta.channel;
         let storage_partition_id_for_create = storage_partition_id.clone();
         let resolver_pool = pool.clone();
+        let create_pool = pool.clone();
         let (session_id, meta_for_vo) = ctx
             .run(|| async move {
                 let agent_context =
@@ -393,10 +402,14 @@ impl Contacts for ContactsImpl {
                         .await?;
                 let mut meta = meta;
                 meta.agent_context = Some(agent_context);
-                let session_id = store
-                    .create_session(meta)
-                    .await
-                    .map_err(session_store_handler_error)?;
+                let identity = contact_identity(contact.contact_id, tenant_id);
+                let session_id = create_session_for_identity(
+                    store_backend.as_ref(),
+                    &create_pool,
+                    meta,
+                    identity,
+                )
+                .await?;
                 store
                     .replace_session_channel_binding(SessionChannelBindingUpdate {
                         tenant_id,
@@ -779,6 +792,14 @@ impl Contacts for ContactsImpl {
                     .update_session_contact(request.session_id, contact.clone(), promoted_from)
                     .await
                     .map_err(session_store_handler_error)?;
+                replace_contact_session_authz_tuples(
+                    &pool,
+                    tenant_id,
+                    request.session_id,
+                    promoted_from,
+                    contact.contact_id,
+                )
+                .await?;
                 Ok::<_, HandlerError>(Json::from(SessionPromotionResult {
                     contact,
                     promoted_from,
@@ -897,6 +918,100 @@ fn annotate_claim_contact_span(
     if let Some(session_id) = session_id {
         span.set_attribute("moa.session.id", session_id.to_string());
     }
+}
+
+/// Replaces contact-owned session tuples when a session is promoted to a canonical contact.
+pub async fn replace_contact_session_authz_tuples(
+    pool: &sqlx::PgPool,
+    tenant_id: TenantId,
+    session_id: moa_core::SessionId,
+    promoted_from: Option<ContactId>,
+    promoted_to: ContactId,
+) -> Result<(), HandlerError> {
+    let Some(promoted_from) = promoted_from.filter(|contact_id| *contact_id != promoted_to) else {
+        return Ok(());
+    };
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
+
+    enqueue_contact_session_owner_tuple(
+        &mut transaction,
+        TupleOp::Delete,
+        tenant_id,
+        session_id,
+        promoted_from,
+    )
+    .await?;
+    enqueue_contact_session_participant_tuple(
+        &mut transaction,
+        TupleOp::Delete,
+        tenant_id,
+        session_id,
+        promoted_from,
+    )
+    .await?;
+    enqueue_contact_session_owner_tuple(
+        &mut transaction,
+        TupleOp::Write,
+        tenant_id,
+        session_id,
+        promoted_to,
+    )
+    .await?;
+    enqueue_contact_session_participant_tuple(
+        &mut transaction,
+        TupleOp::Write,
+        tenant_id,
+        session_id,
+        promoted_to,
+    )
+    .await?;
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
+    Ok(())
+}
+
+async fn enqueue_contact_session_owner_tuple(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    op: TupleOp,
+    tenant_id: TenantId,
+    session_id: moa_core::SessionId,
+    contact_id: ContactId,
+) -> Result<(), HandlerError> {
+    let owner_tuple = TupleKey::new(
+        UserType::Contact,
+        contact_id.0,
+        Relation::Owner,
+        ObjectType::Session,
+        session_id.0,
+    );
+    enqueue(&mut **transaction, op, &owner_tuple, Some(tenant_id.0))
+        .await
+        .map_err(|error| TerminalError::new(format!("authz outbox owner tuple: {error}")).into())
+}
+
+async fn enqueue_contact_session_participant_tuple(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    op: TupleOp,
+    tenant_id: TenantId,
+    session_id: moa_core::SessionId,
+    contact_id: ContactId,
+) -> Result<(), HandlerError> {
+    enqueue_raw(
+        &mut **transaction,
+        op,
+        &format!("contact:{contact_id}"),
+        "contact",
+        &format!("session:{session_id}"),
+        Some(tenant_id.0),
+    )
+    .await
+    .map_err(|error| TerminalError::new(format!("authz outbox contact tuple: {error}")).into())
 }
 
 fn contact_identity(contact_id: ContactId, tenant_id: TenantId) -> Identity {

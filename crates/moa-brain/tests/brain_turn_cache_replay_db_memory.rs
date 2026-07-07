@@ -33,6 +33,26 @@ const FILE_READ_DEDUP_PLACEHOLDER: &str = "[file previously read — see latest 
 const OLD_SNIPPET: &str = "    let refresh_token = issue_refresh_token(user_id);\n    format!(\"refresh:{refresh_token}\")";
 const NEW_SNIPPET: &str = "    let issued_refresh_token = issue_refresh_token(user_id);\n    format!(\"refresh:{issued_refresh_token}\")";
 
+async fn allow_cache_replay_bash(
+    store: &moa_session::PostgresSessionStore,
+    tenant_id: TenantId,
+) -> Result<()> {
+    // This replay test needs the deterministic bash fixture to execute, so it
+    // opts into Allow without weakening the production AdminReview default.
+    store
+        .upsert_action_policy_rule(moa_core::ActionPolicyRule {
+            id: uuid::Uuid::now_v7(),
+            scope: moa_core::ActionRuleScope::Tenant { tenant_id },
+            tool: "bash".to_string(),
+            pattern: "python3 -c *".to_string(),
+            effect: moa_core::ActionPolicyEffect::Allow,
+            reason: Some("cache replay test bash opt-in".to_string()),
+            created_by: moa_core::UserId::new("cache-replay-test"),
+            created_at: chrono::Utc::now(),
+        })
+        .await
+}
+
 #[tokio::test]
 async fn brain_turn_cache_replay_db_memory() -> Result<()> {
     let span_recorder = SpanRecorder::default();
@@ -83,11 +103,13 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
         ..SessionMeta::default()
     };
     let session_id = session_store.create_session(session.clone()).await?;
+    allow_cache_replay_bash(&session_store, tenant_id).await?;
 
     let router = Arc::new(
         ToolRouter::new_local(&workspace)
             .await?
             .with_policies(ActionPolicies::from_config(&config)?)
+            .with_rule_store(session_store.clone())
             .with_session_store(session_store.clone()),
     );
     router

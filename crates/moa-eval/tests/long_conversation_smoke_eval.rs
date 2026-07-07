@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use moa_core::shell::{has_action_policy_unsafe_shell_syntax, split_shell_chain};
 use moa_core::transcript::{ProviderEvent, Transcript, Turn, UserUtterance};
 use moa_core::{
     ActionRuleScope, CompletionRequest, CompletionResponse, CompletionStream, Event, LLMProvider,
@@ -15,14 +16,15 @@ use moa_core::{
 use moa_eval::long_conversation::{Budgets, RecordedScriptedProvider, run_scenario_with_provider};
 use moa_eval::memory_eval::tenant_id_from_storage_partition;
 use moa_eval_core::{
-    ActionPolicyOverride, AgentConfig, EngineOptions, LongConversationMode,
-    LongSessionInterleaving, LongTestCase, SecondaryLongSession, TestCase, TestCaseKind, TestSuite,
-    load_suite,
+    ActionPolicyOverride, ActionPolicyRuleOverride, AgentConfig, EngineOptions,
+    LongConversationMode, LongSessionInterleaving, LongTestCase, SecondaryLongSession, TestCase,
+    TestCaseKind, TestSuite, load_suite,
 };
+use moa_security::parse_and_match_command;
 use moa_skills::package::SkillPackage;
 use moa_skills::registry::{NewSkill, SkillRegistry};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -117,6 +119,7 @@ async fn assert_scenario_meets_expectations(scenario_name: &str) -> TestResult {
     let expectations = load_expectations(&scenario_dir.join("expectations.toml"))?;
     let transcript_path = case.long_case()?.transcript.clone();
     let transcript = Transcript::read_jsonl(&transcript_path)?;
+    let allow_rules = transcript_bash_allow_rules(&transcript);
     if std::env::var_os("MOA_DATABASE_URL").is_none() {
         return Ok(());
     }
@@ -132,7 +135,8 @@ async fn assert_scenario_meets_expectations(scenario_name: &str) -> TestResult {
     let mut base_config = moa_core::MoaConfig::default();
     base_config.database.url = moa_test_support::postgres::test_database_url();
     base_config.query_rewrite.enabled = false;
-    let agent_config = agent_config_for(scenario_name);
+    let mut agent_config = agent_config_for(scenario_name);
+    agent_config.permissions.allow_rules = allow_rules;
     if scenario_name == EXPERIENCE_LEARNING_SCENARIO {
         base_config.skill_budget.max_manifest_chars = Some(510);
         base_config.skill_budget.max_per_skill_chars = 128;
@@ -225,6 +229,144 @@ fn write_report_artifacts(
         serde_json::to_vec_pretty(&report.lineage_events)?,
     )?;
     Ok(())
+}
+
+fn transcript_bash_allow_rules(transcript: &Transcript) -> Vec<ActionPolicyRuleOverride> {
+    let mut commands = BTreeSet::new();
+    for turn in &transcript.turns {
+        for event in &turn.expected {
+            let ProviderEvent::ToolCall { call } = event else {
+                continue;
+            };
+            if call.invocation.name != "bash" {
+                continue;
+            }
+            if let Some(command) = bash_command_from_input(&call.invocation.input)
+                && let Some(pattern) = bash_allow_pattern(command)
+            {
+                commands.insert(pattern);
+            }
+        }
+    }
+
+    commands
+        .into_iter()
+        .map(|pattern| ActionPolicyRuleOverride {
+            tool: "bash".to_string(),
+            pattern,
+            reason: Some("recorded long-conversation fixture command".to_string()),
+        })
+        .collect()
+}
+
+fn bash_command_from_input(input: &Value) -> Option<&str> {
+    input
+        .get("cmd")
+        .or_else(|| input.get("command"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+}
+
+fn bash_allow_pattern(command: &str) -> Option<String> {
+    if command.contains("moa_canary_") || has_action_policy_unsafe_shell_syntax(command) {
+        return None;
+    }
+    let sub_commands = split_shell_chain(command);
+    match sub_commands.as_slice() {
+        [single] if !single.trim().is_empty() => Some(glob_literal_pattern(single)),
+        _ => None,
+    }
+}
+
+fn glob_literal_pattern(value: &str) -> String {
+    let mut pattern = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '\\' | '*' | '?' | '[' | ']' | '{' | '}') {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    pattern
+}
+
+#[test]
+fn transcript_bash_allow_rules_extracts_only_matchable_fixture_commands() {
+    // Pins: recorded evals seed exact bash allow rules only for commands that the
+    // production shell-policy matcher can safely normalize.
+    let transcript = Transcript {
+        version: 1,
+        scenario: "policy-fixture".to_string(),
+        turns: vec![Turn {
+            user: UserUtterance {
+                text: "run commands".to_string(),
+            },
+            expected: vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCallContent {
+                        invocation: ToolInvocation {
+                            id: None,
+                            name: "bash".to_string(),
+                            input: json!({"cmd": "cargo test --quiet"}),
+                        },
+                        provider_metadata: None,
+                    },
+                },
+                ProviderEvent::ToolCall {
+                    call: ToolCallContent {
+                        invocation: ToolInvocation {
+                            id: None,
+                            name: "bash".to_string(),
+                            input: json!({"cmd": "printf 'x\\n'"}),
+                        },
+                        provider_metadata: None,
+                    },
+                },
+                ProviderEvent::ToolCall {
+                    call: ToolCallContent {
+                        invocation: ToolInvocation {
+                            id: None,
+                            name: "bash".to_string(),
+                            input: json!({"cmd": "printf 'x\\n' >> file.log"}),
+                        },
+                        provider_metadata: None,
+                    },
+                },
+                ProviderEvent::ToolCall {
+                    call: ToolCallContent {
+                        invocation: ToolInvocation {
+                            id: None,
+                            name: "bash".to_string(),
+                            input: json!({"cmd": "echo moa_canary_secret_vault_xyz"}),
+                        },
+                        provider_metadata: None,
+                    },
+                },
+            ],
+        }],
+    };
+
+    let rules = transcript_bash_allow_rules(&transcript);
+
+    assert_eq!(
+        rules,
+        vec![
+            ActionPolicyRuleOverride {
+                tool: "bash".to_string(),
+                pattern: "cargo test --quiet".to_string(),
+                reason: Some("recorded long-conversation fixture command".to_string()),
+            },
+            ActionPolicyRuleOverride {
+                tool: "bash".to_string(),
+                pattern: "printf x\\\\n".to_string(),
+                reason: Some("recorded long-conversation fixture command".to_string()),
+            },
+        ]
+    );
+    assert!(
+        parse_and_match_command("printf 'x\\n'", &rules[1].pattern)
+            .expect("generated glob literal should compile and match")
+    );
 }
 
 fn single_case<'a>(

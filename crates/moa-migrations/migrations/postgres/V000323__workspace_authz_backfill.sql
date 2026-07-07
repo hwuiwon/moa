@@ -59,7 +59,7 @@ BEGIN
         (idempotency_key, op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id)
     SELECT
         format(
-            'write-tenant:%s-workspace-workspace:%s-v3',
+            'write-tenant:%s-workspace-workspace:%s-v4',
             tenant_id,
             default_workspace_id
         ),
@@ -67,7 +67,7 @@ BEGIN
         'workspace:' || default_workspace_id,
         'workspace',
         'tenant:' || tenant_id,
-        3,
+        4,
         tenant_id
     FROM workspace_authz_backfill_tenants
     ON CONFLICT (idempotency_key) DO NOTHING;

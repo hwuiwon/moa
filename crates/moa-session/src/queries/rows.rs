@@ -170,12 +170,12 @@ fn tenant_id_from_storage(value: String) -> TenantId {
 
 fn action_rule_scope_from_columns(
     scope: &str,
-    storage_partition_id: &str,
+    tenant_id: Uuid,
     user_id: Option<String>,
 ) -> Result<ActionRuleScope> {
     match (scope, user_id) {
         ("tenant", None) => Ok(ActionRuleScope::Tenant {
-            tenant_id: tenant_id_from_storage(storage_partition_id.to_string()),
+            tenant_id: TenantId(tenant_id),
         }),
         ("contact", Some(user_id)) => {
             let contact_id =
@@ -187,7 +187,7 @@ fn action_rule_scope_from_columns(
                         ))
                     })?;
             Ok(ActionRuleScope::Contact {
-                tenant_id: tenant_id_from_storage(storage_partition_id.to_string()),
+                tenant_id: TenantId(tenant_id),
                 contact_id,
             })
         }
@@ -371,12 +371,12 @@ fn parse_segment_assessment(value: Option<String>) -> Result<Option<SegmentAsses
 
 /// Maps an `action_policy_rules` row into an `ActionPolicyRule`.
 pub(crate) fn action_policy_rule_from_row(row: &PgRow) -> Result<ActionPolicyRule> {
-    let storage_partition_id = row.col::<String>("storage_partition_id")?;
+    let tenant_id = row.col::<Uuid>("tenant_id")?;
     let scope = row.col::<String>("scope")?;
     let user_id = row.col::<Option<String>>("user_id")?;
     Ok(ActionPolicyRule {
         id: row.col::<Uuid>("id")?,
-        scope: action_rule_scope_from_columns(&scope, &storage_partition_id, user_id)?,
+        scope: action_rule_scope_from_columns(&scope, tenant_id, user_id)?,
         tool: row.col::<String>("tool")?,
         pattern: row.col::<String>("pattern")?,
         effect: from_db("action policy effect", &row.col::<String>("effect")?)?,

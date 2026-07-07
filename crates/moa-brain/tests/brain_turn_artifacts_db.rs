@@ -7,6 +7,28 @@ include!("brain_turn_support/db.rs");
 #[cfg(feature = "eval-harness")]
 include!("brain_turn_support/artifacts.rs");
 
+#[cfg(feature = "eval-harness")]
+async fn allow_artifact_capture_bash(
+    store: &moa_session::PostgresSessionStore,
+    tenant_id: moa_core::TenantId,
+) {
+    // These tests exercise artifact capture after local bash execution, so they
+    // intentionally override the hardened AdminReview default for python fixtures.
+    store
+        .upsert_action_policy_rule(moa_core::ActionPolicyRule {
+            id: uuid::Uuid::now_v7(),
+            scope: moa_core::ActionRuleScope::Tenant { tenant_id },
+            tool: "bash".to_string(),
+            pattern: "python3 -c *".to_string(),
+            effect: moa_core::ActionPolicyEffect::Allow,
+            reason: Some("artifact capture test bash opt-in".to_string()),
+            created_by: moa_core::UserId::new("artifact-capture-test"),
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .expect("seed artifact test bash allow rule");
+}
+
 #[tokio::test]
 async fn brain_turn_text_artifact_store_round_trips_db() {
     // Pins: the brain turn artifact DB lane exercises the real session-store blob path.
@@ -60,6 +82,7 @@ async fn run_brain_turn_uses_tool_result_search_for_artifact_backed_output() {
         ..SessionMeta::default()
     };
     store.create_session(session.clone()).await.unwrap();
+    allow_artifact_capture_bash(&store, session.tenant_id).await;
     store
         .emit_event(
             session.id,
@@ -81,6 +104,7 @@ async fn run_brain_turn_uses_tool_result_search_for_artifact_backed_output() {
                 ActionPolicies::from_config(&config)
                     .expect("default test policy config should be valid"),
             )
+            .with_rule_store(store.clone())
             .with_session_store(store.clone()),
     );
     let pipeline = build_no_memory_test_pipeline_with_tools(
@@ -163,6 +187,7 @@ async fn run_brain_turn_reads_stderr_stream_from_artifact_backed_output() {
         ..SessionMeta::default()
     };
     store.create_session(session.clone()).await.unwrap();
+    allow_artifact_capture_bash(&store, session.tenant_id).await;
     store
         .emit_event(
             session.id,
@@ -184,6 +209,7 @@ async fn run_brain_turn_reads_stderr_stream_from_artifact_backed_output() {
                 ActionPolicies::from_config(&config)
                     .expect("default test policy config should be valid"),
             )
+            .with_rule_store(store.clone())
             .with_session_store(store.clone()),
     );
     let pipeline = build_no_memory_test_pipeline_with_tools(

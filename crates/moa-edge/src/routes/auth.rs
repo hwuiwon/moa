@@ -82,13 +82,53 @@ pub(super) fn translate(
         ));
     }
     if *method == Method::POST && uri.path() == "/v1/authz/tuple-write" {
-        return Some(RouteTranslation::Forward {
-            method: Method::POST,
-            path: "/Authz/write_tuple".to_string(),
-            body: body.to_vec(),
-        });
+        return Some(RouteTranslation::BadRequest(
+            "raw authz tuple writes are not supported",
+        ));
+    }
+    if *method == Method::POST && uri.path() == "/v1/authz/api-key-tenant-roles" {
+        return Some(translate_api_key_tenant_role(body));
     }
     None
+}
+
+fn translate_api_key_tenant_role(body: &Bytes) -> RouteTranslation {
+    let value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(_) => return RouteTranslation::BadRequest("bad API-key tenant-role body"),
+    };
+    let Some(object) = value.as_object() else {
+        return RouteTranslation::BadRequest("API-key tenant-role body must be object");
+    };
+    for field in object.keys() {
+        if !matches!(
+            field.as_str(),
+            "operation" | "api_key_id" | "tenant_id" | "relation"
+        ) {
+            return RouteTranslation::BadRequest("unsupported API-key tenant-role field");
+        }
+    }
+    match object.get("operation").and_then(serde_json::Value::as_str) {
+        Some("grant_api_key_tenant_role" | "revoke_api_key_tenant_role") => {}
+        _ => return RouteTranslation::BadRequest("unsupported API-key tenant-role operation"),
+    }
+    match object.get("relation").and_then(serde_json::Value::as_str) {
+        Some("admin" | "operator") => {}
+        _ => return RouteTranslation::BadRequest("unsupported API-key tenant-role relation"),
+    }
+    for field in ["api_key_id", "tenant_id"] {
+        let Some(value) = object.get(field).and_then(serde_json::Value::as_str) else {
+            return RouteTranslation::BadRequest("API-key tenant-role id must be a UUID");
+        };
+        if Uuid::parse_str(value).is_err() {
+            return RouteTranslation::BadRequest("API-key tenant-role id must be a UUID");
+        }
+    }
+    RouteTranslation::Forward {
+        method: Method::POST,
+        path: "/Authz/write_tuple".to_string(),
+        body: body.to_vec(),
+    }
 }
 
 #[cfg(test)]
@@ -239,5 +279,78 @@ mod tests {
                 panic!("authz challenge decision should not fail translation: {message}")
             }
         }
+    }
+
+    #[test]
+    fn raw_authz_tuple_route_fails_closed() {
+        // Pins: public HTTP no longer exposes arbitrary OpenFGA tuple strings.
+        let uri = "/v1/authz/tuple-write"
+            .parse::<Uri>()
+            .expect("route path should parse");
+        let body = Bytes::from_static(
+            br#"{"user":"user:11111111-1111-1111-1111-111111111111","relation":"participant","object":"session:22222222-2222-2222-2222-222222222222"}"#,
+        );
+
+        let translation = translate(&Method::POST, &uri, &body);
+
+        assert_eq!(
+            translation,
+            RouteTranslation::BadRequest("raw authz tuple writes are not supported")
+        );
+    }
+
+    #[test]
+    fn api_key_tenant_role_route_translates_typed_body() {
+        // Pins: the public authz route supports only typed API-key tenant role writes.
+        let uri = "/v1/authz/api-key-tenant-roles"
+            .parse::<Uri>()
+            .expect("route path should parse");
+        let body = Bytes::from_static(
+            br#"{"operation":"grant_api_key_tenant_role","api_key_id":"11111111-1111-1111-1111-111111111111","tenant_id":"22222222-2222-2222-2222-222222222222","relation":"admin"}"#,
+        );
+
+        let translation = translate(&Method::POST, &uri, &body);
+
+        match translation {
+            RouteTranslation::Forward { method, path, body } => {
+                assert_eq!(method, Method::POST);
+                assert_eq!(path, "/Authz/write_tuple");
+                let forwarded: serde_json::Value =
+                    serde_json::from_slice(&body).expect("forwarded body should be valid JSON");
+                assert_eq!(
+                    forwarded,
+                    serde_json::json!({
+                        "operation": "grant_api_key_tenant_role",
+                        "api_key_id": "11111111-1111-1111-1111-111111111111",
+                        "tenant_id": "22222222-2222-2222-2222-222222222222",
+                        "relation": "admin"
+                    })
+                );
+            }
+            RouteTranslation::NoChange => {
+                panic!("API-key tenant-role route should translate to Authz service")
+            }
+            RouteTranslation::BadRequest(message) => {
+                panic!("API-key tenant-role route should not fail translation: {message}")
+            }
+        }
+    }
+
+    #[test]
+    fn api_key_tenant_role_route_rejects_raw_tuple_shape() {
+        // Pins: stale `user:<id>` subject bodies cannot be smuggled through the typed route.
+        let uri = "/v1/authz/api-key-tenant-roles"
+            .parse::<Uri>()
+            .expect("route path should parse");
+        let body = Bytes::from_static(
+            br#"{"user":"user:11111111-1111-1111-1111-111111111111","relation":"admin","object":"tenant:22222222-2222-2222-2222-222222222222"}"#,
+        );
+
+        let translation = translate(&Method::POST, &uri, &body);
+
+        assert_eq!(
+            translation,
+            RouteTranslation::BadRequest("unsupported API-key tenant-role field")
+        );
     }
 }

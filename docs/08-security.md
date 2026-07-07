@@ -42,10 +42,12 @@ deployments must keep the Restate handler port internal-only. See
 Agent-facing contacts are end users and use MOA-issued contact JWTs, not
 trusted edge identity headers. Contact JWTs are bounded route/data credentials
 with explicit scopes, structured permissions, tenant id, contact id, and
-optional agent/session allowlists. Issuing a contact token is a tenant
-admin/operator or authorized integration operation protected by normal caller
-authz; presenting a contact JWT cannot call admin/operator APIs or become an
-workspace, tenant-admin, or tenant-operator principal.
+agent/session allowlists. Issuing a contact token is a tenant admin/operator or
+authorized integration operation protected by normal caller authz, and the
+issuance request must include non-empty `requested_scopes` and `agent_ids`
+rather than relying on implicit defaults or wildcard agent access. Presenting a
+contact JWT cannot call admin/operator APIs or become an workspace,
+tenant-admin, or tenant-operator principal.
 
 Identity verification can be initiated by skills or their procedures, but the platform
 contact service enforces challenge creation, OTP-style completion, token
@@ -174,6 +176,14 @@ Lineage audit and security-event audit are separate:
 |---|---|---|
 | Lineage audit | `moa-lineage-audit` | Data lineage, Merkle roots, DSAR verification |
 | Security audit | `moa-ocsf` and `services/audit-shipper` | OCSF event signing and tenant audit export |
+
+Tool execution spans do not attach raw serialized tool input, raw tool output,
+or raw error output by default. Spans keep correlation-safe metadata instead:
+tool name, duration, success, input byte length and hash, and output byte length
+and hash when output exists. `MOA_TRACE_TOOL_OUTPUT=1` or `true` is an
+operator-only diagnostic opt-in for bounded raw tool input/output bodies,
+mirroring `MOA_TRACE_PROMPT_SAMPLE`; it must not be enabled for normal
+production telemetry.
 
 The compliance lineage tier carries an explicit attestation caveat until
 external cryptographic review covers canonicalization, hash chaining, signing,

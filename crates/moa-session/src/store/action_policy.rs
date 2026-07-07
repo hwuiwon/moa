@@ -14,7 +14,7 @@ impl PostgresSessionStore {
     ) -> Result<Vec<ActionPolicyRule>> {
         let action_policy_rules = self.table_name("action_policy_rules");
         let rows = sqlx::query(&format!(
-            "SELECT id, storage_partition_id, user_id, tool, pattern, effect, scope, reason, created_by, created_at \
+            "SELECT id, tenant_id, storage_partition_id, user_id, tool, pattern, effect, scope, reason, created_by, created_at \
              FROM {action_policy_rules} \
              WHERE tenant_id = $1 \
                AND ((scope = 'tenant' AND user_id IS NULL) OR (scope = 'contact' AND user_id = $2)) \

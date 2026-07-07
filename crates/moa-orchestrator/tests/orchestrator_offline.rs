@@ -2,6 +2,8 @@
 
 #[path = "orchestrator_offline/admin_maintenance.rs"]
 mod admin_maintenance;
+#[path = "orchestrator_offline/authz_admin.rs"]
+mod authz_admin;
 #[path = "orchestrator_offline/ctx_identity.rs"]
 mod ctx_identity;
 #[path = "orchestrator_offline/llm_gateway.rs"]

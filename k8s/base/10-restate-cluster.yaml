@@ -8,6 +8,8 @@ spec:
     autoProvision: true
   compute:
     replicas: 3
+    labels:
+      moa.hwuiwon.com/restate-cluster: moa-restate
     image: docker.restate.dev/restatedev/restate:1.7.0
     resources:
       requests:

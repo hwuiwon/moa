@@ -67,20 +67,33 @@ impl ToolRouter {
         })
     }
 
-    /// Creates a local router from the loaded MOA config.
+    /// Creates a tool router from the loaded MOA config.
     pub async fn from_config(config: &MoaConfig) -> Result<Self> {
-        let sandbox_root = expand_local_path(&config.local.sandbox_dir)?;
-        let local_provider = Arc::new(
-            LocalHandProvider::new_with_docker_detection(
-                &sandbox_root,
-                config.local.docker_enabled,
-            )
-            .await?
-            .with_command_timeout(DEFAULT_TOOL_TIMEOUT),
-        );
-        let local_provider_trait: Arc<dyn HandProvider> = local_provider.clone();
+        let hand_routes = configured_hand_routes(config)?;
+        if routes_include_local_provider(&hand_routes) && !local_provider_allowed(config) {
+            return Err(MoaError::ConfigError(
+                "local hand provider is disabled by default; set cloud.hands.allow_local_provider=true or MOA_CLOUD_HANDS_ALLOW_LOCAL=true for development-only local hands".to_string(),
+            ));
+        }
+
         let mut providers = HashMap::new();
-        providers.insert(DEFAULT_PROVIDER_NAME.to_string(), local_provider_trait);
+        let mut sandbox_root = None;
+        let mut local_provider = None;
+        if routes_include_local_provider(&hand_routes) {
+            let expanded_sandbox_root = expand_local_path(&config.local.sandbox_dir)?;
+            let provider = Arc::new(
+                LocalHandProvider::new_with_docker_detection(
+                    &expanded_sandbox_root,
+                    config.local.docker_enabled,
+                )
+                .await?
+                .with_command_timeout(DEFAULT_TOOL_TIMEOUT),
+            );
+            let provider_trait: Arc<dyn HandProvider> = provider.clone();
+            providers.insert(DEFAULT_PROVIDER_NAME.to_string(), provider_trait);
+            sandbox_root = Some(expanded_sandbox_root);
+            local_provider = Some(provider);
+        }
 
         if let Some(hands) = &config.cloud.hands
             && cloud_provider_requested(hands, "daytona")
@@ -102,7 +115,6 @@ impl ToolRouter {
 
         let mut registry = ToolRegistry::default_local();
         registry.apply_budgets(&config.tool_budgets);
-        let hand_routes = configured_hand_routes(config)?;
         if !is_local_only_route(&hand_routes) {
             for route in &hand_routes {
                 if !providers.contains_key(&route.provider) {
@@ -116,8 +128,8 @@ impl ToolRouter {
         }
 
         let mut router = Self {
-            sandbox_root: Some(sandbox_root),
-            local_provider: Some(local_provider),
+            sandbox_root,
+            local_provider,
             ..Self::new(registry, providers)
         }
         .with_tool_output_config(config.tool_output.clone())
@@ -284,6 +296,20 @@ fn is_local_only_route(routes: &[HandRoute]) -> bool {
     routes.len() == 1
         && routes[0].provider == DEFAULT_PROVIDER_NAME
         && matches!(routes[0].tier, SandboxTier::Local)
+}
+
+fn routes_include_local_provider(routes: &[HandRoute]) -> bool {
+    routes.iter().any(|route| {
+        route.provider == DEFAULT_PROVIDER_NAME && matches!(route.tier, SandboxTier::Local)
+    })
+}
+
+fn local_provider_allowed(config: &MoaConfig) -> bool {
+    config
+        .cloud
+        .hands
+        .as_ref()
+        .is_some_and(|hands| hands.allow_local_provider)
 }
 
 fn configured_hand_routes(config: &MoaConfig) -> Result<Vec<HandRoute>> {

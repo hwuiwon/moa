@@ -8,12 +8,14 @@ use moa_brain::{
     TurnResult, pipeline::history::HistoryCompiler, run_brain_turn, run_streamed_turn,
 };
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, Event, EventRange,
-    EventRecord, EventType, LLMProvider, MoaConfig, ModelCapabilities, Result, RuntimeEvent,
-    SessionActorRef, SessionId, SessionMeta, SessionStore, StopReason, TokenPricing,
-    ToolCallContent, ToolCallFormat, ToolInvocation,
+    ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, CompletionContent, CompletionRequest,
+    CompletionResponse, CompletionStream, Event, EventRange, EventRecord, EventType, LLMProvider,
+    MoaConfig, ModelCapabilities, Result, RuntimeEvent, SessionActorRef, SessionId, SessionMeta,
+    SessionStore, StopReason, TokenPricing, ToolCallContent, ToolCallFormat, ToolInvocation,
+    UserId,
 };
 use moa_hands::ToolRouter;
+use moa_security::ActionPolicyRuleStore;
 use serde_json::json;
 use tempfile::tempdir;
 use tokio::sync::{Mutex, broadcast};
@@ -684,4 +686,67 @@ fn make_event_record(session_id: &SessionId, sequence_num: u64, event: Event) ->
         hand_id: None,
         token_count: None,
     }
+}
+
+struct StaticActionPolicyRuleStore {
+    rules: Vec<ActionPolicyRule>,
+}
+
+#[async_trait]
+impl ActionPolicyRuleStore for StaticActionPolicyRuleStore {
+    async fn list_action_policy_rules_for_tool(
+        &self,
+        tenant_id: &moa_core::TenantId,
+        _user_id: &UserId,
+        tool: &str,
+    ) -> Result<Vec<ActionPolicyRule>> {
+        Ok(self
+            .rules
+            .iter()
+            .filter(|rule| {
+                rule.tool == tool
+                    && matches!(
+                        rule.scope,
+                        ActionRuleScope::Tenant { tenant_id: rule_tenant_id }
+                            if rule_tenant_id == *tenant_id
+                    )
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn upsert_action_policy_rule(&self, _rule: ActionPolicyRule) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_action_policy_rule(
+        &self,
+        _tenant_id: &moa_core::TenantId,
+        _user_id: Option<&UserId>,
+        _tool: &str,
+        _pattern: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
+fn allow_bash_commands_for_tenant<const N: usize>(
+    tenant_id: moa_core::TenantId,
+    patterns: [&str; N],
+) -> Arc<dyn ActionPolicyRuleStore> {
+    Arc::new(StaticActionPolicyRuleStore {
+        rules: patterns
+            .into_iter()
+            .map(|pattern| ActionPolicyRule {
+                id: uuid::Uuid::now_v7(),
+                scope: ActionRuleScope::Tenant { tenant_id },
+                tool: "bash".to_string(),
+                pattern: pattern.to_string(),
+                effect: ActionPolicyEffect::Allow,
+                reason: Some("offline test fixture allows this exact command".to_string()),
+                created_by: UserId::new("offline-test-admin"),
+                created_at: Utc::now(),
+            })
+            .collect(),
+    })
 }

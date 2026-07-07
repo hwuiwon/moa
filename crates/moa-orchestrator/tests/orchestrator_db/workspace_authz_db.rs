@@ -2,14 +2,17 @@
 
 use anyhow::Result;
 use moa_authz::enqueue_raw;
-use moa_authz_schema::TupleOp;
+use moa_authz_schema::{MODEL_VERSION, TupleOp};
 use uuid::Uuid;
 
 #[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
 struct AuthzTupleRow {
+    idempotency_key: String,
+    op: String,
     tuple_user: String,
     tuple_relation: String,
     tuple_object: String,
+    model_version: i32,
     tenant_id: Uuid,
 }
 
@@ -45,7 +48,8 @@ async fn workspace_tenant_tuple_is_idempotent_db() -> Result<()> {
 
     let rows: Vec<AuthzTupleRow> = sqlx::query_as(
         r#"
-        SELECT tuple_user, tuple_relation, tuple_object, tenant_id
+        SELECT idempotency_key, op, tuple_user, tuple_relation, tuple_object,
+               model_version, tenant_id
         FROM authz_outbox
         WHERE tuple_user = $1
           AND tuple_relation = 'workspace'
@@ -61,12 +65,43 @@ async fn workspace_tenant_tuple_is_idempotent_db() -> Result<()> {
     assert_eq!(
         rows,
         vec![AuthzTupleRow {
+            idempotency_key: format!("write-{tenant}-workspace-{workspace}-v{MODEL_VERSION}"),
+            op: "write".to_string(),
             tuple_user: workspace,
             tuple_relation: "workspace".to_string(),
             tuple_object: tenant,
+            model_version: MODEL_VERSION as i32,
             tenant_id,
         }]
     );
 
     Ok(())
+}
+
+#[test]
+fn workspace_authz_backfill_migration_uses_current_model_version_static() {
+    // Pins: V000323 is edited in place with the current authz model version so
+    // the pre-prod workspace backfill cannot keep writing stale v3 rows.
+    let sql = include_str!(
+        "../../../moa-migrations/migrations/postgres/V000323__workspace_authz_backfill.sql"
+    );
+
+    assert!(
+        sql.contains(&format!(
+            "'write-tenant:%s-workspace-workspace:%s-v{MODEL_VERSION}'"
+        )),
+        "V000323 idempotency key suffix must match moa_authz_schema::MODEL_VERSION"
+    );
+    assert!(
+        sql.contains(&format!("\n        {MODEL_VERSION},\n")),
+        "V000323 inserted model_version must match moa_authz_schema::MODEL_VERSION"
+    );
+    assert!(
+        !sql.contains("-v3"),
+        "V000323 must not retain stale v3 idempotency suffixes"
+    );
+    assert!(
+        !sql.contains("\n        3,\n"),
+        "V000323 must not retain stale model_version 3 literals"
+    );
 }

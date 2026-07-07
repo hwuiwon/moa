@@ -155,9 +155,7 @@ fn event_to_context_message(
                     ContextMessage::tool_result(
                         call_id.clone(),
                         format!("<tool_error id=\"{tool_id}\">{replayable_error}</tool_error>"),
-                        Some(vec![ToolContent::Text {
-                            text: replayable_error,
-                        }]),
+                        Some(vec![wrapped_tool_text_block(&replayable_error)]),
                     )
                     .with_source_ref(ContextSourceRef::tool_error_event(record, *tool_id))
                 }
@@ -514,12 +512,29 @@ fn replayable_tool_content_blocks(
         .sum::<usize>();
 
     if total_chars <= tool_output.max_replay_chars {
-        return Some(output.content.clone());
+        return Some(
+            output
+                .content
+                .iter()
+                .map(replayable_tool_content_block)
+                .collect(),
+        );
     }
 
-    Some(vec![ToolContent::Text {
-        text: replayable_text.to_string(),
-    }])
+    Some(vec![wrapped_tool_text_block(replayable_text)])
+}
+
+fn replayable_tool_content_block(content: &ToolContent) -> ToolContent {
+    match content {
+        ToolContent::Text { text } => wrapped_tool_text_block(text),
+        ToolContent::Json { data } => wrapped_tool_text_block(&data.to_string()),
+    }
+}
+
+fn wrapped_tool_text_block(text: &str) -> ToolContent {
+    ToolContent::Text {
+        text: wrap_untrusted_tool_output(text),
+    }
 }
 
 fn tool_content_char_len(content: &ToolContent) -> usize {
@@ -678,7 +693,23 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tool_use_id.as_deref(), Some("toolu_history"));
         assert!(messages[0].content.contains("<tool_result"));
-        assert_eq!(messages[0].content_blocks.as_ref().map(Vec::len), Some(2));
+        let blocks = messages[0]
+            .content_blocks
+            .as_ref()
+            .expect("tool result should preserve replayable content blocks");
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks.iter().any(|block| matches!(
+            block,
+            ToolContent::Text { text }
+                if text.contains("<untrusted_tool_output>")
+                    && text.contains("1 result")
+        )));
+        assert!(blocks.iter().any(|block| matches!(
+            block,
+            ToolContent::Text { text }
+                if text.contains("<untrusted_tool_output>")
+                    && text.contains("notes/today.md")
+        )));
     }
 
     #[test]
@@ -731,7 +762,12 @@ mod tests {
                 assert!(text.contains("src/lib.rs:1"));
                 assert!(text.contains("src/lib.rs:15000"));
                 assert!(text.contains("[... ~"));
-                assert!(text.chars().count() <= ToolOutputConfig::default().max_replay_chars);
+                let body = text
+                    .strip_prefix("<untrusted_tool_output>\n")
+                    .and_then(|rest| rest.split_once("\n</untrusted_tool_output>"))
+                    .map(|(body, _)| body)
+                    .expect("oversized replay block should keep the untrusted wrapper");
+                assert!(body.chars().count() <= ToolOutputConfig::default().max_replay_chars);
             }
             ToolContent::Json { .. } => panic!("oversized replay should collapse to a text block"),
         }

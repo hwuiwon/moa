@@ -2,14 +2,16 @@
 
 use std::sync::Arc;
 
-use moa_authz_schema::Relation;
+use moa_authz::require_authz_with_delegation;
+use moa_authz_schema::{ObjectType, Relation};
 use moa_core::RlsContext;
+use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::admin::{
     CheckpointCleanupResponse, CheckpointCreateRequest, CheckpointCreateResponse,
     CheckpointListResponse, CheckpointRollbackRequest, CheckpointRollbackResponse,
     VectorPromoteRequest, VectorPromotionResponse, VectorPromotionUpdateRequest,
 };
-use moa_core::{BranchManager, StoragePartitionId, TenantId};
+use moa_core::{BranchManager, StoragePartitionId, TenantId, WORKSPACE_ID};
 use moa_memory_vector::{
     PromotionOptions, PromotionReport, TurbopufferStore, VectorPartitionPromotion,
     VectorStoreFactory, finalize_promotion, rollback_promotion,
@@ -19,7 +21,9 @@ use restate_sdk::prelude::*;
 
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
-use crate::handlers::authz_shim::{authorize_tenant, require_identity};
+use crate::handlers::authz_shim::{
+    authorize_tenant, require_fga_client, require_identity, translate_authz_error,
+};
 
 /// Restate service for user-facing administrative maintenance operations.
 #[restate_sdk::service]
@@ -180,7 +184,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         request: Json<CheckpointCreateRequest>,
     ) -> Result<Json<CheckpointCreateResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "checkpoint_create");
-        authorize_tenant_admin(&ctx).await?;
+        authorize_platform_maintenance(&ctx).await?;
         let request = request.into_inner();
         let config = OrchestratorCtx::current_config().clone();
 
@@ -205,7 +209,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         _request: Json<serde_json::Value>,
     ) -> Result<Json<CheckpointListResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "checkpoint_list");
-        authorize_tenant_admin(&ctx).await?;
+        authorize_platform_maintenance(&ctx).await?;
         let config = OrchestratorCtx::current_config().clone();
 
         Ok(ctx
@@ -229,7 +233,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         request: Json<CheckpointRollbackRequest>,
     ) -> Result<Json<CheckpointRollbackResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "checkpoint_rollback");
-        authorize_tenant_admin(&ctx).await?;
+        authorize_platform_maintenance(&ctx).await?;
         let request = request.into_inner();
         let config = OrchestratorCtx::current_config().clone();
 
@@ -252,7 +256,6 @@ impl AdminMaintenance for AdminMaintenanceImpl {
                     .await
                     .map_err(|error| TerminalError::new(format!("rollback checkpoint: {error}")))?;
                 Ok::<_, HandlerError>(Json(CheckpointRollbackResponse {
-                    database_url: checkpoint.handle.connection_url.clone(),
                     handle: checkpoint.handle,
                 }))
             })
@@ -267,7 +270,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         _request: Json<serde_json::Value>,
     ) -> Result<Json<CheckpointCleanupResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "checkpoint_cleanup");
-        authorize_tenant_admin(&ctx).await?;
+        authorize_platform_maintenance(&ctx).await?;
         let config = OrchestratorCtx::current_config().clone();
 
         Ok(ctx
@@ -340,8 +343,33 @@ async fn authorize_tenant_admin_for_tenant(
     Ok(())
 }
 
-async fn authorize_tenant_admin(ctx: &impl RequestHeaders) -> Result<(), HandlerError> {
+/// Authorizes deployment-global checkpoint maintenance.
+///
+/// Checkpoint branches are platform resources, so callers must be service
+/// identities with the canonical deployment workspace admin relation.
+pub async fn authorize_platform_maintenance(ctx: &impl RequestHeaders) -> Result<(), HandlerError> {
+    let identity = platform_maintenance_identity(ctx)?;
+    let fga = require_fga_client()?;
+    require_authz_with_delegation(
+        &fga,
+        &identity,
+        ObjectType::Workspace,
+        WORKSPACE_ID,
+        Relation::Admin,
+    )
+    .await
+    .map_err(translate_authz_error)
+}
+
+/// Loads and validates the caller shape required before workspace admin authz.
+pub fn platform_maintenance_identity(ctx: &impl RequestHeaders) -> Result<Identity, HandlerError> {
     let identity = require_identity(ctx)?;
-    authorize_tenant(ctx, identity.tenant_id, Relation::Admin).await?;
-    Ok(())
+    if identity.identity_type != IdentityType::Service || identity.api_key_id.is_some() {
+        return Err(TerminalError::new_with_code(
+            403,
+            "platform maintenance requires service workspace admin",
+        )
+        .into());
+    }
+    Ok(identity)
 }

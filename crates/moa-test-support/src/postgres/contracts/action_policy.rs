@@ -70,15 +70,15 @@ where
         .list_action_policy_rules_for_tool(&tenant_id, &user_id, "bash")
         .await
         .expect("list action policy rules");
-    assert!(
-        rules.iter().any(|candidate| candidate.id == rule.id
-            && candidate.effect == ActionPolicyEffect::AdminReview)
-    );
+    assert!(rules.iter().any(|candidate| candidate.id == rule.id
+        && candidate.effect == ActionPolicyEffect::AdminReview
+        && candidate.scope == (ActionRuleScope::Tenant { tenant_id })));
     assert!(
         rules
             .iter()
             .any(|candidate| candidate.id == tenant_override_rule.id
-                && candidate.effect == ActionPolicyEffect::Deny)
+                && candidate.effect == ActionPolicyEffect::Deny
+                && candidate.scope == (ActionRuleScope::Tenant { tenant_id }))
     );
     assert!(
         !rules

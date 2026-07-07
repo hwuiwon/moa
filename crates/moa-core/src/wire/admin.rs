@@ -78,8 +78,6 @@ pub struct CheckpointRollbackRequest {
 pub struct CheckpointRollbackResponse {
     /// Checkpoint selected for rollback.
     pub handle: CheckpointHandle,
-    /// Database URL selected after rollback.
-    pub database_url: String,
 }
 
 /// Response payload for deleting expired checkpoint branches.

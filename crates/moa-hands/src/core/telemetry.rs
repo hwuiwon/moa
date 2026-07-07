@@ -12,6 +12,9 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use super::ToolExecution;
 
+const TOOL_ERROR_OUTPUT_STATUS: &str = "tool returned error output";
+const TOOL_EXECUTION_FAILED_STATUS: &str = "tool execution failed";
+
 pub(super) fn tool_execution_span(
     session: &SessionMeta,
     invocation: &ToolInvocation,
@@ -25,7 +28,7 @@ pub(super) fn tool_execution_span(
         span.set_attribute("gen_ai.tool.call.id", tool_call_id.clone());
     }
     if let Ok(serialized_input) = serde_json::to_string(&invocation.input) {
-        span.set_attribute("moa.tool.input", truncate_tool_span_text(serialized_input));
+        record_tool_input_fields(&span, &serialized_input, trace_tool_output_enabled());
     }
     span.set_attribute("moa.tool.denied", false);
     span
@@ -79,7 +82,7 @@ pub(super) fn record_tool_execution_result(
                 duration,
             );
             if output.is_error {
-                span.set_status(Status::error(output.to_text()));
+                span.set_status(Status::error(TOOL_ERROR_OUTPUT_STATUS));
             }
         }
         Err(MoaError::PermissionDenied(_)) => {
@@ -90,9 +93,9 @@ pub(super) fn record_tool_execution_result(
             span.set_attribute("moa.tool.success", false);
             record_tool_call(tool_name, "error", duration);
         }
-        Err(error) => {
+        Err(_) => {
             span.set_attribute("moa.tool.success", false);
-            span.set_status(Status::error(error.to_string()));
+            span.set_status(Status::error(TOOL_EXECUTION_FAILED_STATUS));
             record_tool_call(tool_name, "error", duration);
         }
     }
@@ -124,10 +127,27 @@ fn record_tool_output_fields(span: &tracing::Span, output_text: &str, attach_bod
     }
 }
 
+/// Records the tool-input telemetry fields on `span`.
+///
+/// Spans always carry input size and a stable short hash for correlation. The
+/// raw serialized input body is attached only when body tracing is explicitly
+/// enabled.
+fn record_tool_input_fields(span: &tracing::Span, serialized_input: &str, attach_body: bool) {
+    span.set_attribute("moa.tool.input.bytes", serialized_input.len() as i64);
+    span.set_attribute("moa.tool.input.hash", short_content_hash(serialized_input));
+    if let Some(body) = tool_body_field(serialized_input, attach_body) {
+        span.set_attribute("moa.tool.input", body);
+    }
+}
+
 /// Returns the capped tool-output body to attach, or `None` when body tracing is
 /// disabled.
 fn tool_output_body_field(output_text: &str, attach_body: bool) -> Option<String> {
-    attach_body.then(|| truncate_tool_span_text(output_text.to_string()))
+    tool_body_field(output_text, attach_body)
+}
+
+fn tool_body_field(value: &str, attach_body: bool) -> Option<String> {
+    attach_body.then(|| truncate_tool_span_text(value.to_string()))
 }
 
 /// Returns whether tool-output bodies should be attached to execution spans.
@@ -172,7 +192,7 @@ fn truncate_tool_span_text(mut value: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_trace_flag, short_content_hash, tool_output_body_field};
+    use super::{parse_trace_flag, short_content_hash, tool_body_field, tool_output_body_field};
 
     #[test]
     fn trace_flag_only_enables_on_explicit_truthy_values() {
@@ -201,6 +221,14 @@ mod tests {
         let body = tool_output_body_field(&large, true).expect("enabled body should be present");
         assert!(body.len() <= 8 * 1024 + '…'.len_utf8());
         assert!(body.ends_with('…'));
+    }
+
+    #[test]
+    fn tool_body_helper_is_shared_by_input_and_output_fields() {
+        // Pins: raw body attachment uses one opt-in path for both tool input and
+        // output so input telemetry cannot bypass the output tracing gate.
+        assert_eq!(tool_body_field("secret", false), None);
+        assert_eq!(tool_body_field("secret", true), Some("secret".to_string()));
     }
 
     #[test]

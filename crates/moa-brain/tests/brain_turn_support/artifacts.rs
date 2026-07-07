@@ -15,6 +15,10 @@ use serde_json::json;
 use tempfile::tempdir;
 use tokio::sync::Mutex;
 
+const ARTIFACT_RETRIEVAL_BASH_CMD: &str =
+    "python3 -c \"for i in range(1, 261): print(f'bash-line-{i}-' + ('x' * 120))\"";
+const ARTIFACT_STDERR_BASH_CMD: &str = "python3 -c \"import sys; [print(f'stdout-line-{i}-' + ('x' * 120)) for i in range(1, 261)]; sys.stderr.write('warning: deprecated config\\nwarning: retrying fallback\\n')\"";
+
 #[derive(Default)]
 struct ArtifactRetrievalLlmProvider {
     requests: Arc<Mutex<Vec<CompletionRequest>>>,
@@ -57,7 +61,7 @@ impl LLMProvider for ArtifactRetrievalLlmProvider {
                         id: Some("33333333-3333-3333-3333-333333333333".to_string()),
                         name: "bash".to_string(),
                         input: json!({
-                            "cmd": "python3 -c \"for i in range(1, 261): print(f'bash-line-{i}-' + ('x' * 120))\""
+                            "cmd": ARTIFACT_RETRIEVAL_BASH_CMD
                         }),
                     },
                     provider_metadata: None,
@@ -187,7 +191,7 @@ impl LLMProvider for ArtifactStderrLlmProvider {
                         id: Some("55555555-5555-5555-5555-555555555555".to_string()),
                         name: "bash".to_string(),
                         input: json!({
-                            "cmd": "python3 -c \"import sys\nfor i in range(1, 261):\n    print(f'stdout-line-{i}-' + ('x' * 120))\nsys.stderr.write('warning: deprecated config\\nwarning: retrying fallback\\n')\""
+                            "cmd": ARTIFACT_STDERR_BASH_CMD
                         }),
                     },
                     provider_metadata: None,

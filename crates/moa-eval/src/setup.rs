@@ -10,11 +10,14 @@ use moa_brain::{
     pipeline::identity::DEFAULT_IDENTITY_PROMPT,
 };
 use moa_core::{
-    ActionPolicyEffect, ExperienceStore, LLMProvider, LearningCandidateStore, LineageHandle,
-    MoaConfig, SegmentStore, SessionActorRef, SessionMeta, SessionStore, StoragePartitionId,
-    TenantId, UserId,
+    ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, ExperienceStore, LLMProvider,
+    LearningCandidateStore, LineageHandle, MoaConfig, SegmentStore, SessionActorRef, SessionMeta,
+    SessionStore, StoragePartitionId, TenantId, UserId,
 };
-use moa_eval_core::{ActionPolicyOverride, AgentConfig, EvalError, InstructionOverride, Result};
+use moa_eval_core::{
+    ActionPolicyOverride, ActionPolicyRuleOverride, AgentConfig, EvalError, InstructionOverride,
+    Result,
+};
 use moa_hands::ToolRouter;
 use moa_providers::ProviderRegistry;
 use moa_security::{ActionPolicies, ActionPolicyRuleStore};
@@ -129,6 +132,13 @@ pub(crate) async fn build_agent_environment_with_provider(
     let learning_candidate_store: Arc<dyn LearningCandidateStore> = session_store_concrete.clone();
     let rule_store: Arc<dyn ActionPolicyRuleStore> = session_store_concrete.clone();
     seed_memory(base_config, agent_config).await?;
+    seed_eval_action_policy_rules(
+        session_store_concrete.as_ref(),
+        tenant_id,
+        &user_id,
+        &agent_config.permissions.allow_rules,
+    )
+    .await?;
 
     let tool_router = Arc::new(
         build_tool_router(
@@ -237,6 +247,7 @@ async fn build_tool_router(
     let router = ToolRouter::new_local(workspace_dir).await?;
     let available_tools = router.tool_names();
     validate_named_tools(&available_tools, &agent_config.tools.disable)?;
+    validate_action_policy_rule_tools(&available_tools, &agent_config.permissions.allow_rules)?;
     validate_named_tools(&available_tools, &agent_config.permissions.admin_review)?;
     validate_named_tools(&available_tools, &agent_config.permissions.always_deny)?;
     if let Some(enabled) = &agent_config.tools.enabled {
@@ -407,6 +418,40 @@ fn validate_named_tools(available_tools: &[String], requested_tools: &[String]) 
                 "unknown tool override '{tool}'"
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_action_policy_rule_tools(
+    available_tools: &[String],
+    rules: &[ActionPolicyRuleOverride],
+) -> Result<()> {
+    let requested_tools = rules
+        .iter()
+        .map(|rule| rule.tool.clone())
+        .collect::<Vec<_>>();
+    validate_named_tools(available_tools, &requested_tools)
+}
+
+async fn seed_eval_action_policy_rules(
+    rule_store: &dyn ActionPolicyRuleStore,
+    tenant_id: TenantId,
+    user_id: &UserId,
+    rules: &[ActionPolicyRuleOverride],
+) -> Result<()> {
+    for rule in rules {
+        rule_store
+            .upsert_action_policy_rule(ActionPolicyRule {
+                id: Uuid::now_v7(),
+                scope: ActionRuleScope::Tenant { tenant_id },
+                tool: rule.tool.clone(),
+                pattern: rule.pattern.clone(),
+                effect: ActionPolicyEffect::Allow,
+                reason: rule.reason.clone(),
+                created_by: user_id.clone(),
+                created_at: chrono::Utc::now(),
+            })
+            .await?;
     }
     Ok(())
 }

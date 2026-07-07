@@ -288,10 +288,24 @@ pub struct ToolOverride {
 pub struct ActionPolicyOverride {
     /// Default effect when no rule or tool-specific config matches.
     pub default_effect: Option<ActionPolicyEffect>,
+    /// Explicit policy rules seeded before eval execution.
+    pub allow_rules: Vec<ActionPolicyRuleOverride>,
     /// Tools that should be recorded for tenant-admin review.
     pub admin_review: Vec<String>,
     /// Always denies the listed tools.
     pub always_deny: Vec<String>,
+}
+
+/// Action-policy rule seeded by an eval agent config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionPolicyRuleOverride {
+    /// Tool name this rule applies to.
+    pub tool: String,
+    /// Glob pattern used for matching normalized inputs.
+    pub pattern: String,
+    /// Optional human-readable reason attached to the rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

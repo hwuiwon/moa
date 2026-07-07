@@ -269,6 +269,8 @@ fn completion_request_omits_native_web_search_when_disabled() {
 
 #[test]
 fn anthropic_content_blocks_render_text_and_json_as_text_blocks() {
+    // Pins: Anthropic content-block serialization is direct; tool-output
+    // trust wrapping is applied by history compilation before provider routing.
     let blocks = anthropic_content_blocks(&[
         ToolContent::Text {
             text: "summary".to_string(),
@@ -278,11 +280,19 @@ fn anthropic_content_blocks_render_text_and_json_as_text_blocks() {
         },
     ]);
 
-    assert_eq!(blocks[0]["type"], "text");
-    assert_eq!(blocks[0]["text"], "<untrusted_tool_output>");
-    assert_eq!(blocks[1]["text"], "summary");
-    assert_eq!(blocks[2]["text"], "{\"path\":\"notes/today.md\"}");
-    assert_eq!(blocks[3]["text"], "</untrusted_tool_output>");
+    assert_eq!(
+        blocks,
+        json!([
+            {
+                "type": "text",
+                "text": "summary",
+            },
+            {
+                "type": "text",
+                "text": "{\"path\":\"notes/today.md\"}",
+            },
+        ])
+    );
 }
 
 #[test]
@@ -299,7 +309,8 @@ fn anthropic_message_wraps_tool_results_with_tool_use_id() {
     assert_eq!(message["role"], "user");
     assert_eq!(message["content"][0]["type"], "tool_result");
     assert_eq!(message["content"][0]["tool_use_id"], "toolu_123");
-    assert_eq!(message["content"][0]["content"][1]["text"], "hello");
+    assert_eq!(message["content"][0]["content"][0]["type"], "text");
+    assert_eq!(message["content"][0]["content"][0]["text"], "hello");
 }
 
 #[test]

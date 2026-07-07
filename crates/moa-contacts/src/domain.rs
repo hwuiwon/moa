@@ -43,9 +43,14 @@ pub struct ContactPointDelivery {
 }
 
 /// Returns low-assurance scopes bounded by the contact service allowlist.
-#[must_use]
-pub fn low_assurance_scopes(requested_scopes: &[String]) -> Vec<String> {
-    bounded_scopes(requested_scopes, LOW_ASSURANCE_SCOPES)
+pub fn low_assurance_scopes(requested_scopes: &[String]) -> Result<Vec<String>> {
+    if requested_scopes.is_empty() {
+        return Err(ContactError::terminal(
+            400,
+            "contact token requested_scopes is required",
+        ));
+    }
+    Ok(bounded_scopes(requested_scopes, LOW_ASSURANCE_SCOPES))
 }
 
 /// Returns the full verified contact scope set.
@@ -60,9 +65,6 @@ pub fn verified_scopes() -> Vec<String> {
 /// Bounds requested scopes to an allowed static allowlist.
 #[must_use]
 pub(crate) fn bounded_scopes(requested_scopes: &[String], allowed: &[&str]) -> Vec<String> {
-    if requested_scopes.is_empty() {
-        return allowed.iter().map(|scope| (*scope).to_string()).collect();
-    }
     requested_scopes
         .iter()
         .filter(|scope| allowed.iter().any(|allowed| allowed == &scope.as_str()))
@@ -134,24 +136,38 @@ pub fn require_contact_session_permission(
     }
 }
 
+/// Requires token issuance to specify at least one allowed agent id.
+pub fn require_contact_agent_allowlist(agent_ids: &[String]) -> Result<()> {
+    if agent_ids.is_empty() {
+        Err(ContactError::terminal(
+            400,
+            "contact token agent_ids is required",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Requires a contact token to allow the selected agent.
 pub fn require_contact_agent_permission(
     claims: &ContactTokenClaims,
     agent: &AgentSessionSelection,
 ) -> Result<()> {
     if claims.agent_ids.is_empty() {
-        validate_contact_agent_selection(agent).map(|_| ())
+        return Err(ContactError::terminal(
+            403,
+            "contact token agent allowlist required",
+        ));
+    }
+    let selected_agent = validate_contact_agent_selection(agent)?;
+    if claims
+        .agent_ids
+        .iter()
+        .any(|agent_id| agent_id == &selected_agent)
+    {
+        Ok(())
     } else {
-        let selected_agent = validate_contact_agent_selection(agent)?;
-        if claims
-            .agent_ids
-            .iter()
-            .any(|agent_id| agent_id == &selected_agent)
-        {
-            Ok(())
-        } else {
-            Err(ContactError::terminal(403, "contact token agent denied"))
-        }
+        Err(ContactError::terminal(403, "contact token agent denied"))
     }
 }
 
@@ -291,7 +307,7 @@ mod tests {
     use super::{
         contact_allows_channel_contact, contact_point_delivery, hash_contact_point_with_key_hex,
         low_assurance_scopes, normalize_contact_point, normalize_phone,
-        require_contact_agent_permission,
+        require_contact_agent_allowlist, require_contact_agent_permission,
     };
     use crate::ContactError;
 
@@ -308,8 +324,8 @@ mod tests {
     }
 
     #[test]
-    fn contact_agent_permission_allows_unbounded_token_with_single_selector() {
-        // Pins: unbounded contact tokens may create sessions only when exactly one agent selector is provided.
+    fn contact_agent_permission_rejects_empty_token_allowlist() {
+        // Pins: contact tokens must carry an explicit agent allowlist before creating sessions.
         let installation_uid = uuid::Uuid::now_v7();
         let claims = contact_claims(Vec::new());
         let selection = AgentSessionSelection {
@@ -317,8 +333,10 @@ mod tests {
             revision_uid: None,
         };
 
-        require_contact_agent_permission(&claims, &selection)
-            .expect("unbounded token should allow a single selected agent");
+        let error = require_contact_agent_permission(&claims, &selection)
+            .expect_err("empty token agent allowlist should reject");
+
+        assert_terminal(&error, 403, "contact token agent allowlist required");
     }
 
     #[test]
@@ -350,9 +368,19 @@ mod tests {
             "memory:self:write".to_string(),
         ];
 
-        let granted = low_assurance_scopes(&requested);
+        let granted =
+            low_assurance_scopes(&requested).expect("non-empty requested scope list should bound");
 
         assert_eq!(granted, vec!["contact:session:message:send".to_string()]);
+    }
+
+    #[test]
+    fn contact_token_issuance_requires_explicit_agent_allowlist() {
+        // Pins: contact-token issuance is fail-closed when no agent allowlist is requested.
+        let error = require_contact_agent_allowlist(&[])
+            .expect_err("empty token agent allowlist should reject");
+
+        assert_terminal(&error, 400, "contact token agent_ids is required");
     }
 
     #[test]

@@ -164,7 +164,9 @@ pub struct ContactRef {
     /// Structured route/data permissions granted to this contact token.
     #[serde(default)]
     pub permissions: Value,
-    /// Optional allowlist of agent ids the contact token may address.
+    /// Explicit allowlist of agent ids the contact token may address.
+    ///
+    /// Empty token allowlists cannot create contact sessions.
     #[serde(default)]
     pub agent_ids: Vec<String>,
     /// Optional allowlist of session ids the contact token may continue.
@@ -220,7 +222,9 @@ pub struct ContactTokenClaims {
     /// Structured route/data permissions for bounded contact access.
     #[serde(default)]
     pub permissions: Value,
-    /// Optional allowlist of agent ids the token may address.
+    /// Explicit allowlist of agent ids the token may address.
+    ///
+    /// Empty token allowlists cannot create contact sessions.
     #[serde(default)]
     pub agent_ids: Vec<String>,
     /// Optional allowlist of session ids the token may continue.
@@ -251,13 +255,17 @@ pub struct ContactTokenIssueRequest {
     /// Optional contact metadata supplied by the authorized integration.
     #[serde(default)]
     pub metadata: Value,
-    /// Optional requested low-assurance scopes.
+    /// Explicit requested low-assurance scopes.
+    ///
+    /// Token issuance rejects an empty list.
     #[serde(default)]
     pub requested_scopes: Vec<String>,
     /// Structured route/data permissions requested for the contact token.
     #[serde(default)]
     pub permissions: Value,
-    /// Optional allowlist of agent ids the issued token may address.
+    /// Explicit allowlist of agent ids the issued token may address.
+    ///
+    /// Token issuance rejects an empty list.
     #[serde(default)]
     pub agent_ids: Vec<String>,
 }
