@@ -20,6 +20,7 @@ moa-memory-lifecycle = { workspace = true }
 moa-memory-types = { workspace = true }
 moa-memory-vector = { workspace = true }
 moa-providers = { workspace = true }
+pgvector = { version = "0.4.1", features = ["sqlx", "halfvec"] }
 serde.workspace = true
 serde_json.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "runtime-tokio-rustls", "postgres"] }

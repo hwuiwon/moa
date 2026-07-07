@@ -181,6 +181,36 @@ pub struct TurbopufferVectorConfig {
     pub environment: Option<String>,
     /// Whether the configured Turbopuffer account has a BAA for restricted data.
     pub baa_enabled: bool,
+    /// Vector element type used for the Turbopuffer projection namespace.
+    pub vector_type: TurbopufferVectorType,
+}
+
+/// Turbopuffer vector element type for read-side graph-memory projections.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TurbopufferVectorType {
+    /// Store vectors as 32-bit floats.
+    F32,
+    /// Store vectors as 16-bit floats.
+    #[default]
+    F16,
+}
+
+impl TurbopufferVectorType {
+    /// Returns the stable config and namespace label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::F16 => "f16",
+        }
+    }
+
+    /// Returns the Turbopuffer schema type for a vector of this element type.
+    #[must_use]
+    pub fn schema_type(self, dimensions: usize) -> String {
+        format!("[{}]{}", dimensions, self.as_str())
+    }
 }
 
 /// Per-tenant embedder selection.

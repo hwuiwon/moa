@@ -16,11 +16,12 @@ use moa_memory_vector::{TurbopufferStore, TurbopufferTextQuery, VectorQuery, Vec
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
-use crate::retrieval::hybrid::{
-    GraphPathTrace, GraphRetrievalDiagnostics, GraphRetrievalPolicy, GraphSeedSource, LegSources,
-    LineageContext, Result, RetrievalRequest,
-};
+use crate::retrieval::policy::GraphRetrievalPolicy;
 use crate::retrieval::ranking::normalize_tokens;
+use crate::retrieval::types::{
+    GraphPathTrace, GraphRetrievalDiagnostics, GraphSeedSource, LegSources, LineageContext, Result,
+    RetrievalRequest,
+};
 
 /// Reciprocal-rank fusion denominator offset.
 pub const RRF_K: f64 = 60.0;
@@ -281,12 +282,56 @@ fn policy_allows_expansion_hit(
             }
             anchored_rescue_allows_path(hit, seed_labels.get(&hit.seed).copied())
         }
+        GraphRetrievalPolicy::EntityLocalSearch => {
+            let Some(seed_source) = seed_sources.get(&hit.seed).copied() else {
+                return false;
+            };
+            if seed_source == GraphSeedSource::BroadFallback {
+                return false;
+            }
+            entity_local_search_allows_path(hit, seed_labels.get(&hit.seed).copied())
+        }
         GraphRetrievalPolicy::LegacyBroadExpansion
-        | GraphRetrievalPolicy::ArticleGraph
-        | GraphRetrievalPolicy::EntityLocalSearch
+        | GraphRetrievalPolicy::SourceGraph
         | GraphRetrievalPolicy::Propagation
         | GraphRetrievalPolicy::Community => true,
     }
+}
+
+fn entity_local_search_allows_path(hit: &GraphExpansionHit, seed_label: Option<NodeLabel>) -> bool {
+    if hit.edges.is_empty()
+        || hit.edges.len() != hit.directions.len()
+        || hit.hop > 2
+        || seed_label != Some(NodeLabel::Entity)
+        || hit.label != NodeLabel::Chunk
+    {
+        return false;
+    }
+    if hit.hop == 1 && hit.edges.len() == 1 {
+        return hit.edges[0] == EdgeLabel::MentionedIn
+            && hit.directions[0] == GraphTraversalDirection::Incoming;
+    }
+    hit.hop == 2
+        && hit.edges.len() == 2
+        && entity_local_search_allows_semantic_step(hit.edges[0], hit.directions[0])
+        && hit.edges[1] == EdgeLabel::MentionedIn
+        && hit.directions[1] == GraphTraversalDirection::Incoming
+}
+
+fn entity_local_search_allows_semantic_step(
+    edge: EdgeLabel,
+    direction: GraphTraversalDirection,
+) -> bool {
+    direction == GraphTraversalDirection::Outgoing
+        && matches!(
+            edge,
+            EdgeLabel::RelatesTo
+                | EdgeLabel::DependsOn
+                | EdgeLabel::OwnedBy
+                | EdgeLabel::Caused
+                | EdgeLabel::LearnedFrom
+                | EdgeLabel::AppliesTo
+        )
 }
 
 fn anchored_rescue_allows_path(hit: &GraphExpansionHit, seed_label: Option<NodeLabel>) -> bool {
@@ -375,16 +420,18 @@ fn anchored_rescue_allows_semantic_step(
 }
 
 fn graph_hops_for_policy(policy: GraphRetrievalPolicy, req: &RetrievalRequest) -> u8 {
+    let tenant_chunk_only = request_is_tenant_chunk_only(req);
     if matches!(
         policy,
-        GraphRetrievalPolicy::AnchoredRescue | GraphRetrievalPolicy::ArticleGraph
-    ) && request_is_tenant_chunk_only(req)
+        GraphRetrievalPolicy::AnchoredRescue | GraphRetrievalPolicy::SourceGraph
+    ) && tenant_chunk_only
     {
         1
     } else if matches!(
         policy,
-        GraphRetrievalPolicy::AnchoredRescue | GraphRetrievalPolicy::ArticleGraph
-    ) {
+        GraphRetrievalPolicy::AnchoredRescue | GraphRetrievalPolicy::SourceGraph
+    ) || (policy == GraphRetrievalPolicy::EntityLocalSearch && tenant_chunk_only)
+    {
         2
     } else {
         GRAPH_HOPS
@@ -405,7 +452,7 @@ const fn graph_evidence_threshold(policy: GraphRetrievalPolicy) -> f64 {
         GraphRetrievalPolicy::Off
         | GraphRetrievalPolicy::ContextOnly
         | GraphRetrievalPolicy::LegacyBroadExpansion
-        | GraphRetrievalPolicy::ArticleGraph
+        | GraphRetrievalPolicy::SourceGraph
         | GraphRetrievalPolicy::EntityLocalSearch
         | GraphRetrievalPolicy::Propagation
         | GraphRetrievalPolicy::Community => 0.0,
@@ -1057,7 +1104,8 @@ mod tests {
     use sqlx::PgConnection;
     use uuid::Uuid;
 
-    use crate::retrieval::hybrid::{GraphPathTrace, GraphRetrievalPolicy, GraphSeedSource};
+    use crate::retrieval::policy::GraphRetrievalPolicy;
+    use crate::retrieval::types::{GraphPathTrace, GraphSeedSource};
 
     use super::{
         GRAPH_HOPS, GRAPH_WEIGHT, LEXICAL_WEIGHT, LegCandidate, RetrievalRequest, VECTOR_WEIGHT,
@@ -1360,6 +1408,88 @@ mod tests {
     }
 
     #[test]
+    fn entity_local_search_admits_only_precise_entity_chunk_paths() {
+        // Pins: entity-local retrieval uses semantic entity anchors to find
+        // chunks directly mentioning the entity or chunks mentioning one
+        // semantically-related entity, without admitting structural fanout.
+        let seed = uid(1);
+        let direct_chunk = uid(2);
+        let related_chunk = uid(3);
+        let wrong_direction_chunk = uid(4);
+        let sibling_chunk = uid(5);
+        let strengths = strengths(&[(seed, 1.0)]);
+        let seed_sources = HashMap::from([(seed, GraphSeedSource::SemanticEntity)]);
+        let seed_labels = HashMap::from([(seed, NodeLabel::Entity)]);
+
+        let mut direct_path = expansion_hit(seed, direct_chunk, 1, vec![EdgeLabel::MentionedIn]);
+        direct_path.label = NodeLabel::Chunk;
+        direct_path.directions = vec![GraphTraversalDirection::Incoming];
+        let mut related_path = expansion_hit(
+            seed,
+            related_chunk,
+            2,
+            vec![EdgeLabel::RelatesTo, EdgeLabel::MentionedIn],
+        );
+        related_path.label = NodeLabel::Chunk;
+        related_path.directions = vec![
+            GraphTraversalDirection::Outgoing,
+            GraphTraversalDirection::Incoming,
+        ];
+        let mut wrong_direction =
+            expansion_hit(seed, wrong_direction_chunk, 1, vec![EdgeLabel::MentionedIn]);
+        wrong_direction.label = NodeLabel::Chunk;
+        let mut structural_path = expansion_hit(
+            seed,
+            sibling_chunk,
+            2,
+            vec![EdgeLabel::Contains, EdgeLabel::Contains],
+        );
+        structural_path.label = NodeLabel::Chunk;
+        structural_path.directions = vec![
+            GraphTraversalDirection::Incoming,
+            GraphTraversalDirection::Outgoing,
+        ];
+
+        let ordered = score_expansion_for_policy(
+            &[direct_path, related_path, wrong_direction, structural_path],
+            &strengths,
+            None,
+            Some(&[NodeLabel::Chunk]),
+            GraphRetrievalPolicy::EntityLocalSearch,
+            &seed_sources,
+            &seed_labels,
+        );
+
+        assert_eq!(ordered, vec![direct_chunk, related_chunk]);
+    }
+
+    #[test]
+    fn entity_local_search_rejects_non_entity_anchors() {
+        // Pins: exact entity-local search is not another way to revive generic
+        // chunk-neighbor graph expansion from phase-one chunk seeds.
+        let seed = uid(1);
+        let sibling_chunk = uid(2);
+        let strengths = strengths(&[(seed, 1.0)]);
+        let seed_sources = HashMap::from([(seed, GraphSeedSource::ExactPhaseOne)]);
+        let seed_labels = HashMap::from([(seed, NodeLabel::Chunk)]);
+        let mut path = expansion_hit(seed, sibling_chunk, 1, vec![EdgeLabel::MentionedIn]);
+        path.label = NodeLabel::Chunk;
+        path.directions = vec![GraphTraversalDirection::Incoming];
+
+        let ordered = score_expansion_for_policy(
+            &[path],
+            &strengths,
+            None,
+            Some(&[NodeLabel::Chunk]),
+            GraphRetrievalPolicy::EntityLocalSearch,
+            &seed_sources,
+            &seed_labels,
+        );
+
+        assert!(ordered.is_empty());
+    }
+
+    #[test]
     fn anchored_rescue_rejects_contains_contains_sibling_chunk_paths() {
         // Pins: a chunk -> document -> sibling chunk structural walk is not
         // graph evidence for AnchoredRescue tenant chunk ranking.
@@ -1413,8 +1543,12 @@ mod tests {
             1
         );
         assert_eq!(
-            graph_hops_for_policy(GraphRetrievalPolicy::ArticleGraph, &request),
+            graph_hops_for_policy(GraphRetrievalPolicy::SourceGraph, &request),
             1
+        );
+        assert_eq!(
+            graph_hops_for_policy(GraphRetrievalPolicy::EntityLocalSearch, &request),
+            2
         );
         assert_eq!(
             graph_hops_for_policy(GraphRetrievalPolicy::LegacyBroadExpansion, &request),

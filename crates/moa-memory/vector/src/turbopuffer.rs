@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
+use moa_core::config::TurbopufferVectorType;
 use moa_core::{MoaConfig, StoragePartitionId, TenantId};
 use reqwest::{Client, Method};
 use secrecy::{ExposeSecret, SecretString};
@@ -34,6 +35,7 @@ pub struct TurbopufferStore {
     api_key: SecretString,
     env: String,
     baa_enabled: bool,
+    vector_type: TurbopufferVectorType,
     storage_partition_id: Option<String>,
 }
 
@@ -73,11 +75,12 @@ impl TurbopufferStore {
             .or_else(|| config.observability.environment.clone())
             .unwrap_or_else(|| "dev".to_string());
 
-        Self::new(
+        Self::new_with_vector_type(
             base_url,
             SecretString::from(api_key.to_string()),
             env,
             turbopuffer.baa_enabled,
+            turbopuffer.vector_type,
         )
     }
 
@@ -96,6 +99,23 @@ impl TurbopufferStore {
         api_key: SecretString,
         env: impl Into<String>,
         baa_enabled: bool,
+    ) -> Result<Self> {
+        Self::new_with_vector_type(
+            base_url,
+            api_key,
+            env,
+            baa_enabled,
+            TurbopufferVectorType::default(),
+        )
+    }
+
+    /// Creates a Turbopuffer store with explicit configuration and vector type.
+    pub fn new_with_vector_type(
+        base_url: impl Into<String>,
+        api_key: SecretString,
+        env: impl Into<String>,
+        baa_enabled: bool,
+        vector_type: TurbopufferVectorType,
     ) -> Result<Self> {
         let base_url = base_url.into().trim().trim_end_matches('/').to_string();
         if base_url.is_empty() {
@@ -125,6 +145,7 @@ impl TurbopufferStore {
             api_key,
             env,
             baa_enabled,
+            vector_type,
             storage_partition_id: None,
         })
     }
@@ -149,6 +170,14 @@ impl TurbopufferStore {
         store
     }
 
+    /// Returns a clone that targets a specific Turbopuffer vector element type.
+    #[must_use]
+    pub fn with_vector_type(&self, vector_type: TurbopufferVectorType) -> Self {
+        let mut store = self.clone();
+        store.vector_type = vector_type;
+        store
+    }
+
     /// Returns the Turbopuffer namespace for one storage partition.
     pub fn namespace_for_storage_partition(&self, storage_partition_id: &str) -> Result<String> {
         let storage_partition_segment = namespace_segment(storage_partition_id);
@@ -158,7 +187,16 @@ impl TurbopufferStore {
             ));
         }
 
-        let namespace = format!("moa-{}-{}", self.env, storage_partition_segment);
+        let namespace = if self.vector_type == TurbopufferVectorType::F32 {
+            format!("moa-{}-{}", self.env, storage_partition_segment)
+        } else {
+            format!(
+                "moa-{}-{}-{}",
+                self.env,
+                self.vector_type.as_str(),
+                storage_partition_segment
+            )
+        };
         if namespace.len() > 128 {
             return Err(Error::TurbopufferConfig(format!(
                 "namespace `{namespace}` exceeds Turbopuffer's 128-byte limit"
@@ -326,13 +364,11 @@ impl VectorStore for TurbopufferStore {
         self.ensure_namespace(&namespace).await?;
         let upsert_rows = items.iter().map(upsert_row).collect::<Result<Vec<_>>>()?;
         let has_search_text = upsert_rows.iter().any(|row| row.get("content").is_some());
-        let mut body = json!({
+        let body = json!({
             "upsert_rows": upsert_rows,
             "distance_metric": "cosine_distance",
+            "schema": turbopuffer_schema(self.vector_type, has_search_text),
         });
-        if has_search_text {
-            body["schema"] = bm25_schema();
-        }
         self.request_value(Method::POST, write_path(&namespace), body)
             .await?;
 
@@ -457,13 +493,20 @@ fn admitted_search_text(item: &VectorItem) -> Option<&str> {
         .filter(|text| !text.is_empty())
 }
 
-fn bm25_schema() -> Value {
-    json!({
-        "content": {
+fn turbopuffer_schema(vector_type: TurbopufferVectorType, has_search_text: bool) -> Value {
+    let mut schema = json!({
+        "vector": {
+            "type": vector_type.schema_type(VECTOR_DIMENSION),
+            "ann": true,
+        }
+    });
+    if has_search_text {
+        schema["content"] = json!({
             "type": "string",
             "full_text_search": true,
-        }
-    })
+        });
+    }
+    schema
 }
 
 fn parse_matches(value: Value) -> Result<Vec<VectorMatch>> {
@@ -579,10 +622,31 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(
             requests[0].path,
-            format!("/v2/namespaces/moa-test-{storage_partition_id}")
+            format!("/v2/namespaces/moa-test-f16-{storage_partition_id}")
         );
         assert!(requests[0].body.contains("\"upsert_rows\""));
+        assert!(requests[0].body.contains("\"type\":\"[1024]f16\""));
         assert!(requests[0].body.contains("\"valid_to\":\"open\""));
+    }
+
+    #[test]
+    fn f32_vector_type_preserves_legacy_namespace_shape() {
+        let storage_partition_id = Uuid::now_v7().to_string();
+        let store = TurbopufferStore::new_with_vector_type(
+            "https://example.test",
+            SecretString::from("test-key".to_string()),
+            "test",
+            false,
+            TurbopufferVectorType::F32,
+        )
+        .expect("store");
+
+        assert_eq!(
+            store
+                .namespace_for_storage_partition(&storage_partition_id)
+                .expect("namespace"),
+            format!("moa-test-{storage_partition_id}")
+        );
     }
 
     #[test]

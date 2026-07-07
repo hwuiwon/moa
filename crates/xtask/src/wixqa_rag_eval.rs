@@ -11,9 +11,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use moa_brain::planning::Strategy;
 use moa_brain::retrieval::{
-    ArticleFeatureContribution, ArticleFeatureContributions, GraphCandidateCounts, GraphPathTrace,
-    GraphRetrievalDiagnostics, GraphRetrievalPolicy, GraphSeedDiagnostics, GraphSeedSource,
-    HybridRetriever, LexicalBackend, RetrievalHit, RetrievalOutput, RetrievalRequest,
+    GraphCandidateCounts, GraphPathTrace, GraphRetrievalDiagnostics, GraphRetrievalPolicy,
+    GraphSeedDiagnostics, GraphSeedSource, HybridRetriever, LexicalBackend, RetrievalHit,
+    RetrievalOutput, RetrievalRequest, SourceObjectFeatureContribution,
+    SourceObjectFeatureContributions,
 };
 use moa_core::traits::EmbeddingProvider;
 use moa_core::{MoaConfig, RlsContext, TenantId};
@@ -38,9 +39,10 @@ use moa_memory_graph::{NodeLabel, PiiClass, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{VectorStoreFactory, VectorSyncReport};
 use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
+use pgvector::HalfVector;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 const DEFAULT_DATA_DIR: &str = ".moa/wixqa/raw";
@@ -153,7 +155,7 @@ async fn run_async(options: Options) -> Result<RunSummary> {
             drain_external_vector_sync(&pool, &config, options.vector_sync_drain_limit).await?;
         (ingestion, vector_sync)
     };
-    let measurements = retrieve_questions(RetrievalEvalInputs {
+    let query_run = retrieve_questions(RetrievalEvalInputs {
         pool: &pool,
         tenant_id,
         embedder: retrieval_embedder,
@@ -165,8 +167,24 @@ async fn run_async(options: Options) -> Result<RunSummary> {
         graph_policy: options.graph_policy,
         weak_repeat_fallback_top_k: options.weak_repeat_fallback_top_k,
         weak_repeat_rerank: options.weak_repeat_rerank,
+        capture_embedding_export_queries: options.embedding_export.is_some(),
+        expected_embedding_dim: options.embedding_dim,
     })
     .await?;
+    if let Some(embedding_export_path) = &options.embedding_export {
+        let export = build_embedding_export(
+            &pool,
+            tenant_id,
+            connection_uid,
+            &selected,
+            &options,
+            query_run.embedding_export_queries,
+        )
+        .await?;
+        write_pretty_json(embedding_export_path, &export).with_context(|| {
+            format!("write embedding export {}", embedding_export_path.display())
+        })?;
+    }
     let report = build_report(
         &options,
         tenant_id,
@@ -174,15 +192,9 @@ async fn run_async(options: Options) -> Result<RunSummary> {
         selected,
         ingestion,
         vector_sync,
-        measurements,
+        query_run.measurements,
     );
-    if let Some(parent) = options.output.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create report directory {}", parent.display()))?;
-    }
-    fs::write(&options.output, serde_json::to_vec_pretty(&report)?)
+    write_pretty_json(&options.output, &report)
         .with_context(|| format!("write {}", options.output.display()))?;
     Ok(RunSummary {
         output: options.output,
@@ -213,6 +225,149 @@ async fn drain_external_vector_sync(
         .drain_external_sync(pool, limit)
         .await
         .context("drain external vector sync outbox")
+}
+
+async fn build_embedding_export(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    connection_uid: Uuid,
+    selected: &SelectedWorkload,
+    options: &Options,
+    queries: Vec<EmbeddingExportQuery>,
+) -> Result<EmbeddingExport> {
+    let chunks =
+        fetch_embedding_export_chunks(pool, tenant_id, connection_uid, selected, options).await?;
+    if chunks.is_empty() {
+        bail!(
+            "cannot write embedding export for cache `{}` because no active chunk embeddings were found",
+            selected.cache_key
+        );
+    }
+    Ok(EmbeddingExport {
+        dataset: selected.dataset.as_str().to_string(),
+        cache_key: selected.cache_key.clone(),
+        embedding_model: options.embedder_name.clone(),
+        embedding_dimensions: options.embedding_dim,
+        metric: "cosine".to_string(),
+        tenant_id: tenant_id.0,
+        connection_uid,
+        storage_partition_id: tenant_id.0.to_string(),
+        chunk_count: chunks.len(),
+        query_count: queries.len(),
+        chunks,
+        queries,
+    })
+}
+
+async fn fetch_embedding_export_chunks(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    connection_uid: Uuid,
+    selected: &SelectedWorkload,
+    options: &Options,
+) -> Result<Vec<EmbeddingExportChunk>> {
+    let scope = RlsContext::tenant(tenant_id);
+    let mut conn = ScopedConn::begin(pool, &scope)
+        .await
+        .context("begin scoped embedding export transaction")?;
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(conn.as_mut())
+        .await
+        .context("assume moa_app role")?;
+    let article_ids = selected
+        .articles
+        .iter()
+        .map(|article| article.id.clone())
+        .collect::<Vec<_>>();
+    let storage_partition_id = tenant_id.0.to_string();
+    let rows = sqlx::query(
+        r#"
+        SELECT embedding.uid,
+               embedding.embedding,
+               object.external_object_id AS article_id,
+               object.title,
+               object.source_uri,
+               chunk.text
+          FROM moa.embeddings AS embedding
+          JOIN moa.knowledge_chunks AS chunk
+            ON chunk.storage_partition_id = embedding.storage_partition_id
+           AND chunk.graph_node_uid = embedding.uid
+          JOIN moa.knowledge_document_versions AS version
+            ON version.document_version_uid = chunk.document_version_id
+          JOIN moa.knowledge_objects AS object
+            ON object.object_uid = version.object_id
+         WHERE embedding.storage_partition_id = $1
+           AND embedding.label = 'Chunk'
+           AND embedding.valid_to IS NULL
+           AND object.tenant_id = $2
+           AND object.connection_id = $3
+           AND object.external_object_id = ANY($4::TEXT[])
+           AND object.status = 'active'
+         ORDER BY object.external_object_id, chunk.ordinal, chunk.chunk_uid, embedding.uid
+        "#,
+    )
+    .bind(&storage_partition_id)
+    .bind(tenant_id.0)
+    .bind(connection_uid)
+    .bind(&article_ids)
+    .fetch_all(conn.as_mut())
+    .await
+    .context("fetch active WixQA chunk embeddings for embedding export")?;
+    let chunks = rows
+        .into_iter()
+        .map(|row| {
+            let uid = row.try_get("uid")?;
+            let embedding: HalfVector = row.try_get("embedding")?;
+            let embedding = halfvec_to_f32(embedding);
+            ensure_embedding_dimensions("chunk", uid, embedding.len(), options.embedding_dim)?;
+            Ok(EmbeddingExportChunk {
+                uid,
+                article_id: row.try_get("article_id")?,
+                title: row.try_get("title")?,
+                source_uri: row.try_get("source_uri")?,
+                text: row.try_get("text")?,
+                embedding,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    conn.commit()
+        .await
+        .context("commit scoped embedding export transaction")?;
+    Ok(chunks)
+}
+
+fn halfvec_to_f32(embedding: HalfVector) -> Vec<f32> {
+    embedding
+        .to_vec()
+        .into_iter()
+        .map(|value| value.to_f32())
+        .collect()
+}
+
+fn ensure_embedding_dimensions(
+    kind: &str,
+    uid: Uuid,
+    actual: usize,
+    expected: usize,
+) -> Result<()> {
+    if actual != expected {
+        bail!("{kind} embedding {uid} has {actual} dimensions, expected {expected}");
+    }
+    Ok(())
+}
+
+fn write_pretty_json<T>(path: &Path, value: &T) -> Result<()>
+where
+    T: Serialize,
+{
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create output directory {}", parent.display()))?;
+    }
+    fs::write(path, serde_json::to_vec_pretty(value)?)
+        .with_context(|| format!("write {}", path.display()))
 }
 
 async fn validate_cached_workload(
@@ -489,9 +644,11 @@ struct RetrievalEvalInputs<'a> {
     graph_policy: GraphRetrievalPolicy,
     weak_repeat_fallback_top_k: Option<usize>,
     weak_repeat_rerank: bool,
+    capture_embedding_export_queries: bool,
+    expected_embedding_dim: usize,
 }
 
-async fn retrieve_questions(inputs: RetrievalEvalInputs<'_>) -> Result<Vec<QueryMeasurement>> {
+async fn retrieve_questions(inputs: RetrievalEvalInputs<'_>) -> Result<QueryRun> {
     let RetrievalEvalInputs {
         pool,
         tenant_id,
@@ -504,6 +661,8 @@ async fn retrieve_questions(inputs: RetrievalEvalInputs<'_>) -> Result<Vec<Query
         graph_policy,
         weak_repeat_fallback_top_k,
         weak_repeat_rerank,
+        capture_embedding_export_queries,
+        expected_embedding_dim,
     } = inputs;
     let scope = RlsContext::tenant(tenant_id);
     let vector_factory = VectorStoreFactory::from_config(config);
@@ -518,6 +677,11 @@ async fn retrieve_questions(inputs: RetrievalEvalInputs<'_>) -> Result<Vec<Query
             .with_graph_policy(graph_policy);
     let memory_scope = MemoryScope::Tenant { tenant_id };
     let mut measurements = Vec::with_capacity(selected.questions.len());
+    let mut embedding_export_queries = Vec::with_capacity(if capture_embedding_export_queries {
+        selected.questions.len()
+    } else {
+        0
+    });
     for question in &selected.questions {
         let embed_started = Instant::now();
         let embeddings = embedder
@@ -528,6 +692,18 @@ async fn retrieve_questions(inputs: RetrievalEvalInputs<'_>) -> Result<Vec<Query
             .into_iter()
             .next()
             .context("query embedding provider returned no vectors")?;
+        if query_embedding.len() != expected_embedding_dim {
+            bail!(
+                "query embedding has {} dimensions, expected {}",
+                query_embedding.len(),
+                expected_embedding_dim
+            );
+        }
+        let export_query = capture_embedding_export_queries.then(|| EmbeddingExportQuery {
+            question: question.question.clone(),
+            gold_article_ids: question.article_ids.clone(),
+            embedding: query_embedding.clone(),
+        });
         let query_embedding_ms = elapsed_ms(embed_started);
         let retrieve_started = Instant::now();
         let mut output = retrieve_wixqa_output(
@@ -615,8 +791,14 @@ async fn retrieve_questions(inputs: RetrievalEvalInputs<'_>) -> Result<Vec<Query
             retrieval_ms,
             total_ms: query_embedding_ms.saturating_add(retrieval_ms),
         });
+        if let Some(export_query) = export_query {
+            embedding_export_queries.push(export_query);
+        }
     }
-    Ok(measurements)
+    Ok(QueryRun {
+        measurements,
+        embedding_export_queries,
+    })
 }
 
 async fn retrieve_wixqa_output(
@@ -697,8 +879,8 @@ fn query_metrics(
     top_k: usize,
 ) -> QueryMetrics {
     let gold = gold_article_ids.iter().collect::<BTreeSet<_>>();
-    let top_articles = ranked_articles.iter().take(top_k).collect::<Vec<_>>();
-    let matched = top_articles
+    let top_source_objects = ranked_articles.iter().take(top_k).collect::<Vec<_>>();
+    let matched = top_source_objects
         .iter()
         .filter(|article_id| gold.contains(*article_id))
         .count();
@@ -1030,7 +1212,7 @@ fn build_report(
         cost,
         per_query: measurements,
         notes: vec![
-            "WixQA gold uses article_ids; this report measures article-level retrieval before answer generation.".to_string(),
+            "WixQA gold uses article_ids; this report measures source-object retrieval before answer generation.".to_string(),
             "Rerank cost is estimated per query when reranker is enabled; embedding token counts use the repo's chars/4 estimator.".to_string(),
         ],
     }
@@ -1095,7 +1277,9 @@ fn graph_diagnostics_report(
         }
         report.candidate_counts.add(diagnostics.candidate_counts);
         report.raw_path_count += diagnostics.raw_path_count;
-        report.article_ranking.record(&diagnostics.article_ranking);
+        report
+            .source_object_ranking
+            .record(&diagnostics.source_object_ranking);
         graph_latencies.push(u128::from(diagnostics.graph_latency_ms));
         if let Some(comparison) = &measurement.graph_comparison {
             report.compared_query_count += 1;
@@ -1107,7 +1291,7 @@ fn graph_diagnostics_report(
         }
     }
     report.graph_latency = LatencySummary::from_values(graph_latencies);
-    report.article_ranking.finish();
+    report.source_object_ranking.finish();
     report
 }
 
@@ -1474,6 +1658,7 @@ struct Options {
     vector_sync_drain_limit: i64,
     weak_repeat_fallback_top_k: Option<usize>,
     weak_repeat_rerank: bool,
+    embedding_export: Option<PathBuf>,
     help: bool,
 }
 
@@ -1502,6 +1687,7 @@ impl Options {
             vector_sync_drain_limit: VECTOR_SYNC_DRAIN_LIMIT,
             weak_repeat_fallback_top_k: None,
             weak_repeat_rerank: false,
+            embedding_export: None,
             help: false,
         };
         let mut args = args.peekable();
@@ -1581,6 +1767,10 @@ impl Options {
                         Some(parse_usize(&arg, &required_value(&mut args, &arg)?)?);
                 }
                 "--weak-repeat-rerank" => options.weak_repeat_rerank = true,
+                "--embedding-export" => {
+                    options.embedding_export =
+                        Some(PathBuf::from(required_value(&mut args, &arg)?));
+                }
                 other => bail!("unknown wixqa-rag-eval option: {other}"),
             }
         }
@@ -1654,7 +1844,7 @@ fn parse_bool_flag(flag: &str, next: Option<&str>) -> Result<bool> {
 fn parse_graph_policy(value: &str) -> Result<GraphRetrievalPolicy> {
     GraphRetrievalPolicy::from_str_label(value).with_context(|| {
         format!(
-            "unsupported --graph-policy value `{value}`; expected off|context-only|legacy-broad-expansion|anchored-rescue|article-graph|entity-local-search|propagation|community"
+            "unsupported --graph-policy value `{value}`; expected off|context-only|legacy-broad-expansion|anchored-rescue|source-graph|entity-local-search|propagation|community"
         )
     })
 }
@@ -1676,7 +1866,7 @@ fn print_help() {
           --embedding-dim N            Embedding output dimension (default: 1024)\n\
           --reranker [on|off]          Enable Cohere rerank-v4.0-fast (default: off)\n\
            --disable-graph-expansion    Measure vector+lexical fusion without graph expansion\n\
-          --graph-policy NAME          off|context-only|legacy-broad-expansion|anchored-rescue|article-graph|entity-local-search|propagation|community (default: anchored-rescue)\n\
+          --graph-policy NAME          off|context-only|legacy-broad-expansion|anchored-rescue|source-graph|entity-local-search|propagation|community (default: anchored-rescue)\n\
            --chunk-target-tokens N      Chunk target tokens (default: 700)\n\
            --chunk-max-tokens N         Chunk max tokens (default: 1000)\n\
            --chunk-min-tokens N         Chunk min tokens (default: 120)\n\
@@ -1685,7 +1875,8 @@ fn print_help() {
            --drain-vector-sync          Drain external vector sync even when ingestion is skipped\n\
           --vector-sync-drain-limit N  Maximum outbox rows to drain (default: 100000)\n\
           --weak-repeat-fallback-top-k N  Rerun retrieval at N when top-10 has no repeated source article\n\
-          --weak-repeat-rerank       Rerank only weak-repeat queries at the primary top-k\n"
+          --weak-repeat-rerank       Rerank only weak-repeat queries at the primary top-k\n\
+          --embedding-export PATH        Write eval-only chunk/query embedding bundle\n"
     );
 }
 
@@ -1717,6 +1908,45 @@ struct SelectedWorkload {
 struct CachedWorkload {
     article_count: u64,
     chunk_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EmbeddingExport {
+    dataset: String,
+    cache_key: String,
+    embedding_model: String,
+    embedding_dimensions: usize,
+    metric: String,
+    tenant_id: Uuid,
+    connection_uid: Uuid,
+    storage_partition_id: String,
+    chunk_count: usize,
+    query_count: usize,
+    chunks: Vec<EmbeddingExportChunk>,
+    queries: Vec<EmbeddingExportQuery>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EmbeddingExportChunk {
+    uid: Uuid,
+    article_id: String,
+    title: Option<String>,
+    source_uri: Option<String>,
+    text: String,
+    embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EmbeddingExportQuery {
+    question: String,
+    gold_article_ids: Vec<String>,
+    embedding: Vec<f32>,
+}
+
+#[derive(Debug)]
+struct QueryRun {
+    measurements: Vec<QueryMeasurement>,
+    embedding_export_queries: Vec<EmbeddingExportQuery>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1835,7 +2065,7 @@ struct GraphDiagnosticsReport {
     hop_histogram: BTreeMap<u8, usize>,
     candidate_counts: GraphCandidateCounts,
     raw_path_count: usize,
-    article_ranking: ArticleRankingReport,
+    source_object_ranking: SourceObjectRankingReport,
     graph_latency: LatencySummary,
     graph_hurt_count: usize,
     graph_rescue_count: usize,
@@ -1844,23 +2074,23 @@ struct GraphDiagnosticsReport {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
-struct ArticleRankingReport {
+struct SourceObjectRankingReport {
     enabled_query_count: usize,
-    ranked_article_count: usize,
-    feature_totals: ArticleFeatureContributions,
-    top_rank_movements: Vec<ArticleFeatureContribution>,
+    ranked_source_object_count: usize,
+    feature_totals: SourceObjectFeatureContributions,
+    top_rank_movements: Vec<SourceObjectFeatureContribution>,
 }
 
-impl ArticleRankingReport {
-    fn record(&mut self, diagnostics: &moa_brain::retrieval::ArticleRankingDiagnostics) {
+impl SourceObjectRankingReport {
+    fn record(&mut self, diagnostics: &moa_brain::retrieval::SourceObjectRankingDiagnostics) {
         if !diagnostics.enabled {
             return;
         }
         self.enabled_query_count += 1;
-        self.ranked_article_count += diagnostics.ranked_article_count;
+        self.ranked_source_object_count += diagnostics.ranked_source_object_count;
         self.feature_totals.add(diagnostics.feature_totals);
         self.top_rank_movements
-            .extend(diagnostics.top_articles.iter().cloned());
+            .extend(diagnostics.top_source_objects.iter().cloned());
     }
 
     fn finish(&mut self) {
@@ -1874,7 +2104,7 @@ impl ArticleRankingReport {
     }
 }
 
-fn movement_magnitude(contribution: &ArticleFeatureContribution) -> usize {
+fn movement_magnitude(contribution: &SourceObjectFeatureContribution) -> usize {
     contribution
         .rank_delta_after_minus_before
         .map(i64::unsigned_abs)
@@ -2130,6 +2360,24 @@ mod tests {
     }
 
     #[test]
+    fn embedding_export_option_parses_output_path() {
+        // Pins: the WixQA harness can write a reusable embedding bundle for
+        // offline embedding experiments without changing the normal report path.
+        let options = Options::parse(
+            ["--embedding-export", ".moa/wixqa/exports/export.json"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("embedding export option should parse");
+
+        assert_eq!(
+            options.embedding_export.as_deref(),
+            Some(Path::new(".moa/wixqa/exports/export.json"))
+        );
+        assert_eq!(options.output, PathBuf::from(DEFAULT_OUTPUT));
+    }
+
+    #[test]
     fn top_graph_paths_reports_seed_and_path_identity_for_harmful_candidate() {
         // Pins: WixQA graph-harm diagnostics name the seed, seed source,
         // candidate, rank, article, hop, and path labels that produced harm.
@@ -2231,36 +2479,36 @@ mod tests {
     }
 
     #[test]
-    fn graph_report_aggregates_article_feature_contributions() {
-        // Pins: WixQA reports expose ArticleGraph feature totals and rank
+    fn graph_report_aggregates_source_object_feature_contributions() {
+        // Pins: WixQA reports expose SourceGraph feature totals and rank
         // movements instead of burying them in per-query retrieval diagnostics.
         let object_uid = Uuid::from_u128(42);
-        let mut diagnostics = GraphRetrievalDiagnostics::new(GraphRetrievalPolicy::ArticleGraph);
-        diagnostics.article_ranking = moa_brain::retrieval::ArticleRankingDiagnostics {
+        let mut diagnostics = GraphRetrievalDiagnostics::new(GraphRetrievalPolicy::SourceGraph);
+        diagnostics.source_object_ranking = moa_brain::retrieval::SourceObjectRankingDiagnostics {
             enabled: true,
-            ranked_article_count: 2,
-            feature_totals: ArticleFeatureContributions {
+            ranked_source_object_count: 2,
+            feature_totals: SourceObjectFeatureContributions {
                 max_fused_score: 1.0,
                 lexical_title: 0.05,
-                same_article_repeat: 0.02,
+                same_source_object_repeat: 0.02,
                 exact_title_match: 0.04,
                 typed_graph_evidence: 0.03,
                 adjacent_chunk_support: 0.01,
                 structural_only_penalty: -0.04,
             },
-            top_articles: vec![ArticleFeatureContribution {
+            top_source_objects: vec![SourceObjectFeatureContribution {
                 object_uid,
                 source_uri: Some("https://support.example.invalid/a".to_string()),
                 source_title: Some("Custom domains".to_string()),
                 chunk_count: 2,
-                rank_before_article_graph: Some(3),
-                rank_after_article_graph: 1,
+                rank_before_source_graph: Some(3),
+                rank_after_source_graph: 1,
                 rank_delta_after_minus_before: Some(-2),
                 score: 1.11,
-                features: ArticleFeatureContributions {
+                features: SourceObjectFeatureContributions {
                     max_fused_score: 1.0,
                     lexical_title: 0.05,
-                    same_article_repeat: 0.02,
+                    same_source_object_repeat: 0.02,
                     exact_title_match: 0.04,
                     typed_graph_evidence: 0.03,
                     adjacent_chunk_support: 0.01,
@@ -2294,28 +2542,28 @@ mod tests {
         let report = graph_diagnostics_report(
             &measurements,
             &Options {
-                graph_policy: GraphRetrievalPolicy::ArticleGraph,
+                graph_policy: GraphRetrievalPolicy::SourceGraph,
                 ..Options::parse(std::iter::empty()).expect("default options should parse")
             },
         );
 
-        assert_eq!(report.article_ranking.enabled_query_count, 1);
-        assert_eq!(report.article_ranking.ranked_article_count, 2);
+        assert_eq!(report.source_object_ranking.enabled_query_count, 1);
+        assert_eq!(report.source_object_ranking.ranked_source_object_count, 2);
         assert_eq!(
-            report.article_ranking.feature_totals,
-            ArticleFeatureContributions {
+            report.source_object_ranking.feature_totals,
+            SourceObjectFeatureContributions {
                 max_fused_score: 1.0,
                 lexical_title: 0.05,
-                same_article_repeat: 0.02,
+                same_source_object_repeat: 0.02,
                 exact_title_match: 0.04,
                 typed_graph_evidence: 0.03,
                 adjacent_chunk_support: 0.01,
                 structural_only_penalty: -0.04,
             }
         );
-        assert_eq!(report.article_ranking.top_rank_movements.len(), 1);
+        assert_eq!(report.source_object_ranking.top_rank_movements.len(), 1);
         assert_eq!(
-            report.article_ranking.top_rank_movements[0].object_uid,
+            report.source_object_ranking.top_rank_movements[0].object_uid,
             object_uid
         );
     }

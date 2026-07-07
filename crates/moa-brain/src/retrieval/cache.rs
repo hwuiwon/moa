@@ -12,7 +12,8 @@ use moka::future::Cache;
 use sqlx::PgPool;
 
 use crate::planning::PlannedQuery;
-use crate::retrieval::hybrid::{HybridRetriever, Result};
+use crate::retrieval::hybrid::HybridRetriever;
+use crate::retrieval::types::Result;
 use crate::retrieval::{RetrievalHit, RetrievalRequest};
 
 const DEFAULT_MAX_TENANTS: u64 = 1_000;

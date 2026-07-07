@@ -231,7 +231,7 @@ fn memory_eval_report_serializes_probe_graph_harm_path() -> TestResult {
             graph_only: 1,
             ..GraphCandidateCounts::default()
         },
-        article_ranking: moa_brain::retrieval::ArticleRankingDiagnostics::default(),
+        source_object_ranking: moa_brain::retrieval::SourceObjectRankingDiagnostics::default(),
         graph_latency_ms: 7,
         raw_path_count: 1,
     };
