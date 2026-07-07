@@ -1,6 +1,10 @@
 # WixQA RAG Experiments
 
-This file is the running scorecard for WixQA retrieval experiments in MOA. Append new runs here as JSON reports are produced so quality, latency, and cost decisions stay tied to measured results.
+This file is an experiment log for WixQA retrieval runs in MOA, not the
+canonical retrieval architecture. Append new runs here as JSON reports are
+produced so quality, latency, and cost decisions stay tied to measured results.
+For current production retrieval behavior, read the code and the numbered
+architecture docs first.
 
 ## Priorities
 
@@ -8,7 +12,7 @@ This file is the running scorecard for WixQA retrieval experiments in MOA. Appen
 2. Latency: keep the default path acceptable for realtime conversations.
 3. Price: avoid paid rerank or extra embedding work unless the measured quality gain justifies it.
 
-## Current Evaluation Setup
+## Evaluation Setup Snapshot
 
 - Dataset: WixQA `simulated` split.
 - Main working subset: 200 questions over 1000 selected articles.
@@ -24,20 +28,23 @@ This file is the running scorecard for WixQA retrieval experiments in MOA. Appen
 
 ## Decision Baseline
 
-The current default recommendation is:
+The current code default for graph retrieval policy is `AnchoredRescue`.
+`SourceGraph` remains an explicit experiment/eval mode, not the default path.
+The measured WixQA recommendation from this log is:
 
 - Turbopuffer vector-first retrieval.
 - `top_k=25`.
-- Graph expansion disabled for tenant knowledge retrieval.
+- `AnchoredRescue` graph guardrails by default; use `SourceGraph` explicitly
+  for the measured graph-ranking candidate.
 - Turbopuffer BM25 disabled on the vector-first tenant knowledge path.
 - Cohere rerank disabled by default.
 - Optional WixQA candidate: weak-repeat k50 fallback when higher recall is preferred over the lowest p95.
 
 Rationale: rerank improves rank quality but is too slow and expensive for default realtime use; BM25 variants rescued too little recall or hurt rank quality enough to stay out of the default path. Weak-repeat k50 fallback is the best measured no-rerank recall lever. Chunk300 plus weak-repeat fallback is the best measured query-time score, but it requires rebuilding the graph/vector cache and increases indexed chunks by about 34%.
 
-## Current Graph Experiment Plan
+## 2026-07-06 Graph Experiment Snapshot
 
-The next graph-quality lane keeps complexity and latency low:
+The graph-quality lane tracked on 2026-07-06 kept complexity and latency low:
 
 1. Source-diverse SourceGraph context selection: select the first chunk from each source object before filling leftover slots with capped same-source-object support chunks. This is the first implementation step because it uses existing ranked hits and adds no provider calls, no graph rebuild, and no paid rerank.
 2. Exact-anchor entity-local search: only admit semantic entity graph seeds when entity phrases have exact multi-token overlap with the query or selected article title. This stays experimental until the article-diverse selector is measured.
@@ -165,7 +172,7 @@ These runs used 10 questions over 100 articles and are useful only for quick smo
 - Gemini 2 k10 is not a good fast-mode default. It has high MRR/NDCG but recall 0.975 and total p95 531 ms, so it is slower and costlier than Cohere k25 while matching Cohere k25 recall.
 - Gemini 2 k10 with weak-repeat fallback to k25 is dominated by direct Gemini 2 k25: lower recall/MRR/NDCG and higher p95.
 - Gemini 2 k25 with selective Cohere rerank is rejected: recall fell to 0.9875 and MRR/NDCG fell versus no-rerank Gemini 2 k25, while cost rose to 0.3465.
-- Current mode readout: fast should remain Cohere k25 for latency/cost; balanced should use SourceGraph top-change gating on Gemini 2 k25 when quality can dominate cost; slow should use SourceGraph top-change gating until a better semantic graph or source-object-collapsed rerank beats it under the 3s cap.
+- 2026-07-06 mode readout: fast should remain Cohere k25 for latency/cost; balanced should use explicit SourceGraph top-change gating on Gemini 2 k25 when quality can dominate cost; slow should use explicit SourceGraph top-change gating until a better semantic graph or source-object-collapsed rerank beats it under the 3s cap.
 
 ### 2026-07-06 Gemini 2 Plus Graph Expansion
 

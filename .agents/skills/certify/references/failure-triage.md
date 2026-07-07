@@ -12,7 +12,7 @@ Do not jump from "a test failed" to "the orchestrator is broken." In MOA, the fa
 - brain pipeline or streamed-turn harness (`moa-brain`)
 - provider request or parsing logic
 - session store or replay (`moa-session`)
-- tool routing or approval rendering (`moa-hands` / `moa-gateway`)
+- tool routing or approval rendering (`moa-hands` / `moa-messaging` / `moa-edge`)
 - live-service flake
 
 ## Fast Classification Rules

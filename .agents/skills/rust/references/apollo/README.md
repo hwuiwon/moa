@@ -14,4 +14,4 @@ Use only what the task needs:
 - [08-comments-vs-documentation.md](08-comments-vs-documentation.md): use for doc comment and inline comment decisions
 - [09-understanding-pointers.md](09-understanding-pointers.md): use for `Arc`, `Mutex`, `RwLock`, `Send`, `Sync`, and interior mutability
 
-MOA-specific repo rules still win. Read [../moa-rust-rules.md](../moa-rust-rules.md) before treating any generic Rust advice as binding.
+MOA-specific repo rules still win. Read [../repo-rules.md](../repo-rules.md) before treating any generic Rust advice as binding.

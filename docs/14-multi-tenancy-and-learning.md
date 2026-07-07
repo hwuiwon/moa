@@ -55,6 +55,9 @@ This keeps routing flexible while preserving auditable, tenant-scoped adaptation
 
 | Field | Purpose |
 |---|---|
+| `storage_partition_id` | storage partition used by RLS and scoped reads |
+| `user_id` | optional contact/user scope inside the partition |
+| `scope` | generated `global`, `tenant`, or `contact` tier |
 | `tenant_id` | tenant scope |
 | `learning_type` | machine-readable event kind |
 | `target_id` | skill, memory, segment, or other target |

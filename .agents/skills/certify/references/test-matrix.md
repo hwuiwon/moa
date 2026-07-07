@@ -56,12 +56,13 @@ Live provider matrix (requires keys):
 cargo test -p moa-providers --test provider_matrix_live -- --ignored --nocapture
 ```
 
-Per-provider live smoke when narrowing a failure:
+Per-provider embedding/rerank live smokes when narrowing a failure:
 
 ```bash
-cargo test -p moa-providers --test anthropic_live -- --ignored --nocapture
-cargo test -p moa-providers --test openai_live -- --ignored --nocapture
-cargo test -p moa-providers --test gemini_live -- --ignored --nocapture
+cargo test -p moa-providers --test openai_embedding_live -- --ignored --nocapture
+cargo test -p moa-providers --test gemini_embedding_live -- --ignored --nocapture
+cargo test -p moa-providers --test cohere_embedding_live -- --ignored --nocapture
+cargo test -p moa-providers --test cohere_reranker_live -- --ignored --nocapture
 ```
 
 If you do not see one of these test files, list `crates/moa-providers/tests/` and use the actual name.
@@ -90,7 +91,7 @@ cargo test -p moa-memory-graph --tests
 Live cache or live harness verification when prompt layout or cache planning changed:
 
 ```bash
-cargo test -p moa-brain --test harness_live -- --ignored --nocapture
+cargo test -p moa-brain --test brain_turn_live -- --ignored --nocapture
 cargo test -p moa-brain --test cache_audit_live -- --ignored --nocapture
 ```
 
@@ -107,10 +108,10 @@ cargo test -p moa-hands --tests
 When sandbox provider behavior changed, scope to the affected adapter:
 
 ```bash
-cargo test -p moa-hands --test local_provider
+cargo test -p moa-hands --test hands_offline local_tools_offline
+cargo test -p moa-hands --test hands_offline mcp_router
 MOA_RUN_LIVE_DAYTONA_TESTS=1 cargo test -p moa-hands --test daytona_live -- --ignored --nocapture
 MOA_RUN_LIVE_E2B_TESTS=1 cargo test -p moa-hands --test e2b_live -- --ignored --nocapture
-cargo test -p moa-hands --test mcp
 ```
 
 ## Skills and Eval Infrastructure
@@ -131,13 +132,13 @@ curl -X POST "$MOA_EDGE_URL/v1/evals/run" \
   --data @skill-eval-request.json
 ```
 
-## Gateway
+## Messaging And Edge
 
 Deterministic, with feature flags as needed:
 
 ```bash
-cargo test -p moa-gateway --tests
-cargo test -p moa-gateway --tests --features slack
+cargo test -p moa-messaging --tests
+cargo test -p moa-edge --lib
 ```
 
 ## Suggested Release Gate

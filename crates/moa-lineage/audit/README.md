@@ -11,9 +11,11 @@ engineering lineage tier.
 EXTERNAL CRYPTOGRAPHIC REVIEW IS COMPLETE.**
 
 MOA's use of BLAKE3 canonical payload hashes, Ed25519 signatures, Merkle proof
-construction, PII crypto-shredding semantics, and S3 Object Lock handling must be
-reviewed by an external cryptographer or appsec firm before any compliance
-certification or customer audit claim is made.
+construction, PII crypto-shredding semantics, and object-lock
+metadata/manifest signing and verification support must be reviewed by an
+external cryptographer or appsec firm before any compliance certification or
+customer audit claim is made. Bucket-level retention enforcement is an
+operational configuration requirement, not something this crate can guarantee.
 
 Engineering and internal-forensics use is allowed before that review.
 Compliance representations are blocked until the review report is linked from

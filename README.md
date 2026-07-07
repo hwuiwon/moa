@@ -29,7 +29,7 @@ Status: early active development. The architecture is stable enough to document,
 
 - Postgres with pgvector and pgaudit on `localhost:10040`
 - `moa-edge` on `localhost:10000`
-- Restate Server 1.6.2 on `localhost:10010` for ingress and `localhost:10011` for the UI
+- Restate Server 1.7.0 on `localhost:10010` for ingress and `localhost:10011` for the UI
 - `moa-orchestrator` with an internal-only Restate handler port and `localhost:10021` for health
 - PII filter on `localhost:10050`
 - audit log shipper with no exposed port
@@ -149,13 +149,14 @@ cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --healt
 The binary serves these Restate surfaces: virtual objects `Session`, `Worker`,
 `Tenant`, `CronJob`, and `IngestionVO`; services `AgentDefinitions`, `Agents`,
 `AdminMaintenance`, `Artifacts`, `ActionReviews`, `ApiKeys`, `Authz`,
-`AuthzChallenges`, `Contacts`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`,
-`LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`,
-`Tenants`, `ToolExecutor`, and `ActionPolicy`; and workflows
-`Consolidate`, `TurnExecution`, `WorkerTurnExecution`,
-`ProcedureExecution`, and `KnowledgeSyncIngestion`. Feature-gated builds
-also register experiment and eval-runner surfaces. Deployment registration is
-handled outside the binary.
+`AuthzChallenges`, `Contacts`, `Eval`, `Experiments`, `GraphMemoryMaint`,
+`Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`,
+`SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, and `ActionPolicy`; and
+workflows `Consolidate`, `TurnExecution`, `WorkerTurnExecution`,
+`ProcedureExecution`, `KnowledgeSyncIngestion`, `ExperimentRun`, and
+`ExperimentTrialRun`. Builds with `skill-learning` also register the
+`SkillLearning` workflow. Deployment registration is handled outside the
+binary.
 
 The Docker image builds `moa-orchestrator-bin` and installs it as `/usr/local/bin/moa-orchestrator`.
 
@@ -176,7 +177,7 @@ REST / Messaging / API automation
         v
 Restate handler service (`moa-orchestrator-bin`)
         |
-        +-- Session VO -> TurnRunner -> context pipeline -> LLMGateway
+        +-- Session VO -> TurnExecution workflow -> context pipeline -> LLMGateway
         +-- Worker VO -> bounded child agent execution
         +-- ToolExecutor -> ToolRouter -> hands / MCP / built-ins
         +-- Consolidate workflow -> memory compaction
@@ -190,7 +191,10 @@ Postgres / Neon
   lineage, scores, compliance audit tables
 ```
 
-The context pipeline is byte-stable where possible for prompt caching. With query rewriting and memory digests enabled, the current processors are: identity, agent instructions, instructions, tools, query rewrite, skills, digest, memory, history, runtime context, and compactor.
+The context pipeline is byte-stable where possible for prompt caching. With
+query rewriting and memory digests enabled, the current processors are:
+identity, agent instructions, instructions, tools, query rewrite, skills,
+digest, memory, history, delegation planning, runtime context, and compactor.
 
 ## Memory
 
@@ -214,6 +218,7 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-brain`](crates/moa-brain/) | Context pipeline, query rewriting, segment helpers, resolution scoring, streamed turns |
 | [`moa-db`](crates/moa-db/) | Database helpers shared by MOA storage crates (pools, scoped connections, RLS) |
 | [`moa-session`](crates/moa-session/) | Postgres session store, event log, task segments, learning log, analytics views |
+| [`moa-analytics`](crates/moa-analytics/) | Query catalog and read models for safe analytics API queries |
 | [`moa-runtime-store`](crates/moa-runtime-store/) | Runtime cache store implementations (in-memory and Redis/Valkey) |
 | [`moa-migrations`](crates/moa-migrations/) | Central Postgres migrations and schema runners |
 | [`moa-memory-graph`](crates/moa-memory/graph/) | Graph memory store, SQL sidecars, RLS, bitemporal state, and changelog |
@@ -262,7 +267,7 @@ Start with [`docs/README.md`](docs/README.md), then read:
 - [`docs/02-brain-orchestration.md`](docs/02-brain-orchestration.md) for Restate session and worker flow.
 - [`docs/13-task-segmentation.md`](docs/13-task-segmentation.md) for segments and resolution scoring.
 - [`docs/14-multi-tenancy-and-learning.md`](docs/14-multi-tenancy-and-learning.md) for tenants, skills-first learning, rollback, and the learning log.
-- [`architecture.md`](architecture.md) for the current enterprise runtime map.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) for the current enterprise runtime map.
 
 ## Development
 

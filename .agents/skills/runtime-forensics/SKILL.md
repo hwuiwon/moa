@@ -76,7 +76,7 @@ Read only the matching docs before choosing commands:
 - `docs/12-restate-architecture.md` for Restate virtual objects, services, signal flow, and worker behavior
 - `docs/05-session-event-log.md` for persisted events, replay, and recovery
 - `docs/11-event-replay-runbook.md` for replay-cost and event-fetch instrumentation
-- `docs/observability/turn-latency.md` for `session_turn` span interpretation
+- `docs/17-observability.md` for `session_turn` span interpretation
 - `docs/analytics.md` for generated columns, triggers, views, and refresh behavior
 - `docs/implementation-caveats.md` when the issue smells adapter-specific
 

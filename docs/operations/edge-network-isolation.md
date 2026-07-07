@@ -18,8 +18,10 @@ handler debugging, bind `127.0.0.1:10020:9080` in a developer-only override.
 
 - The orchestrator Service is `ClusterIP` or internal, never `LoadBalancer` or
   `NodePort`.
-- A NetworkPolicy permits ingress to Restate ingress only from the `moa-edge`
-  pod selector and ingress to orchestrator port 9080 only from Restate.
+- Deployment manifests must restrict Restate ingress to `moa-edge` and
+  orchestrator port 9080 to Restate. Current Restate deployment config uses
+  `networkPeers` for this service-level boundary; add Kubernetes
+  `NetworkPolicy` objects in environments that enforce them.
 - If a service mesh is in use, require mTLS between `moa-edge` and the
   orchestrator.
 - Verify exposure on deploy:

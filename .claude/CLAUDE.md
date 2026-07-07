@@ -1,5 +1,5 @@
-# CodeGraph
+# Claude Project Notes
 
-In repositories indexed by CodeGraph, use `codegraph_explore` for codebase
-structure questions before grep/find or reading files. For shells and
-subagents without MCP access, use `./scripts/codegraph explore "<question>"`.
+Use the repository-level instructions in [`../AGENTS.md`](../AGENTS.md). This
+scoped file exists only so Claude-style tooling loads project guidance without
+duplicating the full instruction set.

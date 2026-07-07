@@ -29,7 +29,7 @@ cargo test -p moa-orchestrator --test orchestrator_offline replay_determinism --
 For live or provider lifecycle failures:
 
 ```bash
-MOA_RUN_LIVE_PROVIDER_TESTS=1 cargo test -p moa-brain --test live_harness -- --ignored --nocapture
+MOA_RUN_LIVE_PROVIDER_TESTS=1 cargo test -p moa-brain --test brain_turn_live -- --ignored --nocapture
 ```
 
 If a target name is not present in the current `tests/` directory, list the directory and pick the closest current name.
@@ -38,25 +38,20 @@ If a target name is not present in the current `tests/` directory, list the dire
 
 When a repro yields a session id, collect both the row-level summary and the raw events.
 
-Use the hosted analytics API for the fast operational view:
+Use the hosted analytics catalog/query API for the fast operational view:
 
 ```bash
-curl -X POST "$MOA_EDGE_URL/v1/analytics/session-stats" \
+curl "$MOA_EDGE_URL/v1/analytics/catalog" \
+  -H "Authorization: Bearer $MOA_API_KEY" \
+  -H "Content-Type: application/json"
+curl -X POST "$MOA_EDGE_URL/v1/analytics/query" \
   -H "Authorization: Bearer $MOA_API_KEY" \
   -H "Content-Type: application/json" \
-  --data '{"session_id":"<session-id>"}'
-curl -X POST "$MOA_EDGE_URL/v1/analytics/tool-stats" \
+  --data '{"dataset":"sessions","dimensions":[{"field":"status","alias":null}],"measures":[{"field":null,"aggregation":"count","alias":"sessions"}],"filters":[],"order_by":[],"limit":20}'
+curl -X POST "$MOA_EDGE_URL/v1/analytics/query" \
   -H "Authorization: Bearer $MOA_API_KEY" \
   -H "Content-Type: application/json" \
-  --data '{}'
-curl -X POST "$MOA_EDGE_URL/v1/analytics/tenant-stats" \
-  -H "Authorization: Bearer $MOA_API_KEY" \
-  -H "Content-Type: application/json" \
-  --data '{"days":30}'
-curl -X POST "$MOA_EDGE_URL/v1/analytics/cache-stats" \
-  -H "Authorization: Bearer $MOA_API_KEY" \
-  -H "Content-Type: application/json" \
-  --data '{"days":30}'
+  --data '{"dataset":"tool_calls","dimensions":[{"field":"tool_name","alias":null}],"measures":[{"field":null,"aggregation":"count","alias":"calls"}],"filters":[],"order_by":[],"limit":20}'
 ```
 
 If you need the raw event log, query the store or use the test harness path already used by the failing test. The key question is whether the expected event was persisted at all.

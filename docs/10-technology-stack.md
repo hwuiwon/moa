@@ -4,42 +4,25 @@ _Crates, services, build targets, and deployment dependencies._
 
 ## Rust Workspace
 
-The root workspace currently contains:
+The root workspace currently contains these packages from
+`cargo metadata --no-deps`:
 
-| Crate | Purpose |
-|---|---|
-| `moa-core` | Shared traits, DTOs, config, events, telemetry, analytics helpers |
-| `moa-artifacts` | Canonical skill (including optional procedures), connector, action, and agent artifact documents, validation, references, tenant scopes, and Postgres registry |
-| `moa-brain` | Context pipeline, query rewriting, task segmentation helpers, segment assessment |
-| `moa-session` | Tenant-owned Postgres session store, event log, task segments, learning log, analytics |
-| `moa-runtime-store` | Runtime cache implementations for process-local memory and optional Redis-backed coordination |
-| `moa-migrations` | Central refinery migrations, schema-isolated test replay helpers, and database DDL guardrails |
-| `moa-knowledge` | Tenant knowledge linked connectors, provider sync, parsing, normalization, block/chunk derivation, sync-run inspection, and graph ingestion assembly |
-| `moa-memory/graph` (`moa-memory-graph`) | Relational graph-memory node and edge tables, sidecar indexes, RLS, and changelog |
-| `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path graph-memory ingestion DTOs and deterministic helpers |
-| `moa-memory/pii` (`moa-memory-pii`) | PII classification client and privacy-class aggregation helpers |
-| `moa-memory/vector` (`moa-memory-vector`) | VectorStore trait, Gemini/Cohere embedders, pgvector halfvec backend, and Turbopuffer cloud backend |
-| `moa-lineage/core` (`moa-lineage-core`) | Lineage record and score record types |
-| `moa-lineage/citation` (`moa-lineage-citation`) | Provider citation normalization and answer-source verification |
-| `moa-lineage/sink` (`moa-lineage-sink`) | Async lineage sink writers |
-| `moa-lineage/otel` (`moa-lineage-otel`) | OTel/OpenInference bridge |
-| `moa-lineage/audit` (`moa-lineage-audit`) | Compliance audit hash chain, Merkle root, signing, and DSAR support |
-| `moa-auth/authz-schema` (`moa-authz-schema`) | Typed OpenFGA tuple keys and model constants |
-| `moa-auth/authz` (`moa-authz`) | OpenFGA client, authorization checks, transactional outbox, and outbox poller |
-| `moa-auth/providers` (`moa-auth-providers`) | Local API keys, disabled auth, builtin async-authz challenges, null token vault, and provider bundle construction |
-| `moa-auth/auth0` (`moa-auth-providers-auth0`) | Optional Auth0 and generic OIDC providers gated by the `auth0` feature |
-| `moa-auth/fga-bootstrap` (`moa-fga-bootstrap`) | OpenFGA store and authorization-model bootstrap binary |
-| `moa-ocsf` | OCSF v1.3 security-event types, emit helpers, signing, and persistence |
-| `moa-hands` | Tool router, local/Docker hands, Daytona, E2B, MCP |
-| `moa-providers` | Anthropic, OpenAI, Gemini, embedding provider wiring, reranker provider wiring |
-| `moa-orchestrator` | One production binary with Restate services, virtual objects, workflows, and in-process application/repository boundaries |
-| `moa-messaging` | Slack adapter, renderer, Postmark email connector, and Twilio SMS connector |
-| `moa-security` | Action policies, MCP credential proxy, prompt-injection controls |
-| `moa-skills` | Skill parser, DB-backed tenant package registry, tenant-local draft proposal generation, regression suite source generation, and the pure deterministic procedure interpreter |
-| `moa-eval` | Evaluation harness used by CI and optional orchestrator-owned internal eval execution |
-| `moa-loadtest` | Direct HTTP load-test harness for hosted orchestrator APIs |
-| `workspace-hack` | Generated `cargo-hakari` feature unification crate |
-| `xtask` | Repo-local audits and maintenance commands |
+- Core/runtime: `moa-core`, `moa-brain`, `moa-db`, `moa-session`,
+  `moa-runtime-store`, `moa-edge`, `moa-orchestrator`, `moa-migrations`.
+- Memory/knowledge: `moa-knowledge`, `moa-memory-graph`,
+  `moa-memory-ingest`, `moa-memory-lifecycle`, `moa-memory-pii`,
+  `moa-memory-types`, `moa-memory-vector`.
+- Auth/security/audit: `moa-authz`, `moa-authz-schema`,
+  `moa-auth-providers`, `moa-auth-providers-auth0`, `moa-fga-bootstrap`,
+  `moa-ocsf`, `moa-security`.
+- Lineage/observability/analytics: `moa-lineage-core`,
+  `moa-lineage-citation`, `moa-lineage-sink`, `moa-lineage-otel`,
+  `moa-lineage-audit`, `moa-observability`, `moa-analytics`.
+- Product domains: `moa-agents`, `moa-contacts`, `moa-artifacts`,
+  `moa-experiments`, `moa-scoring`, `moa-messaging`, `moa-skills`.
+- Providers/tools/eval/dev: `moa-hands`, `moa-providers`,
+  `moa-eval-core`, `moa-eval`, `moa-loadtest`, `moa-test-support`,
+  `workspace-hack`, `xtask`.
 
 ## Core Dependencies
 

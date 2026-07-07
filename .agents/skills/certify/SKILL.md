@@ -2,7 +2,7 @@
 name: certify
 description: >
   Use this skill when validating MOA changes before merge or release, especially for
-  orchestrators (Restate or local), providers, approvals, session lifecycle, persistence,
+  orchestrators (Restate orchestrator or direct brain harness), providers, approvals, session lifecycle, persistence,
   event schemas, memory and context pipeline, or skill/eval infrastructure. It selects
   the right deterministic and live test matrix, enforces shared orchestrator contract
   coverage, and helps localize regressions before shipping. Triggers include: "validate

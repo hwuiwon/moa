@@ -101,6 +101,9 @@ CREATE TABLE events (
 CREATE TABLE task_segments (
     id UUID PRIMARY KEY,
     session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    storage_partition_id TEXT NOT NULL,
+    user_id TEXT,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     tenant_id TEXT NOT NULL,
     segment_index INT NOT NULL,
     task_summary TEXT,
@@ -116,6 +119,9 @@ CREATE TABLE task_segments (
     previous_segment_id UUID,
     UNIQUE(session_id, segment_index)
 );
+
+CREATE INDEX idx_task_segments_scope
+    ON task_segments (storage_partition_id, scope, user_id);
 ```
 
 `contact_channel_accounts` stores provider-native identities or delivery
@@ -234,7 +240,8 @@ and `narration:{session_id}:{narration_seq}`.
 
 `task_segments` is the queryable state for segment analytics and learning. It stores the current or final state for each segment:
 
-- tenant and session scope
+- storage partition, generated scope tier, optional user, tenant, and session
+  scope
 - segment index and previous segment edge
 - task summary
 - start/end timestamps
@@ -360,7 +367,7 @@ Session rollups come from generated columns and triggers. Views and materialized
 - `tool_call_analytics`
 - `tool_call_summary`
 - `session_turn_metrics`
-- `daily_tenant_metrics`
+- `daily_storage_partition_metrics`
 - `skill_resolution_rates`
 - `segment_baselines`
 

@@ -13,7 +13,7 @@ description: Run and baseline MOA's live 100-session realistic persona sweep. Us
    - latest reports under `docs/engineering-discipline/live-runs/`
    - Restate/Redis/Postgres availability if the run fails early.
 3. Use the bundled runner:
-   - `scripts/run_100_session_sweep.py`
+   - `.agents/skills/moa-100-session-sweep/scripts/run_100_session_sweep.py`
 4. Run the full baseline unless the user asks for a focused lane:
    - `MOA_SWEEP_WRITE_REPO=1 MOA_SWEEP_MODEL=gpt-5.4-mini .agents/skills/moa-100-session-sweep/scripts/run_100_session_sweep.py`
 5. For a focused lane, set `MOA_SWEEP_IDS` (the repo baseline is not written unless you add `MOA_SWEEP_WRITE_REPO=1`):

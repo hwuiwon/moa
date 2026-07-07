@@ -20,7 +20,6 @@ report identifies the bottleneck before new memory architecture ships.
 |---|---|
 | `recorded` | PR-CI mode. A JSONL transcript provides user turns and recorded provider events. |
 | `scripted_user` | Offline replay guard. A goal card and scripted-user JSONL drive the normal long-conversation runner without live simulation or billed providers. |
-| `live` | Reserved for nightly or manual provider runs. Never run by default. |
 
 Recorded mode uses `RecordedScriptedProvider`. Strict matching is the default:
 if the latest user message differs from the transcript, the run fails with a
@@ -78,9 +77,8 @@ store, and memory retrieval stages still run.
 
 Recorded mode is the default CI implementation. `scripted_user` mode is also
 implemented for offline scripted-user replay guards: the runner reads the goal
-card and scripted user turns, then drives the same brain/session path. `live`
-remains an explicit schema value for future nightly or manual provider runs and
-is not implemented in the default local lane.
+card and scripted user turns, then drives the same brain/session path. There is
+no in-repo long-conversation `live` mode in the current suite schema.
 
 ## ScoreCard
 
@@ -204,14 +202,13 @@ Only update a scenario after confirming:
 4. the scenario documentation explains the invariant;
 5. transcripts do not contain timestamps, request IDs, secrets, or PII.
 
-When re-recording:
+When re-recording, use a dedicated recorder or fixture-generation workflow for
+the scenario and commit only the resulting sanitized `transcript.jsonl`. The
+current in-repo test runner replays recorded transcripts; it does not wire a
+generic recording mode.
 
-```bash
-MOA_RECORD_TRANSCRIPT=1 cargo test -p moa-eval --test long_conversation_smoke_eval -- --ignored
-```
-
-Validate with the ignored long-conversation test and the budget gate before
-committing transcript changes.
+Validate transcript changes with the ignored long-conversation test and the
+budget gate before committing them.
 
 Escalate immediately when any safety exposure counter is non-zero, cache
 regression materially increases cost, the same scenario flakes twice, event

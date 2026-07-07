@@ -39,7 +39,7 @@ Choose a mutation that represents a real regression that could plausibly happen 
 | `tx.commit().await?` | Replace with `tx.rollback().await?` |
 | Sequence number assignment | Reuse the previous number instead of incrementing |
 | Workspace GUC `SET LOCAL` | Change to `SET` (leaks across pool checkouts) |
-| Cypher query with workspace constraint | Remove the workspace clause |
+| Relational graph query with scoped storage predicates | Remove the `ScopedConn`/GUC setup or drop the `storage_partition_id`/`scope` filter |
 
 Pick the one that would be hardest to spot in a code review. If the test catches that one, it is strong.
 

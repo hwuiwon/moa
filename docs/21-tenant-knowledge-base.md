@@ -171,7 +171,7 @@ context.
 
 ## Public Endpoints
 
-Task 9 defines the public HTTP routes for this surface:
+The public HTTP routes for this surface are:
 
 - `POST /v1/knowledge/integrations`
 - `POST /v1/knowledge/link-token`
@@ -180,6 +180,8 @@ Task 9 defines the public HTTP routes for this surface:
 - `POST /v1/knowledge/sync-status`
 - `POST /v1/knowledge/sync-events`
 - `POST /v1/knowledge/connections`
+- `POST /v1/knowledge/connections/source-selection`
+- `POST /v1/knowledge/connections/disconnect`
 - `POST /v1/knowledge/objects`
 - `POST /v1/knowledge/object`
 - `POST /v1/knowledge/query-trace`

@@ -8,9 +8,8 @@ Use a regression eval when the question is "did this behavior regress under a
 controlled scenario?" Regression evals live in `moa-eval`. They use datasets,
 transcripts, scripted providers, replay, and budget gates so CI and nightly
 jobs can compare runs deterministically. The `Eval` service is an
-internal-only surface compiled behind `internal-eval-runner`; hosted run status
-is persisted in Postgres. Default public edge builds do not translate
-`/v1/evals/*`.
+internal-only Restate surface; hosted run status is persisted in Postgres.
+Public edge builds do not translate `/v1/evals/*` product routes.
 
 Use a live behavior experiment when the question is "what happens when this
 variant uses real MOA execution paths?" Live experiments live in
@@ -76,12 +75,24 @@ the `Experiments` Restate service:
 | `POST /v1/experiments/run-plan` | `Experiments/run` |
 | `POST /v1/experiments/status` | `Experiments/status` |
 | `POST /v1/experiments/list` | `Experiments/list` |
+| `POST /v1/experiments/plans/list` | `Experiments/list_plans` |
 | `POST /v1/experiments/trials` | `Experiments/trials` |
 | `POST /v1/experiments/trial-status` | `Experiments/trial_status` |
 | `POST /v1/experiments/cancel` | `Experiments/cancel` |
 | `POST /v1/experiments/propose-improvements` | `Experiments/propose_improvements` |
 | `POST /v1/experiments/scores` | `Experiments/scores` |
 | `POST /v1/experiments/compare` | `Experiments/compare` |
+
+Agent-revision simulation routes are also backed by `Experiments`, but are
+documented separately because they compare installed agent revisions rather than
+generic experiment plans:
+
+| Public route | Service handler |
+|---|---|
+| `POST /v1/experiments/agent-revision-simulations` | `Experiments/run_agent_revision_simulation` |
+| `POST /v1/experiments/agent-revision-simulations/compare` | `Experiments/compare_agent_revision_simulation` |
+| `POST /v1/agent-simulations` | `Experiments/run_agent_revision_simulation` |
+| `POST /v1/agent-simulations/{run_uid}/compare` | `Experiments/compare_agent_revision_simulation` |
 
 Do not document `/v1/experiments/run` as public; the public admission route is
 `/v1/experiments/run-plan`.
@@ -157,17 +168,17 @@ lane.
 
 | Surface | Required authorization |
 |---|---|
-| Internal-gated `Eval` suites, plan, run, status, datasets list, replay, scores, compare | `Tenant:Member` |
-| Internal-gated `Eval` dataset registration | `Tenant:Editor` |
-| `Experiments/generate_plan`, `run`, `cancel`, `propose_improvements` | `Tenant:Editor` |
-| `Experiments/status`, `list`, `trials`, `trial_status`, `scores`, `compare` | `Tenant:Member` |
+| Internal `Eval` suites, plan, run, status, datasets, replay, scores, compare | `Tenant:Operator`, which includes tenant admins and workspace admins |
+| `Eval/execute_run` | Internal dispatch token created by `Eval/run` |
+| `Experiments/generate_plan`, `run`, `cancel`, `propose_improvements` | `Tenant:Operator`, which includes tenant admins and workspace admins |
+| `Experiments/status`, `list`, `list_plans`, `trials`, `trial_status`, `scores`, `compare` | `Tenant:Operator`, which includes tenant admins and workspace admins |
+| `Experiments/run_agent_revision_simulation`, `compare_agent_revision_simulation` | `Tenant:Operator`, which includes tenant admins and workspace admins |
 | direct edge `GET /v1/analytics/catalog` | `Tenant:Operator` |
 | direct edge `POST /v1/analytics/query` | `Tenant:Operator` |
-| direct edge `lineage/explain`, `query`, `verify` | `Tenant:Member` |
+| direct edge `lineage/explain`, `query`, `verify` | tenant-authorized direct edge read |
 
 Future MCP support is a thin adapter over product/default typed services such
 as `Experiments`, direct edge analytics/lineage reads, and `Skills`. If it exposes
-internal eval at all, that surface must remain qualified as
-`internal-eval-runner` gated. MCP must forward through the same DTOs and
-authorization boundaries instead of owning eval, experiment, analytics,
-lineage, or learning domain logic.
+internal eval at all, that surface must remain explicitly internal. MCP must
+forward through the same DTOs and authorization boundaries instead of owning
+eval, experiment, analytics, lineage, or learning domain logic.

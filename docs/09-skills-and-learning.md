@@ -190,8 +190,7 @@ Skill package import, export, rendering, and turn-time injection are production
 surfaces. Automatic skill distillation and improvement are learning surfaces
 compiled with the `moa-skills/skill-learning` feature. When compiled, they run by
 default after qualifying experience persistence and create draft proposals only.
-Eval-backed regression execution is owned by
-`moa-orchestrator` and additionally requires `internal-eval-runner`; `moa-skills`
+Eval-backed regression execution is owned by `moa-orchestrator`; `moa-skills`
 only generates reviewable regression suite source.
 
 Skill distillation runs after successful multi-step work that passes the
@@ -223,7 +222,7 @@ Current review flow:
 2. `LearningReview/accept_skill` validates that the candidate is a proposed
    skill candidate and that the referenced draft artifact is publishable.
 3. Review-time regression evidence is attached to the candidate
-   `evaluation_payload`. When `internal-eval-runner` is disabled, this records
+   `evaluation_payload`. When no eval execution result is attached, this records
    `"regression_execution": "unavailable"` while still requiring human review
    and artifact validation.
 4. Accept publishes the existing draft artifact revision.
@@ -271,6 +270,9 @@ Learning is not a single subsystem. It is the record of all durable derived know
 
 `learning_log` is append-only and bitemporal:
 
+- `storage_partition_id`
+- `user_id`
+- generated `scope`
 - `tenant_id`
 - `learning_type`
 - `target_id`

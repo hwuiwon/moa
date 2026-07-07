@@ -10,7 +10,7 @@
 
 ## MOA Translation
 
-- MOA already standardizes this split: library crates use `thiserror`, while `anyhow` is allowed only in binary entrypoints such as `moa-orchestrator-bin`, `moa-edge`, `xtask`, and `moa-desktop`.
+- MOA already standardizes this split: library crates use `thiserror`, while `anyhow` is allowed only in binary entrypoints such as `moa-orchestrator-bin`, `moa-edge`, and `xtask`.
 - When adding crate errors, prefer one crate-local error enum with explicit variants over stringly typed propagation.
 - If a function cannot actually fail, do not return `Result` just because nearby code does.
 - If a failure is expected and normal, `let-else` or a small guard often reads better than a large `match`.

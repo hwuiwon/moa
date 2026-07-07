@@ -124,8 +124,8 @@ services and virtual objects in `moa-orchestrator` (see sections 5–6 and
 | `EmbeddingProvider` | Shared embedding interface | OpenAI embedding, Cohere v4, Gemini embedding, ZeroEntropy embedding, mock/test embedding |
 | `HandProvider` | Provision, execute, pause, resume, destroy execution environments | local, Docker, Daytona, E2B |
 | `BuiltInTool` | In-process tools with policy and schema metadata | memory, file/search/read/write, shell helpers |
-| `PlatformAdapter` | Messaging normalization/rendering | Slack |
-| `ContextProcessor` | Ordered context-pipeline stage | identity, agent instructions, instructions, tools, query rewrite, skills, digest, memory, history, runtime context, compactor |
+| `ChannelAdapter` | Messaging normalization/rendering | Slack |
+| `ContextProcessor` | Ordered context-pipeline stage | identity, agent instructions, instructions, tools, query rewrite, skills, digest, memory, history, delegation planning, runtime context, compactor |
 | `CredentialVault` | Secret storage abstraction | environment-backed MCP vault, environment-backed delivery vault |
 | `AuthProvider` | Resolve API keys or bearer JWTs to MOA identities | local API keys, disabled local/test mode, optional Auth0/OIDC |
 | `TokenVaultProvider` | Retrieve third-party OAuth tokens for linked user connections | null provider, optional Auth0 Token Vault |
@@ -142,6 +142,7 @@ services and virtual objects in `moa-orchestrator` (see sections 5–6 and
 | `moa-brain` | Context pipeline, retrieval, turn harness, approvals, resolution scoring, lineage emission |
 | `moa-db` | Database helpers shared by MOA storage crates (pools, scoped connections, RLS) |
 | `moa-session` | Postgres session store, event log, snapshots, task segments, learning log, analytics |
+| `moa-analytics` | Query catalog and read models for safe analytics API queries |
 | `moa-runtime-store` | Runtime cache store implementations (in-memory and Redis/Valkey) |
 | `moa-migrations` | Central Postgres migrations and schema runners |
 | `moa-memory/graph` (`moa-memory-graph`) | Graph memory, relational node/edge tables, sidecars, RLS, changelog |

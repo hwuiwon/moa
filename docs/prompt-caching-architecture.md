@@ -62,13 +62,16 @@ Current date: 2026-04-16
 Current project: moa
 Current working directory: /Users/example/Github/moa
 Current git branch: main
-Current user: alice
+Current tenant: 00000000-0000-0000-0000-000000000201
+Current contact: 00000000-0000-0000-0000-000000000301
 </system-reminder>
 ```
 
-This reminder is inserted after the stable prefix and before the current user
-turn. That keeps the early prompt byte-stable while still giving the model the
-runtime facts it needs for the active turn.
+The project, working directory, git branch, and contact lines are included only
+when the runtime context has those values. This reminder is inserted after the
+stable prefix and before the current user turn. That keeps the early prompt
+byte-stable while still giving the model the runtime facts it needs for the
+active turn.
 
 ### Provider Mapping
 
@@ -91,7 +94,8 @@ When adding prompt content:
 - Keep query rewriting, retrieved memory, replayed history, and runtime context
   out of the stable prefix.
 - Preserve the current dynamic order: query rewrite, skills, standing memory
-  digest, graph memory, history, runtime context, compactor.
+  digest, graph memory, history, delegation planning, runtime context,
+  compactor.
 - Put dynamic session or turn state in `RuntimeContextProcessor`.
 - Keep tool definitions sorted deterministically by tool name.
 - Keep rendered skill metadata deterministic, but do not place selected skills

@@ -18,15 +18,17 @@ This order matters because analytics and traces are derived surfaces.
 The analytics model is documented in:
 
 - `docs/analytics.md`
-- `crates/moa-core/src/analytics.rs` (or whichever current path holds the analytics types)
-- `crates/moa-session/src/schema.rs`
+- `crates/moa-core/src/wire/analytics.rs`
+- `crates/moa-analytics/src/catalog.rs`
+- `crates/moa-session/src/analytics.rs`
+- `crates/moa-session/src/store/mod.rs`
 
 Key invariants:
 
 - generated columns own `total_input_tokens` and `cache_hit_rate`
 - the `update_session_aggregates` trigger owns event-derived counters
 - `session_summary` and `tool_call_summary` are live views
-- `session_turn_metrics` and tenant daily metrics are materialized views and may be stale until refreshed. The tenant daily SQL view is `daily_storage_partition_metrics`.
+- `session_turn_metrics`, `daily_storage_partition_metrics`, and `analytics.*_fact` read models are materialized views and may be stale until refreshed.
 
 If a metric looks wrong:
 
@@ -92,16 +94,15 @@ cargo test -p moa-brain --test brain_turn_cache_replay_db_memory -- --nocapture
 Operational reads:
 
 ```bash
-curl -X POST "$MOA_EDGE_URL/v1/analytics/session-stats" \
+curl "$MOA_EDGE_URL/v1/analytics/catalog" \
+  -H "Authorization: Bearer $MOA_API_KEY" \
+  -H "Content-Type: application/json"
+curl -X POST "$MOA_EDGE_URL/v1/analytics/query" \
   -H "Authorization: Bearer $MOA_API_KEY" \
   -H "Content-Type: application/json" \
-  --data '{"session_id":"<session-id>"}'
-curl -X POST "$MOA_EDGE_URL/v1/analytics/tool-stats" \
+  --data '{"dataset":"sessions","dimensions":[{"field":"status","alias":null}],"measures":[{"field":null,"aggregation":"count","alias":"sessions"}],"filters":[],"order_by":[],"limit":20}'
+curl -X POST "$MOA_EDGE_URL/v1/analytics/query" \
   -H "Authorization: Bearer $MOA_API_KEY" \
   -H "Content-Type: application/json" \
-  --data '{}'
-curl -X POST "$MOA_EDGE_URL/v1/analytics/cache-stats" \
-  -H "Authorization: Bearer $MOA_API_KEY" \
-  -H "Content-Type: application/json" \
-  --data '{"days":30}'
+  --data '{"dataset":"turns","dimensions":[{"field":"model","alias":null}],"measures":[{"field":"cost_cents","aggregation":"sum","alias":"cost_cents"}],"filters":[],"order_by":[],"limit":20}'
 ```

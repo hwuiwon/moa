@@ -29,7 +29,7 @@ The code reports fixed stage numbers through each `ContextProcessor`. With query
 | 7 | `MemoryRetriever` | Dynamic tail | tenant knowledge plus admitted contact memory filtered by pinned agent knowledge policy |
 | 8 | `HistoryCompiler` | Dynamic/history tail | replayed events, checkpoints, recent turns, errors, checkpoint compaction |
 | 8 | `DelegationPlanningProcessor` | Dynamic tail | conservative coordinator DAG candidate for high-confidence multi-workstream tasks |
-| 9 | `RuntimeContextProcessor` | Dynamic tail | current date, tenant, working directory, branch, contact or admin/operator actor |
+| 9 | `RuntimeContextProcessor` | Dynamic tail | current date, tenant, working directory, branch, and contact when present |
 
 If query rewriting or memory digests are disabled, those processors are omitted; later processors keep their configured stage numbers.
 

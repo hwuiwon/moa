@@ -263,13 +263,14 @@ requires a running orchestrator with Prometheus metrics enabled:
 
 ```bash
 MOA_RUN_LOADTEST_REMOTE_SMOKE=1 \
+MOA_RESTATE_INGRESS_URL=http://localhost:10010 \
 MOA_LOADTEST_METRICS_ENDPOINT=http://localhost:9090/metrics \
 cargo test -p moa-loadtest --test mock_loadtest_service_e2e mock_short_profile_reports_runtime_step_latency -- --ignored
 ```
 
-The runner may start `postgres`, `openfga`, and `moa-pii-service` if compose is
-not already running. If it starts compose itself, it stops compose at the end
-with volumes preserved.
+The remote smoke test expects the orchestrator, Restate ingress, and metrics
+endpoint to already be running. It does not bring up or tear down the compose
+stack for you.
 
 ## Snapshot Testing
 

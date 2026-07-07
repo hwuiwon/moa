@@ -22,6 +22,9 @@ Important fields:
 
 - `id`
 - `session_id`
+- `storage_partition_id`
+- `user_id`
+- `scope`
 - `tenant_id`
 - `segment_index`
 - `task_summary`

@@ -8,8 +8,8 @@ The trait lives at `crates/moa-core/src/traits/embedding.rs`. The two operations
 
 Reference implementations to read first:
 
-- OpenAI embeddings (in `crates/moa-providers/src/embedding.rs` or equivalent — search for the current location)
-- Cohere v4 embed/rerank (the live tests are at `crates/moa-memory/vector/tests/cohere_live.rs`)
+- OpenAI embeddings in `crates/moa-providers/src/embedding/openai.rs`
+- Cohere v4 embed/rerank in `crates/moa-providers/src/embedding/cohere.rs` and `crates/moa-providers/src/rerank/cohere.rs`
 - Mock embedding provider for tests
 
 ## Required Behaviors
@@ -36,6 +36,7 @@ Embedding providers couple to two layers in `moa-memory`:
 
 1. **Vector storage** (`crates/moa-memory/vector/`): the storage layer expects a specific dimension. Adding a provider with a different dimension requires either a separate column or a migration.
 2. **Hybrid retrieval**: the retrieval pipeline mixes vector search with graph traversal. A new embedding provider must be tested against the hybrid retrieval path, not just isolated embedding API calls.
+3. **Provider factory** (`crates/moa-providers/src/embedding/factory.rs`): runtime construction and config routing live with provider implementations.
 
 ## Live Test Pattern
 
@@ -55,7 +56,7 @@ Do not assert on specific vector values; embeddings are model-version-dependent 
 
 ## Wiring Points
 
-1. The embedding-provider registry in `moa-providers` (or `moa-memory/vector/`).
+1. The embedding-provider registry/factory in `moa-providers`.
 2. The hybrid-retrieval pipeline in `moa-memory`.
 3. The pricing table for cost analytics.
 

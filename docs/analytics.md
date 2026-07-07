@@ -1,174 +1,82 @@
 # Analytics
 
-MOA stores session analytics in Postgres so application code does not maintain
-its own rollups on the write path.
+MOA stores analytics in Postgres. Application code writes durable product
+events and rows; triggers, generated columns, views, materialized views, and
+`moa-analytics` own read models.
 
-## Source of truth
+## Write Path
 
-- Generated columns on `sessions` own pure row-local derivations:
-  - `total_input_tokens`
-  - `cache_hit_rate`
-- The `update_session_aggregates` trigger owns cross-event rollups on `sessions`:
-  - `event_count`
-  - `turn_count`
-  - `total_input_tokens_uncached`
-  - `total_input_tokens_cache_write`
-  - `total_input_tokens_cache_read`
-  - `total_output_tokens`
-  - `total_cost_cents`
-  - `last_checkpoint_seq`
-- Views and materialized views own analytics queries:
-  - `session_summary`
-  - `tool_call_analytics`
-  - `tool_call_summary`
-  - `session_turn_metrics`
-  - `daily_storage_partition_metrics`
-  - `skill_resolution_rates`
-  - `segment_baselines`
+Do not write derived session counters from application code.
 
-Do not write session aggregate counters from application code. The trigger and
-generated columns are the only supported write path for these values.
+- Generated columns on `sessions` own pure row-local derivations such as
+  `total_input_tokens` and `cache_hit_rate`.
+- The `update_session_aggregates` trigger owns event-derived counters such as
+  turn count, event count, token totals, cost totals, checkpoint sequence, and
+  cache-token splits.
+- `task_segments` owns task-level outcome, skill/tool usage, turn count, and
+  token cost.
 
-## Dashboard source selection
+## Legacy Views
 
-Behavioral tool dashboards must use one source per panel:
+Session and task internals still expose direct views used by runtime code:
 
-- Use `tool_call_analytics`, `tool_call_summary`, or `session_turn_metrics`
-  when the panel answers product questions such as tool count, success rate,
-  duration, or per-turn tool time.
-- Use `moa_tool_calls_total` and `moa_tool_call_duration_seconds` only for
-  operational SLOs and alerting on the live tool router.
-- Use OTEL spans such as brain `tool_dispatch`, hands `tool_execution`, and
-  provider-specific hand spans for trace drilldown only.
+- `session_summary`
+- `tool_call_analytics`
+- `tool_call_summary`
+- `session_turn_metrics`
+- `daily_storage_partition_metrics`
+- `skill_resolution_rates`
+- `segment_baselines`
 
-Do not combine brain spans, hand spans, and durable `ToolCall`/`ToolResult`
-events in the same behavioral count. That double-counts one logical tool call
-at multiple layers of the execution stack.
+`SkillInjector` uses `skill_resolution_rates` for skill ranking, and segment
+assessment uses `segment_baselines` for structural comparison.
 
-## Views
+## Generic Analytics API
 
-### `session_summary`
+The public analytics API is:
 
-Live per-session rollup for operational API reads.
+- `GET /v1/analytics/catalog`
+- `POST /v1/analytics/query`
 
-Columns include:
+Both routes require tenant operator authorization. `moa-analytics` owns the
+allowlisted dataset catalog and query compiler; clients select datasets and
+fields from the catalog instead of sending raw SQL.
 
-- session identity and status
-- `turn_count`
-- `event_count`
-- `total_input_tokens`
-- `total_output_tokens`
-- `total_cost_cents`
-- `cache_hit_rate`
-- derived `duration_seconds`
-- `tool_call_count`
-- `error_count`
+Catalog datasets currently map to:
 
-### `tool_call_analytics`
+- `analytics.session_fact`
+- `analytics.turn_fact`
+- `analytics.tool_call_fact`
+- `analytics.task_segment_fact`
+- skill activations derived from `analytics.task_segment_fact`
+- `analytics.procedure_run_fact`
+- `analytics.procedure_node_run_fact`
+- `analytics.learning_candidate_fact`
+- `analytics.experiment_run_fact`
+- `analytics.event_fact`
 
-Live per-call fact view over `ToolCall` plus matching `ToolResult` or
-`ToolError` rows.
+The compiler injects tenant predicates for every query. Materialized views are
+tenant-keyed read models, not a replacement for authorization.
 
-Columns include:
+## Refresh Behavior
 
-- tenant and session identity
-- tool name and tool id
-- call and finish timestamps
-- `duration_ms`
-- `success`
+`PostgresSessionStore::refresh_analytics_materialized_views` refreshes the
+session turn and daily storage-partition views plus the `analytics.*_fact`
+materialized views. `moa-edge` may trigger that refresh in the background before
+analytics query reads, throttled to at most once per process per minute. The
+query itself proceeds against the current materialized-view state.
 
-### `tool_call_summary`
+Segment-specific views (`skill_resolution_rates` and `segment_baselines`) are
+refreshed separately by session-store segment refresh helpers and by the
+default `segment_materialized_views_refresh` cron job every 15 minutes.
 
-Live per-tool aggregation built from `tool_call_analytics`.
-
-Columns include:
-
-- `call_count`
-- `avg_duration_ms`
-- `p50_ms`
-- `p95_ms`
-- `success_rate`
-
-## Materialized views
-
-### `session_turn_metrics`
-
-Cached per-turn analytics derived from `BrainResponse` rows and the tool events
-that occurred within each turn boundary.
-
-Columns include:
-
-- turn number
-- model
-- `llm_ms`
-- `tool_ms`
-- `tool_call_count`
-- token counts
-- `cost_cents`
-
-`pipeline_ms` is present but currently `NULL` because turn-pipeline latency is
-only traced, not yet persisted as an event payload.
-
-### `daily_storage_partition_metrics`
-
-Cached daily tenant rollup keyed by the legacy storage column `(storage_partition_id, day)`.
-
-Columns include:
-
-- `session_count`
-- `turn_count`
-- `total_input_tokens`
-- `total_cache_read_tokens`
-- `total_output_tokens`
-- `total_cost_cents`
-- `avg_cache_hit_rate`
-
-### `skill_resolution_rates`
-
-Cached tenant-level skill outcome aggregate derived from `task_segments`.
-
-Columns include:
-
-- `tenant_id`
-- `skill_name`
-- `uses`
-- `resolution_rate`
-- `avg_token_cost`
-- `avg_turn_count`
-
-`SkillInjector` uses this view to rank skill metadata in the context pipeline.
-
-### `segment_baselines`
-
-Cached structural baselines for segment assessment.
-
-Columns include:
-
-- `tenant_id`
-- `sample_count`
-- average and standard deviation for turn count
-- average and standard deviation for token cost
-- average and standard deviation for duration
-
-## Refresh behavior
-
-Materialized views are refreshed with:
-
-```sql
-REFRESH MATERIALIZED VIEW CONCURRENTLY session_turn_metrics;
-REFRESH MATERIALIZED VIEW CONCURRENTLY daily_storage_partition_metrics;
-REFRESH MATERIALIZED VIEW CONCURRENTLY skill_resolution_rates;
-REFRESH MATERIALIZED VIEW CONCURRENTLY segment_baselines;
-```
-
-The orchestrator runs this refresh loop hourly. Tenant and cache analytics
-API handlers also trigger an on-demand refresh before reading these materialized views.
-
-## Adding new analytics
+## Adding Analytics
 
 1. Prefer a regular view when live reads are cheap enough.
-2. Prefer a materialized view only when the query is expensive and stale reads
-   are acceptable.
-3. Use generated columns only for pure expressions of columns in the same row.
-4. Use triggers only for bounded mutations on the same session row.
-5. Keep currency storage in integer cents.
+2. Prefer a materialized view when the query is expensive and stale reads are
+   acceptable.
+3. Add public dashboard fields through `moa-analytics` catalog metadata, not by
+   exposing raw table names.
+4. Keep tenant/storage-partition filters explicit in read models and compiled
+   queries.
+5. Store currency in integer cents.

@@ -64,46 +64,25 @@ Fast interpretation:
 - `event_persist` is high: inspect session-store writes and post-turn
   maintenance.
 
-## Broadcast Lag
+## Durable Progress
 
-MOA uses Tokio broadcast channels for live session updates:
+Hosted session streams do not depend on process-local broadcast tails for
+correctness. `moa-edge` reads the contact/session progress projection through
+the orchestrator, emits durable session events in sequence, and adds transient
+progress frames for active turns when the progress cursor changes.
 
-- `event_tx` for persisted session-event previews;
-- `runtime_tx` for live runtime updates used by gateway/API observers.
+Polling behavior:
 
-When a subscriber falls behind, Tokio returns `RecvError::Lagged(n)`. MOA does
-not treat that as fatal for best-effort live previews.
+- the stream polls progress at a 1s baseline while durable events are flowing;
+- repeated polls without durable events grow the interval gradually;
+- elapsed-time-only progress changes do not emit new transient frames;
+- terminal SSE frames are derived from the durable progress snapshot.
 
-Signals to watch:
-
-- warn logs containing `broadcast subscriber fell behind, dropped events`;
-- `moa_broadcast_lag_events_dropped_total`.
-
-Important labels:
-
-- `channel=event`
-- `channel=runtime`
-- `policy=skip_with_gap|backfill_from_store|abort`
-
-Do not put `session_id` on this Prometheus counter. Keep session-specific lag
-details in logs or traces and use durable event replay for drilldown.
-
-Runtime behavior:
-
-| Policy | Behavior | Use |
-|---|---|---|
-| `SkipWithGap` | Emit a gap marker and refresh from durable session log | Gateway/API observers |
-| `BackfillFromStore` | Reload from `SessionStore::get_events` after last sequence | Complete ordered consumers |
-| `Abort` | Stop the consumer | Automated observers that are cheaper to restart |
-
-Interpretation:
-
-- high `event` lag means the event-preview subscriber is slow or the buffer is
-  undersized;
-- high `runtime` lag means a live UI or relay subscriber is not draining fast
-  enough;
-- zero counters under normal load means there is no reason to increase channel
-  sizes.
+Progress itself is written through Restate workflow state and session events.
+`TurnExecution/progress` and `Session/progress` are the cross-process boundary;
+Slack/chat channels may also receive live status edits when channel progress
+delivery is enabled. Treat process-local broadcast channels as test-harness or
+in-process helper plumbing, not as the hosted observation source of truth.
 
 ## Behavior-Lab Simulations
 

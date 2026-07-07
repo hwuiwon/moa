@@ -167,7 +167,7 @@ it is realized as Restate services and virtual objects in `moa-orchestrator`
 | `Reranker` | Shared reranking interface | Noop, Cohere Rerank, and ZeroEntropy rerank through `moa-providers` |
 | `ChannelAdapter` | Channel inbound/outbound normalization | Slack |
 | `BuiltInTool` | Built-in tool execution | memory/search/web and other built-ins |
-| `ContextProcessor` | One stage in context compilation | identity, agent instructions, instructions, tools, query rewrite, skills, digest, memory, history, runtime context |
+| `ContextProcessor` | One stage in context compilation | identity, agent instructions, instructions, tools, query rewrite, skills, digest, memory, history, delegation planning, runtime context |
 | `LinkedIntegrationProvider` | Tenant knowledge linked-account flow, provider sync trigger, changed-record listing, and webhook verification | Nango and Merge adapters in `moa-knowledge` |
 | `DocumentParser` | Structure-aware parsing into normalized document elements for tenant knowledge ingestion | Native parser backed by `liteparse` for local file parsing, plus LlamaParse, Unstructured, and Reducto adapters in `moa-knowledge` |
 | `CredentialVault` | Secret storage and retrieval | environment-backed MCP vault |
@@ -249,6 +249,7 @@ User message
        6 memory_digest (when enabled)
        7 memory
        8 history
+       8 delegation_planning
        9 runtime_context
   -> Query rewrite may mark `is_new_task`
   -> SegmentTracker opens or rolls a task segment
@@ -263,7 +264,8 @@ User message
   -> LearningEntry rows record promoted segment, skill, or memory learning
 ```
 
-If query rewriting is disabled, stage 5 is omitted and the remaining processors still report their configured stage numbers.
+If query rewriting is disabled, the `query_rewrite` processor is omitted and
+the remaining processors still report their configured stage numbers.
 
 V1 guardrails are optional configured-agent LLM-judge text policies. Input
 guardrails run before a `UserMessage` event is appended; output guardrails run
@@ -479,39 +481,10 @@ timestamp discipline, and replay resistance on the verify path.
 
 ## Workspace Layout
 
-| Crate | Role |
-|---|---|
-| `moa-core` | Shared types, traits, config, events, analytics helpers |
-| `moa-brain` | Context pipeline, query rewrite, segment helpers, segment assessment |
-| `moa-session` | Postgres session store, event log, task segments, learning log |
-| `moa-knowledge` | Tenant knowledge linked connectors, provider sync, parsing, block/chunk derivation, sync-run inspection, and high-level graph ingestion assembly |
-| `moa-memory/graph` (`moa-memory-graph`) | Relational graph-memory node and edge tables, SQL sidecars, RLS, and changelog |
-| `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path graph ingestion and fast memory write APIs |
-| `moa-memory/pii` (`moa-memory-pii`) | PII classification and privacy helpers |
-| `moa-memory/vector` (`moa-memory-vector`) | Graph-memory vector storage abstraction, pgvector backend, and Turbopuffer backend |
-| `moa-lineage/core` (`moa-lineage-core`) | Lineage records and score record types |
-| `moa-lineage/citation` (`moa-lineage-citation`) | Provider citation normalization and answer-source verification |
-| `moa-lineage/sink` (`moa-lineage-sink`) | Async lineage sink writers |
-| `moa-lineage/otel` (`moa-lineage-otel`) | OTel/OpenInference bridge |
-| `moa-lineage/audit` (`moa-lineage-audit`) | Compliance audit hashes, Merkle roots, signing, DSAR support |
-| `moa-auth/authz-schema` (`moa-authz-schema`) | Typed FGA tuple keys and schema constants |
-| `moa-auth/fga-bootstrap` (`moa-fga-bootstrap`) | Idempotent OpenFGA store and model bootstrap binary |
-| `moa-auth/authz` (`moa-authz`) | FGA client, transactional outbox, and outbox poller |
-| `moa-edge` | Public HTTP edge for token validation and identity header injection |
-| `moa-auth/providers` (`moa-auth-providers`) | Local API keys, builtin approvals, null token vault, and provider bundle construction |
-| `moa-auth/auth0` (`moa-auth-providers-auth0`) | Optional Auth0 and generic OIDC implementations gated by the `auth0` Cargo feature |
-| `moa-ocsf` | OCSF v1.3 security-event types, emission helpers, and per-tenant signing |
-| `moa-hands` | Tool routing and hand providers |
-| `moa-providers` | LLM, embedding, and reranker providers |
-| `moa-orchestrator` | Restate handlers and cloud orchestration binary |
-| `moa-messaging` | Messaging adapters, renderers, and notification connectors |
-| `moa-security` | Vault, policies, MCP credential proxy, injection controls |
-| `moa-skills` | Skill parsing, active package registry, draft proposal generation, and regression suite source generation |
-| `moa-eval` | Evaluation harness and optional internal regression execution used from `moa-orchestrator` |
-| `moa-experiments` | Live behavior experiment domain model and scoped Postgres run ledger |
-| `moa-loadtest` | Direct HTTP load-test tooling for hosted APIs |
-| `workspace-hack` | Generated `cargo-hakari` dependency feature unification crate |
-| `xtask` | Repo-local audit and maintenance commands |
+The complete package inventory changes often enough that duplicating it here
+creates drift. Use the root [`README.md`](../README.md#workspace-layout) for a
+scan-friendly crate map, and [`docs/10-technology-stack.md`](10-technology-stack.md)
+for the current full workspace list from `cargo metadata`.
 
 ## Where To Look Next
 

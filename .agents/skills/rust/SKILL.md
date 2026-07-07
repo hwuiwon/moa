@@ -53,7 +53,7 @@ Do not use this skill for:
 - Preserve documented traits and crate boundaries. Do not invent new interfaces when `docs/01-architecture-overview.md` already defines one.
 - Import directly from the owning crate or module. Do not add compatibility shim modules, wrapper functions, or `pub use` re-exports just to preserve old paths; update call sites to the source of truth.
 - Prefer borrowing over cloning. Use owned inputs only when ownership transfer is part of the API.
-- Use `Result`-based APIs for fallible work. In library crates, model errors with `thiserror`. Use `anyhow` only in binary entrypoints such as `moa-orchestrator-bin`, `moa-edge`, `xtask`, or `moa-desktop`.
+- Use `Result`-based APIs for fallible work. In library crates, model errors with `thiserror`. Use `anyhow` only in binary entrypoints such as `moa-orchestrator-bin`, `moa-edge`, or `xtask`.
 - Keep all I/O async on `tokio`. Avoid blocking filesystem or network work in async paths.
 - Use `tracing` for observability. Never add `println!` or `eprintln!` to library code.
 - Every public function needs a doc comment. Every module needs a module-level doc comment.
@@ -113,7 +113,6 @@ Before editing a subsystem, read the matching design doc:
 ## Verification
 
 - Rust-only changes: run `cargo fmt --all` and `cargo clippy --all-targets --all-features --locked -- -D warnings`.
-- Desktop/GPUI changes: also run `cargo build -p moa-desktop`.
 - If you cannot run a required check, say so explicitly and explain why.
 
 ## Output Format

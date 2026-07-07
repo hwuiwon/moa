@@ -28,6 +28,7 @@ These docs describe the current MOA architecture as implemented in the Rust work
 | 19 | [Data Operations](19-data-operations.md) | Postgres extensions, changelog replication, audit retention, PII sidecar |
 | 20 | [Testing](20-testing.md) | Provider overrides and snapshot testing conventions |
 | 21 | [Tenant Knowledge Base](21-tenant-knowledge-base.md) | Linked-account ingestion, document parsing, and knowledge graph labels |
+| 22 | [Load And Chaos Testing](22-load-and-chaos-testing.md) | Load profiles, chaos scenarios, and staged validation |
 
 Supporting notes:
 
@@ -38,7 +39,7 @@ Supporting notes:
 | [Implementation Caveats](implementation-caveats.md) | Known implementation tradeoffs and follow-up seams |
 | [Prompt Caching Architecture](prompt-caching-architecture.md) | Cache-region rules and verification |
 
-For a current end-to-end map, start with the root [`architecture.md`](../architecture.md)
+For a current end-to-end map, start with the root [`ARCHITECTURE.md`](../ARCHITECTURE.md)
 before diving into the numbered specs.
 
 ## Current Architectural Decisions

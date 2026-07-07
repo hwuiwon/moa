@@ -25,6 +25,6 @@ These rules apply to every memory-pack step that touches Postgres. They keep ten
 
 ## Where to Look
 
-- `crates/moa-memory/graph/src/scoped.rs` (or the current location of `ScopedConn`)
-- `crates/moa-memory/graph/src/migrations/` for live RLS policy examples
+- `crates/moa-db/src/lib.rs` for `ScopedConn`, `RlsContext`, and scoped GUC helpers
+- `crates/moa-migrations/migrations/postgres/V000001__session_baseline.sql` for current RLS helper functions and policy examples
 - `docs/08-security.md` for the security model that motivates these rules

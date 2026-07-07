@@ -10,7 +10,6 @@ Read at least one existing adapter end-to-end before writing your own:
 
 - `crates/moa-providers/src/adapters/anthropic/` for streaming + cache_control + native web search
 - `crates/moa-providers/src/adapters/openai_responses/` for the Responses-API envelope
-- `crates/moa-providers/src/adapters/openai_chat/` for the older Chat-Completions shape
 - `crates/moa-providers/src/adapters/gemini/` for Google's wire format
 - `crates/moa-providers/src/adapters/scripted/` for the in-memory test double
 

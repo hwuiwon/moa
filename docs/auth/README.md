@@ -21,7 +21,7 @@ Trusted headers:
 
 | Header | Meaning |
 |---|---|
-| `x-moa-identity-type` | `user`, `agent`, or `service` |
+| `x-moa-identity-type` | `user`, `contact`, `agent`, or `service` |
 | `x-moa-identity-id` | principal UUID |
 | `x-moa-tenant-id` | tenant UUID |
 | `x-moa-api-key-id` | API key UUID when a local key authenticated the call |

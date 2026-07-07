@@ -34,6 +34,10 @@ The public edge routes are:
 | `POST /v1/experiments/propose-improvements` | `Experiments/propose_improvements` |
 | `POST /v1/experiments/scores` | `Experiments/scores` |
 | `POST /v1/experiments/compare` | `Experiments/compare` |
+| `POST /v1/experiments/agent-revision-simulations` | `Experiments/run_agent_revision_simulation` |
+| `POST /v1/experiments/agent-revision-simulations/compare` | `Experiments/compare_agent_revision_simulation` |
+| `POST /v1/agent-simulations` | `Experiments/run_agent_revision_simulation` |
+| `POST /v1/agent-simulations/{run_uid}/compare` | `Experiments/compare_agent_revision_simulation` |
 
 There is no default public `/v1/evals/*` product route and no public
 `/v1/experiments/run` alias.

@@ -2,11 +2,11 @@
 name: memory-pack
 description: >
   Use this skill when implementing or reviewing `sequence/memory-pack` steps such
-  as M01-M30 graph memory, RLS, AGE, pgvector, ingestion, retrieval, privacy, and
+  as M01-M30 graph memory, RLS, pgvector, ingestion, retrieval, privacy, and
   migration cleanup in the MOA workspace. It owns the step-by-step graph-memory
-  migration workflow and the rules around RLS, ScopedConn, Cypher safety, and
+  migration workflow and the rules around RLS, ScopedConn, relational graph queries, and
   hard-break migrations. Triggers include: "implement M07", "graph-memory step",
-  "ingest the new schema", "fix the RLS policy", "AGE Cypher pattern", "pgvector
+  "ingest the new schema", "fix the RLS policy", "relational graph query", "pgvector
   migration". Do NOT use for eval baseline refreshes, query-rewrite policy or
   gating research, retrieval ranking scorecards, live memory-eval lanes, general
   Rust refactors outside memory-pack scope (use `rust`), release certification
@@ -22,7 +22,7 @@ allowed-tools:
   - Bash(cargo:*)
   - Bash(git:*)
 metadata:
-  moa-tags: "memory-pack, graph-memory, migrations, retrieval, ingestion, rls, pgvector, age"
+  moa-tags: "memory-pack, graph-memory, migrations, retrieval, ingestion, rls, pgvector"
 ---
 
 # Memory Pack
@@ -34,7 +34,7 @@ Use this skill for implementing the `sequence/memory-pack` prompts. It owns the 
 Use this skill for:
 
 - `M01`-style `MemoryScope` and graph-memory type changes
-- Postgres / RLS / AGE / pgvector / changelog migrations under `crates/moa-memory/`
+- Postgres / RLS / pgvector / changelog migrations under `crates/moa-memory/`
 - `moa-memory/graph`, `moa-memory/vector`, `moa-memory/pii`, and `moa-memory/ingest` sequence work
 - hybrid retrieval, query planning, read-time cache, and cleanup only when the task is a memory-pack implementation step or direct graph-memory internals change
 - translating memory-pack prompt paths and acceptance criteria into this repo
@@ -79,7 +79,7 @@ Search exact top-level crates first. Avoid failing broad searches against a non-
 The dense rules are in references, loaded only when relevant:
 
 - [references/rls-and-scoped-conn.md](references/rls-and-scoped-conn.md) for RLS, `ScopedConn`, and scoped GUC handling
-- [references/age-cypher-patterns.md](references/age-cypher-patterns.md) for AGE Cypher safety, parameter binding, and projection helpers
+- [references/relational-graph-patterns.md](references/relational-graph-patterns.md) for graph sidecar tables, recursive SQL, and query-builder safety
 - [references/migration-rules.md](references/migration-rules.md) for hard-break vs compatibility, deprecation policy, and SQL helper conventions
 
 The five rules to keep in mind without loading a reference:
@@ -88,7 +88,7 @@ The five rules to keep in mind without loading a reference:
 - Contact-scoped memory is always tenant-bound.
 - Tool names use underscores, not dotted names.
 - For RLS work, use `FORCE ROW LEVEL SECURITY`; app paths must not use `BYPASSRLS`.
-- For AGE Cypher work, do not format user input into Cypher strings.
+- For relational graph work, keep storage-partition and scope predicates in every query path.
 
 ## Execution Sequence
 

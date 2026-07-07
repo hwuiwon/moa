@@ -29,7 +29,7 @@ Each credential has a key string. The convention:
 - LLM providers: `provider.<name>.api_key`. Example: `provider.anthropic.api_key`.
 - Embedding providers: `embedding.<name>.api_key`.
 - Hand sandbox providers: `hand.<name>.api_key` and any auxiliary keys (`hand.daytona.workspace_token`, etc.).
-- Platform adapters: `platform.<name>.bot_token` and `platform.<name>.signing_secret`.
+- Channel adapters: `channel.<name>.bot_token` and `channel.<name>.signing_secret`.
 - MCP servers: see "MCP Credential Proxy" below.
 
 When adding a new provider, register the credential keys in the vault's startup config or schema, and document the keys in a top-level table (search `docs/` for an existing credentials table; if none exists, add one).

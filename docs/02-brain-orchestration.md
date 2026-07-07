@@ -34,15 +34,13 @@ Core production Restate bindings:
 | Restate primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` |
-| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
-| Workflow | `ProcedureExecution`, `KnowledgeSyncIngestion`, `Consolidate`, `TurnExecution`, `WorkerTurnExecution` |
+| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `Eval`, `Experiments`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
+| Workflow | `ProcedureExecution`, `KnowledgeSyncIngestion`, `Consolidate`, `TurnExecution`, `WorkerTurnExecution`, `ExperimentRun`, `ExperimentTrialRun` |
 
 Feature-gated Restate bindings:
 
 | Feature | Additional bindings |
 |---|---|
-| `experiments` | `Experiments` service plus `ExperimentRun` and `ExperimentTrialRun` workflows |
-| `internal-eval-runner` | `Eval` service |
 | `skill-learning` | `SkillLearning` workflow |
 
 Internal application boundaries for action reviews, builtin async-authz
@@ -352,10 +350,19 @@ counter that invalidates stale delayed ticks after reconfiguration.
 
 ### Background Maintenance Jobs
 
-On boot, the orchestrator installs two periodic jobs via the `CronJob` virtual object:
+On boot, the orchestrator installs four periodic jobs via the `CronJob`
+virtual object:
 
-- `graph_memory_compact`: fires at HH:00 UTC every hour and invokes `GraphMemoryMaint/compact`, which queues one `Consolidate` workflow for each active graph-memory tenant.
-- `neon_prune_branches`: fires at 00:00, 06:00, 12:00, and 18:00 UTC and invokes `NeonMaint/prune_branches`. It is a no-op when `MOA_NEON_API_KEY` is unset.
+- `graph_memory_compact`: fires at HH:00 UTC every hour and invokes
+  `GraphMemoryMaint/compact`, which queues one `Consolidate` workflow for each
+  active graph-memory tenant.
+- `vector_sync_outbox_drain`: fires every minute and invokes
+  `GraphMemoryMaint/sync_vectors` with `limit = 512`.
+- `segment_materialized_views_refresh`: fires every 15 minutes and invokes
+  `SessionStore/refresh_segment_materialized_views`.
+- `neon_prune_branches`: fires at 00:00, 06:00, 12:00, and 18:00 UTC and
+  invokes `NeonMaint/prune_branches`. It is a no-op when `MOA_NEON_API_KEY` is
+  unset.
 
 To inspect the schedule:
 

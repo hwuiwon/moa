@@ -560,41 +560,41 @@ sequenceDiagram
 
 ---
 
-## 13. Observation — history-first, tail-second
+## 13. Observation — durable progress polling
 
-`BrainOrchestrator::observe()` replays durable history, then attaches a live broadcast tail. If the tail lags beyond its buffer, the stream errors so callers can reconnect from durable state — silent loss is a bug.
+Hosted observation reads durable session progress instead of attaching callers
+to an in-process broadcast tail. `moa-edge` polls the contact/session progress
+projection, streams persisted events in sequence, and emits transient progress
+frames only when the active turn cursor changes.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Client as Observer (Messaging / Desktop)
-    participant Orch as Orchestrator
+    participant Client as Browser / Messaging Client
+    participant Edge as moa-edge SSE
+    participant Contacts as Contacts service
+    participant Session as Session VO
+    participant Turn as TurnExecution
     participant Log as SessionStore
-    participant Brain
-    participant Bcast as broadcast channel
 
-    Client->>Orch: observe(session_id, level)
+    Client->>Edge: open session stream
 
-    Orch->>Log: get_events(all)
-    Log-->>Orch: EventRecord[]
-    Orch-->>Client: replay durable history
+    loop Until session is terminal
+        Edge->>Contacts: progress(session_id, last_sequence)
+        Contacts->>Session: progress()
+        Session->>Turn: progress() if active turn exists
+        Turn-->>Session: transient turn progress
+        Session->>Log: read durable events after last_sequence
+        Log-->>Session: EventRecord[]
+        Session-->>Contacts: SessionProgress
+        Contacts-->>Edge: SessionProgress
+        Edge-->>Client: durable event SSE frames
 
-    alt Session is active
-        Orch->>Bcast: subscribe
-        Bcast-->>Orch: Receiver
-        Orch-->>Client: attach live tail
-
-        loop While session running
-            Brain->>Bcast: emit EventRecord
-            Bcast-->>Client: live event
-
-            alt Subscriber lagged beyond buffer
-                Bcast-->>Client: Err(Lagged)
-                Note over Client: Client reconnects from<br/>last durable sequence it has seen
-            end
+        alt Active progress cursor changed
+            Edge-->>Client: transient progress SSE frame
         end
-    else Session terminal
-        Note over Client: No live tail needed
+
+        Note over Edge: Adaptive backoff grows when no durable events arrive
     end
 ```
 
@@ -639,7 +639,7 @@ sequenceDiagram
 
 ## Related docs
 
-- [`architecture.md`](architecture.md) — structural overview of all the components shown above
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — structural overview of all the components shown above
 - [`docs/01-architecture-overview.md`](docs/01-architecture-overview.md) — full trait signatures
 - [`docs/02-brain-orchestration.md`](docs/02-brain-orchestration.md) — Restate + local orchestrator internals
 - [`docs/03-communication-layer.md`](docs/03-communication-layer.md) — approval UX, observation verbosity, rate limits
