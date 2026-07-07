@@ -28,7 +28,7 @@ fn tenant_id() -> Uuid {
 
 fn user_identity(user_id: Uuid) -> Identity {
     Identity {
-        identity_type: IdentityType::User,
+        identity_type: IdentityType::Operator,
         id: user_id,
         tenant_id: TenantId::from(tenant_id()),
         api_key_id: None,
@@ -56,11 +56,11 @@ fn agent_identity(agent_id: Uuid, acting_on_behalf_of: Option<Uuid>) -> Identity
     }
 }
 
-fn check_body(user: &str, relation: &str, object: &str) -> serde_json::Value {
+fn check_body(operator: &str, relation: &str, object: &str) -> serde_json::Value {
     json!({
         "authorization_model_id": "model-1",
         "tuple_key": {
-            "user": user,
+            "user": operator,
             "relation": relation,
             "object": object,
         },
@@ -101,7 +101,7 @@ async fn tenant_admin_administers_tenant() {
         when.method(POST)
             .path("/stores/store-1/check")
             .json_body(check_body(
-                "user:11111111-1111-1111-1111-111111111111",
+                "operator:11111111-1111-1111-1111-111111111111",
                 "admin",
                 "tenant:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             ));
@@ -133,7 +133,7 @@ async fn workspace_admin_resolution_still_checks_target_tenant_admin() {
         when.method(POST)
             .path("/stores/store-1/check")
             .json_body(check_body(
-                "user:99999999-9999-9999-9999-999999999999",
+                "operator:99999999-9999-9999-9999-999999999999",
                 "admin",
                 "tenant:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
             ));
@@ -163,7 +163,7 @@ async fn tenant_admin_participates_in_tenant_session() {
         when.method(POST)
             .path("/stores/store-1/check")
             .json_body(check_body(
-                "user:11111111-1111-1111-1111-111111111111",
+                "operator:11111111-1111-1111-1111-111111111111",
                 "participant",
                 "session:22222222-2222-2222-2222-222222222222",
             ));
@@ -192,7 +192,7 @@ async fn tenant_operator_cannot_admin_tenant() {
         when.method(POST)
             .path("/stores/store-1/check")
             .json_body(check_body(
-                "user:11111111-1111-1111-1111-111111111111",
+                "operator:11111111-1111-1111-1111-111111111111",
                 "admin",
                 "tenant:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             ));
@@ -216,7 +216,7 @@ async fn tenant_operator_cannot_admin_tenant() {
             object_id,
             relation,
         } => {
-            assert_eq!(subject, "user:11111111-1111-1111-1111-111111111111");
+            assert_eq!(subject, "operator:11111111-1111-1111-1111-111111111111");
             assert_eq!(object_type, ObjectType::Tenant);
             assert_eq!(object_id, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
             assert_eq!(relation, Relation::Admin);
@@ -238,7 +238,7 @@ async fn tenant_operator_check_uses_operator_relation() {
         when.method(POST)
             .path("/stores/store-1/check")
             .json_body(check_body(
-                "user:12121212-1212-1212-1212-121212121212",
+                "operator:12121212-1212-1212-1212-121212121212",
                 "operator",
                 "tenant:cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd",
             ));
@@ -421,7 +421,7 @@ async fn delegated_agent_still_requires_can_act_as() {
             .path("/stores/store-1/batch-check")
             .json_body(batch_check_body(&[
                 (
-                    "user:11111111-1111-1111-1111-111111111111",
+                    "operator:11111111-1111-1111-1111-111111111111",
                     "can_act_as",
                     "agent:66666666-6666-6666-6666-666666666666",
                 ),
@@ -481,7 +481,7 @@ async fn delegated_agent_acts_as_agent_subject_not_user() {
             .path("/stores/store-1/batch-check")
             .json_body(batch_check_body(&[
                 (
-                    "user:11111111-1111-1111-1111-111111111111",
+                    "operator:11111111-1111-1111-1111-111111111111",
                     "can_act_as",
                     "agent:66666666-6666-6666-6666-666666666666",
                 ),
@@ -541,7 +541,7 @@ async fn non_agent_identity_cannot_claim_delegation() {
             object_id,
             relation,
         } => {
-            assert_eq!(subject, "user:11111111-1111-1111-1111-111111111111");
+            assert_eq!(subject, "operator:11111111-1111-1111-1111-111111111111");
             assert_eq!(object_type, ObjectType::Agent);
             assert_eq!(object_id, user_id.to_string());
             assert_eq!(relation, Relation::CanActAs);
@@ -562,7 +562,7 @@ async fn require_authz_engine_error_propagates() {
         when.method(POST)
             .path("/stores/store-1/check")
             .json_body(check_body(
-                "user:11111111-1111-1111-1111-111111111111",
+                "operator:11111111-1111-1111-1111-111111111111",
                 "operator",
                 "tenant:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             ));

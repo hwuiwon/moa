@@ -211,7 +211,7 @@ fn map_handler_error<T>(
 fn user_identity() -> Identity {
     let tenant_id = TenantId::new();
     Identity {
-        identity_type: IdentityType::User,
+        identity_type: IdentityType::Operator,
         id: Uuid::now_v7(),
         tenant_id,
         api_key_id: None,

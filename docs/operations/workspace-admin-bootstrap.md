@@ -15,9 +15,9 @@ INSERT INTO authz_outbox
     (idempotency_key, op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id)
 VALUES
     (
-        'write-workspace:00000000-0000-0000-0000-000000000001-admin-user:<workspace-admin-user-id>-v3',
+        'write-workspace:00000000-0000-0000-0000-000000000001-admin-operator:<workspace-admin-operator-id>-v4',
         'write',
-        'user:<workspace-admin-user-id>',
+        'operator:<workspace-admin-operator-id>',
         'admin',
         'workspace:00000000-0000-0000-0000-000000000001',
         3,
@@ -32,7 +32,7 @@ After a workspace admin exists, grant additional users workspace-admin access:
 curl -X POST "$MOA_EDGE_URL/v1/authz/tuple-write" \
   -H "Authorization: Bearer <workspace-admin-key>" \
   -H "Content-Type: application/json" \
-  --data '{"user":"user:<workspace-admin-user-id>","relation":"admin","object":"workspace:00000000-0000-0000-0000-000000000001"}'
+  --data '{"user":"operator:<workspace-admin-operator-id>","relation":"admin","object":"workspace:00000000-0000-0000-0000-000000000001"}'
 ```
 
 Attach a tenant to the workspace:

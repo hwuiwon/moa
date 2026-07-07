@@ -232,10 +232,10 @@ pub async fn require_authz_with_delegation(
     let subject = fga_subject(identity);
     let object = format!("{object_type}:{object_id}");
     let relation_str = relation.to_string();
-    let delegated_user = format!("user:{user_id}");
+    let delegated_operator = format!("operator:{user_id}");
     let can_act_as = Relation::CanActAs.to_string();
 
-    let delegation_key = decision_key(&delegated_user, &can_act_as, &agent_object);
+    let delegation_key = decision_key(&delegated_operator, &can_act_as, &agent_object);
     let resource_key = decision_key(&subject, &relation_str, &object);
     let delegation_cached = decision_cache().get(&delegation_key).await.is_some();
     let resource_cached = decision_cache().get(&resource_key).await.is_some();
@@ -246,7 +246,7 @@ pub async fn require_authz_with_delegation(
         let results = fga
             .batch_check(&[
                 (
-                    delegated_user.clone(),
+                    delegated_operator.clone(),
                     can_act_as.clone(),
                     agent_object.clone(),
                 ),
@@ -305,7 +305,7 @@ pub fn fga_subject(identity: &Identity) -> String {
     }
 
     match identity.identity_type {
-        IdentityType::User => format!("user:{}", identity.id),
+        IdentityType::Operator => format!("operator:{}", identity.id),
         IdentityType::Contact => format!("contact:{}", identity.id),
         IdentityType::Agent => format!("agent:{}", identity.id),
         IdentityType::Service => format!("service:{}", identity.id),
@@ -324,7 +324,7 @@ mod tests {
         // bounding how long a revoked grant can be served.
         let calls = AtomicUsize::new(0);
         // Unique per-test tuples so a shared process-global cache cannot pollute.
-        let subject = format!("user:{}", uuid::Uuid::new_v4());
+        let subject = format!("operator:{}", uuid::Uuid::new_v4());
         let denied_object = format!("session:{}", uuid::Uuid::new_v4());
         let allowed_object = format!("session:{}", uuid::Uuid::new_v4());
 

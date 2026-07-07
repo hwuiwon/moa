@@ -21,13 +21,13 @@ Agent registration writes:
 
 ```text
 tenant:<tenant> tenant agent:<agent>
-user:<operator> operator agent:<agent>
+operator:<operator> operator agent:<agent>
 ```
 
 Delegation uses the OpenFGA object shape from `schema_v1.json`:
 
 ```text
-user:<user> can_act_as agent:<agent>
+operator:<operator> can_act_as agent:<agent>
 ```
 
 That tuple lets `require_authz_with_delegation` verify that an agent may act on

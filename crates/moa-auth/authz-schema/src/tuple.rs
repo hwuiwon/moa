@@ -17,7 +17,7 @@ pub enum ObjectType {
     Tenant,
     /// A tenant-local end-user contact.
     Contact,
-    /// A tenant-local user, contact, or agent session.
+    /// A tenant-local operator, contact, or agent session.
     Session,
     /// A local API key principal.
     ApiKey,
@@ -25,15 +25,15 @@ pub enum ObjectType {
     Agent,
 }
 
-/// Subject types on the user side of an OpenFGA tuple.
+/// Subject types on the subject side of an OpenFGA tuple.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::Display)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum UserType {
     /// A deployment workspace object used as a tuple subject.
     Workspace,
-    /// A human user.
-    User,
+    /// A human operator.
+    Operator,
     /// A service principal.
     Service,
     /// A tenant-local end-user contact.
@@ -108,7 +108,7 @@ impl TupleKey {
         }
     }
 
-    /// Render the wire-format subject string, such as `user:<uuid>`.
+    /// Render the wire-format subject string, such as `operator:<uuid>`.
     pub fn user_wire(&self) -> String {
         format!("{}:{}", self.user_type, self.user_id)
     }
@@ -148,7 +148,7 @@ impl TupleKey {
 /// Serializable OpenFGA tuple key shape.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TupleKeyWire {
-    /// Wire-format subject, such as `user:<uuid>`.
+    /// Wire-format subject, such as `operator:<uuid>`.
     pub user: String,
     /// Relation name.
     pub relation: String,
@@ -190,7 +190,7 @@ mod tests {
 
         let user_types = [
             (UserType::Workspace, "workspace"),
-            (UserType::User, "user"),
+            (UserType::Operator, "operator"),
             (UserType::Service, "service"),
             (UserType::Contact, "contact"),
             (UserType::Agent, "agent"),
@@ -275,11 +275,11 @@ mod tests {
     fn idempotency_key_is_deterministic_and_includes_model_version() {
         // Pins: outbox idempotency keys include operation, tuple identity, and model version.
         let user_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111")
-            .expect("fixture user UUID should parse");
+            .expect("fixture operator UUID should parse");
         let tenant_id = Uuid::parse_str("22222222-2222-2222-2222-222222222222")
             .expect("fixture tenant UUID should parse");
         let tuple = TupleKey::new(
-            UserType::User,
+            UserType::Operator,
             user_id,
             Relation::Operator,
             ObjectType::Tenant,
@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(
             first,
-            "write-tenant-22222222-2222-2222-2222-222222222222-operator-user-11111111-1111-1111-1111-111111111111-v1"
+            "write-tenant-22222222-2222-2222-2222-222222222222-operator-operator-11111111-1111-1111-1111-111111111111-v1"
         );
 
         let v2 = tuple.idempotency_key(TupleOp::Write, 2);
@@ -323,10 +323,10 @@ mod tests {
                 "agent",
                 "api_key",
                 "contact",
+                "operator",
                 "service",
                 "session",
                 "tenant",
-                "user",
                 "workspace",
             ]
         );

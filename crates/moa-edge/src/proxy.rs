@@ -99,7 +99,7 @@ impl OrchestratorProxy {
 
 fn identity_type_str(identity_type: IdentityType) -> &'static str {
     match identity_type {
-        IdentityType::User => "user",
+        IdentityType::Operator => "operator",
         IdentityType::Contact => "contact",
         IdentityType::Agent => "agent",
         IdentityType::Service => "service",

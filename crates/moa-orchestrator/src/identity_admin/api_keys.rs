@@ -80,7 +80,7 @@ pub(crate) async fn list_keys(
     identity: Identity,
 ) -> Result<Vec<KeyListItem>, HandlerError> {
     let (owner_user_id, owner_agent_id) = match identity.identity_type {
-        IdentityType::User => (Some(identity.id), None),
+        IdentityType::Operator => (Some(identity.id), None),
         IdentityType::Agent => (None, Some(identity.id)),
         IdentityType::Service | IdentityType::Contact => {
             return Err(
@@ -443,7 +443,7 @@ impl ApiKeyRow {
 
 fn actor_user_id(identity: &Identity) -> Option<Uuid> {
     match identity.identity_type {
-        IdentityType::User => Some(identity.id),
+        IdentityType::Operator => Some(identity.id),
         IdentityType::Agent | IdentityType::Service | IdentityType::Contact => {
             identity.acting_on_behalf_of
         }
@@ -452,7 +452,7 @@ fn actor_user_id(identity: &Identity) -> Option<Uuid> {
 
 fn owner_wire(owner: KeyOwner) -> String {
     match owner {
-        KeyOwner::User(user_id) => format!("user:{user_id}"),
+        KeyOwner::User(user_id) => format!("operator:{user_id}"),
         KeyOwner::Agent(agent_id) => format!("agent:{agent_id}"),
     }
 }

@@ -131,10 +131,10 @@ OpenFGA `workspace#admin` relation inherits into every linked tenant's
 sessions, contacts, memory, learning, artifacts, analytics, policies, events,
 and audit evidence are tenant-owned.
 
-Contacts are end users inside a tenant. Users are admin/operator principals:
-workspace admins, tenant admins, tenant operators, service users, and API-key
-subjects. Users are authorized to administer or operate tenants, but they are
-not contact memory subjects and are not part of the contact/session lineage.
+Contacts are end users inside a tenant. Operators are admin/control-plane
+principals: workspace admins, tenant admins, tenant operators, service users,
+and API-key subjects. Operators are authorized to administer or operate tenants,
+but they are not contact memory subjects and are not part of the contact/session lineage.
 Contact credentials cannot access platform-internal control-plane surfaces such
 as skills, experiments, knowledge management, or tenant administration.
 

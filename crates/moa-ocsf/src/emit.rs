@@ -60,7 +60,7 @@ impl ActorInput {
     #[must_use]
     pub fn from_identity(identity: &Identity) -> Self {
         let (prefix, type_id) = match identity.identity_type {
-            IdentityType::User => ("user", 1),
+            IdentityType::Operator => ("operator", 1),
             IdentityType::Contact => ("contact", 2),
             IdentityType::Agent => ("agent", 3),
             IdentityType::Service => ("service", 4),

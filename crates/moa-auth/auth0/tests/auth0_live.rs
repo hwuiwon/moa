@@ -12,7 +12,7 @@ mod support;
 #[tokio::test]
 #[ignore = "requires MOA_RUN_LIVE_AUTH0_TESTS=1 and an Auth0 tenant"]
 async fn auth0_authenticate_valid_token_returns_identity() {
-    // Pins: a real Auth0 access token with MOA namespaced claims resolves to a MOA user identity.
+    // Pins: a real Auth0 access token with MOA namespaced claims resolves to a MOA operator identity.
     let Some(env) = live_valid_env() else {
         return;
     };
@@ -22,7 +22,7 @@ async fn auth0_authenticate_valid_token_returns_identity() {
         .authenticate(&Credential::BearerJwt(env.valid_token))
         .await
         .expect("valid live Auth0 token should authenticate");
-    assert_eq!(identity.identity_type, IdentityType::User);
+    assert_eq!(identity.identity_type, IdentityType::Operator);
     assert_eq!(identity.tenant_id, TenantId::from(env.tenant_id));
     assert_eq!(identity.api_key_id, None);
 }

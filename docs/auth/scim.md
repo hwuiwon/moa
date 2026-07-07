@@ -14,7 +14,7 @@ SCIM clients authenticate with a MOA API key whose OpenFGA scope grants
 ```sh
 curl -X POST http://localhost:10010/ApiKeys/create \
   -H "Content-Type: application/json" \
-  -H "x-moa-identity-type: user" \
+  -H "x-moa-identity-type: operator" \
   -H "x-moa-identity-id: <admin-user-id>" \
   -H "x-moa-tenant-id: <tenant-id>" \
   --data '{"name":"okta-scim","env":"prod","description":null,"for_agent_id":null}'
@@ -83,8 +83,8 @@ SCIM groups enqueue FGA tuples when members are added or removed only for
 schema-backed tenant role groups. The mapping is:
 
 - ordinary group names persist membership as SCIM product data without OpenFGA tuples
-- `tenant:<T>:admin` maps to `user:<U> admin tenant:<T>`
-- `tenant:<T>:operator` maps to `user:<U> operator tenant:<T>`
+- `tenant:<T>:admin` maps to `operator:<U> admin tenant:<T>`
+- `tenant:<T>:operator` maps to `operator:<U> operator tenant:<T>`
 
 Other `tenant:<T>:<relation>` group names are rejected.
 

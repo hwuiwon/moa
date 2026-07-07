@@ -17,7 +17,7 @@ pub async fn grant_tenant_admin(
 ) -> Result<()> {
     apply_raw_tuple(
         TupleOp::Write,
-        &format!("user:{}", identity.id),
+        &format!("operator:{}", identity.id),
         "admin",
         &format!("tenant:{tenant_id}"),
     )
@@ -32,7 +32,7 @@ pub async fn grant_tenant_operator(
 ) -> Result<()> {
     apply_raw_tuple(
         TupleOp::Write,
-        &format!("user:{}", identity.id),
+        &format!("operator:{}", identity.id),
         "operator",
         &format!("tenant:{tenant_id}"),
     )
@@ -44,7 +44,7 @@ pub async fn grant_tenant_operator(
 pub async fn grant_session_participant(identity: &Identity, session_id: SessionId) -> Result<()> {
     apply_raw_tuple(
         TupleOp::Write,
-        &format!("user:{}", identity.id),
+        &format!("operator:{}", identity.id),
         "participant",
         &format!("session:{session_id}"),
     )

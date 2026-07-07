@@ -194,7 +194,7 @@ async fn grant_session_participant(
         .as_ref()
         .context("fixture OpenFGA client is unavailable")?;
     let tuple = json!({
-        "user": format!("user:{}", identity.id),
+        "user": format!("operator:{}", identity.id),
         "relation": "participant",
         "object": format!("session:{session_id}"),
     });
@@ -521,7 +521,7 @@ fn event_summary(events: &[EventRecord]) -> String {
 
 fn default_fixture_identity() -> Identity {
     Identity {
-        identity_type: IdentityType::User,
+        identity_type: IdentityType::Operator,
         id: Uuid::from_u128(0x1000_0000_0000_0000_0000_0000_0000_0001),
         tenant_id: TenantId::from(Uuid::from_u128(0x2000_0000_0000_0000_0000_0000_0000_0001)),
         api_key_id: None,

@@ -319,7 +319,7 @@ fn session_identity(meta: &SessionMeta) -> Option<Identity> {
     }
     match meta.created_by.as_ref()? {
         SessionActorRef::Identity { id } => Some(Identity {
-            identity_type: IdentityType::User,
+            identity_type: IdentityType::Operator,
             id: *id,
             tenant_id: meta.tenant_id,
             api_key_id: None,
@@ -440,7 +440,7 @@ mod tests {
             ..SessionMeta::default()
         };
         let identity = session_identity(&with_creator).expect("creator identity");
-        assert_eq!(identity.identity_type, IdentityType::User);
+        assert_eq!(identity.identity_type, IdentityType::Operator);
         assert_eq!(identity.id, creator);
 
         let anonymous = SessionMeta {

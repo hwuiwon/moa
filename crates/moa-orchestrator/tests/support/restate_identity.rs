@@ -3,10 +3,10 @@
 use moa_core::traits::{Identity, IdentityType};
 use uuid::Uuid;
 
-/// Return a fresh user identity suitable for direct Restate e2e calls.
+/// Return a fresh operator identity suitable for direct Restate e2e calls.
 pub fn test_user_identity() -> Identity {
     Identity {
-        identity_type: IdentityType::User,
+        identity_type: IdentityType::Operator,
         id: Uuid::new_v4(),
         tenant_id: moa_core::TenantId::new(),
         api_key_id: None,
@@ -20,7 +20,7 @@ pub fn with_identity(
     identity: &Identity,
 ) -> reqwest::RequestBuilder {
     request
-        .header("x-moa-identity-type", "user")
+        .header("x-moa-identity-type", "operator")
         .header("x-moa-identity-id", identity.id.to_string())
         .header("x-moa-tenant-id", identity.tenant_id.to_string())
 }

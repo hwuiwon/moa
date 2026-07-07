@@ -532,14 +532,14 @@ fn agent_doc(name: &str, display_name: &str, allowed_tool: &str) -> ArtifactDocu
 
 fn identity_json() -> serde_json::Value {
     let identity = Identity {
-        identity_type: IdentityType::User,
+        identity_type: IdentityType::Operator,
         id: Uuid::now_v7(),
         tenant_id: TenantId::new(),
         api_key_id: None,
         acting_on_behalf_of: None,
     };
     json!({
-        "type": "user",
+        "type": "operator",
         "id": identity.id,
         "tenant_id": identity.tenant_id
     })
@@ -547,7 +547,7 @@ fn identity_json() -> serde_json::Value {
 
 fn identity_for_tenant(tenant_id: TenantId) -> Identity {
     Identity {
-        identity_type: IdentityType::User,
+        identity_type: IdentityType::Operator,
         id: Uuid::now_v7(),
         tenant_id,
         api_key_id: None,

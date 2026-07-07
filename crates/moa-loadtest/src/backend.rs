@@ -239,7 +239,7 @@ impl RemoteTarget {
     async fn grant_session_participant(&self, session_id: SessionId) -> Result<()> {
         grant_raw_tuple(
             &self.fga,
-            format!("user:{}", self.identity.id),
+            format!("operator:{}", self.identity.id),
             "participant",
             format!("session:{session_id}"),
         )
@@ -459,7 +459,7 @@ impl RemoteHttpClient {
             return request;
         };
         let identity_type = match identity.identity_type {
-            IdentityType::User => "user",
+            IdentityType::Operator => "operator",
             IdentityType::Agent => "agent",
             IdentityType::Service => "service",
             IdentityType::Contact => "contact",

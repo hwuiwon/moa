@@ -19,10 +19,10 @@ every linked tenant's `tenant#admin` relation. The tenant remains the hard
 runtime isolation boundary for sessions, contacts, learning, memory, artifacts,
 analytics, policies, events, and audit evidence.
 
-Contacts are end users inside a tenant. Users are admin/operator principals:
-workspace admins, tenant admins, tenant operators, service users, and API-key
-subjects. Users can administer or operate tenants through authorization, but
-they are not contact memory subjects. Contact credentials cannot access
+Contacts are end users inside a tenant. Operators are admin/control-plane
+principals: workspace admins, tenant admins, tenant operators, service users,
+and API-key subjects. Operators can administer or operate tenants through
+authorization, but they are not contact memory subjects. Contact credentials cannot access
 platform-internal control-plane surfaces such as skills, experiments, knowledge
 management, or tenant administration.
 

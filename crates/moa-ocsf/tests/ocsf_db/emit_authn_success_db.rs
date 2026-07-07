@@ -16,7 +16,7 @@ async fn emit_authn_success_inserts_signed_security_event() {
     let tenant_id = Uuid::from_u128(0x10);
     let user_id = Uuid::from_u128(0x20);
     let identity = Identity {
-        identity_type: IdentityType::User,
+        identity_type: IdentityType::Operator,
         id: user_id,
         tenant_id: TenantId::from(tenant_id),
         api_key_id: None,
@@ -43,7 +43,7 @@ async fn emit_authn_success_inserts_signed_security_event() {
     assert_eq!(row.0, 3002);
     assert_eq!(row.1, 1);
     assert_eq!(row.2, 1);
-    assert_eq!(row.3, format!("user:{user_id}"));
+    assert_eq!(row.3, format!("operator:{user_id}"));
     assert!(!row.4.is_empty());
 
     let verified = signing::verify(&pool, row.5, &row.6, &row.4)

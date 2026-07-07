@@ -19,7 +19,7 @@ local API-key provider and JWT bearer values to Auth0.
 exports.onExecutePostLogin = async (event, api) => {
   const tid = event.user.app_metadata.tenant_id;
   if (tid) api.accessToken.setCustomClaim('https://moa/tenant_id', tid);
-  const t = event.user.app_metadata.identity_type || 'user';
+  const t = event.user.app_metadata.identity_type || 'operator';
   api.accessToken.setCustomClaim('https://moa/identity_type', t);
 };
 ```

@@ -44,7 +44,7 @@ async fn outbox_basic_enqueue_is_idempotent_on_same_key() {
     let user_id = Uuid::new_v4();
     let tenant_id = Uuid::new_v4();
     let tuple = TupleKey::new(
-        UserType::User,
+        UserType::Operator,
         user_id,
         Relation::Operator,
         ObjectType::Tenant,
@@ -83,7 +83,7 @@ async fn outbox_basic_enqueue_separates_write_and_delete() {
     let user_id = Uuid::new_v4();
     let tenant_id = Uuid::new_v4();
     let tuple = TupleKey::new(
-        UserType::User,
+        UserType::Operator,
         user_id,
         Relation::Operator,
         ObjectType::Tenant,
@@ -119,7 +119,7 @@ async fn outbox_basic_failed_row_moves_to_dead_letter_at_max_attempts() {
     let tenant_id = Uuid::new_v4();
     let user_id = Uuid::new_v4();
     let tuple = TupleKey::new(
-        UserType::User,
+        UserType::Operator,
         user_id,
         Relation::Operator,
         ObjectType::Tenant,

@@ -1086,7 +1086,7 @@ async fn purge_tenant_account(pool: &sqlx::PgPool, tenant_id: Uuid) -> Result<()
                 enqueue_raw(
                     &mut *tx,
                     TupleOp::Delete,
-                    &format!("user:{user_id}"),
+                    &format!("operator:{user_id}"),
                     relation,
                     &format!("session:{session_id}"),
                     Some(tenant_id),
@@ -1292,7 +1292,7 @@ async fn enqueue_user_role_tuple(
     enqueue_raw(
         &mut **tx,
         op,
-        &format!("user:{user_id}"),
+        &format!("operator:{user_id}"),
         relation,
         &format!("tenant:{tenant_id}"),
         Some(tenant_id),

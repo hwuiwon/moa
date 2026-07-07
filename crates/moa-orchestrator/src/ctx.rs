@@ -608,7 +608,7 @@ pub fn current_identity(
 
 fn parse_identity_type(value: &str) -> Result<IdentityType, IdentityHeaderError> {
     match value {
-        "user" => Ok(IdentityType::User),
+        "operator" => Ok(IdentityType::Operator),
         "contact" => Ok(IdentityType::Contact),
         "agent" => Ok(IdentityType::Agent),
         "service" => Ok(IdentityType::Service),

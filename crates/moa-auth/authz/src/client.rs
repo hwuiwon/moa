@@ -41,7 +41,7 @@ struct FgaInner {
 /// Tuple returned from OpenFGA `Read`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FgaTuple {
-    /// Wire-format subject, such as `user:<uuid>`.
+    /// Wire-format subject, such as `operator:<uuid>`.
     pub user: String,
     /// Relation name.
     pub relation: String,

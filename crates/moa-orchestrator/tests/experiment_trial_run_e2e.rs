@@ -1002,7 +1002,7 @@ fn new_parent_run(identity: &Identity, agent_revision_uid: Uuid) -> NewExperimen
         artifact_revision_uids: Vec::new(),
         idempotency_key: Some(format!("trial-parent-{}", Uuid::now_v7())),
         created_by_identity: json!({
-            "type": "user",
+            "type": "operator",
             "id": identity.id.to_string(),
         }),
     }

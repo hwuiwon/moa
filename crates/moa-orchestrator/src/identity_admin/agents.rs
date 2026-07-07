@@ -174,7 +174,7 @@ async fn mutate_can_act_as(
     enqueue_raw(
         &mut *transaction,
         op,
-        &format!("user:{}", request.user_id),
+        &format!("operator:{}", request.user_id),
         "can_act_as",
         &format!("agent:{}", request.agent_id),
         Some(identity.tenant_id.0),
@@ -290,7 +290,7 @@ async fn enqueue_agent_tuples(
         enqueue_raw(
             &mut **transaction,
             op,
-            &format!("user:{operator_user_id}"),
+            &format!("operator:{operator_user_id}"),
             "operator",
             &format!("agent:{}", agent.id),
             Some(agent.tenant_id),
@@ -328,7 +328,7 @@ fn required_operator_user_id(identity: &Identity) -> Result<Uuid, HandlerError> 
     if let Some(user_id) = identity.acting_on_behalf_of {
         return Ok(user_id);
     }
-    if identity.identity_type == IdentityType::User {
+    if identity.identity_type == IdentityType::Operator {
         return Ok(identity.id);
     }
     Err(TerminalError::new_with_code(403, "agent registration requires a user operator").into())
@@ -336,7 +336,7 @@ fn required_operator_user_id(identity: &Identity) -> Result<Uuid, HandlerError> 
 
 fn actor_user_id(identity: &Identity) -> Option<Uuid> {
     match identity.identity_type {
-        IdentityType::User => Some(identity.id),
+        IdentityType::Operator => Some(identity.id),
         IdentityType::Agent | IdentityType::Service | IdentityType::Contact => {
             identity.acting_on_behalf_of
         }
@@ -369,10 +369,10 @@ mod tests {
         // Pins: a direct human caller becomes the operator for newly registered agents.
         let user_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111")
             .expect("user fixture UUID should parse");
-        let identity = identity(IdentityType::User, user_id, None);
+        let identity = identity(IdentityType::Operator, user_id, None);
 
         let operator_user_id =
-            required_operator_user_id(&identity).expect("user identity should be accepted");
+            required_operator_user_id(&identity).expect("operator identity should be accepted");
 
         assert_eq!(operator_user_id, user_id);
     }

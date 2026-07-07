@@ -43,7 +43,7 @@ async fn authenticate_api_key(pool: &PgPool, key: &str) -> Result<Identity, Auth
     match validate(pool, key).await {
         Ok(resolved) => {
             let (identity_type, id) = match (resolved.owner_user_id, resolved.owner_agent_id) {
-                (Some(user_id), None) => (IdentityType::User, user_id),
+                (Some(user_id), None) => (IdentityType::Operator, user_id),
                 (None, Some(agent_id)) => (IdentityType::Agent, agent_id),
                 _ => {
                     return Err(AuthError::Internal(
@@ -76,7 +76,7 @@ async fn authenticate_api_key(pool: &PgPool, key: &str) -> Result<Identity, Auth
 async fn authenticate_user_session(pool: &PgPool, token: &str) -> Result<Identity, AuthError> {
     match user_sessions::validate(pool, token).await {
         Ok(resolved) => Ok(Identity {
-            identity_type: IdentityType::User,
+            identity_type: IdentityType::Operator,
             id: resolved.user_id,
             tenant_id: moa_core::TenantId::from(resolved.tenant_id),
             api_key_id: None,

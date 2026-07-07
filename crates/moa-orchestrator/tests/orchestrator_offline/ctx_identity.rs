@@ -49,7 +49,7 @@ fn full_header_set_produces_expected_identity() {
 fn partial_header_set_returns_malformed_error() {
     // Pins: partial identity is rejected instead of producing an ambiguous principal.
     let mut headers = HeaderMap::with_capacity(1);
-    headers.insert("x-moa-identity-type", "user".to_string());
+    headers.insert("x-moa-identity-type", "operator".to_string());
 
     let error =
         extract_identity(&headers).expect_err("partial identity header set should be malformed");

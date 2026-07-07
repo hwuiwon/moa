@@ -188,7 +188,7 @@ async fn provision_static(
 ) -> Result<Uuid, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let new_id = Uuid::new_v4();
-    if identity_type == IdentityType::User {
+    if identity_type == IdentityType::Operator {
         let external_id = format!("{source}:{sub}");
         sqlx::query(
             r#"
@@ -230,8 +230,8 @@ async fn provision_static(
 }
 
 pub(crate) fn parse_identity_type(value: Option<&str>) -> Result<IdentityType, AuthError> {
-    match value.unwrap_or("user") {
-        "user" => Ok(IdentityType::User),
+    match value.unwrap_or("operator") {
+        "operator" => Ok(IdentityType::Operator),
         "agent" => Ok(IdentityType::Agent),
         "service" => Ok(IdentityType::Service),
         other => Err(AuthError::Internal(format!(

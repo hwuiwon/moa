@@ -302,7 +302,7 @@ fn event_summary(events: &[EventRecord]) -> String {
 
 fn default_fixture_identity() -> Identity {
     Identity {
-        identity_type: IdentityType::User,
+        identity_type: IdentityType::Operator,
         id: Uuid::from_u128(0x1000_0000_0000_0000_0000_0000_0000_0001),
         tenant_id: TenantId::from(Uuid::from_u128(0x2000_0000_0000_0000_0000_0000_0000_0001)),
         api_key_id: None,

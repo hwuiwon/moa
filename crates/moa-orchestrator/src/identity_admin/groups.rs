@@ -575,7 +575,7 @@ async fn enqueue_group_mapping(
         enqueue_raw(
             &mut **tx,
             op,
-            &format!("user:{user_id}"),
+            &format!("operator:{user_id}"),
             &target.relation,
             &target.object,
             Some(tenant_id),

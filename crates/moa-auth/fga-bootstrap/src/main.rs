@@ -106,7 +106,7 @@ async fn run_smoke_checks(client: &http::FgaClient, store_id: &str, model_id: &s
 
     let smoke_tuples = [
         serde_json::json!({
-            "user": format!("user:{user_id}"),
+            "user": format!("operator:{user_id}"),
             "relation": "admin",
             "object": format!("workspace:{workspace_id}"),
         }),
@@ -143,7 +143,7 @@ async fn run_smoke_checks(client: &http::FgaClient, store_id: &str, model_id: &s
     let tenant = format!("tenant:{tenant_id}");
     let agent = format!("agent:{agent_id}");
     let session = format!("session:{session_id}");
-    let user = format!("user:{user_id}");
+    let user = format!("operator:{user_id}");
     let contact = format!("contact:{contact_id}");
     let admin_check = client
         .check(store_id, model_id, &user, "admin", &tenant)

@@ -82,7 +82,7 @@ a dev API key through the hosted `ApiKeys` service:
 ./scripts/bootstrap-api-identity.sh
 curl -X POST http://localhost:10010/ApiKeys/create \
   -H "Content-Type: application/json" \
-  -H "x-moa-identity-type: user" \
+  -H "x-moa-identity-type: operator" \
   -H "x-moa-identity-id: 00000000-0000-0000-0000-000000000101" \
   -H "x-moa-tenant-id: 00000000-0000-0000-0000-000000000201" \
   --data '{"name":"local","env":"dev","description":null,"for_agent_id":null}'

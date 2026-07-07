@@ -310,7 +310,7 @@ fn new_session_meta(
 
 fn session_actor_ref(identity: &Identity) -> Result<SessionActorRef, HandlerError> {
     match identity.identity_type {
-        IdentityType::User | IdentityType::Agent => Ok(SessionActorRef::Identity {
+        IdentityType::Operator | IdentityType::Agent => Ok(SessionActorRef::Identity {
             id: identity.acting_on_behalf_of.unwrap_or(identity.id),
         }),
         IdentityType::Service => Err(TerminalError::new_with_code(
@@ -354,7 +354,7 @@ fn with_identity_headers<'a, Req, Res>(
 
 fn identity_type_header(identity_type: IdentityType) -> &'static str {
     match identity_type {
-        IdentityType::User => "user",
+        IdentityType::Operator => "operator",
         IdentityType::Agent => "agent",
         IdentityType::Service => "service",
         IdentityType::Contact => "contact",

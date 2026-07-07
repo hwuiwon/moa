@@ -219,7 +219,7 @@ fn owner_tuple_subject(identity: &Identity) -> Result<(UserType, uuid::Uuid), Ha
     }
 
     match identity.identity_type {
-        IdentityType::User => Ok((UserType::User, identity.id)),
+        IdentityType::Operator => Ok((UserType::Operator, identity.id)),
         IdentityType::Contact => Ok((UserType::Contact, identity.id)),
         IdentityType::Agent => Ok((UserType::Agent, identity.id)),
         IdentityType::Service => {

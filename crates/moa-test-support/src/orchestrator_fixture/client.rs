@@ -155,7 +155,7 @@ impl TestApiClient {
             return request;
         };
         let identity_type = match identity.identity_type {
-            IdentityType::User => "user",
+            IdentityType::Operator => "operator",
             IdentityType::Agent => "agent",
             IdentityType::Service => "service",
             IdentityType::Contact => "contact",

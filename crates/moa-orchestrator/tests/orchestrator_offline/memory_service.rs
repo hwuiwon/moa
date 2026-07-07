@@ -14,7 +14,7 @@ use uuid::Variant;
 
 fn user_identity(user_id: Uuid) -> Identity {
     Identity {
-        identity_type: IdentityType::User,
+        identity_type: IdentityType::Operator,
         id: user_id,
         tenant_id: TenantId::new(),
         api_key_id: None,

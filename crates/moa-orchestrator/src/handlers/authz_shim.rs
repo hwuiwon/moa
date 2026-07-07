@@ -133,7 +133,7 @@ mod tests {
     fn require_identity_keeps_partial_identity_as_bad_request() {
         // Pins: forged or truncated trusted identity headers are malformed requests.
         let mut headers = HeaderMap::with_capacity(1);
-        headers.insert("x-moa-identity-type", "user".to_string());
+        headers.insert("x-moa-identity-type", "operator".to_string());
         let headers = TestHeaders(headers);
 
         let error = require_identity(&headers)

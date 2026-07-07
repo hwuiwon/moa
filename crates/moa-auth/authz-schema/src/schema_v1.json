@@ -2,7 +2,7 @@
   "schema_version": "1.2",
   "type_definitions": [
     {
-      "type": "user"
+      "type": "operator"
     },
     {
       "type": "service"
@@ -14,7 +14,7 @@
           "admin": {
             "directly_related_user_types": [
               {
-                "type": "user"
+                "type": "operator"
               },
               {
                 "type": "api_key"
@@ -68,14 +68,14 @@
           "can_act_as": {
             "directly_related_user_types": [
               {
-                "type": "user"
+                "type": "operator"
               }
             ]
           },
           "operator": {
             "directly_related_user_types": [
               {
-                "type": "user"
+                "type": "operator"
               },
               {
                 "type": "api_key"
@@ -126,7 +126,7 @@
           "owner": {
             "directly_related_user_types": [
               {
-                "type": "user"
+                "type": "operator"
               },
               {
                 "type": "contact"
@@ -161,7 +161,7 @@
           "admin": {
             "directly_related_user_types": [
               {
-                "type": "user"
+                "type": "operator"
               },
               {
                 "type": "api_key"
@@ -178,7 +178,7 @@
           "operator": {
             "directly_related_user_types": [
               {
-                "type": "user"
+                "type": "operator"
               },
               {
                 "type": "api_key"
@@ -243,7 +243,7 @@
           "owner": {
             "directly_related_user_types": [
               {
-                "type": "user"
+                "type": "operator"
               },
               {
                 "type": "contact"
@@ -259,7 +259,7 @@
           "participant": {
             "directly_related_user_types": [
               {
-                "type": "user"
+                "type": "operator"
               },
               {
                 "type": "contact"

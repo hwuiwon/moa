@@ -57,7 +57,7 @@ async fn poller_drains_write_to_fga() {
     let tenant_id = Uuid::new_v4();
     let user_id = Uuid::new_v4();
     let tuple = TupleKey::new(
-        UserType::User,
+        UserType::Operator,
         user_id,
         Relation::Operator,
         ObjectType::Tenant,
@@ -82,7 +82,7 @@ async fn poller_drains_write_to_fga() {
 
     let allowed = client
         .check(
-            &format!("user:{user_id}"),
+            &format!("operator:{user_id}"),
             "operator",
             &format!("tenant:{tenant_id}"),
         )

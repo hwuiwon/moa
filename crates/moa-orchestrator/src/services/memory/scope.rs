@@ -21,7 +21,7 @@ pub enum UserScopeError {
 #[must_use]
 pub fn effective_user_id(identity: &Identity) -> Option<UserId> {
     match identity.identity_type {
-        IdentityType::User => Some(UserId::new(identity.id.to_string())),
+        IdentityType::Operator => Some(UserId::new(identity.id.to_string())),
         IdentityType::Agent => identity
             .acting_on_behalf_of
             .map(|user_id| UserId::new(user_id.to_string())),

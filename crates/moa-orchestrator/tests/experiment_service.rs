@@ -610,7 +610,7 @@ fn completed_run_record(storage_partition_id: StoragePartitionId) -> ExperimentR
         procedure_run_uid: Some(fixture_uuid(5)),
         artifact_revision_uids: vec![fixture_uuid(20), fixture_uuid(21)],
         idempotency_key: Some("run-key".to_string()),
-        created_by_identity: json!({"type": "user"}),
+        created_by_identity: json!({"type": "operator"}),
         error: None,
         created_at: fixture_time(),
         started_at: Some(fixture_time()),

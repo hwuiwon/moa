@@ -369,7 +369,7 @@ pub async fn change_password(
         Ok(identity) => identity,
         Err(response) => return response,
     };
-    if identity.identity_type != IdentityType::User {
+    if identity.identity_type != IdentityType::Operator {
         return (StatusCode::FORBIDDEN, "only users can change password").into_response();
     }
     let request: ChangePasswordRequest = match parse_json_body(&body) {
@@ -436,7 +436,7 @@ pub async fn get_me(State(state): State<AppState>, headers: HeaderMap) -> Respon
         Ok(identity) => identity,
         Err(response) => return response,
     };
-    if identity.identity_type != IdentityType::User {
+    if identity.identity_type != IdentityType::Operator {
         return (StatusCode::FORBIDDEN, "only users have profiles").into_response();
     }
     let user = match load_user_response(&state.pool, identity.tenant_id.0, identity.id).await {
@@ -456,7 +456,7 @@ pub async fn patch_me(State(state): State<AppState>, headers: HeaderMap, body: B
         Ok(identity) => identity,
         Err(response) => return response,
     };
-    if identity.identity_type != IdentityType::User {
+    if identity.identity_type != IdentityType::Operator {
         return (StatusCode::FORBIDDEN, "only users have profiles").into_response();
     }
     let request: PatchMeRequest = match parse_json_body(&body) {
@@ -661,7 +661,7 @@ pub(super) async fn issue_login_session(
     .await
     .map_err(|error| internal_error(format!("create session token: {error}")))?;
     let identity = Identity {
-        identity_type: IdentityType::User,
+        identity_type: IdentityType::Operator,
         id: row.id,
         tenant_id: moa_core::TenantId::from(row.tenant_id),
         api_key_id: None,

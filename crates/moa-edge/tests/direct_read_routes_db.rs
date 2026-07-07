@@ -311,7 +311,7 @@ async fn dashboard_sessions_operator_reads_list_detail_and_redacted_events_db() 
         &store,
         &database_url,
         &schema_name,
-        identity(IdentityType::User, tenant_id),
+        identity(IdentityType::Operator, tenant_id),
         Some(fga.client.clone()),
     )
     .await;
@@ -459,7 +459,7 @@ async fn dashboard_sessions_cross_tenant_read_is_denied_db() {
         &store,
         &database_url,
         &schema_name,
-        identity(IdentityType::User, caller_tenant),
+        identity(IdentityType::Operator, caller_tenant),
         Some(fga.client.clone()),
     )
     .await;
@@ -503,7 +503,7 @@ async fn dashboard_sessions_workspace_admin_reads_explicit_tenant_db() {
         &store,
         &database_url,
         &schema_name,
-        identity(IdentityType::User, caller_tenant),
+        identity(IdentityType::Operator, caller_tenant),
         Some(fga.client.clone()),
     )
     .await;
@@ -556,7 +556,7 @@ async fn dashboard_sessions_malformed_cursor_is_rejected_db() {
         &store,
         &database_url,
         &schema_name,
-        identity(IdentityType::User, tenant_id),
+        identity(IdentityType::Operator, tenant_id),
         Some(fga.client.clone()),
     )
     .await;
@@ -642,7 +642,7 @@ async fn authz_gate_runs_before_analytics_query_db() {
         &store,
         &database_url,
         &schema_name,
-        identity(IdentityType::User, tenant_id),
+        identity(IdentityType::Operator, tenant_id),
         None,
     )
     .await;
@@ -682,7 +682,7 @@ async fn analytics_query_uses_requested_tenant_when_authorized_db() {
         &store,
         &database_url,
         &schema_name,
-        identity(IdentityType::User, tenant_a),
+        identity(IdentityType::Operator, tenant_a),
         Some(fga.client.clone()),
     )
     .await;
@@ -740,7 +740,7 @@ async fn analytics_query_denies_unauthorized_requested_tenant_db() {
         &store,
         &database_url,
         &schema_name,
-        identity(IdentityType::User, caller_tenant),
+        identity(IdentityType::Operator, caller_tenant),
         Some(fga.client.clone()),
     )
     .await;
@@ -781,7 +781,7 @@ async fn analytics_catalog_requires_tenant_operator_db() {
         &store,
         &database_url,
         &schema_name,
-        identity(IdentityType::User, caller_tenant),
+        identity(IdentityType::Operator, caller_tenant),
         Some(fga.client.clone()),
     )
     .await;
@@ -855,7 +855,7 @@ async fn analytics_query_uses_configured_schema_db() {
         &store,
         &database_url,
         &schema_name,
-        identity(IdentityType::User, tenant_id),
+        identity(IdentityType::Operator, tenant_id),
         Some(fga.client.clone()),
     )
     .await;
@@ -919,7 +919,7 @@ async fn lineage_query_uses_typed_filters_and_rejects_legacy_sql_db() {
         &store,
         &database_url,
         &schema_name,
-        identity(IdentityType::User, tenant_a),
+        identity(IdentityType::Operator, tenant_a),
         Some(fga.client.clone()),
     )
     .await;

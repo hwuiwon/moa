@@ -48,7 +48,7 @@ macro_rules! emit_committed {
 
 fn user_identity(tenant_uuid: Uuid, user_id: Uuid) -> Identity {
     Identity {
-        identity_type: IdentityType::User,
+        identity_type: IdentityType::Operator,
         id: user_id,
         tenant_id: TenantId::from(tenant_uuid),
         api_key_id: None,
@@ -109,7 +109,10 @@ async fn emit_authz_decision_deny_writes_low_severity_authorization_audit_db() {
         i64::from(AUTHORIZATION * 100 + 99),
         "type_uid = class*100+activity"
     );
-    assert_eq!(row.4.as_deref(), Some(format!("user:{user_id}").as_str()));
+    assert_eq!(
+        row.4.as_deref(),
+        Some(format!("operator:{user_id}").as_str())
+    );
     assert_eq!(row.5.as_deref(), Some(object_uid.as_str()));
 
     let signed: (Uuid, Vec<u8>, String) = sqlx::query_as(

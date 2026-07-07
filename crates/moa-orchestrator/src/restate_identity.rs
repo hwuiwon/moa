@@ -57,7 +57,7 @@ pub(crate) fn with_reqwest_identity_headers(
 
 fn identity_type_header(identity_type: IdentityType) -> &'static str {
     match identity_type {
-        IdentityType::User => "user",
+        IdentityType::Operator => "operator",
         IdentityType::Contact => "contact",
         IdentityType::Agent => "agent",
         IdentityType::Service => "service",

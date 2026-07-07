@@ -89,7 +89,7 @@ async fn denied_require_authz_persists_ocsf_security_event_db() {
     let user_id = Uuid::from_u128(0x7002);
     let session_id = Uuid::from_u128(0x7003);
     let identity = Identity {
-        identity_type: IdentityType::User,
+        identity_type: IdentityType::Operator,
         id: user_id,
         tenant_id: TenantId::from(tenant_id),
         api_key_id: None,
@@ -99,7 +99,7 @@ async fn denied_require_authz_persists_ocsf_security_event_db() {
         when.method(POST)
             .path("/stores/store-1/check")
             .json_body(check_body(
-                &format!("user:{user_id}"),
+                &format!("operator:{user_id}"),
                 "participant",
                 &format!("session:{session_id}"),
             ));
@@ -153,7 +153,10 @@ async fn denied_require_authz_persists_ocsf_security_event_db() {
     assert_eq!(row.1, 3003, "deny audit must use Authorization class");
     assert_eq!(row.2, 99, "deny audit maps to authz activity Other");
     assert_eq!(row.3, 2, "deny audit must be Low severity");
-    assert_eq!(row.4.as_deref(), Some(format!("user:{user_id}").as_str()));
+    assert_eq!(
+        row.4.as_deref(),
+        Some(format!("operator:{user_id}").as_str())
+    );
     assert_eq!(
         row.5.as_deref(),
         Some(format!("session:{session_id}").as_str())

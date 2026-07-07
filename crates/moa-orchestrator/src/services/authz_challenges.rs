@@ -58,14 +58,14 @@ pub struct AuthzChallengesImpl;
 
 impl AuthzChallenges for AuthzChallengesImpl {
     #[tracing::instrument(skip(self, ctx))]
-    // SAFETY: Lists only builtin challenges keyed to the trusted user identity.
+    // SAFETY: Lists only builtin challenges keyed to the trusted operator identity.
     async fn list_mine(
         &self,
         ctx: Context<'_>,
     ) -> Result<Json<Vec<AuthzChallengeSummary>>, HandlerError> {
         annotate_restate_handler_span("AuthzChallenges", "list_mine");
         let identity = require_identity(&ctx)?;
-        if identity.identity_type != IdentityType::User {
+        if identity.identity_type != IdentityType::Operator {
             return Err(
                 TerminalError::new_with_code(403, "only users can list authz challenges").into(),
             );
@@ -88,7 +88,7 @@ impl AuthzChallenges for AuthzChallengesImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
-    // SAFETY: Resolves only builtin challenges keyed to the trusted user identity.
+    // SAFETY: Resolves only builtin challenges keyed to the trusted operator identity.
     async fn decide(
         &self,
         ctx: Context<'_>,
@@ -96,7 +96,7 @@ impl AuthzChallenges for AuthzChallengesImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("AuthzChallenges", "decide");
         let identity = require_identity(&ctx)?;
-        if identity.identity_type != IdentityType::User {
+        if identity.identity_type != IdentityType::Operator {
             return Err(TerminalError::new_with_code(
                 403,
                 "only users can resolve authz challenges",

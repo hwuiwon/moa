@@ -93,7 +93,7 @@ fn sign(signing_key: &RsaPrivateKey, iss: &str, aud: &str, exp: i64) -> String {
         aud: aud.to_string(),
         exp,
         tenant_id: Uuid::from_u128(0x200).to_string(),
-        identity_type: "user".to_string(),
+        identity_type: "operator".to_string(),
     };
     let pem = signing_key
         .to_pkcs8_pem(LineEnding::LF)

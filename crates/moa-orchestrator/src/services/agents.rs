@@ -280,7 +280,7 @@ async fn require_agent_operator_or_tenant_admin(
 
 fn actor_user_id(identity: &Identity) -> Option<Uuid> {
     match identity.identity_type {
-        IdentityType::User => Some(identity.id),
+        IdentityType::Operator => Some(identity.id),
         IdentityType::Agent | IdentityType::Service | IdentityType::Contact => {
             identity.acting_on_behalf_of
         }

@@ -37,7 +37,7 @@ async fn create_present_validate_revoke() -> Result<(), Box<dyn std::error::Erro
     let tenant_id = Uuid::new_v4();
     let fga = live_fga_client()?;
     let bootstrap_tuple = TupleKey::new(
-        UserType::User,
+        UserType::Operator,
         user_id,
         Relation::Admin,
         ObjectType::Tenant,
@@ -46,7 +46,7 @@ async fn create_present_validate_revoke() -> Result<(), Box<dyn std::error::Erro
     fga.apply(TupleOp::Write, &bootstrap_tuple).await?;
 
     let direct_identity = Identity {
-        identity_type: IdentityType::User,
+        identity_type: IdentityType::Operator,
         id: user_id,
         tenant_id: TenantId::from(tenant_id),
         api_key_id: None,
@@ -74,7 +74,7 @@ async fn create_present_validate_revoke() -> Result<(), Box<dyn std::error::Erro
         .await?;
     assert_eq!(whoami.status(), reqwest::StatusCode::OK);
     let identity = whoami.json::<Identity>().await?;
-    assert_eq!(identity.identity_type, IdentityType::User);
+    assert_eq!(identity.identity_type, IdentityType::Operator);
     assert_eq!(identity.id, user_id);
     assert_eq!(identity.tenant_id, TenantId::from(tenant_id));
     assert_eq!(identity.api_key_id, Some(issued.id));
@@ -138,7 +138,7 @@ where
 {
     let response = client
         .post(format!("{}{path}", base_url.trim_end_matches('/')))
-        .header("x-moa-identity-type", "user")
+        .header("x-moa-identity-type", "operator")
         .header("x-moa-identity-id", identity.id.to_string())
         .header("x-moa-tenant-id", identity.tenant_id.to_string())
         .json(body)
@@ -167,7 +167,7 @@ where
 {
     let response = client
         .post(format!("{}{path}", base_url.trim_end_matches('/')))
-        .header("x-moa-identity-type", "user")
+        .header("x-moa-identity-type", "operator")
         .header("x-moa-identity-id", identity.id.to_string())
         .header("x-moa-tenant-id", identity.tenant_id.to_string())
         .json(body)

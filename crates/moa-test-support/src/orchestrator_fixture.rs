@@ -423,7 +423,7 @@ impl Drop for OrchestratorTestFixture {
 
 fn default_test_identity() -> Identity {
     Identity {
-        identity_type: IdentityType::User,
+        identity_type: IdentityType::Operator,
         id: Uuid::from_u128(0x1000_0000_0000_0000_0000_0000_0000_0001),
         tenant_id: TenantId::from(Uuid::from_u128(0x2000_0000_0000_0000_0000_0000_0000_0001)),
         api_key_id: None,
@@ -436,7 +436,7 @@ fn identity_subject(identity: &Identity) -> String {
         return format!("api_key:{api_key_id}");
     }
     match identity.identity_type {
-        IdentityType::User => format!("user:{}", identity.id),
+        IdentityType::Operator => format!("operator:{}", identity.id),
         IdentityType::Agent => format!("agent:{}", identity.id),
         IdentityType::Service => format!("service:{}", identity.id),
         IdentityType::Contact => format!("contact:{}", identity.id),

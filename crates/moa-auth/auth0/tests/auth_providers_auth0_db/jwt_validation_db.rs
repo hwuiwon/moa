@@ -73,7 +73,7 @@ async fn jwt_validation_accepts_self_signed_auth0_token() {
         .await
         .expect("cached valid token should authenticate");
 
-    assert_eq!(first.identity_type, IdentityType::User);
+    assert_eq!(first.identity_type, IdentityType::Operator);
     assert_eq!(first.tenant_id, TenantId::from(tenant_id));
     assert_eq!(first.api_key_id, None);
     assert_eq!(first.acting_on_behalf_of, None);
@@ -113,7 +113,7 @@ fn signed_token(
         aud: audience.to_string(),
         exp: Utc::now().timestamp() + 600,
         tenant_id: tenant_id.to_string(),
-        identity_type: "user".to_string(),
+        identity_type: "operator".to_string(),
     };
     let private_key = key
         .to_pkcs8_pem(LineEnding::LF)

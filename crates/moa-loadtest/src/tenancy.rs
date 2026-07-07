@@ -47,7 +47,7 @@ impl TenancyPool {
             let tenant_weight = 1.0 / ((tenant_rank + 1) as f64).powf(TENANT_ZIPF_EXPONENT);
             for _ in 0..identities_per_tenant {
                 let identity = Identity {
-                    identity_type: IdentityType::User,
+                    identity_type: IdentityType::Operator,
                     id: Uuid::now_v7(),
                     tenant_id,
                     api_key_id: None,
@@ -89,7 +89,7 @@ impl TenancyPool {
         for entry in &self.entries {
             grant_raw_tuple(
                 fga,
-                format!("user:{}", entry.identity.id),
+                format!("operator:{}", entry.identity.id),
                 "operator",
                 format!("tenant:{}", entry.tenant_id),
             )

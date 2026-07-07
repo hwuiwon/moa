@@ -17,8 +17,8 @@ use crate::TenantId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdentityType {
-    /// Human user.
-    User,
+    /// Human operator for tenant control-plane access.
+    Operator,
     /// Tenant-local end-user contact.
     Contact,
     /// AI agent principal.

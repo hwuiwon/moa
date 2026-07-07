@@ -750,7 +750,7 @@ fn repeated_loop_successful_results(events: &[EventRecord]) -> usize {
 
 fn test_identity() -> Identity {
     Identity {
-        identity_type: IdentityType::User,
+        identity_type: IdentityType::Operator,
         id: Uuid::new_v4(),
         tenant_id: TenantId::new(),
         api_key_id: None,

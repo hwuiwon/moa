@@ -30,7 +30,7 @@ async fn background_audit_writer_persists_signed_events_off_the_request_path_db(
     let tenant_id = Uuid::from_u128(0x501);
     let user_id = Uuid::from_u128(0x502);
     let identity = Identity {
-        identity_type: IdentityType::User,
+        identity_type: IdentityType::Operator,
         id: user_id,
         tenant_id: TenantId::from(tenant_id),
         api_key_id: None,

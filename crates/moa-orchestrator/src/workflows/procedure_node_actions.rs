@@ -1118,7 +1118,7 @@ mod tests {
     fn memory_write_stamps_procedure_provenance_metadata() {
         // Pins: procedure memory writes preserve reviewable node/run provenance in graph ingestion metadata.
         let context = procedure_action_context(Identity {
-            identity_type: IdentityType::User,
+            identity_type: IdentityType::Operator,
             id: Uuid::now_v7(),
             tenant_id: TenantId::new(),
             api_key_id: None,
@@ -1168,7 +1168,7 @@ mod tests {
     fn memory_write_requires_content_or_documents() {
         // Pins: memory_write nodes fail closed rather than writing empty graph-memory records.
         let context = procedure_action_context(Identity {
-            identity_type: IdentityType::User,
+            identity_type: IdentityType::Operator,
             id: Uuid::now_v7(),
             tenant_id: TenantId::new(),
             api_key_id: None,
@@ -1189,7 +1189,7 @@ mod tests {
         let identity_id = Uuid::now_v7();
         let tenant_id = TenantId::new();
         let context = procedure_action_context(Identity {
-            identity_type: IdentityType::User,
+            identity_type: IdentityType::Operator,
             id: identity_id,
             tenant_id,
             api_key_id: None,

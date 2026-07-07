@@ -407,7 +407,7 @@ pub async fn cascade_deactivate_user(
         return Ok(CascadeSummary::default());
     }
 
-    let user_wire = format!("user:{user_id}");
+    let user_wire = format!("operator:{user_id}");
     let mut summary = CascadeSummary::default();
 
     let active_sessions: Vec<(Uuid,)> = sqlx::query_as(
@@ -540,7 +540,7 @@ async fn revoke_user_api_keys(
         enqueue_raw(
             &mut **tx,
             TupleOp::Delete,
-            &format!("user:{user_id}"),
+            &format!("operator:{user_id}"),
             "owner",
             &format!("api_key:{key_id}"),
             Some(tenant_id),
@@ -585,7 +585,7 @@ async fn enqueue_direct_user_tuple_deletes(
     tenant_id: Uuid,
     user_id: Uuid,
 ) -> Result<(), CascadeError> {
-    let user_wire = format!("user:{user_id}");
+    let user_wire = format!("operator:{user_id}");
 
     for relation in ["admin", "operator"] {
         enqueue_raw(
@@ -618,7 +618,7 @@ async fn orphan_user_agents(
         enqueue_raw(
             &mut **tx,
             TupleOp::Delete,
-            &format!("user:{user_id}"),
+            &format!("operator:{user_id}"),
             "operator",
             &format!("agent:{agent_id}"),
             Some(tenant_id),

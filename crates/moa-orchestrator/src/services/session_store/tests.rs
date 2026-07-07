@@ -77,7 +77,7 @@ async fn create_session_for_identity_db_enqueues_owner_and_tenant_tuples() -> Re
     let meta = test_session_meta("authorized-helper");
     let tenant_id = meta.tenant_id;
     let identity = Identity {
-        identity_type: IdentityType::User,
+        identity_type: IdentityType::Operator,
         id: Uuid::new_v4(),
         tenant_id,
         api_key_id: None,
@@ -109,7 +109,7 @@ async fn create_session_for_identity_db_enqueues_owner_and_tenant_tuples() -> Re
         tuples,
         vec![
             AuthzOutboxTuple {
-                tuple_user: format!("user:{}", identity.id),
+                tuple_user: format!("operator:{}", identity.id),
                 tuple_relation: "owner".to_string(),
                 tuple_object: session_object.clone(),
                 tenant_id: Some(identity.tenant_id.0),

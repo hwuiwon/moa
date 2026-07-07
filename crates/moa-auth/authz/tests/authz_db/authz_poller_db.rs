@@ -184,7 +184,7 @@ async fn insert_outbox_row(
     sqlx::query(&sql)
         .bind(row_id)
         .bind(format!("test-key-{row_id}"))
-        .bind(format!("user:{}", Uuid::new_v4()))
+        .bind(format!("operator:{}", Uuid::new_v4()))
         .bind(format!("tenant:{}", Uuid::new_v4()))
         .bind(status)
         .bind(lease_token)

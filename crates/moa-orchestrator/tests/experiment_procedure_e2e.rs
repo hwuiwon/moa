@@ -636,7 +636,7 @@ fn new_procedure_run(
         artifact_revision_uids: Vec::new(),
         idempotency_key: Some(format!("procedure-run-{}", Uuid::now_v7())),
         created_by_identity: json!({
-            "type": "user",
+            "type": "operator",
             "id": identity.id.to_string(),
         }),
     }
