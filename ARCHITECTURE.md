@@ -28,6 +28,59 @@ MOA has four durable boundaries:
 Restate owns durable cloud orchestration. Postgres owns enterprise state and
 auditability.
 
+```mermaid
+flowchart TB
+    Clients["Clients<br/>REST · messaging adapters · API automation"]
+
+    subgraph Runtime["Runtime boundary"]
+        Edge["moa-edge<br/>public HTTP edge"]
+        Auth["moa-auth + OpenFGA<br/>authn / authz"]
+        Orchestrator["moa-orchestrator on Restate<br/>Session VO · TurnExecution ·<br/>detached workflows: SkillLearning,<br/>ProcedureExecution, experiments"]
+    end
+
+    subgraph Brain["Brain boundary — moa-brain"]
+        Pipeline["Context pipeline<br/>instructions · graph-memory retrieval ·<br/>skill manifest · compaction"]
+        Providers["moa-providers<br/>LLM · embedding · rerank"]
+        Assess["Segment assessment<br/>deterministic outcome scoring"]
+    end
+
+    subgraph Hands["Execution boundary — moa-hands"]
+        Router["ToolRouter"]
+        Builtin["Built-in tools"]
+        Sandboxes["Sandboxes<br/>local · Docker · Daytona · E2B"]
+        MCP["MCP servers"]
+    end
+
+    subgraph Learning["Learning loop — moa-skills"]
+        Loop["experience → distillation / weakness mining →<br/>Proposed candidate → regression gate +<br/>tenant operator/admin review → published revision"]
+    end
+
+    subgraph Data["Data boundary"]
+        PG["Postgres / Neon<br/>sessions & events · graph memory + vectors ·<br/>task segments & experiences · skill/procedure artifacts ·<br/>learning candidates & log · lineage · analytics"]
+        Audit["moa-ocsf audit<br/>signed events → S3"]
+    end
+
+    Clients --> Edge
+    Edge --- Auth
+    Edge --> Orchestrator
+    Orchestrator -->|drives each turn| Pipeline
+    Pipeline <-->|completions| Providers
+    Pipeline -->|approved tool calls| Router
+    Router -->|tool results| Pipeline
+    Router --> Builtin
+    Router --> Sandboxes
+    Router --> MCP
+    Pipeline -.->|"skill packages materialized into the active hand (.moa/skills)"| Sandboxes
+    Orchestrator --> Assess
+    Assess -->|assessed segments| Loop
+    Loop -.->|published skill revisions re-enter context| Pipeline
+    Orchestrator --> PG
+    Pipeline --> PG
+    Router --> PG
+    Loop --> PG
+    Edge --> Audit
+```
+
 ---
 
 ## 2. System Sequence Diagram
