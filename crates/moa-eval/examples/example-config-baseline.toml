@@ -2,11 +2,6 @@
 name = "baseline"
 model = "claude-sonnet-4-20250514"
 
-[agent.skills]
-include = ["skills/deploy-to-fly", "skills/incident-triage"]
-exclude = []
-exclusive = false
-
 [agent.memory]
 tenant_memory_path = "tests/fixtures/memory/webapp-v1"
 clear_defaults = false

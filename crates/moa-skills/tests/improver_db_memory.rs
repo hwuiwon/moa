@@ -5,12 +5,12 @@
 #[path = "support/common.rs"]
 mod support;
 
-use moa_skills::improver::{ImprovementResult, improve_skill_with_learning};
+use moa_skills::improver::{ImprovementResult, improve_skill_from_experience_with_learning};
 use support::{
     BASELINE_SKILL, IMPROVED_SKILL, REGRESSED_SKILL, RENAMED_SKILL, SESSION_WITH_5_TOOL_CALLS,
-    active_semantic_version, artifact_revision_count, learning_store, load_session_fixture,
-    scripted_router, seed_skill, session_storage_partition_id, setup_test_db, skill_row_count,
-    tenant_scope, test_config,
+    active_semantic_version, artifact_revision_count, experience_input, learning_store,
+    load_session_fixture, scripted_router, seed_skill, session_storage_partition_id, setup_test_db,
+    skill_row_count, tenant_scope, test_config,
 };
 
 #[tokio::test]
@@ -19,16 +19,16 @@ async fn improver_that_renames_skill_is_rejected() {
     // and the active skill is left untouched (no new artifact revision).
     let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
-    let (config, _temp_dir) = test_config(&test_db);
+    let (_config, _temp_dir) = test_config(&test_db);
     let storage_partition_id = session_storage_partition_id(&loaded.session);
     let scope = tenant_scope(&storage_partition_id);
     let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
+    let input = experience_input(&loaded, "improve the auth flow skill");
 
-    let result = improve_skill_with_learning(
-        &config,
+    let result = improve_skill_from_experience_with_learning(
         &loaded.session,
         &existing,
-        &loaded.events,
+        &input,
         scripted_router([RENAMED_SKILL]),
         Some(learning_store(&test_db)),
     )
@@ -58,16 +58,16 @@ async fn improver_that_renames_skill_is_rejected() {
 async fn improver_with_changed_body_bumps_minor_version() {
     let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
-    let (config, _temp_dir) = test_config(&test_db);
+    let (_config, _temp_dir) = test_config(&test_db);
     let storage_partition_id = session_storage_partition_id(&loaded.session);
     let scope = tenant_scope(&storage_partition_id);
     let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
+    let input = experience_input(&loaded, "improve the auth flow skill");
 
-    let result = improve_skill_with_learning(
-        &config,
+    let result = improve_skill_from_experience_with_learning(
         &loaded.session,
         &existing,
-        &loaded.events,
+        &input,
         scripted_router([IMPROVED_SKILL]),
         Some(learning_store(&test_db)),
     )
@@ -98,16 +98,16 @@ async fn improver_with_changed_body_bumps_minor_version() {
 async fn improver_with_unchanged_body_returns_unchanged_short_circuit() {
     let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
-    let (config, _temp_dir) = test_config(&test_db);
+    let (_config, _temp_dir) = test_config(&test_db);
     let storage_partition_id = session_storage_partition_id(&loaded.session);
     let scope = tenant_scope(&storage_partition_id);
     let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
+    let input = experience_input(&loaded, "improve the auth flow skill");
 
-    let result = improve_skill_with_learning(
-        &config,
+    let result = improve_skill_from_experience_with_learning(
         &loaded.session,
         &existing,
-        &loaded.events,
+        &input,
         scripted_router(["UNCHANGED"]),
         Some(learning_store(&test_db)),
     )
@@ -129,16 +129,16 @@ async fn improver_with_unchanged_body_returns_unchanged_short_circuit() {
 async fn improver_with_breaking_changes_to_skill_signature_bumps_major_version() {
     let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
-    let (config, _temp_dir) = test_config(&test_db);
+    let (_config, _temp_dir) = test_config(&test_db);
     let storage_partition_id = session_storage_partition_id(&loaded.session);
     let scope = tenant_scope(&storage_partition_id);
     let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
+    let input = experience_input(&loaded, "improve the auth flow skill");
 
-    let result = improve_skill_with_learning(
-        &config,
+    let result = improve_skill_from_experience_with_learning(
         &loaded.session,
         &existing,
-        &loaded.events,
+        &input,
         scripted_router([REGRESSED_SKILL]),
         Some(learning_store(&test_db)),
     )
@@ -159,10 +159,11 @@ async fn improver_with_breaking_changes_to_skill_signature_bumps_major_version()
 async fn improver_concurrent_attempts_on_same_skill_reuse_draft_proposal() {
     let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
-    let (config, _temp_dir) = test_config(&test_db);
+    let (_config, _temp_dir) = test_config(&test_db);
     let storage_partition_id = session_storage_partition_id(&loaded.session);
     let scope = tenant_scope(&storage_partition_id);
     let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
+    let input = experience_input(&loaded, "improve the auth flow skill");
     let router = scripted_router([
         IMPROVED_SKILL,
         IMPROVED_SKILL,
@@ -172,43 +173,38 @@ async fn improver_concurrent_attempts_on_same_skill_reuse_draft_proposal() {
     ]);
     let store = learning_store(&test_db);
 
-    let result_1 = improve_skill_with_learning(
-        &config,
+    let result_1 = improve_skill_from_experience_with_learning(
         &loaded.session,
         &existing,
-        &loaded.events,
+        &input,
         router.clone(),
         Some(store.clone()),
     );
-    let result_2 = improve_skill_with_learning(
-        &config,
+    let result_2 = improve_skill_from_experience_with_learning(
         &loaded.session,
         &existing,
-        &loaded.events,
+        &input,
         router.clone(),
         Some(store.clone()),
     );
-    let result_3 = improve_skill_with_learning(
-        &config,
+    let result_3 = improve_skill_from_experience_with_learning(
         &loaded.session,
         &existing,
-        &loaded.events,
+        &input,
         router.clone(),
         Some(store.clone()),
     );
-    let result_4 = improve_skill_with_learning(
-        &config,
+    let result_4 = improve_skill_from_experience_with_learning(
         &loaded.session,
         &existing,
-        &loaded.events,
+        &input,
         router.clone(),
         Some(store.clone()),
     );
-    let result_5 = improve_skill_with_learning(
-        &config,
+    let result_5 = improve_skill_from_experience_with_learning(
         &loaded.session,
         &existing,
-        &loaded.events,
+        &input,
         router,
         Some(store),
     );
@@ -238,17 +234,17 @@ async fn improver_concurrent_attempts_on_same_skill_reuse_draft_proposal() {
 async fn improver_emits_review_candidate_with_lineage_payload() {
     let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
-    let (config, _temp_dir) = test_config(&test_db);
+    let (_config, _temp_dir) = test_config(&test_db);
     let storage_partition_id = session_storage_partition_id(&loaded.session);
     let scope = tenant_scope(&storage_partition_id);
     let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
+    let input = experience_input(&loaded, "improve the auth flow skill");
     let store = learning_store(&test_db);
 
-    let result = improve_skill_with_learning(
-        &config,
+    let result = improve_skill_from_experience_with_learning(
         &loaded.session,
         &existing,
-        &loaded.events,
+        &input,
         scripted_router([IMPROVED_SKILL]),
         Some(store.clone()),
     )
@@ -280,4 +276,9 @@ async fn improver_emits_review_candidate_with_lineage_payload() {
         payload["skill_metadata"]["path"], ".moa/skills/auth-flow/SKILL.md",
         "review can materialize the target skill path"
     );
+    assert_eq!(
+        payload["evidence"]["routing"]["matched_skill"], "auth-flow",
+        "reviewers see which skill the improvement was routed to"
+    );
+    assert_eq!(payload["evidence"]["outcome"], "resolved");
 }

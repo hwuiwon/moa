@@ -93,12 +93,16 @@ pub struct PreparedSkillAcceptance {
 
 /// Held-in and held-out acceptance checks recorded when a candidate is promoted.
 ///
-/// Acceptance requires both checks to pass: `held_in_pass` proves the mined
-/// pattern's evidence probes/tests now pass, and `held_out_pass` proves the skill
-/// regression suite and golden set show no regression (the reward-hacking defense
-/// — a proposal must win on a split it did not iterate against). Promotion errors
-/// unless both are true; the booleans and their descriptions are recorded on the
-/// candidate's evaluation payload so a rejection preserves the failing check.
+/// Acceptance requires both checks to pass. `held_in_pass` records that the
+/// draft validated as publishable and its own generated suite (derived from the
+/// proposal's source session) parsed and executed. `held_out_pass` records the
+/// result on material the candidate was *not* derived from: the previous
+/// promoted revision's suite (each revision carries its own) plus sibling
+/// suites accumulated from deduped recurring sessions. When no held-out
+/// material exists yet — the first revision of a novel task — the description
+/// says so explicitly instead of implying a split. The descriptions must state
+/// what actually ran; they persist on the candidate's evaluation payload as the
+/// audit record of the gate. Promotion errors unless both booleans are true.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptanceChecks {
     /// Whether the held-in check (the evidence probes/tests now pass) succeeded.
@@ -337,6 +341,32 @@ pub async fn promote_claimed_skill_candidate(
         draft_artifact_revision_uid: Some(prepared.draft_artifact_revision_uid),
         published_artifact_revision_uid: Some(published.revision_uid),
     })
+}
+
+/// Releases a claimed candidate back to `Proposed` after an operational failure.
+///
+/// Gate errors that are not properties of the candidate — an unavailable
+/// provider, eval infrastructure failure — must not strand the candidate in
+/// `Evaluating`: acceptance requires `Proposed`, so an unreleased claim would
+/// make the accept permanently unretryable.
+pub async fn release_claimed_skill_candidate(
+    store: &(impl LearningReviewStore + ?Sized),
+    candidate_id: Uuid,
+    reason: &str,
+) -> Result<()> {
+    finish_claimed_candidate_review(
+        store,
+        LearningCandidateStatusUpdate {
+            candidate_id,
+            status: LearningCandidateStatus::Proposed,
+            status_reason: Some(format!(
+                "promotion gate failed operationally; claim released for retry: {reason}"
+            )),
+            evaluation_payload: None,
+            updated_at: Utc::now(),
+        },
+    )
+    .await
 }
 
 /// Rejects a proposed learning candidate while preserving linked draft artifacts.

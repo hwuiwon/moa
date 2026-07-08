@@ -313,6 +313,69 @@ mod tests {
     };
 
     #[test]
+    fn rank_skills_pins_all_four_scoring_branches_exactly() {
+        // Pins: the four score formulas selected by which rate maps are populated. Empty
+        // query keywords zero the keyword term so each branch's remaining terms are exact:
+        //   1. task-conditioned:  0.45*kw + 0.45*smoothed*weight + 0.10*global
+        //   2. task data exists for others only: 0.60*kw + 0.15*global
+        //   3. tenant resolution rate only:      0.45*kw + 0.55*global
+        //   4. no outcome data at all:           kw
+        let skill = test_skill("branch-skill", "Branch formula pin");
+        let skills = vec![skill];
+        let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
+        let task_rate = TaskStrategySuccessRate {
+            tenant_id: TenantId::new(),
+            task_fingerprint: "task-hash".to_string(),
+            subject_type: AttributionSubjectType::Skill,
+            subject_id: "branch-skill".to_string(),
+            uses: 10,
+            success_rate: 0.8,
+            avg_confidence: 1.0,
+            avg_token_cost: 100.0,
+            avg_turn_count: 2.0,
+        };
+
+        // Branch 1: smoothed = (1 + 0.8*10)/(2 + 10) = 0.75; weight = min(10/5,1)*1.0 = 1.0;
+        // global defaults to the 0.5 prior when the skill has no resolution row.
+        let task_rates = HashMap::from([("branch-skill".to_string(), task_rate.clone())]);
+        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &task_rates);
+        assert!(
+            (ranked[0].score - (0.45 * 0.75 + 0.10 * 0.5)).abs() < 1e-9,
+            "task-conditioned branch: {}",
+            ranked[0].score
+        );
+
+        // Branch 2: task data exists for a different skill, so this skill takes the
+        // keyword+global fallback with the 0.5 unrated prior.
+        let other_rates = HashMap::from([(
+            "someone-else".to_string(),
+            TaskStrategySuccessRate {
+                subject_id: "someone-else".to_string(),
+                ..task_rate
+            },
+        )]);
+        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &other_rates);
+        assert!(
+            (ranked[0].score - 0.15 * 0.5).abs() < 1e-9,
+            "task-data-elsewhere branch: {}",
+            ranked[0].score
+        );
+
+        // Branch 3: no task-conditioned data at all; a tenant resolution rate blends in.
+        let resolution = HashMap::from([("branch-skill".to_string(), 0.9)]);
+        let ranked = rank_skills(&skills, &[], &budget, &resolution, &HashMap::new());
+        assert!(
+            (ranked[0].score - 0.55 * 0.9).abs() < 1e-9,
+            "resolution-rate branch: {}",
+            ranked[0].score
+        );
+
+        // Branch 4: no outcome data anywhere falls back to pure keyword overlap.
+        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &HashMap::new());
+        assert_eq!(ranked[0].score, 0.0, "keyword-only branch");
+    }
+
+    #[test]
     fn selects_top_ranked_skills_then_resorts_emission_alphabetically() {
         let skills = (0..30)
             .map(|index| {

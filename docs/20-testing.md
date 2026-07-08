@@ -199,13 +199,12 @@ MOA_RUN_LIVE_E2E=1 make e2e-clean-live
 ```
 
 The live Restate lane keeps provider-backed cases out of the default `--live`
-path. It uses `moa-orchestrator/provider-overrides` and
-`moa-orchestrator/skill-learning` with
+path. It uses `moa-orchestrator/provider-overrides` with
 `MOA_PROVIDERS_OVERRIDE=mock:<run-id>` for deterministic lifecycle and
-skill-learning smoke tests. The clean runner also executes the focused
-`skill_learning` orchestrator tests with the feature enabled before the ignored
-live profiles, and it unsets provider API-key environment variables around
-provider-override smoke tests. Billed provider coverage remains in the separate
+skill-learning smoke tests (skill learning is always compiled in). The clean
+runner also executes the focused `skill_learning` orchestrator tests before the
+ignored live profiles, and it unsets provider API-key environment variables
+around provider-override smoke tests. Billed provider coverage remains in the separate
 provider lane below.
 
 Optional provider and long-eval lanes remain explicit because they can be

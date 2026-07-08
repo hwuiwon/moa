@@ -41,7 +41,6 @@ Feature-gated Restate bindings:
 
 | Feature | Additional bindings |
 |---|---|
-| `skill-learning` | `SkillLearning` workflow |
 
 Internal application boundaries for action reviews, builtin async-authz
 challenges, learning review, experiments, privacy, provider routing, and memory

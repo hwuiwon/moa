@@ -200,7 +200,6 @@ Core production bindings:
 
 Feature-gated bindings:
 
-- `skill-learning`: detached `SkillLearning` workflow.
 
 Internal application boundaries are in-process modules or domain crates behind
 these handlers, not separate network services. Current examples include action

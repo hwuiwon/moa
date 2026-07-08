@@ -4,22 +4,17 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-default = []
-regression = ["dep:moa-eval-core"]
-skill-learning = ["regression", "dep:moa-providers", "dep:moa-session"]
-
 [dependencies]
 chrono.workspace = true
 hex.workspace = true
 moa-artifacts.workspace = true
 moa-core = { workspace = true }
 moa-db = { workspace = true }
-moa-eval-core = { workspace = true, optional = true }
+moa-eval-core = { workspace = true }
 moa-memory-graph = { workspace = true }
 moa-memory-types = { workspace = true }
-moa-providers = { workspace = true, optional = true }
-moa-session = { workspace = true, optional = true }
+moa-providers = { workspace = true }
+moa-session = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
@@ -43,19 +38,15 @@ tempfile.workspace = true
 [[test]]
 name = "distillation_db_memory"
 path = "tests/distillation_db_memory.rs"
-required-features = ["skill-learning"]
 
 [[test]]
 name = "improver_db_memory"
 path = "tests/improver_db_memory.rs"
-required-features = ["skill-learning"]
 
 [[test]]
 name = "regression"
 path = "tests/regression.rs"
-required-features = ["regression"]
 
 [[test]]
 name = "draft_proposals_db_memory"
 path = "tests/draft_proposals_db_memory.rs"
-required-features = ["skill-learning"]

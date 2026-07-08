@@ -1,22 +1,33 @@
-//! Integration tests for successful-session skill distillation.
+//! Integration tests for experience-backed skill distillation.
 
 #![recursion_limit = "256"]
 
 #[path = "support/common.rs"]
 mod support;
 
-use moa_core::MoaConfig;
+use moa_core::{MoaConfig, SegmentOutcome};
 use moa_skills::distiller::{
-    DistillationOutcome, DistillationSkipReason, distill_skill_with_learning,
+    DistillationOutcome, DistillationSkipReason, distill_skill_from_experience_with_learning,
 };
 use support::{
-    SESSION_WITH_4_TOOL_CALLS, SESSION_WITH_5_TOOL_CALLS, failed_session, learning_store,
+    SESSION_WITH_4_TOOL_CALLS, SESSION_WITH_5_TOOL_CALLS, experience_input, learning_store,
     load_optional_active_skill, load_session_fixture, scripted_router, seed_skill,
     session_storage_partition_id, setup_test_db, skill_markdown, tenant_scope, test_config,
 };
 
+/// Returns the fixture's task text so experience summaries match the session events.
+fn fixture_task(loaded: &support::LoadedSession) -> String {
+    loaded
+        .session
+        .title
+        .clone()
+        .expect("session fixture carries a task title")
+}
+
 #[tokio::test]
-async fn session_with_5_tool_calls_and_success_outcome_triggers_distillation() {
+async fn resolved_experience_with_5_tool_calls_triggers_distillation() {
+    // Pins: a learnable resolved experience above the tool-call threshold produces a
+    // reviewable draft proposal without creating an active skill row.
     let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
@@ -27,15 +38,15 @@ async fn session_with_5_tool_calls_and_success_outcome_triggers_distillation() {
         "1.0",
     );
 
-    let outcome = distill_skill_with_learning(
+    let outcome = distill_skill_from_experience_with_learning(
         &config,
         &loaded.session,
-        &loaded.events,
+        experience_input(&loaded, &fixture_task(&loaded)),
         scripted_router([proposed]),
         Some(learning_store(&test_db)),
     )
     .await
-    .expect("distill successful session");
+    .expect("distill resolved experience");
 
     let DistillationOutcome::NewSkillProposed { proposal } = outcome else {
         panic!("expected new skill proposal");
@@ -51,13 +62,14 @@ async fn session_with_5_tool_calls_and_success_outcome_triggers_distillation() {
 }
 
 #[tokio::test]
-async fn session_with_4_tool_calls_does_not_trigger_distillation() {
+async fn experience_with_4_tool_calls_does_not_trigger_distillation() {
+    // Pins: segments below the configured tool-call threshold skip distillation.
     let loaded = load_session_fixture(SESSION_WITH_4_TOOL_CALLS);
 
-    let outcome = distill_skill_with_learning(
+    let outcome = distill_skill_from_experience_with_learning(
         &MoaConfig::default(),
         &loaded.session,
-        &loaded.events,
+        experience_input(&loaded, &fixture_task(&loaded)),
         scripted_router(Vec::<String>::new()),
         None,
     )
@@ -73,23 +85,27 @@ async fn session_with_4_tool_calls_does_not_trigger_distillation() {
 }
 
 #[tokio::test]
-async fn session_with_failure_outcome_does_not_trigger_distillation_even_above_threshold() {
-    let loaded = failed_session(load_session_fixture(SESSION_WITH_5_TOOL_CALLS));
+async fn failed_experience_does_not_trigger_distillation_even_above_threshold() {
+    // Pins: an experience with a failed assessed outcome cannot seed a reusable skill,
+    // regardless of how many tool calls the segment contains.
+    let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
+    let mut input = experience_input(&loaded, &fixture_task(&loaded));
+    input.experience.outcome = SegmentOutcome::Failed;
 
-    let outcome = distill_skill_with_learning(
+    let outcome = distill_skill_from_experience_with_learning(
         &MoaConfig::default(),
         &loaded.session,
-        &loaded.events,
+        input,
         scripted_router(Vec::<String>::new()),
         None,
     )
     .await
-    .expect("skip failed session");
+    .expect("skip failed experience");
 
     assert_eq!(
         outcome,
         DistillationOutcome::Skipped {
-            reason: DistillationSkipReason::Failure
+            reason: DistillationSkipReason::UnlearnableOutcome
         }
     );
 }
@@ -115,15 +131,15 @@ async fn distillation_above_similarity_threshold_routes_to_improver() {
         "1.0",
     );
 
-    let outcome = distill_skill_with_learning(
+    let outcome = distill_skill_from_experience_with_learning(
         &config,
         &loaded.session,
-        &loaded.events,
+        experience_input(&loaded, &fixture_task(&loaded)),
         scripted_router([improved]),
         Some(learning_store(&test_db)),
     )
     .await
-    .expect("route similar session to improver");
+    .expect("route similar experience to improver");
 
     let DistillationOutcome::ImprovementProposed {
         existing_skill_id,
@@ -160,10 +176,10 @@ async fn distillation_below_similarity_threshold_creates_new_skill() {
         "1.0",
     );
 
-    let outcome = distill_skill_with_learning(
+    let outcome = distill_skill_from_experience_with_learning(
         &config,
         &loaded.session,
-        &loaded.events,
+        experience_input(&loaded, &fixture_task(&loaded)),
         scripted_router([proposed]),
         Some(learning_store(&test_db)),
     )
@@ -177,7 +193,9 @@ async fn distillation_below_similarity_threshold_creates_new_skill() {
 }
 
 #[tokio::test]
-async fn distillation_candidate_includes_lineage_pointer_to_originating_session() {
+async fn distillation_candidate_includes_lineage_pointers_to_session_and_experience() {
+    // Pins: the review candidate records both the originating session and the source
+    // experience so promoted learning is auditable back to its evidence.
     let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
@@ -187,11 +205,13 @@ async fn distillation_candidate_includes_lineage_pointer_to_originating_session(
         "Keep the reusable auth workflow steps concise.",
         "1.0",
     );
+    let input = experience_input(&loaded, &fixture_task(&loaded));
+    let experience_id = input.experience.id;
 
-    let outcome = distill_skill_with_learning(
+    let outcome = distill_skill_from_experience_with_learning(
         &config,
         &loaded.session,
-        &loaded.events,
+        input,
         scripted_router([proposed]),
         Some(learning_store(&test_db)),
     )
@@ -214,4 +234,5 @@ async fn distillation_candidate_includes_lineage_pointer_to_originating_session(
             .expect("source_session_id is string"),
         session_id
     );
+    assert_eq!(candidate.source_experience_ids, vec![experience_id]);
 }

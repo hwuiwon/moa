@@ -54,7 +54,6 @@ impl SkillFrontmatter {
             .unwrap_or_else(|| DEFAULT_VERSION.to_string())
     }
 
-    #[cfg(feature = "skill-learning")]
     pub(crate) fn set_version(&mut self, value: impl Into<String>) {
         self.insert_metadata(META_VERSION, value.into());
     }
@@ -84,7 +83,6 @@ impl SkillFrontmatter {
             .and_then(|value| value.parse::<usize>().ok())
     }
 
-    #[cfg(feature = "skill-learning")]
     fn insert_metadata(&mut self, key: &str, value: String) {
         self.metadata.insert(key.to_string(), value);
     }

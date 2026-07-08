@@ -1,7 +1,6 @@
 //! Learning-log helper types for turn workflows.
 
 use chrono::{DateTime, Utc};
-#[cfg(feature = "skill-learning")]
 use moa_core::{Event, EventRecord};
 use moa_core::{LearningEntry, MoaError, SegmentAssessment, SegmentId, TenantId};
 use uuid::Uuid;
@@ -47,16 +46,22 @@ pub(crate) fn segment_assessment_learning_entry(
 }
 
 /// Returns whether an assessed segment should dispatch skill-learning follow-up.
-#[cfg(feature = "skill-learning")]
+///
+/// Mirrors the distiller's own gates (learnable outcome plus tool-call
+/// threshold) so unlearnable experiences never spawn a detached workflow that
+/// would load session data only to skip.
 pub(crate) fn skill_learning_dispatch_is_eligible(
     segment_events: &[EventRecord],
     min_tool_calls: usize,
+    experience: &moa_core::ExperienceRecord,
+    attributions: &[moa_core::ExperienceAttribution],
 ) -> bool {
-    segment_events
-        .iter()
-        .filter(|record| matches!(record.event, Event::ToolCall { .. }))
-        .count()
-        >= min_tool_calls
+    moa_skills::distiller::experience_is_learnable(experience, attributions)
+        && segment_events
+            .iter()
+            .filter(|record| matches!(record.event, Event::ToolCall { .. }))
+            .count()
+            >= min_tool_calls
 }
 
 #[cfg(test)]

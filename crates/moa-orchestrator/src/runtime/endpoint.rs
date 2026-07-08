@@ -11,7 +11,6 @@ use crate::services::eval::{Eval, EvalImpl};
 use crate::services::experiments::{Experiments, ExperimentsImpl};
 use crate::workflows::experiment_run::{ExperimentRun, ExperimentRunImpl};
 use crate::workflows::experiment_trial_run::{ExperimentTrialRun, ExperimentTrialRunImpl};
-#[cfg(feature = "skill-learning")]
 use crate::workflows::skill_learning::{SkillLearning, SkillLearningImpl};
 use crate::{
     objects::{
@@ -157,7 +156,6 @@ pub fn build_endpoint(
         .bind(KnowledgeSyncIngestionImpl.serve())
         .bind(ConsolidateImpl.serve());
 
-    #[cfg(feature = "skill-learning")]
     {
         builder = builder.bind(SkillLearningImpl.serve());
     }
@@ -175,18 +173,12 @@ pub fn build_endpoint(
 /// Returns the service names expected for readiness in this build.
 #[must_use]
 pub fn expected_service_names() -> Vec<&'static str> {
-    expected_service_names_for_features(cfg!(feature = "skill-learning"))
-}
-
-fn expected_service_names_for_features(skill_learning_enabled: bool) -> Vec<&'static str> {
     let mut names = Vec::new();
     names.extend(CORE_HEAD_SERVICE_NAMES.iter().copied());
     names.push("Eval");
     names.push("Experiments");
     names.extend(CORE_BODY_SERVICE_NAMES.iter().copied());
-    if skill_learning_enabled {
-        names.push("SkillLearning");
-    }
+    names.push("SkillLearning");
     names.extend(EXPERIMENT_WORKFLOW_SERVICE_NAMES.iter().copied());
     names.extend(CORE_TAIL_SERVICE_NAMES.iter().copied());
     names
@@ -218,8 +210,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        RegisteredDeployment, RegisteredService, expected_service_names,
-        expected_service_names_for_features, services_registered,
+        RegisteredDeployment, RegisteredService, expected_service_names, services_registered,
         services_registered_with_expected,
     };
 
@@ -243,17 +234,11 @@ mod tests {
         for name in expected_service_names() {
             assert!(names.insert(name), "duplicate Restate binding name {name}");
         }
-
-        assert_eq!(
-            expected_service_names(),
-            expected_service_names_for_features(cfg!(feature = "skill-learning")),
-            "readiness names must match compiled feature flags"
-        );
     }
 
     #[test]
     fn product_expected_services_include_eval_and_experiments() {
-        let names = expected_service_names_for_features(false);
+        let names = expected_service_names();
 
         assert_eq!(names.iter().filter(|name| **name == "Eval").count(), 1);
         assert_eq!(
@@ -326,8 +311,10 @@ mod tests {
     }
 
     #[test]
-    fn skill_learning_feature_adds_skill_learning_workflow() {
-        let names = expected_service_names_for_features(true);
+    fn skill_learning_workflow_is_always_expected() {
+        // Pins: skill learning is always on — readiness requires the SkillLearning
+        // workflow in every build, exactly once.
+        let names = expected_service_names();
 
         assert_eq!(
             names
@@ -335,11 +322,7 @@ mod tests {
                 .filter(|name| **name == "SkillLearning")
                 .count(),
             1,
-            "skill-learning feature should add SkillLearning exactly once"
-        );
-        assert!(
-            !expected_service_names_for_features(false).contains(&"SkillLearning"),
-            "builds without the feature must not expect SkillLearning"
+            "readiness must expect SkillLearning exactly once"
         );
     }
 }

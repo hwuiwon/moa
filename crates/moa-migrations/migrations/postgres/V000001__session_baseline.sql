@@ -2248,6 +2248,16 @@ CREATE INDEX IF NOT EXISTS idx_learning_candidates_batch
     ON learning_candidates (batch_id) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_learning_candidates_scope
     ON learning_candidates (storage_partition_id, scope, user_id);
+-- Open-proposal dedupe lookups: proposal writers check for an existing
+-- proposed candidate by target label or task fingerprint before filing
+-- (and before spending an LLM generation), so both need partial indexes
+-- restricted to the open status.
+CREATE INDEX IF NOT EXISTS idx_learning_candidates_open_target
+    ON learning_candidates (tenant_id, candidate_type, target_label)
+    WHERE status = 'proposed';
+CREATE INDEX IF NOT EXISTS idx_learning_candidates_open_fingerprint
+    ON learning_candidates (tenant_id, candidate_type, task_fingerprint)
+    WHERE status = 'proposed';
 
 DROP MATERIALIZED VIEW IF EXISTS task_strategy_success_rates;
 

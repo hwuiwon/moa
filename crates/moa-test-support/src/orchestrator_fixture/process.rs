@@ -2,7 +2,7 @@
 
 use super::*;
 
-const ORCHESTRATOR_FIXTURE_FEATURES: &str = "provider-overrides,skill-learning";
+const ORCHESTRATOR_FIXTURE_FEATURES: &str = "provider-overrides";
 
 pub(super) async fn locate_orchestrator_binary(repo_root: &Path) -> Result<PathBuf> {
     if let Ok(path) = std::env::var("MOA_ORCHESTRATOR_BIN") {

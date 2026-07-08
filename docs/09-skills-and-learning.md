@@ -188,28 +188,53 @@ tenant-level rate when no similar task evidence exists.
 
 Skill package import, export, rendering, and turn-time injection are production
 surfaces. Automatic skill distillation and improvement are learning surfaces
-compiled with the `moa-skills/skill-learning` feature. When compiled, they run by
-default after qualifying experience persistence and create draft proposals only.
+always compiled in. They run by default after qualifying experience
+persistence and create draft proposals only.
 Eval-backed regression execution is owned by `moa-orchestrator`; `moa-skills`
 only generates reviewable regression suite source.
+
+Every learned skill change requires human review: generation of any kind —
+distillation, improvement, experiment-derived, or mined — only ever produces a
+`Proposed` learning candidate, and a tenant operator or admin must accept it
+through `LearningReview` before anything about the active skill changes. There
+is no unreviewed mutation path.
 
 Skill distillation runs after successful multi-step work that passes the
 configured evidence threshold. The current learning flow proposes tenant-local
 skill changes. Tenant learning is never globally promoted and never rewrites
 shared defaults automatically. Current generation flow:
 
-1. Count tool calls; short/simple sessions are skipped.
-2. Extract a task summary from recent user input.
-3. Compare against existing tenant skills.
+1. Gate on the assessed experience: resolved outcomes need confidence >= 0.7,
+   partial outcomes need >= 0.85 plus helpful verification attribution, and the
+   segment must contain enough tool calls. The turn driver applies the same
+   gates before dispatching the detached workflow.
+2. Preflight against open proposals: an open `Proposed` candidate for the same
+   task fingerprint (or, for improvements, the same skill name) is returned
+   without any model call.
+3. Compare the experience's task summary, fingerprint, and facets against
+   existing tenant skills.
 4. If a similar skill exists, attempt improvement.
 5. Otherwise ask the configured model to produce a complete skill document.
+   Generation prompts truncate per-event text and carry an explicit output cap.
 6. Validate the generated package and store it as a tenant-scoped
    `ArtifactKind::Skill` draft revision.
-7. Generate reviewable regression suite TOML and store it in the candidate
-   payload without writing or running the suite.
+7. Generate reviewable regression suite TOML deterministically from the
+   segment events. It is stored in the candidate payload and rides the draft
+   package as `tests/regression-suite.toml`, so every promoted revision carries
+   the suite derived from its own source session; nothing runs at generation
+   time. When a recurring task dedupes onto an open proposal, the new session's
+   suite accumulates onto the candidate as sibling held-out material instead of
+   being discarded.
 8. Append one `LearningCandidateType::Skill` row with status `Proposed`,
-   source experience IDs, operation, draft artifact revision ID, and review
-   evidence.
+   source experience IDs, operation, draft artifact revision ID, and an
+   `evidence` payload carrying the assessed outcome and confidence,
+   segment-assessment evidence rows, attribution summaries, tools used, and
+   the similarity routing that chose improve-vs-create.
+
+Proposal filing dedupes twice before creating a draft: an open `Proposed`
+skill candidate for the same skill name, or for the same task fingerprint
+(the generator may name the same recurring work differently), is returned
+instead of filing a near-duplicate review item.
 
 Skill improvement builds an updated `SKILL.md`, preserves supporting package
 files from the previous revision, and stores the result as a draft artifact.
@@ -221,10 +246,20 @@ Current review flow:
    `LearningReview/get`.
 2. `LearningReview/accept_skill` validates that the candidate is a proposed
    skill candidate and that the referenced draft artifact is publishable.
-3. Review-time regression evidence is attached to the candidate
-   `evaluation_payload`. When no eval execution result is attached, this records
-   `"regression_execution": "unavailable"` while still requiring human review
-   and artifact validation.
+3. The review-time regression gate fails closed. Candidate-content defects — a
+   missing, unparseable, or empty generated suite, a missing skill name, or an
+   estimated execution cost over the review budget — terminally reject the
+   candidate with the failing state preserved in `evaluation_payload`. An
+   unavailable provider is an operational failure and errors the accept request
+   instead of waiving the gate. Held-in check: when a previous active revision
+   exists, both revisions execute the candidate's own suite and scores are
+   compared; a first revision executes its suite alone as a smoke gate.
+   Held-out check: the previous revision's own suite plus any accumulated
+   sibling suites — material the candidate was not derived from — execute the
+   same way, and the candidate must not regress on them (a stale pooled case
+   that fails both revisions equally neutralizes itself). The acceptance checks
+   recorded on the promoted candidate are derived from what actually executed,
+   including whether any held-out material existed.
 4. Accept publishes the existing draft artifact revision.
 5. Accept marks the candidate `Promoted` and appends `skill_created` or
    `skill_improved` to `learning_log`.
@@ -295,6 +330,13 @@ Current learning types include:
 - `skill_improved`
 - `memory_updated`
 - `segment_assessed`
+
+Weakness mining is the failure-driven counterpart to distillation: after each
+assessed segment, durable tool errors and denied action reviews in the session
+window are clustered deterministically (no model call) and recurring patterns
+file `Proposed` candidates naming the implicated editable surface. Re-observed
+patterns bump the open candidate's occurrence evidence instead of filing
+duplicates, and candidates a reviewer already claimed keep their review state.
 
 `learning_candidates` is not a replacement for `learning_log`. Candidates are
 mutable proposal state with evaluation payloads and explicit status transitions.

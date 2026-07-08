@@ -13,7 +13,6 @@ pub mod procedure_execution;
 pub mod procedure_node_actions;
 pub(crate) mod procedure_target_wait;
 pub(crate) mod progress_delivery;
-#[cfg(feature = "skill-learning")]
 pub mod skill_learning;
 pub(crate) mod turn_events;
 pub mod turn_execution;

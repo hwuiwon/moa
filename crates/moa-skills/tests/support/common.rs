@@ -15,12 +15,15 @@ use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
     ActionRuleScope, Attachment, Channel, CompletionContent, CompletionRequest, CompletionResponse,
-    CompletionStream, Event, EventRecord, LLMProvider, MoaConfig, MoaError, ModelCapabilities,
-    ModelId, ModelTier, SessionId, SessionMeta, SessionStatus, StopReason, StoragePartitionId,
-    TokenPricing, TokenUsage, ToolCallFormat, ToolCallId, ToolOutput,
+    CompletionStream, Event, EventRecord, ExperienceRecord, LLMProvider, MoaConfig, MoaError,
+    ModelCapabilities, ModelId, ModelTier, SegmentEvidence, SegmentEvidenceKind,
+    SegmentEvidencePolarity, SegmentId, SegmentOutcome, SessionId, SessionMeta, SessionStatus,
+    StopReason, StoragePartitionId, TaskFacetSet, TaskFingerprint, TokenPricing, TokenUsage,
+    ToolCallFormat, ToolCallId, ToolOutput, UserId,
 };
 use moa_providers::ModelRouter;
 use moa_session::PostgresSessionStore;
+use moa_skills::distiller::ExperienceDistillationInput;
 use moa_skills::format::{
     build_skill_path, parse_skill_markdown, render_skill_markdown, skill_metadata_from_document,
 };
@@ -190,6 +193,62 @@ pub fn failed_session(mut loaded: LoadedSession) -> LoadedSession {
         },
     );
     loaded
+}
+
+/// Builds a learnable experience-distillation input from a loaded session fixture.
+///
+/// The experience carries a resolved outcome above the learnability threshold and
+/// reuses the fixture's events, so tests can drive the experience-native
+/// distillation path without seeding segment-assessment rows.
+pub fn experience_input(loaded: &LoadedSession, task_summary: &str) -> ExperienceDistillationInput {
+    let tools_used = loaded
+        .events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::ToolCall { tool_name, .. } => Some(tool_name.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let experience = ExperienceRecord {
+        id: Uuid::now_v7(),
+        segment_id: SegmentId::new(),
+        session_id: loaded.session.id,
+        tenant_id: loaded.session.tenant_id,
+        user_id: UserId::new("fixture-user"),
+        task_summary: Some(task_summary.to_string()),
+        task_fingerprint: TaskFingerprint {
+            hash: format!(
+                "fixture-{}",
+                task_summary.to_ascii_lowercase().replace(' ', "-")
+            ),
+            normalized_summary: task_summary.to_ascii_lowercase(),
+            policy_version: "experience_v1".to_string(),
+        },
+        task_facets: TaskFacetSet::default(),
+        actions: Vec::new(),
+        resources: Vec::new(),
+        outcome: SegmentOutcome::Resolved,
+        confidence: 0.9,
+        evidence: vec![SegmentEvidence {
+            kind: SegmentEvidenceKind::Verification,
+            polarity: SegmentEvidencePolarity::SupportsResolved,
+            strength: 0.8,
+            summary: "verification tool run passed".to_string(),
+        }],
+        tools_used,
+        skills_activated: Vec::new(),
+        turn_count: 2,
+        token_cost: 10,
+        duration_ms: Some(100),
+        assessment_policy_version: "assessment_v1".to_string(),
+        extraction_policy_version: "experience_v1".to_string(),
+        created_at: Utc::now(),
+    };
+    ExperienceDistillationInput {
+        experience,
+        attributions: Vec::new(),
+        events: loaded.events.clone(),
+    }
 }
 
 /// Builds a model router backed by deterministic text responses.

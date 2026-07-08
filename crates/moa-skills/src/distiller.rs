@@ -9,7 +9,7 @@ use moa_core::{
     SegmentEvidencePolarity, SegmentOutcome, SessionMeta, SkillMetadata,
 };
 use moa_providers::ModelRouter;
-use moa_session::{PostgresSessionStore, create_session_store};
+use moa_session::PostgresSessionStore;
 
 use crate::format::{
     SkillDocument, build_skill_path, parse_skill_markdown, skill_metadata_from_document,
@@ -20,18 +20,18 @@ use crate::proposals::{
     SkillDraftProposal, SkillProposalOperation, SkillProposalSource, store_skill_draft_proposal,
 };
 use crate::registry::SkillRegistry;
-use crate::regression::generate_skill_test_suite_source;
+use crate::regression::{
+    generate_skill_test_suite_source, generate_skill_test_suite_source_for_name,
+};
 
 /// Similarity score at or above which distillation routes to existing-skill improvement.
 pub const SIMILARITY_THRESHOLD: f32 = 0.5;
 
-/// Reason a session was not distilled.
+/// Reason an experience was not distilled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DistillationSkipReason {
-    /// The session did not contain enough tool calls to justify distillation.
+    /// The segment did not contain enough tool calls to justify distillation.
     BelowThreshold,
-    /// The session failed, so it must not seed a reusable skill.
-    Failure,
     /// The assessed segment outcome is not learnable enough to seed a reusable skill.
     UnlearnableOutcome,
     /// No learning store was available to persist a reviewable draft proposal.
@@ -109,113 +109,6 @@ pub struct ExperienceDistillationInput {
     pub events: Vec<EventRecord>,
 }
 
-/// Distills a successful multi-step session into a reusable tenant skill when appropriate.
-pub async fn maybe_distill_skill(
-    config: &MoaConfig,
-    session: &SessionMeta,
-    events: &[EventRecord],
-    model_router: Arc<ModelRouter>,
-) -> Result<Option<SkillMetadata>> {
-    let learning_store = create_session_store(config).await?;
-    maybe_distill_skill_with_learning(config, session, events, model_router, Some(learning_store))
-        .await
-}
-
-/// Distills a successful session and records learning-log entries when a store is provided.
-pub async fn maybe_distill_skill_with_learning(
-    config: &MoaConfig,
-    session: &SessionMeta,
-    events: &[EventRecord],
-    model_router: Arc<ModelRouter>,
-    learning_store: Option<Arc<PostgresSessionStore>>,
-) -> Result<Option<SkillMetadata>> {
-    match distill_skill_with_learning(config, session, events, model_router, learning_store).await?
-    {
-        DistillationOutcome::NewSkillProposed { proposal } => Ok(Some(proposal.metadata)),
-        DistillationOutcome::ImprovementProposed { proposal, .. } => {
-            Ok(proposal.map(|proposal| proposal.metadata))
-        }
-        DistillationOutcome::Skipped { .. } => Ok(None),
-    }
-}
-
-/// Distills a successful session and returns the exact routing outcome.
-pub async fn distill_skill_with_learning(
-    config: &MoaConfig,
-    session: &SessionMeta,
-    events: &[EventRecord],
-    model_router: Arc<ModelRouter>,
-    learning_store: Option<Arc<PostgresSessionStore>>,
-) -> Result<DistillationOutcome> {
-    if count_tool_calls(events) < config.learning.skills.min_tool_calls {
-        return Ok(DistillationOutcome::Skipped {
-            reason: DistillationSkipReason::BelowThreshold,
-        });
-    }
-    if session_failed(session, events) {
-        return Ok(DistillationOutcome::Skipped {
-            reason: DistillationSkipReason::Failure,
-        });
-    }
-    let Some(store) = learning_store.clone() else {
-        return Ok(DistillationOutcome::Skipped {
-            reason: DistillationSkipReason::LearningStoreUnavailable,
-        });
-    };
-
-    let task_summary = extract_task_summary(events);
-    let existing_skills = SkillRegistry::new(store.pool().clone())
-        .list_for_pipeline(session.tenant_id)
-        .await?;
-
-    if let Some(existing) = find_similar_skill(&task_summary, &existing_skills) {
-        let existing_skill_id = existing.name.clone();
-        let result = crate::improver::improve_skill_with_learning(
-            config,
-            session,
-            existing,
-            events,
-            model_router,
-            learning_store,
-        )
-        .await;
-        return result.map(|result| DistillationOutcome::ImprovementProposed {
-            existing_skill_id,
-            proposal: match result {
-                ImprovementResult::Improved { proposal, .. } => Some(proposal),
-                ImprovementResult::Unchanged { .. }
-                | ImprovementResult::Rejected { .. }
-                | ImprovementResult::Skipped => None,
-            },
-        });
-    }
-
-    let llm = model_router.provider_for(ModelTask::SkillDistillation);
-    let response = llm
-        .complete(build_distillation_request(&task_summary, events))
-        .await?
-        .collect()
-        .await?;
-    let skill_markdown = normalize_llm_markdown(&response.text);
-    let skill = parse_skill_markdown(skill_markdown)?;
-    let path = build_skill_path(&skill.frontmatter.name);
-    let markdown = render_skill_for_registry(&skill)?;
-    let metadata = skill_metadata_from_document(path, &skill);
-    let package = SkillPackage::from_skill_markdown(markdown).validate()?;
-    let generated_suite = generate_skill_test_suite_source(session.tenant_id, &skill, events)?;
-    let proposal = store_skill_draft_proposal(
-        store.as_ref(),
-        session,
-        &package,
-        metadata,
-        SkillProposalOperation::Created,
-        SkillProposalSource::session_only(),
-        generated_suite,
-    )
-    .await?;
-    Ok(DistillationOutcome::NewSkillProposed { proposal })
-}
-
 /// Distills an assessed experience into a skill candidate and promotes it when gates pass.
 pub async fn distill_skill_from_experience_with_learning(
     config: &MoaConfig,
@@ -240,21 +133,51 @@ pub async fn distill_skill_from_experience_with_learning(
         });
     };
 
+    // Preflight before any LLM spend: an open proposal for this task
+    // fingerprint already awaits review, so generating again would only
+    // produce a duplicate for the in-transaction dedupe to discard. The new
+    // session still contributes: its deterministic suite accumulates onto the
+    // open candidate as held-out material for the review gate.
+    if let Some(open) = crate::proposals::find_open_skill_proposal(
+        store.as_ref(),
+        session.tenant_id,
+        None,
+        Some(&input.experience.task_fingerprint.hash),
+    )
+    .await?
+    {
+        let sibling_suite = generate_skill_test_suite_source_for_name(
+            session.tenant_id,
+            &open.metadata.name,
+            &input.events,
+        )?;
+        crate::proposals::accumulate_sibling_suite(
+            store.as_ref(),
+            session.tenant_id,
+            &open,
+            sibling_suite,
+            input.experience.id,
+            session.id,
+        )
+        .await?;
+        return Ok(outcome_for_open_proposal(open));
+    }
+
     let task_summary = experience_similarity_text(&input.experience);
     let existing_skills = SkillRegistry::new(store.pool().clone())
         .list_for_pipeline(session.tenant_id)
         .await?;
-    let source = SkillProposalSource {
-        source_experience_ids: vec![input.experience.id],
-        task_fingerprint: Some(input.experience.task_fingerprint.clone()),
-        task_facets: Some(input.experience.task_facets.clone()),
-        confidence: Some(input.experience.confidence),
-    };
 
-    if let Some(existing) = find_similar_skill(&task_summary, &existing_skills) {
+    if let Some((similarity, existing)) = find_similar_skill(&task_summary, &existing_skills) {
         let existing_skill_id = existing.name.clone();
+        let routing = serde_json::json!({
+            "decision": "improve_existing",
+            "matched_skill": existing_skill_id.clone(),
+            "similarity_score": similarity,
+            "similarity_threshold": SIMILARITY_THRESHOLD,
+        });
+        let source = proposal_source_from_experience(&input, Some(routing));
         let result = crate::improver::improve_skill_with_learning_for_sources(
-            config,
             session,
             existing,
             &input.events,
@@ -288,18 +211,90 @@ pub async fn distill_skill_from_experience_with_learning(
     let package = SkillPackage::from_skill_markdown(markdown).validate()?;
     let generated_suite =
         generate_skill_test_suite_source(session.tenant_id, &skill, &input.events)?;
+    let routing = serde_json::json!({
+        "decision": "create_new",
+        "similarity_threshold": SIMILARITY_THRESHOLD,
+        "reason": "no existing tenant skill matched the task above the similarity threshold",
+    });
     let proposal = store_skill_draft_proposal(
         store.as_ref(),
         session,
         &package,
         metadata,
         SkillProposalOperation::Created,
-        source,
+        proposal_source_from_experience(&input, Some(routing)),
         generated_suite,
     )
     .await?;
 
     Ok(DistillationOutcome::NewSkillProposed { proposal })
+}
+
+/// Maps an already-open draft proposal onto the distillation outcome it represents.
+fn outcome_for_open_proposal(proposal: SkillDraftProposal) -> DistillationOutcome {
+    match &proposal.operation {
+        SkillProposalOperation::Created => DistillationOutcome::NewSkillProposed { proposal },
+        SkillProposalOperation::Improved { .. } => DistillationOutcome::ImprovementProposed {
+            existing_skill_id: proposal.metadata.name.clone(),
+            proposal: Some(proposal),
+        },
+    }
+}
+
+/// Builds the proposal source (lineage + reviewer evidence) for one experience.
+pub(crate) fn proposal_source_from_experience(
+    input: &ExperienceDistillationInput,
+    routing: Option<serde_json::Value>,
+) -> SkillProposalSource {
+    SkillProposalSource {
+        source_experience_ids: vec![input.experience.id],
+        task_fingerprint: Some(input.experience.task_fingerprint.clone()),
+        task_facets: Some(input.experience.task_facets.clone()),
+        confidence: Some(input.experience.confidence),
+        evidence: Some(experience_evidence_payload(input, routing)),
+    }
+}
+
+/// Renders the reviewer-facing rationale for a proposal derived from one experience.
+///
+/// Reviewers accept or reject drafts through `LearningReview/get`; this block
+/// answers "why was this proposed" without requiring them to load the source
+/// session: the assessed outcome and confidence, the segment-assessment
+/// evidence rows, verification/tool attributions, and the similarity routing
+/// that chose improve-vs-create.
+fn experience_evidence_payload(
+    input: &ExperienceDistillationInput,
+    routing: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let experience = &input.experience;
+    let attributions = input
+        .attributions
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "subject_type": row.subject_type,
+                "subject_id": row.subject_id,
+                "effect": row.effect,
+                "confidence": row.confidence,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "source": "segment_assessment",
+        "task_summary": experience.task_summary,
+        "outcome": experience.outcome.as_str(),
+        "confidence": experience.confidence,
+        "task_fingerprint": {
+            "hash": experience.task_fingerprint.hash,
+            "normalized_summary": experience.task_fingerprint.normalized_summary,
+        },
+        "tools_used": experience.tools_used,
+        "skills_activated": experience.skills_activated,
+        "turn_count": experience.turn_count,
+        "segment_evidence": experience.evidence,
+        "attributions": attributions,
+        "routing": routing,
+    })
 }
 
 fn render_skill_for_registry(skill: &SkillDocument) -> Result<String> {
@@ -313,24 +308,6 @@ fn count_tool_calls(events: &[EventRecord]) -> usize {
         .count()
 }
 
-fn session_failed(session: &SessionMeta, _events: &[EventRecord]) -> bool {
-    session.status == moa_core::SessionStatus::Failed
-}
-
-fn extract_task_summary(events: &[EventRecord]) -> String {
-    events
-        .iter()
-        .rev()
-        .find_map(|record| match &record.event {
-            Event::UserMessage { text, .. } | Event::QueuedMessage { text, .. } => {
-                Some(text.trim().to_string())
-            }
-            _ => None,
-        })
-        .filter(|summary| !summary.is_empty())
-        .unwrap_or_else(|| "distilled session workflow".to_string())
-}
-
 const SKILL_DISTILLATION_SYSTEM_PROMPT: &str = "\
 Distill task evidence into a reusable Agent Skill.
 Output only a complete SKILL.md document using the Agent Skills format from agentskills.io.
@@ -341,21 +318,6 @@ Store project-specific fields inside `metadata` using `moa-` prefixes, including
 The skill should include when-to-use guidance, a numbered procedure, pitfalls, and verification steps.
 Learn only durable workflow structure. Do not copy secrets, transient IDs, or one-off paths unless \
 the path is essential to the workflow.";
-
-fn build_distillation_request(task_summary: &str, events: &[EventRecord]) -> CompletionRequest {
-    crate::util::completion_request(
-        SKILL_DISTILLATION_SYSTEM_PROMPT,
-        build_distillation_user_prompt(task_summary, events),
-    )
-}
-
-fn build_distillation_user_prompt(task_summary: &str, events: &[EventRecord]) -> String {
-    format!(
-        "Task summary: {task_summary}\n\n\
-         Session events:\n{}",
-        format_events_for_learning(events)
-    )
-}
 
 fn build_experience_distillation_request(input: &ExperienceDistillationInput) -> CompletionRequest {
     crate::util::completion_request(
@@ -392,7 +354,13 @@ fn build_experience_distillation_user_prompt(input: &ExperienceDistillationInput
     )
 }
 
-fn experience_is_learnable(
+/// Returns whether an assessed experience is strong enough to seed skill learning.
+///
+/// Resolved outcomes need confidence >= 0.7; partial outcomes need >= 0.85 plus
+/// a helpful attribution and verification support. Dispatchers call this before
+/// spawning the detached learning workflow, and the distiller re-checks it as a
+/// replay-safe gate.
+pub fn experience_is_learnable(
     experience: &ExperienceRecord,
     attributions: &[ExperienceAttribution],
 ) -> bool {
@@ -459,14 +427,13 @@ fn experience_similarity_text(experience: &ExperienceRecord) -> String {
 fn find_similar_skill<'a>(
     task_summary: &str,
     skills: &'a [SkillMetadata],
-) -> Option<&'a SkillMetadata> {
+) -> Option<(f32, &'a SkillMetadata)> {
     let summary_tokens = tokenize(task_summary);
     skills
         .iter()
         .map(|skill| (similarity_score(&summary_tokens, skill), skill))
         .filter(|(score, _)| *score >= SIMILARITY_THRESHOLD)
         .max_by(|left, right| left.0.total_cmp(&right.0))
-        .map(|(_, skill)| skill)
 }
 
 fn similarity_score(summary_tokens: &HashSet<String>, skill: &SkillMetadata) -> f32 {
@@ -499,9 +466,9 @@ fn tokenize(text: &str) -> HashSet<String> {
 mod tests {
     use chrono::{TimeZone, Utc};
     use moa_core::{
-        Event, EventRecord, ExperienceRecord, MessageRole, SegmentEvidence, SegmentEvidenceKind,
-        SegmentEvidencePolarity, SegmentId, SessionId, SessionMeta, SessionStatus, TaskFacetSet,
-        TaskFingerprint, TenantId, ToolCallId, UserId,
+        ExperienceRecord, MessageRole, SegmentEvidence, SegmentEvidenceKind,
+        SegmentEvidencePolarity, SegmentId, SessionId, TaskFacetSet, TaskFingerprint, TenantId,
+        UserId,
     };
     use uuid::Uuid;
 
@@ -532,36 +499,15 @@ mod tests {
     }
 
     #[test]
-    fn session_distillation_failure_uses_final_status_not_historical_tool_errors() {
-        // Pins: retry-heavy successful sessions can still seed skill distillation.
-        let session = SessionMeta {
-            status: SessionStatus::Completed,
-            ..SessionMeta::default()
+    fn experience_distillation_request_keeps_segment_evidence_out_of_system_prompt() {
+        // Pins: learned-skill generation reuses static instructions while segment evidence
+        // stays dynamic, so the stable system prompt remains cacheable.
+        let input = ExperienceDistillationInput {
+            experience: experience(SegmentOutcome::Resolved, 0.9),
+            attributions: Vec::new(),
+            events: Vec::new(),
         };
-        let events = vec![event_record(
-            session.id,
-            Event::ToolError {
-                tool_id: ToolCallId::new(),
-                provider_tool_use_id: None,
-                tool_name: "bash".to_string(),
-                error: "transient timeout".to_string(),
-                retryable: true,
-            },
-        )];
-
-        assert!(!session_failed(&session, &events));
-
-        let failed = SessionMeta {
-            status: SessionStatus::Failed,
-            ..session
-        };
-        assert!(session_failed(&failed, &events));
-    }
-
-    #[test]
-    fn skill_distillation_request_keeps_session_evidence_out_of_system_prompt() {
-        // Pins: learned-skill generation reuses static instructions while session evidence stays dynamic.
-        let request = build_distillation_request("Fix auth regression", &[]);
+        let request = build_experience_distillation_request(&input);
 
         assert_eq!(request.messages.len(), 2);
         assert_eq!(request.messages[0].role, MessageRole::System);
@@ -573,7 +519,7 @@ mod tests {
                 .content
                 .contains("Task summary: Fix auth regression")
         );
-        assert!(request.messages[1].content.contains("Session events:"));
+        assert!(request.messages[1].content.contains("Segment events:"));
     }
 
     fn experience(outcome: SegmentOutcome, confidence: f64) -> ExperienceRecord {
@@ -615,20 +561,6 @@ mod tests {
             assessment_policy_version: "assessment_v1".to_string(),
             extraction_policy_version: "experience_v1".to_string(),
             created_at: now,
-        }
-    }
-
-    fn event_record(session_id: SessionId, event: Event) -> EventRecord {
-        EventRecord {
-            id: Uuid::now_v7(),
-            session_id,
-            sequence_num: 1,
-            event_type: event.event_type(),
-            event,
-            timestamp: Utc::now(),
-            brain_id: None,
-            hand_id: None,
-            token_count: None,
         }
     }
 

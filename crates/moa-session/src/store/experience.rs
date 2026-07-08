@@ -1,7 +1,9 @@
 //! Experience-learning operations for the Postgres session store.
 
-use super::*;
+use moa_core::LearningCandidateType;
 use sqlx::PgConnection;
+
+use super::*;
 
 impl PostgresSessionStore {
     /// Appends or idempotently refreshes one experience record.
@@ -241,6 +243,64 @@ impl PostgresSessionStore {
             .await
             .map_err(map_sqlx_error)?;
         rows.iter().map(learning_candidate_from_row).collect()
+    }
+
+    /// Finds one open proposed candidate of a type targeting a label, using an existing connection.
+    ///
+    /// Proposal writers use this to dedupe against an already-open review item
+    /// (for example one `Proposed` skill draft per skill name per tenant)
+    /// before filing a new candidate.
+    pub async fn find_proposed_learning_candidate_by_target_with_conn(
+        &self,
+        conn: &mut PgConnection,
+        tenant_id: &TenantId,
+        candidate_type: LearningCandidateType,
+        target_label: &str,
+    ) -> Result<Option<LearningCandidate>> {
+        let learning_candidates = self.table_name("learning_candidates");
+        let row = sqlx::query(&format!(
+            "SELECT {LEARNING_CANDIDATE_COLUMNS} FROM {learning_candidates} \
+             WHERE tenant_id = $1 AND candidate_type = $2 AND status = $3 AND target_label = $4 \
+             ORDER BY created_at ASC, id ASC LIMIT 1"
+        ))
+        .bind(tenant_id.to_string())
+        .bind(candidate_type.as_str())
+        .bind(LearningCandidateStatus::Proposed.as_str())
+        .bind(target_label)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(map_sqlx_error)?;
+        row.as_ref().map(learning_candidate_from_row).transpose()
+    }
+
+    /// Finds one open proposed candidate of a type with a task fingerprint, using an existing connection.
+    ///
+    /// Complements [`Self::find_proposed_learning_candidate_by_target_with_conn`]
+    /// for the case where a generator names the same recurring work differently:
+    /// the task fingerprint is stable across similar tasks, so an open proposal
+    /// for the same fingerprint dedupes even when the target label differs.
+    pub async fn find_proposed_learning_candidate_by_fingerprint_with_conn(
+        &self,
+        conn: &mut PgConnection,
+        tenant_id: &TenantId,
+        candidate_type: LearningCandidateType,
+        fingerprint_hash: &str,
+    ) -> Result<Option<LearningCandidate>> {
+        let learning_candidates = self.table_name("learning_candidates");
+        let row = sqlx::query(&format!(
+            "SELECT {LEARNING_CANDIDATE_COLUMNS} FROM {learning_candidates} \
+             WHERE tenant_id = $1 AND candidate_type = $2 AND status = $3 \
+               AND task_fingerprint = $4 \
+             ORDER BY created_at ASC, id ASC LIMIT 1"
+        ))
+        .bind(tenant_id.to_string())
+        .bind(candidate_type.as_str())
+        .bind(LearningCandidateStatus::Proposed.as_str())
+        .bind(fingerprint_hash)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(map_sqlx_error)?;
+        row.as_ref().map(learning_candidate_from_row).transpose()
     }
 
     /// Loads one full learning candidate by tenant and candidate ID.

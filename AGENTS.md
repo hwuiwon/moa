@@ -43,8 +43,8 @@ crate, translate it to `crates/<name>/...`.
 3. Use `tracing` for logging; never `println!`/`eprintln!` in library code.
 4. Use `tokio`; all I/O must be async.
 5. No `unwrap()` in library code. Use `?` or explicit handling.
-6. Optional dependencies are controlled by feature flags such as `slack`,
-   `skill-learning`, and `experiments`.
+6. Optional dependencies are controlled by feature flags such as `slack`
+   and `experiments`.
 7. Prefer direct imports from the owning crate/module. Do not add compatibility
    shims, wrapper functions, or `pub use` re-exports just to preserve old paths.
 

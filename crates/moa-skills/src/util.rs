@@ -4,7 +4,6 @@
 //! completion-request boilerplate into one place.
 
 use moa_core::{ActionRuleScope, MoaError, Result, RlsContext, TenantId};
-#[cfg(feature = "skill-learning")]
 use moa_core::{CompletionRequest, ContextMessage};
 use serde_json::Value;
 use sqlx::PgConnection;
@@ -44,11 +43,14 @@ pub(crate) fn empty_object() -> Value {
     Value::Object(serde_json::Map::new())
 }
 
+/// Output-token ceiling for skill-learning generations; a `SKILL.md` document
+/// is small, so an uncapped response only ever wastes budget.
+const SKILL_LEARNING_MAX_OUTPUT_TOKENS: usize = 4_096;
+
 /// Builds a single-turn completion request from a system and user message.
 ///
 /// Centralises the shared scaffold (no model override, empty tool set, default
 /// sampling and metadata) used by the distillation and improvement prompts.
-#[cfg(feature = "skill-learning")]
 pub(crate) fn completion_request(
     system: impl Into<String>,
     user: impl Into<String>,
@@ -57,7 +59,7 @@ pub(crate) fn completion_request(
         model: None,
         messages: vec![ContextMessage::system(system), ContextMessage::user(user)],
         tools: Vec::new(),
-        max_output_tokens: None,
+        max_output_tokens: Some(SKILL_LEARNING_MAX_OUTPUT_TOKENS),
         temperature: None,
         response_format: None,
         metadata: Default::default(),

@@ -9,6 +9,12 @@ use crate::format::{SkillDocument, slugify_skill_name};
 
 const DEFAULT_SUITE_TIMEOUT_SECONDS: u64 = 120;
 
+/// Package-relative path where a proposal's generated suite rides its draft
+/// revision. Each promoted revision therefore carries the suite derived from
+/// its own source session, and the review gate pools previous revisions'
+/// suites as held-out material for the next candidate.
+pub const REGRESSION_SUITE_PACKAGE_PATH: &str = "tests/regression-suite.toml";
+
 /// Generated regression suite source for a skill draft proposal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedSkillSuite {
@@ -37,11 +43,24 @@ pub fn generate_skill_test_suite_source(
     skill: &SkillDocument,
     events: &[EventRecord],
 ) -> Result<GeneratedSkillSuite> {
-    let suite = build_generated_suite(skill, events);
+    generate_skill_test_suite_source_for_name(tenant_id, &skill.frontmatter.name, events)
+}
+
+/// Generates regression suite TOML for a skill known only by name.
+///
+/// Sibling-suite accumulation uses this when a recurring task dedupes onto an
+/// open proposal: the new session's events become held-out material for the
+/// open candidate without regenerating (or even parsing) its skill document.
+pub fn generate_skill_test_suite_source_for_name(
+    tenant_id: TenantId,
+    skill_name: &str,
+    events: &[EventRecord],
+) -> Result<GeneratedSkillSuite> {
+    let suite = build_generated_suite(skill_name, events);
     let source_toml = toml::to_string_pretty(&suite)
         .map_err(|error| MoaError::StorageError(error.to_string()))?;
     Ok(GeneratedSkillSuite {
-        relative_path: skill_suite_relative_path(tenant_id, &skill.frontmatter.name),
+        relative_path: skill_suite_relative_path(tenant_id, skill_name),
         source_toml,
     })
 }
@@ -59,14 +78,11 @@ pub fn compare_scores(
     candidate.average_score + f64::EPSILON >= previous.average_score
 }
 
-fn build_generated_suite(skill: &SkillDocument, events: &[EventRecord]) -> TestSuite {
+fn build_generated_suite(skill_name: &str, events: &[EventRecord]) -> TestSuite {
     let case_name = slugify_case_name(&extract_task_input(events));
     TestSuite {
-        name: format!("{}-regression", skill.frontmatter.name),
-        description: Some(format!(
-            "Auto-generated regression suite for {}",
-            skill.frontmatter.name
-        )),
+        name: format!("{skill_name}-regression"),
+        description: Some(format!("Auto-generated regression suite for {skill_name}")),
         cases: vec![TestCase {
             name: if case_name.is_empty() {
                 "smoke".to_string()
@@ -85,7 +101,7 @@ fn build_generated_suite(skill: &SkillDocument, events: &[EventRecord]) -> TestS
             ..TestCase::default()
         }],
         default_timeout_seconds: DEFAULT_SUITE_TIMEOUT_SECONDS,
-        tags: vec!["skill".to_string(), skill.frontmatter.name.clone()],
+        tags: vec!["skill".to_string(), skill_name.to_string()],
     }
 }
 

@@ -3,12 +3,13 @@
 use std::sync::Arc;
 
 use moa_core::{
-    ActionRuleScope, CompletionRequest, Event, EventRecord, MoaConfig, ModelTask, Result,
-    SessionMeta, SkillMetadata,
+    ActionRuleScope, CompletionRequest, Event, EventRecord, ModelTask, Result, SessionMeta,
+    SkillMetadata,
 };
 use moa_providers::ModelRouter;
-use moa_session::{PostgresSessionStore, create_session_store};
+use moa_session::PostgresSessionStore;
 
+use crate::distiller::ExperienceDistillationInput;
 use crate::format::{
     SkillDocument, parse_skill_markdown, render_skill_markdown, skill_metadata_from_document,
 };
@@ -45,75 +46,37 @@ pub enum ImprovementResult {
     Skipped,
 }
 
-/// Compares a run against an existing skill and proposes an update when useful.
-pub async fn maybe_improve_skill(
-    config: &MoaConfig,
+/// Compares an assessed experience against an existing skill and returns a typed proposal outcome.
+///
+/// This is the experience-native improver entry: the proposal is keyed to and
+/// audited against the experience record, so callers must have already applied
+/// the learnability gates that `distill_skill_from_experience_with_learning`
+/// enforces before routing here.
+pub async fn improve_skill_from_experience_with_learning(
     session: &SessionMeta,
     existing: &SkillMetadata,
-    events: &[EventRecord],
-    model_router: Arc<ModelRouter>,
-) -> Result<Option<SkillMetadata>> {
-    let learning_store = create_session_store(config).await?;
-    maybe_improve_skill_with_learning(
-        config,
-        session,
-        existing,
-        events,
-        model_router,
-        Some(learning_store),
-    )
-    .await
-}
-
-/// Compares a run against an existing skill and records a draft proposal when provided.
-pub async fn maybe_improve_skill_with_learning(
-    config: &MoaConfig,
-    session: &SessionMeta,
-    existing: &SkillMetadata,
-    events: &[EventRecord],
-    model_router: Arc<ModelRouter>,
-    learning_store: Option<Arc<PostgresSessionStore>>,
-) -> Result<Option<SkillMetadata>> {
-    match improve_skill_with_learning(
-        config,
-        session,
-        existing,
-        events,
-        model_router,
-        learning_store,
-    )
-    .await?
-    {
-        ImprovementResult::Improved { proposal, .. } => Ok(Some(proposal.metadata)),
-        ImprovementResult::Unchanged { .. }
-        | ImprovementResult::Rejected { .. }
-        | ImprovementResult::Skipped => Ok(None),
-    }
-}
-
-/// Compares a run against an existing skill and returns a typed proposal outcome.
-pub async fn improve_skill_with_learning(
-    config: &MoaConfig,
-    session: &SessionMeta,
-    existing: &SkillMetadata,
-    events: &[EventRecord],
+    input: &ExperienceDistillationInput,
     model_router: Arc<ModelRouter>,
     learning_store: Option<Arc<PostgresSessionStore>>,
 ) -> Result<ImprovementResult> {
+    let routing = serde_json::json!({
+        "decision": "improve_existing",
+        "matched_skill": existing.name.clone(),
+        "reason": "caller-directed improvement of a named skill",
+    });
+    let source = crate::distiller::proposal_source_from_experience(input, Some(routing));
     improve_skill_with_learning_for_sources(
-        config,
         session,
         existing,
-        events,
+        &input.events,
         model_router,
         learning_store,
-        SkillProposalSource::session_only(),
+        source,
     )
     .await
 }
 
 pub(crate) async fn improve_skill_with_learning_for_sources(
-    _config: &MoaConfig,
     session: &SessionMeta,
     existing: &SkillMetadata,
     events: &[EventRecord],
@@ -124,6 +87,46 @@ pub(crate) async fn improve_skill_with_learning_for_sources(
     let Some(store) = learning_store else {
         return Ok(ImprovementResult::Skipped);
     };
+    // Preflight before the LLM call: an open improvement draft for this skill
+    // already awaits review, so generating again would only produce a
+    // duplicate for the in-transaction dedupe to discard. The new session
+    // still contributes a sibling suite as held-out gate material. The version
+    // fields echo the open draft's baseline; the proposed version lives in the
+    // draft artifact itself.
+    if let Some(open) = crate::proposals::find_open_skill_proposal(
+        store.as_ref(),
+        session.tenant_id,
+        Some(&existing.name),
+        None,
+    )
+    .await?
+    {
+        if let Some(source_experience_id) = source.source_experience_ids.first().copied() {
+            let sibling_suite = crate::regression::generate_skill_test_suite_source_for_name(
+                session.tenant_id,
+                &open.metadata.name,
+                events,
+            )?;
+            crate::proposals::accumulate_sibling_suite(
+                store.as_ref(),
+                session.tenant_id,
+                &open,
+                sibling_suite,
+                source_experience_id,
+                session.id,
+            )
+            .await?;
+        }
+        let previous_version = match &open.operation {
+            SkillProposalOperation::Improved { previous_version } => previous_version.clone(),
+            SkillProposalOperation::Created => String::new(),
+        };
+        return Ok(ImprovementResult::Improved {
+            proposal: open,
+            previous_version: previous_version.clone(),
+            version: previous_version,
+        });
+    }
     let registry = SkillRegistry::new(store.pool().clone());
     let scope = ActionRuleScope::Tenant {
         tenant_id: session.tenant_id,
@@ -290,29 +293,59 @@ fn build_improvement_user_prompt(current_skill: &str, events: &[EventRecord]) ->
     )
 }
 
+/// Per-event character cap for learning prompts; tool output can be megabytes.
+const LEARNING_EVENT_TEXT_CAP: usize = 2_000;
+/// Total character budget for the formatted event section of a learning prompt.
+const LEARNING_EVENTS_TOTAL_CAP: usize = 60_000;
+
 pub(crate) fn format_events_for_learning(events: &[EventRecord]) -> String {
     let mut lines = Vec::new();
+    let mut total = 0usize;
     for record in events {
-        match &record.event {
-            Event::UserMessage { text, .. } => lines.push(format!("user: {text}")),
-            Event::QueuedMessage { text, .. } => lines.push(format!("queued: {text}")),
+        let line = match &record.event {
+            Event::UserMessage { text, .. } => {
+                Some(format!("user: {}", truncate_for_learning(text)))
+            }
+            Event::QueuedMessage { text, .. } => {
+                Some(format!("queued: {}", truncate_for_learning(text)))
+            }
             Event::ToolCall {
                 tool_name, input, ..
-            } => lines.push(format!("tool_call {tool_name}: {input}")),
+            } => Some(format!(
+                "tool_call {tool_name}: {}",
+                truncate_for_learning(&input.to_string())
+            )),
             Event::ToolResult {
                 output, success, ..
-            } => {
-                lines.push(format!(
-                    "tool_result success={success}: {}",
-                    output.to_text()
-                ));
+            } => Some(format!(
+                "tool_result success={success}: {}",
+                truncate_for_learning(&output.to_text())
+            )),
+            Event::ToolError { error, .. } => {
+                Some(format!("tool_error: {}", truncate_for_learning(error)))
             }
-            Event::ToolError { error, .. } => lines.push(format!("tool_error: {error}")),
-            Event::BrainResponse { text, .. } => lines.push(format!("assistant: {text}")),
-            _ => {}
+            Event::BrainResponse { text, .. } => {
+                Some(format!("assistant: {}", truncate_for_learning(text)))
+            }
+            _ => None,
+        };
+        let Some(line) = line else { continue };
+        total += line.len();
+        if total > LEARNING_EVENTS_TOTAL_CAP {
+            lines.push("[remaining events omitted: learning prompt budget reached]".to_string());
+            break;
         }
+        lines.push(line);
     }
     lines.join("\n")
+}
+
+fn truncate_for_learning(text: &str) -> String {
+    if text.chars().count() <= LEARNING_EVENT_TEXT_CAP {
+        return text.to_string();
+    }
+    let prefix: String = text.chars().take(LEARNING_EVENT_TEXT_CAP).collect();
+    format!("{prefix} [truncated]")
 }
 
 #[cfg(test)]

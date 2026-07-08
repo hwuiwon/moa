@@ -9,7 +9,6 @@ default = []
 integration = []
 auth0 = ["moa-auth-providers/auth0"]
 provider-overrides = ["moa-providers/scripted-provider"]
-skill-learning = ["moa-skills/skill-learning"]
 slack = ["moa-messaging/slack"]
 postmark = ["moa-messaging/postmark"]
 twilio = ["moa-messaging/twilio"]
@@ -93,7 +92,7 @@ moa-migrations = { workspace = true }
 moa-providers = { workspace = true }
 moa-runtime-store = { workspace = true, features = ["redis"] }
 moa-session = { workspace = true }
-moa-skills = { workspace = true, features = ["regression"] }
+moa-skills = { workspace = true }
 rand.workspace = true
 restate-sdk.workspace = true
 reqwest.workspace = true

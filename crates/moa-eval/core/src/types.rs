@@ -222,8 +222,6 @@ pub struct AgentConfig {
     pub name: String,
     /// Optional model override.
     pub model: Option<String>,
-    /// Skill-selection overrides.
-    pub skills: SkillOverride,
     /// Memory overrides.
     pub memory: MemoryOverride,
     /// Instruction overrides.
@@ -234,18 +232,6 @@ pub struct AgentConfig {
     pub permissions: ActionPolicyOverride,
     /// Arbitrary metadata labels for comparison and reporting.
     pub metadata: HashMap<String, String>,
-}
-
-/// Skill-selection overrides for an agent config.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct SkillOverride {
-    /// Skill paths to include.
-    pub include: Vec<String>,
-    /// Skill paths to exclude.
-    pub exclude: Vec<String>,
-    /// When true, only the listed skills are enabled.
-    pub exclusive: bool,
 }
 
 /// Memory overrides for an agent config.
@@ -361,7 +347,6 @@ struct AgentConfigDocument {
 struct AgentConfigBody {
     name: String,
     model: Option<String>,
-    skills: SkillOverride,
     memory: MemoryOverride,
     instructions: InstructionOverride,
     tools: ToolOverride,
@@ -374,7 +359,6 @@ impl From<AgentConfigDocument> for AgentConfig {
         Self {
             name: value.agent.name,
             model: value.agent.model,
-            skills: value.agent.skills,
             memory: value.agent.memory,
             instructions: value.agent.instructions,
             tools: value.agent.tools,
@@ -390,7 +374,6 @@ impl From<AgentConfig> for AgentConfigDocument {
             agent: AgentConfigBody {
                 name: value.name,
                 model: value.model,
-                skills: value.skills,
                 memory: value.memory,
                 instructions: value.instructions,
                 tools: value.tools,

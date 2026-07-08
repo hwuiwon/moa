@@ -90,7 +90,6 @@ use crate::turn_driver::{
 use crate::worker_dispatch::MAX_WORKER_FAN_OUT;
 use crate::workflows::durable_utc_now;
 use crate::workflows::errors::moa_error_to_handler_error;
-#[cfg(feature = "skill-learning")]
 use crate::workflows::skill_learning::{RunSkillLearningRequest, SkillLearningClient};
 use crate::workflows::turn_events::{
     append_session_event, append_tool_call_event, append_tool_result_event,
@@ -2202,10 +2201,13 @@ async fn emit_experience_for_assessment(
     );
     let runtime = OrchestratorCtx::current();
     let store = runtime.session_store();
-    #[cfg(feature = "skill-learning")]
     let experience_id = learning.experience.id;
-    #[cfg(feature = "skill-learning")]
-    let min_skill_learning_tool_calls = runtime.config().learning.skills.min_tool_calls;
+    let skill_learning_eligible = driver_learning::skill_learning_dispatch_is_eligible(
+        segment_events,
+        runtime.config().learning.skills.min_tool_calls,
+        &learning.experience,
+        &learning.attributions,
+    );
     let learning_error = ctx
         .run(move || {
             let store = store.clone();
@@ -2250,17 +2252,58 @@ async fn emit_experience_for_assessment(
         .await?;
         return Ok(());
     }
-    #[cfg(feature = "skill-learning")]
-    if driver_learning::skill_learning_dispatch_is_eligible(
-        segment_events,
-        min_skill_learning_tool_calls,
-    ) {
+    if skill_learning_eligible {
         dispatch_skill_learning_after_experience(ctx, meta.id, experience_id).await?;
+    }
+    mine_segment_weakness_patterns(ctx, meta, segment_events).await?;
+    Ok(())
+}
+
+/// Mines the segment's failure signals into reviewable weakness candidates.
+///
+/// Failure-driven learning counterpart to experience emission: deterministic,
+/// model-free, and idempotent (candidate IDs derive from the tenant and
+/// pattern key), so a mining failure only warns and never fails the turn.
+async fn mine_segment_weakness_patterns(
+    ctx: &WorkflowContext<'_>,
+    meta: &SessionMeta,
+    segment_events: &[EventRecord],
+) -> Result<(), HandlerError> {
+    if moa_skills::mining::session_failures_from_events(segment_events).is_empty() {
+        return Ok(());
+    }
+    let tenant_id = meta.tenant_id;
+    let session_id = meta.id;
+    let store = OrchestratorCtx::current().session_store_backend();
+    let events = segment_events.to_vec();
+    let mining_error = ctx
+        .run(move || {
+            let store = store.clone();
+            let events = events.clone();
+            async move {
+                let result = moa_skills::mining::mine_and_file_session_failures(
+                    store.as_ref(),
+                    tenant_id,
+                    &events,
+                    Utc::now(),
+                )
+                .await;
+                Ok::<_, HandlerError>(Json::from(result.err().map(|error| error.to_string())))
+            }
+        })
+        .name("mine_weakness_patterns")
+        .await?
+        .into_inner();
+    if let Some(error) = mining_error {
+        tracing::warn!(
+            session_id = %session_id,
+            error,
+            "weakness mining failed; failure signals were not filed"
+        );
     }
     Ok(())
 }
 
-#[cfg(feature = "skill-learning")]
 async fn dispatch_skill_learning_after_experience(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,

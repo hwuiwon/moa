@@ -123,6 +123,111 @@ pub enum CandidateFiling {
     Bump(LearningCandidateStatusUpdate),
 }
 
+/// Extracts mineable failure signals from a bounded slice of session events.
+///
+/// Deterministic and model-free: durable (non-retryable) tool errors mine as
+/// [`SessionFailureKind::DurableToolError`] keyed by tool name, and denied
+/// action reviews mine as [`SessionFailureKind::RejectedApproval`] keyed by the
+/// reviewed tool (correlated through the matching review-request event).
+/// Retryable tool errors and cleared reviews are not failures and are skipped.
+#[must_use]
+pub fn session_failures_from_events(events: &[moa_core::EventRecord]) -> Vec<SessionFailure> {
+    use moa_core::{ActionReviewDecision, Event};
+
+    let mut review_subjects: BTreeMap<Uuid, String> = BTreeMap::new();
+    let mut failures = Vec::new();
+    for record in events {
+        match &record.event {
+            Event::ToolError {
+                tool_name,
+                retryable: false,
+                ..
+            } => failures.push(SessionFailure {
+                event_id: record.id.to_string(),
+                kind: SessionFailureKind::DurableToolError,
+                subject: tool_name.clone(),
+            }),
+            Event::ActionReviewRequested {
+                review_id,
+                envelope,
+                ..
+            } => {
+                review_subjects.insert(*review_id, envelope.tool_name.clone());
+            }
+            Event::ActionReviewDecided {
+                review_id,
+                decision: ActionReviewDecision::Denied { .. },
+                ..
+            } => failures.push(SessionFailure {
+                event_id: record.id.to_string(),
+                kind: SessionFailureKind::RejectedApproval,
+                subject: review_subjects
+                    .get(review_id)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown_tool".to_string()),
+            }),
+            _ => {}
+        }
+    }
+    failures
+}
+
+/// Mines a session event window's failure signals and files or bumps candidates.
+///
+/// The store-coupled application of the pure passes below: extract signals,
+/// cluster by recurrence, then file one reviewable candidate per pattern key.
+/// Candidates a reviewer already claimed (`Evaluating`) keep their state — the
+/// conditional bump only applies while a candidate is still `Proposed`.
+/// Returns the number of filings applied.
+pub async fn mine_and_file_session_failures(
+    store: &moa_session::PostgresSessionStore,
+    tenant_id: TenantId,
+    events: &[moa_core::EventRecord],
+    now: DateTime<Utc>,
+) -> moa_core::Result<usize> {
+    let session_failures = session_failures_from_events(events);
+    if session_failures.is_empty() {
+        return Ok(0);
+    }
+    let patterns = mine_failure_patterns(&MiningInputs {
+        failed_probes: Vec::new(),
+        session_failures,
+    });
+
+    let tenant_key = tenant_id.to_string();
+    let mut open = store
+        .list_learning_candidates(&tenant_key, Some(LearningCandidateStatus::Proposed), 200)
+        .await?;
+    open.extend(
+        store
+            .list_learning_candidates(&tenant_key, Some(LearningCandidateStatus::Evaluating), 200)
+            .await?,
+    );
+
+    let mut applied = 0usize;
+    for filing in file_candidates(&patterns, DEFAULT_MINING_THRESHOLD, &open, tenant_id, now) {
+        match filing {
+            CandidateFiling::New(candidate) => {
+                store.append_learning_candidate(&candidate).await?;
+                applied += 1;
+            }
+            CandidateFiling::Bump(update) => {
+                // Conditional on Proposed: a claimed candidate keeps its review state.
+                if store
+                    .update_learning_candidate_status_from(
+                        &update,
+                        LearningCandidateStatus::Proposed,
+                    )
+                    .await?
+                {
+                    applied += 1;
+                }
+            }
+        }
+    }
+    Ok(applied)
+}
+
 /// Clusters raw failure signals into recurrence-counted patterns.
 ///
 /// Clustering is deterministic and model-free: signals group by
@@ -504,5 +609,150 @@ mod tests {
             CandidateFiling::Bump(_) => panic!("expected new candidate"),
         };
         assert_eq!(id_of(&first), id_of(&second));
+    }
+}
+
+#[cfg(test)]
+mod extraction_tests {
+    use chrono::Utc;
+    use moa_core::{
+        ActionClass, ActionEnvelope, ActionReviewDecision, ActionReviewField, ActionReviewPreview,
+        Event, EventRecord, RiskLevel, SessionActorRef, SessionId, TenantId, ToolCallId,
+    };
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[test]
+    fn session_failures_extract_durable_errors_and_denied_reviews_only() {
+        // Pins: retryable tool errors and cleared reviews are not failure signals, and a
+        // denied review resolves its subject tool through the matching request envelope.
+        let session_id = SessionId::new();
+        let review_id = Uuid::from_u128(0x51);
+        let events = vec![
+            record(session_id, 1, tool_error("bash", false)),
+            record(session_id, 2, tool_error("bash", true)),
+            record(
+                session_id,
+                3,
+                Event::ActionReviewRequested {
+                    review_id,
+                    envelope: envelope(review_id, "file_write"),
+                    preview: preview(),
+                },
+            ),
+            record(
+                session_id,
+                4,
+                Event::ActionReviewDecided {
+                    review_id,
+                    decision: ActionReviewDecision::Denied { reason: None },
+                    decided_by: "admin".to_string(),
+                    decided_at: Utc::now(),
+                },
+            ),
+        ];
+
+        let failures = session_failures_from_events(&events);
+
+        assert_eq!(
+            failures.len(),
+            2,
+            "retryable error must not mine: {failures:?}"
+        );
+        assert_eq!(failures[0].kind, SessionFailureKind::DurableToolError);
+        assert_eq!(failures[0].subject, "bash");
+        assert_eq!(failures[1].kind, SessionFailureKind::RejectedApproval);
+        assert_eq!(
+            failures[1].subject, "file_write",
+            "denied review subject comes from the request envelope"
+        );
+    }
+
+    #[test]
+    fn session_failures_ignore_cleared_reviews() {
+        // Pins: a cleared review is a success signal and must not mine as a failure.
+        let session_id = SessionId::new();
+        let review_id = Uuid::from_u128(0x52);
+        let events = vec![
+            record(
+                session_id,
+                1,
+                Event::ActionReviewRequested {
+                    review_id,
+                    envelope: envelope(review_id, "file_write"),
+                    preview: preview(),
+                },
+            ),
+            record(
+                session_id,
+                2,
+                Event::ActionReviewDecided {
+                    review_id,
+                    decision: ActionReviewDecision::Cleared,
+                    decided_by: "admin".to_string(),
+                    decided_at: Utc::now(),
+                },
+            ),
+        ];
+
+        assert!(session_failures_from_events(&events).is_empty());
+    }
+
+    fn tool_error(tool_name: &str, retryable: bool) -> Event {
+        Event::ToolError {
+            tool_id: ToolCallId::new(),
+            provider_tool_use_id: None,
+            tool_name: tool_name.to_string(),
+            error: "boom".to_string(),
+            retryable,
+        }
+    }
+
+    fn envelope(review_id: Uuid, tool_name: &str) -> ActionEnvelope {
+        ActionEnvelope {
+            review_id,
+            tenant_id: TenantId::from(Uuid::from_u128(1)),
+            requested_by: SessionActorRef::Identity {
+                id: Uuid::from_u128(2),
+            },
+            session_id: Some(SessionId::new()),
+            worker_id: None,
+            tool_call_id: ToolCallId::from(review_id),
+            tool_name: tool_name.to_string(),
+            normalized_input: "input".to_string(),
+            input_summary: "input".to_string(),
+            risk_level: RiskLevel::Medium,
+            action_class: ActionClass::LocalWrite,
+            origin_kind: None,
+            origin_id: None,
+            origin_step_id: None,
+            idempotency_key: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn preview() -> ActionReviewPreview {
+        ActionReviewPreview {
+            fields: vec![ActionReviewField {
+                label: "Path".to_string(),
+                value: "input".to_string(),
+            }],
+            file_diffs: Vec::new(),
+        }
+    }
+
+    fn record(session_id: SessionId, sequence_num: u64, event: Event) -> EventRecord {
+        EventRecord {
+            id: Uuid::from_u128(0x9100 + u128::from(sequence_num)),
+            session_id,
+            sequence_num,
+            event_type: event.event_type(),
+            event,
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        }
     }
 }

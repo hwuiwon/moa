@@ -18,6 +18,7 @@ use moa_skills::review::{
     AcceptanceChecks, LearningReviewStore, SkillReviewAction, SkillReviewError, SkillReviewOutcome,
     SkillReviewRequest, get_learning_candidate_for_review, prepare_skill_acceptance,
     promote_claimed_skill_candidate, reject_claimed_skill_candidate, reject_learning_candidate,
+    release_claimed_skill_candidate,
 };
 use restate_sdk::prelude::*;
 use uuid::Uuid;
@@ -25,7 +26,9 @@ use uuid::Uuid;
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::authorize_tenant;
-use crate::services::skill_regression::skill_acceptance_regression_report;
+use crate::services::skill_regression::{
+    SkillRegressionExecution, SkillRegressionGate, skill_acceptance_regression_report,
+};
 use crate::workflows::errors::moa_error_to_status_handler_error;
 
 /// Restate service surface for protected learning-candidate review.
@@ -202,7 +205,7 @@ pub async fn accept_skill_candidate_after_authz(
     let prepared = prepare_skill_acceptance(&review_store, pool.clone(), &review_request)
         .await
         .map_err(skill_review_error_to_handler_error)?;
-    let regression_gate = skill_acceptance_regression_report(
+    let regression_gate = match skill_acceptance_regression_report(
         config.as_ref().clone(),
         providers,
         SkillRegistry::new(pool.clone()),
@@ -211,7 +214,27 @@ pub async fn accept_skill_candidate_after_authz(
         prepared.draft_files.clone(),
     )
     .await
-    .map_err(moa_error_to_status_handler_error)?;
+    {
+        Ok(gate) => gate,
+        Err(error) => {
+            // Operational gate failure: release the Evaluating claim so the
+            // accept can be retried once the deployment is fixed.
+            if let Err(release_error) = release_claimed_skill_candidate(
+                &review_store,
+                prepared.candidate.id,
+                &error.to_string(),
+            )
+            .await
+            {
+                tracing::warn!(
+                    candidate_id = %prepared.candidate.id,
+                    error = %release_error,
+                    "failed to release claimed skill candidate after gate error"
+                );
+            }
+            return Err(moa_error_to_status_handler_error(error));
+        }
+    };
     if !regression_gate.allow_promotion {
         let outcome = reject_claimed_skill_candidate(
             &review_store,
@@ -226,18 +249,7 @@ pub async fn accept_skill_candidate_after_authz(
         return Ok(review_response_from_outcome(outcome));
     }
 
-    // The review-time regression gate is the held-out check: it runs the skill regression suite
-    // against the proposed draft and requires no golden-set regression before promotion. The draft
-    // validation that `prepare_skill_acceptance` already enforced is the held-in check. Promotion is
-    // only reached with `allow_promotion` true, so both are satisfied here.
-    let acceptance_checks = AcceptanceChecks {
-        held_in_pass: true,
-        held_in_description:
-            "proposed skill draft validated and its generated regression suite executed".to_string(),
-        held_out_pass: true,
-        held_out_description: "skill regression suite and golden-set no-regression gate passed"
-            .to_string(),
-    };
+    let acceptance_checks = acceptance_checks_for_gate(&regression_gate);
     let outcome = promote_claimed_skill_candidate(
         &review_store,
         pool,
@@ -250,6 +262,57 @@ pub async fn accept_skill_candidate_after_authz(
     .map_err(skill_review_error_to_handler_error)?;
 
     Ok(review_response_from_outcome(outcome))
+}
+
+/// Derives promotion acceptance checks from what the regression gate actually executed.
+///
+/// The descriptions become part of the candidate's permanent evaluation payload,
+/// so they must state what ran — not what an ideal gate would have run. Promotion
+/// is only reached when the gate allowed it, but the booleans are still derived
+/// (not asserted) so a future gate outcome that neither blocks nor executes
+/// cannot silently promote.
+fn acceptance_checks_for_gate(gate: &SkillRegressionGate) -> AcceptanceChecks {
+    let executed = gate.allow_promotion
+        && matches!(
+            gate.execution,
+            SkillRegressionExecution::ComparedWithPrevious
+                | SkillRegressionExecution::CandidateOnly
+        );
+    let held_out_description = match gate.execution {
+        SkillRegressionExecution::ComparedWithPrevious if gate.held_out_sources > 0 => format!(
+            "candidate showed no regression against the previous active revision, including \
+             {} held-out suite source(s) pooled from prior revisions and sibling sessions",
+            gate.held_out_sources
+        ),
+        SkillRegressionExecution::ComparedWithPrevious => {
+            "candidate suite scores showed no regression against the previous active skill \
+             revision; no held-out pool existed yet"
+                .to_string()
+        }
+        SkillRegressionExecution::CandidateOnly if gate.held_out_sources > 0 => format!(
+            "no previous active skill to compare against; candidate passed its generated suite \
+             and {} held-out sibling suite source(s) (smoke gate)",
+            gate.held_out_sources
+        ),
+        SkillRegressionExecution::CandidateOnly => {
+            "no previous active skill to compare against; candidate executed its generated suite \
+             without failures (smoke gate)"
+                .to_string()
+        }
+        SkillRegressionExecution::Blocked => gate
+            .rejection_reason
+            .clone()
+            .unwrap_or_else(|| "regression gate blocked promotion".to_string()),
+    };
+    AcceptanceChecks {
+        held_in_pass: executed,
+        held_in_description:
+            "draft artifact revision validated as publishable and its generated regression suite \
+             parsed and executed"
+                .to_string(),
+        held_out_pass: executed,
+        held_out_description,
+    }
 }
 
 /// Rejects one candidate after the caller has authorized tenant operator access.
@@ -327,5 +390,119 @@ fn skill_review_error_to_handler_error(error: SkillReviewError) -> HandlerError 
         SkillReviewError::NotFound(message) => TerminalError::new_with_code(404, message).into(),
         SkillReviewError::Conflict(message) => TerminalError::new_with_code(409, message).into(),
         SkillReviewError::Moa(error) => moa_error_to_status_handler_error(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn gate(
+        allow_promotion: bool,
+        rejection_reason: Option<&str>,
+        execution: SkillRegressionExecution,
+    ) -> SkillRegressionGate {
+        gate_with_held_out(allow_promotion, rejection_reason, execution, 0)
+    }
+
+    fn gate_with_held_out(
+        allow_promotion: bool,
+        rejection_reason: Option<&str>,
+        execution: SkillRegressionExecution,
+        held_out_sources: usize,
+    ) -> SkillRegressionGate {
+        SkillRegressionGate {
+            report: json!({}),
+            allow_promotion,
+            rejection_reason: rejection_reason.map(ToString::to_string),
+            execution,
+            held_out_sources,
+        }
+    }
+
+    #[test]
+    fn acceptance_checks_reflect_compared_execution() {
+        // Pins: a compared previous-vs-candidate run yields passing checks whose
+        // description says a comparison ran — not a golden-set claim.
+        let checks = acceptance_checks_for_gate(&gate(
+            true,
+            None,
+            SkillRegressionExecution::ComparedWithPrevious,
+        ));
+
+        assert!(checks.held_in_pass);
+        assert!(checks.held_out_pass);
+        assert!(
+            checks
+                .held_out_description
+                .contains("previous active skill")
+        );
+        assert!(!checks.held_out_description.contains("golden"));
+    }
+
+    #[test]
+    fn acceptance_checks_reflect_candidate_only_smoke_run() {
+        // Pins: a first-revision smoke run passes but records that no baseline existed,
+        // so the audit record cannot be mistaken for a regression comparison.
+        let checks =
+            acceptance_checks_for_gate(&gate(true, None, SkillRegressionExecution::CandidateOnly));
+
+        assert!(checks.held_in_pass);
+        assert!(checks.held_out_pass);
+        assert!(
+            checks
+                .held_out_description
+                .contains("no previous active skill")
+        );
+        assert!(checks.held_out_description.contains("smoke gate"));
+    }
+
+    #[test]
+    fn acceptance_checks_report_held_out_pool_when_it_executed() {
+        // Pins: when held-out material actually ran, the audit record says so with the
+        // source count — and when none existed, it says that instead of implying a split.
+        let pooled = acceptance_checks_for_gate(&gate_with_held_out(
+            true,
+            None,
+            SkillRegressionExecution::ComparedWithPrevious,
+            2,
+        ));
+        assert!(pooled.held_out_pass);
+        assert!(
+            pooled
+                .held_out_description
+                .contains("2 held-out suite source(s)")
+        );
+
+        let unpooled = acceptance_checks_for_gate(&gate(
+            true,
+            None,
+            SkillRegressionExecution::ComparedWithPrevious,
+        ));
+        assert!(
+            unpooled
+                .held_out_description
+                .contains("no held-out pool existed yet")
+        );
+    }
+
+    #[test]
+    fn acceptance_checks_fail_when_gate_blocked() {
+        // Pins: a blocked gate derives failing checks carrying the rejection reason, so a
+        // future outcome that neither blocks nor executes cannot silently promote.
+        let checks = acceptance_checks_for_gate(&gate(
+            false,
+            Some("generated regression suite could not be parsed"),
+            SkillRegressionExecution::Blocked,
+        ));
+
+        assert!(!checks.held_in_pass);
+        assert!(!checks.held_out_pass);
+        assert_eq!(
+            checks.held_out_description,
+            "generated regression suite could not be parsed"
+        );
     }
 }

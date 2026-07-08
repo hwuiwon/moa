@@ -332,3 +332,70 @@ fn skipped_report(
         draft_artifact_revision_uid: None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moa_skills::distiller::DistillationSkipReason;
+
+    #[test]
+    fn proposed_generation_reports_candidate_and_draft_ids() {
+        // Pins: a proposed draft surfaces both review identifiers so operators can jump
+        // from the workflow report to the candidate and artifact.
+        let session_id = SessionId::new();
+        let experience_id = Uuid::now_v7();
+        let candidate_id = Uuid::now_v7();
+        let draft_uid = Uuid::now_v7();
+
+        let report = report_from_proposal_generation(
+            session_id,
+            experience_id,
+            SkillProposalGeneration::Proposed {
+                candidate_id,
+                draft_artifact_revision_uid: draft_uid,
+            },
+        );
+
+        assert_eq!(report.outcome, "proposed");
+        assert_eq!(report.candidate_id, Some(candidate_id));
+        assert_eq!(report.draft_artifact_revision_uid, Some(draft_uid));
+        assert_eq!(report.session_id, session_id);
+        assert_eq!(report.experience_id, experience_id);
+        assert_eq!(report.message, None);
+    }
+
+    #[test]
+    fn unchanged_generation_reports_skip_without_identifiers() {
+        // Pins: "existing skill already covers the run" is a skip with a reason, never a
+        // phantom candidate reference.
+        let report = report_from_proposal_generation(
+            SessionId::new(),
+            Uuid::now_v7(),
+            SkillProposalGeneration::Unchanged,
+        );
+
+        assert_eq!(report.outcome, "skipped");
+        assert_eq!(
+            report.message.as_deref(),
+            Some("existing skill did not need a draft")
+        );
+        assert_eq!(report.candidate_id, None);
+        assert_eq!(report.draft_artifact_revision_uid, None);
+    }
+
+    #[test]
+    fn skipped_generation_reports_the_stable_skip_reason() {
+        // Pins: gate skips carry their stable reason for observability queries.
+        let report = report_from_proposal_generation(
+            SessionId::new(),
+            Uuid::now_v7(),
+            SkillProposalGeneration::Skipped {
+                reason: DistillationSkipReason::UnlearnableOutcome,
+            },
+        );
+
+        assert_eq!(report.outcome, "skipped");
+        assert_eq!(report.message.as_deref(), Some("UnlearnableOutcome"));
+        assert_eq!(report.candidate_id, None);
+    }
+}
