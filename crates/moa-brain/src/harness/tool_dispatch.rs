@@ -18,8 +18,17 @@ use super::context_build::append_event;
 
 pub(super) enum ToolCallOutcome {
     Executed,
-    Skipped,
+    Skipped(Option<DurableToolFailure>),
     Cancelled,
+}
+
+/// A terminal (non-retryable) tool failure captured for negative-results memory.
+///
+/// `error_class` is a stable, low-cardinality label (never a raw error message),
+/// so incident titles assembled from it deduplicate across turns.
+pub(super) struct DurableToolFailure {
+    pub(super) tool_name: String,
+    pub(super) error_class: &'static str,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -91,7 +100,10 @@ pub(super) async fn handle_tool_call(
                 "Blocked because a protected canary token leaked into tool input".to_string(),
             ),
         }));
-        return Ok(ToolCallOutcome::Skipped);
+        return Ok(ToolCallOutcome::Skipped(Some(DurableToolFailure {
+            tool_name: invocation.name.clone(),
+            error_class: "canary_leak",
+        })));
     }
 
     let Some(router) = tool_router else {
@@ -109,7 +121,7 @@ pub(super) async fn handle_tool_call(
             },
         )
         .await?;
-        return Ok(ToolCallOutcome::Skipped);
+        return Ok(ToolCallOutcome::Skipped(None));
     };
 
     let prepared = router.prepare_invocation(session, invocation).await?;
@@ -183,7 +195,10 @@ pub(super) async fn handle_tool_call(
                 summary,
                 detail: Some(message),
             }));
-            Ok(ToolCallOutcome::Skipped)
+            Ok(ToolCallOutcome::Skipped(Some(DurableToolFailure {
+                tool_name: invocation.name.clone(),
+                error_class: "action_policy_denied",
+            })))
         }
         ActionPolicyEffect::AdminReview => {
             record_denied_tool_span(invocation, tool_dispatch_span);
@@ -225,7 +240,10 @@ pub(super) async fn handle_tool_call(
                 summary: summary.clone(),
                 detail: Some(message),
             }));
-            Ok(ToolCallOutcome::Skipped)
+            Ok(ToolCallOutcome::Skipped(Some(DurableToolFailure {
+                tool_name: invocation.name.clone(),
+                error_class: "admin_review_required",
+            })))
         }
     }
 }
@@ -322,6 +340,8 @@ pub(super) async fn execute_tool(
             Ok(ToolCallOutcome::Executed)
         }
         Err(MoaError::Cancelled) => {
+            // Cancellation is not a durable failure: the turn was interrupted, so
+            // it carries no negative-results lesson to preserve.
             tool_span.record("moa.tool.success", false);
             append_event(
                 &session_store,
@@ -345,7 +365,7 @@ pub(super) async fn execute_tool(
             }));
             Ok(ToolCallOutcome::Cancelled)
         }
-        Err(error) => {
+        Err(ref error) => {
             tool_span.record("moa.tool.success", false);
             append_event(
                 &session_store,
@@ -367,8 +387,30 @@ pub(super) async fn execute_tool(
                 summary: format!("{} failed", call.name),
                 detail: Some(error.to_string()),
             }));
-            Ok(ToolCallOutcome::Skipped)
+            Ok(ToolCallOutcome::Skipped(Some(DurableToolFailure {
+                tool_name: call.name.clone(),
+                error_class: tool_error_class(error),
+            })))
         }
+    }
+}
+
+/// Maps a terminal tool error to a stable, low-cardinality class label.
+///
+/// Titles derived from these labels must deduplicate across turns, so the label
+/// is drawn from the error variant, never from its (unbounded) message text.
+fn tool_error_class(error: &MoaError) -> &'static str {
+    match error {
+        MoaError::ToolError(_) => "tool_error",
+        MoaError::ValidationError(_) => "validation_error",
+        MoaError::PermissionDenied(_) => "permission_denied",
+        MoaError::BudgetExhausted(_) => "budget_exhausted",
+        MoaError::RateLimited { .. } => "rate_limited",
+        MoaError::Unsupported(_) | MoaError::NotImplemented(_) => "unsupported",
+        MoaError::ProviderError(_) | MoaError::ProviderQuirk(_) | MoaError::StreamError(_) => {
+            "provider_error"
+        }
+        _ => "tool_failure",
     }
 }
 
@@ -493,4 +535,39 @@ fn record_denied_tool_span(call: &ToolInvocation, tool_dispatch_span: Option<&tr
     );
     let _entered = denied_span.enter();
     tracing::info!("tool denied by policy");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tool_error_class;
+    use moa_core::MoaError;
+
+    #[test]
+    fn tool_error_class_is_stable_and_low_cardinality() {
+        // Pins: terminal tool errors map to a fixed label drawn from the error
+        // variant (never the message), so incident titles built from tool name +
+        // class deduplicate across turns instead of exploding on error text.
+        assert_eq!(
+            tool_error_class(&MoaError::ToolError("boom: id=4821".to_string())),
+            "tool_error"
+        );
+        assert_eq!(
+            tool_error_class(&MoaError::ToolError("boom: id=9999".to_string())),
+            "tool_error",
+            "message contents must not change the class"
+        );
+        assert_eq!(
+            tool_error_class(&MoaError::PermissionDenied("no".to_string())),
+            "permission_denied"
+        );
+        assert_eq!(
+            tool_error_class(&MoaError::ProviderError("upstream".to_string())),
+            "provider_error"
+        );
+        assert_eq!(
+            tool_error_class(&MoaError::HomeDirectoryNotFound),
+            "tool_failure",
+            "unmapped variants fall back to the generic terminal-failure label"
+        );
+    }
 }

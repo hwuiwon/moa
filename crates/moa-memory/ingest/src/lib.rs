@@ -36,7 +36,8 @@ pub use extractor::ScriptedFactExtractor;
 pub use extractor::{FactExtractor, HeuristicFactExtractor};
 pub use fast_path::{
     FastError, FastMemoryToolExecutor, FastPathCtx, FastRememberRequest, ForgetPattern,
-    execute_memory_tool, fast_forget, fast_remember, fast_supersede, is_fast_memory_tool,
+    IncidentRecord, execute_memory_tool, fast_forget, fast_remember, fast_supersede,
+    is_fast_memory_tool, record_incident, record_incident_with_ctx,
 };
 pub use model_entity_merge::{
     EntityMergeFixtureRecord, MERGE_PROMPT_VERSION, ModelEntityMergeVerifier,

@@ -21,6 +21,7 @@ moa-hands = { workspace = true }
 moa-lineage-citation = { workspace = true }
 moa-lineage-core = { workspace = true }
 moa-memory-graph = { workspace = true }
+moa-memory-ingest = { workspace = true }
 moa-memory-types = { workspace = true }
 moa-memory-vector = { workspace = true }
 moa-observability = { workspace = true }

@@ -58,6 +58,17 @@ Never compare single-run point estimates across branches: a delta inside the
 bootstrap interval (or within ~2 standard errors on a slice) is noise, not a
 win. Report intervals alongside means in scorecards.
 
+## Held-Out Acceptance Split
+
+Seeds `101`, `102`, and `103` are the **held-out set**: they are never used
+during self-improvement proposal iteration (mining, drafting, or tuning). They
+exist only to confirm no regression at acceptance time — a proposal must win on
+data it did not iterate against, which is the post's reward-hacking defense. The
+same three seeds are pinned in code as
+`moa_eval::memory_eval::HELD_OUT_GOLDEN_SEEDS` so tooling and this document
+cannot drift. Do not regenerate corpora or baselines to add them; they are a
+reservation over existing seeds, kept disjoint from proposal-iteration seeds.
+
 ## Labeling Protocol
 
 1. **Mine queries from real usage**: replayed persona-sweep sessions and (with

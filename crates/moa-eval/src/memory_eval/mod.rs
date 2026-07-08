@@ -1,5 +1,14 @@
 //! Memory evaluation corpus, fixture, and scoring support.
 
+/// Golden-corpus seeds reserved as the held-out acceptance split.
+///
+/// Self-improvement proposal iteration must never generate or tune against these
+/// seeds; they exist only to confirm no regression at acceptance time (the
+/// reward-hacking defense — a proposal must win on data it did not iterate
+/// against). Documented in `docs/eval/golden-retrieval-set.md`; kept disjoint
+/// from proposal-iteration seeds.
+pub const HELD_OUT_GOLDEN_SEEDS: [u64; 3] = [101, 102, 103];
+
 pub mod budget_gate;
 pub mod corpus;
 pub mod embeddings;
@@ -97,5 +106,22 @@ impl moa_memory_ingest::RecordedEntityMergeStore
 {
     fn get_optional(&self, key: &str) -> Option<&moa_memory_ingest::EntityMergeFixtureRecord> {
         crate::kernel::FixtureStore::get_optional(self, key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HELD_OUT_GOLDEN_SEEDS;
+
+    #[test]
+    fn held_out_golden_seeds_are_the_documented_reservation() {
+        // Pins: the held-out acceptance split is exactly seeds 101-103, distinct and sorted, so a
+        // silent edit here (or drift from docs/eval/golden-retrieval-set.md) fails the build.
+        assert_eq!(HELD_OUT_GOLDEN_SEEDS, [101, 102, 103]);
+        assert!(
+            HELD_OUT_GOLDEN_SEEDS
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
     }
 }

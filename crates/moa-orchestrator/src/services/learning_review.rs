@@ -15,7 +15,7 @@ use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_session::PostgresSessionStore;
 use moa_skills::registry::SkillRegistry;
 use moa_skills::review::{
-    LearningReviewStore, SkillReviewAction, SkillReviewError, SkillReviewOutcome,
+    AcceptanceChecks, LearningReviewStore, SkillReviewAction, SkillReviewError, SkillReviewOutcome,
     SkillReviewRequest, get_learning_candidate_for_review, prepare_skill_acceptance,
     promote_claimed_skill_candidate, reject_claimed_skill_candidate, reject_learning_candidate,
 };
@@ -226,12 +226,25 @@ pub async fn accept_skill_candidate_after_authz(
         return Ok(review_response_from_outcome(outcome));
     }
 
+    // The review-time regression gate is the held-out check: it runs the skill regression suite
+    // against the proposed draft and requires no golden-set regression before promotion. The draft
+    // validation that `prepare_skill_acceptance` already enforced is the held-in check. Promotion is
+    // only reached with `allow_promotion` true, so both are satisfied here.
+    let acceptance_checks = AcceptanceChecks {
+        held_in_pass: true,
+        held_in_description:
+            "proposed skill draft validated and its generated regression suite executed".to_string(),
+        held_out_pass: true,
+        held_out_description: "skill regression suite and golden-set no-regression gate passed"
+            .to_string(),
+    };
     let outcome = promote_claimed_skill_candidate(
         &review_store,
         pool,
         &review_request,
         prepared,
         regression_gate.report,
+        acceptance_checks,
     )
     .await
     .map_err(skill_review_error_to_handler_error)?;

@@ -122,6 +122,13 @@ fn push_hit_context(section: &mut String, hit: &crate::retrieval::RetrievalHit, 
         }
     }
     section.push_str("]\n");
+    // Incidents are negative priors: frame the excerpt as a failed approach so
+    // the model reads it as evidence to avoid, not an instruction to follow. The
+    // excerpt itself is unchanged, so it still appears verbatim in the prompt for
+    // citation verification.
+    if hit.node.label == moa_memory_graph::NodeLabel::Incident {
+        section.push_str("Previously failed approach: ");
+    }
     section.push_str(excerpt);
     section.push_str("\n\n");
 }
@@ -328,6 +335,38 @@ mod tests {
             context_window: Vec::new(),
         });
         hit
+    }
+
+    #[test]
+    fn incident_hit_renders_failed_approach_prefix_and_preserves_evidence_excerpt() {
+        // Pins: an Incident-labeled hit renders as a negative prior ("Previously
+        // failed approach: ") while the evidence ref still carries the un-prefixed
+        // excerpt verbatim, so citation verification keys on the exact prompt text.
+        let incident_uid = Uuid::now_v7();
+        let excerpt = "search_web: provider_error";
+        let mut hit = fact_hit(incident_uid, excerpt);
+        hit.node.label = NodeLabel::Incident;
+
+        let rendered = render_memory_context(&[hit], 64);
+
+        assert!(
+            rendered
+                .section
+                .contains(&format!("Previously failed approach: {excerpt}")),
+            "incident excerpt must be framed as a failed approach in the prompt"
+        );
+        let evidence = rendered.source_refs[0]
+            .excerpt
+            .as_deref()
+            .expect("incident evidence excerpt");
+        assert_eq!(
+            evidence, excerpt,
+            "evidence excerpt must not carry the prefix"
+        );
+        assert!(
+            rendered.section.contains(evidence),
+            "prompt must contain the exact excerpt the citation verifier checks"
+        );
     }
 
     #[test]

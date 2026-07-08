@@ -31,7 +31,7 @@ use super::context_build::{
     calculate_response_cost_cents, complete_cache_report, last_user_message_text,
     record_turn_span_metrics, turn_number_for_events,
 };
-use super::tool_dispatch::{ToolCallOutcome, handle_tool_call};
+use super::tool_dispatch::{DurableToolFailure, ToolCallOutcome, handle_tool_call};
 
 const TURN_EVENT_TAIL_LIMIT: usize = 16;
 
@@ -76,6 +76,9 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
         let mut total_tool_calls = 0usize;
         let mut total_input_tokens = 0usize;
         let mut total_output_tokens = 0usize;
+        // First terminal tool failure seen this turn, if any. Capped at one so a
+        // turn writes at most one incident when it completes.
+        let mut durable_failure: Option<DurableToolFailure> = None;
 
         loop {
             let session = session_store.get_session(session_id).await?;
@@ -301,7 +304,11 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                             total_tool_calls += 1;
                             match outcome {
                                 ToolCallOutcome::Executed => executed_tools = true,
-                                ToolCallOutcome::Skipped => {}
+                                ToolCallOutcome::Skipped(failure) => {
+                                    if durable_failure.is_none() {
+                                        durable_failure = failure;
+                                    }
+                                }
                                 ToolCallOutcome::Cancelled => {
                                     record_turn_span_metrics(
                                         &turn_span,
@@ -389,6 +396,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
             }
 
             if response.stop_reason == StopReason::EndTurn {
+                spawn_incident_capture(&session, turn_number, durable_failure.take());
                 record_turn_span_metrics(
                     &turn_span,
                     total_tool_calls,
@@ -410,6 +418,42 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
         }
     }
     .await
+}
+
+/// Fire-and-forgets a negative-results incident write when a turn concludes on a
+/// terminal tool failure.
+///
+/// Mirrors [`crate::retrieval::bump_last_accessed`]'s background pattern: the
+/// write runs off the turn's critical path and its result is logged at debug, so
+/// a memory-storage hiccup never fails the turn. `record_incident` itself no-ops
+/// when memory learning is disabled or the failure was already recorded.
+fn spawn_incident_capture(
+    session: &SessionMeta,
+    turn_seq: i64,
+    failure: Option<DurableToolFailure>,
+) {
+    let Some(failure) = failure else {
+        return;
+    };
+    let session = session.clone();
+    tokio::spawn(async move {
+        match moa_memory_ingest::record_incident(
+            &session,
+            turn_seq,
+            &failure.tool_name,
+            failure.error_class,
+        )
+        .await
+        {
+            Ok(Some(uid)) => {
+                tracing::debug!(session_id = %session.id, %uid, "recorded turn incident");
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::debug!(session_id = %session.id, %error, "incident capture skipped");
+            }
+        }
+    });
 }
 
 async fn register_selected_skill_files(

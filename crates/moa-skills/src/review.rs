@@ -91,6 +91,59 @@ pub struct PreparedSkillAcceptance {
     pub publish_report: ValidationReport,
 }
 
+/// Held-in and held-out acceptance checks recorded when a candidate is promoted.
+///
+/// Acceptance requires both checks to pass: `held_in_pass` proves the mined
+/// pattern's evidence probes/tests now pass, and `held_out_pass` proves the skill
+/// regression suite and golden set show no regression (the reward-hacking defense
+/// — a proposal must win on a split it did not iterate against). Promotion errors
+/// unless both are true; the booleans and their descriptions are recorded on the
+/// candidate's evaluation payload so a rejection preserves the failing check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptanceChecks {
+    /// Whether the held-in check (the evidence probes/tests now pass) succeeded.
+    pub held_in_pass: bool,
+    /// Human-readable description of the held-in check.
+    pub held_in_description: String,
+    /// Whether the held-out check (regression suite + golden no-regression) succeeded.
+    pub held_out_pass: bool,
+    /// Human-readable description of the held-out check.
+    pub held_out_description: String,
+}
+
+impl AcceptanceChecks {
+    /// Returns the first failing check's description, or `None` when both checks passed.
+    #[must_use]
+    pub fn failing_check(&self) -> Option<&str> {
+        if !self.held_in_pass {
+            Some(self.held_in_description.as_str())
+        } else if !self.held_out_pass {
+            Some(self.held_out_description.as_str())
+        } else {
+            None
+        }
+    }
+
+    fn to_payload(&self) -> Value {
+        json!({
+            "held_in_pass": self.held_in_pass,
+            "held_in_description": self.held_in_description,
+            "held_out_pass": self.held_out_pass,
+            "held_out_description": self.held_out_description,
+        })
+    }
+}
+
+/// Errors acceptance when either the held-in or held-out check failed.
+fn ensure_acceptance_checks(checks: &AcceptanceChecks) -> Result<()> {
+    if let Some(failing) = checks.failing_check() {
+        return Err(bad_request(format!(
+            "acceptance blocked: held-in/held-out check failed: {failing}"
+        )));
+    }
+    Ok(())
+}
+
 /// Result of applying a learning-candidate review decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillReviewOutcome {
@@ -229,7 +282,11 @@ pub async fn promote_claimed_skill_candidate(
     request: &SkillReviewRequest,
     prepared: PreparedSkillAcceptance,
     regression_report: Value,
+    acceptance_checks: AcceptanceChecks,
 ) -> Result<SkillReviewOutcome> {
+    // Reject before mutating any surface: promotion cannot publish unless both the held-in and
+    // held-out checks passed.
+    ensure_acceptance_checks(&acceptance_checks)?;
     let scope_context = artifact_scope_context(&prepared.scope);
     let mut conn = ScopedConn::begin(&pool, &scope_context).await?;
     let published = ArtifactRegistry::publish_revision_in_tx(
@@ -239,7 +296,7 @@ pub async fn promote_claimed_skill_candidate(
     )
     .await?;
     let artifact_uid = Some(published.artifact_uid);
-    let evaluation_payload = review_evaluation_payload(ReviewEvaluationPayload {
+    let mut evaluation_payload = review_evaluation_payload(ReviewEvaluationPayload {
         request,
         candidate: &prepared.candidate,
         artifact_uid,
@@ -247,6 +304,7 @@ pub async fn promote_claimed_skill_candidate(
         published_artifact_revision_uid: Some(published.revision_uid),
         regression_report: Some(regression_report),
     });
+    evaluation_payload["acceptance_checks"] = acceptance_checks.to_payload();
 
     finish_claimed_candidate_review_in_tx(
         store,
@@ -792,6 +850,53 @@ mod tests {
         assert!(
             matches!(error, SkillReviewError::NotFound(_)),
             "expected NotFound, got {error:?}"
+        );
+    }
+
+    fn checks(held_in: bool, held_out: bool) -> AcceptanceChecks {
+        AcceptanceChecks {
+            held_in_pass: held_in,
+            held_in_description: "evidence probes now pass".to_string(),
+            held_out_pass: held_out,
+            held_out_description: "regression suite + golden no-regression".to_string(),
+        }
+    }
+
+    #[test]
+    fn acceptance_requires_both_held_in_and_held_out_checks() {
+        // Pins: promotion is blocked unless both checks pass, and the surfaced error names the
+        // specific failing check (the reason a rejection later logs). Only both-true accepts.
+        let held_in_failed = ensure_acceptance_checks(&checks(false, true))
+            .expect_err("a failed held-in check blocks acceptance");
+        assert!(
+            matches!(held_in_failed, SkillReviewError::BadRequest(message) if message.contains("evidence probes now pass")),
+            "the held-in description must appear in the failing-check error"
+        );
+
+        let held_out_failed = ensure_acceptance_checks(&checks(true, false))
+            .expect_err("a failed held-out check blocks acceptance");
+        assert!(
+            matches!(held_out_failed, SkillReviewError::BadRequest(message) if message.contains("regression suite")),
+            "the held-out description must appear in the failing-check error"
+        );
+
+        ensure_acceptance_checks(&checks(true, true)).expect("both checks passing must accept");
+    }
+
+    #[test]
+    fn acceptance_checks_payload_records_both_booleans_and_descriptions() {
+        // Pins: the recorded acceptance payload keeps both booleans and descriptions so a promoted
+        // candidate carries an auditable held-in/held-out record.
+        let payload = checks(true, false).to_payload();
+        assert_eq!(payload["held_in_pass"], json!(true));
+        assert_eq!(payload["held_out_pass"], json!(false));
+        assert_eq!(
+            payload["held_in_description"],
+            json!("evidence probes now pass")
+        );
+        assert_eq!(
+            payload["held_out_description"],
+            json!("regression suite + golden no-regression")
         );
     }
 

@@ -258,6 +258,225 @@ pub async fn fast_supersede(
     }
 }
 
+/// A durable failure to preserve as retrievable negative-results memory.
+///
+/// Mirrors [`FastRememberRequest`] scoping: `tenant`/`contact` must agree with
+/// `contact_id`. `attempted` and `failure` are short, controlled strings (a tool
+/// name and an error class); both are PII-classified and redacted before the node
+/// is written, identical to the explicit fast-path write path.
+#[derive(Debug, Clone)]
+pub struct IncidentRecord {
+    /// Tenant that owns the incident row.
+    pub tenant_id: Uuid,
+    /// Optional contact owner inside the tenant.
+    pub contact_id: Option<Uuid>,
+    /// Scope tier string: `tenant` or `contact`.
+    pub scope: String,
+    /// Session the failure occurred in; also the dedup partition.
+    pub session_id: Uuid,
+    /// Turn sequence number the failure concluded on.
+    pub turn_seq: i64,
+    /// What was attempted (for example the failing tool name).
+    pub attempted: String,
+    /// Why it failed (a stable error class, not a raw message).
+    pub failure: String,
+    /// Principal recorded in the changelog for the write.
+    pub actor_id: Uuid,
+    /// Principal kind recorded in the changelog for the write.
+    pub actor_kind: String,
+}
+
+/// Records one durable failure as an `Incident` node using the installed runtime.
+///
+/// Fire-and-forget from the brain turn loop: returns `Ok(None)` (rather than an
+/// error) when memory learning is disabled in config, when the same failure was
+/// already recorded for this session, or when PII classification cannot vouch for
+/// the text. The write is scoped to the session's contact when present and to the
+/// tenant otherwise, mirroring the explicit fast-path write.
+pub async fn record_incident(
+    session: &SessionMeta,
+    turn_seq: i64,
+    attempted: &str,
+    failure: &str,
+) -> Result<Option<Uuid>, FastError> {
+    let runtime = current_runtime()?;
+    if !runtime.fact_extraction_enabled() {
+        return Ok(None);
+    }
+    let tenant_id = tenant_uuid(session);
+    let contact_id = session.contact.as_ref().map(|contact| contact.contact_id.0);
+    let (scope_ctx, scope) = match contact_id {
+        Some(contact_id) => (
+            RlsContext::contact(TenantId::from(tenant_id), ContactId(contact_id)),
+            "contact",
+        ),
+        None => (RlsContext::tenant(TenantId::from(tenant_id)), "tenant"),
+    };
+    let ctx = runtime_fast_ctx(scope_ctx).await?;
+    record_incident_with_ctx(
+        IncidentRecord {
+            tenant_id,
+            contact_id,
+            scope: scope.to_string(),
+            session_id: session.id.0,
+            turn_seq,
+            attempted: attempted.to_string(),
+            failure: failure.to_string(),
+            actor_id: actor_id_from_session(session),
+            actor_kind: "system".to_string(),
+        },
+        &ctx,
+    )
+    .await
+}
+
+/// Writes one `Incident` node through the graph write protocol.
+///
+/// Returns `Ok(None)` when the failure duplicates an active incident already
+/// recorded for the same session (dedup by node name), or when PII classification
+/// fails closed for either field. `attempted` and `failure` are classified and
+/// redacted independently so a stored field never carries un-vouched text.
+pub async fn record_incident_with_ctx(
+    req: IncidentRecord,
+    ctx: &FastPathCtx,
+) -> Result<Option<Uuid>, FastError> {
+    validate_incident_request(&req)?;
+
+    let Some((attempted_safe, attempted_class)) = classify_and_redact(&req.attempted, ctx).await?
+    else {
+        return Ok(None);
+    };
+    let Some((failure_safe, failure_class)) = classify_and_redact(&req.failure, ctx).await? else {
+        return Ok(None);
+    };
+    let pii_class = more_restrictive(attempted_class, failure_class);
+    let summary = format!("{attempted_safe}: {failure_safe}");
+    let title = short_name(&summary);
+
+    if incident_already_recorded(&title, req.session_id, ctx).await? {
+        return Ok(None);
+    }
+
+    let embedding = ctx
+        .embedder
+        .embed(std::slice::from_ref(&summary))
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| FastError::Invalid("embedder returned no result".to_string()))?;
+    if embedding.len() != VECTOR_DIMENSION {
+        return Err(FastError::Invalid(format!(
+            "expected {VECTOR_DIMENSION}-dimension embedding, got {}",
+            embedding.len()
+        )));
+    }
+
+    let intent = NodeWriteIntent {
+        uid: Uuid::now_v7(),
+        label: NodeLabel::Incident,
+        storage_partition_id: Some(
+            StoragePartitionId::for_tenant(TenantId::from(req.tenant_id)).to_string(),
+        ),
+        contact_id: req.contact_id.map(|contact_id| contact_id.to_string()),
+        scope: req.scope.clone(),
+        name: title,
+        properties: json!({
+            "summary": summary,
+            "attempted": attempted_safe,
+            "failure": failure_safe,
+            "session_id": req.session_id,
+            "turn_seq": req.turn_seq,
+            "source": "incident",
+        }),
+        pii_class,
+        confidence: Some(0.9),
+        valid_from: Utc::now(),
+        embedding: Some(embedding),
+        embedding_model: Some(ctx.embedder.model_id().to_string()),
+        embedding_model_version: Some(ctx.embedder.model_version()),
+        embedding_text: None,
+        actor_id: req.actor_id.to_string(),
+        actor_kind: req.actor_kind.clone(),
+    };
+    let uid = ctx.graph.create_node(intent).await?;
+    metrics::counter!("moa_incident_recorded_total").increment(1);
+    Ok(Some(uid))
+}
+
+fn validate_incident_request(req: &IncidentRecord) -> Result<(), FastError> {
+    if req.attempted.trim().is_empty() || req.failure.trim().is_empty() {
+        return Err(FastError::Invalid(
+            "incident requires attempted and failure text".to_string(),
+        ));
+    }
+    match req.scope.as_str() {
+        "tenant" if req.contact_id.is_none() => Ok(()),
+        "contact" if req.contact_id.is_some() => Ok(()),
+        _ => Err(FastError::Invalid(
+            "incident scope must be `tenant` without a contact or `contact` with one".to_string(),
+        )),
+    }
+}
+
+/// Classifies and redacts one incident field, skipping the write (returning
+/// `None`) when the classifier fails closed and cannot vouch for the text.
+async fn classify_and_redact(
+    text: &str,
+    ctx: &FastPathCtx,
+) -> Result<Option<(String, PiiClass)>, FastError> {
+    let pii = match ctx.pii.classify(text).await {
+        Ok(result) => result,
+        Err(error) => {
+            warn!(%error, "PII classifier failed for incident; failing closed");
+            PiiResult::fail_closed("incident-fallback")
+        }
+    };
+    if pii.abstained && pii.spans.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((redact_text(text, &pii.spans), pii.class)))
+}
+
+async fn incident_already_recorded(
+    title: &str,
+    session_id: Uuid,
+    ctx: &FastPathCtx,
+) -> Result<bool, FastError> {
+    let mut conn = begin_scoped(ctx).await?;
+    let exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS ( \
+             SELECT 1 FROM moa.node_index \
+             WHERE label = 'Incident' \
+               AND name = $1 \
+               AND valid_to IS NULL \
+               AND properties_summary->>'session_id' = $2 \
+         )",
+    )
+    .bind(title)
+    .bind(session_id.to_string())
+    .fetch_one(conn.as_mut())
+    .await?;
+    conn.commit().await?;
+    Ok(exists)
+}
+
+fn more_restrictive(a: PiiClass, b: PiiClass) -> PiiClass {
+    if incident_pii_rank(a) >= incident_pii_rank(b) {
+        a
+    } else {
+        b
+    }
+}
+
+fn incident_pii_rank(class: PiiClass) -> u8 {
+    match class {
+        PiiClass::None => 0,
+        PiiClass::Pii => 1,
+        PiiClass::Phi => 2,
+        PiiClass::Restricted => 3,
+    }
+}
+
 /// Executes a memory tool request using the installed orchestrator runtime.
 pub async fn execute_memory_tool(
     session: &SessionMeta,

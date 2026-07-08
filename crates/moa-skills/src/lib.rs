@@ -11,6 +11,8 @@ pub mod format;
 #[cfg(feature = "skill-learning")]
 pub mod improver;
 pub mod lessons;
+#[cfg(feature = "skill-learning")]
+pub mod mining;
 pub mod package;
 /// Deterministic procedure graph execution for skill-backed procedures.
 pub mod procedure;

@@ -1,0 +1,19 @@
+[suite]
+name = "planted_fact_survives_16_turn_horizon"
+description = "A fact stated on turn 1 must remain recallable 15 turns later."
+default_timeout_seconds = 90
+tags = ["long_conversation", "recorded", "memory"]
+
+[[cases]]
+kind = "long"
+name = "planted_fact_survives_16_turn_horizon"
+goal_card = "scenarios/long_conversation/planted_fact_survives_16_turn_horizon/goal_card.md"
+transcript = "scenarios/long_conversation/planted_fact_survives_16_turn_horizon/transcript.jsonl"
+expectations = "scenarios/long_conversation/planted_fact_survives_16_turn_horizon/expectations.toml"
+mode = "recorded"
+
+# Planted-fact recall is scored from the durable session log; recall_k bounds the
+# per-fact search. The scenario-specific invariant asserts recall == 1.0.
+[cases.metadata]
+planted_facts = ["the staging deploy window is every Tuesday at 14:00 UTC"]
+recall_k = 25

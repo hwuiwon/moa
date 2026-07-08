@@ -37,7 +37,8 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
 
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store().await?;
     let graph_pool = session_store.pool().clone();
-    let session_store: Arc<dyn SessionStore> = Arc::new(session_store);
+    let session_store = Arc::new(session_store);
+    let dyn_session_store: Arc<dyn SessionStore> = session_store.clone();
     let storage_partition_id = StoragePartitionId::new(format!(
         "skill-package-materialization-{}",
         Uuid::now_v7().simple()
@@ -53,6 +54,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
             None,
         ))
         .await?;
+    allow_skill_package_bash(&session_store, tenant_id).await?;
 
     let skill_document = skill_artifact_document(&skill_name);
     let skill_source = skill_document.to_yaml().expect("serialize skill artifact");
@@ -79,7 +81,8 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
     let router = Arc::new(
         ToolRouter::new_local(&workspace)
             .await?
-            .with_policies(ActionPolicies::from_config(&config)?),
+            .with_policies(ActionPolicies::from_config(&config)?)
+            .with_rule_store(session_store.clone()),
     );
     router
         .remember_workspace_root(tenant_id, workspace.clone())
@@ -88,7 +91,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
     let provider = Arc::new(scripted_provider(&skill_name));
     let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         &config,
-        session_store.clone(),
+        dyn_session_store.clone(),
         GraphMemoryPipelineOptions {
             graph_pool,
             shared_graph_memory_retriever: None,
@@ -114,7 +117,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
 
     let result = run_brain_turn(
         session_id,
-        session_store.clone(),
+        dyn_session_store.clone(),
         provider.clone(),
         &pipeline,
         Some(router),
@@ -318,6 +321,26 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
     assert_eq!(tool_results[0].1.to_text(), "Pinned v1 checklist.");
 
     testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+/// Opts this tenant into running the materialized `run.sh` helper without
+/// weakening the production `AdminReview` default for `bash` command execution.
+async fn allow_skill_package_bash(
+    store: &moa_session::PostgresSessionStore,
+    tenant_id: TenantId,
+) -> Result<()> {
+    store
+        .upsert_action_policy_rule(moa_core::ActionPolicyRule {
+            id: Uuid::now_v7(),
+            scope: ActionRuleScope::Tenant { tenant_id },
+            tool: "bash".to_string(),
+            pattern: "*run.sh".to_string(),
+            effect: moa_core::ActionPolicyEffect::Allow,
+            reason: Some("skill package materialization test bash opt-in".to_string()),
+            created_by: UserId::new("skill-package-test"),
+            created_at: chrono::Utc::now(),
+        })
+        .await
 }
 
 fn skill_files() -> Vec<NewArtifactFile> {

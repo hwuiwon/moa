@@ -10,6 +10,7 @@ use moa_core::{
 };
 use moa_db::ScopedConn;
 use moa_session::PostgresSessionStore;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -25,6 +26,40 @@ use crate::package::ValidatedSkillPackage;
 use crate::regression::GeneratedSkillSuite;
 use crate::util::map_sqlx_error;
 
+/// Editable surface a self-improvement proposal may target.
+///
+/// The self-improvement loop may only mutate these four surfaces. The enum is
+/// closed, so authz rules, action-policy definitions, audit configuration, eval
+/// suite definitions, and budget gates are *structurally* non-proposable: they
+/// are not variants, so no proposal that targets them can be constructed. Filing
+/// therefore rejects anything outside this set by construction rather than by a
+/// runtime allowlist check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditableSurface {
+    /// A skill package's markdown body.
+    SkillMarkdown,
+    /// A query-rewrite prompt version.
+    RewritePromptVersion,
+    /// The retrieval router rule table.
+    RouterRules,
+    /// Retrieval ranking configuration values.
+    RankingConfig,
+}
+
+impl EditableSurface {
+    /// Returns the stable snake_case wire label for this surface.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SkillMarkdown => "skill_markdown",
+            Self::RewritePromptVersion => "rewrite_prompt_version",
+            Self::RouterRules => "router_rules",
+            Self::RankingConfig => "ranking_config",
+        }
+    }
+}
+
 /// Reviewable draft proposal generated from skill self-learning.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkillDraftProposal {
@@ -36,6 +71,8 @@ pub struct SkillDraftProposal {
     pub metadata: SkillMetadata,
     /// Creation or improvement operation represented by the draft.
     pub operation: SkillProposalOperation,
+    /// Editable surface this proposal targets; always [`EditableSurface::SkillMarkdown`].
+    pub surface: EditableSurface,
 }
 
 /// Operation represented by a generated skill proposal.
@@ -178,6 +215,7 @@ pub(crate) async fn store_skill_draft_proposal(
         draft_artifact_revision_uid: stored.revision_uid,
         metadata,
         operation,
+        surface: EditableSurface::SkillMarkdown,
     })
 }
 
@@ -231,6 +269,7 @@ fn proposal_from_existing(
         draft_artifact_revision_uid,
         metadata,
         operation,
+        surface: EditableSurface::SkillMarkdown,
     })
 }
 
@@ -265,6 +304,7 @@ fn proposal_payload(input: ProposalPayloadInput<'_>) -> serde_json::Value {
         "artifact_kind": ArtifactKind::Skill.as_str(),
         "artifact_name": input.metadata.name.clone(),
         "artifact_status": ArtifactStatus::Draft.as_str(),
+        "surface": EditableSurface::SkillMarkdown,
         "source_session_id": input.session.id.to_string(),
         "source_experience_ids": input.source.source_experience_ids.clone(),
         "skill_metadata": input.metadata.clone(),
@@ -281,4 +321,33 @@ fn proposal_payload(input: ProposalPayloadInput<'_>) -> serde_json::Value {
         payload["previous_version"] = json!(previous_version);
     }
     payload
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editable_surface_round_trips_every_proposable_variant() {
+        // Pins: the four proposable surfaces are the complete closed set and each serializes to a
+        // stable snake_case label. A proposal can only ever carry one of these, so non-proposable
+        // surfaces (authz, action policy, audit, eval definitions, budget gates) have no wire form.
+        let variants = [
+            (EditableSurface::SkillMarkdown, "skill_markdown"),
+            (
+                EditableSurface::RewritePromptVersion,
+                "rewrite_prompt_version",
+            ),
+            (EditableSurface::RouterRules, "router_rules"),
+            (EditableSurface::RankingConfig, "ranking_config"),
+        ];
+        for (surface, label) in variants {
+            assert_eq!(surface.as_str(), label);
+            let json = serde_json::to_value(surface).expect("surface serializes");
+            assert_eq!(json, json!(label));
+            let parsed: EditableSurface =
+                serde_json::from_value(json).expect("surface round-trips from its label");
+            assert_eq!(parsed, surface);
+        }
+    }
 }

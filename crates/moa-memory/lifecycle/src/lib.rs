@@ -3,6 +3,7 @@
 use serde_json::Value;
 
 pub mod consolidate;
+pub mod curate;
 pub mod digest;
 pub mod quality;
 
@@ -21,6 +22,9 @@ pub use consolidate::{
     advance_consolidation_watermark, backfill_entities, consolidate_tenant, decay_confidence,
     decay_target_confidence, merge_duplicates, rebuild_digests, resolve_entity_duplicates,
     sweep_contradictions, tenant_changelog_version, tenants_needing_consolidation,
+};
+pub use curate::{
+    LessonCurationOptions, LessonCurationStats, curate_skill_lessons, normalize_lesson_summary,
 };
 pub use digest::{
     DIGEST_RENDER_VERSION, DigestFact, DigestScopeKind, DigestStats, RenderedDigest, render_digest,

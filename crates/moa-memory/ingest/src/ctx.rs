@@ -206,6 +206,7 @@ pub struct IngestRuntime {
     contradiction_detector: Arc<dyn ContradictionDetector>,
     contradiction_detector_name: &'static str,
     vector_store_factory: VectorStoreFactory,
+    fact_extraction_enabled: bool,
     fingerprint: IngestRuntimeFingerprint,
 }
 
@@ -247,6 +248,7 @@ impl IngestRuntime {
             contradiction_detector,
             contradiction_detector_name,
             vector_store_factory,
+            fact_extraction_enabled: false,
             fingerprint,
         }
     }
@@ -284,6 +286,7 @@ impl IngestRuntime {
             )),
             contradiction_detector_name,
             vector_store_factory: VectorStoreFactory::from_config(config),
+            fact_extraction_enabled: config.memory.extraction.enabled,
             fingerprint,
         }
     }
@@ -407,6 +410,15 @@ impl IngestRuntime {
     #[must_use]
     pub fn vector_store_factory(&self) -> VectorStoreFactory {
         self.vector_store_factory.clone()
+    }
+
+    /// Returns whether config-level memory learning (fact extraction) is enabled.
+    ///
+    /// This is the single off-switch that also gates background incident capture:
+    /// deployments with memory learning disabled record no negative-results nodes.
+    #[must_use]
+    pub fn fact_extraction_enabled(&self) -> bool {
+        self.fact_extraction_enabled
     }
 
     fn is_compatible_with(&self, other: &Self) -> bool {

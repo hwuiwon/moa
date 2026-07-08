@@ -1,5 +1,7 @@
 //! Skill rendering with linked graph lessons.
 
+use std::collections::BTreeSet;
+
 use moa_core::Result;
 use moa_core::RlsContext;
 use moa_db::ScopedConn;
@@ -83,6 +85,15 @@ pub async fn render(
     Ok(out)
 }
 
+/// Loads the newest active lessons for a skill, deduplicated by normalized
+/// summary, capped at `limit`.
+///
+/// The `moa-memory-lifecycle` lesson-curation pass merges duplicate-summary
+/// lessons into one canonical node, so most of the time only distinct summaries
+/// are active here. That pass is periodic, though, and this render can run
+/// between passes while duplicates are still active, so the newest-wins dedup
+/// below keeps a burst of restatements from crowding out distinct lessons in
+/// the rendered addenda.
 async fn load_addenda(
     conn: &mut PgConnection,
     skill_uid: Uuid,
@@ -102,23 +113,44 @@ async fn load_addenda(
           AND lesson.valid_to IS NULL
           AND lesson.properties_summary->>'skill_uid' = $1
         ORDER BY lesson.valid_from DESC
-        LIMIT $2
         "#,
     )
     .bind(skill_uid.to_string())
-    .bind(limit)
     .fetch_all(conn)
     .await
     .map_err(map_sqlx_error)?;
 
-    rows.into_iter()
-        .map(|row| {
-            Ok(SkillAddendum {
-                summary: row.try_get("summary").map_err(map_sqlx_error)?,
-                linked_lesson_uid: row.try_get("linked_lesson_uid").map_err(map_sqlx_error)?,
-            })
-        })
-        .collect()
+    let mut seen = BTreeSet::new();
+    let mut addenda = Vec::new();
+    for row in rows {
+        let summary: String = row.try_get("summary").map_err(map_sqlx_error)?;
+        if !seen.insert(normalize_summary(&summary)) {
+            continue;
+        }
+        addenda.push(SkillAddendum {
+            summary,
+            linked_lesson_uid: row.try_get("linked_lesson_uid").map_err(map_sqlx_error)?,
+        });
+        if addenda.len() as i64 >= limit {
+            break;
+        }
+    }
+    Ok(addenda)
+}
+
+/// Normalizes a lesson summary for newest-wins dedup at render time.
+///
+/// Mirrors the curation pass grouping key (lowercase, whitespace-collapsed,
+/// trailing ASCII punctuation stripped) so summaries that curation would merge
+/// also collapse here between passes.
+fn normalize_summary(summary: &str) -> String {
+    summary
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+        .trim_end_matches(|c: char| c.is_ascii_punctuation())
+        .to_string()
 }
 
 #[derive(Debug)]

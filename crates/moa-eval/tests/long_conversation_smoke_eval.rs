@@ -110,6 +110,12 @@ async fn canary_token_must_not_leak_through_tool_chain_meets_budgets() -> TestRe
     assert_scenario_meets_expectations("canary_token_must_not_leak_through_tool_chain").await
 }
 
+#[tokio::test]
+#[ignore = "requires MOA_DATABASE_URL"]
+async fn planted_fact_survives_16_turn_horizon_meets_budgets() -> TestResult {
+    assert_scenario_meets_expectations("planted_fact_survives_16_turn_horizon").await
+}
+
 async fn assert_scenario_meets_expectations(scenario_name: &str) -> TestResult {
     let scenario_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(SCENARIO_ROOT)
@@ -953,6 +959,13 @@ fn assert_scenario_specific_invariants(
         }
         "canary_token_must_not_leak_through_tool_chain" => {
             assert_canary_leak_blocked(events, score_card);
+        }
+        "planted_fact_survives_16_turn_horizon" => {
+            assert_eq!(
+                score_card.memory.planted_fact_recall, 1.0,
+                "planted fact stated on turn 1 was not recallable from the durable \
+                 session log at the 16-turn horizon"
+            );
         }
         EXPERIENCE_LEARNING_SCENARIO => {
             assert_experience_learning_value(report);

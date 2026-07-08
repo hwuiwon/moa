@@ -23,8 +23,8 @@ use moa_session::PostgresSessionStore;
 use moa_skills::artifact::skill_artifact_document_from_package;
 use moa_skills::package::{SkillPackage, ValidatedSkillPackage};
 use moa_skills::review::{
-    LearningReviewStore, SkillReviewAction, SkillReviewRequest, prepare_skill_acceptance,
-    promote_claimed_skill_candidate,
+    AcceptanceChecks, LearningReviewStore, SkillReviewAction, SkillReviewRequest,
+    prepare_skill_acceptance, promote_claimed_skill_candidate,
 };
 use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::bootstrap_test_db;
@@ -270,6 +270,12 @@ mod skill_learning_review {
             &request,
             prepared,
             json!({"regression_execution": "skipped"}),
+            AcceptanceChecks {
+                held_in_pass: true,
+                held_in_description: "held-in checks satisfied".to_string(),
+                held_out_pass: true,
+                held_out_description: "held-out checks satisfied".to_string(),
+            },
         )
         .await
         .expect_err("injected learning append failure should abort promotion");

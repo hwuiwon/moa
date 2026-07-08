@@ -11,8 +11,8 @@ use moa_db::ScopedConn;
 use moa_memory_graph::{NodeLabel, PiiClass, PostgresGraphStore};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, FastError, FastPathCtx,
-    FastRememberRequest, ForgetPattern, IngestError, RrfPlusJudgeDetector, fast_forget,
-    fast_remember,
+    FastRememberRequest, ForgetPattern, IncidentRecord, IngestError, RrfPlusJudgeDetector,
+    fast_forget, fast_remember, record_incident_with_ctx,
 };
 use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorStoreFactory};
@@ -270,6 +270,59 @@ async fn node_pii_class(pool: &PgPool, tenant_id: Uuid, uid: Uuid) -> String {
             .expect("read pii_class");
     conn.commit().await.expect("commit pii read");
     pii_class
+}
+
+async fn node_label(pool: &PgPool, tenant_id: Uuid, uid: Uuid) -> String {
+    let mut conn = tenant_scoped_conn(pool, tenant_id).await;
+    let label = sqlx::query_scalar::<_, String>("SELECT label FROM moa.node_index WHERE uid = $1")
+        .bind(uid)
+        .fetch_one(conn.as_mut())
+        .await
+        .expect("read node label");
+    conn.commit().await.expect("commit label read");
+    label
+}
+
+async fn node_property(pool: &PgPool, tenant_id: Uuid, uid: Uuid, key: &str) -> String {
+    let mut conn = tenant_scoped_conn(pool, tenant_id).await;
+    let value = sqlx::query_scalar::<_, Option<String>>(&format!(
+        "SELECT properties_summary->>'{key}' FROM moa.node_index WHERE uid = $1"
+    ))
+    .bind(uid)
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("read node property")
+    .unwrap_or_default();
+    conn.commit().await.expect("commit property read");
+    value
+}
+
+async fn incident_count_for_tenant(pool: &PgPool, tenant_id: Uuid) -> i64 {
+    let mut conn = tenant_scoped_conn(pool, tenant_id).await;
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM moa.node_index \
+         WHERE storage_partition_id = $1 AND label = 'Incident' AND valid_to IS NULL",
+    )
+    .bind(tenant_id.to_string())
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("count tenant incidents");
+    conn.commit().await.expect("commit incident count read");
+    count
+}
+
+fn tenant_incident_record(tenant_id: Uuid, session_id: Uuid) -> IncidentRecord {
+    IncidentRecord {
+        tenant_id,
+        contact_id: None,
+        scope: "tenant".to_string(),
+        session_id,
+        turn_seq: 3,
+        attempted: "search_web".to_string(),
+        failure: "provider_error".to_string(),
+        actor_id: Uuid::now_v7(),
+        actor_kind: "system".to_string(),
+    }
 }
 
 async fn node_valid_to(pool: &PgPool, tenant_id: Uuid, uid: Uuid) -> Option<DateTime<Utc>> {
@@ -933,6 +986,87 @@ async fn fast_remember_real_detector_flags_restated_fact_as_duplicate_db_memory(
         verdict,
         Conflict::Duplicate(seeded_uid),
         "real detector must flag the restated fact as a duplicate of the seeded node"
+    );
+
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn record_incident_writes_scoped_node_and_dedups_within_session_db_memory() {
+    // Pins: a durable failure writes one PII-classified, session-scoped Incident
+    // node whose properties preserve the attempt/failure and session partition;
+    // re-recording the same failure in the same session is a no-op, while the same
+    // failure in a different session writes a distinct incident.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let tenant_id = Uuid::now_v7();
+    let ctx = test_ctx(
+        session_store.pool(),
+        tenant_id,
+        Conflict::Insert,
+        Duration::ZERO,
+        PiiClass::None,
+    );
+    seed_tenant_embedder_state(session_store.pool(), tenant_id).await;
+    let session_id = Uuid::now_v7();
+
+    let uid = record_incident_with_ctx(tenant_incident_record(tenant_id, session_id), &ctx)
+        .await
+        .expect("record incident")
+        .expect("first incident should write a node");
+
+    assert_eq!(
+        node_label(session_store.pool(), tenant_id, uid).await,
+        "Incident"
+    );
+    assert_eq!(
+        node_pii_class(session_store.pool(), tenant_id, uid).await,
+        "none"
+    );
+    assert_eq!(
+        node_property(session_store.pool(), tenant_id, uid, "attempted").await,
+        "search_web"
+    );
+    assert_eq!(
+        node_property(session_store.pool(), tenant_id, uid, "failure").await,
+        "provider_error"
+    );
+    assert_eq!(
+        node_property(session_store.pool(), tenant_id, uid, "session_id").await,
+        session_id.to_string()
+    );
+    assert_eq!(
+        node_name(session_store.pool(), tenant_id, uid).await,
+        "search_web: provider_error"
+    );
+
+    // Same failure, same session: deduplicated by name within the session.
+    let duplicate = record_incident_with_ctx(tenant_incident_record(tenant_id, session_id), &ctx)
+        .await
+        .expect("record duplicate incident");
+    assert!(
+        duplicate.is_none(),
+        "identical failure in the same session must not write a second node"
+    );
+    assert_eq!(
+        incident_count_for_tenant(session_store.pool(), tenant_id).await,
+        1
+    );
+
+    // Same failure, different session: a distinct negative-results node.
+    let other_session = Uuid::now_v7();
+    record_incident_with_ctx(tenant_incident_record(tenant_id, other_session), &ctx)
+        .await
+        .expect("record incident for other session")
+        .expect("distinct session should write its own incident");
+    assert_eq!(
+        incident_count_for_tenant(session_store.pool(), tenant_id).await,
+        2
     );
 
     drop(session_store);

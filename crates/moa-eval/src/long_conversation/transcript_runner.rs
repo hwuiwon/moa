@@ -70,6 +70,15 @@ pub struct LongRunReport {
     pub phase_comparison: Option<PhaseComparison>,
 }
 
+impl LongRunReport {
+    /// Runs the over-optimism failure-mode rubric over this report: flags a run
+    /// that declared the task complete while a citation failed verification.
+    #[must_use]
+    pub fn over_optimism_check(&self) -> super::rubric::DeclaredSuccessWithoutEvidence {
+        super::rubric::declared_success_without_evidence(&self.score_card, &self.score_records)
+    }
+}
+
 /// Persisted learning artifact counts for a long-conversation run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LearningRunSummary {
