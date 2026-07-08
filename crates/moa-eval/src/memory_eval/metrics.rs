@@ -737,6 +737,7 @@ fn aggregate_metrics(
             p50_retrieval_latency_ms: p50_retrieval_latency_ms(probe_results),
             p95_retrieval_latency_ms: p95_retrieval_latency_ms(probe_results),
             cross_user_leak_count: cross_user_leak_count(probe_results),
+            staleness_leak_rate: staleness_leak_rate(probe_results),
             pii_unredacted_count: pii_unredacted_count(probe_results),
         },
         ingestion_coverage: MetricSummary::from_counts(resolved_facts, total_facts),
@@ -838,6 +839,20 @@ fn retrieved_expected_fact_ids(
         }
     }
     found
+}
+
+/// Fraction of update probes whose top-25 candidates leaked a superseded fact.
+fn staleness_leak_rate(probe_results: &[ProbeResult]) -> MetricSummary {
+    let (leaked, total) = probe_results
+        .iter()
+        .filter(|probe| probe.probe_type == ProbeType::LatestValueAfterUpdate)
+        .fold((0_usize, 0_usize), |(leaked, total), probe| {
+            (
+                leaked + usize::from(!probe.leaked_blocked_fact_ids().is_empty()),
+                total + 1,
+            )
+        });
+    MetricSummary::from_counts(leaked, total)
 }
 
 fn cross_user_leak_count(probe_results: &[ProbeResult]) -> usize {

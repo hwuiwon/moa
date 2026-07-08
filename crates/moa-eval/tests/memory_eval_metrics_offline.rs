@@ -679,6 +679,9 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
     assert_eq!(report.cross_user_leak_probe_ids, Vec::<String>::new());
     assert_eq!(report.metrics.pii_unredacted_count, 1);
     assert_metric(report.metrics.pii_redaction_rate, 0.0, 1, 0.0);
+    // The update probe retrieved its superseded blocked fact, so the staleness
+    // slice counts it: one leaking probe out of one update probe.
+    assert_metric(report.metrics.staleness_leak_rate, 1.0, 1, 1.0);
 }
 
 #[test]

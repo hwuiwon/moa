@@ -245,6 +245,34 @@ pub struct ExistingSupersessionIntent {
     pub actor_kind: String,
 }
 
+/// Intent to reinforce one active node that ingestion re-observed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct NodeReinforcementIntent {
+    /// Node whose confidence should be boosted.
+    pub uid: Uuid,
+    /// Confidence increment applied toward the cap.
+    pub step: f64,
+    /// Ceiling for the boost; higher existing confidences are preserved.
+    pub cap: f64,
+}
+
+/// Intent to close one active graph node without a replacement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeExpiryIntent {
+    /// Node to invalidate.
+    pub uid: Uuid,
+    /// Application-time validity end to write on the node.
+    pub valid_to: DateTime<Utc>,
+    /// Transaction-time invalidation instant to write on the node.
+    pub invalidated_at: DateTime<Utc>,
+    /// Audit reason written to invalidation metadata.
+    pub reason: String,
+    /// Principal identifier that triggered the mutation.
+    pub actor_id: String,
+    /// Principal kind written to the graph changelog.
+    pub actor_kind: String,
+}
+
 /// Intent to attach a vector embedding to an existing graph node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeEmbeddingIntent {

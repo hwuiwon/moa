@@ -61,7 +61,8 @@ pub use metrics::{
 pub use moa_brain::retrieval::RankingConfig;
 pub use recording::{
     MemoryExtractionRecordingOptions, MemoryExtractionRecordingReport, MemoryMergeRecordingOptions,
-    MemoryMergeRecordingReport, record_memory_extractions, record_memory_merges,
+    MemoryMergeRecordingReport, missing_extraction_chunk_hashes, record_memory_extractions,
+    record_memory_merges,
 };
 pub use runner::{
     EvalLane, GraphExpansionEvalPolicy, MemoryEvalExtractorMode, MemoryGraphDiagnostics,

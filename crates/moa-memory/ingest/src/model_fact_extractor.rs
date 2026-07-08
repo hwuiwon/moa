@@ -12,7 +12,13 @@ use crate::{
 };
 
 /// Version for the LLM extraction prompt and recorded extraction fixtures.
-pub const EXTRACTION_PROMPT_VERSION: &str = "v2";
+pub const EXTRACTION_PROMPT_VERSION: &str = "v3";
+
+/// Prompt versions whose recorded fixtures remain valid for replay.
+///
+/// v3 only adds the optional `event_time` output key on top of v2, so v2
+/// fixtures replay correctly — their facts simply carry no event time.
+pub const COMPATIBLE_PROMPT_VERSIONS: &[&str] = &["v2", "v3"];
 
 const EXTRACTION_SYSTEM_PROMPT: &str = r#"You extract durable, declarative facts from transcripts.
 Skip questions, requests, speculation, small talk, transient scheduling commentary, and provenance-only details like "last sprint" or "per the platform decision".
@@ -24,6 +30,7 @@ For each fact return one JSON object with keys:
 - summary: one sentence restating the fact
 - scope: "contact" or "tenant" using the rubric below
 - confidence: number from 0.0 to 1.0
+- event_time: OPTIONAL; include only when the transcript states when the fact became true, as an ISO 8601 date or timestamp (e.g. "2025-08-01"). Omit the key when the transcript gives no time.
 Use this scope rubric:
 scope = "contact" when the fact is about the speaker personally: preferences ("I prefer", "my setup", "for my work"), personal state, individual habits, or anything phrased in first person about themselves.
 scope = "tenant" when the fact is about shared systems or team agreements: "we decided", "the team", "our service", infrastructure, ownership, processes that apply to everyone inside the tenant.
@@ -37,6 +44,8 @@ Transcript: user: We decided the API gateway runs on port 8443.
 Fact: {"subject":"API gateway","predicate":"runs on port","object":"8443","summary":"The API gateway runs on port 8443.","scope":"tenant","confidence":0.94}
 Transcript: user: Our team owns the billing reconciler service.
 Fact: {"subject":"team","predicate":"owns","object":"billing reconciler service","summary":"The team owns the billing reconciler service.","scope":"tenant","confidence":0.93}
+Transcript (sent 2026-03-10): user: I moved to Denver last August.
+Fact: {"subject":"contact","predicate":"lives in","object":"Denver","summary":"The contact lives in Denver.","scope":"contact","confidence":0.9,"event_time":"2025-08-01"}
 Return a JSON array and nothing else."#;
 
 /// Fact extractor backed by the configured provider model.
@@ -78,6 +87,7 @@ struct ModelExtractedFact {
     summary: String,
     scope: String,
     confidence: Option<f64>,
+    event_time: Option<String>,
     source_chunk: usize,
 }
 
@@ -117,6 +127,7 @@ impl ModelFactExtractionClient {
                         summary: fact.summary,
                         scope: fact.scope,
                         confidence: fact.confidence,
+                        event_time: fact.event_time,
                         source_chunk: chunk.index,
                     }),
             );
@@ -161,6 +172,8 @@ struct ParsedModelExtractedFact {
     scope: String,
     #[serde(default)]
     confidence: Option<f64>,
+    #[serde(default)]
+    event_time: Option<String>,
 }
 
 #[async_trait]
@@ -217,6 +230,7 @@ fn provider_fact_into_extracted(fact: ModelExtractedFact) -> Result<ExtractedFac
         source_chunk: fact.source_chunk,
         scope_hint,
         confidence,
+        event_time: parse_event_time(fact.event_time.as_deref()),
     };
     let hash = fact_hash(&extracted)?;
     extracted.uid = fact_uid_from_hash(&hash);
@@ -225,6 +239,25 @@ fn provider_fact_into_extracted(fact: ModelExtractedFact) -> Result<ExtractedFac
 
 fn clamp_confidence(confidence: f64) -> f64 {
     confidence.clamp(0.0, 1.0)
+}
+
+/// Parses a model-provided event time as an RFC 3339 timestamp or plain date.
+///
+/// Unparseable values degrade to `None` rather than failing the extraction:
+/// event time only refines `valid_from`, so a malformed value must never cost
+/// the fact itself.
+pub(crate) fn parse_event_time(value: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
+    let trimmed = value?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(instant) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Some(instant.with_timezone(&chrono::Utc));
+    }
+    chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|naive| naive.and_utc())
 }
 
 pub(crate) fn normalize_extracted_fact(mut fact: ExtractedFact) -> ExtractedFact {
@@ -368,14 +401,32 @@ mod tests {
     }
 
     #[test]
-    fn scope_rubric_v2_prompt_contains_few_shot_pairs_and_contact_default() {
-        // Pins: v2 extraction prompt makes ambiguous scope privacy-preserving and examples explicit.
-        assert_eq!(EXTRACTION_PROMPT_VERSION, "v2");
+    fn extraction_prompt_contains_few_shot_pairs_contact_default_and_event_time() {
+        // Pins: the extraction prompt makes ambiguous scope privacy-preserving,
+        // keeps the few-shot examples explicit, and asks for an optional
+        // event_time only when the transcript states one.
+        assert_eq!(EXTRACTION_PROMPT_VERSION, "v3");
         assert!(EXTRACTION_SYSTEM_PROMPT.contains("When genuinely ambiguous, choose \"contact\"."));
         assert!(EXTRACTION_SYSTEM_PROMPT.contains("I prefer Linear for bug triage"));
         assert!(EXTRACTION_SYSTEM_PROMPT.contains("For my work, repo/control-plane"));
         assert!(EXTRACTION_SYSTEM_PROMPT.contains("We decided the API gateway runs on port 8443"));
         assert!(EXTRACTION_SYSTEM_PROMPT.contains("Our team owns the billing reconciler service"));
+        assert!(EXTRACTION_SYSTEM_PROMPT.contains("event_time: OPTIONAL"));
+        assert!(EXTRACTION_SYSTEM_PROMPT.contains("I moved to Denver last August"));
+    }
+
+    #[test]
+    fn event_time_parses_dates_and_timestamps_and_degrades_on_garbage() {
+        // Pins: stated event times parse from RFC 3339 timestamps or plain dates,
+        // and malformed values degrade to None instead of failing extraction.
+        let date = parse_event_time(Some("2025-08-01")).expect("plain date parses");
+        assert_eq!(date.to_rfc3339(), "2025-08-01T00:00:00+00:00");
+        let instant =
+            parse_event_time(Some("2025-08-01T12:30:00-04:00")).expect("timestamp parses");
+        assert_eq!(instant.to_rfc3339(), "2025-08-01T16:30:00+00:00");
+        assert_eq!(parse_event_time(Some("last summer")), None);
+        assert_eq!(parse_event_time(Some("  ")), None);
+        assert_eq!(parse_event_time(None), None);
     }
 
     fn extractor_for_response(response: &str, max_facts: usize) -> ModelFactExtractor {
@@ -418,6 +469,38 @@ mod tests {
         assert_eq!(facts[0].source_chunk, 7);
         assert_eq!(facts[0].scope_hint, ExtractedFactScopeHint::Contact);
         assert_eq!(facts[0].confidence, Some(0.91));
+        assert_eq!(facts[0].event_time, None);
+    }
+
+    #[tokio::test]
+    async fn model_extractor_carries_stated_event_time_into_extracted_fact() {
+        // Pins: an event_time key in the model response reaches ExtractedFact as
+        // a parsed UTC instant, and its presence does not change the fact uid.
+        let response = r#"[
+{"subject":"contact","predicate":"lives in","object":"Denver","summary":"The contact lives in Denver.","scope":"contact","confidence":0.9,"event_time":"2025-08-01"}
+]"#;
+        let dated = extractor_for_response(response, 12)
+            .extract(&[chunk()])
+            .await
+            .expect("extract dated fact");
+        let undated =
+            extractor_for_response(&response.replace(",\"event_time\":\"2025-08-01\"", ""), 12)
+                .extract(&[chunk()])
+                .await
+                .expect("extract undated fact");
+
+        assert_eq!(
+            dated[0]
+                .event_time
+                .expect("event time should parse")
+                .to_rfc3339(),
+            "2025-08-01T00:00:00+00:00"
+        );
+        assert_eq!(undated[0].event_time, None);
+        assert_eq!(
+            dated[0].uid, undated[0].uid,
+            "event time must not change fact identity"
+        );
     }
 
     #[tokio::test]

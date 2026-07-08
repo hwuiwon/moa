@@ -90,6 +90,12 @@ pub struct MemoryRetrievalConfig {
     pub reranker_latency: Option<String>,
     /// Whether retrieval writes narrow quality-scoring lineage rows.
     pub lineage_enabled: bool,
+    /// Fraction of turns that write lineage rows when lineage is enabled.
+    ///
+    /// Sampling is deterministic per `(session, turn)`, so a given turn either
+    /// always writes lineage or never does at a fixed rate. Values are clamped
+    /// to `[0.0, 1.0]` at the write site; `1.0` records every turn.
+    pub lineage_sample_rate: f64,
     /// Deterministic post-hydration ranking behavior.
     pub ranking: MemoryRankingConfig,
 }
@@ -102,6 +108,7 @@ impl Default for MemoryRetrievalConfig {
             // Lineage rows are the dashboard's provenance source of truth, so
             // retrieval records them unless a deployment opts out.
             lineage_enabled: true,
+            lineage_sample_rate: 1.0,
             ranking: MemoryRankingConfig::default(),
         }
     }

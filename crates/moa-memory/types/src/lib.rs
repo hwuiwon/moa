@@ -3,6 +3,19 @@
 use moa_core::{ContactId, RlsContext, TenantId};
 use serde::{Deserialize, Serialize};
 
+/// Normalizes one fact-content component (subject, predicate, or object) for
+/// identity comparison.
+///
+/// This is the shared semantic contract behind fact-content identity: final
+/// retrieval selection, consolidation duplicate merging, and eval probe
+/// equivalence all treat facts with equal normalized `(subject, predicate,
+/// object)` as the same content. Keep every comparer on this helper so the
+/// three stay in agreement.
+#[must_use]
+pub fn normalize_fact_component(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
 /// Runtime graph-memory scope.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

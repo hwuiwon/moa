@@ -18,7 +18,19 @@ pub(super) fn render_fact_transcript(
         .as_deref()
         .and_then(|canonical_id| facts_by_id.get(canonical_id))
     {
-        return render_fact_transcript(transcript_style, category, canonical, facts_by_id);
+        return match transcript_style {
+            // Marked restatements stay verbatim so exact fact-hash collapse
+            // remains pinned by the deterministic heuristic lane.
+            TranscriptStyle::Marked => {
+                render_fact_transcript(transcript_style, category, canonical, facts_by_id)
+            }
+            // Natural restatements paraphrase: real users rephrase, so the
+            // recorded lane exercises the write-time duplicate detector and
+            // reinforcement instead of byte-identical text dedup.
+            TranscriptStyle::Natural => {
+                natural_frames::render_restatement(&fact.fact_id, canonical)
+            }
+        };
     }
 
     match transcript_style {
@@ -114,6 +126,14 @@ mod natural_frames {
     const UPDATE_FRAMES: &[&str] = &[
         "Quick update: {subject} {predicate_phrase} {object} now, not {old_object} anymore.",
         "Correction to earlier: {subject} moved to {object}.",
+        // A stated change date lets model extraction emit `event_time`, so the
+        // fact's `valid_from` reflects when the change actually happened.
+        "Actually, {subject} moved to {object} back on {event_date}; {old_object} is out of date.",
+    ];
+    const RESTATEMENT_FRAMES: &[&str] = &[
+        "Still true that {subject} {predicate_phrase} {object}.",
+        "As before, {subject} {predicate_phrase} {object}.",
+        "Reminder for the record: {subject} {predicate_phrase} {object}.",
     ];
     const DISTRACTORS: &[&str] = &[
         "Thanks, that all sounds reasonable to me.",
@@ -149,6 +169,17 @@ mod natural_frames {
             fact,
             "the previous value",
             predicate_phrase(&fact.predicate),
+        )
+    }
+
+    /// Renders a paraphrased restatement of the canonical fact, keyed by the
+    /// restating fact id so repeated restatements vary their phrasing.
+    pub(super) fn render_restatement(key: &str, canonical: &LedgerFact) -> String {
+        apply_frame(
+            select(key, RESTATEMENT_FRAMES),
+            canonical,
+            "the previous value",
+            predicate_phrase(&canonical.predicate),
         )
     }
 
@@ -201,6 +232,10 @@ mod natural_frames {
             .replace("{predicate_phrase}", predicate_phrase)
             .replace("{object}", &fact.object)
             .replace("{old_object}", old_object)
+            .replace(
+                "{event_date}",
+                &fact.valid_from.format("%Y-%m-%d").to_string(),
+            )
     }
 }
 

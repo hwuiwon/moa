@@ -18,7 +18,8 @@ use async_trait::async_trait;
 use chrono::{Duration, TimeZone, Utc};
 use moa_core::TenantId;
 use moa_memory_lifecycle::{
-    BackfillStats, ConsolidationOutcome, DecayStats, DigestStats, MergeStats, SweepStats,
+    BackfillStats, ConsolidationOutcome, DecayStats, DigestStats, ExpiryStats, MergeStats,
+    SweepStats,
 };
 use moa_orchestrator::workflows::consolidate::{
     ConsolidateDurableSteps, ConsolidateReport, ConsolidateRequest, run_consolidate_workflow,
@@ -90,6 +91,14 @@ impl ConsolidateDurableSteps for RecordedConsolidateSteps<'_> {
         Ok(self
             .recorder
             .run("contradict", request, SweepStats::default))
+    }
+
+    async fn expire_idle_facts(
+        &mut self,
+        request: &ConsolidateRequest,
+        _now: chrono::DateTime<Utc>,
+    ) -> Result<ExpiryStats, HandlerError> {
+        Ok(self.recorder.run("expire", request, ExpiryStats::default))
     }
 
     async fn backfill_entities(

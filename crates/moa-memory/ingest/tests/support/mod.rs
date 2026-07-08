@@ -440,6 +440,75 @@ pub(crate) async fn node_confidence(pool: &PgPool, storage_partition_id: Uuid, u
     confidence
 }
 
+/// Overwrites one node's derived ranking state to simulate a decayed fact.
+pub(crate) async fn set_node_ranking_state(
+    pool: &PgPool,
+    storage_partition_id: Uuid,
+    uid: Uuid,
+    confidence: f64,
+    base_confidence: Option<f64>,
+    last_accessed_at: DateTime<Utc>,
+) {
+    let mut conn = user_scoped_conn(pool, storage_partition_id).await;
+    sqlx::query(
+        r#"
+        UPDATE moa.node_index
+        SET confidence = $2,
+            properties_summary = CASE
+                WHEN $3::double precision IS NULL
+                    THEN properties_summary - 'base_confidence'
+                ELSE jsonb_set(
+                    COALESCE(properties_summary, '{}'::jsonb),
+                    '{base_confidence}',
+                    to_jsonb($3::double precision)
+                )
+            END,
+            last_accessed_at = $4
+        WHERE uid = $1
+        "#,
+    )
+    .bind(uid)
+    .bind(confidence)
+    .bind(base_confidence)
+    .bind(last_accessed_at)
+    .execute(conn.as_mut())
+    .await
+    .expect("set node ranking state");
+    conn.commit().await.expect("commit node ranking state");
+}
+
+/// Reads one node's derived ranking state: confidence, decay anchor, last access.
+pub(crate) async fn node_ranking_state(
+    pool: &PgPool,
+    storage_partition_id: Uuid,
+    uid: Uuid,
+) -> (f64, Option<f64>, DateTime<Utc>) {
+    let mut conn = user_scoped_conn(pool, storage_partition_id).await;
+    let row = sqlx::query(
+        r#"
+        SELECT confidence,
+               (properties_summary->>'base_confidence')::double precision AS base_confidence,
+               last_accessed_at
+        FROM moa.node_index
+        WHERE uid = $1
+        "#,
+    )
+    .bind(uid)
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("read node ranking state");
+    conn.commit().await.expect("commit node ranking state read");
+    (
+        row.try_get::<Option<f64>, _>("confidence")
+            .expect("confidence column")
+            .expect("confidence should be set"),
+        row.try_get::<Option<f64>, _>("base_confidence")
+            .expect("base_confidence column"),
+        row.try_get::<DateTime<Utc>, _>("last_accessed_at")
+            .expect("last_accessed_at column"),
+    )
+}
+
 pub(crate) async fn contradiction_edge_count(pool: &PgPool, storage_partition_id: Uuid) -> i64 {
     let mut conn = user_scoped_conn(pool, storage_partition_id).await;
     let count = sqlx::query_scalar::<_, i64>(

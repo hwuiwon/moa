@@ -9,8 +9,8 @@ use moa_core::{
     ContactId, MemoryDigestConfig, StoragePartitionId, TenantId, traits::EmbeddingProvider,
 };
 use moa_memory_graph::{
-    ExistingSupersessionIntent, GraphError, NodeEmbeddingIntent, NodeIndexRow, NodeLabel,
-    NodePropertyUpdateIntent, PiiClass, PostgresGraphStore,
+    ExistingSupersessionIntent, GraphError, NodeEmbeddingIntent, NodeExpiryIntent, NodeIndexRow,
+    NodeLabel, NodePropertyUpdateIntent, PiiClass, PostgresGraphStore,
 };
 use moa_memory_ingest::{EntityMergeVerifier, IngestError, normalize_entity_name};
 use moa_memory_vector::VectorStoreFactory;
@@ -20,6 +20,9 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::digest::{DigestStats, rebuild_storage_digests};
+
+/// Invalidation reason written when idle floor-bound facts are expired.
+pub const EXPIRED_IDLE_REASON: &str = "expired_idle";
 
 const CONSOLIDATION_ACTOR: &str = "consolidation";
 const CONSOLIDATION_ACTOR_KIND: &str = "system";
@@ -58,9 +61,17 @@ pub struct ConsolidationOptions {
     pub decay_half_life_days: f64,
     /// Minimum confidence retained by decay.
     pub decay_floor: f64,
+    /// Idle days after which floor-bound facts are closed; `0` disables expiry.
+    #[serde(default = "default_expire_idle_days")]
+    pub expire_idle_days: i64,
     /// Standing digest rebuild configuration.
     #[serde(default)]
     pub digest: MemoryDigestConfig,
+}
+
+/// Default idle window before floor-bound facts expire.
+fn default_expire_idle_days() -> i64 {
+    180
 }
 
 impl Default for ConsolidationOptions {
@@ -69,6 +80,7 @@ impl Default for ConsolidationOptions {
             decay_idle_days: 30,
             decay_half_life_days: 180.0,
             decay_floor: 0.1,
+            expire_idle_days: default_expire_idle_days(),
             digest: MemoryDigestConfig::default(),
         }
     }
@@ -83,6 +95,9 @@ pub struct ConsolidationOutcome {
     pub decayed: u64,
     /// Active facts whose computed confidence is at the configured floor.
     pub at_floor: u64,
+    /// Floor-bound idle facts closed by bitemporal invalidation.
+    #[serde(default)]
+    pub expired_idle: u64,
     /// Older contradictory facts superseded by the newest fact.
     pub contradiction_supersessions: u64,
     /// Entity nodes that received missing embeddings.
@@ -105,6 +120,7 @@ impl ConsolidationOutcome {
     pub fn has_no_work(&self) -> bool {
         self.merged == 0
             && self.decayed == 0
+            && self.expired_idle == 0
             && self.contradiction_supersessions == 0
             && self.entity_embeddings_backfilled == 0
             && self.aliases_promoted == 0
@@ -129,6 +145,13 @@ pub struct DecayStats {
     pub decayed: u64,
     /// Facts currently sitting at the configured floor.
     pub at_floor: u64,
+}
+
+/// Outcome for idle-fact expiry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpiryStats {
+    /// Floor-bound idle facts closed by bitemporal invalidation.
+    pub expired_idle: u64,
 }
 
 /// Outcome for deterministic contradiction sweep.
@@ -201,6 +224,9 @@ pub async fn consolidate_tenant(
         .filter(|fact| !merged_closed.contains(&fact.uid))
         .collect::<Vec<_>>();
     let (sweep, _swept_closed) = sweep_contradiction_rows(pool, &live_after_merge, now).await?;
+    // Expiry runs after decay and the sweep so it sees post-decay confidence and
+    // does not close a fact another pass would have superseded this run.
+    let expiry = expire_idle_facts(pool, &tenant_id, now, &opts).await?;
     let backfill = backfill_entities(pool, &tenant_id, embedder).await?;
     let storage_partition_id = storage_partition_id(&tenant_id);
     let digest = rebuild_storage_digests(pool, &storage_partition_id, now, &opts.digest).await?;
@@ -209,6 +235,7 @@ pub async fn consolidate_tenant(
         merged: merge.merged,
         decayed: decay.decayed,
         at_floor: decay.at_floor,
+        expired_idle: expiry.expired_idle,
         contradiction_supersessions: sweep.contradiction_supersessions,
         entity_embeddings_backfilled: backfill.entity_embeddings_backfilled,
         aliases_promoted: backfill.aliases_promoted,
@@ -385,6 +412,82 @@ pub async fn decay_confidence(
     let at_floor = u64::try_from(row.try_get::<i64, _>("at_floor")?)
         .map_err(|_| Error::InvalidRow("negative at_floor count".to_string()))?;
     Ok(DecayStats { decayed, at_floor })
+}
+
+/// Closes floor-bound facts that have been idle past the expiry window.
+///
+/// A fact expires only when decay has already bottomed it out at the configured
+/// floor AND nothing touched it (retrieval access, reinforcement) for
+/// `expire_idle_days`. The close is a bitemporal invalidation with reason
+/// `expired_idle` — history and as-of reads keep working — so the pass bounds
+/// the active retrieval set without destroying anything. `expire_idle_days <= 0`
+/// disables the pass. Rerunning at the same `now` is a no-op because closed
+/// rows leave the candidate set.
+pub async fn expire_idle_facts(
+    pool: &PgPool,
+    tenant_id: &TenantId,
+    now: DateTime<Utc>,
+    opts: &ConsolidationOptions,
+) -> Result<ExpiryStats> {
+    if opts.expire_idle_days <= 0 {
+        return Ok(ExpiryStats::default());
+    }
+
+    let candidates = sqlx::query(
+        r#"
+        SELECT uid, contact_id
+        FROM moa.node_index
+        WHERE tenant_id = $1
+          AND label = 'Fact'
+          AND valid_to IS NULL
+          AND confidence IS NOT NULL
+          AND ABS(confidence - $2) <= $3
+          AND EXTRACT(EPOCH FROM ($4::timestamptz - last_accessed_at))
+              >= ($5::double precision * 86400.0)
+        ORDER BY uid
+        "#,
+    )
+    .bind(tenant_id.0)
+    .bind(opts.decay_floor)
+    .bind(EPSILON)
+    .bind(now)
+    .bind(opts.expire_idle_days as f64)
+    .fetch_all(pool)
+    .await?;
+
+    // Per-node closes keep the per-node changelog record and vector delete
+    // that expiry shares with manual invalidation. Candidate counts are small
+    // after the first pass (only newly floor-bound idle facts qualify); batch
+    // the closes per scope if scheduled consolidation ever shows this loop in
+    // its latency profile.
+    let mut stores: BTreeMap<Option<Uuid>, PostgresGraphStore> = BTreeMap::new();
+    let mut expired_idle = 0_u64;
+    for candidate in candidates {
+        let uid: Uuid = candidate.try_get("uid")?;
+        let contact_id: Option<Uuid> = candidate.try_get("contact_id")?;
+        let scope = match contact_id {
+            Some(contact_id) => RlsContext::contact(*tenant_id, ContactId(contact_id)),
+            None => RlsContext::tenant(*tenant_id),
+        };
+        let store = stores
+            .entry(contact_id)
+            .or_insert_with(|| scoped_graph_for(pool, scope));
+        let closed = store
+            .expire_node(NodeExpiryIntent {
+                uid,
+                valid_to: now,
+                invalidated_at: now,
+                reason: EXPIRED_IDLE_REASON.to_string(),
+                actor_id: CONSOLIDATION_ACTOR.to_string(),
+                actor_kind: CONSOLIDATION_ACTOR_KIND.to_string(),
+            })
+            .await?;
+        if closed {
+            expired_idle += 1;
+        }
+    }
+
+    Ok(ExpiryStats { expired_idle })
 }
 
 /// Supersedes older active contradictory facts using a deterministic newest-wins policy.
@@ -901,7 +1004,18 @@ async fn close_into_existing(
 fn duplicate_groups(rows: &[LifecycleNodeRow]) -> Vec<Vec<LifecycleNodeRow>> {
     let mut groups = BTreeMap::<DuplicateKey, Vec<LifecycleNodeRow>>::new();
     for row in rows {
-        let Some(fact_hash) = row.property_text("fact_hash") else {
+        // Duplicates are keyed by normalized fact content, not the full
+        // fact_hash: the hash also covers the free-text summary, so the same
+        // fact restated in different words ("still true that X depends on Y")
+        // would never merge. Subject/predicate/object is the fact identity used
+        // by final-selection dedupe and probe equivalence; consolidation
+        // follows the same rule. Update-era facts keep distinct objects, so
+        // bitemporal families never collapse here.
+        let (Some(subject), Some(predicate), Some(object)) = (
+            row.property_text("subject"),
+            row.property_text("predicate"),
+            row.property_text("object"),
+        ) else {
             continue;
         };
         groups
@@ -909,7 +1023,9 @@ fn duplicate_groups(rows: &[LifecycleNodeRow]) -> Vec<Vec<LifecycleNodeRow>> {
                 tenant_id: row.tenant_id,
                 contact_id: row.contact_id,
                 scope: row.scope.clone(),
-                fact_hash,
+                subject: moa_memory_types::normalize_fact_component(&subject),
+                predicate: moa_memory_types::normalize_fact_component(&predicate),
+                object: moa_memory_types::normalize_fact_component(&object),
             })
             .or_default()
             .push(row.clone());
@@ -1311,7 +1427,9 @@ struct DuplicateKey {
     tenant_id: Uuid,
     contact_id: Option<Uuid>,
     scope: String,
-    fact_hash: String,
+    subject: String,
+    predicate: String,
+    object: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

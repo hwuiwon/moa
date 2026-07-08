@@ -540,6 +540,83 @@ async fn fast_remember_db_memory() {
 }
 
 #[tokio::test]
+async fn fast_remember_duplicate_reinforces_survivor_instead_of_dropping_db_memory() {
+    // Pins: an agent restating a known fact returns the surviving node's uid and
+    // confirms it — confidence steps by exactly the reinforcement step and the
+    // base_confidence decay anchor clears — instead of silently dropping the
+    // observation or writing a second node.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let tenant_id = Uuid::now_v7();
+    let seeded_uid =
+        seed_active_tenant_node(session_store.pool(), tenant_id, "we deploy to fly.io").await;
+    // Simulate a decayed fact: lowered confidence with an anchored base.
+    let mut conn = tenant_scoped_conn(session_store.pool(), tenant_id).await;
+    sqlx::query(
+        r#"
+        UPDATE moa.node_index
+        SET confidence = 0.6,
+            properties_summary = jsonb_set(
+                properties_summary, '{base_confidence}', to_jsonb(0.9::double precision)
+            )
+        WHERE uid = $1
+        "#,
+    )
+    .bind(seeded_uid)
+    .execute(conn.as_mut())
+    .await
+    .expect("seed decayed ranking state");
+    conn.commit().await.expect("commit decayed ranking state");
+    let ctx = test_ctx(
+        session_store.pool(),
+        tenant_id,
+        Conflict::Duplicate(seeded_uid),
+        Duration::ZERO,
+        PiiClass::None,
+    );
+    seed_tenant_embedder_state(session_store.pool(), tenant_id).await;
+
+    let uid = fast_remember(
+        tenant_remember_request(tenant_id, "we deploy to fly.io"),
+        &ctx,
+    )
+    .await
+    .expect("duplicate remember succeeds");
+
+    assert_eq!(uid, seeded_uid, "duplicate must return the surviving node");
+    assert_eq!(
+        node_count_for_tenant(session_store.pool(), tenant_id).await,
+        1,
+        "duplicate remember must not write a second node"
+    );
+    let confidence = node_confidence(session_store.pool(), tenant_id, seeded_uid).await;
+    assert!(
+        (confidence - 0.7).abs() < 1e-9,
+        "confidence must step from 0.6 by exactly 0.1, got {confidence}"
+    );
+    let mut conn = tenant_scoped_conn(session_store.pool(), tenant_id).await;
+    let anchored = sqlx::query_scalar::<_, bool>(
+        "SELECT properties_summary ? 'base_confidence' FROM moa.node_index WHERE uid = $1",
+    )
+    .bind(seeded_uid)
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("read decay anchor presence");
+    conn.commit().await.expect("commit decay anchor read");
+    assert!(
+        !anchored,
+        "decay anchor must clear so the next decay re-anchors from the boosted value"
+    );
+
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
 async fn fast_remember_fail_closed_pii_without_spans_errors_before_embedding_or_graph_write() {
     // Pins: missing PII classification fails before embedding or graph persistence.
     let _guard = TEST_LOCK.lock().await;

@@ -19,8 +19,9 @@ use support::{
     SLOW_PATH_CONTACT_ID, TEST_LOCK, active_tenant_entity_rows, active_tenant_fact_rows,
     active_user_entity_rows, active_user_fact_rows, configured_test_db, contradiction_edge_count,
     create_changelog_payloads, create_fact, entity_resolution_edges, entity_rows, fact_rows,
-    fixed_time, ingest_ctx, ingest_ctx_with_pii, node_confidence, node_valid_to, relates_to_edges,
-    supersede_protocol_count, supersedes_edge_exists, turn, user_fact_rows,
+    fixed_time, ingest_ctx, ingest_ctx_with_pii, node_confidence, node_ranking_state,
+    node_valid_to, relates_to_edges, set_node_ranking_state, supersede_protocol_count,
+    supersedes_edge_exists, turn, user_fact_rows,
 };
 
 #[derive(Debug, Deserialize)]
@@ -165,6 +166,84 @@ async fn duplicate_direct_ingest_attempt_skips_without_duplicate_durable_rows() 
 }
 
 #[tokio::test]
+async fn reobserved_duplicate_fact_reinforces_survivor_once_per_turn() {
+    // Pins: a fact re-observed in a later turn confirms its surviving node —
+    // confidence steps by exactly the reinforcement step, the base_confidence
+    // decay anchor clears, and last_accessed_at advances — while replaying the
+    // same turn takes the dedup early-return and leaves the boost untouched.
+    let _guard = TEST_LOCK.lock().await;
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let pool = test_db.store().pool();
+    let storage_partition_id = Uuid::now_v7();
+    let old_uid = create_fact(
+        pool,
+        storage_partition_id,
+        "API runs_on_port 3000",
+        fixed_time() - Duration::days(30),
+    )
+    .await;
+    let stale_access = fixed_time() - Duration::days(30);
+    set_node_ranking_state(
+        pool,
+        storage_partition_id,
+        old_uid,
+        0.6,
+        Some(0.9),
+        stale_access,
+    )
+    .await;
+
+    let duplicate_turn = turn(storage_partition_id, "Fact: API runs_on_port 3000", 2);
+    let report = ingest_turn_direct_with_ctx(
+        ingest_ctx(pool, storage_partition_id).await,
+        duplicate_turn.clone(),
+    )
+    .await
+    .expect("re-observed fact should ingest");
+
+    assert_eq!(report.reinforced, 1);
+    assert_eq!(report.inserted, 0);
+    assert_eq!(report.superseded, 0);
+    assert_eq!(report.skipped, 0);
+    assert_eq!(report.failed, 0);
+
+    let rows = active_user_fact_rows(pool, storage_partition_id).await;
+    assert_eq!(rows.len(), 1, "reinforcement must not add fact nodes");
+    assert_eq!(rows[0].uid, old_uid);
+
+    let (confidence, base_confidence, last_accessed_at) =
+        node_ranking_state(pool, storage_partition_id, old_uid).await;
+    assert!(
+        (confidence - 0.7).abs() < 1e-9,
+        "confidence must step from 0.6 by exactly 0.1, got {confidence}"
+    );
+    assert_eq!(
+        base_confidence, None,
+        "decay anchor must clear so the next decay re-anchors from the boosted value"
+    );
+    assert!(
+        last_accessed_at > stale_access,
+        "last_accessed_at must advance on reinforcement"
+    );
+
+    let replay =
+        ingest_turn_direct_with_ctx(ingest_ctx(pool, storage_partition_id).await, duplicate_turn)
+            .await
+            .expect("replayed turn should ingest");
+
+    assert_eq!(replay.reinforced, 0);
+    assert_eq!(replay.skipped, 1);
+    let (confidence_after_replay, _, _) =
+        node_ranking_state(pool, storage_partition_id, old_uid).await;
+    assert!(
+        (confidence_after_replay - 0.7).abs() < 1e-9,
+        "replay must not boost confidence twice, got {confidence_after_replay}"
+    );
+}
+
+#[tokio::test]
 async fn slow_path_respects_user_default_and_tenant_shared_scope_markers() {
     // Pins: unmarked and user-private slow-path facts stay user scoped, while explicit
     // tenant-shared markers write tenant rows with the marker stripped.
@@ -259,7 +338,10 @@ async fn slow_path_ingests_document_with_contradictions_and_uses_supersedes_edge
 
     assert_eq!(report.inserted, 0);
     assert_eq!(report.superseded, 1);
-    assert_eq!(report.skipped, 1);
+    // The restated "3000" fact reinforces the seeded node before the "8080"
+    // fact supersedes it; nothing is silently skipped.
+    assert_eq!(report.reinforced, 1);
+    assert_eq!(report.skipped, 0);
     assert_eq!(report.failed, 0);
     assert!(
         node_valid_to(test_db.store().pool(), storage_partition_id, old_uid)
@@ -452,6 +534,69 @@ async fn slow_path_uses_scripted_extractor_for_fact_heuristic_would_skip() {
     assert_eq!(properties["predicate"], "note");
     assert_eq!(properties["object"], "names standup owner");
     assert_eq!(properties["source_chunk"], 0);
+}
+
+#[tokio::test]
+async fn stated_event_time_backdates_fact_valid_from() {
+    // Pins: an extractor-provided event time becomes the fact node's
+    // `valid_from` so recency ranking and as-of reads reflect when the fact
+    // became true, while a future-dated event time falls back to the turn
+    // instant instead of creating a not-yet-valid fact.
+    let _guard = TEST_LOCK.lock().await;
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let pool = test_db.store().pool();
+    let storage_partition_id = Uuid::now_v7();
+    let stated = fixed_time() - Duration::days(120);
+    let future = fixed_time() + Duration::days(5);
+    let mut facts = extract_facts(&[
+        TurnChunk {
+            index: 0,
+            text: "Fact: contact moved_to Denver".to_string(),
+            token_estimate: 4,
+        },
+        TurnChunk {
+            index: 1,
+            text: "Fact: contact joined team_beta".to_string(),
+            token_estimate: 4,
+        },
+    ])
+    .expect("scripted facts extract");
+    facts[0].event_time = Some(stated);
+    facts[1].event_time = Some(future);
+    let ctx = ingest_ctx(pool, storage_partition_id)
+        .await
+        .with_extractor(Arc::new(ScriptedFactExtractor::new(facts)));
+
+    let report = ingest_turn_direct_with_ctx(ctx, turn(storage_partition_id, "transcript", 3))
+        .await
+        .expect("slow path ingests dated facts");
+
+    assert_eq!(report.inserted, 2);
+    let rows = active_user_fact_rows(pool, storage_partition_id).await;
+    assert_eq!(rows.len(), 2);
+    let by_object = |needle: &str| {
+        rows.iter()
+            .find(|row| {
+                row.properties_summary
+                    .as_ref()
+                    .and_then(|properties| properties.get("object"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(needle)
+            })
+            .expect("expected fact present")
+    };
+    assert_eq!(
+        by_object("Denver").valid_from,
+        stated,
+        "stated event time must backdate valid_from"
+    );
+    assert_eq!(
+        by_object("team_beta").valid_from,
+        fixed_time(),
+        "future-dated event time must fall back to the turn instant"
+    );
 }
 
 #[tokio::test]

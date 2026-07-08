@@ -296,6 +296,41 @@ fn natural_transcripts_contain_no_fact_markers() {
 }
 
 #[test]
+fn natural_pr_corpus_chunks_are_covered_by_recorded_fixtures() {
+    use moa_eval::memory_eval::missing_extraction_chunk_hashes;
+    // Pins: every chunk the recorded extraction lane will hash has a committed
+    // fixture, so a natural-renderer or chunking change fails in the PR that
+    // causes the drift instead of at the next recorded eval run.
+    let corpus = generate_memory_eval_corpus_with_style(
+        CorpusProfile::Pr,
+        vec![1, 2, 3],
+        TranscriptStyle::Natural,
+    )
+    .expect("generate natural PR corpus");
+    let fixtures_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/memory");
+    let fixture_path = ["v3", "v2"]
+        .iter()
+        .map(|version| {
+            fixtures_dir.join(format!(
+                "extractions-{}-{version}.jsonl",
+                corpus.manifest.corpus_id
+            ))
+        })
+        .find(|candidate| candidate.exists())
+        .expect("a recorded extraction fixture file should exist for the natural PR corpus");
+
+    let missing = missing_extraction_chunk_hashes(&corpus.sessions, &corpus.ledger, &fixture_path)
+        .expect("compute fixture coverage");
+
+    assert!(
+        missing.is_empty(),
+        "{} corpus chunk(s) have no recorded extraction fixture — the natural renderer          or chunking drifted. Re-record with: cargo run -p xtask --          record-memory-extractions --corpus target/memory-eval/pr-natural\nmissing: {:?}",
+        missing.len(),
+        &missing[..missing.len().min(5)]
+    );
+}
+
+#[test]
 fn natural_generation_is_deterministic_for_same_seed() {
     // Pins: natural corpus generation is byte-stable for the same profile and seeds.
     let first = generate_memory_eval_corpus_with_style(

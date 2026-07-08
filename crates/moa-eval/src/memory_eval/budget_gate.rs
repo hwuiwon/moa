@@ -740,6 +740,7 @@ mod tests {
                 p50_retrieval_latency_ms: 0,
                 p95_retrieval_latency_ms: 0,
                 cross_user_leak_count: 0,
+                staleness_leak_rate: MetricSummary::default(),
                 pii_unredacted_count: 0,
             },
             ingestion_coverage: MetricSummary::default(),

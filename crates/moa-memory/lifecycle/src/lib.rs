@@ -17,11 +17,12 @@ pub(crate) fn property_string(properties: &Option<Value>, key: &str) -> Option<S
 }
 
 pub use consolidate::{
-    BackfillStats, ConsolidationOptions, ConsolidationOutcome, DecayStats, EntityResolutionOptions,
-    EntityResolutionStats, MergeStats, Result, SweepStats, TenantConsolidationCursor,
-    advance_consolidation_watermark, backfill_entities, consolidate_tenant, decay_confidence,
-    decay_target_confidence, merge_duplicates, rebuild_digests, resolve_entity_duplicates,
-    sweep_contradictions, tenant_changelog_version, tenants_needing_consolidation,
+    BackfillStats, ConsolidationOptions, ConsolidationOutcome, DecayStats, EXPIRED_IDLE_REASON,
+    EntityResolutionOptions, EntityResolutionStats, ExpiryStats, MergeStats, Result, SweepStats,
+    TenantConsolidationCursor, advance_consolidation_watermark, backfill_entities,
+    consolidate_tenant, decay_confidence, decay_target_confidence, expire_idle_facts,
+    merge_duplicates, rebuild_digests, resolve_entity_duplicates, sweep_contradictions,
+    tenant_changelog_version, tenants_needing_consolidation,
 };
 pub use curate::{
     LessonCurationOptions, LessonCurationStats, curate_skill_lessons, normalize_lesson_summary,

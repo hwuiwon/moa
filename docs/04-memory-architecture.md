@@ -136,7 +136,24 @@ must not synthesize session turns or overload `Memory.ingest_documents`.
 These identities let ingestion diff changed documents, reuse embeddings,
 tombstone deleted source content, and keep citations stable across re-syncs.
 
+Re-observation reinforces instead of dropping. When the contradiction detector
+routes an extracted fact as a duplicate of an existing node (or the fast-path
+`memory_remember` restates one), ingestion confirms the survivor: confidence
+steps toward a cap, the `base_confidence` decay anchor clears so the next decay
+re-anchors from the boosted value, and `last_accessed_at` advances. Combined
+with anchored decay this makes memory use-it-or-lose-it: restated facts stay
+hot, one-off mentions fade. The slow path records the boost with the same-turn
+dedup row so Restate replays do not double-boost.
+
 Slow-path fact extraction is behind the `FactExtractor` seam. The heuristic extractor remains the default and journal-safe fallback. Environments can opt into provider-backed `ModelFactExtractor` with `memory.extraction.enabled`; model selection, credentials, and configured chat-model failover come from the shared `moa-providers` config path, while memory prompts, parsing, and prompt versions stay in `moa-memory-ingest`. Eval replay uses recorded extraction fixtures so the natural transcript lane stays hermetic after live recording.
+
+The model extractor may emit an optional `event_time` when the transcript
+states when a fact became true ("I moved to Denver last August"). A stated,
+non-future event time becomes the fact node's `valid_from`, so recency ranking
+and as-of reads reflect event time rather than ingestion time. Event time is
+not part of the fact identity hash, and malformed values degrade to the turn
+instant instead of failing extraction. Prompt v3 adds only this optional key,
+so recorded v2 fixtures remain replayable.
 
 PII classification runs before durable memory writes. Sensitive text is either filtered, redacted, or tagged according to the privacy class and policy.
 
@@ -168,9 +185,12 @@ only.
 
 When `memory.retrieval.lineage_enabled` is true, retrieval records best-effort
 lineage rows after ranking: tenant, contact, session, turn sequence, durable
-turn id when known, node UID, rank, and timestamp. The write is fire-and-forget
-and flag-dark by default, so normal retrieval does not wait on lineage
-persistence.
+turn id when known, node UID, rank, and timestamp. The write is fire-and-forget,
+so normal retrieval does not wait on lineage persistence.
+`memory.retrieval.lineage_sample_rate` (default `1.0`) caps lineage write cost
+at scale: sampling is deterministic per `(session, turn)` — hashing, not
+randomness — so a given turn either always records lineage or never does at a
+fixed rate, and Beta-smoothed quality scores still converge on the sample.
 
 Tenant knowledge query trace records are renderer-facing lineage views. They
 record the original query, rewritten retrieval query, searched scopes, graph,
@@ -188,15 +208,21 @@ Tenant consolidation is a scheduled maintenance pass. In cloud mode it is the
 logic does not depend on Restate, so hermetic eval runs and scheduled
 maintenance call the same code.
 
-Consolidation v1 runs five deterministic operations:
+Consolidation v1 runs six deterministic operations:
 
-- **Exact duplicate merge** groups active `Fact` nodes by `(tenant_id, contact_id, scope, fact_hash)`. The canonical is the earliest `valid_from` row with UID as the tiebreak. Other active rows are closed with a `SUPERSEDES` edge in the same direction as normal graph supersession: replacement/canonical `-> SUPERSEDES -> old`.
+- **Exact duplicate merge** groups active `Fact` nodes by normalized `(tenant_id, contact_id, scope, subject, predicate, object)` — fact content, not the summary-bearing `fact_hash`, so the same fact restated in different words still merges. The canonical is the earliest `valid_from` row with UID as the tiebreak. Other active rows are closed with a `SUPERSEDES` edge in the same direction as normal graph supersession: replacement/canonical `-> SUPERSEDES -> old`.
 - **Anchored confidence decay** lowers confidence for idle facts. On first decay the current confidence is copied to `properties.base_confidence`; future runs recompute from that base instead of multiplying against the current value. This makes rerunning at the same `now` idempotent. Decay floors at the configured minimum and never deletes or invalidates a fact.
 - **Contradiction sweep** groups active facts by `(tenant_id, contact_id, scope, subject, predicate)` only for explicit v1 update/contradiction predicates such as `cache_backend_conflict`, `deploy_target`, and `on_call_primary`. If a group contains multiple objects, the newest `valid_from` row wins with UID as the deterministic tiebreak, and older rows are superseded. Broad or multi-valued predicates such as preferences, contact email, dependency, owner, editor, `uses`, `is`, and `switched to` are not swept in v1 because recorded extraction can use them across unrelated facts. No LLM judge runs in v1.
+- **Idle expiry** closes active `Fact` nodes that sit at the decay floor AND
+  have not been accessed for `expire_idle_days` (default 180; `0` disables).
+  The close is a bitemporal invalidation with reason `expired_idle` — history
+  and as-of reads keep working — so the pass bounds the active retrieval set
+  per tenant without destroying anything. It runs after decay so it sees
+  post-decay confidence.
 - **Entity backfill** embeds active `Entity` nodes that lack vector rows when an embedder is available, and promotes edge-level `alias_mention` values into `properties.aliases` through the graph property-update operation.
 - **Digest rebuild** renders deterministic standing contact and tenant summaries from active `Fact` nodes above the decay floor. Preference-like predicates render first, then other facts, newest first within each tier. The renderer truncates at whole lines using a chars/4 token estimate and stores the included source fact UIDs in `moa.memory_digests`. Contact sessions consume only the current contact digest.
 
-The v1 pass deliberately does not do semantic near-duplicate merging, LLM-polished digest prose, episode building, scope-drift repair, or destructive expiry. `at_floor` is reported for future policy design, but floor-bound facts remain active unless another write supersedes them.
+The v1 pass deliberately does not do semantic near-duplicate merging, LLM-polished digest prose, episode building, scope-drift repair, or destructive (hard-delete) expiry. `at_floor` is reported alongside `expired_idle`; floor-bound facts inside the idle window remain active unless another write supersedes them.
 
 Successful consolidation appends a tenant-local `memory_updated` entry to
 `learning_log`.

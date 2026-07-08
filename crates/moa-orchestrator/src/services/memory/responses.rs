@@ -63,6 +63,7 @@ pub(super) fn ingest_result_from_report(
         inserted: usize_to_u64(report.inserted),
         superseded: usize_to_u64(report.superseded),
         skipped: usize_to_u64(report.skipped),
+        reinforced: usize_to_u64(report.reinforced),
         failed: usize_to_u64(report.failed),
         edges: 0,
         contradictions: 0,

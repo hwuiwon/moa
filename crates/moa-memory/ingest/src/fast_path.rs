@@ -581,6 +581,20 @@ async fn fast_remember_inner(
     };
 
     if let Conflict::Duplicate(existing_uid) = conflict {
+        // An agent restating a fact is a confirmation, not a no-op: reinforce
+        // the survivor so decay and recency ranking treat it as live.
+        // Best-effort — a failed boost must not fail the remember call.
+        if let Err(error) = ctx
+            .graph
+            .reinforce_node(moa_memory_graph::NodeReinforcementIntent {
+                uid: existing_uid,
+                step: crate::extract::REINFORCE_CONFIDENCE_STEP,
+                cap: crate::extract::REINFORCE_CONFIDENCE_CAP,
+            })
+            .await
+        {
+            warn!(%error, "fast-path duplicate reinforcement failed");
+        }
         return Ok(existing_uid);
     }
 

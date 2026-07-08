@@ -438,6 +438,7 @@ fn redact_fact(fact: &ExtractedFact, result: &PiiResult) -> ExtractedFact {
         source_chunk: fact.source_chunk,
         scope_hint: fact.scope_hint,
         confidence: fact.confidence,
+        event_time: fact.event_time,
     };
     match fact_hash(&redacted) {
         Ok(hash) => redacted.uid = fact_uid_from_hash(&hash),
@@ -608,14 +609,15 @@ fn decision_from_conflict(conflict: Conflict, fact: EmbeddedFact) -> IngestDecis
     match conflict {
         Conflict::Insert | Conflict::Indeterminate => IngestDecision::Insert { fact },
         Conflict::Supersede(old_uid) => IngestDecision::Supersede { old_uid, fact },
-        Conflict::Duplicate(fact_uid) => IngestDecision::SkipDuplicate { fact_uid },
+        Conflict::Duplicate(fact_uid) => IngestDecision::SkipDuplicate { fact_uid, fact },
     }
 }
 
 fn decision_scope(turn: &SessionTurn, decision: &IngestDecision) -> RlsContext {
-    match decision_fact(decision) {
-        Some(fact) => fact_scope(turn, fact),
-        None => turn_default_scope(turn),
+    match decision {
+        IngestDecision::Insert { fact }
+        | IngestDecision::Supersede { fact, .. }
+        | IngestDecision::SkipDuplicate { fact, .. } => fact_scope(turn, fact),
     }
 }
 
@@ -672,6 +674,7 @@ async fn apply_decisions(
                 report.superseded += 1;
                 record_drain_scope(&mut drain_scopes, &scope);
             }
+            Ok(ApplyOutcome::Reinforced) => report.reinforced += 1,
             Ok(ApplyOutcome::Skipped) => report.skipped += 1,
             Err(error) => {
                 report.failed += 1;
@@ -753,6 +756,11 @@ async fn apply_one_decision(
     turn: &SessionTurn,
     decision: &IngestDecision,
 ) -> Result<ApplyOutcome, HandlerError> {
+    // Re-observation confirms the survivor instead of dropping the fact, and
+    // skips the entity/vector setup below that only insert paths need.
+    if let IngestDecision::SkipDuplicate { fact_uid, fact } = decision {
+        return reinforce_duplicate(deps.pool, scope, turn, fact, *fact_uid).await;
+    }
     let Some(fact) = decision_fact(decision) else {
         return Ok(ApplyOutcome::Skipped);
     };
@@ -942,7 +950,13 @@ fn node_intent(
         }),
         pii_class: fact.classified.pii_class,
         confidence: Some(extracted_confidence(extracted)),
-        valid_from: turn.finalized_at,
+        // A stated event time backdates validity so recency ranking and as-of
+        // reads reflect when the fact became true; future-dated values fall
+        // back to the turn instant.
+        valid_from: extracted
+            .event_time
+            .filter(|event_time| *event_time <= turn.finalized_at)
+            .unwrap_or(turn.finalized_at),
         embedding: fact.embedding.clone(),
         embedding_model: fact.embedding_model.clone(),
         embedding_model_version: fact.embedding_model_version,
@@ -1402,7 +1416,48 @@ fn ingest_step_retry_policy() -> RunRetryPolicy {
 enum ApplyOutcome {
     Inserted,
     Superseded,
+    Reinforced,
     Skipped,
+}
+
+/// Confirms a re-observed fact by reinforcing the surviving node.
+///
+/// The same-turn `ingest_dedup` row committed with the boost makes
+/// reinforcement idempotent under Restate replays: a retried turn takes the
+/// `dedup_fact_uid` early return instead of boosting twice.
+async fn reinforce_duplicate(
+    pool: &PgPool,
+    scope: &RlsContext,
+    turn: &SessionTurn,
+    fact: &EmbeddedFact,
+    existing_uid: uuid::Uuid,
+) -> Result<ApplyOutcome, HandlerError> {
+    let hash = fact_hash(&fact.classified.fact).map_err(HandlerError::from)?;
+    if dedup_fact_uid(pool, scope, turn, &hash).await?.is_some() {
+        return Ok(ApplyOutcome::Skipped);
+    }
+    let mut conn = ScopedConn::begin_as_app(pool, scope, true)
+        .await
+        .map_err(HandlerError::from)?;
+    let reinforced = moa_memory_graph::write::reinforce_node_in_conn(
+        conn.as_mut(),
+        moa_memory_graph::NodeReinforcementIntent {
+            uid: existing_uid,
+            step: crate::extract::REINFORCE_CONFIDENCE_STEP,
+            cap: crate::extract::REINFORCE_CONFIDENCE_CAP,
+        },
+    )
+    .await
+    .map_err(HandlerError::from)?;
+    insert_dedup_in_conn(conn.as_mut(), scope, turn, &hash, existing_uid).await?;
+    conn.commit().await.map_err(HandlerError::from)?;
+    // A closed survivor means the duplicate verdict raced a supersession;
+    // report a skip rather than reviving stale confidence.
+    Ok(if reinforced {
+        ApplyOutcome::Reinforced
+    } else {
+        ApplyOutcome::Skipped
+    })
 }
 
 #[cfg(test)]
@@ -1491,6 +1546,7 @@ mod tests {
             source_chunk: 0,
             scope_hint: ExtractedFactScopeHint::Contact,
             confidence: Some(0.9),
+            event_time: None,
         };
         let hash = fact_hash(&fact).expect("fact hashes");
         fact.uid = crate::fact_uid_from_hash(&hash);
@@ -1572,6 +1628,7 @@ mod tests {
             source_chunk: 0,
             scope_hint: ExtractedFactScopeHint::Contact,
             confidence: Some(0.9),
+            event_time: None,
         };
         let hash = fact_hash(&fact).expect("fact hashes");
         fact.uid = crate::fact_uid_from_hash(&hash);
@@ -1784,6 +1841,7 @@ mod tests {
             source_chunk: 3,
             scope_hint: ExtractedFactScopeHint::Contact,
             confidence: Some(0.93),
+            event_time: None,
         };
         let hash = fact_hash(&fact).expect("fact hashes");
         fact.uid = crate::fact_uid_from_hash(&hash);

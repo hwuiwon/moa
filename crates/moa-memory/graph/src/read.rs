@@ -10,7 +10,7 @@ use crate::{
     GraphError, GraphExpansionHit, GraphStore, GraphTraversalDirection, GraphWalkScoring,
     PostgresGraphStore,
     edge::{EdgeLabel, EdgeWriteIntent},
-    node::{NODE_INDEX_COLUMNS, NodeIndexRow, NodeLabel, NodeWriteIntent},
+    node::{NODE_INDEX_COLUMNS, NodeIndexRow, NodeLabel, NodeReinforcementIntent, NodeWriteIntent},
 };
 
 #[async_trait::async_trait]
@@ -33,6 +33,10 @@ impl GraphStore for PostgresGraphStore {
         intent: NodeWriteIntent,
     ) -> Result<Uuid, GraphError> {
         crate::write::supersede_node(self, old_uid, intent).await
+    }
+
+    async fn reinforce_node(&self, intent: NodeReinforcementIntent) -> Result<bool, GraphError> {
+        crate::write::reinforce_node(self, intent).await
     }
 
     async fn invalidate_node(&self, uid: Uuid, reason: &str) -> Result<(), GraphError> {

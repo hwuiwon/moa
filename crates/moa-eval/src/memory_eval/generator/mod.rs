@@ -220,6 +220,7 @@ pub fn generate_memory_eval_corpus_with_style(
     let sessions = schedule.render_sessions(transcript_style);
     let mut probes = build_probes(
         profile,
+        transcript_style,
         &seeds,
         &users,
         &storage_partitions,
@@ -1041,6 +1042,7 @@ fn schedule_user_facts(
 
 fn build_probes(
     profile: CorpusProfile,
+    transcript_style: TranscriptStyle,
     seeds: &[u64],
     users: &[UserId],
     storage_partitions: &[StoragePartitionId],
@@ -1117,6 +1119,35 @@ fn build_probes(
                 as_of: None,
                 expected_redacted: false,
             });
+
+            // Conversational phrasing variant, natural style only so marked
+            // (golden) corpora stay byte-identical. Real queries are colloquial
+            // and underspecified; the `-conv` suffix lets reports split the
+            // templated and conversational slices.
+            if transcript_style == TranscriptStyle::Natural {
+                probes.push(Probe {
+                    probe_id: format!("{user_prefix}-latest-deploy-target-conv"),
+                    probe_type: ProbeType::LatestValueAfterUpdate,
+                    storage_partition_id: storage_partition.clone(),
+                    user_id: user.clone(),
+                    query: format!(
+                        "Where does {} deploy these days?",
+                        tenant_fact_refs.component
+                    ),
+                    rewrite_query: None,
+                    expected_rewrite: None,
+                    query_class: None,
+                    answer: format!(
+                        "The latest deploy target is {}.",
+                        tenant_fact_refs.deploy_target
+                    ),
+                    expected_fact_ids: vec![tenant_fact_refs.deploy_new_fact_id.clone()],
+                    expected_fact_grades: std::collections::BTreeMap::new(),
+                    blocked_fact_ids: vec![tenant_fact_refs.deploy_old_fact_id.clone()],
+                    as_of: None,
+                    expected_redacted: false,
+                });
+            }
 
             probes.push(Probe {
                 probe_id: format!("{user_prefix}-cross-user-private-repository"),
@@ -2122,32 +2153,58 @@ mod tests {
     };
 
     #[test]
-    fn generator_restatement_transcripts_are_verbatim_repeats() {
-        // Pins: exact-hash consolidation is exercised by byte-identical restatement transcripts.
-        let corpus = generate_memory_eval_corpus_with_style(
+    fn marked_restatements_stay_verbatim_and_natural_restatements_paraphrase() {
+        // Pins: the marked lane keeps byte-identical restatement transcripts so
+        // exact fact-hash collapse stays deterministic, while the natural lane
+        // paraphrases restatements — real users rephrase, so the recorded lane
+        // exercises the write-time duplicate detector instead of text equality.
+        // Paraphrases must still name the canonical subject and object so
+        // extraction can produce matching fact content.
+        let marked = generate_memory_eval_corpus_with_style(
+            CorpusProfile::Pr,
+            vec![1, 2, 3],
+            TranscriptStyle::Marked,
+        )
+        .expect("generate PR marked corpus");
+        let natural = generate_memory_eval_corpus_with_style(
             CorpusProfile::Pr,
             vec![1, 2, 3],
             TranscriptStyle::Natural,
         )
         .expect("generate PR natural corpus");
-        let turns = turns_by_fact_id(&corpus.sessions);
-        let restating = corpus
-            .ledger
-            .iter()
-            .filter(|fact| fact.restates.is_some())
-            .collect::<Vec<_>>();
 
-        assert!(restating.len() >= 10);
-        for fact in restating {
-            let canonical_id = fact.restates.as_deref().expect("canonical id");
-            let canonical = turns
-                .get(canonical_id)
-                .expect("canonical turn should exist");
-            let restatement = turns
-                .get(fact.fact_id.as_str())
-                .expect("restating turn should exist");
-
-            assert_eq!(restatement.transcript, canonical.transcript);
+        for corpus in [&marked, &natural] {
+            let verbatim = corpus.manifest.transcript_style == TranscriptStyle::Marked;
+            let turns = turns_by_fact_id(&corpus.sessions);
+            let restating = corpus
+                .ledger
+                .iter()
+                .filter(|fact| fact.restates.is_some())
+                .collect::<Vec<_>>();
+            assert!(restating.len() >= 10);
+            for fact in restating {
+                let canonical_id = fact.restates.as_deref().expect("canonical id");
+                let canonical = turns
+                    .get(canonical_id)
+                    .expect("canonical turn should exist");
+                let restatement = turns
+                    .get(fact.fact_id.as_str())
+                    .expect("restating turn should exist");
+                if verbatim {
+                    assert_eq!(restatement.transcript, canonical.transcript);
+                } else {
+                    assert_ne!(
+                        restatement.transcript, canonical.transcript,
+                        "natural restatement must paraphrase, not repeat"
+                    );
+                    assert!(
+                        restatement.transcript.contains(&fact.subject)
+                            && restatement.transcript.contains(&fact.object),
+                        "paraphrase must preserve fact content: {}",
+                        restatement.transcript
+                    );
+                }
+            }
         }
     }
 

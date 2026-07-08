@@ -33,6 +33,16 @@ where
 {
     /// Reads a version-checked fixture store from a JSONL file.
     pub fn read_jsonl(path: &Path, expected_version: &str) -> Result<Self> {
+        Self::read_jsonl_any(path, &[expected_version])
+    }
+
+    /// Reads a fixture store accepting any of the listed compatible versions.
+    ///
+    /// Suites use this when a prompt bump only adds optional output keys, so
+    /// fixtures recorded under an older prompt version stay replayable. The
+    /// first listed version is treated as current for remediation messages.
+    pub fn read_jsonl_any(path: &Path, expected_versions: &[&str]) -> Result<Self> {
+        let expected_version = expected_versions.first().copied().unwrap_or_default();
         let body = fs::read_to_string(path).map_err(|source| io_error(path, source))?;
         let mut records = BTreeMap::new();
         for (line_index, line) in body.lines().enumerate() {
@@ -46,13 +56,13 @@ where
                     line_index + 1
                 ))
             })?;
-            if record.fixture_version() != expected_version {
+            if !expected_versions.contains(&record.fixture_version()) {
                 return Err(EvalError::InvalidConfig(format!(
-                    "fixture {} key {} has version {}; expected {}",
+                    "fixture {} key {} has version {}; expected one of {}",
                     path.display(),
                     record.fixture_key(),
                     record.fixture_version(),
-                    expected_version
+                    expected_versions.join(", ")
                 )));
             }
             let key = normalize_key(record.fixture_key());
@@ -185,7 +195,7 @@ mod tests {
         let error = FixtureStore::<TestRecord>::read_jsonl(&path, "v2")
             .expect_err("version mismatch should fail");
 
-        assert!(error.to_string().contains("expected v2"));
+        assert!(error.to_string().contains("expected one of v2"));
         assert!(error.to_string().contains("abc"));
     }
 

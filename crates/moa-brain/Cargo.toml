@@ -46,6 +46,7 @@ workspace-hack = { workspace = true }
 [dev-dependencies]
 insta.workspace = true
 moa-memory-ingest = { workspace = true, features = ["test-util"] }
+moa-memory-lifecycle = { workspace = true }
 moa-memory-pii = { workspace = true }
 moa-providers = { workspace = true, features = ["test-util"] }
 moa-session = { workspace = true }

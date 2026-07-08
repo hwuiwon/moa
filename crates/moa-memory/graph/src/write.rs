@@ -14,8 +14,8 @@ use crate::{
     changelog::{ChangelogRecord, write_and_bump},
     edge::{EdgeLabel, EdgeWriteIntent},
     node::{
-        ExistingSupersessionIntent, NodeEmbeddingIntent, NodeLabel, NodePropertyUpdateIntent,
-        NodeWriteIntent, PiiClass,
+        ExistingSupersessionIntent, NodeEmbeddingIntent, NodeExpiryIntent, NodeLabel,
+        NodePropertyUpdateIntent, NodeReinforcementIntent, NodeWriteIntent, PiiClass,
     },
 };
 
@@ -420,6 +420,64 @@ pub async fn close_existing_node_with_supersession(
     Ok(())
 }
 
+/// Closes one active graph node without a replacement, at caller-provided instants.
+///
+/// Bitemporal close only: the node row, its incident edges, and its vector rows
+/// are closed or removed, and a changelog record is written — history and as-of
+/// reads keep working. Returns `false` without writing when the node is already
+/// closed, so scheduled passes rerun idempotently at the same `now`.
+pub async fn expire_node(store: &PostgresGraphStore, intent: NodeExpiryIntent) -> Result<bool> {
+    let mut conn = store.begin_required().await?;
+    let old = fetch_stored_node(conn.as_mut(), intent.uid)
+        .await?
+        .ok_or(GraphError::NotFound(intent.uid))?;
+    if old.valid_to.is_some() {
+        return Ok(false);
+    }
+
+    close_node_index(
+        conn.as_mut(),
+        intent.uid,
+        intent.valid_to,
+        intent.invalidated_at,
+        actor_uuid(&intent.actor_id),
+        &intent.reason,
+    )
+    .await?;
+    close_incident_edges(conn.as_mut(), intent.uid, intent.valid_to).await?;
+    if let Some(vector) = store.vector() {
+        vector.delete_in_tx(conn.as_mut(), &[intent.uid]).await?;
+    }
+    write_and_bump(
+        conn.as_mut(),
+        ChangelogRecord {
+            storage_partition_id: old.storage_partition_id,
+            contact_id: old.contact_id,
+            scope: old.scope,
+            actor_id: Some(intent.actor_id),
+            actor_kind: intent.actor_kind,
+            op: "invalidate".to_string(),
+            target_kind: "node".to_string(),
+            target_label: old.label.as_str().to_string(),
+            target_uid: intent.uid,
+            payload: json!({
+                "before": old.properties_summary,
+                "valid_to": intent.valid_to.to_rfc3339(),
+                "reason": intent.reason,
+            }),
+            redaction_marker: None,
+            pii_class: old.pii_class.as_str().to_string(),
+            audit_metadata: None,
+            cause_change_id: None,
+        },
+    )
+    .await?;
+
+    conn.commit().await?;
+    sync_vector_post_commit(store, "expire_node").await;
+    Ok(true)
+}
+
 /// Updates one active graph node's mutable properties atomically.
 pub async fn update_node_properties(
     store: &PostgresGraphStore,
@@ -485,6 +543,53 @@ pub async fn update_node_properties(
 
     conn.commit().await?;
     Ok(())
+}
+
+/// Reinforces one active node that ingestion re-observed, in its own transaction.
+///
+/// Bumps `confidence` one `step` toward `cap` (never lowering an already higher
+/// confidence), drops the `base_confidence` decay anchor so the next
+/// consolidation decay re-anchors from the boosted value, and touches
+/// `last_accessed_at` so idle decay and last-access recency ranking treat the
+/// fact as live. Like consolidation decay, this adjusts derived ranking
+/// metadata only, so no changelog row is written. Returns `true` when an
+/// active row was updated.
+pub async fn reinforce_node(
+    store: &PostgresGraphStore,
+    intent: NodeReinforcementIntent,
+) -> Result<bool> {
+    let mut conn = store.begin_required().await?;
+    let reinforced = reinforce_node_in_conn(conn.as_mut(), intent).await?;
+    conn.commit().await?;
+    Ok(reinforced)
+}
+
+/// Reinforces one active node inside a caller-owned scoped transaction.
+///
+/// See [`reinforce_node`] for semantics.
+pub async fn reinforce_node_in_conn(
+    conn: &mut PgConnection,
+    intent: NodeReinforcementIntent,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE moa.node_index
+        SET confidence = GREATEST(
+                COALESCE(confidence, 0.5),
+                LEAST(COALESCE(confidence, 0.5) + $2, $3)
+            ),
+            properties_summary = properties_summary - 'base_confidence',
+            last_accessed_at = now()
+        WHERE uid = $1
+          AND valid_to IS NULL
+        "#,
+    )
+    .bind(intent.uid)
+    .bind(intent.step)
+    .bind(intent.cap)
+    .execute(conn)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// Attaches a vector embedding to one active graph node atomically.

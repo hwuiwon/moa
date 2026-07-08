@@ -89,6 +89,13 @@ pub struct RetrievalCoreMetrics {
     pub p95_retrieval_latency_ms: u64,
     /// Number of blocked cross-user facts retrieved.
     pub cross_user_leak_count: usize,
+    /// Fraction of update probes whose top candidates leaked a superseded fact.
+    ///
+    /// This is the staleness rate: over `latest_value_after_update` probes, how
+    /// often the closed old value is still retrieved alongside or above its
+    /// replacement. Rising values mean memory is going stale in retrieval.
+    #[serde(default, skip_serializing_if = "summary_has_no_support")]
+    pub staleness_leak_rate: MetricSummary,
     /// Number of PII-redaction probes that returned unredacted material.
     #[serde(default)]
     pub pii_unredacted_count: usize,
@@ -96,6 +103,11 @@ pub struct RetrievalCoreMetrics {
 
 fn is_zero_u64(value: &u64) -> bool {
     *value == 0
+}
+
+/// Returns whether a sliced summary saw no contributing probes.
+fn summary_has_no_support(summary: &MetricSummary) -> bool {
+    summary.denominator == 0
 }
 
 impl Default for RetrievalCoreMetrics {
@@ -115,6 +127,7 @@ impl Default for RetrievalCoreMetrics {
             p50_retrieval_latency_ms: 0,
             p95_retrieval_latency_ms: 0,
             cross_user_leak_count: 0,
+            staleness_leak_rate: MetricSummary::default(),
             pii_unredacted_count: 0,
         }
     }

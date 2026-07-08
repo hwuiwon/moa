@@ -9,7 +9,7 @@ use crate::{
     ExtractedFact, ExtractedFactScopeHint, FactExtractor, IngestError, Result, TurnChunk,
     fact_hash, fact_uid_from_hash,
     model_fact_extractor::{
-        EXTRACTION_PROMPT_VERSION, normalize_extracted_fact, should_keep_extracted_fact,
+        COMPATIBLE_PROMPT_VERSIONS, normalize_extracted_fact, should_keep_extracted_fact,
     },
 };
 
@@ -43,6 +43,9 @@ pub struct RecordedFact {
     /// Optional extraction confidence.
     #[serde(default)]
     pub confidence: Option<f64>,
+    /// Optional stated event time recorded by the extractor.
+    #[serde(default)]
+    pub event_time: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl ExtractionFixtureRecord {
@@ -68,6 +71,7 @@ impl From<&ExtractedFact> for RecordedFact {
             summary: fact.summary.clone(),
             scope_hint: fact.scope_hint,
             confidence: fact.confidence,
+            event_time: fact.event_time,
         }
     }
 }
@@ -110,10 +114,14 @@ where
                 missing.push(key);
                 continue;
             };
-            if record.prompt_version != EXTRACTION_PROMPT_VERSION {
+            // v3 only adds the optional `event_time` key on top of v2, so v2
+            // fixtures stay valid: their facts simply carry no event time.
+            if !COMPATIBLE_PROMPT_VERSIONS.contains(&record.prompt_version.as_str()) {
                 return Err(IngestError::Extraction(format!(
-                    "recorded extraction fixture {} has prompt_version {}; expected {}",
-                    record.chunk_hash, record.prompt_version, EXTRACTION_PROMPT_VERSION
+                    "recorded extraction fixture {} has prompt_version {}; expected one of {}",
+                    record.chunk_hash,
+                    record.prompt_version,
+                    COMPATIBLE_PROMPT_VERSIONS.join(", ")
                 )));
             }
             for recorded in &record.facts {
@@ -147,6 +155,7 @@ impl RecordedFact {
             source_chunk,
             scope_hint: self.scope_hint,
             confidence: self.confidence.map(|value| value.clamp(0.0, 1.0)),
+            event_time: self.event_time,
         };
         let hash = fact_hash(&fact)?;
         fact.uid = fact_uid_from_hash(&hash);
@@ -166,6 +175,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::model_fact_extractor::EXTRACTION_PROMPT_VERSION;
 
     #[derive(Debug, Clone)]
     struct MapStore {
@@ -198,6 +208,7 @@ mod tests {
                 summary: "auth uses JWT".to_string(),
                 scope_hint: ExtractedFactScopeHint::Tenant,
                 confidence: Some(0.87),
+                event_time: None,
             }],
         };
         let extractor = RecordedFactExtractor::new(
@@ -237,6 +248,7 @@ mod tests {
                 summary: "The user prefers Linear.".to_string(),
                 scope_hint: ExtractedFactScopeHint::Contact,
                 confidence: Some(0.9),
+                event_time: None,
             }],
         };
         let extractor = RecordedFactExtractor::new(
@@ -252,9 +264,51 @@ mod tests {
             .expect_err("reject v1 fixture");
 
         assert!(
-            error.to_string().contains("prompt_version v1; expected v2"),
+            error
+                .to_string()
+                .contains("prompt_version v1; expected one of v2, v3"),
             "{error}"
         );
+    }
+
+    #[tokio::test]
+    async fn fixture_loader_accepts_v2_fixtures_because_v3_only_adds_event_time() {
+        // Pins: recorded v2 fixtures stay replayable after the v3 prompt bump —
+        // v3 only adds the optional event_time key, so v2 facts load with none.
+        let chunk = TurnChunk {
+            index: 2,
+            text: "user: auth uses JWT everywhere".to_string(),
+            token_estimate: 5,
+        };
+        let key = chunk_hash(&chunk.text);
+        let record = ExtractionFixtureRecord {
+            chunk_hash: key.clone(),
+            model: "command-test".to_string(),
+            prompt_version: "v2".to_string(),
+            facts: vec![RecordedFact {
+                subject: "auth".to_string(),
+                predicate: "uses".to_string(),
+                object: "JWT".to_string(),
+                summary: "auth uses JWT".to_string(),
+                scope_hint: ExtractedFactScopeHint::Tenant,
+                confidence: Some(0.9),
+                event_time: None,
+            }],
+        };
+        let extractor = RecordedFactExtractor::new(
+            MapStore {
+                records: BTreeMap::from([(key, record)]),
+            },
+            "cargo run -p xtask -- record-memory-extractions --corpus target/memory-eval/pr-natural",
+        );
+
+        let facts = extractor
+            .extract(&[chunk])
+            .await
+            .expect("v2 fixture replays");
+
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].event_time, None);
     }
 
     #[tokio::test]
@@ -277,6 +331,7 @@ mod tests {
                 summary: "The user had a busy week.".to_string(),
                 scope_hint: ExtractedFactScopeHint::Contact,
                 confidence: Some(0.8),
+                event_time: None,
             }],
         };
         let extractor = RecordedFactExtractor::new(
@@ -311,6 +366,7 @@ mod tests {
                 summary: "User 04 should use repo/control-plane.".to_string(),
                 scope_hint: ExtractedFactScopeHint::Tenant,
                 confidence: Some(0.8),
+                event_time: None,
             }],
         };
         let extractor = RecordedFactExtractor::new(

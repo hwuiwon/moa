@@ -72,6 +72,11 @@ pub struct ExtractedFact {
     pub scope_hint: ExtractedFactScopeHint,
     /// Optional model-provided confidence for this extracted fact.
     pub confidence: Option<f64>,
+    /// Instant the fact became true when the transcript states it, so
+    /// `valid_from` reflects event time rather than ingestion time. Not part
+    /// of the fact identity hash.
+    #[serde(default)]
+    pub event_time: Option<DateTime<Utc>>,
 }
 
 /// A fact after PII classification.
@@ -98,6 +103,11 @@ pub struct EmbeddedFact {
     pub embedding_model_version: Option<i32>,
 }
 
+/// Confidence boost applied when a re-observed fact reinforces its survivor.
+pub const REINFORCE_CONFIDENCE_STEP: f64 = 0.1;
+/// Ceiling for reinforcement boosts; confidences already above it are kept.
+pub const REINFORCE_CONFIDENCE_CAP: f64 = 0.95;
+
 /// Contradiction decision made before writing a fact to the graph.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -114,10 +124,13 @@ pub enum IngestDecision {
         /// Replacement fact.
         fact: EmbeddedFact,
     },
-    /// Skip because the fact is already represented.
+    /// Skip because the fact is already represented, reinforcing the survivor.
     SkipDuplicate {
         /// Fact uid that was considered duplicate.
         fact_uid: Uuid,
+        /// Re-observed fact; carried so apply can scope and hash the
+        /// reinforcement without re-running extraction.
+        fact: EmbeddedFact,
     },
 }
 
@@ -130,6 +143,9 @@ pub struct IngestApplyReport {
     pub superseded: usize,
     /// Number of facts skipped by idempotency or duplicate checks.
     pub skipped: usize,
+    /// Number of re-observed facts that reinforced an existing node.
+    #[serde(default)]
+    pub reinforced: usize,
     /// Number of facts written to the dead-letter queue.
     pub failed: usize,
 }
@@ -281,6 +297,7 @@ fn extracted_fact_from_summary(source_chunk: usize, summary: String) -> Extracte
         source_chunk,
         scope_hint,
         confidence: None,
+        event_time: None,
     }
 }
 

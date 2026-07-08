@@ -127,7 +127,7 @@ Promote the kernel to a separate crate only when a second suite needs it.
 `CachedHybridRetriever` caches final ranked hits. Its key includes scope, query
 text and embedding fingerprint, cutoff, reranker flag, temporal filter, ranking
 reference time, and a stable ranking fingerprint made from the ranking config
-plus `RANKING_PIPELINE_VERSION` 8. The fingerprinted config shape excludes the
+plus the current `RANKING_PIPELINE_VERSION`. The fingerprinted config shape excludes the
 ranking-mode switch while retaining the stemmed token features, first-person
 scope boost, graph-rescue weight, and OR lexical leg behavior.
 

@@ -38,8 +38,8 @@ use crate::retrieval::source_rank::{
 };
 use crate::retrieval::types::{
     GraphCandidateCounts, GraphRetrievalDiagnostics, KnowledgeChunkHydration,
-    KnowledgeChunkWindowPart, LegSources, LexicalBackend, Result, RetrievalError, RetrievalHit,
-    RetrievalLineageHit, RetrievalOutput, RetrievalRequest, SourceTier,
+    KnowledgeChunkWindowPart, LegSources, LexicalBackend, LineageContext, Result, RetrievalError,
+    RetrievalHit, RetrievalLineageHit, RetrievalOutput, RetrievalRequest, SourceTier,
 };
 
 const MIN_FUSED_CANDIDATE_LIMIT: usize = 26;
@@ -59,7 +59,32 @@ pub struct HybridRetriever {
     ranking_config: RankingConfig,
     assume_app_role: bool,
     lineage_enabled: bool,
+    lineage_sample_rate: f64,
     graph_policy: GraphRetrievalPolicy,
+}
+
+/// Deterministically decides whether one turn's retrieval writes lineage rows.
+///
+/// The decision hashes `(session_id, turn_seq)` instead of drawing randomness,
+/// so replays and reruns of one turn are stable: at a fixed rate a turn either
+/// always records lineage or never does. Beta-smoothed quality scores converge
+/// on a sample, so partial rates cap lineage write cost at scale without
+/// starving the scoring job.
+fn lineage_turn_sampled(lineage: &LineageContext, sample_rate: f64) -> bool {
+    if sample_rate >= 1.0 {
+        return true;
+    }
+    if sample_rate <= 0.0 {
+        return false;
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(lineage.session_id.0.as_bytes());
+    hasher.update(&lineage.turn_seq.to_be_bytes());
+    let digest = hasher.finalize();
+    let mut prefix = [0_u8; 8];
+    prefix.copy_from_slice(&digest.as_bytes()[..8]);
+    let bucket = u64::from_be_bytes(prefix) as f64 / u64::MAX as f64;
+    bucket < sample_rate
 }
 
 impl HybridRetriever {
@@ -81,6 +106,7 @@ impl HybridRetriever {
             ranking_config: RankingConfig::default(),
             assume_app_role: false,
             lineage_enabled: false,
+            lineage_sample_rate: 1.0,
             graph_policy: GraphRetrievalPolicy::default(),
         }
     }
@@ -100,6 +126,7 @@ impl HybridRetriever {
             .with_configured_reranker(configured)
             .with_ranking_config(RankingConfig::from(&config.memory.retrieval.ranking))
             .with_lineage_enabled(config.memory.retrieval.lineage_enabled)
+            .with_lineage_sample_rate(config.memory.retrieval.lineage_sample_rate)
     }
 
     /// Adds an optional Turbopuffer target backend for promoted storage partitions.
@@ -149,6 +176,13 @@ impl HybridRetriever {
     #[must_use]
     pub fn with_lineage_enabled(mut self, enabled: bool) -> Self {
         self.lineage_enabled = enabled;
+        self
+    }
+
+    /// Overrides the fraction of turns that write lineage rows.
+    #[must_use]
+    pub fn with_lineage_sample_rate(mut self, sample_rate: f64) -> Self {
+        self.lineage_sample_rate = sample_rate;
         self
     }
 
@@ -360,6 +394,7 @@ impl HybridRetriever {
         }
         if self.lineage_enabled
             && let Some(lineage) = req.lineage
+            && lineage_turn_sampled(&lineage, self.lineage_sample_rate)
         {
             let ranked_hits = final_hits
                 .iter()
@@ -1106,6 +1141,38 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::Utc;
+
+    #[test]
+    fn lineage_sampling_is_deterministic_and_respects_rate_bounds() {
+        // Pins: lineage sampling keys on (session, turn) so the same turn always
+        // makes the same decision, 1.0 records everything, 0.0 records nothing,
+        // and a partial rate keeps roughly that fraction of turns.
+        let session_id = moa_core::SessionId(uuid::Uuid::from_u128(0x5eed));
+        let lineage = |turn_seq: i64| LineageContext {
+            session_id,
+            turn_id: None,
+            turn_seq,
+        };
+
+        for turn_seq in 0..64 {
+            assert!(lineage_turn_sampled(&lineage(turn_seq), 1.0));
+            assert!(!lineage_turn_sampled(&lineage(turn_seq), 0.0));
+            assert_eq!(
+                lineage_turn_sampled(&lineage(turn_seq), 0.5),
+                lineage_turn_sampled(&lineage(turn_seq), 0.5),
+                "sampling must be deterministic per (session, turn)"
+            );
+        }
+
+        let sampled = (0..1_000)
+            .filter(|turn_seq| lineage_turn_sampled(&lineage(*turn_seq), 0.5))
+            .count();
+        assert!(
+            (350..=650).contains(&sampled),
+            "a 0.5 rate should keep roughly half of 1000 turns, kept {sampled}"
+        );
+    }
+
     use moa_core::TenantId;
     use moa_memory_graph::{GraphError, PiiClass};
     use moa_providers::{RerankHit, Reranker};
@@ -2666,6 +2733,119 @@ mod tests {
             object_type: "article".to_string(),
             context_window: Vec::new(),
         }
+    }
+
+    fn fact_hit_with_spo(
+        uid: Uuid,
+        score: f64,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+    ) -> RetrievalHit {
+        let mut fact = hit(uid, "contact", score);
+        fact.node.properties_summary = Some(serde_json::json!({
+            "subject": subject,
+            "predicate": predicate,
+            "object": object,
+        }));
+        fact
+    }
+
+    #[test]
+    fn restated_fact_defers_to_distinct_fact_but_era_objects_survive() {
+        // Pins: final selection defers a fact restating identical content
+        // (same subject/predicate/object) so a distinct lower-ranked fact can
+        // take the slot, while update-era facts (same subject/predicate,
+        // different object) are never collapsed.
+        let hits = vec![
+            fact_hit_with_spo(Uuid::from_u128(1), 1.0, "component", "depends_on", "lib-a"),
+            fact_hit_with_spo(Uuid::from_u128(2), 0.9, "component", "depends_on", "lib-a"),
+            fact_hit_with_spo(
+                Uuid::from_u128(3),
+                0.8,
+                "component",
+                "depends_on",
+                "lib-old",
+            ),
+            fact_hit_with_spo(Uuid::from_u128(4), 0.7, "lib-a", "owned_by", "team-search"),
+        ];
+
+        let selected =
+            select_final_hits_for_policy(hits, &[], 3, GraphRetrievalPolicy::AnchoredRescue);
+
+        assert_eq!(
+            selected.iter().map(|hit| hit.uid).collect::<Vec<_>>(),
+            vec![Uuid::from_u128(1), Uuid::from_u128(3), Uuid::from_u128(4)],
+            "restatement must defer; era variant and second hop must be kept"
+        );
+    }
+
+    #[test]
+    fn cap_rejected_hit_does_not_block_a_later_fact_with_the_same_content() {
+        // Pins: a hit rejected by the per-object cap must not record its
+        // content facet as selected — a later distinct hit carrying the same
+        // content must still win a slot over deferred duplicates.
+        let object = Uuid::from_u128(0xA);
+        let chunk_fact = |uid: u128, score: f64, subject: &str| {
+            let mut fact =
+                fact_hit_with_spo(Uuid::from_u128(uid), score, subject, "covers", "topic");
+            fact.knowledge_chunk = Some(KnowledgeChunkHydration {
+                chunk_uid: Uuid::from_u128(uid + 0x100),
+                document_version_uid: Uuid::from_u128(uid + 0x200),
+                object_uid: object,
+                chunk_hash: format!("chunk-{uid}"),
+                ordinal: 0,
+                heading_path: Vec::new(),
+                text: subject.to_string(),
+                token_count: 4,
+                metadata: Value::Null,
+                source_uri: None,
+                source_title: None,
+                object_type: "article".to_string(),
+                context_window: Vec::new(),
+            });
+            fact
+        };
+        let hits = vec![
+            chunk_fact(1, 1.0, "alpha"),
+            chunk_fact(2, 0.9, "beta"),
+            // Third hit for the same knowledge object: rejected by the cap.
+            chunk_fact(3, 0.8, "gamma"),
+            // Same content as an already-selected hit: a true duplicate.
+            fact_hit_with_spo(Uuid::from_u128(4), 0.7, "alpha", "covers", "topic"),
+            // Same content as the cap-rejected hit: must still be selectable.
+            fact_hit_with_spo(Uuid::from_u128(5), 0.6, "gamma", "covers", "topic"),
+        ];
+
+        let selected =
+            select_final_hits_for_policy(hits, &[], 3, GraphRetrievalPolicy::AnchoredRescue);
+
+        assert_eq!(
+            selected.iter().map(|hit| hit.uid).collect::<Vec<_>>(),
+            vec![Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(5)],
+            "the cap-rejected gamma facet must not defer the later gamma fact"
+        );
+    }
+
+    #[test]
+    fn duplicate_facets_backfill_when_fewer_distinct_facets_than_k() {
+        // Pins: when the candidate pool has fewer distinct content facets than
+        // k, deferred duplicates backfill in fused order instead of returning
+        // fewer hits than the undiversified selection.
+        let hits = vec![
+            fact_hit_with_spo(Uuid::from_u128(1), 1.0, "s", "p", "o"),
+            fact_hit_with_spo(Uuid::from_u128(2), 0.9, "s", "p", "o"),
+            fact_hit_with_spo(Uuid::from_u128(3), 0.8, "s", "p", "o"),
+        ];
+
+        let selected =
+            select_final_hits_for_policy(hits, &[], 3, GraphRetrievalPolicy::AnchoredRescue);
+
+        assert_eq!(
+            selected.iter().map(|hit| hit.uid).collect::<Vec<_>>(),
+            vec![Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3)],
+            "duplicates must backfill in fused order"
+        );
     }
 
     fn tenant_chunk_hit(

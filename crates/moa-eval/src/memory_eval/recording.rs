@@ -10,10 +10,10 @@ use moa_core::MoaConfig;
 use moa_core::config::MemoryExtractionConfig;
 use moa_memory_graph::NodeIndexRow;
 use moa_memory_ingest::{
-    EXTRACTION_PROMPT_VERSION, EntityMergeFixtureRecord, EntityMergeVerifier,
-    ExtractionFixtureRecord, FactExtractor, MERGE_PROMPT_VERSION, ModelEntityMergeVerifier,
-    ModelFactExtractor, RecordedFact, RecordedFactExtractor, chunk_hash, chunk_turn,
-    merge_fixture_key,
+    COMPATIBLE_PROMPT_VERSIONS, EXTRACTION_PROMPT_VERSION, EntityMergeFixtureRecord,
+    EntityMergeVerifier, ExtractionFixtureRecord, FactExtractor, MERGE_PROMPT_VERSION,
+    ModelEntityMergeVerifier, ModelFactExtractor, RecordedFact, RecordedFactExtractor, chunk_hash,
+    chunk_turn, merge_fixture_key,
 };
 use moa_providers::{ProviderId, resolve_provider_selection};
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,8 @@ use super::runner::{
     cleanup_eval_graph_rows,
 };
 use super::{
-    read_ledger_jsonl, read_manifest_json, read_probes_jsonl, read_sessions_jsonl, validate_corpus,
+    LedgerFact, SyntheticSession, read_ledger_jsonl, read_manifest_json, read_probes_jsonl,
+    read_sessions_jsonl, validate_corpus,
 };
 use crate::kernel::FixtureStore;
 use crate::kernel::cost::{
@@ -341,9 +342,9 @@ pub async fn record_memory_merges(
         options.corpus_dir.display(),
         extraction_path.display()
     );
-    let extraction_store = FixtureStore::<ExtractionFixtureRecord>::read_jsonl(
+    let extraction_store = FixtureStore::<ExtractionFixtureRecord>::read_jsonl_any(
         &extraction_path,
-        EXTRACTION_PROMPT_VERSION,
+        &extraction_replay_versions(),
     )?
     .with_remediation_command(extraction_remediation.clone());
     let extractor = Arc::new(RecordedFactExtractor::new(
@@ -468,10 +469,77 @@ fn write_records(path: &Path, records: &BTreeMap<String, ExtractionFixtureRecord
     FixtureStore::write_jsonl(path, records.values().cloned())
 }
 
-fn default_extractions_path(corpus_id: &str) -> PathBuf {
+/// Returns corpus chunk hashes that have no recorded extraction fixture.
+///
+/// The natural recorded lane replays fixtures keyed by chunk hash, so any
+/// renderer or chunking change silently invalidates coverage until the next
+/// recorded eval run. The drift-guard test calls this to fail in the PR that
+/// causes the drift, with the remediation command in hand.
+pub fn missing_extraction_chunk_hashes(
+    sessions: &[SyntheticSession],
+    ledger: &[LedgerFact],
+    fixture_path: &Path,
+) -> Result<Vec<String>> {
+    let facts = super::gold::facts_by_id(ledger)?;
+    let store = FixtureStore::<ExtractionFixtureRecord>::read_jsonl_any(
+        fixture_path,
+        &extraction_replay_versions(),
+    )?;
+    let recorded = store
+        .records()
+        .map(|record| record.chunk_hash.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut missing = std::collections::BTreeSet::new();
+    for session in sessions {
+        for turn in &session.turns {
+            let source = super::gold::FactSource { session, turn };
+            let session_turn = super::gold::session_turn(&source, &facts)?;
+            let chunks = chunk_turn(&session_turn, CHUNK_TARGET_TOKENS, CHUNK_OVERLAP_TOKENS)
+                .map_err(|error| {
+                    EvalError::InvalidConfig(format!(
+                        "failed to chunk synthetic session {} turn {}: {error}",
+                        session.session_id, turn.turn_seq
+                    ))
+                })?;
+            for chunk in chunks {
+                let hash = chunk_hash(&chunk.text);
+                if !recorded.contains(&hash) {
+                    missing.insert(hash);
+                }
+            }
+        }
+    }
+    Ok(missing.into_iter().collect())
+}
+
+/// Resolves the default extraction fixture path for one corpus.
+///
+/// Prefers the current prompt version's fixture, but falls back to any
+/// replay-compatible older recording so an additive prompt bump does not
+/// orphan committed fixtures. Recording always writes the current version.
+pub(crate) fn default_extractions_path(corpus_id: &str) -> PathBuf {
+    for version in extraction_replay_versions() {
+        let candidate = Path::new("crates/moa-eval/fixtures/memory")
+            .join(format!("extractions-{corpus_id}-{version}.jsonl"));
+        if candidate.exists() {
+            return candidate;
+        }
+    }
     Path::new("crates/moa-eval/fixtures/memory").join(format!(
         "extractions-{corpus_id}-{EXTRACTION_PROMPT_VERSION}.jsonl"
     ))
+}
+
+/// Replay-accepted extraction prompt versions, current version first.
+pub(crate) fn extraction_replay_versions() -> Vec<&'static str> {
+    let mut versions = vec![EXTRACTION_PROMPT_VERSION];
+    versions.extend(
+        COMPATIBLE_PROMPT_VERSIONS
+            .iter()
+            .copied()
+            .filter(|version| *version != EXTRACTION_PROMPT_VERSION),
+    );
+    versions
 }
 
 fn default_merges_path(corpus_id: &str) -> PathBuf {

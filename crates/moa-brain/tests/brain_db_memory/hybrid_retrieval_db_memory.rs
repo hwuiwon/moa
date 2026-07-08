@@ -201,6 +201,7 @@ fn scripted_user_fact(summary: &str) -> ExtractedFact {
         source_chunk: 0,
         scope_hint: ExtractedFactScopeHint::Contact,
         confidence: Some(0.92),
+        event_time: None,
     };
     let hash = fact_hash(&fact).expect("scripted fact hashes");
     fact.uid = fact_uid_from_hash(&hash);
@@ -888,6 +889,209 @@ async fn parent_document_retrieval_hydrates_ordinal_adjacent_neighbors() {
     for uid in [before_uid, matched_uid, after_uid] {
         let _ = graph.hard_purge(uid, "redacted:parent-document-test").await;
     }
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres test database"]
+async fn reinforced_fact_survives_consolidation_while_idle_one_off_expires_from_retrieval() {
+    // Pins: the full freshness loop across production paths — a fact restated in
+    // a later turn is reinforced at write time (confidence capped, decay anchor
+    // reset); after months of idleness a one-off fact decays to the floor and
+    // is bitemporally expired by consolidation; live retrieval then surfaces
+    // the reinforced fact but not the expired one, while the expired row stays
+    // readable as history.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool().clone();
+    let storage_partition_id = test_storage_partition_id();
+    let tenant_id = tenant_id_from_storage_partition_id(&storage_partition_id);
+    let user = "freshness-user";
+    let workspace_scope = tenant_scope(&storage_partition_id);
+
+    let spo_fact = |subject: &str, predicate: &str, object: &str| {
+        let mut fact = ExtractedFact {
+            uid: Uuid::nil(),
+            subject: subject.to_string(),
+            predicate: predicate.to_string(),
+            object: object.to_string(),
+            summary: format!("{subject} {predicate} {object}"),
+            source_chunk: 0,
+            scope_hint: ExtractedFactScopeHint::Contact,
+            confidence: Some(0.92),
+            event_time: None,
+        };
+        let hash = fact_hash(&fact).expect("scripted fact hashes");
+        fact.uid = fact_uid_from_hash(&hash);
+        fact
+    };
+    // Distinct subjects and predicates so the contradiction detector routes
+    // both as inserts rather than superseding one with the other.
+    let retained = spo_fact("workspace-home", "defaults_to", "dashboards overview");
+    let one_off = spo_fact("quarterly-report", "generated_by", "legacy reporting tool");
+    set_workspace_embedder_state(&pool, &storage_partition_id, "reranker-default-test").await;
+
+    let ingest_ctx = |facts: Vec<ExtractedFact>| {
+        let vector = Arc::new(PgvectorStore::new_for_app_role(
+            pool.clone(),
+            workspace_scope.clone(),
+        ));
+        let graph = Arc::new(
+            PostgresGraphStore::scoped_for_app_role(pool.clone(), workspace_scope.clone())
+                .with_vector_store(vector.clone()),
+        );
+        IngestCtx::new(
+            pool.clone(),
+            graph,
+            vector,
+            Arc::new(RerankerDefaultEmbedder),
+            Arc::new(FixedPiiClassifier),
+            Arc::new(RrfPlusJudgeDetector::default()),
+        )
+        .with_extractor(Arc::new(ScriptedFactExtractor::new(facts)))
+    };
+    let turn = |turn_seq: u64, finalized_at: &str| SessionTurn {
+        tenant_id,
+        contact_id: Some(contact_id_from_user_id(user)),
+        session_id: SessionId::new(),
+        turn_seq,
+        transcript: "conversational transcript".to_string(),
+        dominant_pii_class: "none".to_string(),
+        finalized_at: utc(finalized_at),
+    };
+
+    let first = ingest_turn_direct_with_ctx(
+        ingest_ctx(vec![retained.clone(), one_off.clone()]),
+        turn(1, "2025-06-01T12:00:00Z"),
+    )
+    .await
+    .expect("initial turn ingests");
+    assert_eq!(first.inserted, 2, "unexpected report: {first:?}");
+
+    // A later turn restates the retained fact verbatim: the detector routes it
+    // as a duplicate and reinforcement confirms the survivor.
+    let second = ingest_turn_direct_with_ctx(
+        ingest_ctx(vec![retained.clone()]),
+        turn(2, "2025-09-01T12:00:00Z"),
+    )
+    .await
+    .expect("restating turn ingests");
+    assert_eq!(second.reinforced, 1);
+    assert_eq!(second.inserted, 0);
+
+    // Simulate two idle years for the one-off fact; the retained fact keeps
+    // the fresh access stamp reinforcement just gave it.
+    let now = Utc::now();
+    let aged = sqlx::query(
+        "UPDATE moa.node_index SET last_accessed_at = $2 \
+         WHERE tenant_id = $1 AND label = 'Fact' AND name = 'quarterly-report'",
+    )
+    .bind(tenant_id.0)
+    .bind(now - chrono::Duration::days(720))
+    .execute(&pool)
+    .await
+    .expect("age one-off fact");
+    assert_eq!(aged.rows_affected(), 1, "one-off fact row should age");
+
+    let outcome = moa_memory_lifecycle::consolidate_tenant(
+        &pool,
+        tenant_id,
+        moa_memory_lifecycle::ConsolidationOptions::default(),
+        now,
+        None,
+    )
+    .await
+    .expect("consolidation pass runs");
+    assert_eq!(outcome.decayed, 1, "only the idle one-off decays");
+    assert_eq!(outcome.at_floor, 1, "720 idle days bottom out at the floor");
+    assert_eq!(outcome.expired_idle, 1, "floor-bound idle fact expires");
+
+    // Live retrieval: the reinforced fact answers, the expired one is gone.
+    let contact_graph = user_graph_store(&pool, &storage_partition_id, user);
+    let contact_vector =
+        PgvectorStore::new_for_app_role(pool.clone(), contact_scope(&storage_partition_id, user));
+    let retriever = HybridRetriever::new(
+        pool.clone(),
+        Arc::new(contact_graph),
+        Arc::new(contact_vector),
+    )
+    .with_assume_app_role(true);
+    let request = |query: &str| RetrievalRequest {
+        seeds: Vec::new(),
+        query_text: query.to_string(),
+        query_embedding: deterministic_vector(query),
+        scope: contact_memory_scope(&storage_partition_id, user),
+        label_filter: Some(vec![NodeLabel::Fact]),
+        max_pii_class: PiiClass::Restricted,
+        k_final: 25,
+        use_reranker: false,
+        strategy: None,
+        as_of: None,
+        ranking_reference_time: None,
+        lineage: None,
+        disable_leg_timeouts: true,
+        disable_graph_expansion: false,
+    };
+    let retained_hits = retriever
+        .retrieve(request(&retained.summary))
+        .await
+        .expect("retained retrieval succeeds");
+    assert!(
+        retained_hits
+            .iter()
+            .any(|hit| hit_summary(hit) == Some(retained.summary.as_str())),
+        "reinforced fact must stay retrievable: {retained_hits:?}"
+    );
+    let expired_hits = retriever
+        .retrieve(request(&one_off.summary))
+        .await
+        .expect("expired retrieval succeeds");
+    assert!(
+        expired_hits
+            .iter()
+            .all(|hit| hit_summary(hit) != Some(one_off.summary.as_str())),
+        "expired fact must not reach live retrieval: {expired_hits:?}"
+    );
+
+    // Reinforcement capped confidence and expiry preserved history.
+    let (retained_confidence, retained_valid_to): (Option<f64>, Option<DateTime<Utc>>) =
+        sqlx::query_as(
+            "SELECT confidence, valid_to FROM moa.node_index \
+             WHERE tenant_id = $1 AND label = 'Fact' AND name = 'workspace-home'",
+        )
+        .bind(tenant_id.0)
+        .fetch_one(&pool)
+        .await
+        .expect("read retained fact");
+    let (expired_valid_to, expired_reason): (Option<DateTime<Utc>>, Option<String>) =
+        sqlx::query_as(
+            "SELECT valid_to, invalidated_reason FROM moa.node_index \
+             WHERE tenant_id = $1 AND label = 'Fact' AND name = 'quarterly-report'",
+        )
+        .bind(tenant_id.0)
+        .fetch_one(&pool)
+        .await
+        .expect("read expired fact");
+    assert_eq!(retained_valid_to, None, "reinforced fact stays active");
+    assert!(
+        (retained_confidence.expect("confidence set") - 0.95).abs() < 1e-9,
+        "reinforcement steps 0.92 to the 0.95 cap"
+    );
+    assert_eq!(
+        expired_valid_to,
+        Some(now),
+        "expiry closes at the pass instant"
+    );
+    assert_eq!(
+        expired_reason.as_deref(),
+        Some(moa_memory_lifecycle::EXPIRED_IDLE_REASON)
+    );
+
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)
         .await

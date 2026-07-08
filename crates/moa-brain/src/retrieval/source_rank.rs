@@ -445,21 +445,66 @@ fn select_final_hits(
     let mut selected = Vec::with_capacity(k_final);
     let mut selected_uids = HashSet::new();
     let mut object_counts = HashMap::<Uuid, usize>::new();
+    let mut selected_facets = HashSet::new();
+    let mut facet_duplicates = Vec::new();
     for hit in primary {
-        push_capped_hit(
+        // Facts restating identical content (same subject/predicate/object)
+        // waste final-context slots on information an earlier hit already
+        // carries; defer them so a later distinct fact (typically the second
+        // hop of a multi-hop question) can take the slot. Update-era facts
+        // keep distinct objects, so bitemporal families are never collapsed.
+        // A facet counts as selected only when its hit actually survives the
+        // uid and per-object caps; a rejected hit must not block a later
+        // representative of the same content.
+        let facet = fact_content_facet(&hit);
+        if let Some(facet) = &facet
+            && selected_facets.contains(facet)
+        {
+            facet_duplicates.push(hit);
+            continue;
+        }
+        if push_capped_hit(
             hit,
             &mut selected,
             &mut selected_uids,
             &mut object_counts,
             k_final,
-        );
+        ) && let Some(facet) = facet
+        {
+            selected_facets.insert(facet);
+        }
         if selected.len() == k_final {
             return selected;
         }
     }
     for hit in fallback {
-        push_capped_hit(
+        let facet = fact_content_facet(hit);
+        if let Some(facet) = &facet
+            && selected_facets.contains(facet)
+        {
+            facet_duplicates.push(hit.clone());
+            continue;
+        }
+        if push_capped_hit(
             hit.clone(),
+            &mut selected,
+            &mut selected_uids,
+            &mut object_counts,
+            k_final,
+        ) && let Some(facet) = facet
+        {
+            selected_facets.insert(facet);
+        }
+        if selected.len() == k_final {
+            return selected;
+        }
+    }
+    // Fewer distinct facets than k: backfill with the deferred duplicates in
+    // their original fused order so the cutoff never returns fewer hits than
+    // the undiversified selection would have.
+    for hit in facet_duplicates {
+        push_capped_hit(
+            hit,
             &mut selected,
             &mut selected_uids,
             &mut object_counts,
@@ -470,6 +515,27 @@ fn select_final_hits(
         }
     }
     selected
+}
+
+/// Returns the normalized `(subject, predicate, object)` content facet for a
+/// `Fact` hit, or `None` for non-fact hits or facts missing any component.
+fn fact_content_facet(hit: &RetrievalHit) -> Option<(String, String, String)> {
+    if hit.node.label != NodeLabel::Fact {
+        return None;
+    }
+    let properties = hit.node.properties_summary.as_ref()?;
+    let component = |key: &str| {
+        properties
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(moa_memory_types::normalize_fact_component)
+            .filter(|value| !value.is_empty())
+    };
+    Some((
+        component("subject")?,
+        component("predicate")?,
+        component("object")?,
+    ))
 }
 
 /// Selects final hits using source diversity for source-object graph policies.
@@ -575,23 +641,26 @@ fn push_source_diverse_hit(
     selected.push(hit);
 }
 
+/// Pushes a hit unless it violates the uid or per-object caps; returns whether
+/// the hit was actually selected.
 fn push_capped_hit(
     hit: RetrievalHit,
     selected: &mut Vec<RetrievalHit>,
     selected_uids: &mut HashSet<Uuid>,
     object_counts: &mut HashMap<Uuid, usize>,
     k_final: usize,
-) {
+) -> bool {
     if selected.len() == k_final || !selected_uids.insert(hit.uid) {
-        return;
+        return false;
     }
     if let Some(object_uid) = hit.knowledge_chunk.as_ref().map(|chunk| chunk.object_uid) {
         let count = object_counts.entry(object_uid).or_default();
         if *count >= MAX_FINAL_HITS_PER_KNOWLEDGE_OBJECT {
             selected_uids.remove(&hit.uid);
-            return;
+            return false;
         }
         *count += 1;
     }
     selected.push(hit);
+    true
 }

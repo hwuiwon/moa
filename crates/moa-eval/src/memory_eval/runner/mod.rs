@@ -345,9 +345,9 @@ impl MemoryRetrievalEvalOptions {
                     self.corpus_dir.display(),
                     path.display()
                 );
-                let store = FixtureStore::<ExtractionFixtureRecord>::read_jsonl(
+                let store = FixtureStore::<ExtractionFixtureRecord>::read_jsonl_any(
                     &path,
-                    EXTRACTION_PROMPT_VERSION,
+                    &super::recording::extraction_replay_versions(),
                 )?
                 .with_remediation_command(remediation.clone());
                 Ok(Arc::new(RecordedFactExtractor::new(store, remediation)))
@@ -419,10 +419,7 @@ pub enum QueryRewritePolicy {
 }
 
 fn default_extractions_path(manifest: &CorpusManifest) -> PathBuf {
-    PathBuf::from("crates/moa-eval/fixtures/memory").join(format!(
-        "extractions-{}-{}.jsonl",
-        manifest.corpus_id, EXTRACTION_PROMPT_VERSION
-    ))
+    super::recording::default_extractions_path(&manifest.corpus_id)
 }
 
 fn default_merges_path(manifest: &CorpusManifest) -> PathBuf {
@@ -503,11 +500,15 @@ async fn run_memory_retrieval_eval_in_store(
     } else {
         None
     };
-    let equivalent_fact_ids_by_uid = if options.consolidate() {
+    let mut equivalent_fact_ids_by_uid = if options.consolidate() {
         equivalent_fact_ids_by_uid(store.pool(), &corpus.ledger, &fact_ids_by_uid).await?
     } else {
         HashMap::new()
     };
+    merge_equivalents(
+        &mut equivalent_fact_ids_by_uid,
+        content_equivalent_fact_ids(&corpus.ledger, &fact_ids_by_uid),
+    );
     seed_eval_quality_scores(
         store.pool(),
         &corpus.ledger,
@@ -1915,6 +1916,69 @@ async fn equivalent_fact_ids_by_uid(
     Ok(aliases)
 }
 
+/// Maps each resolved fact uid to other ledger fact ids carrying identical
+/// tenant-shared content in the same storage partition.
+///
+/// The corpus legitimately plants distinct gold facts with byte-identical
+/// `(subject, predicate, object)` (two components depending on one library
+/// owned by one team). Retrieval surfacing any duplicate-content row carries
+/// the same evidence, so probes accept the group instead of one arbitrary
+/// fact id. Contact-scope facts are excluded: they are never interchangeable
+/// across contacts, and isolation probes must not gain accidental matches.
+fn content_equivalent_fact_ids(
+    ledger: &[LedgerFact],
+    fact_ids_by_uid: &HashMap<Uuid, String>,
+) -> HashMap<Uuid, Vec<String>> {
+    let mut groups = HashMap::<(String, String, String, String), Vec<&str>>::new();
+    for fact in ledger {
+        if fact.scope != ScopeTier::Tenant {
+            continue;
+        }
+        groups
+            .entry((
+                fact.storage_partition_id.to_string(),
+                moa_memory_types::normalize_fact_component(&fact.subject),
+                moa_memory_types::normalize_fact_component(&fact.predicate),
+                moa_memory_types::normalize_fact_component(&fact.object),
+            ))
+            .or_default()
+            .push(fact.fact_id.as_str());
+    }
+    let group_by_fact_id: HashMap<&str, &Vec<&str>> = groups
+        .values()
+        .filter(|group| group.len() > 1)
+        .flat_map(|group| group.iter().map(move |fact_id| (*fact_id, group)))
+        .collect();
+
+    let mut aliases = HashMap::new();
+    for (uid, fact_id) in fact_ids_by_uid {
+        let Some(group) = group_by_fact_id.get(fact_id.as_str()) else {
+            continue;
+        };
+        let mut others = group
+            .iter()
+            .filter(|other| **other != fact_id.as_str())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        others.sort();
+        aliases.insert(*uid, others);
+    }
+    aliases
+}
+
+/// Merges additional equivalents into an existing uid-keyed alias map.
+fn merge_equivalents(
+    target: &mut HashMap<Uuid, Vec<String>>,
+    additional: HashMap<Uuid, Vec<String>>,
+) {
+    for (uid, fact_ids) in additional {
+        let entry = target.entry(uid).or_default();
+        entry.extend(fact_ids);
+        entry.sort();
+        entry.dedup();
+    }
+}
+
 fn supersession_representative(uid: Uuid, replacement_by_old: &HashMap<Uuid, Uuid>) -> Uuid {
     let mut current = uid;
     let mut seen = std::collections::BTreeSet::new();
@@ -1995,6 +2059,7 @@ fn add_consolidation_outcome(total: &mut ConsolidationOutcome, next: Consolidati
     total.merged += next.merged;
     total.decayed += next.decayed;
     total.at_floor += next.at_floor;
+    total.expired_idle += next.expired_idle;
     total.contradiction_supersessions += next.contradiction_supersessions;
     total.entity_embeddings_backfilled += next.entity_embeddings_backfilled;
     total.aliases_promoted += next.aliases_promoted;

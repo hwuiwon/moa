@@ -164,6 +164,9 @@ pub struct MemoryIngestResult {
     pub superseded: u64,
     /// Number of graph nodes skipped.
     pub skipped: u64,
+    /// Number of re-observed facts that reinforced an existing node.
+    #[serde(default)]
+    pub reinforced: u64,
     /// Number of graph nodes that failed ingestion.
     pub failed: u64,
     /// Number of graph edges inserted.

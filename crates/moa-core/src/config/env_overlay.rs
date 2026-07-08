@@ -186,6 +186,8 @@ pub struct MoaEnvOverlay {
     pub memory_retrieval_reranker_latency: Option<String>,
     /// `MOA_MEMORY_RETRIEVAL_LINEAGE_ENABLED`.
     pub memory_retrieval_lineage_enabled: Option<bool>,
+    /// `MOA_MEMORY_RETRIEVAL_LINEAGE_SAMPLE_RATE`.
+    pub memory_retrieval_lineage_sample_rate: Option<f64>,
     /// `MOA_MEMORY_DIGEST_ENABLED`.
     pub memory_digest_enabled: Option<bool>,
     /// `MOA_MEMORY_DIGEST_MAX_TOKENS`.

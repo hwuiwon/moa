@@ -5,7 +5,8 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use moa_core::{StoragePartitionId, TenantId};
 use moa_memory_lifecycle::{
     ConsolidationOptions, TenantConsolidationCursor, advance_consolidation_watermark,
-    consolidate_tenant, decay_confidence, decay_target_confidence, tenants_needing_consolidation,
+    consolidate_tenant, decay_confidence, decay_target_confidence, expire_idle_facts,
+    tenants_needing_consolidation,
 };
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::{Value, json};
@@ -347,6 +348,99 @@ async fn seed_spo_fact(
         .await
         .expect("pin valid_from");
     uid
+}
+
+#[tokio::test]
+async fn idle_floor_facts_expire_bitemporally_and_rerun_is_noop_db_memory() {
+    // Pins: expiry closes only floor-bound facts idle past the window, with a
+    // bitemporal close (`valid_to`/`expired_idle` reason, row preserved); floor
+    // facts inside the window and above-floor idle facts survive, and rerunning
+    // at the same instant is a no-op.
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let pool = test_db.store().pool();
+    let tenant_id = TenantId::new();
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
+    let opts = ConsolidationOptions::default();
+    let now = Utc
+        .with_ymd_and_hms(2026, 6, 11, 0, 0, 0)
+        .single()
+        .expect("fixed timestamp");
+
+    // Floor-bound and idle past the 180-day window: must expire.
+    let expired = seed_fact(
+        pool,
+        &storage_partition_id,
+        tenant_id,
+        opts.decay_floor,
+        now - Duration::days(200),
+        Some(0.9),
+    )
+    .await;
+    // Floor-bound but inside the window: must survive.
+    let floor_recent = seed_fact(
+        pool,
+        &storage_partition_id,
+        tenant_id,
+        opts.decay_floor,
+        now - Duration::days(100),
+        Some(0.9),
+    )
+    .await;
+    // Above the floor, however idle: must survive.
+    let idle_confident = seed_fact(
+        pool,
+        &storage_partition_id,
+        tenant_id,
+        0.8,
+        now - Duration::days(400),
+        None,
+    )
+    .await;
+
+    let stats = expire_idle_facts(pool, &tenant_id, now, &opts)
+        .await
+        .expect("run idle expiry");
+
+    assert_eq!(stats.expired_idle, 1, "unexpected expiry count");
+    let (valid_to, reason) = node_validity(pool, expired).await;
+    assert_eq!(valid_to, Some(now), "expired fact must close at `now`");
+    assert_eq!(
+        reason.as_deref(),
+        Some(moa_memory_lifecycle::EXPIRED_IDLE_REASON)
+    );
+    assert_eq!(node_validity(pool, floor_recent).await, (None, None));
+    assert_eq!(node_validity(pool, idle_confident).await, (None, None));
+
+    // Rerun at the same instant: closed rows leave the candidate set.
+    let second = expire_idle_facts(pool, &tenant_id, now, &opts)
+        .await
+        .expect("rerun idle expiry");
+    assert_eq!(second.expired_idle, 0, "expiry rerun must be a no-op");
+
+    // Disabled window expires nothing.
+    let disabled = ConsolidationOptions {
+        expire_idle_days: 0,
+        ..ConsolidationOptions::default()
+    };
+    let none = expire_idle_facts(pool, &tenant_id, now, &disabled)
+        .await
+        .expect("run disabled expiry");
+    assert_eq!(none.expired_idle, 0, "disabled expiry must not close facts");
+}
+
+async fn node_validity(pool: &PgPool, uid: Uuid) -> (Option<DateTime<Utc>>, Option<String>) {
+    let row = sqlx::query("SELECT valid_to, invalidated_reason FROM moa.node_index WHERE uid = $1")
+        .bind(uid)
+        .fetch_one(pool)
+        .await
+        .expect("read node validity");
+    (
+        row.try_get("valid_to").expect("valid_to column"),
+        row.try_get("invalidated_reason")
+            .expect("invalidated_reason column"),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

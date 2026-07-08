@@ -21,9 +21,9 @@ pub use edge::{EdgeLabel, EdgeWriteIntent};
 pub use error::GraphError;
 pub use lexical::LexicalStore;
 pub use node::{
-    ExistingSupersessionIntent, NodeEmbeddingIntent, NodeIndexRow, NodeLabel,
-    NodePropertyUpdateIntent, NodeWriteIntent, PiiClass, bump_last_accessed, lookup_seed_by_name,
-    lookup_seeds_by_names,
+    ExistingSupersessionIntent, NodeEmbeddingIntent, NodeExpiryIntent, NodeIndexRow, NodeLabel,
+    NodePropertyUpdateIntent, NodeReinforcementIntent, NodeWriteIntent, PiiClass,
+    bump_last_accessed, lookup_seed_by_name, lookup_seeds_by_names,
 };
 pub use store::PostgresGraphStore;
 pub use validity::push_validity_filter;
@@ -153,6 +153,19 @@ pub trait GraphStore: Send + Sync {
 
     /// Updates properties on an existing node by superseding it with a new node.
     async fn supersede_node(&self, old_uid: Uuid, intent: NodeWriteIntent) -> Result<Uuid>;
+
+    /// Reinforces one active node that ingestion re-observed.
+    ///
+    /// Bumps `confidence` one `step` toward `cap` without lowering a higher
+    /// confidence, drops the `base_confidence` decay anchor, and touches
+    /// `last_accessed_at`. Returns `true` when an active row was updated. The
+    /// default implementation rejects the call for stores without relational
+    /// reinforcement support.
+    async fn reinforce_node(&self, _intent: NodeReinforcementIntent) -> Result<bool> {
+        Err(GraphError::Conflict(
+            "node reinforcement is not supported by this store".to_string(),
+        ))
+    }
 
     /// Soft-invalidates a node by setting its validity end and invalidation metadata.
     async fn invalidate_node(&self, uid: Uuid, reason: &str) -> Result<()>;

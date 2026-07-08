@@ -8,8 +8,8 @@ use moa_memory_vector::{VectorPostCommitSync, VectorStore};
 use sqlx::{PgConnection, PgPool};
 
 use crate::{
-    ExistingSupersessionIntent, GraphError, NodeEmbeddingIntent, NodePropertyUpdateIntent,
-    NodeWriteIntent,
+    ExistingSupersessionIntent, GraphError, NodeEmbeddingIntent, NodeExpiryIntent,
+    NodePropertyUpdateIntent, NodeWriteIntent,
 };
 
 /// Graph store backed by relational node, edge, changelog, and vector tables.
@@ -112,6 +112,11 @@ impl PostgresGraphStore {
         intent: ExistingSupersessionIntent,
     ) -> Result<(), GraphError> {
         crate::write::close_existing_node_with_supersession(self, intent).await
+    }
+
+    /// Closes an active node without a replacement, at caller-provided instants.
+    pub async fn expire_node(&self, intent: NodeExpiryIntent) -> Result<bool, GraphError> {
+        crate::write::expire_node(self, intent).await
     }
 
     /// Updates a node's mutable properties in place.

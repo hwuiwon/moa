@@ -3380,6 +3380,7 @@ dependencies = [
  "moa-lineage-core",
  "moa-memory-graph",
  "moa-memory-ingest",
+ "moa-memory-lifecycle",
  "moa-memory-pii",
  "moa-memory-types",
  "moa-memory-vector",

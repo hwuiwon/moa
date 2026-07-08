@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use moa_core::{LearningEntry, TenantId};
 use moa_memory_lifecycle::{
-    BackfillStats, ConsolidationOptions, ConsolidationOutcome, DecayStats, DigestStats, MergeStats,
-    SweepStats, TenantConsolidationCursor,
+    BackfillStats, ConsolidationOptions, ConsolidationOutcome, DecayStats, DigestStats,
+    ExpiryStats, MergeStats, SweepStats, TenantConsolidationCursor,
 };
 use restate_sdk::prelude::*;
 use uuid::Uuid;
@@ -60,6 +60,9 @@ pub struct ConsolidateReport {
     /// Active facts currently at the confidence floor.
     #[serde(default)]
     pub confidence_at_floor: u64,
+    /// Floor-bound idle facts closed by bitemporal expiry.
+    #[serde(default)]
+    pub facts_expired: u64,
     /// Entity nodes that received missing embeddings.
     #[serde(default)]
     pub entity_embeddings_backfilled: u64,
@@ -105,6 +108,7 @@ impl ConsolidateReport {
             duplicates_merged: 0,
             duplicates_remaining: 0,
             confidence_at_floor: 0,
+            facts_expired: 0,
             entity_embeddings_backfilled: 0,
             aliases_promoted: 0,
             digests_rebuilt: 0,
@@ -138,6 +142,7 @@ impl ConsolidateReport {
             duplicates_merged: 0,
             duplicates_remaining: 0,
             confidence_at_floor: 0,
+            facts_expired: 0,
             entity_embeddings_backfilled: 0,
             aliases_promoted: 0,
             digests_rebuilt: 0,
@@ -161,6 +166,7 @@ impl ConsolidateReport {
     ) -> Self {
         let records_updated = outcome.merged
             + outcome.decayed
+            + outcome.expired_idle
             + outcome.contradiction_supersessions
             + outcome.entity_embeddings_backfilled
             + outcome.aliases_promoted
@@ -177,6 +183,7 @@ impl ConsolidateReport {
             duplicates_merged: outcome.merged,
             duplicates_remaining: outcome.duplicates_remaining,
             confidence_at_floor: outcome.at_floor,
+            facts_expired: outcome.expired_idle,
             entity_embeddings_backfilled: outcome.entity_embeddings_backfilled,
             aliases_promoted: outcome.aliases_promoted,
             digests_rebuilt: outcome.digests_rebuilt,
@@ -257,6 +264,13 @@ pub trait ConsolidateDurableSteps {
         now: DateTime<Utc>,
     ) -> Result<SweepStats, HandlerError>;
 
+    /// Runs the idle floor-bound fact expiry step.
+    async fn expire_idle_facts(
+        &mut self,
+        request: &ConsolidateRequest,
+        now: DateTime<Utc>,
+    ) -> Result<ExpiryStats, HandlerError>;
+
     /// Runs the entity embedding and alias backfill step.
     async fn backfill_entities(
         &mut self,
@@ -312,12 +326,16 @@ pub async fn run_consolidate_workflow(
     let merge = steps.merge_duplicates(&request, ran_at).await?;
     let decay = steps.decay_confidence(&request, ran_at).await?;
     let sweep = steps.sweep_contradictions(&request, ran_at).await?;
+    // Expiry runs after decay and the sweep so it sees post-decay confidence and
+    // does not close a fact another step would have superseded this run.
+    let expiry = steps.expire_idle_facts(&request, ran_at).await?;
     let backfill = steps.backfill_entities(&request).await?;
     let digest = steps.rebuild_digests(&request, ran_at).await?;
     let outcome = ConsolidationOutcome {
         merged: merge.merged,
         decayed: decay.decayed,
         at_floor: decay.at_floor,
+        expired_idle: expiry.expired_idle,
         contradiction_supersessions: sweep.contradiction_supersessions,
         entity_embeddings_backfilled: backfill.entity_embeddings_backfilled,
         aliases_promoted: backfill.aliases_promoted,
@@ -442,6 +460,31 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
                     .map_err(lifecycle_handler_error)
             })
             .name("contradict")
+            .await
+            .map(Json::into_inner)
+            .map_err(HandlerError::from)
+    }
+
+    async fn expire_idle_facts(
+        &mut self,
+        request: &ConsolidateRequest,
+        now: DateTime<Utc>,
+    ) -> Result<ExpiryStats, HandlerError> {
+        let pool = OrchestratorCtx::current_graph_pool();
+        let tenant_id = request.tenant_id;
+        self.ctx
+            .run(|| async move {
+                moa_memory_lifecycle::expire_idle_facts(
+                    &pool,
+                    &tenant_id,
+                    now,
+                    &ConsolidationOptions::default(),
+                )
+                .await
+                .map(Json::from)
+                .map_err(lifecycle_handler_error)
+            })
+            .name("expire")
             .await
             .map(Json::into_inner)
             .map_err(HandlerError::from)
@@ -595,6 +638,7 @@ async fn record_memory_learning(
                     "duplicates_merged": report.duplicates_merged,
                     "duplicates_remaining": report.duplicates_remaining,
                     "confidence_at_floor": report.confidence_at_floor,
+                    "facts_expired": report.facts_expired,
                     "entity_embeddings_backfilled": report.entity_embeddings_backfilled,
                     "aliases_promoted": report.aliases_promoted,
                     "digests_rebuilt": report.digests_rebuilt,

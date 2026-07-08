@@ -9,7 +9,7 @@ use moa_memory_types::MemoryScope;
 use serde::{Deserialize, Serialize};
 
 /// Ranking pipeline version included in cache fingerprints.
-pub const RANKING_PIPELINE_VERSION: u32 = 10;
+pub const RANKING_PIPELINE_VERSION: u32 = 11;
 
 /// Weights used by the FeatureV1 deterministic scorer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
