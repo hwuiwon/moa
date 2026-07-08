@@ -1,0 +1,5 @@
+---
+source: crates/moa-analytics/tests/analytics_sql_offline.rs
+expression: compiled.sql
+---
+SELECT d.outcome AS c0, toString(sac.agent_id) AS c1, count() AS c2, avg(d.outcome_confidence) AS c3, ifNull(sum(d.token_cost), 0) AS c4, quantileExactInclusive(0.95)(if(d.ended_at IS NULL, NULL, (toUnixTimestamp64Micro(d.ended_at) - toUnixTimestamp64Micro(d.started_at)) / 1000.0)) AS c5 FROM dim_task_segments AS d FINAL LEFT JOIN dim_session_agent_context AS sac FINAL ON sac.session_id = d.session_id AND sac.tenant_id = d.tenant_id LEFT JOIN dim_sessions AS s FINAL ON s.session_id = d.session_id AND s.tenant_id = d.tenant_id WHERE d.tenant_id = toUUID(?) AND d.outcome IN (?, ?) AND d.started_at BETWEEN parseDateTime64BestEffort(?, 6, 'UTC') AND parseDateTime64BestEffort(?, 6, 'UTC') GROUP BY 1, 2 ORDER BY c2 DESC LIMIT 50

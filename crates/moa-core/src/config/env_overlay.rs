@@ -410,6 +410,24 @@ pub struct MoaEnvOverlay {
     pub observability_lineage_journal_path: Option<String>,
     /// `MOA_OBSERVABILITY_LINEAGE_SAMPLE_PGVECTOR_EXPLAIN`.
     pub observability_lineage_sample_pgvector_explain: Option<f64>,
+    /// `MOA_CLICKHOUSE_URL`; empty means unset.
+    #[serde(deserialize_with = "deserialize_optional_nonempty")]
+    pub clickhouse_url: Option<String>,
+    /// `MOA_CLICKHOUSE_DATABASE`; empty means unset.
+    #[serde(deserialize_with = "deserialize_optional_nonempty")]
+    pub clickhouse_database: Option<String>,
+    /// `MOA_CLICKHOUSE_USER`; empty means unset.
+    #[serde(deserialize_with = "deserialize_optional_nonempty")]
+    pub clickhouse_user: Option<String>,
+    /// `MOA_CLICKHOUSE_PASSWORD`; empty means unset.
+    #[serde(deserialize_with = "deserialize_optional_nonempty")]
+    pub clickhouse_password: Option<String>,
+    /// `MOA_CLICKHOUSE_LINEAGE_TTL_DAYS`.
+    pub clickhouse_lineage_ttl_days: Option<u32>,
+    /// `MOA_CLICKHOUSE_EXPORT_POLL_SECS`.
+    pub clickhouse_export_poll_secs: Option<u64>,
+    /// `MOA_CLICKHOUSE_EXPORT_BATCH_ROWS`.
+    pub clickhouse_export_batch_rows: Option<usize>,
     /// `MOA_METRICS_ENABLED`.
     pub metrics_enabled: Option<bool>,
     /// `MOA_METRICS_LISTEN`.
@@ -578,6 +596,7 @@ impl MoaEnvOverlay {
                 "MOA_OBSERVABILITY_OTLP_ENDPOINT",
                 &self.observability_otlp_endpoint,
             ),
+            ("MOA_CLICKHOUSE_URL", &self.clickhouse_url),
         ] {
             if let Some(value) = value {
                 url::Url::parse(value).map_err(|error| parse_error(env_name, value, error))?;
@@ -864,6 +883,7 @@ fn seed_optional_sections(config: &mut Value) -> Result<()> {
         &["auth", "auth0"][..],
         &["auth", "oidc"],
         &["authz", "openfga"],
+        &["clickhouse"],
         &["cloud", "hands"],
     ] {
         insert_seed(config, path)?;
@@ -920,6 +940,15 @@ fn optional_section_seed(path: &[&str]) -> Option<Value> {
             "model_id": "",
             "timeout_ms": 5000,
         })),
+        ["clickhouse"] => Some(json!({
+            "url": "",
+            "database": "moa",
+            "user": null,
+            "password": null,
+            "lineage_ttl_days": 30,
+            "export_poll_secs": 15,
+            "export_batch_rows": 5000,
+        })),
         ["cloud", "hands"] => Some(json!({
             "default_provider": null,
             "fallback_providers": [],
@@ -975,6 +1004,25 @@ fn restore_env_prefix(message: &str) -> String {
 }
 
 /// Deserializes a comma-separated env value into a trimmed, non-empty list.
+/// Deserializes an env value where an empty string means "unset".
+///
+/// Used for the opt-in ClickHouse section so compose files can pass
+/// `MOA_CLICKHOUSE_URL: ${MOA_CLICKHOUSE_URL:-}` without an empty default
+/// half-creating the section and failing startup validation.
+fn deserialize_optional_nonempty<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 fn deserialize_optional_list<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<Vec<String>>, D::Error>
@@ -1651,6 +1699,65 @@ mod tests {
         assert_eq!(hands.default_provider.as_deref(), Some("daytona"));
         assert_eq!(hands.fallback_providers, vec!["e2b".to_string()]);
         assert!(hands.allow_local_provider);
+    }
+
+    #[test]
+    fn clickhouse_env_creates_optional_section() {
+        // Pins: flat Kubernetes env can enable the ClickHouse analytics store
+        // without a TOML section; unset knobs keep their seeded defaults.
+        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+            ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
+            ("MOA_CLICKHOUSE_URL", "http://clickhouse.example:8123"),
+            ("MOA_CLICKHOUSE_PASSWORD", "redacted"),
+            ("MOA_CLICKHOUSE_EXPORT_POLL_SECS", "30"),
+            ("MOA_CLICKHOUSE_EXPORT_BATCH_ROWS", "2500"),
+        ]))
+        .expect("overlay should deserialize");
+        let mut config = MoaConfig::default();
+        assert!(config.clickhouse.is_none());
+
+        overlay.apply_to(&mut config).expect("overlay should apply");
+
+        let clickhouse = config.clickhouse.expect("clickhouse config");
+        assert_eq!(clickhouse.url, "http://clickhouse.example:8123");
+        assert_eq!(clickhouse.database, "moa");
+        assert_eq!(clickhouse.user, None);
+        assert_eq!(clickhouse.password.as_deref(), Some("redacted"));
+        assert_eq!(clickhouse.lineage_ttl_days, 30);
+        assert_eq!(clickhouse.export_poll_secs, 30);
+        assert_eq!(clickhouse.export_batch_rows, 2500);
+    }
+
+    #[test]
+    fn empty_clickhouse_env_values_mean_unset() {
+        // Pins: compose files can pass `MOA_CLICKHOUSE_URL: ${MOA_CLICKHOUSE_URL:-}`;
+        // empty values leave the section absent so Postgres stays the backend.
+        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+            ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
+            ("MOA_CLICKHOUSE_URL", ""),
+            ("MOA_CLICKHOUSE_USER", " "),
+            ("MOA_CLICKHOUSE_PASSWORD", ""),
+        ]))
+        .expect("overlay should deserialize");
+        let mut config = MoaConfig::default();
+
+        overlay.apply_to(&mut config).expect("overlay should apply");
+
+        assert!(config.clickhouse.is_none());
+    }
+
+    #[test]
+    fn clickhouse_env_without_url_is_rejected() {
+        // Pins: a partially configured ClickHouse section fails startup instead
+        // of silently falling back to Postgres while credentials are set.
+        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+            ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
+            ("MOA_CLICKHOUSE_PASSWORD", "redacted"),
+        ]))
+        .expect("overlay should deserialize");
+        let mut config = MoaConfig::default();
+
+        assert_config_error_contains(overlay.apply_to(&mut config), "clickhouse.url");
     }
 
     fn env_pairs<const N: usize>(pairs: [(&str, &str); N]) -> Vec<(String, String)> {

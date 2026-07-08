@@ -98,6 +98,23 @@ SELECT slot_name, plugin FROM pg_replication_slots WHERE slot_name = 'moa_change
 `moa_app` must not be able to update or delete changelog rows. Older monthly
 partitions are detached for S3/Object Lock retention before physical pruning.
 
+## ClickHouse Copies And Tenant Deletion
+
+When `[clickhouse]` is configured, ClickHouse holds copies that tenant
+offboarding must reach (both run from the edge purge path after the Postgres
+transaction commits, so a ClickHouse failure surfaces without rolling back the
+relational purge):
+
+- `turn_lineage` rows: `ClickHouseStore::delete_partition_rows`;
+- analytics-export tables (`events_raw`, `dim_*`, `turn_fact`,
+  `tool_call_fact`): `AnalyticsClickHouseClient::purge_tenant`, which skips
+  tables that were never created.
+
+Retention inside ClickHouse: `turn_lineage` drops via table TTL
+(`clickhouse.lineage_ttl_days`, default 30); the analytics tables currently
+have no TTL — their Postgres sources are the retention authority until the
+events tiering phase (see the plan's north-star section).
+
 ## Audit Log Retention
 
 MOA keeps two audit trails for graph memory:

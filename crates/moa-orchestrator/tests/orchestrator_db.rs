@@ -1,5 +1,9 @@
 //! Consolidated Postgres-backed (`_db`) integration-test harness for `moa-orchestrator`.
 
+#[path = "orchestrator_db/analytics_chaos_db.rs"]
+mod analytics_chaos_db;
+#[path = "orchestrator_db/analytics_export_db.rs"]
+mod analytics_export_db;
 #[path = "orchestrator_db/api_keys_db.rs"]
 mod api_keys_db;
 #[path = "orchestrator_db/authz_admin_db.rs"]

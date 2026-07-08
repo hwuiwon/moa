@@ -1,0 +1,5 @@
+---
+source: crates/moa-analytics/tests/analytics_sql_offline.rs
+expression: compiled.sql
+---
+SELECT d.name AS c0, d.status AS c1, (d.error IS NOT NULL) AS c2, count() AS c3, quantileExactInclusive(0.95)(if(d.started_at IS NULL OR d.completed_at IS NULL, NULL, (toUnixTimestamp64Micro(d.completed_at) - toUnixTimestamp64Micro(d.started_at)) / 1000.0)) AS c4 FROM dim_experiment_run AS d FINAL WHERE d.tenant_id = toUUID(?) AND d.updated_at BETWEEN parseDateTime64BestEffort(?, 6, 'UTC') AND parseDateTime64BestEffort(?, 6, 'UTC') GROUP BY 1, 2, 3 ORDER BY c3 DESC LIMIT 50

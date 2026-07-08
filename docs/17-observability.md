@@ -84,6 +84,24 @@ Slack/chat channels may also receive live status edits when channel progress
 delivery is enabled. Treat process-local broadcast channels as test-harness or
 in-process helper plumbing, not as the hosted observation source of truth.
 
+## ClickHouse Lineage And Analytics Export
+
+When `[clickhouse]` is configured, two background flows carry their own
+metrics:
+
+- Lineage sink (rows to ClickHouse instead of Timescale):
+  `moa_lineage_compliance_chain_skipped_total` counts rows written without
+  `prev_hash` links because compliance chaining requires the Postgres backend
+  — a non-zero rate on a compliance tenant is a misconfiguration signal.
+- Analytics exporter (`moa-orchestrator/src/analytics_export/`):
+  `moa_analytics_export_lag_seconds{table}` (gauge; freshness of each
+  ClickHouse read model — the operative dashboard-staleness signal),
+  `moa_analytics_export_rows_total{table}`,
+  `moa_analytics_export_skipped_rows_total{table}` (tenant ids that failed
+  UUID parsing), and `moa_analytics_export_errors_total`. ClickHouse being
+  down surfaces as rising lag with errors incrementing; Postgres and the
+  product write path are unaffected, and the exporter resumes from its cursor.
+
 ## Behavior-Lab Simulations
 
 Experiment run and trial traces use aggregate metrics for dashboards and trace

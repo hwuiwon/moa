@@ -1,0 +1,288 @@
+//! Offline pins for compiled analytics SQL across both backends.
+//!
+//! These snapshot the exact SQL the compiler emits for every catalog dataset in
+//! the Postgres and ClickHouse dialects, and pin the tenant-scope injection that
+//! isolates every dataset on both backends. They run fully offline: compilation
+//! never touches a database.
+
+use moa_analytics::{AnalyticsBackend, AnalyticsCompiler, analytics_catalog};
+use moa_core::TenantId;
+use moa_core::wire::analytics::{
+    AnalyticsAggregation, AnalyticsCell, AnalyticsDimension, AnalyticsFilter,
+    AnalyticsFilterOperator, AnalyticsMeasure, AnalyticsOrderBy, AnalyticsQueryRequest,
+    AnalyticsSortDirection,
+};
+
+/// The datasets a request is built for, in catalog order.
+const DATASETS: &[&str] = &[
+    "sessions",
+    "turns",
+    "tool_calls",
+    "task_segments",
+    "skills",
+    "procedure_runs",
+    "procedure_node_runs",
+    "learning_candidates",
+    "experiment_runs",
+    "events",
+];
+
+fn dim(field: &str) -> AnalyticsDimension {
+    AnalyticsDimension {
+        field: field.to_string(),
+        alias: None,
+    }
+}
+
+fn count() -> AnalyticsMeasure {
+    AnalyticsMeasure {
+        field: None,
+        aggregation: AnalyticsAggregation::Count,
+        alias: None,
+    }
+}
+
+fn measure(field: &str, aggregation: AnalyticsAggregation) -> AnalyticsMeasure {
+    AnalyticsMeasure {
+        field: Some(field.to_string()),
+        aggregation,
+        alias: None,
+    }
+}
+
+fn eq(field: &str, value: &str) -> AnalyticsFilter {
+    AnalyticsFilter {
+        field: field.to_string(),
+        operator: AnalyticsFilterOperator::Eq,
+        value: Some(AnalyticsCell::String(value.to_string())),
+    }
+}
+
+fn contains(field: &str, value: &str) -> AnalyticsFilter {
+    AnalyticsFilter {
+        field: field.to_string(),
+        operator: AnalyticsFilterOperator::Contains,
+        value: Some(AnalyticsCell::String(value.to_string())),
+    }
+}
+
+fn is_in(field: &str, values: &[&str]) -> AnalyticsFilter {
+    AnalyticsFilter {
+        field: field.to_string(),
+        operator: AnalyticsFilterOperator::In,
+        value: Some(AnalyticsCell::Json(serde_json::json!(values))),
+    }
+}
+
+fn between_window(field: &str) -> AnalyticsFilter {
+    AnalyticsFilter {
+        field: field.to_string(),
+        operator: AnalyticsFilterOperator::Between,
+        value: Some(AnalyticsCell::Json(serde_json::json!([
+            "2026-01-01T00:00:00Z",
+            "2026-02-01T00:00:00Z"
+        ]))),
+    }
+}
+
+fn order_count_desc() -> AnalyticsOrderBy {
+    AnalyticsOrderBy {
+        field: "count".to_string(),
+        direction: AnalyticsSortDirection::Desc,
+    }
+}
+
+/// Builds a representative query per dataset that exercises the dialect-specific
+/// translations: UUID/string/boolean dimensions, timestamp `between` windows,
+/// `eq`/`contains`/`in` filters, percentile/sum/avg measures, and `count(*)`.
+fn request_for(dataset: &str) -> AnalyticsQueryRequest {
+    let tenant = Some(TenantId::new());
+    let (dimensions, measures, filters) = match dataset {
+        "sessions" => (
+            vec![dim("agent_id"), dim("channel")],
+            vec![
+                count(),
+                measure("total_cost_cents", AnalyticsAggregation::P95),
+                measure("tool_call_count", AnalyticsAggregation::Sum),
+                measure("cache_hit_rate", AnalyticsAggregation::Avg),
+                measure("duration_seconds", AnalyticsAggregation::P50),
+            ],
+            vec![eq("status", "active"), between_window("created_at")],
+        ),
+        "turns" => (
+            vec![dim("model"), dim("turn_number")],
+            vec![
+                count(),
+                measure("llm_ms", AnalyticsAggregation::P95),
+                measure("pipeline_ms", AnalyticsAggregation::Avg),
+                measure("llm_ttft_ms", AnalyticsAggregation::Avg),
+                measure("total_input_tokens", AnalyticsAggregation::Sum),
+            ],
+            vec![eq("channel", "chat"), between_window("finished_at")],
+        ),
+        "tool_calls" => (
+            vec![dim("tool_name"), dim("success")],
+            vec![count(), measure("duration_ms", AnalyticsAggregation::P95)],
+            vec![contains("tool_name", "search"), between_window("called_at")],
+        ),
+        "task_segments" => (
+            vec![dim("outcome"), dim("agent_id")],
+            vec![
+                count(),
+                measure("outcome_confidence", AnalyticsAggregation::Avg),
+                measure("token_cost", AnalyticsAggregation::Sum),
+                measure("duration_ms", AnalyticsAggregation::P95),
+            ],
+            vec![
+                is_in("outcome", &["success", "failure"]),
+                between_window("started_at"),
+            ],
+        ),
+        "skills" => (
+            vec![dim("skill_name"), dim("channel")],
+            vec![
+                count(),
+                measure("token_cost", AnalyticsAggregation::Sum),
+                measure("duration_ms", AnalyticsAggregation::P95),
+            ],
+            vec![between_window("started_at")],
+        ),
+        "procedure_runs" => (
+            vec![dim("procedure_ref"), dim("status"), dim("error_present")],
+            vec![count(), measure("duration_ms", AnalyticsAggregation::P95)],
+            vec![between_window("started_at")],
+        ),
+        "procedure_node_runs" => (
+            vec![dim("node_id"), dim("status")],
+            vec![count(), measure("duration_ms", AnalyticsAggregation::P95)],
+            vec![between_window("started_at")],
+        ),
+        "learning_candidates" => (
+            vec![dim("candidate_type"), dim("status"), dim("risk_class")],
+            vec![count(), measure("confidence", AnalyticsAggregation::Avg)],
+            vec![between_window("updated_at")],
+        ),
+        "experiment_runs" => (
+            vec![dim("name"), dim("status"), dim("error_present")],
+            vec![count(), measure("duration_ms", AnalyticsAggregation::P95)],
+            vec![between_window("updated_at")],
+        ),
+        "events" => (
+            vec![dim("event_type"), dim("session_id")],
+            vec![count(), measure("token_count", AnalyticsAggregation::Sum)],
+            vec![between_window("occurred_at")],
+        ),
+        other => panic!("no request template for dataset {other}"),
+    };
+
+    AnalyticsQueryRequest {
+        dataset: dataset.to_string(),
+        tenant_id: tenant,
+        dimensions,
+        measures,
+        filters,
+        order_by: vec![order_count_desc()],
+        limit: Some(50),
+    }
+}
+
+fn compile(dataset: &str, backend: AnalyticsBackend) -> moa_analytics::CompiledAnalyticsQuery {
+    AnalyticsCompiler::with_backend(analytics_catalog(), backend)
+        .compile(request_for(dataset))
+        .unwrap_or_else(|error| panic!("compile {dataset}/{}: {error}", backend.as_str()))
+}
+
+#[test]
+fn postgres_sql_is_pinned_for_every_dataset_offline() {
+    // Pins: the Postgres dialect emission for every dataset. This is the
+    // byte-for-byte guard that the ClickHouse backend did not change today's
+    // Postgres SQL.
+    for dataset in DATASETS {
+        let compiled = compile(dataset, AnalyticsBackend::Postgres);
+        insta::assert_snapshot!(format!("postgres_{dataset}"), compiled.sql);
+    }
+}
+
+#[test]
+fn clickhouse_sql_is_pinned_for_every_dataset_offline() {
+    // Pins: the ClickHouse dialect emission for every dataset, including the
+    // dim/fact FROM shapes, FINAL usage, `?` binds, quantileExactInclusive,
+    // countIf-derived session counts, and microsecond timestamp projection.
+    for dataset in DATASETS {
+        let compiled = compile(dataset, AnalyticsBackend::ClickHouse);
+        insta::assert_snapshot!(format!("clickhouse_{dataset}"), compiled.sql);
+    }
+}
+
+#[test]
+fn tenant_scope_is_injected_first_on_every_dataset_and_backend_offline() {
+    // Pins: both backends bind the tenant id as the first parameter and gate the
+    // driving table on it, so no dataset can be queried cross-tenant.
+    for dataset in DATASETS {
+        for backend in [AnalyticsBackend::Postgres, AnalyticsBackend::ClickHouse] {
+            let request = request_for(dataset);
+            let tenant = request.tenant_id.expect("request carries a tenant");
+            let compiled = AnalyticsCompiler::with_backend(analytics_catalog(), backend)
+                .compile(request)
+                .unwrap_or_else(|error| panic!("compile {dataset}: {error}"));
+
+            // The tenant filter is on the driving table for most datasets, but a
+            // ClickHouse source may inject it into its own subquery (events), so
+            // match the predicate without the alias prefix.
+            let expected_predicate = match backend {
+                AnalyticsBackend::Postgres => "tenant_id = $1::UUID",
+                AnalyticsBackend::ClickHouse => "tenant_id = toUUID(?)",
+            };
+            assert!(
+                compiled.sql.contains(expected_predicate),
+                "{dataset}/{} missing tenant predicate in: {}",
+                backend.as_str(),
+                compiled.sql
+            );
+            assert_eq!(
+                compiled.bind_values.first(),
+                Some(&moa_analytics::AnalyticsBindValue::String(
+                    tenant.to_string()
+                )),
+                "{dataset}/{} must bind the tenant id first",
+                backend.as_str()
+            );
+        }
+    }
+}
+
+#[test]
+fn clickhouse_events_raw_reads_are_duplicate_tolerant_offline() {
+    // Pins the ReplacingMergeTree dedup rules for the un-FINAL events_raw stream:
+    // session counts use uniqExactIf (never countIf), the events dataset counts
+    // with uniqExact, and the events source dedups to one row per
+    // (session_id, sequence_num) with LIMIT 1 BY behind the tenant filter.
+    let sessions = compile("sessions", AnalyticsBackend::ClickHouse).sql;
+    assert!(
+        sessions.contains("uniqExactIf(event_id, event_type = 'ToolCall')")
+            && sessions.contains("uniqExactIf(event_id, event_type = 'Error')"),
+        "session counts must be duplicate-tolerant: {sessions}"
+    );
+    assert!(
+        !sessions.contains("countIf("),
+        "session counts must not use countIf over events_raw: {sessions}"
+    );
+
+    let events = compile("events", AnalyticsBackend::ClickHouse).sql;
+    assert!(
+        events.contains("LIMIT 1 BY (session_id, sequence_num)"),
+        "events source must dedup the raw stream: {events}"
+    );
+    assert!(
+        events.contains("WHERE tenant_id = toUUID(?)"),
+        "events dedup must run behind the tenant filter: {events}"
+    );
+    assert!(
+        events.contains("uniqExact(d.event_id)"),
+        "events count must be duplicate-tolerant: {events}"
+    );
+    assert!(
+        !events.contains(" count()"),
+        "events dataset must not use raw count(): {events}"
+    );
+}

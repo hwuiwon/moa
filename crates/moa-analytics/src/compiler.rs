@@ -8,6 +8,7 @@ use moa_core::wire::analytics::{
 };
 
 use crate::catalog::{FieldSpec, analytics_catalog, find_dataset_spec, find_field_spec};
+use crate::dialect::{AnalyticsBackend, clickhouse_field_expr, clickhouse_from_sql};
 use crate::error::{AnalyticsError, Result};
 use crate::query::{aggregation_name, validate_query};
 
@@ -15,12 +16,23 @@ use crate::query::{aggregation_name, validate_query};
 #[derive(Debug, Clone)]
 pub struct AnalyticsCompiler {
     catalog: AnalyticsCatalogResponse,
+    backend: AnalyticsBackend,
 }
 
 impl AnalyticsCompiler {
-    /// Creates a compiler for the supplied catalog.
+    /// Creates a Postgres-backed compiler for the supplied catalog.
     pub fn new(catalog: AnalyticsCatalogResponse) -> Self {
-        Self { catalog }
+        Self::with_backend(catalog, AnalyticsBackend::Postgres)
+    }
+
+    /// Creates a compiler that emits SQL for the requested backend.
+    pub fn with_backend(catalog: AnalyticsCatalogResponse, backend: AnalyticsBackend) -> Self {
+        Self { catalog, backend }
+    }
+
+    /// Returns the backend this compiler emits SQL for.
+    pub fn backend(&self) -> AnalyticsBackend {
+        self.backend
     }
 
     /// Validates a request and compiles SQL plus response column metadata.
@@ -38,6 +50,7 @@ impl AnalyticsCompiler {
         let mut group_by_positions = Vec::with_capacity(validated.request.dimensions.len());
         let mut selected = Vec::with_capacity(columns.capacity());
 
+        let backend = self.backend;
         for dimension in &validated.request.dimensions {
             let field = required_spec(&dataset, &dimension.field)?;
             let column_index = columns.len();
@@ -48,7 +61,7 @@ impl AnalyticsCompiler {
             let sql_alias = sql_alias(column_index);
             select_clauses.push(format!(
                 "{} AS {sql_alias}",
-                dimension_select_expression(field)
+                dimension_select_expression(backend, &dataset_id, field)?
             ));
             group_by_positions.push(column_index + 1);
             selected.push(SelectedOutput {
@@ -78,7 +91,7 @@ impl AnalyticsCompiler {
                             response_id,
                             format!("{} {}", aggregation_name(measure.aggregation), field.label),
                             measure_kind(measure.aggregation, field.kind),
-                            measure_expression(measure.aggregation, field),
+                            measure_expression(backend, &dataset_id, measure.aggregation, field)?,
                             Some(field_id.to_string()),
                         )
                     }
@@ -89,7 +102,7 @@ impl AnalyticsCompiler {
                             .unwrap_or_else(|| aggregation_name(measure.aggregation).to_string()),
                         "count".to_string(),
                         AnalyticsFieldKind::Integer,
-                        "COUNT(*)::BIGINT".to_string(),
+                        count_star_expression(backend, &dataset_id),
                         None,
                     ),
                 };
@@ -107,14 +120,43 @@ impl AnalyticsCompiler {
             });
         }
 
+        // The tenant id is always bind #1 in appearance order. For most datasets
+        // the tenant predicate sits in the outer WHERE on the driving table; a
+        // ClickHouse source may instead inject the filter into its own subquery
+        // (marked with `$TENANT$`) so a dedup/`FINAL` runs behind the tenant
+        // primary-key filter. Either way the value is bound first.
+        let tenant_placeholder = placeholder(backend, AnalyticsFieldKind::Uuid, 1);
+        let (from_sql, tenant_in_source) = match backend {
+            AnalyticsBackend::Postgres => (format!("{} AS d", dataset.relation_sql), false),
+            AnalyticsBackend::ClickHouse => {
+                let raw = clickhouse_from_sql(&dataset_id).ok_or_else(|| {
+                    AnalyticsError::BackendFieldUnavailable {
+                        dataset: dataset_id.clone(),
+                        field: "*".to_string(),
+                        backend: backend.as_str(),
+                    }
+                })?;
+                if raw.contains("$TENANT$") {
+                    (raw.replace("$TENANT$", &tenant_placeholder), true)
+                } else {
+                    (raw.to_string(), false)
+                }
+            }
+        };
+
         let mut bind_values = vec![AnalyticsBindValue::String(validated.tenant_id.to_string())];
-        let mut predicates = vec!["d.tenant_id = $1::UUID".to_string()];
+        let mut predicates = Vec::new();
+        if !tenant_in_source {
+            predicates.push(format!("d.tenant_id = {tenant_placeholder}"));
+        }
         for filter in &validated.request.filters {
             if filter.field == "tenant_id" {
                 continue;
             }
             let field = required_spec(&dataset, &filter.field)?;
             predicates.push(filter_predicate(
+                backend,
+                &dataset_id,
                 field,
                 filter.operator,
                 filter.value.as_ref(),
@@ -122,12 +164,11 @@ impl AnalyticsCompiler {
             )?);
         }
 
-        let mut sql = format!(
-            "SELECT {} FROM {} AS d WHERE {}",
-            select_clauses.join(", "),
-            dataset.relation_sql,
-            predicates.join(" AND ")
-        );
+        let mut sql = format!("SELECT {} FROM {}", select_clauses.join(", "), from_sql);
+        if !predicates.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&predicates.join(" AND "));
+        }
         if !group_by_positions.is_empty() {
             let positions = group_by_positions
                 .into_iter()
@@ -237,19 +278,77 @@ fn sql_alias(index: usize) -> String {
     format!("c{index}")
 }
 
-fn field_expression(field: &FieldSpec) -> String {
-    format!("d.{}", field.column)
-}
-
-fn dimension_select_expression(field: &FieldSpec) -> String {
-    match field.kind {
-        AnalyticsFieldKind::Uuid => format!("{}::TEXT", field_expression(field)),
-        _ => field_expression(field),
+fn field_expression(
+    backend: AnalyticsBackend,
+    dataset_id: &str,
+    field: &FieldSpec,
+) -> Result<String> {
+    match backend {
+        AnalyticsBackend::Postgres => Ok(format!("d.{}", field.column)),
+        AnalyticsBackend::ClickHouse => clickhouse_field_expr(dataset_id, field.id)
+            .map(str::to_string)
+            .ok_or_else(|| AnalyticsError::BackendFieldUnavailable {
+                dataset: dataset_id.to_string(),
+                field: field.id.to_string(),
+                backend: backend.as_str(),
+            }),
     }
 }
 
-fn measure_expression(aggregation: AnalyticsAggregation, field: &FieldSpec) -> String {
-    let expression = field_expression(field);
+fn dimension_select_expression(
+    backend: AnalyticsBackend,
+    dataset_id: &str,
+    field: &FieldSpec,
+) -> Result<String> {
+    let expression = field_expression(backend, dataset_id, field)?;
+    Ok(match (backend, field.kind) {
+        (AnalyticsBackend::Postgres, AnalyticsFieldKind::Uuid) => format!("{expression}::TEXT"),
+        (AnalyticsBackend::ClickHouse, AnalyticsFieldKind::Uuid) => {
+            format!("toString({expression})")
+        }
+        // ClickHouse timestamps are emitted as microsecond epochs so the executor
+        // can decode a stable integer regardless of the server datetime format.
+        (AnalyticsBackend::ClickHouse, AnalyticsFieldKind::Timestamp) => {
+            format!("toUnixTimestamp64Micro({expression})")
+        }
+        _ => expression,
+    })
+}
+
+fn count_star_expression(backend: AnalyticsBackend, dataset_id: &str) -> String {
+    match backend {
+        AnalyticsBackend::Postgres => "COUNT(*)::BIGINT".to_string(),
+        // Counts over the un-`FINAL` events_raw stream must be duplicate-tolerant.
+        // The events source is deduped to one row per (session_id, sequence_num),
+        // so uniqExact over the event id is an exact row count that also tolerates
+        // any duplicate that slips past the dedup.
+        AnalyticsBackend::ClickHouse if dataset_id == "events" => {
+            "uniqExact(d.event_id)".to_string()
+        }
+        AnalyticsBackend::ClickHouse => "count()".to_string(),
+    }
+}
+
+fn measure_expression(
+    backend: AnalyticsBackend,
+    dataset_id: &str,
+    aggregation: AnalyticsAggregation,
+    field: &FieldSpec,
+) -> Result<String> {
+    let expression = field_expression(backend, dataset_id, field)?;
+    Ok(match backend {
+        AnalyticsBackend::Postgres => postgres_measure_expression(aggregation, field, &expression),
+        AnalyticsBackend::ClickHouse => {
+            clickhouse_measure_expression(aggregation, field, &expression)
+        }
+    })
+}
+
+fn postgres_measure_expression(
+    aggregation: AnalyticsAggregation,
+    field: &FieldSpec,
+    expression: &str,
+) -> String {
     match aggregation {
         AnalyticsAggregation::Count => format!("COUNT({expression})::BIGINT"),
         AnalyticsAggregation::CountDistinct => format!("COUNT(DISTINCT {expression})::BIGINT"),
@@ -281,54 +380,103 @@ fn measure_expression(aggregation: AnalyticsAggregation, field: &FieldSpec) -> S
     }
 }
 
+/// Emits the ClickHouse aggregate for a measure.
+///
+/// `quantileExactInclusive(p)(x)` is ClickHouse's exact, linearly interpolated
+/// percentile with inclusive rank — the same definition as Postgres
+/// `PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x)` — so the two dialects return
+/// identical percentile cells for the same data.
+fn clickhouse_measure_expression(
+    aggregation: AnalyticsAggregation,
+    field: &FieldSpec,
+    expression: &str,
+) -> String {
+    match aggregation {
+        AnalyticsAggregation::Count => format!("count({expression})"),
+        AnalyticsAggregation::CountDistinct => format!("uniqExact({expression})"),
+        AnalyticsAggregation::Sum => match field.kind {
+            AnalyticsFieldKind::Integer => format!("ifNull(sum({expression}), 0)"),
+            AnalyticsFieldKind::Float => format!("ifNull(sum({expression}), 0.0)"),
+            _ => format!("count({expression})"),
+        },
+        AnalyticsAggregation::Avg => format!("avg({expression})"),
+        AnalyticsAggregation::Min => format!("min({expression})"),
+        AnalyticsAggregation::Max => format!("max({expression})"),
+        AnalyticsAggregation::P50 => format!("quantileExactInclusive(0.5)({expression})"),
+        AnalyticsAggregation::P95 => format!("quantileExactInclusive(0.95)({expression})"),
+        AnalyticsAggregation::P99 => format!("quantileExactInclusive(0.99)({expression})"),
+    }
+}
+
 fn filter_predicate(
+    backend: AnalyticsBackend,
+    dataset_id: &str,
     field: &FieldSpec,
     operator: AnalyticsFilterOperator,
     value: Option<&AnalyticsCell>,
     bind_values: &mut Vec<AnalyticsBindValue>,
 ) -> Result<String> {
-    let expression = field_expression(field);
+    let expression = field_expression(backend, dataset_id, field)?;
     match operator {
         AnalyticsFilterOperator::Eq => {
-            let placeholder = push_cell_bind(field, value, bind_values)?;
+            let placeholder = push_cell_bind(backend, field, value, bind_values)?;
             Ok(format!("{expression} = {placeholder}"))
         }
         AnalyticsFilterOperator::NotEq => {
-            let placeholder = push_cell_bind(field, value, bind_values)?;
+            let placeholder = push_cell_bind(backend, field, value, bind_values)?;
             Ok(format!("{expression} <> {placeholder}"))
         }
         AnalyticsFilterOperator::Lt => {
-            let placeholder = push_cell_bind(field, value, bind_values)?;
+            let placeholder = push_cell_bind(backend, field, value, bind_values)?;
             Ok(format!("{expression} < {placeholder}"))
         }
         AnalyticsFilterOperator::Lte => {
-            let placeholder = push_cell_bind(field, value, bind_values)?;
+            let placeholder = push_cell_bind(backend, field, value, bind_values)?;
             Ok(format!("{expression} <= {placeholder}"))
         }
         AnalyticsFilterOperator::Gt => {
-            let placeholder = push_cell_bind(field, value, bind_values)?;
+            let placeholder = push_cell_bind(backend, field, value, bind_values)?;
             Ok(format!("{expression} > {placeholder}"))
         }
         AnalyticsFilterOperator::Gte => {
-            let placeholder = push_cell_bind(field, value, bind_values)?;
+            let placeholder = push_cell_bind(backend, field, value, bind_values)?;
             Ok(format!("{expression} >= {placeholder}"))
         }
         AnalyticsFilterOperator::Contains => {
-            let placeholder = push_stringish_bind(field, value, bind_values)?;
-            Ok(format!(
-                "{expression}::TEXT ILIKE '%' || {placeholder} || '%'"
-            ))
+            let placeholder = push_stringish_bind(backend, field, value, bind_values)?;
+            Ok(match backend {
+                AnalyticsBackend::Postgres => {
+                    format!("{expression}::TEXT ILIKE '%' || {placeholder} || '%'")
+                }
+                AnalyticsBackend::ClickHouse => {
+                    format!("positionCaseInsensitive(toString({expression}), {placeholder}) > 0")
+                }
+            })
         }
         AnalyticsFilterOperator::StartsWith => {
-            let placeholder = push_stringish_bind(field, value, bind_values)?;
-            Ok(format!("{expression}::TEXT ILIKE {placeholder} || '%'"))
+            let placeholder = push_stringish_bind(backend, field, value, bind_values)?;
+            Ok(match backend {
+                AnalyticsBackend::Postgres => {
+                    format!("{expression}::TEXT ILIKE {placeholder} || '%'")
+                }
+                AnalyticsBackend::ClickHouse => {
+                    format!("startsWith(lower(toString({expression})), lower({placeholder}))")
+                }
+            })
         }
         AnalyticsFilterOperator::EndsWith => {
-            let placeholder = push_stringish_bind(field, value, bind_values)?;
-            Ok(format!("{expression}::TEXT ILIKE '%' || {placeholder}"))
+            let placeholder = push_stringish_bind(backend, field, value, bind_values)?;
+            Ok(match backend {
+                AnalyticsBackend::Postgres => {
+                    format!("{expression}::TEXT ILIKE '%' || {placeholder}")
+                }
+                AnalyticsBackend::ClickHouse => {
+                    format!("endsWith(lower(toString({expression})), lower({placeholder}))")
+                }
+            })
         }
         AnalyticsFilterOperator::In | AnalyticsFilterOperator::NotIn => {
-            let placeholders = push_array_binds(field, value, bind_values)?;
+            let placeholders = push_array_binds(backend, field, value, bind_values)?;
             let keyword = if operator == AnalyticsFilterOperator::In {
                 "IN"
             } else {
@@ -342,7 +490,7 @@ fn filter_predicate(
         AnalyticsFilterOperator::IsNull => Ok(format!("{expression} IS NULL")),
         AnalyticsFilterOperator::IsNotNull => Ok(format!("{expression} IS NOT NULL")),
         AnalyticsFilterOperator::Between => {
-            let placeholders = push_array_binds(field, value, bind_values)?;
+            let placeholders = push_array_binds(backend, field, value, bind_values)?;
             if placeholders.len() != 2 {
                 return Err(AnalyticsError::InvalidFilterValue {
                     field: field.id.to_string(),
@@ -358,6 +506,7 @@ fn filter_predicate(
 }
 
 fn push_cell_bind(
+    backend: AnalyticsBackend,
     field: &FieldSpec,
     value: Option<&AnalyticsCell>,
     bind_values: &mut Vec<AnalyticsBindValue>,
@@ -368,10 +517,11 @@ fn push_cell_bind(
     })?;
     let bind = bind_from_cell(field, value)?;
     bind_values.push(bind);
-    Ok(placeholder(field.kind, bind_values.len()))
+    Ok(placeholder(backend, field.kind, bind_values.len()))
 }
 
 fn push_stringish_bind(
+    backend: AnalyticsBackend,
     field: &FieldSpec,
     value: Option<&AnalyticsCell>,
     bind_values: &mut Vec<AnalyticsBindValue>,
@@ -387,10 +537,11 @@ fn push_stringish_bind(
         });
     };
     bind_values.push(AnalyticsBindValue::String(value.to_string()));
-    Ok(format!("${}", bind_values.len()))
+    Ok(text_placeholder(backend, bind_values.len()))
 }
 
 fn push_array_binds(
+    backend: AnalyticsBackend,
     field: &FieldSpec,
     value: Option<&AnalyticsCell>,
     bind_values: &mut Vec<AnalyticsBindValue>,
@@ -410,7 +561,7 @@ fn push_array_binds(
     let mut placeholders = Vec::with_capacity(values.len());
     for value in values {
         bind_values.push(bind_from_json(field, value)?);
-        placeholders.push(placeholder(field.kind, bind_values.len()));
+        placeholders.push(placeholder(backend, field.kind, bind_values.len()));
     }
     Ok(placeholders)
 }
@@ -509,15 +660,32 @@ fn cell_string(value: &AnalyticsCell) -> Option<&str> {
     }
 }
 
-fn placeholder(kind: AnalyticsFieldKind, position: usize) -> String {
-    match kind {
-        AnalyticsFieldKind::Uuid => format!("${position}::UUID"),
-        AnalyticsFieldKind::Timestamp => format!("${position}::TIMESTAMPTZ"),
-        AnalyticsFieldKind::Integer => format!("${position}::BIGINT"),
-        AnalyticsFieldKind::Float => format!("${position}::DOUBLE PRECISION"),
-        AnalyticsFieldKind::Boolean => format!("${position}::BOOLEAN"),
-        AnalyticsFieldKind::Json => format!("${position}::JSONB"),
-        AnalyticsFieldKind::String => format!("${position}"),
+fn placeholder(backend: AnalyticsBackend, kind: AnalyticsFieldKind, position: usize) -> String {
+    match backend {
+        AnalyticsBackend::Postgres => match kind {
+            AnalyticsFieldKind::Uuid => format!("${position}::UUID"),
+            AnalyticsFieldKind::Timestamp => format!("${position}::TIMESTAMPTZ"),
+            AnalyticsFieldKind::Integer => format!("${position}::BIGINT"),
+            AnalyticsFieldKind::Float => format!("${position}::DOUBLE PRECISION"),
+            AnalyticsFieldKind::Boolean => format!("${position}::BOOLEAN"),
+            AnalyticsFieldKind::Json => format!("${position}::JSONB"),
+            AnalyticsFieldKind::String => format!("${position}"),
+        },
+        // ClickHouse uses positional `?` binds; the bound value is text, so UUID
+        // and timestamp comparisons wrap the placeholder in the parsing function
+        // that yields the column's native type.
+        AnalyticsBackend::ClickHouse => match kind {
+            AnalyticsFieldKind::Uuid => "toUUID(?)".to_string(),
+            AnalyticsFieldKind::Timestamp => "parseDateTime64BestEffort(?, 6, 'UTC')".to_string(),
+            _ => "?".to_string(),
+        },
+    }
+}
+
+fn text_placeholder(backend: AnalyticsBackend, position: usize) -> String {
+    match backend {
+        AnalyticsBackend::Postgres => format!("${position}"),
+        AnalyticsBackend::ClickHouse => "?".to_string(),
     }
 }
 

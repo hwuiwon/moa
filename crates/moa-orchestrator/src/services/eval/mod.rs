@@ -1124,7 +1124,7 @@ async fn replay_dataset_for_tenant(
 
     let (sink, writer) = MpscSink::spawn(
         MpscSinkConfig::from(&config.observability.lineage),
-        pool.clone(),
+        moa_lineage_sink::LineageStore::from_config(config.clickhouse.as_ref(), pool.clone()),
     )
     .await?;
     let report = Box::pin(replay_items_live(

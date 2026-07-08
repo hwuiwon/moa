@@ -87,6 +87,15 @@ async fn main() -> anyhow::Result<()> {
         pool: pool.clone(),
         session_store: Arc::new(session_store),
         proxy: Arc::new(OrchestratorProxy::new(&upstream).context("build orchestrator proxy")?),
+        clickhouse_lineage: moa_config
+            .clickhouse
+            .as_ref()
+            .map(|clickhouse| Arc::new(moa_lineage_sink::ClickHouseStore::connect(clickhouse))),
+        clickhouse_analytics: moa_config.clickhouse.as_ref().map(|clickhouse| {
+            Arc::new(moa_analytics::AnalyticsClickHouseClient::connect(
+                clickhouse,
+            ))
+        }),
     };
     let listener = tokio::net::TcpListener::bind(&args.bind)
         .await

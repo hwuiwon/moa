@@ -12,6 +12,9 @@ pub enum Error {
     /// SQL write failed.
     #[error("lineage sql: {0}")]
     Sqlx(#[from] sqlx::Error),
+    /// ClickHouse operation failed.
+    #[error("lineage clickhouse: {0}")]
+    ClickHouse(#[from] clickhouse::error::Error),
     /// JSON serialization failed.
     #[error("lineage json: {0}")]
     Json(#[from] serde_json::Error),

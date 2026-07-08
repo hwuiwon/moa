@@ -169,42 +169,64 @@ impl KnowledgeService {
         &self,
         request: KnowledgeQueryTraceRequest,
     ) -> Result<KnowledgeQueryTraceResponse, KnowledgeServiceError> {
-        let Some(pool) = self.postgres_pool() else {
-            tracing::Span::current().record("status", "no_pool");
-            tracing::Span::current().record("error_code", "none");
-            tracing::Span::current().record("stage_count", 0_u64);
-            tracing::Span::current().record("hit_count", 0_u64);
-            return Ok(empty_query_trace_response(request.trace_uid));
-        };
-        let storage_partition_id = StoragePartitionId::for_tenant(request.tenant_id).to_string();
-        let rows = sqlx::query(
-            r#"
-            SELECT ts, payload
-            FROM analytics.turn_lineage
-            WHERE storage_partition_id = $1
-              AND turn_id = $2
-              AND record_kind = $3
-            ORDER BY ts ASC, record_kind ASC
-            "#,
-        )
-        .bind(storage_partition_id)
-        .bind(request.trace_uid)
-        .bind(RecordKind::Retrieval.as_i16())
-        .fetch_all(&pool)
-        .await
-        .map_err(|error| {
-            tracing::Span::current().record("status", "failed");
-            tracing::Span::current().record("error_code", "query_trace_storage_failed");
-            KnowledgeServiceError::Moa(MoaError::StorageError(error.to_string()))
-        })?;
-
-        let mut traces = Vec::with_capacity(rows.len());
-        for row in rows {
-            let payload: Value = row.try_get("payload").map_err(|error| {
+        let storage_partition_id = StoragePartitionId::for_tenant(request.tenant_id);
+        let payloads: Vec<Value> = if let Some(clickhouse) = self.lineage_clickhouse.as_deref() {
+            clickhouse
+                .trace_payloads(
+                    &storage_partition_id,
+                    request.trace_uid,
+                    RecordKind::Retrieval.as_i16(),
+                )
+                .await
+                .map_err(|error| {
+                    tracing::Span::current().record("status", "failed");
+                    tracing::Span::current().record("error_code", "query_trace_storage_failed");
+                    KnowledgeServiceError::Moa(MoaError::StorageError(error.to_string()))
+                })?
+                .into_iter()
+                .map(|(_, payload)| payload)
+                .collect()
+        } else {
+            let Some(pool) = self.postgres_pool() else {
+                tracing::Span::current().record("status", "no_pool");
+                tracing::Span::current().record("error_code", "none");
+                tracing::Span::current().record("stage_count", 0_u64);
+                tracing::Span::current().record("hit_count", 0_u64);
+                return Ok(empty_query_trace_response(request.trace_uid));
+            };
+            let rows = sqlx::query(
+                r#"
+                SELECT ts, payload
+                FROM analytics.turn_lineage
+                WHERE storage_partition_id = $1
+                  AND turn_id = $2
+                  AND record_kind = $3
+                ORDER BY ts ASC, record_kind ASC
+                "#,
+            )
+            .bind(storage_partition_id.as_str())
+            .bind(request.trace_uid)
+            .bind(RecordKind::Retrieval.as_i16())
+            .fetch_all(&pool)
+            .await
+            .map_err(|error| {
                 tracing::Span::current().record("status", "failed");
-                tracing::Span::current().record("error_code", "query_trace_decode_failed");
+                tracing::Span::current().record("error_code", "query_trace_storage_failed");
                 KnowledgeServiceError::Moa(MoaError::StorageError(error.to_string()))
             })?;
+            rows.into_iter()
+                .map(|row| {
+                    row.try_get::<Value, _>("payload").map_err(|error| {
+                        tracing::Span::current().record("status", "failed");
+                        tracing::Span::current().record("error_code", "query_trace_decode_failed");
+                        KnowledgeServiceError::Moa(MoaError::StorageError(error.to_string()))
+                    })
+                })
+                .collect::<Result<_, _>>()?
+        };
+
+        let mut traces = Vec::with_capacity(payloads.len());
+        for payload in payloads {
             if let LineageEvent::Retrieval(record) = serde_json::from_value::<LineageEvent>(payload)
                 .map_err(|error| {
                     tracing::Span::current().record("status", "failed");

@@ -175,6 +175,10 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
             "../migrations/postgres/V000326__knowledge_semantic_graph_extractions.sql"
         ),
     },
+    SchemaMigration {
+        name: "V000327__clickhouse_analytics_export_state.sql",
+        sql: include_str!("../migrations/postgres/V000327__clickhouse_analytics_export_state.sql"),
+    },
 ];
 
 const AUTH_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[

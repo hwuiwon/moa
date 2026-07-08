@@ -79,6 +79,12 @@ pub struct AppState {
     pub session_store: Arc<PostgresSessionStore>,
     /// Internal orchestrator proxy.
     pub proxy: Arc<OrchestratorProxy>,
+    /// ClickHouse lineage store when `[clickhouse]` is configured; lineage
+    /// reads and offboarding deletes follow the write backend.
+    pub clickhouse_lineage: Option<Arc<moa_lineage_sink::ClickHouseStore>>,
+    /// ClickHouse analytics query client when `[clickhouse]` is configured;
+    /// dashboard queries follow the analytics-export backend.
+    pub clickhouse_analytics: Option<Arc<moa_analytics::AnalyticsClickHouseClient>>,
 }
 
 /// Edge-local verification config for public tenant-knowledge webhooks.

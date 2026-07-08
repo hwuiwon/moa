@@ -286,11 +286,13 @@ impl PostgresSessionStore {
             .map_err(map_sqlx_error)?;
         }
 
+        // `analytics.event_fact` is intentionally absent: it is a plain VIEW over
+        // the `events` table (see V000325), so it reflects live data and must not
+        // be refreshed.
         for qualified in [
             "analytics.session_fact",
             "analytics.turn_fact",
             "analytics.tool_call_fact",
-            "analytics.event_fact",
             "analytics.task_segment_fact",
             "analytics.procedure_run_fact",
             "analytics.procedure_node_run_fact",

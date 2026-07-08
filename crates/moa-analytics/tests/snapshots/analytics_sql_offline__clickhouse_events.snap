@@ -1,0 +1,5 @@
+---
+source: crates/moa-analytics/tests/analytics_sql_offline.rs
+expression: compiled.sql
+---
+SELECT d.event_type AS c0, toString(d.session_id) AS c1, uniqExact(d.event_id) AS c2, ifNull(sum(d.token_count), 0) AS c3 FROM ( SELECT event_id, session_id, tenant_id, sequence_num, event_type, token_count, ts FROM events_raw WHERE tenant_id = toUUID(?) LIMIT 1 BY (session_id, sequence_num) ) AS d LEFT JOIN dim_session_agent_context AS sac FINAL ON sac.session_id = d.session_id AND sac.tenant_id = d.tenant_id LEFT JOIN dim_sessions AS s FINAL ON s.session_id = d.session_id AND s.tenant_id = d.tenant_id WHERE d.ts BETWEEN parseDateTime64BestEffort(?, 6, 'UTC') AND parseDateTime64BestEffort(?, 6, 'UTC') GROUP BY 1, 2 ORDER BY c2 DESC LIMIT 50

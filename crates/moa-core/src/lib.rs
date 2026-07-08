@@ -21,7 +21,7 @@ pub use analytics::{
     ToolCallSummary,
 };
 pub use config::{
-    AuthzConfig, AuthzEngine, CloudConfig, CloudHandsConfig, CompactionConfig,
+    AuthzConfig, AuthzEngine, ClickHouseConfig, CloudConfig, CloudHandsConfig, CompactionConfig,
     ContextSnapshotConfig, DatabaseConfig, DatabaseNeonConfig, GeneralConfig, LineageConfig,
     LocalConfig, McpCredentialConfig, McpServerConfig, McpTransportConfig, MemoryConfig,
     MemoryDigestConfig, MemoryRankingConfig, MemoryRankingWeights, MemoryRetrievalConfig,

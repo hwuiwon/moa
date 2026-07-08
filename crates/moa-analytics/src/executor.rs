@@ -9,19 +9,42 @@ use moa_db::ScopedConn;
 use sqlx::{PgPool, Row, postgres::PgRow};
 
 use crate::catalog::analytics_catalog;
+use crate::clickhouse_exec::AnalyticsClickHouseClient;
 use crate::compiler::{AnalyticsBindValue, AnalyticsCompiler, CompiledAnalyticsQuery};
+use crate::dialect::AnalyticsBackend;
 use crate::error::{AnalyticsError, Result};
 
 /// Generic analytics service facade.
+///
+/// A service is bound to one backend at construction: [`AnalyticsService::new`]
+/// compiles and executes against Postgres materialized views, while
+/// [`AnalyticsService::clickhouse`] compiles and executes against the ClickHouse
+/// read models. The edge selects the constructor by `[clickhouse]` presence and
+/// calls the matching `query` / `query_clickhouse` entrypoint.
 #[derive(Debug, Clone, Default)]
 pub struct AnalyticsService {
     compiler: AnalyticsCompiler,
 }
 
 impl AnalyticsService {
-    /// Creates a service with the default static analytics catalog.
+    /// Creates a Postgres-backed service with the static analytics catalog.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a ClickHouse-backed service with the static analytics catalog.
+    pub fn clickhouse() -> Self {
+        Self {
+            compiler: AnalyticsCompiler::with_backend(
+                analytics_catalog(),
+                AnalyticsBackend::ClickHouse,
+            ),
+        }
+    }
+
+    /// Returns the backend this service compiles and executes against.
+    pub fn backend(&self) -> AnalyticsBackend {
+        self.compiler.backend()
     }
 
     /// Returns the analytics catalog available to clients.
@@ -48,6 +71,31 @@ impl AnalyticsService {
         conn.commit()
             .await
             .map_err(|error| AnalyticsError::Execution(error.to_string()))?;
+        let row_count = rows.len() as u64;
+        Ok(AnalyticsQueryResponse {
+            columns: compiled.columns.clone(),
+            rows,
+            metadata: AnalyticsQueryMetadata {
+                effective_tenant_id: Some(compiled.effective_tenant_id),
+                dataset: compiled.dataset,
+                row_count,
+                read_model_updated_at: None,
+            },
+        })
+    }
+
+    /// Executes a compiled analytics query against the ClickHouse read models.
+    ///
+    /// The service must have been built with [`AnalyticsService::clickhouse`] so
+    /// the compiler emits ClickHouse SQL; the executor pins the tenant on the
+    /// driving table exactly as the Postgres path does.
+    pub async fn query_clickhouse(
+        &self,
+        client: &AnalyticsClickHouseClient,
+        request: AnalyticsQueryRequest,
+    ) -> Result<AnalyticsQueryResponse> {
+        let compiled = self.compile(request)?;
+        let rows = client.execute(&compiled).await?;
         let row_count = rows.len() as u64;
         Ok(AnalyticsQueryResponse {
             columns: compiled.columns.clone(),

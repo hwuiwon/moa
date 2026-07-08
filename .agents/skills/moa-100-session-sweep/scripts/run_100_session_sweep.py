@@ -203,7 +203,8 @@ def teardown_database(admin_url, db_name):
 
 def build_headers(identity_id, tenant_id):
     return {
-        "x-moa-identity-type": "user",
+        # `user` was renamed to `operator` in the auth schema (2026-07-07).
+        "x-moa-identity-type": "operator",
         "x-moa-identity-id": identity_id,
         "x-moa-tenant-id": tenant_id,
     }
@@ -221,7 +222,9 @@ def grant_operator(env, identity_id, tenant_id):
         "writes": {
             "tuple_keys": [
                 {
-                    "user": f"user:{identity_id}",
+                    # The authz schema renamed the `user` type to `operator`
+                    # (2026-07-07); identities are operator:<uuid> subjects.
+                    "user": f"operator:{identity_id}",
                     "relation": "operator",
                     "object": f"tenant:{tenant_id}",
                 }

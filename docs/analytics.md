@@ -1,8 +1,11 @@
 # Analytics
 
-MOA stores analytics in Postgres. Application code writes durable product
-events and rows; triggers, generated columns, views, materialized views, and
-`moa-analytics` own read models.
+MOA stores analytics in Postgres by default. Application code writes durable
+product events and rows; triggers, generated columns, views, materialized
+views, and `moa-analytics` own read models. When the optional top-level
+`[clickhouse]` config section is present, dashboard read models are served
+from ClickHouse instead (see "ClickHouse Backend" below); Postgres remains the
+transactional source of truth either way.
 
 ## Write Path
 
@@ -69,6 +72,31 @@ query itself proceeds against the current materialized-view state.
 Segment-specific views (`skill_resolution_rates` and `segment_baselines`) are
 refreshed separately by session-store segment refresh helpers and by the
 default `segment_materialized_views_refresh` cron job every 15 minutes.
+
+## ClickHouse Backend
+
+With `[clickhouse]` configured (`docs/schemas/clickhouse-analytics.md` is the
+schema contract, `docs/plans/clickhouse-analytics-read-models.md` the design):
+
+- A leader-leased exporter in `moa-orchestrator` (`analytics_export/`)
+  incrementally copies dimension rows, the `events_raw` stream (with
+  exporter-stamped `turn_number`), and the Postgres-computed windowed facts
+  (`turn_fact`, `tool_call_fact`) into ClickHouse on a poll interval
+  (`clickhouse.export_poll_secs`, default 15 s). Cursors live in
+  `analytics.clickhouse_export_state`.
+- `moa-analytics` compiles each catalog dataset to ClickHouse SQL
+  (`AnalyticsBackend::ClickHouse`) and executes via
+  `AnalyticsClickHouseClient`; `moa-edge` selects the backend from config and
+  skips the matview refresh entirely. Response metadata
+  `read_model_updated_at` reports the most-stale export cursor.
+- Tenant isolation stays compiler-injected (`tenant_id = ?` bound first) on
+  both backends. Tenant offboarding purges the ClickHouse copies
+  (`AnalyticsClickHouseClient::purge_tenant`) after the relational purge.
+- Runtime aggregates (`skill_resolution_rates`, `segment_baselines`,
+  `task_strategy_success_rates`) and `analytics.scores` stay in Postgres.
+- Validation: the certify skill's "ClickHouse Analytics Backend And Exporter"
+  matrix — offline snapshots alone cannot catch ClickHouse syntax/semantic
+  drift; the live parity lane is the gate.
 
 ## Adding Analytics
 

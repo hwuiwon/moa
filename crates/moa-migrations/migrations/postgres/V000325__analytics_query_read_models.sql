@@ -12,7 +12,7 @@ DROP MATERIALIZED VIEW IF EXISTS analytics.procedure_node_run_fact;
 DROP MATERIALIZED VIEW IF EXISTS analytics.procedure_run_fact;
 DROP MATERIALIZED VIEW IF EXISTS analytics.task_segment_fact;
 DROP MATERIALIZED VIEW IF EXISTS analytics.tool_call_fact;
-DROP MATERIALIZED VIEW IF EXISTS analytics.event_fact;
+DROP VIEW IF EXISTS analytics.event_fact;
 DROP MATERIALIZED VIEW IF EXISTS analytics.turn_fact;
 DROP MATERIALIZED VIEW IF EXISTS analytics.session_fact;
 
@@ -127,7 +127,12 @@ CREATE INDEX analytics_tool_call_fact_tenant_agent_idx
     ON analytics.tool_call_fact(tenant_id, agent_id, called_at DESC)
     WHERE agent_id IS NOT NULL;
 
-CREATE MATERIALIZED VIEW analytics.event_fact AS
+-- `event_fact` is a plain VIEW, not a MATERIALIZED VIEW: `events` is the
+-- highest-volume table in the system, so a materialized copy doubled its
+-- storage and demanded a full refresh on every dashboard cycle. The base-table
+-- indexes below keep the view's on-demand joins index-served, so the analytics
+-- catalog can keep pointing at `analytics.event_fact` unchanged.
+CREATE VIEW analytics.event_fact AS
 SELECT
     e.id AS event_id,
     e.session_id,
@@ -145,15 +150,16 @@ JOIN sessions s
 LEFT JOIN session_agent_context sac
     ON sac.session_id = e.session_id;
 
-CREATE UNIQUE INDEX analytics_event_fact_event_uidx
-    ON analytics.event_fact(event_id, session_id);
-CREATE INDEX analytics_event_fact_tenant_occurred_idx
-    ON analytics.event_fact(tenant_id, occurred_at DESC);
-CREATE INDEX analytics_event_fact_tenant_type_idx
-    ON analytics.event_fact(tenant_id, event_type, occurred_at DESC);
-CREATE INDEX analytics_event_fact_tenant_agent_idx
-    ON analytics.event_fact(tenant_id, agent_id, occurred_at DESC)
-    WHERE agent_id IS NOT NULL;
+-- Serves the view's tenant + time-ordered dashboard path
+-- (WHERE tenant_id = $1 ORDER BY occurred_at DESC); a backward btree scan
+-- satisfies the DESC ordering. The tenant + event_type path
+-- (WHERE tenant_id = $1 AND event_type = $2 ORDER BY occurred_at DESC) is
+-- already served by idx_events_tenant_type_time from V000307. The old
+-- materialized-only tenant + agent partial index is dropped: agent_id comes
+-- from the session_agent_context join, so it cannot live on the `events` base
+-- table and is resolved by that join at query time.
+CREATE INDEX IF NOT EXISTS idx_events_tenant_time
+    ON events(tenant_id, timestamp DESC);
 
 CREATE MATERIALIZED VIEW analytics.task_segment_fact AS
 SELECT

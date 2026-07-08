@@ -1,0 +1,56 @@
+//! Offline coverage for the ClickHouse analytics executor against a mock server.
+//!
+//! The clickhouse `test-util` mock cannot serve a custom `JSONEachRow` body (the
+//! raw-bytes handler is private and `provide` is RowBinary-only), so decoding of
+//! populated rows is unit-tested in `clickhouse_exec`. This test pins the
+//! executor's request/response plumbing: it builds the client, compiles and
+//! binds ClickHouse SQL, fetches, and assembles a response — here against an
+//! empty result — proving the wiring and the empty-result path end to end.
+
+use clickhouse::Client;
+use clickhouse::test::{Mock, handlers};
+use moa_analytics::{AnalyticsClickHouseClient, AnalyticsService};
+use moa_core::TenantId;
+use moa_core::wire::analytics::{
+    AnalyticsAggregation, AnalyticsDimension, AnalyticsMeasure, AnalyticsQueryRequest,
+};
+
+#[tokio::test]
+async fn clickhouse_executor_returns_empty_result_and_metadata_offline() {
+    // Pins: a ClickHouse-backed service compiles + executes a query and reports
+    // dataset, tenant, and a zero row count when the store returns no rows.
+    let mock = Mock::new();
+    mock.add(handlers::provide(std::iter::empty::<u8>()));
+
+    let client = AnalyticsClickHouseClient::from_client(Client::default().with_url(mock.url()));
+    let service = AnalyticsService::clickhouse();
+
+    let tenant = TenantId::new();
+    let request = AnalyticsQueryRequest {
+        dataset: "sessions".to_string(),
+        tenant_id: Some(tenant),
+        dimensions: vec![AnalyticsDimension {
+            field: "channel".to_string(),
+            alias: None,
+        }],
+        measures: vec![AnalyticsMeasure {
+            field: Some("total_cost_cents".to_string()),
+            aggregation: AnalyticsAggregation::P95,
+            alias: None,
+        }],
+        filters: Vec::new(),
+        order_by: Vec::new(),
+        limit: Some(10),
+    };
+
+    let response = service
+        .query_clickhouse(&client, request)
+        .await
+        .expect("clickhouse query should succeed against the mock");
+
+    assert_eq!(response.rows.len(), 0, "mock returned no rows");
+    assert_eq!(response.metadata.row_count, 0);
+    assert_eq!(response.metadata.dataset, "sessions");
+    assert_eq!(response.metadata.effective_tenant_id, Some(tenant));
+    assert_eq!(response.columns.len(), 2, "channel dimension + p95 measure");
+}

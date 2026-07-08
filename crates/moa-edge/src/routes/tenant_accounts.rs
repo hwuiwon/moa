@@ -814,7 +814,15 @@ pub async fn delete_tenant(
         )
             .into_response();
     };
-    match purge_tenant_account(&state.pool, fga, tenant.id).await {
+    match purge_tenant_account(
+        &state.pool,
+        state.clickhouse_lineage.as_deref(),
+        state.clickhouse_analytics.as_deref(),
+        fga,
+        tenant.id,
+    )
+    .await
+    {
         Ok(()) => Json(DeletedTenantResponse {
             deleted: true,
             tenant_id: tenant.id,
@@ -1052,6 +1060,8 @@ struct AgentTupleTarget {
 
 async fn purge_tenant_account(
     pool: &sqlx::PgPool,
+    clickhouse_lineage: Option<&moa_lineage_sink::ClickHouseStore>,
+    clickhouse_analytics: Option<&moa_analytics::AnalyticsClickHouseClient>,
     fga: &FgaClient,
     tenant_id: Uuid,
 ) -> Result<(), String> {
@@ -1164,7 +1174,26 @@ async fn purge_tenant_account(
         .map_err(|error| format!("delete tenant row: {error}"))?;
     tx.commit()
         .await
-        .map_err(|error| format!("db commit: {error}"))
+        .map_err(|error| format!("db commit: {error}"))?;
+
+    // ClickHouse holds the turn_lineage rows and analytics-export copies when
+    // that backend is configured; offboarding must reach them too. Runs after
+    // the Postgres commit so a ClickHouse failure surfaces without rolling
+    // back the relational purge.
+    if let Some(clickhouse) = clickhouse_lineage {
+        let partition = moa_core::StoragePartitionId::new(&storage_partition_id);
+        clickhouse
+            .delete_partition_rows(&partition)
+            .await
+            .map_err(|error| format!("clickhouse turn_lineage delete: {error}"))?;
+    }
+    if let Some(clickhouse) = clickhouse_analytics {
+        clickhouse
+            .purge_tenant(tenant_id)
+            .await
+            .map_err(|error| format!("clickhouse analytics purge: {error}"))?;
+    }
+    Ok(())
 }
 
 async fn load_contact_session_tuple_targets<'executor, Executor>(

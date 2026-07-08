@@ -55,7 +55,7 @@ pub async fn handle_explain(
     {
         return response;
     }
-    match explain_inner(&state.pool, request).await {
+    match explain_inner(&state, request).await {
         Ok(response) => Json(response).into_response(),
         Err(response) => response,
     }
@@ -88,7 +88,7 @@ pub async fn handle_query(
     {
         return response;
     }
-    match query_inner(&state.pool, request).await {
+    match query_inner(&state, request).await {
         Ok(response) => Json(response).into_response(),
         Err(response) => response,
     }
@@ -121,20 +121,27 @@ pub async fn handle_verify(
     {
         return response;
     }
-    match verify_inner(&state.pool, request, state.config.compliance.clone()).await {
+    match verify_inner(&state, request).await {
         Ok(response) => Json(response).into_response(),
         Err(response) => response,
     }
 }
 
 async fn explain_inner(
-    pool: &sqlx::PgPool,
+    state: &AppState,
     request: LineageExplainRequest,
 ) -> Result<LineageExplainResponse, Response> {
     let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
-    let records = lineage_sink_admin::explain_records(pool, &storage_partition_id, request.id)
-        .await
-        .map_err(route_error)?;
+    let records = if let Some(clickhouse) = state.clickhouse_lineage.as_deref() {
+        clickhouse
+            .explain_records(&storage_partition_id, request.id)
+            .await
+            .map_err(route_error)?
+    } else {
+        lineage_sink_admin::explain_records(&state.pool, &storage_partition_id, request.id)
+            .await
+            .map_err(route_error)?
+    };
     Ok(LineageExplainResponse {
         id: request.id,
         records,
@@ -142,11 +149,18 @@ async fn explain_inner(
 }
 
 async fn query_inner(
-    pool: &sqlx::PgPool,
+    state: &AppState,
     request: LineageQueryRequest,
 ) -> Result<LineageQueryResponse, Response> {
     let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
-    let mut tx = moa_db::ScopedConn::begin(pool, &RlsContext::tenant(request.tenant_id))
+    if let Some(clickhouse) = state.clickhouse_lineage.as_deref() {
+        let rows =
+            execute_typed_lineage_query_clickhouse(clickhouse, &request, &storage_partition_id)
+                .await
+                .map_err(route_error)?;
+        return Ok(LineageQueryResponse { rows });
+    }
+    let mut tx = moa_db::ScopedConn::begin(&state.pool, &RlsContext::tenant(request.tenant_id))
         .await
         .map_err(route_error)?;
     sqlx::query("SET TRANSACTION READ ONLY")
@@ -165,10 +179,19 @@ async fn query_inner(
 }
 
 async fn verify_inner(
-    pool: &sqlx::PgPool,
+    state: &AppState,
     request: LineageVerifyRequest,
-    config: ComplianceConfig,
 ) -> Result<LineageVerifyResponse, Response> {
+    // The audit hash chain is only folded on the Postgres backend; ClickHouse
+    // rows carry per-row hashes but no prev_hash links to verify.
+    if state.clickhouse_lineage.is_some() {
+        return Err(route_error(
+            "lineage verification requires the postgres lineage backend; \
+             remove the [clickhouse] config section to verify compliance chains",
+        ));
+    }
+    let pool: &sqlx::PgPool = &state.pool;
+    let config: ComplianceConfig = state.config.compliance.clone();
     let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
     if request.window == "hot" || request.window == "db" {
         let rows = lineage_audit_admin::load_compliance_rows_for_interval(
@@ -281,6 +304,43 @@ async fn execute_typed_lineage_query(
     rows.into_iter()
         .map(|row| lineage_record_from_row(row, request.tenant_id))
         .collect()
+}
+
+/// Runs the typed lineage query against ClickHouse with the same filters,
+/// ordering, and limit clamp as the Postgres query builder.
+async fn execute_typed_lineage_query_clickhouse(
+    clickhouse: &moa_lineage_sink::ClickHouseStore,
+    request: &LineageQueryRequest,
+    storage_partition_id: &StoragePartitionId,
+) -> Result<Vec<LineageRecordView>, moa_lineage_sink::Error> {
+    let records = clickhouse
+        .query_records(
+            storage_partition_id,
+            moa_lineage_sink::LineageQueryFilters {
+                turn_id: request.filters.turn_id,
+                session_id: request.filters.session_id.map(|session_id| session_id.0),
+                user_id: request.filters.user_id.as_ref().map(UserId::as_str),
+                record_kind: request.filters.record_kind,
+                from_time: request.filters.from_time,
+                to_time: request.filters.to_time,
+                descending: matches!(request.order, LineageQueryOrder::TimestampDesc),
+                limit: normalized_query_limit(request.limit),
+            },
+        )
+        .await?;
+    Ok(records
+        .into_iter()
+        .map(|record| LineageRecordView {
+            turn_id: record.turn_id,
+            session_id: Some(SessionId(record.session_id)),
+            tenant_id: Some(request.tenant_id),
+            user_id: Some(UserId::new(record.user_id)),
+            ts: record.ts,
+            record_kind: record.record_kind,
+            payload: record.payload,
+            summary: record.answer_text,
+        })
+        .collect())
 }
 
 fn normalized_query_limit(limit: u32) -> i64 {

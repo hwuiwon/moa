@@ -1,0 +1,5 @@
+---
+source: crates/moa-analytics/tests/analytics_sql_offline.rs
+expression: compiled.sql
+---
+SELECT d.agent_id::TEXT AS c0, d.channel AS c1, COUNT(*)::BIGINT AS c2, PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY d.total_cost_cents)::DOUBLE PRECISION AS c3, COALESCE(SUM(d.tool_call_count), 0)::BIGINT AS c4, AVG(d.cache_hit_rate)::DOUBLE PRECISION AS c5, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY d.duration_seconds)::DOUBLE PRECISION AS c6 FROM analytics.session_fact AS d WHERE d.tenant_id = $1::UUID AND d.status = $2 AND d.created_at BETWEEN $3::TIMESTAMPTZ AND $4::TIMESTAMPTZ GROUP BY 1, 2 ORDER BY c2 DESC LIMIT 50

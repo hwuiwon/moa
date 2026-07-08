@@ -6,10 +6,17 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
+clickhouse.workspace = true
 moa-core.workspace = true
 moa-db.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 workspace-hack.workspace = true
+
+[dev-dependencies]
+clickhouse = { workspace = true, features = ["test-util"] }
+insta.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

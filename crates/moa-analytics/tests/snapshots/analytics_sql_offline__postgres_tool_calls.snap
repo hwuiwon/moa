@@ -1,0 +1,5 @@
+---
+source: crates/moa-analytics/tests/analytics_sql_offline.rs
+expression: compiled.sql
+---
+SELECT d.tool_name AS c0, d.success AS c1, COUNT(*)::BIGINT AS c2, PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY d.duration_ms)::DOUBLE PRECISION AS c3 FROM analytics.tool_call_fact AS d WHERE d.tenant_id = $1::UUID AND d.tool_name::TEXT ILIKE '%' || $2 || '%' AND d.called_at BETWEEN $3::TIMESTAMPTZ AND $4::TIMESTAMPTZ GROUP BY 1, 2 ORDER BY c2 DESC LIMIT 50

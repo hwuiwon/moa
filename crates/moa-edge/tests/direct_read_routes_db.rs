@@ -129,6 +129,8 @@ async fn start_edge(
             OrchestratorProxy::new("http://127.0.0.1:1")
                 .expect("proxy URL should be syntactically valid"),
         ),
+        clickhouse_lineage: None,
+        clickhouse_analytics: None,
     };
     let app = routes::router(state);
     let listener = TcpListener::bind("127.0.0.1:0")

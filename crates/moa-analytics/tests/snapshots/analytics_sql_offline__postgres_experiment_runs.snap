@@ -1,0 +1,5 @@
+---
+source: crates/moa-analytics/tests/analytics_sql_offline.rs
+expression: compiled.sql
+---
+SELECT d.name AS c0, d.status AS c1, d.error_present AS c2, COUNT(*)::BIGINT AS c3, PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY d.duration_ms)::DOUBLE PRECISION AS c4 FROM analytics.experiment_run_fact AS d WHERE d.tenant_id = $1::UUID AND d.updated_at BETWEEN $2::TIMESTAMPTZ AND $3::TIMESTAMPTZ GROUP BY 1, 2, 3 ORDER BY c3 DESC LIMIT 50

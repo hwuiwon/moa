@@ -464,6 +464,7 @@ pub struct KnowledgeService {
     credentials: Arc<dyn KnowledgeCredentialStore>,
     ingestion_runner: Arc<dyn KnowledgeIngestionRunner>,
     max_preview_chars: usize,
+    lineage_clickhouse: Option<Arc<moa_lineage_sink::ClickHouseStore>>,
 }
 
 impl KnowledgeService {
@@ -482,6 +483,7 @@ impl KnowledgeService {
             credentials,
             ingestion_runner,
             max_preview_chars,
+            lineage_clickhouse: None,
         }
     }
 
@@ -500,7 +502,19 @@ impl KnowledgeService {
             credentials,
             ingestion_runner,
             max_preview_chars,
+            lineage_clickhouse: None,
         }
+    }
+
+    /// Points retrieval-trace reads at ClickHouse when that lineage backend
+    /// is configured; `None` keeps the Postgres reads.
+    #[must_use]
+    pub fn with_clickhouse_lineage(
+        mut self,
+        lineage_clickhouse: Option<Arc<moa_lineage_sink::ClickHouseStore>>,
+    ) -> Self {
+        self.lineage_clickhouse = lineage_clickhouse;
+        self
     }
 
     /// Returns the injected page-ingestion runner.
@@ -1005,6 +1019,12 @@ fn service_from_config(pool: sqlx::PgPool, config: &MoaConfig) -> KnowledgeServi
             config.clone(),
         )),
         config.knowledge.observability.max_object_preview_chars,
+    )
+    .with_clickhouse_lineage(
+        config
+            .clickhouse
+            .as_ref()
+            .map(|clickhouse| Arc::new(moa_lineage_sink::ClickHouseStore::connect(clickhouse))),
     )
 }
 

@@ -20,7 +20,7 @@ use moa_core::{SessionId, StoragePartitionId, TenantId, UserId};
 use moa_lineage_core::{
     BackendIntrospection, LineageEvent, RetrievalLineage, RetrievalStage, StageTimings,
 };
-use moa_lineage_sink::{MpscSinkConfig, spawn_writer};
+use moa_lineage_sink::{LineageStore, MpscSinkConfig, spawn_writer};
 use moa_memory_types::MemoryScope;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::sync::mpsc;
@@ -43,7 +43,7 @@ async fn lineage_writer_flush_on_shutdown_drains_pending_rows_db() -> TestResult
     };
 
     let (tx, rx) = mpsc::channel::<LineageEvent>(64);
-    let handle = spawn_writer(rx, config, pool.clone()).await?;
+    let handle = spawn_writer(rx, config, LineageStore::Postgres(pool.clone())).await?;
 
     let turn_ids: Vec<Uuid> = (0..3).map(|_| Uuid::now_v7()).collect();
     for turn_id in &turn_ids {
@@ -93,7 +93,7 @@ async fn lineage_writer_poison_batch_dead_letters_without_acking_journal_db() ->
     };
 
     let (tx, rx) = mpsc::channel::<LineageEvent>(64);
-    let handle = spawn_writer(rx, config.clone(), pool.clone()).await?;
+    let handle = spawn_writer(rx, config.clone(), LineageStore::Postgres(pool.clone())).await?;
 
     // Poison the write target: dropping the destination table makes the COPY/INSERT
     // fail with `undefined_table` (42P01), which is not a retryable SQLSTATE.
@@ -143,7 +143,7 @@ async fn lineage_writer_poison_batch_dead_letters_without_acking_journal_db() ->
     // its own idempotent schema bootstrap) replays the retained, unacked row and
     // finally persists it -- proving the journal kept it.
     let (tx2, rx2) = mpsc::channel::<LineageEvent>(64);
-    let handle2 = spawn_writer(rx2, config, pool.clone()).await?;
+    let handle2 = spawn_writer(rx2, config, LineageStore::Postgres(pool.clone())).await?;
     drop(tx2);
     let recovery_stats = handle2.shutdown().await?;
     assert!(
@@ -182,7 +182,7 @@ async fn lineage_writer_compliance_partition_writes_verifiable_hash_chain_db() -
     };
 
     let (tx, rx) = mpsc::channel::<LineageEvent>(64);
-    let handle = spawn_writer(rx, config, pool.clone()).await?;
+    let handle = spawn_writer(rx, config, LineageStore::Postgres(pool.clone())).await?;
 
     let partition = "compliance-partition";
     sqlx::query(
@@ -257,6 +257,130 @@ async fn lineage_writer_compliance_partition_writes_verifiable_hash_chain_db() -
         "partition state tip must equal the chain's final integrity hash"
     );
     assert_eq!(record_count, 3, "record count advances once per new row");
+
+    pool.close().await;
+    drop_database(&cleanup_pool, &database_name).await;
+    Ok(())
+}
+
+/// Row shape the mock ClickHouse server decodes from the writer's RowBinary
+/// insert; field order and serde attributes mirror the sink's wire row.
+#[derive(Debug, serde::Deserialize)]
+struct RecordedClickHouseRow {
+    #[serde(with = "clickhouse::serde::uuid")]
+    turn_id: Uuid,
+    #[serde(with = "clickhouse::serde::uuid")]
+    _session_id: Uuid,
+    _user_id: String,
+    storage_partition_id: String,
+    #[serde(with = "clickhouse::serde::chrono::datetime64::micros")]
+    _ts: chrono::DateTime<Utc>,
+    _tier: i16,
+    record_kind: i16,
+    payload: String,
+    _answer_text: Option<String>,
+    integrity_hash: String,
+    _prev_hash: Option<String>,
+}
+
+#[tokio::test]
+async fn lineage_writer_clickhouse_backend_splits_rows_from_scores_db() -> TestResult<()> {
+    // Pins: with [clickhouse] configured, turn_lineage rows land in ClickHouse
+    // (bootstrapped with database + TTL table DDL) and NOT in Postgres, while
+    // score rows still land in Postgres analytics.scores.
+    let (pool, database_name, cleanup_pool) = isolated_pool().await?;
+    let journal = tempfile::tempdir()?;
+
+    let mock = clickhouse::test::Mock::new();
+    let create_database = mock.add(clickhouse::test::handlers::record_ddl());
+    let create_table = mock.add(clickhouse::test::handlers::record_ddl());
+    let insert = mock.add(clickhouse::test::handlers::record::<RecordedClickHouseRow>());
+
+    let clickhouse_config = moa_core::ClickHouseConfig {
+        url: mock.url().to_string(),
+        ..moa_core::ClickHouseConfig::default()
+    };
+    let store = LineageStore::from_config(Some(&clickhouse_config), pool.clone());
+
+    let config = MpscSinkConfig {
+        channel_capacity: 64,
+        batch_size: 100,
+        batch_max_age: Duration::from_secs(3600),
+        journal_path: journal.path().to_path_buf(),
+    };
+    let (tx, rx) = mpsc::channel::<LineageEvent>(64);
+    let handle = spawn_writer(rx, config, store).await?;
+
+    let turn_id = Uuid::now_v7();
+    let score_id = Uuid::now_v7();
+    tx.send(retrieval_event(turn_id, "clickhouse-partition"))
+        .await
+        .map_err(|error| test_error(format!("send should enqueue event: {error}")))?;
+    tx.send(LineageEvent::Eval(moa_lineage_core::ScoreRecord {
+        score_id,
+        ts: Utc::now(),
+        target: moa_lineage_core::ScoreTarget::Turn {
+            turn_id: moa_lineage_core::TurnId(turn_id),
+        },
+        storage_partition_id: StoragePartitionId::new("clickhouse-partition"),
+        user_id: None,
+        name: "retrieval_zero_recall".to_string(),
+        value: moa_lineage_core::ScoreValue::Boolean(false),
+        source: moa_lineage_core::ScoreSource::OnlineJudge,
+        model_or_evaluator: "retriever".to_string(),
+        run_id: None,
+        dataset_id: None,
+        comment: None,
+    }))
+    .await
+    .map_err(|error| test_error(format!("send should enqueue score: {error}")))?;
+    drop(tx);
+
+    let stats = handle.shutdown().await?;
+    assert_eq!(stats.written, 2, "both rows must count as written");
+
+    let database_ddl = create_database.query().await;
+    assert!(
+        database_ddl.contains("CREATE DATABASE IF NOT EXISTS"),
+        "first DDL must create the database: {database_ddl}"
+    );
+    let table_ddl = create_table.query().await;
+    assert!(
+        table_ddl.contains("turn_lineage") && table_ddl.contains("TTL"),
+        "second DDL must create the TTL'd turn_lineage table: {table_ddl}"
+    );
+
+    let rows: Vec<RecordedClickHouseRow> = insert.collect().await;
+    assert_eq!(rows.len(), 1, "exactly the lineage row goes to ClickHouse");
+    assert_eq!(rows[0].turn_id, turn_id);
+    assert_eq!(rows[0].storage_partition_id, "clickhouse-partition");
+    assert_eq!(rows[0].record_kind, 1, "retrieval record kind");
+    assert!(
+        rows[0].payload.contains("what is oauth"),
+        "payload must carry the serialized event JSON"
+    );
+    assert!(
+        !rows[0].integrity_hash.is_empty(),
+        "per-row canonical hash must survive the backend switch"
+    );
+
+    let postgres_lineage_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM analytics.turn_lineage")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        postgres_lineage_rows, 0,
+        "turn_lineage rows must not land in Postgres under the clickhouse backend"
+    );
+    let postgres_score_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM analytics.scores WHERE score_id = $1")
+            .bind(score_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        postgres_score_rows, 1,
+        "score rows stay in Postgres under the clickhouse backend"
+    );
 
     pool.close().await;
     drop_database(&cleanup_pool, &database_name).await;

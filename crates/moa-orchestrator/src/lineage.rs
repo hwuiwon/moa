@@ -16,7 +16,10 @@ pub struct LineageSinkRuntime {
 enum LineageSinkMode {
     Null,
     Otel,
+    /// Durable DB sink; the row backend follows `[clickhouse]` config presence.
     Postgres,
+    /// Durable DB sink that requires `[clickhouse]` to be configured.
+    ClickHouse,
 }
 
 impl LineageSinkMode {
@@ -24,10 +27,11 @@ impl LineageSinkMode {
         let normalized = value.map(str::trim).filter(|value| !value.is_empty());
         match normalized.map(str::to_ascii_lowercase).as_deref() {
             Some("postgres") => Ok(Self::Postgres),
+            Some("clickhouse") => Ok(Self::ClickHouse),
             Some("otel") => Ok(Self::Otel),
             Some("null") | None => Ok(Self::Null),
             Some(other) => Err(MoaError::ConfigError(format!(
-                "unknown MOA_LINEAGE_SINK value: {other}; expected postgres|null|otel"
+                "unknown MOA_LINEAGE_SINK value: {other}; expected postgres|clickhouse|null|otel"
             ))),
         }
     }
@@ -51,20 +55,29 @@ pub async fn build_lineage_sink_from_env_value(
     pool: sqlx::PgPool,
     env_value: Option<&str>,
 ) -> Result<LineageSinkRuntime> {
-    match LineageSinkMode::from_env_value(env_value)? {
-        LineageSinkMode::Postgres => {
-            moa_lineage_sink::ensure_schema(&pool)
-                .await
-                .map_err(|error| {
-                    MoaError::StorageError(format!("lineage schema setup failed: {error}"))
-                })?;
+    let mode = LineageSinkMode::from_env_value(env_value)?;
+    match mode {
+        LineageSinkMode::Postgres | LineageSinkMode::ClickHouse => {
+            if mode == LineageSinkMode::ClickHouse && config.clickhouse.is_none() {
+                return Err(MoaError::ConfigError(
+                    "MOA_LINEAGE_SINK=clickhouse requires the [clickhouse] config section \
+                     (or MOA_CLICKHOUSE_URL)"
+                        .to_string(),
+                ));
+            }
+            let store =
+                moa_lineage_sink::LineageStore::from_config(config.clickhouse.as_ref(), pool);
+            let backend = store.backend_name();
+            store.ensure_schema().await.map_err(|error| {
+                MoaError::StorageError(format!("lineage schema setup failed: {error}"))
+            })?;
             let sink_config = moa_lineage_sink::MpscSinkConfig::from(&config.observability.lineage);
-            let (sink, writer) = moa_lineage_sink::MpscSink::spawn(sink_config, pool)
+            let (sink, writer) = moa_lineage_sink::MpscSink::spawn(sink_config, store)
                 .await
                 .map_err(|error| {
                     MoaError::StorageError(format!("lineage writer startup failed: {error}"))
                 })?;
-            tracing::info!("lineage sink: postgres (MpscSink)");
+            tracing::info!(backend, "lineage sink: durable (MpscSink)");
             Ok(LineageSinkRuntime {
                 handle: Arc::new(sink),
                 writer: Some(Arc::new(writer)),
@@ -122,7 +135,15 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "configuration error: unknown MOA_LINEAGE_SINK value: garbage; expected postgres|null|otel"
+            "configuration error: unknown MOA_LINEAGE_SINK value: garbage; expected postgres|clickhouse|null|otel"
+        );
+    }
+
+    #[test]
+    fn lineage_sink_mode_accepts_clickhouse() {
+        assert_eq!(
+            LineageSinkMode::from_env_value(Some("clickhouse")).expect("clickhouse should parse"),
+            LineageSinkMode::ClickHouse
         );
     }
 }

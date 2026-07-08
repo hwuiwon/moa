@@ -1,0 +1,5 @@
+---
+source: crates/moa-analytics/tests/analytics_sql_offline.rs
+expression: compiled.sql
+---
+SELECT d.outcome AS c0, d.agent_id::TEXT AS c1, COUNT(*)::BIGINT AS c2, AVG(d.outcome_confidence)::DOUBLE PRECISION AS c3, COALESCE(SUM(d.token_cost), 0)::BIGINT AS c4, PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY d.duration_ms)::DOUBLE PRECISION AS c5 FROM analytics.task_segment_fact AS d WHERE d.tenant_id = $1::UUID AND d.outcome IN ($2, $3) AND d.started_at BETWEEN $4::TIMESTAMPTZ AND $5::TIMESTAMPTZ GROUP BY 1, 2 ORDER BY c2 DESC LIMIT 50

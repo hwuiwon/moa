@@ -9,6 +9,7 @@ use moa_core::{LineageHandle, MoaError};
 use moa_lineage_core::{LineageEvent, LineageSink};
 use tokio::sync::mpsc;
 
+use crate::store::LineageStore;
 use crate::writer::{DurableJournal, WriterCommand, WriterHandle, spawn_writer_for_sink};
 use crate::{Result, WriterStats};
 
@@ -97,9 +98,9 @@ impl MpscSinkBuilder {
         self
     }
 
-    /// Spawns a sink and writer against the provided SQL pool.
-    pub async fn spawn(self, pool: sqlx::PgPool) -> Result<(MpscSink, WriterHandle)> {
-        MpscSink::spawn(self.config, pool).await
+    /// Spawns a sink and writer against the provided lineage store.
+    pub async fn spawn(self, store: LineageStore) -> Result<(MpscSink, WriterHandle)> {
+        MpscSink::spawn(self.config, store).await
     }
 }
 
@@ -113,12 +114,15 @@ pub struct MpscSink {
 
 impl MpscSink {
     /// Spawns the writer task and returns the hot-path sink plus worker handle.
-    pub async fn spawn(config: MpscSinkConfig, pool: sqlx::PgPool) -> Result<(Self, WriterHandle)> {
+    pub async fn spawn(
+        config: MpscSinkConfig,
+        store: LineageStore,
+    ) -> Result<(Self, WriterHandle)> {
         let (tx, rx) = mpsc::channel(config.channel_capacity);
         let journal = DurableJournal::open(&config.journal_path)?;
         let dropped = Arc::new(AtomicU64::new(0));
         let writer_handle =
-            spawn_writer_for_sink(rx, config.clone(), pool, journal.clone()).await?;
+            spawn_writer_for_sink(rx, config.clone(), store, journal.clone()).await?;
         Ok((
             Self {
                 tx,

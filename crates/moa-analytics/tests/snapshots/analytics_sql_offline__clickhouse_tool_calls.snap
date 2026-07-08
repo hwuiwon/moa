@@ -1,0 +1,5 @@
+---
+source: crates/moa-analytics/tests/analytics_sql_offline.rs
+expression: compiled.sql
+---
+SELECT d.tool_name AS c0, d.success AS c1, count() AS c2, quantileExactInclusive(0.95)(d.duration_ms) AS c3 FROM tool_call_fact AS d FINAL LEFT JOIN dim_session_agent_context AS sac FINAL ON sac.session_id = d.session_id AND sac.tenant_id = d.tenant_id LEFT JOIN dim_sessions AS s FINAL ON s.session_id = d.session_id AND s.tenant_id = d.tenant_id WHERE d.tenant_id = toUUID(?) AND positionCaseInsensitive(toString(d.tool_name), ?) > 0 AND d.ts BETWEEN parseDateTime64BestEffort(?, 6, 'UTC') AND parseDateTime64BestEffort(?, 6, 'UTC') GROUP BY 1, 2 ORDER BY c2 DESC LIMIT 50

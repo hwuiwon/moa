@@ -226,6 +226,9 @@ services:
       MOA_LOCAL_MEMORY_DIR: /var/lib/moa/memory
       MOA_OBSERVABILITY_LINEAGE_JOURNAL_PATH: /var/lib/moa/lineage-journal
       MOA_LINEAGE_SINK: postgres
+      MOA_CLICKHOUSE_URL: ${MOA_CLICKHOUSE_URL:-}
+      MOA_CLICKHOUSE_USER: ${MOA_CLICKHOUSE_USER:-}
+      MOA_CLICKHOUSE_PASSWORD: ${MOA_CLICKHOUSE_PASSWORD:-}
       MOA_SKIP_FGA: ${MOA_SKIP_FGA:-}
       MOA_AUTHZ_OPENFGA_URL: http://openfga:8080
       MOA_AUTHZ_OPENFGA_PRESHARED_KEY: ${MOA_AUTHZ_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod}
@@ -286,6 +289,9 @@ services:
       MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY: ${MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY:-moa-local-dev-secret}
       MOA_SESSION_ATTACHMENT_ALLOW_HTTP: "true"
       MOA_SESSION_ATTACHMENT_VIRTUAL_HOSTED_STYLE: "false"
+      MOA_CLICKHOUSE_URL: ${MOA_CLICKHOUSE_URL:-}
+      MOA_CLICKHOUSE_USER: ${MOA_CLICKHOUSE_USER:-}
+      MOA_CLICKHOUSE_PASSWORD: ${MOA_CLICKHOUSE_PASSWORD:-}
       MOA_METRICS_ENABLED: ${MOA_METRICS_ENABLED:-true}
       MOA_METRICS_LISTEN: 0.0.0.0:9090
       RUST_LOG: info,moa_edge=debug
@@ -402,7 +408,35 @@ services:
       - moa-pg-audit:/var/log/postgresql:ro
       - moa-audit-shipper-state:/var/lib/moa-audit-shipper
 
+  clickhouse:
+    # Optional analytics store for high-volume lineage rows. Start with
+    # `docker compose --profile clickhouse up -d`, then set
+    # MOA_CLICKHOUSE_URL=http://clickhouse:8123 (plus user/password below)
+    # in .env so the orchestrator and edge switch turn_lineage to ClickHouse.
+    image: clickhouse/clickhouse-server:25.5
+    container_name: moa-clickhouse
+    restart: unless-stopped
+    profiles: ["clickhouse"]
+    environment:
+      CLICKHOUSE_DB: moa
+      CLICKHOUSE_USER: moa
+      CLICKHOUSE_PASSWORD: dev
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    ports:
+      - "10061:8123"
+    volumes:
+      - moa-clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
 volumes:
+  moa-clickhouse-data:
   moa-pg-data:
   moa-pg-audit:
   moa-audit-shipper-state:

@@ -54,6 +54,7 @@ blake3.workspace = true
 chrono.workspace = true
 chrono-tz = "0.10"
 clap.workspace = true
+clickhouse.workspace = true
 croner = "2.2"
 ed25519-dalek.workspace = true
 flate2 = "1"
@@ -89,6 +90,7 @@ moa-security = { workspace = true }
 moa-scoring = { workspace = true }
 moa-memory-ingest = { workspace = true }
 moa-migrations = { workspace = true }
+metrics.workspace = true
 moa-providers = { workspace = true }
 moa-runtime-store = { workspace = true, features = ["redis"] }
 moa-session = { workspace = true }
@@ -114,6 +116,8 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
+clickhouse = { workspace = true, features = ["test-util"] }
+moa-analytics.workspace = true
 moa-eval-core.workspace = true
 moa-test-support.workspace = true
 serde_canonical_json.workspace = true

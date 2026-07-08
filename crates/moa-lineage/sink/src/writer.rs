@@ -16,9 +16,11 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::clickhouse::is_retryable_clickhouse_error;
 use crate::fjall_journal::Journal;
 use crate::mpsc_sink::MpscSinkConfig;
-use crate::{Error, Result, ensure_schema};
+use crate::store::LineageStore;
+use crate::{Error, Result};
 
 const WRITE_RETRY_MAX_ATTEMPTS: u32 = 5;
 
@@ -269,28 +271,28 @@ impl WriterReceiver {
 pub async fn spawn_writer(
     rx: mpsc::Receiver<LineageEvent>,
     config: MpscSinkConfig,
-    pool: sqlx::PgPool,
+    store: LineageStore,
 ) -> Result<WriterHandle> {
-    ensure_schema(&pool).await?;
+    store.ensure_schema().await?;
     let journal = DurableJournal::open(&config.journal_path)?;
-    spawn_writer_task(WriterReceiver::Raw(rx), config, pool, journal)
+    spawn_writer_task(WriterReceiver::Raw(rx), config, store, journal)
 }
 
 /// Spawns the writer for the production sink command channel.
 pub(crate) async fn spawn_writer_for_sink(
     rx: mpsc::Receiver<WriterCommand>,
     config: MpscSinkConfig,
-    pool: sqlx::PgPool,
+    store: LineageStore,
     journal: DurableJournal,
 ) -> Result<WriterHandle> {
-    ensure_schema(&pool).await?;
-    spawn_writer_task(WriterReceiver::Commands(rx), config, pool, journal)
+    store.ensure_schema().await?;
+    spawn_writer_task(WriterReceiver::Commands(rx), config, store, journal)
 }
 
 fn spawn_writer_task(
     rx: WriterReceiver,
     config: MpscSinkConfig,
-    pool: sqlx::PgPool,
+    store: LineageStore,
     journal: DurableJournal,
 ) -> Result<WriterHandle> {
     let shutdown = CancellationToken::new();
@@ -298,7 +300,7 @@ fn spawn_writer_task(
     let worker_shutdown = shutdown.clone();
     let worker_stats = stats.clone();
     let join = tokio::spawn(async move {
-        run_writer(rx, config, pool, journal, worker_shutdown, worker_stats).await
+        run_writer(rx, config, store, journal, worker_shutdown, worker_stats).await
     });
 
     Ok(WriterHandle {
@@ -311,12 +313,12 @@ fn spawn_writer_task(
 async fn run_writer(
     mut rx: WriterReceiver,
     config: MpscSinkConfig,
-    pool: sqlx::PgPool,
+    store: LineageStore,
     journal: DurableJournal,
     shutdown: CancellationToken,
     stats: Arc<SharedWriterStats>,
 ) -> Result<WriterStats> {
-    replay_pending(&journal, &pool, &stats).await?;
+    replay_pending(&journal, &store, &stats).await?;
 
     let mut batch = Vec::with_capacity(config.batch_size);
     let mut flush_interval = tokio::time::interval(config.batch_max_age);
@@ -326,27 +328,27 @@ async fn run_writer(
         tokio::select! {
             _ = shutdown.cancelled() => {
                 while let Ok(command) = rx.try_recv() {
-                    handle_writer_command(command, &journal, &pool, &stats, &mut batch, config.batch_size).await?;
+                    handle_writer_command(command, &journal, &store, &stats, &mut batch, config.batch_size).await?;
                 }
-                flush_events(&journal, &pool, &stats, &mut batch).await?;
-                replay_pending(&journal, &pool, &stats).await?;
+                flush_events(&journal, &store, &stats, &mut batch).await?;
+                replay_pending(&journal, &store, &stats).await?;
                 break;
             }
             maybe_command = rx.recv() => {
                 match maybe_command {
                     Some(command) => {
-                        handle_writer_command(command, &journal, &pool, &stats, &mut batch, config.batch_size).await?;
+                        handle_writer_command(command, &journal, &store, &stats, &mut batch, config.batch_size).await?;
                     }
                     None => {
-                        flush_events(&journal, &pool, &stats, &mut batch).await?;
-                        replay_pending(&journal, &pool, &stats).await?;
+                        flush_events(&journal, &store, &stats, &mut batch).await?;
+                        replay_pending(&journal, &store, &stats).await?;
                         break;
                     }
                 }
             }
             _ = flush_interval.tick() => {
-                flush_events(&journal, &pool, &stats, &mut batch).await?;
-                replay_pending(&journal, &pool, &stats).await?;
+                flush_events(&journal, &store, &stats, &mut batch).await?;
+                replay_pending(&journal, &store, &stats).await?;
             }
         }
     }
@@ -358,7 +360,7 @@ async fn run_writer(
 async fn handle_writer_command(
     command: WriterCommand,
     journal: &DurableJournal,
-    pool: &sqlx::PgPool,
+    store: &LineageStore,
     stats: &Arc<SharedWriterStats>,
     batch: &mut Vec<LineageEvent>,
     batch_size: usize,
@@ -367,14 +369,14 @@ async fn handle_writer_command(
         WriterCommand::Event(evt) => {
             batch.push(*evt);
             if batch.len() >= batch_size {
-                flush_events(journal, pool, stats, batch).await?;
+                flush_events(journal, store, stats, batch).await?;
             }
         }
         WriterCommand::Journaled(seq) => {
             metrics::counter!("moa_lineage_journal_notifications_total").increment(1);
             tracing::trace!(seq, "received journaled lineage event notification");
-            flush_events(journal, pool, stats, batch).await?;
-            replay_pending(journal, pool, stats).await?;
+            flush_events(journal, store, stats, batch).await?;
+            replay_pending(journal, store, stats).await?;
         }
     }
     Ok(())
@@ -393,7 +395,7 @@ fn next_sequence(journal: &Journal) -> Result<u64> {
 
 async fn replay_pending(
     journal: &DurableJournal,
-    pool: &sqlx::PgPool,
+    store: &LineageStore,
     stats: &Arc<SharedWriterStats>,
 ) -> Result<()> {
     let cursor = journal.replay_cursor();
@@ -407,7 +409,7 @@ async fn replay_pending(
         .iter()
         .map(|(_, payload)| decode_pending_row(payload))
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let disposition = write_pending_rows_or_dead_letter(pool, &rows).await?;
+    let disposition = write_pending_rows_or_dead_letter(store, &rows).await?;
     let (Some((lo, _)), Some((hi, _))) = (pending.first(), pending.last()) else {
         return Ok(());
     };
@@ -427,7 +429,7 @@ async fn replay_pending(
 
 async fn flush_events(
     journal: &DurableJournal,
-    pool: &sqlx::PgPool,
+    store: &LineageStore,
     stats: &Arc<SharedWriterStats>,
     batch: &mut Vec<LineageEvent>,
 ) -> Result<()> {
@@ -444,7 +446,7 @@ async fn flush_events(
     }
     record_journal_depth(stats, journal.approximate_len_async().await? as u64);
 
-    let disposition = write_pending_rows_or_dead_letter(pool, &rows).await?;
+    let disposition = write_pending_rows_or_dead_letter(store, &rows).await?;
     if should_ack_journal(disposition) {
         journal.ack_sequences(&seqs).await?;
     }
@@ -460,13 +462,13 @@ fn should_ack_journal(disposition: WriteDisposition) -> bool {
 }
 
 async fn write_pending_rows_or_dead_letter(
-    pool: &sqlx::PgPool,
+    store: &LineageStore,
     rows: &[PendingRow],
 ) -> Result<WriteDisposition> {
-    match write_pending_rows_with_retry(pool, rows).await {
+    match write_pending_rows_with_retry(store, rows).await {
         Ok(()) => Ok(WriteDisposition::Written),
         Err(failure) => {
-            let dead_letter_id = write_dead_letter_batch(pool, rows, &failure).await?;
+            let dead_letter_id = write_dead_letter_batch(store.postgres(), rows, &failure).await?;
             tracing::error!(
                 dead_letter_id = %dead_letter_id,
                 error = %failure.error,
@@ -480,7 +482,7 @@ async fn write_pending_rows_or_dead_letter(
 }
 
 async fn write_pending_rows_with_retry(
-    pool: &sqlx::PgPool,
+    store: &LineageStore,
     rows: &[PendingRow],
 ) -> std::result::Result<(), WriteFailure> {
     let backoff = ExponentialBuilder::default()
@@ -491,7 +493,7 @@ async fn write_pending_rows_with_retry(
 
     (|| async {
         attempts.fetch_add(1, Ordering::Relaxed);
-        write_pending_rows(pool, rows).await
+        write_pending_rows(store, rows).await
     })
     .retry(backoff)
     .when(is_retryable_write_error)
@@ -618,6 +620,7 @@ fn is_retryable_write_error(error: &Error) -> bool {
             .code()
             .as_deref()
             .is_some_and(is_retryable_postgres_sqlstate),
+        Error::ClickHouse(clickhouse_error) => is_retryable_clickhouse_error(clickhouse_error),
         _ => false,
     }
 }
@@ -630,7 +633,7 @@ fn is_retryable_postgres_sqlstate(code: &str) -> bool {
         )
 }
 
-async fn write_pending_rows(pool: &sqlx::PgPool, rows: &[PendingRow]) -> Result<()> {
+async fn write_pending_rows(store: &LineageStore, rows: &[PendingRow]) -> Result<()> {
     if rows.is_empty() {
         return Ok(());
     }
@@ -644,8 +647,66 @@ async fn write_pending_rows(pool: &sqlx::PgPool, rows: &[PendingRow]) -> Result<
         }
     }
 
-    write_rows(pool, &lineage_rows).await?;
-    write_score_rows(pool, &score_rows).await?;
+    match store {
+        LineageStore::Postgres(pool) => write_rows(pool, &lineage_rows).await?,
+        LineageStore::ClickHouse {
+            clickhouse,
+            postgres,
+        } => {
+            warn_on_unchained_compliance_partitions(postgres, &lineage_rows).await?;
+            clickhouse.insert_lineage_rows(&lineage_rows).await?;
+        }
+    }
+    write_score_rows(store.postgres(), &score_rows).await?;
+    Ok(())
+}
+
+/// Warns when a compliance-enabled partition's rows land in ClickHouse.
+///
+/// The audit hash chain needs a transactional fold over the row store, which
+/// the ClickHouse backend does not provide. Rows keep their per-row canonical
+/// `integrity_hash`, but `prev_hash` linking (and therefore Merkle roots and
+/// `moa lineage verify`) requires the Postgres backend.
+async fn warn_on_unchained_compliance_partitions(
+    pool: &sqlx::PgPool,
+    rows: &[LineageRow],
+) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let partitions: Vec<String> = rows
+        .iter()
+        .map(|row| row.storage_partition_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let enabled: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT storage_partition_id
+        FROM analytics.compliance_tenants
+        WHERE storage_partition_id = ANY($1) AND enabled
+        "#,
+    )
+    .bind(&partitions)
+    .fetch_all(pool)
+    .await?;
+    if enabled.is_empty() {
+        return Ok(());
+    }
+
+    let unchained_rows = rows
+        .iter()
+        .filter(|row| enabled.contains(&row.storage_partition_id))
+        .count();
+    metrics::counter!("moa_lineage_compliance_chain_skipped_total")
+        .increment(unchained_rows as u64);
+    tracing::warn!(
+        partitions = ?enabled,
+        rows = unchained_rows,
+        "compliance hash chaining is unavailable on the clickhouse lineage backend; \
+         rows written without prev_hash links"
+    );
     Ok(())
 }
 
@@ -1196,18 +1257,19 @@ fn decode_pending_row(payload: &[u8]) -> std::result::Result<PendingRow, serde_j
         .or_else(|_| serde_json::from_slice::<LineageRow>(payload).map(PendingRow::Lineage))
 }
 
+/// Journaled `turn_lineage` row shared by the Postgres and ClickHouse writers.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct LineageRow {
-    turn_id: Uuid,
-    session_id: Uuid,
-    user_id: String,
-    storage_partition_id: String,
-    ts: DateTime<Utc>,
-    tier: i16,
-    record_kind: i16,
-    payload: serde_json::Value,
-    integrity_hash: Vec<u8>,
-    prev_hash: Option<Vec<u8>>,
+pub(crate) struct LineageRow {
+    pub(crate) turn_id: Uuid,
+    pub(crate) session_id: Uuid,
+    pub(crate) user_id: String,
+    pub(crate) storage_partition_id: String,
+    pub(crate) ts: DateTime<Utc>,
+    pub(crate) tier: i16,
+    pub(crate) record_kind: i16,
+    pub(crate) payload: serde_json::Value,
+    pub(crate) integrity_hash: Vec<u8>,
+    pub(crate) prev_hash: Option<Vec<u8>>,
 }
 
 impl LineageRow {

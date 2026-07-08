@@ -1,0 +1,5 @@
+---
+source: crates/moa-analytics/tests/analytics_sql_offline.rs
+expression: compiled.sql
+---
+SELECT d.candidate_type AS c0, d.status AS c1, d.risk_class AS c2, count() AS c3, avg(d.confidence) AS c4 FROM dim_learning_candidates AS d FINAL WHERE d.tenant_id = toUUID(?) AND d.updated_at BETWEEN parseDateTime64BestEffort(?, 6, 'UTC') AND parseDateTime64BestEffort(?, 6, 'UTC') GROUP BY 1, 2, 3 ORDER BY c3 DESC LIMIT 50

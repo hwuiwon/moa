@@ -97,11 +97,42 @@ pub(super) async fn handle_query(
     {
         return response;
     }
-    maybe_refresh_analytics_materialized_views(&state);
-    match AnalyticsService::new().query(&state.pool, request).await {
+    // ClickHouse serving needs no matview refresh; the throttled rebuild is a
+    // Postgres-backend concern only.
+    let result = if let Some(clickhouse) = state.clickhouse_analytics.as_deref() {
+        let response = AnalyticsService::clickhouse()
+            .query_clickhouse(clickhouse, request)
+            .await;
+        match response {
+            Ok(mut response) => {
+                response.metadata.read_model_updated_at =
+                    clickhouse_read_model_updated_at(&state.pool).await;
+                Ok(response)
+            }
+            Err(error) => Err(error),
+        }
+    } else {
+        maybe_refresh_analytics_materialized_views(&state);
+        AnalyticsService::new().query(&state.pool, request).await
+    };
+    match result {
         Ok(response) => Json(response).into_response(),
         Err(error) => analytics_error_response(error),
     }
+}
+
+/// Freshness of the ClickHouse read models: the most-stale export cursor
+/// across all exported tables. `None` when the exporter has not run yet (or
+/// the cursor table is missing) — absence of freshness data must not fail the
+/// query.
+async fn clickhouse_read_model_updated_at(
+    pool: &sqlx::PgPool,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    sqlx::query_scalar("SELECT MIN(cursor_ts) FROM analytics.clickhouse_export_state")
+        .fetch_one(pool)
+        .await
+        .ok()
+        .flatten()
 }
 
 fn analytics_target_tenant(

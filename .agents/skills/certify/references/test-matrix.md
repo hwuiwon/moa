@@ -78,6 +78,37 @@ cargo test -p moa-brain --tests
 
 If the change affects session-derived analytics or event accounting, also rerun the orchestrator deterministic suites because they exercise persisted session state through real flows.
 
+## ClickHouse Analytics Backend And Exporter
+
+For changes to `moa-analytics` (dialect/compiler/executor), `moa-orchestrator/src/analytics_export/`, the `[clickhouse]` config, or the schema contract (`docs/schemas/clickhouse-analytics.md`).
+
+Deterministic:
+
+```bash
+cargo nextest run -p moa-analytics
+MOA_DATABASE_URL=... cargo nextest run -p moa-orchestrator -E 'test(analytics_export)'
+MOA_DATABASE_URL=... cargo nextest run -p moa-edge -E 'binary(direct_read_routes_db)'
+```
+
+Live parity gate (required before merging dialect SQL or exporter schema changes — offline snapshots cannot catch ClickHouse syntax or semantic drift; a real server once rejected snapshot-pinned SQL):
+
+```bash
+docker compose --profile clickhouse start clickhouse
+MOA_RUN_CLICKHOUSE_DOCKER_TESTS=1 MOA_DATABASE_URL=... \
+  cargo nextest run -p moa-orchestrator --run-ignored all \
+  -E 'test(analytics_clickhouse_roundtrip_e2e) or test(analytics_parity)'
+MOA_RUN_CLICKHOUSE_DOCKER_TESTS=1 MOA_DATABASE_URL=... \
+  cargo nextest run -p moa-lineage-sink --run-ignored all -E 'test(clickhouse_store_roundtrip_docker)'
+docker compose --profile clickhouse stop clickhouse
+```
+
+Load check when exporter pull queries or fact recompute SQL changed:
+
+```bash
+MOA_RUN_ANALYTICS_LOAD_TESTS=1 MOA_DATABASE_URL=... \
+  cargo nextest run -p moa-orchestrator --run-ignored all -E 'test(analytics_export_full_pass_load_db)'
+```
+
 ## Memory and Context Pipeline
 
 Deterministic:

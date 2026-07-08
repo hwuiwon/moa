@@ -8,6 +8,7 @@ license.workspace = true
 backon.workspace = true
 blake3.workspace = true
 chrono.workspace = true
+clickhouse.workspace = true
 fjall = "3"
 metrics.workspace = true
 moa-core = { workspace = true }
@@ -26,4 +27,5 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
+clickhouse = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true

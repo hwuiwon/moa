@@ -114,15 +114,44 @@ The turn loop is durable because external calls and side effects are wrapped thr
 - `otel`: emits span attributes only.
 - `postgres`: journals accepted events to the configured fjall path before
   queueing them, then writes to `analytics.turn_lineage` and related lineage
-  tables in the same Postgres database the orchestrator already uses. In cloud,
-  the journal path must be an explicit persistent mounted path, not pod-local
-  temp storage.
+  tables. In cloud, the journal path must be an explicit persistent mounted
+  path, not pod-local temp storage.
+- `clickhouse`: the same durable sink, but fails startup when the
+  `[clickhouse]` config section is missing. Useful to make the backend choice
+  explicit in a deployment.
 
-The Postgres sink runs an in-memory queue (`MpscSink`) and a background writer
+The durable sink runs an in-memory queue (`MpscSink`) and a background writer
 that drains and replays the durable journal. Queue pressure can drop only
 explicitly configured lossy telemetry; audit-class events are not accepted
 before the journal append succeeds. Maximum queue depth and batch size come
 from `config.observability.lineage` in `MoaConfig`.
+
+#### ClickHouse Row Backend
+
+The optional top-level `[clickhouse]` config section (or `MOA_CLICKHOUSE_URL`
+plus `MOA_CLICKHOUSE_USER`/`MOA_CLICKHOUSE_PASSWORD`; empty values mean unset)
+selects where the durable sink lands `turn_lineage` rows:
+
+- **Absent (default):** everything writes to Postgres/Timescale exactly as
+  before.
+- **Present:** `turn_lineage` rows are inserted into ClickHouse
+  (`<database>.turn_lineage`, a `ReplacingMergeTree` ordered by
+  `(storage_partition_id, ts, turn_id, record_kind)` with a
+  `lineage_ttl_days` TTL, bootstrapped at startup). Lineage explain reads,
+  typed lineage queries, knowledge retrieval traces, and tenant-offboarding
+  deletes follow the same switch.
+
+Postgres always stays attached under both backends: `analytics.scores` (its
+rollups join OLTP experiment tables), lineage dead letters, and the compliance
+chain state do not move. Compliance hash chaining and `lineage verify` require
+the Postgres backend; when a compliance-enabled partition's rows land in
+ClickHouse the writer emits `moa_lineage_compliance_chain_skipped_total` and a
+warning, and rows carry only their per-row canonical `integrity_hash`.
+
+Locally, `docker compose --profile clickhouse up -d` starts a ClickHouse
+server on host port 10061; set `MOA_CLICKHOUSE_URL=http://clickhouse:8123`,
+`MOA_CLICKHOUSE_USER=moa`, and `MOA_CLICKHOUSE_PASSWORD=dev` in `.env` to
+route the compose orchestrator and edge at it.
 
 `TurnExecution` threads its workflow key through context compilation as the
 lineage `turn_id`. Graph-memory retrieval, compiled context, generation,

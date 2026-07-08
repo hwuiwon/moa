@@ -4,6 +4,7 @@ mod async_authz;
 mod audit_security;
 mod auth;
 mod authz;
+mod clickhouse;
 mod compliance;
 mod context;
 mod database;
@@ -30,6 +31,7 @@ pub use auth::{
     OidcAuthConfig,
 };
 pub use authz::{AuthzConfig, AuthzEngine, OpenFgaConfig};
+pub use clickhouse::ClickHouseConfig;
 pub use compliance::{
     ComplianceConfig, LINEAGE_AUDIT_SIGNING_KEY_ID_DEFAULT, PRIVACY_EXPORT_SIGNING_KEY_ID_DEFAULT,
 };
@@ -117,6 +119,9 @@ pub struct MoaConfig {
     pub orchestrator: OrchestratorConfig,
     /// Observability and OTLP export settings.
     pub observability: ObservabilityConfig,
+    /// Optional ClickHouse analytics store; when present, high-volume
+    /// append-only analytics rows are stored in ClickHouse instead of Postgres.
+    pub clickhouse: Option<ClickHouseConfig>,
     /// Prometheus metrics export settings.
     pub metrics: MetricsConfig,
     /// Tenant budget enforcement settings.
@@ -190,6 +195,10 @@ impl MoaConfig {
         }
 
         self.session.validate()?;
+
+        if let Some(clickhouse) = &self.clickhouse {
+            clickhouse.validate()?;
+        }
 
         Ok(())
     }

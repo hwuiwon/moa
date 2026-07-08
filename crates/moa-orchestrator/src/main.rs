@@ -163,6 +163,11 @@ async fn async_main() -> anyhow::Result<()> {
         restate_ingress_url.clone(),
         shutdown.clone(),
     );
+    let mut analytics_export = moa_orchestrator::analytics_export::spawn_analytics_export(
+        pool.clone(),
+        moa_config.clickhouse.as_ref(),
+        shutdown.clone(),
+    );
 
     tracing::info!(
         port = args.port,
@@ -193,6 +198,9 @@ async fn async_main() -> anyhow::Result<()> {
             if let Some(handle) = channel_ingress.take() {
                 handle.abort();
             }
+            if let Some(handle) = analytics_export.take() {
+                handle.abort();
+            }
             result.context("join Restate handler server")?;
             bail!("Restate handler server exited unexpectedly");
         }
@@ -204,6 +212,9 @@ async fn async_main() -> anyhow::Result<()> {
             if let Some(handle) = channel_ingress.take() {
                 handle.abort();
             }
+            if let Some(handle) = analytics_export.take() {
+                handle.abort();
+            }
             result.context("join health probe server")??;
             bail!("health probe server exited unexpectedly");
         }
@@ -213,6 +224,9 @@ async fn async_main() -> anyhow::Result<()> {
             restate_server.abort();
             health_server.abort();
             if let Some(handle) = channel_ingress.take() {
+                handle.abort();
+            }
+            if let Some(handle) = analytics_export.take() {
                 handle.abort();
             }
             result.context("join SCIM server")??;
@@ -262,6 +276,11 @@ async fn async_main() -> anyhow::Result<()> {
                 handle
                     .await
                     .context("join channel ingress during shutdown")?;
+            }
+            if let Some(handle) = analytics_export.take() {
+                handle
+                    .await
+                    .context("join analytics export during shutdown")?;
             }
         }
     }

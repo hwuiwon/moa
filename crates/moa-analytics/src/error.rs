@@ -129,4 +129,17 @@ pub enum AnalyticsError {
     /// SQL execution failed.
     #[error("analytics query execution failed: {0}")]
     Execution(String),
+    /// ClickHouse query execution or result decoding failed.
+    #[error("analytics clickhouse query failed: {0}")]
+    ClickHouse(String),
+    /// A selected field has no expression mapping for the target backend.
+    #[error("field `{field}` on dataset `{dataset}` is not available on the {backend} backend")]
+    BackendFieldUnavailable {
+        /// Selected dataset identifier.
+        dataset: String,
+        /// Requested field identifier.
+        field: String,
+        /// Target backend name.
+        backend: &'static str,
+    },
 }

@@ -2,6 +2,7 @@
 #![recursion_limit = "256"]
 
 pub(crate) mod action_reviews;
+pub mod analytics_export;
 pub(crate) mod authz_challenges;
 mod brain_bridge;
 pub mod config;
