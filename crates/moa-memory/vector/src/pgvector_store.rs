@@ -20,6 +20,7 @@ pub struct PgvectorStore {
     assume_app_role: bool,
     control_plane: bool,
     exact_search: bool,
+    mrl_shortlist_dims: Option<usize>,
 }
 
 impl PgvectorStore {
@@ -31,6 +32,7 @@ impl PgvectorStore {
             assume_app_role: false,
             control_plane: false,
             exact_search: false,
+            mrl_shortlist_dims: None,
         }
     }
 
@@ -45,6 +47,7 @@ impl PgvectorStore {
             assume_app_role: true,
             control_plane: false,
             exact_search: false,
+            mrl_shortlist_dims: None,
         }
     }
 
@@ -59,6 +62,7 @@ impl PgvectorStore {
             assume_app_role: false,
             control_plane: true,
             exact_search: false,
+            mrl_shortlist_dims: None,
         }
     }
 
@@ -66,6 +70,22 @@ impl PgvectorStore {
     #[must_use]
     pub fn with_exact_search(mut self, exact_search: bool) -> Self {
         self.exact_search = exact_search;
+        self
+    }
+
+    /// Enables the Matryoshka (MRL) truncated-dim KNN cascade.
+    ///
+    /// `None` keeps the single-stage full-dim search (byte-for-byte the previous
+    /// query). `Some(dims)` runs a two-stage query: a shortlist ordered by the
+    /// truncated `dims`-prefix cosine distance, then an exact full-dim rescore of
+    /// that shortlist. `dims` values `>= VECTOR_DIMENSION` (or `0`) are ignored and
+    /// leave the cascade disabled, since a prefix must be strictly shorter than the
+    /// stored embedding. The shortlist is index-accelerated only when `dims`
+    /// matches the base migration's functional index width (512); see
+    /// [`MemoryVectorConfig::mrl_shortlist_dims`](moa_core::config::MemoryVectorConfig).
+    #[must_use]
+    pub fn with_mrl_shortlist(mut self, dims: Option<usize>) -> Self {
+        self.mrl_shortlist_dims = dims.filter(|&dims| dims > 0 && dims < VECTOR_DIMENSION);
         self
     }
 
@@ -94,7 +114,101 @@ impl PgvectorStore {
             Ok(ScopedConn::begin_as_app(&self.pool, &self.scope, self.assume_app_role).await?)
         }
     }
+
+    /// Runs the Matryoshka two-stage KNN cascade and returns `(uid, score)` rows.
+    ///
+    /// Stage 1 orders candidates by the truncated `shortlist_dims`-prefix cosine
+    /// distance and keeps the closest `k * MRL_SHORTLIST_MULTIPLIER` (driven by the
+    /// functional prefix HNSW index when `shortlist_dims` matches its width). Stage 2
+    /// rescores that shortlist by exact full-dim cosine distance and returns the
+    /// top-`k`. The same validity/PII/scope/label predicates as the single-stage path
+    /// apply in stage 1, and the outer `ORDER BY dist, uid` reproduces the single-stage
+    /// path's deterministic ordering, so the output shape is identical.
+    #[allow(clippy::too_many_arguments)]
+    async fn knn_mrl_cascade(
+        &self,
+        conn: &mut PgConnection,
+        query: &VectorQuery,
+        storage_partition_id: &str,
+        max_pii_rank: i32,
+        limit: i64,
+        shortlist_dims: usize,
+        full_probe: HalfVector,
+    ) -> Result<Vec<(Uuid, f32)>> {
+        // Over-sample the shortlist so the exact rescore has a healthy candidate pool:
+        // the truncated prefix only approximates full-dim distance order.
+        let shortlist_limit = limit.saturating_mul(MRL_SHORTLIST_MULTIPLIER);
+        let prefix_probe = HalfVector::from_f32_slice(&query.embedding[..shortlist_dims]);
+
+        let mut builder = QueryBuilder::<Postgres>::new(
+            "SELECT ranked.uid, (1.0 - ranked.dist)::float4 AS score FROM (\
+             SELECT shortlist.uid AS uid, (shortlist.embedding <=> ",
+        );
+        builder.push_bind(full_probe);
+        builder.push(
+            ") AS dist FROM (\
+             SELECT embedding.uid AS uid, embedding.embedding AS embedding \
+             FROM moa.embeddings AS embedding \
+             JOIN moa.node_index AS node ON node.uid = embedding.uid \
+             WHERE ",
+        );
+        if let Some(as_of) = query.as_of {
+            builder.push("node.valid_from <= ");
+            builder.push_bind(as_of);
+            builder.push(" AND (node.valid_to IS NULL OR node.valid_to > ");
+            builder.push_bind(as_of);
+            builder.push(") AND (embedding.valid_to IS NULL OR embedding.valid_to > ");
+            builder.push_bind(as_of);
+            builder.push(")");
+        } else {
+            builder.push("node.valid_to IS NULL AND embedding.valid_to IS NULL");
+        }
+        builder.push(" AND embedding.storage_partition_id = ");
+        builder.push_bind(storage_partition_id);
+        builder.push(
+            " AND CASE embedding.pii_class \
+                   WHEN 'none' THEN 0 \
+                   WHEN 'pii' THEN 1 \
+                   WHEN 'phi' THEN 2 \
+                   WHEN 'restricted' THEN 3 \
+                   ELSE 4 \
+                 END <= ",
+        );
+        builder.push_bind(max_pii_rank);
+        if !query.include_global {
+            builder.push(" AND embedding.scope <> 'global'");
+        }
+        if let Some(labels) = query
+            .label_filter
+            .as_ref()
+            .filter(|labels| !labels.is_empty())
+        {
+            builder.push(" AND embedding.label = ANY(");
+            builder.push_bind(labels.as_slice());
+            builder.push(")");
+        }
+        // `shortlist_dims` is a validated `usize` (0 < dims < VECTOR_DIMENSION), so it is
+        // inlined safely: pgvector type modifiers (`halfvec(<n>)`) cannot be bound parameters.
+        builder.push(format!(
+            " ORDER BY public.subvector(embedding.embedding, 1, {dims})::public.halfvec({dims}) <=> ",
+            dims = shortlist_dims
+        ));
+        builder.push_bind(prefix_probe);
+        builder.push(" LIMIT ");
+        builder.push_bind(shortlist_limit);
+        builder.push(") AS shortlist) AS ranked ORDER BY ranked.dist, ranked.uid ASC LIMIT ");
+        builder.push_bind(limit);
+
+        Ok(builder
+            .build_query_as::<(Uuid, f32)>()
+            .fetch_all(conn)
+            .await?)
+    }
 }
+
+/// Shortlist over-sampling factor for the Matryoshka KNN cascade: stage 1 keeps
+/// `k * MRL_SHORTLIST_MULTIPLIER` truncated-prefix candidates before the exact rescore.
+const MRL_SHORTLIST_MULTIPLIER: i64 = 4;
 
 #[async_trait]
 impl VectorStore for PgvectorStore {
@@ -173,39 +287,55 @@ impl VectorStore for PgvectorStore {
         validate_dimension(&query.embedding)?;
         let halfvec = HalfVector::from_f32_slice(&query.embedding);
 
-        // The 1024-dim probe vector is bound exactly once, as the inner `dist` column. The inner
-        // `ORDER BY dist` resolves back to `embedding.embedding <=> $vec`, so pgvector can still
-        // drive the HNSW index for the distance ordering while the `LIMIT` is applied there. The
-        // outer `ORDER BY` re-sorts the (at most `k`) surviving rows: this restores strict distance
-        // order (required because `hnsw.iterative_scan = relaxed_order` may return rows slightly out
-        // of order) and applies the deterministic `uid` tie-break, so the returned rows and their
-        // ordering are identical to the previous single-level query.
-        let mut builder = QueryBuilder::<Postgres>::new(
-            "SELECT ranked.uid, (1.0 - ranked.dist)::float4 AS score FROM (\
-             SELECT embedding.uid AS uid, (embedding.embedding <=> ",
-        );
-        builder.push_bind(halfvec);
-        builder.push(
-            r#") AS dist
+        // The MRL cascade is skipped under `exact_search`, which promises a true
+        // full-dim exact scan (used for promotion validation and eval ground truth);
+        // an approximate truncated-prefix shortlist would violate that contract.
+        let rows =
+            if let Some(shortlist_dims) = self.mrl_shortlist_dims.filter(|_| !self.exact_search) {
+                self.knn_mrl_cascade(
+                    conn.as_mut(),
+                    query,
+                    &storage_partition_id,
+                    max_pii_rank,
+                    limit,
+                    shortlist_dims,
+                    halfvec,
+                )
+                .await?
+            } else {
+                // The 1024-dim probe vector is bound exactly once, as the inner `dist` column. The inner
+                // `ORDER BY dist` resolves back to `embedding.embedding <=> $vec`, so pgvector can still
+                // drive the HNSW index for the distance ordering while the `LIMIT` is applied there. The
+                // outer `ORDER BY` re-sorts the (at most `k`) surviving rows: this restores strict distance
+                // order (required because `hnsw.iterative_scan = relaxed_order` may return rows slightly out
+                // of order) and applies the deterministic `uid` tie-break, so the returned rows and their
+                // ordering are identical to the previous single-level query.
+                let mut builder = QueryBuilder::<Postgres>::new(
+                    "SELECT ranked.uid, (1.0 - ranked.dist)::float4 AS score FROM (\
+                 SELECT embedding.uid AS uid, (embedding.embedding <=> ",
+                );
+                builder.push_bind(halfvec);
+                builder.push(
+                    r#") AS dist
                FROM moa.embeddings AS embedding
                JOIN moa.node_index AS node ON node.uid = embedding.uid
                WHERE "#,
-        );
-        if let Some(as_of) = query.as_of {
-            builder.push("node.valid_from <= ");
-            builder.push_bind(as_of);
-            builder.push(" AND (node.valid_to IS NULL OR node.valid_to > ");
-            builder.push_bind(as_of);
-            builder.push(") AND (embedding.valid_to IS NULL OR embedding.valid_to > ");
-            builder.push_bind(as_of);
-            builder.push(")");
-        } else {
-            builder.push("node.valid_to IS NULL AND embedding.valid_to IS NULL");
-        }
-        builder.push(" AND embedding.storage_partition_id = ");
-        builder.push_bind(&storage_partition_id);
-        builder.push(
-            r#"
+                );
+                if let Some(as_of) = query.as_of {
+                    builder.push("node.valid_from <= ");
+                    builder.push_bind(as_of);
+                    builder.push(" AND (node.valid_to IS NULL OR node.valid_to > ");
+                    builder.push_bind(as_of);
+                    builder.push(") AND (embedding.valid_to IS NULL OR embedding.valid_to > ");
+                    builder.push_bind(as_of);
+                    builder.push(")");
+                } else {
+                    builder.push("node.valid_to IS NULL AND embedding.valid_to IS NULL");
+                }
+                builder.push(" AND embedding.storage_partition_id = ");
+                builder.push_bind(&storage_partition_id);
+                builder.push(
+                    r#"
                  AND CASE embedding.pii_class
                        WHEN 'none' THEN 0
                        WHEN 'pii' THEN 1
@@ -213,28 +343,29 @@ impl VectorStore for PgvectorStore {
                        WHEN 'restricted' THEN 3
                        ELSE 4
                      END <= "#,
-        );
-        builder.push_bind(max_pii_rank);
-        if !query.include_global {
-            builder.push(" AND embedding.scope <> 'global'");
-        }
-        if let Some(labels) = query
-            .label_filter
-            .as_ref()
-            .filter(|labels| !labels.is_empty())
-        {
-            builder.push(" AND embedding.label = ANY(");
-            builder.push_bind(labels.as_slice());
-            builder.push(")");
-        }
-        builder.push(" ORDER BY dist, embedding.uid ASC LIMIT ");
-        builder.push_bind(limit);
-        builder.push(") AS ranked ORDER BY ranked.dist, ranked.uid ASC");
+                );
+                builder.push_bind(max_pii_rank);
+                if !query.include_global {
+                    builder.push(" AND embedding.scope <> 'global'");
+                }
+                if let Some(labels) = query
+                    .label_filter
+                    .as_ref()
+                    .filter(|labels| !labels.is_empty())
+                {
+                    builder.push(" AND embedding.label = ANY(");
+                    builder.push_bind(labels.as_slice());
+                    builder.push(")");
+                }
+                builder.push(" ORDER BY dist, embedding.uid ASC LIMIT ");
+                builder.push_bind(limit);
+                builder.push(") AS ranked ORDER BY ranked.dist, ranked.uid ASC");
 
-        let rows = builder
-            .build_query_as::<(Uuid, f32)>()
-            .fetch_all(conn.as_mut())
-            .await?;
+                builder
+                    .build_query_as::<(Uuid, f32)>()
+                    .fetch_all(conn.as_mut())
+                    .await?
+            };
         conn.commit().await?;
         Ok(rows
             .into_iter()

@@ -6,6 +6,7 @@ pub mod hybrid;
 pub mod legs;
 pub mod policy;
 pub mod ranking;
+pub mod router;
 mod source_rank;
 pub mod types;
 
@@ -17,10 +18,11 @@ pub use ranking::{
     FeatureRanker, RANKING_PIPELINE_VERSION, RankingConfig, RankingWeights, normalize_tokens,
     ranking_fingerprint,
 };
+pub use router::{RetrievalStrategy, decompose_query, route_query};
 pub use types::{
     GraphCandidateCounts, GraphPathTrace, GraphRetrievalDiagnostics, GraphSeedDiagnostics,
-    GraphSeedSource, KnowledgeChunkHydration, LegSources, LexicalBackend, LineageContext, Result,
-    RetrievalError, RetrievalHit, RetrievalOutput, RetrievalRequest,
-    SourceObjectFeatureContribution, SourceObjectFeatureContributions,
+    GraphSeedSource, KnowledgeChunkHydration, KnowledgeChunkWindowPart, LegSources, LexicalBackend,
+    LineageContext, Result, RetrievalError, RetrievalHit, RetrievalLineageHit, RetrievalOutput,
+    RetrievalRequest, SourceObjectFeatureContribution, SourceObjectFeatureContributions,
     SourceObjectRankingDiagnostics, SourceTier,
 };

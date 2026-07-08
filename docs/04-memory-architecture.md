@@ -53,10 +53,13 @@ Edges represent relationships, evidence, provenance, supersession, contradiction
 
 Tenant knowledge uses `Source`, `Document`, `Chunk`, `Fact`, and `Entity`
 labels. `moa-knowledge` derives graph deltas from parsed objects and calls
-`moa-memory-graph` to write them. Required relationships are `HAS_DOCUMENT`
-from source to document, `HAS_CHUNK` from document to chunk, `EVIDENCES` from
-chunk to fact, `MENTIONS` from chunk to entity, and `DERIVED_FROM` from derived
-contact groups or facts back to source evidence. Full chunk text is stored in
+`moa-memory-graph` to write them. Required relationships map onto the canonical
+`EdgeLabel` vocabulary in `crates/moa-memory/graph/src/edge.rs`: source-to-document
+and document-to-chunk containment are stored as `CONTAINS`, chunk-to-fact evidence
+and derived contact groups or facts pointing back to source evidence are stored as
+`DERIVED_FROM`, and chunk-to-entity mentions are stored as `MENTIONED_IN`
+(`moa-knowledge` translates its connector-facing relationship names to these
+labels during ingestion). Full chunk text is stored in
 `moa.knowledge_chunks`; graph properties stay compact and citation-friendly.
 Provider credentials, account tokens, raw credential material, and unbounded
 raw source payloads are never graph properties.

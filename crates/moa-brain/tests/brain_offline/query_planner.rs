@@ -132,6 +132,7 @@ impl GraphStore for SeedGraph {
         _seeds: &[Uuid],
         _max_hops: u8,
         _as_of: Option<DateTime<Utc>>,
+        _scoring: &moa_memory_graph::GraphWalkScoring,
     ) -> Result<Vec<moa_memory_graph::GraphExpansionHit>, GraphError> {
         Ok(Vec::new())
     }
@@ -203,6 +204,7 @@ impl GraphStore for TemporalSeedGraph {
         _seeds: &[Uuid],
         _max_hops: u8,
         _as_of: Option<DateTime<Utc>>,
+        _scoring: &moa_memory_graph::GraphWalkScoring,
     ) -> Result<Vec<moa_memory_graph::GraphExpansionHit>, GraphError> {
         Ok(Vec::new())
     }

@@ -134,6 +134,11 @@ impl ToolRegistry {
         registry.register_builtin(Arc::new(memory::MemoryRememberTool));
         registry.register_builtin(Arc::new(memory::MemoryForgetTool));
         registry.register_builtin(Arc::new(memory::MemorySupersedeTool));
+        // Registered so they can execute when the brain gates them onto an
+        // agentic turn, but deliberately kept out of `default_loadout` below so
+        // they never appear in the default prompt.
+        registry.register_builtin(Arc::new(memory::MemorySearchTool));
+        registry.register_builtin(Arc::new(memory::MemoryNavigateTool));
         registry.register_builtin(Arc::new(session_search::SessionSearchTool));
         registry.register_builtin(Arc::new(tool_result::ToolResultReadTool));
         registry.register_builtin(Arc::new(tool_result::ToolResultSearchTool));
@@ -246,6 +251,22 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Returns the prompt schemas for the named registered tools, in the given
+    /// order, skipping any that are not registered.
+    ///
+    /// Used to surface gated tools (registered but excluded from the default
+    /// loadout) onto a specific turn.
+    pub fn tool_schemas_for<'a, I>(&self, names: I) -> Vec<Value>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        names
+            .into_iter()
+            .filter_map(|name| self.tools.get(name))
+            .map(|tool| tool.definition.anthropic_schema())
+            .collect()
+    }
+
     /// Retains only the registered tools whose names are present in the allowlist.
     pub fn retain_only<I, S>(&mut self, tool_names: I)
     where
@@ -346,6 +367,55 @@ mod tests {
             ],
             "default local loadout order changed"
         );
+    }
+
+    #[test]
+    fn agentic_memory_tools_are_registered_but_excluded_from_default_loadout() {
+        // Pins: memory_search/memory_navigate are executable (registered) yet
+        // never appear in the default prompt loadout — the brain gates them onto
+        // a turn only when the agentic strategy fires (plan Task 11).
+        use crate::tools::memory::AGENTIC_MEMORY_TOOL_NAMES;
+
+        let registry = ToolRegistry::default_local();
+        let default_names = registry
+            .default_tool_schemas()
+            .into_iter()
+            .map(|schema| {
+                schema
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("schema should include name")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+
+        for name in AGENTIC_MEMORY_TOOL_NAMES {
+            assert!(
+                registry.get(name).is_some(),
+                "{name} must be registered so it can execute when gated on"
+            );
+            assert!(
+                !registry.tool_requires_sandbox(name),
+                "{name} is a built-in tool and must not require a hand"
+            );
+            assert!(
+                !default_names.contains(&name.to_string()),
+                "{name} must not appear in the default prompt loadout"
+            );
+        }
+
+        let gated = registry
+            .tool_schemas_for(AGENTIC_MEMORY_TOOL_NAMES)
+            .into_iter()
+            .map(|schema| {
+                schema
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("schema should include name")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(gated, vec!["memory_search", "memory_navigate"]);
     }
 
     #[test]

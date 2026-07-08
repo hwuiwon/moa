@@ -40,6 +40,7 @@ impl ToolRouter {
             rule_store: None,
             session_store: None,
             memory_tool_executor: tokio::sync::RwLock::new(None),
+            memory_retrieval_executor: tokio::sync::RwLock::new(None),
             lineage: Arc::new(NullLineageHandle),
             sandbox_root: None,
             tool_output: ToolOutputConfig::default(),
@@ -182,6 +183,24 @@ impl ToolRouter {
         *self.memory_tool_executor.write().await = Some(executor);
     }
 
+    /// Attaches the read-only retrieval executor backing the agentic memory tools.
+    #[must_use]
+    pub fn with_memory_retrieval_executor(
+        mut self,
+        executor: Arc<dyn moa_core::MemoryRetrievalExecutor>,
+    ) -> Self {
+        self.memory_retrieval_executor = tokio::sync::RwLock::new(Some(executor));
+        self
+    }
+
+    /// Installs or replaces the read-only retrieval executor backing the agentic memory tools.
+    pub async fn set_memory_retrieval_executor(
+        &self,
+        executor: Arc<dyn moa_core::MemoryRetrievalExecutor>,
+    ) {
+        *self.memory_retrieval_executor.write().await = Some(executor);
+    }
+
     /// Attaches the hot-path lineage handle for built-in tools.
     #[must_use]
     pub fn with_lineage(mut self, lineage: Arc<dyn LineageHandle>) -> Self {
@@ -206,6 +225,16 @@ impl ToolRouter {
     /// Returns the ordered tool schemas for prompt compilation.
     pub fn tool_schemas(&self) -> Vec<serde_json::Value> {
         self.registry.default_tool_schemas()
+    }
+
+    /// Returns the prompt schemas for the read-only agentic memory tools.
+    ///
+    /// These are registered but excluded from the default loadout; the brain
+    /// surfaces them onto a turn only when the agentic retrieval strategy is
+    /// selected or the injected retrieval came back empty.
+    pub fn agentic_memory_tool_schemas(&self) -> Vec<serde_json::Value> {
+        self.registry
+            .tool_schemas_for(crate::tools::memory::AGENTIC_MEMORY_TOOL_NAMES)
     }
 
     /// Returns the stable registered tool names in sorted order.

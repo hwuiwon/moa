@@ -5,7 +5,7 @@ use moa_core::RlsContext;
 use moa_core::TenantId;
 use moa_db::ScopedConn;
 use moa_memory_graph::{
-    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
+    EdgeLabel, EdgeWriteIntent, GraphStore, GraphWalkScoring, NodeLabel, NodeWriteIntent, PiiClass,
     PostgresGraphStore,
 };
 use moa_session::testing;
@@ -80,6 +80,7 @@ fn edge_intent(
         label,
         start_uid,
         end_uid,
+        valid_from: Utc::now(),
         properties: json!({ "source": "knowledge_labels_db_memory" }),
         storage_partition_id: Some(storage_partition_id.to_string()),
         contact_id: None,
@@ -203,7 +204,7 @@ async fn knowledge_graph_labels_create_read_and_delete() {
     }
 
     let source_hits = graph
-        .expand_seeds(&[source_uid], 2, None)
+        .expand_seeds(&[source_uid], 2, None, &GraphWalkScoring::default())
         .await
         .expect("expand source document chain");
     let document = source_hits
@@ -220,7 +221,7 @@ async fn knowledge_graph_labels_create_read_and_delete() {
     assert_eq!(chunk.edges, vec![EdgeLabel::Contains, EdgeLabel::Contains]);
 
     let entity_hits = graph
-        .expand_seeds(&[entity_uid], 1, None)
+        .expand_seeds(&[entity_uid], 1, None, &GraphWalkScoring::default())
         .await
         .expect("expand entity memberships and mentions");
     assert!(entity_hits.iter().any(|hit| {

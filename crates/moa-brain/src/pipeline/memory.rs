@@ -19,7 +19,10 @@ use moa_memory_vector::VectorStoreFactory;
 use sqlx::PgPool;
 
 use crate::planning::{PlannedQuery, Strategy};
-use crate::retrieval::{PlannedRetriever, RetrievalHit, RetrievalRequest};
+use crate::retrieval::{
+    PlannedRetriever, RetrievalHit, RetrievalRequest, RetrievalStrategy, decompose_query,
+    route_query,
+};
 
 /// Maximum number of scope-keyed retrieval runtimes retained process-wide.
 const SCOPED_RUNTIME_CACHE_CAPACITY: u64 = 512;
@@ -49,6 +52,28 @@ const MEMORY_BUDGET_DIVISOR: usize = 5;
 const GRAPH_MEMORY_RESULTS: usize = 4;
 const MIN_PAGE_EXCERPT_TOKENS: usize = 96;
 pub(crate) const MEMORY_REMINDER_PREFIX: &str = "<memory-reminder>";
+
+/// Working-context metadata key recording whether the read-only agentic memory
+/// tools (`memory_search`/`memory_navigate`) should be surfaced onto this turn.
+///
+/// The memory stage owns the decision because it is the only stage that knows
+/// both the routed strategy and whether injected retrieval returned anything.
+/// The harness reads this flag after compilation and, when it is `true`, appends
+/// the gated tool schemas to the request (plan Task 11).
+pub const OFFER_RETRIEVAL_TOOLS_METADATA_KEY: &str = "_moa.memory.offer_retrieval_tools";
+
+/// Decides whether the agentic memory tools are offered on a turn.
+///
+/// They are offered when the router selected the agentic strategy, or as a
+/// cheap CRAG-style "insufficient context" fallback when a retrieval-intent turn
+/// injected no hits. Chit-chat (`Skip`) never offers them.
+fn should_offer_retrieval_tools(strategy: RetrievalStrategy, hits_empty: bool) -> bool {
+    match strategy {
+        RetrievalStrategy::Agentic => true,
+        RetrievalStrategy::Skip => false,
+        RetrievalStrategy::Fast | RetrievalStrategy::Deep => hits_empty,
+    }
+}
 
 /// One planned scope together with the outcome of its pre-embedding cache probe.
 struct ScopeProbe<'a> {
@@ -315,6 +340,34 @@ impl GraphMemoryRetriever {
         Ok(dedupe_and_rank_hits(hits, result_limit))
     }
 
+    /// Runs the deep, decomposed retrieval path for multi-hop queries.
+    ///
+    /// The query is split into at most two self-contained sub-queries; each is
+    /// retrieved through the same per-scope machinery as [`Self::retrieve_hits`],
+    /// and the union of sub-query hits is fused through `dedupe_and_rank_hits`
+    /// (dedup by uid keeping the max score) — the existing rank path, never a new
+    /// fusion path. When decomposition cannot split the query it degrades to a
+    /// single retrieval over the full query.
+    async fn retrieve_hits_deep(
+        &self,
+        ctx: &WorkingContext,
+        query: &str,
+    ) -> Result<Vec<RetrievalHit>> {
+        let mut sub_queries = decompose_query(query);
+        if sub_queries.is_empty() {
+            sub_queries.push(query.to_string());
+        }
+
+        let policy = agent_knowledge_policy(ctx)?;
+        let result_limit = effective_result_limit(&policy, self.result_limit);
+
+        let mut fused = Vec::new();
+        for sub_query in sub_queries {
+            fused.extend(self.retrieve_hits(ctx, sub_query).await?);
+        }
+        Ok(dedupe_and_rank_hits(fused, result_limit))
+    }
+
     /// Plans one scope and probes its read-time cache without an embedding.
     async fn probe_scope<'a>(
         &self,
@@ -488,8 +541,35 @@ impl ContextProcessor for GraphMemoryRetriever {
         let Some(query) = extract_search_query(ctx) else {
             return Ok(Some(Box::new(|_ctx| Ok(ProcessorOutput::default()))));
         };
+
+        // The router is the single dispatch point: it classifies the turn once
+        // from lexical features (no LLM, no I/O) and every branch below keys on
+        // the strategy enum rather than accreting boolean flags.
+        let strategy = route_query(&query);
+        let strategy_label: &'static str = strategy.as_str();
+        if strategy == RetrievalStrategy::Skip {
+            return Ok(Some(Box::new(move |ctx: &mut WorkingContext| {
+                set_offer_retrieval_tools(ctx, strategy, true);
+                Ok(ProcessorOutput {
+                    items_excluded: vec!["graph_memory".to_string()],
+                    excluded_items: vec![ExcludedItem {
+                        item: "graph_memory".to_string(),
+                        reason: "router: skip (no retrieval intent)".to_string(),
+                    }],
+                    metadata: router_strategy_metadata(strategy_label),
+                    ..ProcessorOutput::default()
+                })
+            })));
+        }
+
         let retrieval_started = Instant::now();
-        let hits = self.retrieve_hits(ctx, query.clone()).await?;
+        let hits = match strategy {
+            // Deep queries decompose into capped sub-queries and fuse the
+            // per-sub-query hits through the existing rank machinery.
+            RetrievalStrategy::Deep => self.retrieve_hits_deep(ctx, &query).await?,
+            // Fast and (until Task 11 claims it) Agentic run the single-shot path.
+            _ => self.retrieve_hits(ctx, query.clone()).await?,
+        };
         lineage::emit_retrieval_lineage(
             self.lineage.as_ref(),
             ctx,
@@ -498,10 +578,17 @@ impl ContextProcessor for GraphMemoryRetriever {
             retrieval_started.elapsed(),
         );
         if hits.is_empty() {
-            return Ok(Some(Box::new(|_ctx| Ok(ProcessorOutput::default()))));
+            return Ok(Some(Box::new(move |ctx: &mut WorkingContext| {
+                set_offer_retrieval_tools(ctx, strategy, true);
+                Ok(ProcessorOutput {
+                    metadata: router_strategy_metadata(strategy_label),
+                    ..ProcessorOutput::default()
+                })
+            })));
         }
 
         let apply: StageApply = Box::new(move |ctx: &mut WorkingContext| {
+            set_offer_retrieval_tools(ctx, strategy, false);
             let tokens_before = ctx.token_count;
             let memory_budget =
                 (ctx.token_budget / MEMORY_BUDGET_DIVISOR).max(MIN_PAGE_EXCERPT_TOKENS);
@@ -521,6 +608,7 @@ impl ContextProcessor for GraphMemoryRetriever {
             Ok(ProcessorOutput {
                 tokens_added: ctx.token_count.saturating_sub(tokens_before),
                 items_included: rendered.items_included,
+                metadata: router_strategy_metadata(strategy_label),
                 ..ProcessorOutput::default()
             })
         });
@@ -558,6 +646,32 @@ fn trailing_user_insertion_index(messages: &[ContextMessage]) -> usize {
         insertion_index -= 1;
     }
     insertion_index
+}
+
+/// Builds the processor-output metadata that records the router's chosen
+/// strategy, so evals and tests can observe the routing decision for a turn.
+fn router_strategy_metadata(
+    strategy_label: &'static str,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(
+        "router_strategy".to_string(),
+        serde_json::Value::String(strategy_label.to_string()),
+    );
+    metadata
+}
+
+/// Records the agentic-memory-tool gate decision into the working context so the
+/// harness can surface the tools onto this turn when appropriate.
+fn set_offer_retrieval_tools(
+    ctx: &mut WorkingContext,
+    strategy: RetrievalStrategy,
+    hits_empty: bool,
+) {
+    ctx.insert_metadata(
+        OFFER_RETRIEVAL_TOOLS_METADATA_KEY,
+        serde_json::Value::Bool(should_offer_retrieval_tools(strategy, hits_empty)),
+    );
 }
 
 fn extract_search_query(ctx: &WorkingContext) -> Option<String> {
@@ -712,6 +826,7 @@ mod tests {
             _seeds: &[Uuid],
             _max_hops: u8,
             _as_of: Option<DateTime<Utc>>,
+            _scoring: &moa_memory_graph::GraphWalkScoring,
         ) -> moa_memory_graph::Result<Vec<GraphExpansionHit>> {
             panic!("NoopGraphStore should not be called by runtime factory tests")
         }
@@ -805,6 +920,59 @@ mod tests {
 
     #[async_trait]
     impl ScopedRetrievalRuntimeFactory for ScriptedRuntimeFactory {
+        async fn build_runtime(
+            &self,
+            _scope: &MemoryScope,
+            _config: &moa_core::MoaConfig,
+            _pool: &sqlx::PgPool,
+            _assume_app_role: bool,
+        ) -> moa_core::Result<ScopedRetrievalRuntime> {
+            let retriever: Arc<dyn crate::retrieval::PlannedRetriever> = self.retriever.clone();
+            Ok(ScopedRetrievalRuntime::new(
+                Arc::new(NoopGraphStore),
+                retriever,
+            ))
+        }
+    }
+
+    /// Scripted retriever that returns hits keyed by a substring of the query
+    /// text, so a deep decomposition can be proven to run each sub-query
+    /// independently. Records every retrieved query text.
+    #[derive(Debug)]
+    struct QueryScriptedPlannedRetriever {
+        queries: Arc<Mutex<Vec<String>>>,
+        hits_by_marker: Vec<(String, Vec<crate::retrieval::RetrievalHit>)>,
+    }
+
+    #[async_trait]
+    impl crate::retrieval::PlannedRetriever for QueryScriptedPlannedRetriever {
+        async fn retrieve(
+            &self,
+            _planned: &crate::planning::PlannedQuery,
+            req: crate::retrieval::RetrievalRequest,
+        ) -> crate::retrieval::Result<Vec<crate::retrieval::RetrievalHit>> {
+            let query = req.query_text.to_ascii_lowercase();
+            self.queries
+                .lock()
+                .expect("scripted retriever queries lock")
+                .push(req.query_text.clone());
+            let hits = self
+                .hits_by_marker
+                .iter()
+                .find(|(marker, _)| query.contains(marker.as_str()))
+                .map(|(_, hits)| hits.clone())
+                .unwrap_or_default();
+            Ok(hits)
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct QueryScriptedRuntimeFactory {
+        retriever: Arc<QueryScriptedPlannedRetriever>,
+    }
+
+    #[async_trait]
+    impl ScopedRetrievalRuntimeFactory for QueryScriptedRuntimeFactory {
         async fn build_runtime(
             &self,
             _scope: &MemoryScope,
@@ -1445,6 +1613,301 @@ mod tests {
             !memory_message
                 .content
                 .contains("cross contact memory should not leak")
+        );
+    }
+
+    #[tokio::test]
+    async fn router_skip_turn_excludes_graph_memory_without_retrieval() {
+        // Pins: an acknowledgement turn routes to Skip, so the stage never calls
+        // the retrieval backend, inserts no memory reminder, and reports
+        // graph_memory as excluded with the router reason.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let retriever = scripted_graph_memory_retriever(calls.clone(), HashMap::new());
+        let session = SessionMeta {
+            id: SessionId::new(),
+            tenant_id: TenantId::new(),
+            channel: Channel::Chat,
+            model: ModelId::new("mock"),
+            contact: None,
+            ..SessionMeta::default()
+        };
+        let mut ctx = WorkingContext::new(&session, capabilities());
+        ctx.append_message(moa_core::ContextMessage::user("thanks!"));
+
+        let output = retriever
+            .process(&mut ctx)
+            .await
+            .expect("skip routing should not fail");
+
+        assert_eq!(
+            calls.lock().expect("scripted retriever calls lock").len(),
+            0,
+            "a skipped turn must not touch the retrieval backend"
+        );
+        assert_eq!(
+            ctx.messages.len(),
+            1,
+            "skip must not insert a memory reminder"
+        );
+        assert_eq!(output.items_excluded, vec!["graph_memory".to_string()]);
+        assert_eq!(
+            output.excluded_items,
+            vec![moa_core::ExcludedItem {
+                item: "graph_memory".to_string(),
+                reason: "router: skip (no retrieval intent)".to_string(),
+            }]
+        );
+        assert_eq!(
+            output.metadata.get("router_strategy"),
+            Some(&serde_json::Value::String("skip".to_string()))
+        );
+        assert_eq!(
+            ctx.metadata()
+                .get(super::OFFER_RETRIEVAL_TOOLS_METADATA_KEY),
+            Some(&serde_json::Value::Bool(false)),
+            "a skip turn must not offer the agentic memory tools"
+        );
+    }
+
+    /// Builds a tenant-only session used by the agentic-tool gate tests.
+    fn tenant_only_session() -> SessionMeta {
+        SessionMeta {
+            id: SessionId::new(),
+            tenant_id: TenantId::new(),
+            channel: Channel::Chat,
+            model: ModelId::new("mock"),
+            contact: None,
+            ..SessionMeta::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn fast_turn_with_hits_does_not_offer_agentic_memory_tools() {
+        // Pins: a Fast-routed turn that injected memory hits does NOT gate the
+        // agentic memory tools on — the common cheap path keeps a stable loadout.
+        let session = tenant_only_session();
+        let tenant_scope = MemoryScope::Tenant {
+            tenant_id: session.tenant_id,
+        };
+        let mut hits_by_scope = HashMap::new();
+        hits_by_scope.insert(
+            tenant_scope,
+            vec![retrieval_hit(
+                Uuid::from_u128(0x50),
+                session.tenant_id,
+                None,
+                NodeLabel::Chunk,
+                "tenant",
+                crate::retrieval::SourceTier::TenantKnowledge,
+                "rotation policy",
+                "API keys rotate every 90 days",
+                0.90,
+            )],
+        );
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let retriever = scripted_graph_memory_retriever(calls, hits_by_scope);
+        let mut ctx = WorkingContext::new(&session, capabilities());
+        ctx.append_message(moa_core::ContextMessage::user(
+            "What is my API key rotation policy?",
+        ));
+
+        let output = retriever
+            .process(&mut ctx)
+            .await
+            .expect("fast retrieval should assemble context");
+
+        assert_eq!(
+            output.metadata.get("router_strategy"),
+            Some(&serde_json::Value::String("fast".to_string()))
+        );
+        assert_eq!(
+            ctx.metadata()
+                .get(super::OFFER_RETRIEVAL_TOOLS_METADATA_KEY),
+            Some(&serde_json::Value::Bool(false)),
+            "a fast turn with hits must not offer the agentic memory tools"
+        );
+    }
+
+    #[tokio::test]
+    async fn fast_turn_without_hits_offers_agentic_memory_tools() {
+        // Pins: when a retrieval-intent turn injects nothing, the CRAG-style
+        // fallback gates the agentic memory tools on so the model can dig.
+        let session = tenant_only_session();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let retriever = scripted_graph_memory_retriever(calls, HashMap::new());
+        let mut ctx = WorkingContext::new(&session, capabilities());
+        ctx.append_message(moa_core::ContextMessage::user(
+            "What is my API key rotation policy?",
+        ));
+
+        let output = retriever
+            .process(&mut ctx)
+            .await
+            .expect("fast retrieval should not fail on empty hits");
+
+        assert_eq!(
+            output.metadata.get("router_strategy"),
+            Some(&serde_json::Value::String("fast".to_string()))
+        );
+        assert_eq!(
+            ctx.metadata()
+                .get(super::OFFER_RETRIEVAL_TOOLS_METADATA_KEY),
+            Some(&serde_json::Value::Bool(true)),
+            "an empty fast turn must offer the agentic memory tools"
+        );
+    }
+
+    #[tokio::test]
+    async fn agentic_turn_offers_agentic_memory_tools_even_with_hits() {
+        // Pins: an agentic-routed turn keeps Fast injection (hits still render)
+        // AND gates the agentic memory tools on so the model can iterate.
+        let session = tenant_only_session();
+        let tenant_scope = MemoryScope::Tenant {
+            tenant_id: session.tenant_id,
+        };
+        let mut hits_by_scope = HashMap::new();
+        hits_by_scope.insert(
+            tenant_scope,
+            vec![retrieval_hit(
+                Uuid::from_u128(0x51),
+                session.tenant_id,
+                None,
+                NodeLabel::Chunk,
+                "tenant",
+                crate::retrieval::SourceTier::TenantKnowledge,
+                "prior incident",
+                "the auth outage was caused by a rotated key",
+                0.90,
+            )],
+        );
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let retriever = scripted_graph_memory_retriever(calls, hits_by_scope);
+        let mut ctx = WorkingContext::new(&session, capabilities());
+        ctx.append_message(moa_core::ContextMessage::user(
+            "Investigate what we know about the auth outage",
+        ));
+
+        let output = retriever
+            .process(&mut ctx)
+            .await
+            .expect("agentic retrieval should assemble context");
+
+        assert_eq!(
+            output.metadata.get("router_strategy"),
+            Some(&serde_json::Value::String("agentic".to_string()))
+        );
+        assert_eq!(
+            ctx.metadata()
+                .get(super::OFFER_RETRIEVAL_TOOLS_METADATA_KEY),
+            Some(&serde_json::Value::Bool(true)),
+            "an agentic turn must offer the agentic memory tools"
+        );
+        assert!(
+            ctx.messages
+                .first()
+                .expect("memory reminder inserted")
+                .content
+                .contains("the auth outage was caused by a rotated key"),
+            "agentic turns keep Fast injection of the top-k hits"
+        );
+    }
+
+    #[tokio::test]
+    async fn router_deep_query_runs_each_subquery_and_fuses_hits() {
+        // Pins: a deep-shaped multi-hop query decomposes into (capped) sub-queries,
+        // issues more than one backend retrieval, and the injected memory contains
+        // the fused hits from both sub-queries.
+        let tenant_id = TenantId::new();
+        let inner_hit = retrieval_hit(
+            Uuid::from_u128(0x30),
+            tenant_id,
+            None,
+            NodeLabel::Chunk,
+            "tenant",
+            crate::retrieval::SourceTier::TenantKnowledge,
+            "dependency chunk",
+            "svc depends on the shared crypto library",
+            0.90,
+        );
+        let outer_hit = retrieval_hit(
+            Uuid::from_u128(0x31),
+            tenant_id,
+            None,
+            NodeLabel::Chunk,
+            "tenant",
+            crate::retrieval::SourceTier::TenantKnowledge,
+            "ownership chunk",
+            "the platform team owns the shared crypto library",
+            0.80,
+        );
+        let queries = Arc::new(Mutex::new(Vec::new()));
+        let retriever = Arc::new(QueryScriptedPlannedRetriever {
+            queries: queries.clone(),
+            hits_by_marker: vec![
+                ("depends".to_string(), vec![inner_hit]),
+                ("owns".to_string(), vec![outer_hit]),
+            ],
+        });
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/moa_test")
+            .expect("lazy test pool should not connect");
+        let graph_memory = GraphMemoryRetriever::new(pool, None)
+            .with_scoped_runtime_factory(Arc::new(QueryScriptedRuntimeFactory { retriever }));
+
+        let session = SessionMeta {
+            id: SessionId::new(),
+            tenant_id,
+            channel: Channel::Chat,
+            model: ModelId::new("mock"),
+            contact: None,
+            ..SessionMeta::default()
+        };
+        let mut ctx = WorkingContext::new(&session, capabilities());
+        ctx.append_message(moa_core::ContextMessage::user(
+            "Which team owns the library that svc depends on?",
+        ));
+
+        let output = graph_memory
+            .process(&mut ctx)
+            .await
+            .expect("deep retrieval should assemble context");
+
+        let recorded = queries
+            .lock()
+            .expect("scripted retriever queries lock")
+            .clone();
+        assert_eq!(
+            recorded.len(),
+            2,
+            "deep decomposition runs one retrieval per sub-query (capped at 2): {recorded:?}"
+        );
+        assert!(
+            recorded.iter().any(|query| query.contains("depends on")),
+            "one sub-query retrieves the inner dependency fact: {recorded:?}"
+        );
+        assert!(
+            recorded.iter().any(|query| query.contains("owns")),
+            "one sub-query retrieves the outer ownership fact: {recorded:?}"
+        );
+        assert_eq!(
+            output.metadata.get("router_strategy"),
+            Some(&serde_json::Value::String("deep".to_string()))
+        );
+        let memory_message = ctx
+            .messages
+            .first()
+            .expect("memory reminder should be inserted before user message");
+        assert!(
+            memory_message
+                .content
+                .contains("svc depends on the shared crypto library"),
+            "fused memory must include the inner sub-query hit"
+        );
+        assert!(
+            memory_message
+                .content
+                .contains("the platform team owns the shared crypto library"),
+            "fused memory must include the outer sub-query hit"
         );
     }
 

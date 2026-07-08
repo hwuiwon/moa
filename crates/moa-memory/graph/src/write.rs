@@ -213,6 +213,7 @@ pub async fn supersede_node_in_conn(
         "superseded",
     )
     .await?;
+    close_incident_edges(&mut *conn, current_uid, new.valid_from).await?;
     insert_node_index(store, &mut *conn, &new).await?;
     insert_supersedes_edge_index(
         store,
@@ -222,6 +223,7 @@ pub async fn supersede_node_in_conn(
         new.storage_partition_id.as_deref(),
         new.contact_id.as_deref(),
         &new.scope,
+        new.valid_from,
     )
     .await?;
 
@@ -297,6 +299,7 @@ pub async fn invalidate_node(store: &PostgresGraphStore, uid: Uuid, reason: &str
         reason,
     )
     .await?;
+    close_incident_edges(conn.as_mut(), uid, now).await?;
     if let Some(vector) = store.vector() {
         vector.delete_in_tx(conn.as_mut(), &[uid]).await?;
     }
@@ -369,6 +372,7 @@ pub async fn close_existing_node_with_supersession(
         &intent.reason,
     )
     .await?;
+    close_incident_edges(conn.as_mut(), intent.old_uid, intent.valid_to).await?;
     insert_supersedes_edge_index(
         store,
         conn.as_mut(),
@@ -377,6 +381,7 @@ pub async fn close_existing_node_with_supersession(
         old.storage_partition_id.as_deref(),
         old.contact_id.as_deref(),
         &old.scope,
+        intent.valid_to,
     )
     .await?;
     if let Some(vector) = store.vector() {
@@ -692,8 +697,8 @@ async fn insert_edge_index(
         r#"
         INSERT INTO moa.edge_index
             (uid, label, start_uid, end_uid, storage_partition_id, user_id, tenant_id, contact_id,
-             properties)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             valid_from, properties)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT (uid) DO NOTHING
         "#,
     )
@@ -705,12 +710,97 @@ async fn insert_edge_index(
     .bind(intent.contact_id.as_deref())
     .bind(tenant_id)
     .bind(contact_id)
+    .bind(intent.valid_from)
     .bind(&intent.properties)
     .execute(conn)
     .await?;
     Ok(result.rows_affected() == 1)
 }
 
+/// Closes every still-active edge touching `uid` at `valid_to`.
+///
+/// Node supersession and invalidation call this so relationships die with the
+/// node version they described instead of silently outliving it; history stays
+/// readable through as-of walks.
+async fn close_incident_edges(
+    conn: &mut PgConnection,
+    uid: Uuid,
+    valid_to: DateTime<Utc>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE moa.edge_index
+        SET valid_to = $1
+        WHERE (start_uid = $2 OR end_uid = $2)
+          AND valid_to IS NULL
+        "#,
+    )
+    .bind(valid_to)
+    .bind(uid)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Soft-invalidates one graph edge by closing its validity window.
+pub async fn invalidate_edge(store: &PostgresGraphStore, uid: Uuid, reason: &str) -> Result<()> {
+    let mut conn = store.begin_required().await?;
+    let row = sqlx::query(
+        r#"
+        SELECT label, storage_partition_id, user_id, scope, valid_to
+        FROM moa.edge_index
+        WHERE uid = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(uid)
+    .fetch_optional(conn.as_mut())
+    .await?
+    .ok_or(GraphError::NotFound(uid))?;
+    let valid_to: Option<DateTime<Utc>> = row.try_get("valid_to")?;
+    if valid_to.is_some() {
+        return Err(GraphError::BiTemporal(format!(
+            "{uid} is already invalidated"
+        )));
+    }
+
+    let now = Utc::now();
+    sqlx::query("UPDATE moa.edge_index SET valid_to = $1 WHERE uid = $2 AND valid_to IS NULL")
+        .bind(now)
+        .bind(uid)
+        .execute(conn.as_mut())
+        .await?;
+    let (actor_id, actor_kind) = mutation_actor(store);
+    let label: String = row.try_get("label")?;
+    write_and_bump(
+        conn.as_mut(),
+        ChangelogRecord {
+            storage_partition_id: row.try_get("storage_partition_id")?,
+            contact_id: row.try_get("user_id")?,
+            scope: row.try_get("scope")?,
+            actor_id,
+            actor_kind,
+            op: "invalidate".to_string(),
+            target_kind: "edge".to_string(),
+            target_label: label,
+            target_uid: uid,
+            payload: json!({
+                "reason": reason,
+                "valid_to": now.to_rfc3339(),
+            }),
+            redaction_marker: None,
+            pii_class: "none".to_string(),
+            audit_metadata: None,
+            cause_change_id: None,
+        },
+    )
+    .await?;
+
+    conn.commit().await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn insert_supersedes_edge_index(
     store: &PostgresGraphStore,
     conn: &mut PgConnection,
@@ -719,6 +809,7 @@ async fn insert_supersedes_edge_index(
     storage_partition_id: Option<&str>,
     contact_id: Option<&str>,
     scope: &str,
+    valid_from: DateTime<Utc>,
 ) -> Result<()> {
     validate_scope_shape(storage_partition_id, contact_id, scope)?;
     let (tenant_id, contact_uuid) = runtime_ids_from_parts(
@@ -731,8 +822,8 @@ async fn insert_supersedes_edge_index(
         r#"
         INSERT INTO moa.edge_index
             (uid, label, start_uid, end_uid, storage_partition_id, user_id, tenant_id, contact_id,
-             properties)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{}'::jsonb)
+             valid_from, properties)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, '{}'::jsonb)
         ON CONFLICT (uid) DO NOTHING
         "#,
     )
@@ -744,6 +835,7 @@ async fn insert_supersedes_edge_index(
     .bind(contact_id)
     .bind(tenant_id)
     .bind(contact_uuid)
+    .bind(valid_from)
     .execute(conn)
     .await?;
     Ok(())

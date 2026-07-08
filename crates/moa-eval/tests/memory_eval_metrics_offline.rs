@@ -148,6 +148,7 @@ fn backend_probe(probe_id: &str, fact_id: &str, backend: LexicalBackend, uid: u1
         user_id: "user-backend".to_string(),
         probe_type: ProbeType::PointRecall,
         expected_fact_ids: fact_ids(&[fact_id]),
+        expected_fact_grades: std::collections::BTreeMap::new(),
         blocked_fact_ids: Vec::new(),
         candidates: vec![RetrievedCandidate {
             uid: Uuid::from_u128(uid),
@@ -212,7 +213,7 @@ fn memory_eval_report_serializes_probe_graph_harm_path() -> TestResult {
         }],
     );
     let graph_diagnostics = GraphRetrievalDiagnostics {
-        policy: GraphRetrievalPolicy::LegacyBroadExpansion,
+        policy: GraphRetrievalPolicy::AnchoredRescue,
         seed_counts: GraphSeedDiagnostics {
             broad_fallback: 1,
             ..GraphSeedDiagnostics::default()
@@ -240,6 +241,7 @@ fn memory_eval_report_serializes_probe_graph_harm_path() -> TestResult {
         user_id: "user-graph".to_string(),
         probe_type: ProbeType::PointRecall,
         expected_fact_ids: fact_ids(&["fact-right"]),
+        expected_fact_grades: std::collections::BTreeMap::new(),
         blocked_fact_ids: Vec::new(),
         candidates: graph_candidates,
         post_rerank_candidates: None,
@@ -421,6 +423,7 @@ fn reranker_metrics_track_pre_post_windows_and_p95_latency() {
                 user_id: "user-alice".to_string(),
                 probe_type: ProbeType::PointRecall,
                 expected_fact_ids: fact_ids(&["fact-reranked"]),
+                expected_fact_grades: std::collections::BTreeMap::new(),
                 blocked_fact_ids: Vec::new(),
                 candidates: metric_candidates(
                     0xe00,
@@ -470,6 +473,7 @@ fn reranker_metrics_track_pre_post_windows_and_p95_latency() {
                 user_id: "user-bob".to_string(),
                 probe_type: ProbeType::PointRecall,
                 expected_fact_ids: fact_ids(&["fact-stable"]),
+                expected_fact_grades: std::collections::BTreeMap::new(),
                 blocked_fact_ids: Vec::new(),
                 candidates: metric_candidates(
                     0x1000,
@@ -591,6 +595,7 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
                 user_id: "user-alice".to_string(),
                 probe_type: ProbeType::LatestValueAfterUpdate,
                 expected_fact_ids: fact_ids(&["fact-current"]),
+                expected_fact_grades: std::collections::BTreeMap::new(),
                 blocked_fact_ids: fact_ids(&["fact-old"]),
                 candidates: metric_candidates(
                     0x800,
@@ -622,6 +627,7 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
                 user_id: "user-alice".to_string(),
                 probe_type: ProbeType::CrossUserIsolation,
                 expected_fact_ids: Vec::new(),
+                expected_fact_grades: std::collections::BTreeMap::new(),
                 blocked_fact_ids: fact_ids(&["fact-bob-secret"]),
                 candidates: Vec::new(),
                 post_rerank_candidates: None,
@@ -641,6 +647,7 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
                 user_id: "user-alice".to_string(),
                 probe_type: ProbeType::PiiRedaction,
                 expected_fact_ids: fact_ids(&["fact-phone"]),
+                expected_fact_grades: std::collections::BTreeMap::new(),
                 blocked_fact_ids: Vec::new(),
                 candidates: metric_candidates(
                     0x900,
@@ -769,4 +776,144 @@ fn temporal_parse_rate_aggregates_over_temporal_probes_only() {
 
     assert_metric(report.metrics.temporal_parse_rate, 2.0, 3, 2.0 / 3.0);
     assert_eq!(report.metrics.temporal_parse_mismatch_count, 1);
+}
+
+#[test]
+fn graded_ndcg_penalizes_misranking_a_high_grade_memory_below_a_low_grade_one() {
+    // Pins: graded nDCG distinguishes ranking quality that binary nDCG cannot —
+    // retrieving both expected facts scores 1.0 on the binary metric in either
+    // order, while the graded metric drops when the grade-3 fact ranks below
+    // the grade-1 fact.
+    let grades = std::collections::BTreeMap::from([
+        ("fact-primary".to_string(), 3_u8),
+        ("fact-context".to_string(), 1_u8),
+    ]);
+    let candidate = |rank: usize, fact_id: &str, uid: u128| RetrievedCandidate {
+        uid: Uuid::from_u128(uid),
+        rank,
+        score: 1.0 / rank as f64,
+        fact_id: Some(fact_id.to_string()),
+        equivalent_fact_ids: Vec::new(),
+        legs: CandidateLegs::default(),
+    };
+    let probe = |candidates: Vec<RetrievedCandidate>| ProbeResult {
+        probe_id: "probe-graded".to_string(),
+        user_id: "user-graded".to_string(),
+        probe_type: ProbeType::MultiHop,
+        expected_fact_ids: fact_ids(&["fact-primary", "fact-context"]),
+        expected_fact_grades: grades.clone(),
+        blocked_fact_ids: Vec::new(),
+        candidates,
+        post_rerank_candidates: None,
+        retrieval_latency_ms: 0,
+        answer_faithful: None,
+        abstention_correct: None,
+        pii_redacted: None,
+        temporal_as_of_correct: None,
+        temporal_filter_parsed: None,
+        temporal_filter_matches_as_of: None,
+        preference_context_hit: None,
+        graph_diagnostics: None,
+        graph_comparison: None,
+    };
+
+    let well_ranked = probe(vec![
+        candidate(1, "fact-primary", 0x2_100),
+        candidate(2, "fact-context", 0x2_200),
+    ]);
+    let misranked = probe(vec![
+        candidate(1, "fact-context", 0x2_200),
+        candidate(2, "fact-primary", 0x2_100),
+    ]);
+
+    assert_close(well_ranked.graded_ndcg_at(10).expect("graded ndcg"), 1.0);
+    let misranked_graded = misranked.graded_ndcg_at(10).expect("graded ndcg");
+    assert!(
+        misranked_graded < 1.0,
+        "grade-3 below grade-1 must lose graded nDCG: {misranked_graded}"
+    );
+    assert_close(misranked.ndcg_at(10).expect("binary ndcg"), 1.0);
+    // Absent grades default to the maximum, matching binary behavior.
+    let mut ungraded = misranked.clone();
+    ungraded.expected_fact_grades.clear();
+    assert_close(ungraded.graded_ndcg_at(10).expect("graded ndcg"), 1.0);
+}
+
+#[test]
+fn per_probe_type_slices_report_sliced_means_with_dispersion() {
+    // Pins: core ranking metrics are sliced by probe type with count and
+    // standard error, so budget gates can read the slice a change's mechanism
+    // moves instead of a global mean that hides per-intent regressions.
+    let hit_probe = |probe_id: &str, probe_type: ProbeType, fact: &str, uid: u128, hit: bool| {
+        let mut probe = backend_probe(probe_id, fact, LexicalBackend::PostgresTsvector, uid);
+        probe.probe_type = probe_type;
+        if !hit {
+            probe.candidates.clear();
+        }
+        probe
+    };
+    let report = aggregate_retrieval_eval_from_counts(
+        4,
+        4,
+        vec![
+            hit_probe(
+                "probe-point-hit",
+                ProbeType::PointRecall,
+                "fact-a",
+                0x3_100,
+                true,
+            ),
+            hit_probe(
+                "probe-multi-hit",
+                ProbeType::MultiHop,
+                "fact-b",
+                0x3_200,
+                true,
+            ),
+            hit_probe(
+                "probe-multi-miss",
+                ProbeType::MultiHop,
+                "fact-c",
+                0x3_300,
+                false,
+            ),
+        ],
+        BootstrapConfig {
+            resamples: 25,
+            seed: 31,
+        },
+    );
+
+    let slices = &report.metrics.per_probe_type;
+    assert_eq!(slices.len(), 2);
+    let point = slices.get("point_recall").expect("point_recall slice");
+    assert_eq!(point.probes, 1);
+    let point_recall = point.recall_at_4.expect("point recall stat");
+    assert_close(point_recall.mean, 1.0);
+    assert_eq!(point_recall.count, 1);
+    assert_close(point_recall.std_error, 0.0);
+    let multi = slices.get("multi_hop").expect("multi_hop slice");
+    assert_eq!(multi.probes, 2);
+    let multi_recall = multi.recall_at_4.expect("multi recall stat");
+    assert_close(multi_recall.mean, 0.5);
+    assert_eq!(multi_recall.count, 2);
+    assert!(
+        multi_recall.std_error > 0.0,
+        "two-probe slice with variance must report a nonzero standard error"
+    );
+
+    // The slice serializes under a stable dotted path for --min-metric gates.
+    let value = serde_json::to_value(&report).expect("serialize report");
+    assert_close(
+        value["metrics"]["per_probe_type"]["multi_hop"]["recall_at_4"]["mean"]
+            .as_f64()
+            .expect("slice mean"),
+        0.5,
+    );
+    assert!(
+        value["metrics"]["graded_ndcg_at_10"]["denominator"]
+            .as_u64()
+            .is_some(),
+        "graded nDCG@10 must serialize as a headline metric"
+    );
 }

@@ -29,21 +29,39 @@ use crate::{
 #[derive(Clone, Default)]
 pub struct VectorStoreFactory {
     turbopuffer: Option<Arc<TurbopufferStore>>,
+    /// Matryoshka shortlist width applied to every pgvector source this factory builds.
+    mrl_shortlist_dims: Option<usize>,
 }
 
 impl VectorStoreFactory {
     /// Builds a vector store factory from shared MOA configuration.
     #[must_use]
     pub fn from_config(config: &MoaConfig) -> Self {
+        // Ignore an out-of-range shortlist width instead of failing construction:
+        // the store's `with_mrl_shortlist` applies the same guard, and a truncated
+        // prefix must be strictly shorter than the stored embedding to be meaningful.
+        let mrl_shortlist_dims = config
+            .memory
+            .vector
+            .mrl_shortlist_dims
+            .filter(|&dims| dims > 0 && dims < crate::VECTOR_DIMENSION);
+        if config.memory.vector.mrl_shortlist_dims.is_some() && mrl_shortlist_dims.is_none() {
+            tracing::warn!(
+                configured = config.memory.vector.mrl_shortlist_dims,
+                max = crate::VECTOR_DIMENSION,
+                "ignoring memory.vector.mrl_shortlist_dims outside (0, VECTOR_DIMENSION)"
+            );
+        }
         Self {
             turbopuffer: TurbopufferStore::from_config(config).ok().map(Arc::new),
+            mrl_shortlist_dims,
         }
     }
 
     /// Returns the pgvector source store for normal application-role callers.
     #[must_use]
     pub fn pgvector_source(&self, pool: PgPool, scope: RlsContext) -> Arc<PgvectorStore> {
-        Arc::new(PgvectorStore::new(pool, scope))
+        Arc::new(PgvectorStore::new(pool, scope).with_mrl_shortlist(self.mrl_shortlist_dims))
     }
 
     /// Returns the pgvector source store while assuming `moa_app` inside each transaction.
@@ -53,7 +71,10 @@ impl VectorStoreFactory {
         pool: PgPool,
         scope: RlsContext,
     ) -> Arc<PgvectorStore> {
-        Arc::new(PgvectorStore::new_for_app_role(pool, scope))
+        Arc::new(
+            PgvectorStore::new_for_app_role(pool, scope)
+                .with_mrl_shortlist(self.mrl_shortlist_dims),
+        )
     }
 
     /// Returns the pgvector source store for tenant control-plane validation reads.
@@ -63,7 +84,10 @@ impl VectorStoreFactory {
         pool: PgPool,
         scope: RlsContext,
     ) -> Arc<PgvectorStore> {
-        Arc::new(PgvectorStore::new_for_control_plane(pool, scope))
+        Arc::new(
+            PgvectorStore::new_for_control_plane(pool, scope)
+                .with_mrl_shortlist(self.mrl_shortlist_dims),
+        )
     }
 
     /// Returns the vector store used by transactional graph writes.

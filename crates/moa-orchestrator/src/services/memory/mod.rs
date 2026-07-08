@@ -4,11 +4,13 @@ mod ingest;
 mod responses;
 mod retrieval;
 mod scope;
+mod tools;
 
 pub use ingest::document_ingest_session_id;
 pub use scope::{
     UserScopeError, checked_ingest_contact_id, checked_memory_scope, effective_user_id,
 };
+pub use tools::OrchestratorMemoryRetrievalExecutor;
 
 use moa_authz_schema::Relation;
 use moa_core::wire::memory::{

@@ -16,7 +16,9 @@ use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage,
     RetrievalSelectedHit, RetrievalStage, StageTimings, TurnId, VecHit,
 };
-use moa_memory_graph::{GraphStore, NodeLabel, PiiClass, PostgresGraphStore};
+use moa_memory_graph::{
+    EdgeLabel, GraphStore, NodeIndexRow, NodeLabel, PiiClass, PostgresGraphStore,
+};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::VectorStoreFactory;
 use moa_observability::record_memory_operation;
@@ -169,6 +171,50 @@ struct RetrievalInputs {
     label_filter: Vec<String>,
     max_pii_class: Option<String>,
     use_reranker: bool,
+}
+
+/// Runs the same scoped hybrid retrieval the injection path uses for the
+/// read-only `memory_search` agentic tool (plan Task 11).
+///
+/// Reuses [`memory_stack`], [`lookup_seed_uids`], and [`retrieve_hits`] so the
+/// tool shares one retrieval implementation with stage-7 injection. The `scope`
+/// is derived by the caller from the session alone; this function never accepts
+/// a caller-supplied tenant or contact id.
+pub(super) async fn search_hits_for_tool(
+    scope: &MemoryScope,
+    query: &str,
+    limit: u32,
+) -> Result<Vec<RetrievalHit>, HandlerError> {
+    let (graph, retriever) = memory_stack(scope).await?;
+    let seeds = lookup_seed_uids(graph.as_ref(), query, limit).await?;
+    retrieve_hits(
+        retriever.as_ref(),
+        RetrievalInputs {
+            seeds,
+            query: query.to_string(),
+            limit,
+            scope: scope.clone(),
+            label_filter: Vec::new(),
+            max_pii_class: None,
+            use_reranker: true,
+        },
+    )
+    .await
+}
+
+/// Walks graph neighbors under the session scope for the `memory_navigate`
+/// agentic tool, applying the same RLS scope the injection path uses.
+pub(super) async fn neighbors_for_tool(
+    scope: &MemoryScope,
+    seed: Uuid,
+    hops: u8,
+    edge_filter: Option<Vec<EdgeLabel>>,
+) -> Result<Vec<NodeIndexRow>, HandlerError> {
+    let graph = graph_store(scope);
+    graph
+        .neighbors(seed, hops, edge_filter.as_deref(), None)
+        .await
+        .map_err(memory_handler_error)
 }
 
 async fn retrieve_hits(

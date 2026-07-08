@@ -6,6 +6,8 @@ mod changelog_outbox_db_memory;
 mod concurrent_writers_db_memory;
 #[path = "memory_graph_db_memory/contact_write_db_memory.rs"]
 mod contact_write_db_memory;
+#[path = "memory_graph_db_memory/edge_validity_db_memory.rs"]
+mod edge_validity_db_memory;
 #[path = "memory_graph_db_memory/knowledge_labels_db_memory.rs"]
 mod knowledge_labels_db_memory;
 #[path = "memory_graph_db_memory/lexical_ranking_db_memory.rs"]
@@ -14,5 +16,7 @@ mod lexical_ranking_db_memory;
 mod node_index_db_memory;
 #[path = "memory_graph_db_memory/read_smoke_db_memory.rs"]
 mod read_smoke_db_memory;
+#[path = "memory_graph_db_memory/scored_walk_db_memory.rs"]
+mod scored_walk_db_memory;
 #[path = "memory_graph_db_memory/write_protocol_db_memory.rs"]
 mod write_protocol_db_memory;

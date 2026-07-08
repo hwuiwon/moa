@@ -1,13 +1,14 @@
 //! Read-side implementation for the relational graph store.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 use sqlx::{Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::{
-    GraphError, GraphExpansionHit, GraphStore, GraphTraversalDirection, PostgresGraphStore,
+    GraphError, GraphExpansionHit, GraphStore, GraphTraversalDirection, GraphWalkScoring,
+    PostgresGraphStore,
     edge::{EdgeLabel, EdgeWriteIntent},
     node::{NODE_INDEX_COLUMNS, NodeIndexRow, NodeLabel, NodeWriteIntent},
 };
@@ -113,6 +114,7 @@ impl GraphStore for PostgresGraphStore {
         seeds: &[Uuid],
         max_hops: u8,
         as_of: Option<DateTime<Utc>>,
+        scoring: &GraphWalkScoring,
     ) -> Result<Vec<GraphExpansionHit>, GraphError> {
         let seeds = unique_uids(seeds);
         if seeds.is_empty() || max_hops == 0 {
@@ -122,7 +124,7 @@ impl GraphStore for PostgresGraphStore {
         let max_hops = max_hops.min(3);
         let limit = (seeds.len() as i64 * 200).clamp(1, 5_000);
         let raw_hits = if let Some(mut conn) = self.begin().await? {
-            let rows = build_expansion_query(&seeds, max_hops, as_of, limit)
+            let rows = build_expansion_query(&seeds, max_hops, as_of, limit, scoring)
                 .build()
                 .fetch_all(conn.as_mut())
                 .await
@@ -130,7 +132,7 @@ impl GraphStore for PostgresGraphStore {
             conn.commit().await?;
             expansion_hits_from_rows(rows)?
         } else {
-            let rows = build_expansion_query(&seeds, max_hops, as_of, limit)
+            let rows = build_expansion_query(&seeds, max_hops, as_of, limit, scoring)
                 .build()
                 .fetch_all(&self.pool)
                 .await
@@ -141,19 +143,12 @@ impl GraphStore for PostgresGraphStore {
             return Ok(Vec::new());
         }
 
-        let mut shortest_hits = HashMap::<(Uuid, Uuid), RawExpansionHit>::new();
-        for hit in raw_hits {
-            let key = (hit.seed, hit.uid);
-            let replace = shortest_hits
-                .get(&key)
-                .is_none_or(|stored| hit.hop < stored.hop);
-            if replace {
-                shortest_hits.insert(key, hit);
-            }
-        }
-
-        let mut hits = shortest_hits
-            .into_values()
+        // Every discovered path is returned: retrieval policies gate on path
+        // shape, so collapsing to one path per (seed, candidate) here would let
+        // an ill-shaped path shadow an equally scored admissible one. Callers
+        // that need one entry per candidate dedup after their own filtering.
+        let mut hits = raw_hits
+            .into_iter()
             .map(|hit| GraphExpansionHit {
                 uid: hit.uid,
                 label: hit.label,
@@ -161,6 +156,7 @@ impl GraphStore for PostgresGraphStore {
                 seed_valid_from: hit.seed_valid_from,
                 valid_from: hit.valid_from,
                 hop: hit.hop,
+                path_score: hit.path_score,
                 edges: hit.edges,
                 directions: hit.directions,
             })
@@ -169,6 +165,8 @@ impl GraphStore for PostgresGraphStore {
             left.seed
                 .cmp(&right.seed)
                 .then_with(|| left.uid.cmp(&right.uid))
+                .then_with(|| right.path_score.total_cmp(&left.path_score))
+                .then_with(|| left.hop.cmp(&right.hop))
         });
         Ok(hits)
     }
@@ -234,6 +232,7 @@ struct RawExpansionHit {
     seed_valid_from: DateTime<Utc>,
     valid_from: DateTime<Utc>,
     hop: u8,
+    path_score: f64,
     edges: Vec<EdgeLabel>,
     directions: Vec<GraphTraversalDirection>,
 }
@@ -276,6 +275,8 @@ fn build_neighbors_query<'a>(
     );
     builder.push_bind(i32::from(max_hops));
     builder.push(" AND ");
+    crate::push_validity_filter(&mut builder, Some("edge_row"), as_of);
+    builder.push(" AND ");
     crate::push_validity_filter(&mut builder, Some("next_node"), as_of);
     builder.push(" AND NOT next_node.uid = ANY(walk.path_uids)");
     if let Some(labels) = edge_filter.filter(|labels| !labels.is_empty()) {
@@ -310,11 +311,28 @@ fn build_neighbors_query<'a>(
     builder
 }
 
+/// Appends a `CASE step-prior END` expression over the scoring's edge priors.
+fn push_edge_prior_case(builder: &mut QueryBuilder<'_, Postgres>, scoring: &GraphWalkScoring) {
+    if scoring.edge_priors.is_empty() {
+        builder.push("1.0::float8");
+        return;
+    }
+    builder.push("CASE edge_row.label");
+    for (label, prior) in &scoring.edge_priors {
+        // Labels come from the closed `EdgeLabel` enum, so inlining the SQL
+        // string literal is safe; the prior value is bound.
+        builder.push(format!(" WHEN '{}' THEN ", label.as_str()));
+        builder.push_bind(*prior);
+    }
+    builder.push(" ELSE 1.0::float8 END");
+}
+
 fn build_expansion_query<'a>(
     seeds: &'a [Uuid],
     max_hops: u8,
     as_of: Option<DateTime<Utc>>,
     limit: i64,
+    scoring: &'a GraphWalkScoring,
 ) -> QueryBuilder<'a, Postgres> {
     // Seed-anchored traversal: rather than materializing every visible node in
     // the tenant into a CTE and joining against it (which forced a full
@@ -322,8 +340,7 @@ fn build_expansion_query<'a>(
     // lookup on the seed uids and each recursive hop joins `edge_index` and
     // `node_index` directly with the validity filter inlined into the JOIN. This
     // lets Postgres drive the walk from the seeds outward using the edge and uid
-    // indexes. The reachable set, validity semantics, and result ordering are
-    // unchanged from the previous `visible_nodes` formulation.
+    // indexes.
     //
     // Each hop follows edges in both directions. Instead of a single
     // `edge_row.start_uid = walk.uid OR edge_row.end_uid = walk.uid` join — which
@@ -334,20 +351,25 @@ fn build_expansion_query<'a>(
     // (neighbor, edge label) multiset for every walk row: a non-self-loop edge
     // matches exactly one branch (the endpoint equal to `walk.uid`), and a
     // self-loop matches both branches but is dropped by the path-cycle guard just
-    // as it was under the `OR` form. The reachable set and `edges` arrays are
-    // therefore identical.
+    // as it was under the `OR` form.
+    //
+    // Each branch also emits the edge-label prior, so the recursive arm can
+    // accumulate `path_score = decay^hop * product(priors)` and prune branches
+    // below the configured threshold inside the walk. The final ordering keeps
+    // the best-scoring paths when the row limit truncates hub fan-out.
     let mut builder =
         QueryBuilder::<Postgres>::new("WITH RECURSIVE seed_uids(uid) AS (SELECT unnest(");
     builder.push_bind(seeds);
     builder.push(
         r#"::uuid[])),
-        walk(seed, uid, label, seed_valid_from, valid_from, hop, edges, directions, path_uids) AS (
+        walk(seed, uid, label, seed_valid_from, valid_from, hop, path_score, edges, directions, path_uids) AS (
             SELECT seed_uids.uid,
                    seed_node.uid,
                    seed_node.label,
                    seed_node.valid_from,
                    seed_node.valid_from,
                    0::int,
+                   1.0::float8,
                    ARRAY[]::text[],
                    ARRAY[]::text[],
                    ARRAY[seed_node.uid]
@@ -366,6 +388,11 @@ fn build_expansion_query<'a>(
                    walk.seed_valid_from,
                    next_node.valid_from,
                    walk.hop + 1,
+                   walk.path_score * "#,
+    );
+    builder.push_bind(scoring.decay);
+    builder.push(
+        r#" * step.prior,
                    array_append(walk.edges, step.label),
                    array_append(walk.directions, step.direction),
                    array_append(walk.path_uids, next_node.uid)
@@ -373,15 +400,35 @@ fn build_expansion_query<'a>(
             JOIN LATERAL (
                 SELECT edge_row.end_uid AS neighbor_uid,
                        edge_row.label AS label,
-                       'outgoing'::text AS direction
+                       'outgoing'::text AS direction,
+                       "#,
+    );
+    push_edge_prior_case(&mut builder, scoring);
+    builder.push(
+        r#" AS prior
                 FROM moa.edge_index AS edge_row
                 WHERE edge_row.start_uid = walk.uid
+                  AND "#,
+    );
+    crate::push_validity_filter(&mut builder, Some("edge_row"), as_of);
+    builder.push(
+        r#"
                 UNION ALL
                 SELECT edge_row.start_uid AS neighbor_uid,
                        edge_row.label AS label,
-                       'incoming'::text AS direction
+                       'incoming'::text AS direction,
+                       "#,
+    );
+    push_edge_prior_case(&mut builder, scoring);
+    builder.push(
+        r#" AS prior
                 FROM moa.edge_index AS edge_row
                 WHERE edge_row.end_uid = walk.uid
+                  AND "#,
+    );
+    crate::push_validity_filter(&mut builder, Some("edge_row"), as_of);
+    builder.push(
+        r#"
             ) AS step ON true
             JOIN moa.node_index AS next_node
               ON next_node.uid = step.neighbor_uid
@@ -390,14 +437,18 @@ fn build_expansion_query<'a>(
     crate::push_validity_filter(&mut builder, Some("next_node"), as_of);
     builder.push(" WHERE walk.hop < ");
     builder.push_bind(i32::from(max_hops));
+    builder.push(" AND walk.path_score * ");
+    builder.push_bind(scoring.decay);
+    builder.push(" * step.prior >= ");
+    builder.push_bind(scoring.prune_below);
     builder.push(
         r#"
               AND NOT next_node.uid = ANY(walk.path_uids)
         )
-        SELECT seed, uid, label, seed_valid_from, valid_from, hop, edges, directions
+        SELECT seed, uid, label, seed_valid_from, valid_from, hop, path_score, edges, directions
         FROM walk
         WHERE hop > 0
-        ORDER BY seed, uid, hop, edges
+        ORDER BY path_score DESC, seed, uid, hop, edges
         LIMIT "#,
     );
     builder.push_bind(limit);
@@ -421,6 +472,7 @@ fn expansion_hits_from_rows(
                     "expansion returned invalid hop `{hop_i32}`: {error}"
                 ))
             })?;
+            let path_score: f64 = row.try_get("path_score")?;
             let edge_texts: Vec<String> = row.try_get("edges")?;
             let edges = edge_texts
                 .into_iter()
@@ -438,6 +490,7 @@ fn expansion_hits_from_rows(
                 seed_valid_from,
                 valid_from,
                 hop,
+                path_score,
                 edges,
                 directions,
             })

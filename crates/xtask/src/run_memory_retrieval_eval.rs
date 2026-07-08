@@ -302,7 +302,6 @@ fn parse_graph_expansion_policy(value: &str) -> Result<GraphExpansionEvalPolicy>
     match value {
         "current" => Ok(GraphExpansionEvalPolicy::Current),
         "skip-exact-direct" => Ok(GraphExpansionEvalPolicy::SkipExactDirect),
-        "legacy-broad-expansion" => Ok(GraphExpansionEvalPolicy::LegacyBroadExpansion),
         other => bail!(
             "unsupported --graph-expansion-policy value `{other}`; expected current|skip-exact-direct|legacy-broad-expansion"
         ),

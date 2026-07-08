@@ -56,6 +56,18 @@ pub struct MemoryHit {
     /// Optional server-side node summary or properties used for richer renderers.
     #[serde(default)]
     pub properties: Option<Value>,
+    /// Tenant knowledge chunk uid when the hit is a knowledge chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_uid: Option<Uuid>,
+    /// Knowledge document version containing the cited chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_version_uid: Option<Uuid>,
+    /// Source URI for user-facing citations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_uri: Option<String>,
+    /// Renderer-safe source title when the hit is a knowledge chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_title: Option<String>,
 }
 
 /// Request payload for showing one graph-memory node.

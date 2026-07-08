@@ -2403,7 +2403,7 @@ mod tests {
                     edge_directions: vec!["outgoing".to_string()],
                 },
             ],
-            ..GraphRetrievalDiagnostics::new(GraphRetrievalPolicy::LegacyBroadExpansion)
+            ..GraphRetrievalDiagnostics::new(GraphRetrievalPolicy::AnchoredRescue)
         };
         let url_to_article_id = HashMap::from([
             (
@@ -2592,6 +2592,7 @@ mod tests {
                 source_uri: Some(source_uri.to_string()),
                 source_title: Some("Support".to_string()),
                 object_type: "article".to_string(),
+                context_window: Vec::new(),
             }),
             node: NodeIndexRow {
                 uid,

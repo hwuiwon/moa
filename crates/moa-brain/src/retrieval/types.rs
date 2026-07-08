@@ -303,6 +303,34 @@ pub struct LineageContext {
     pub turn_seq: i64,
 }
 
+/// One ranked hit recorded into the `moa.retrieval_lineage` sidecar table.
+///
+/// Chunk provenance is denormalized here so dashboard queries resolve a
+/// retrieval row to its source document without joining through
+/// `moa.knowledge_chunks`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetrievalLineageHit {
+    /// Retrieved graph node uid.
+    pub uid: Uuid,
+    /// Tenant knowledge chunk uid when the hit is a knowledge chunk.
+    pub chunk_uid: Option<Uuid>,
+    /// Knowledge document version containing the chunk, when known.
+    pub document_version_uid: Option<Uuid>,
+}
+
+impl RetrievalLineageHit {
+    /// Extracts the lineage row payload from one ranked retrieval hit.
+    #[must_use]
+    pub fn from_hit(hit: &RetrievalHit) -> Self {
+        let chunk = hit.knowledge_chunk.as_ref();
+        Self {
+            uid: hit.uid,
+            chunk_uid: chunk.map(|chunk| chunk.chunk_uid),
+            document_version_uid: chunk.map(|chunk| chunk.document_version_uid),
+        }
+    }
+}
+
 /// Retrieval legs that contributed to one fused candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LegSources {
@@ -359,6 +387,20 @@ impl SourceTier {
     }
 }
 
+/// One ordinal-adjacent neighbor chunk that expands a matched chunk's context.
+///
+/// Parent-document ("small-to-big") retrieval matches on a small chunk but
+/// renders the neighbors around it as expanded context. Each part carries the
+/// neighbor's ordinal within the document version and its normalized text. The
+/// matched chunk itself is never represented here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeChunkWindowPart {
+    /// Neighbor chunk ordinal within the same document version.
+    pub ordinal: i32,
+    /// Full normalized neighbor chunk text from `moa.knowledge_chunks`.
+    pub text: String,
+}
+
 /// Full tenant knowledge chunk text and citation metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeChunkHydration {
@@ -386,6 +428,12 @@ pub struct KnowledgeChunkHydration {
     pub source_title: Option<String>,
     /// Source object type.
     pub object_type: String,
+    /// Ordinal-adjacent sibling chunks that expand the matched chunk's context.
+    ///
+    /// Populated by parent-document retrieval with the matched chunk's neighbors
+    /// (ordinal ±1, same document version) in ascending ordinal order. Excludes
+    /// the matched chunk itself and is empty when no neighbors were hydrated.
+    pub context_window: Vec<KnowledgeChunkWindowPart>,
 }
 
 /// One hydrated retrieval result.

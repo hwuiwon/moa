@@ -530,6 +530,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
                 label: EdgeLabel::RelatesTo,
                 start_uid: seed_uid,
                 end_uid,
+                valid_from: Utc::now(),
                 properties: json!({ "source": "hybrid_retrieval_test" }),
                 storage_partition_id: Some(storage_partition_id.clone()),
                 contact_id: None,
@@ -767,6 +768,125 @@ async fn duplicate_crowding_keeps_distinct_supporting_knowledge_chunk() {
         let _ = graph
             .hard_purge(uid, "redacted:hybrid-duplicate-crowding-test")
             .await;
+    }
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn parent_document_retrieval_hydrates_ordinal_adjacent_neighbors() {
+    // Pins: a matched middle chunk hydrates its ordinal ±1 siblings from the same
+    // document version into `context_window`, in ascending ordinal order, and
+    // never includes the matched chunk itself.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool().clone();
+    let storage_partition_id = test_storage_partition_id();
+    let graph = graph_store(&pool, &storage_partition_id);
+    set_workspace_embedder_state(&pool, &storage_partition_id, "test-model").await;
+
+    let query = "parent document retrieval middle chunk escalation owner";
+    let before_text = "Parent document intro overview of the runbook.".to_string();
+    let matched_text = format!("{query} detailed mitigation steps.");
+    let after_text = "Parent document appendix with related references.".to_string();
+
+    let before_uid = graph
+        .create_node(node_intent(
+            &storage_partition_id,
+            NodeLabel::Chunk,
+            &before_text,
+            Some(deterministic_vector(&before_text)),
+        ))
+        .await
+        .expect("create before chunk node");
+    let matched_uid = graph
+        .create_node(node_intent(
+            &storage_partition_id,
+            NodeLabel::Chunk,
+            &matched_text,
+            Some(deterministic_vector(query)),
+        ))
+        .await
+        .expect("create matched chunk node");
+    let after_uid = graph
+        .create_node(node_intent(
+            &storage_partition_id,
+            NodeLabel::Chunk,
+            &after_text,
+            Some(deterministic_vector(&after_text)),
+        ))
+        .await
+        .expect("create after chunk node");
+
+    // One document version carrying ordinals 0, 1, 2 in insertion order.
+    seed_knowledge_document_chunks(
+        &pool,
+        &storage_partition_id,
+        "parent-document-source",
+        "Parent Document Source",
+        "https://example.test/parent-document",
+        &[
+            (before_uid, before_text.clone()),
+            (matched_uid, matched_text.clone()),
+            (after_uid, after_text.clone()),
+        ],
+    )
+    .await;
+
+    let vector = PgvectorStore::new_for_app_role(pool.clone(), tenant_scope(&storage_partition_id));
+    let retriever = HybridRetriever::new(pool.clone(), Arc::new(graph.clone()), Arc::new(vector))
+        .with_assume_app_role(true);
+    let hits = retriever
+        .retrieve(RetrievalRequest {
+            seeds: Vec::new(),
+            query_text: query.to_string(),
+            query_embedding: deterministic_vector(query),
+            scope: tenant_memory_scope(&storage_partition_id),
+            label_filter: Some(vec![NodeLabel::Chunk]),
+            max_pii_class: PiiClass::Restricted,
+            k_final: 5,
+            use_reranker: false,
+            strategy: None,
+            as_of: None,
+            ranking_reference_time: None,
+            lineage: None,
+            disable_leg_timeouts: true,
+            disable_graph_expansion: true,
+        })
+        .await
+        .expect("retrieve parent-document chunks");
+
+    let matched_hit = hits
+        .iter()
+        .find(|hit| hit.uid == matched_uid)
+        .expect("matched middle chunk retrieved");
+    let chunk = matched_hit
+        .knowledge_chunk
+        .as_ref()
+        .expect("matched chunk hydrated");
+    assert_eq!(chunk.ordinal, 1);
+    let window_ordinals = chunk
+        .context_window
+        .iter()
+        .map(|part| part.ordinal)
+        .collect::<Vec<_>>();
+    assert_eq!(window_ordinals, vec![0, 2], "{:#?}", chunk.context_window);
+    assert_eq!(chunk.context_window[0].text, before_text);
+    assert_eq!(chunk.context_window[1].text, after_text);
+    assert!(
+        chunk
+            .context_window
+            .iter()
+            .all(|part| part.text != matched_text),
+        "the matched chunk must not appear in its own context window"
+    );
+
+    for uid in [before_uid, matched_uid, after_uid] {
+        let _ = graph.hard_purge(uid, "redacted:parent-document-test").await;
     }
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)

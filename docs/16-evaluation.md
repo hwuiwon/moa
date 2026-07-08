@@ -14,6 +14,13 @@ Memory retrieval and answer-faithfulness gates are documented separately in
 ingestion coverage, retrieval recall, and answer faithfulness separate so the
 report identifies the bottleneck before new memory architecture ships.
 
+Retrieval-affecting changes additionally gate on the offline
+[Golden Retrieval Set](eval/golden-retrieval-set.md) before any live sweep:
+graded nDCG@10, recall@4/@25, and per-probe-type slices (with standard errors
+and bootstrap intervals) must hold their floors on the deterministic lane
+first. Gate on the slice a change's mechanism can move — global means hide
+per-intent regressions.
+
 ## Modes
 
 | Mode | Use |

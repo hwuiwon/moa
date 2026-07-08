@@ -1,6 +1,6 @@
 //! Retrieval metric aggregation for memory-evaluation reports.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::{Deref, DerefMut};
 
 use moa_brain::retrieval::{
@@ -20,6 +20,9 @@ use super::gold::{GoldResolutionReport, GoldResolutionStatus, ScopeMatchBreakdow
 
 const RECALL_AT_4: usize = 4;
 const RECALL_AT_25: usize = 25;
+const NDCG_AT_10: usize = 10;
+/// Highest supported golden relevance grade (0-3 graded scale).
+pub const MAX_RELEVANCE_GRADE: u8 = 3;
 
 /// Serializable retrieval-leg flags copied from `RetrievalHit.legs`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +94,14 @@ pub struct ProbeResult {
     /// Gold facts that should be retrieved for this probe.
     #[serde(default)]
     pub expected_fact_ids: Vec<String>,
+    /// Graded 0-3 relevance per expected fact for graded ranking metrics.
+    ///
+    /// Facts listed in `expected_fact_ids` but absent here default to the
+    /// maximum grade, so binary-labeled golden sets keep their semantics while
+    /// graded sets can distinguish partially relevant memories (a binary label
+    /// hides ranking regressions a reranker or router introduces).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub expected_fact_grades: BTreeMap<String, u8>,
     /// Facts that must not be returned for this probe.
     #[serde(default)]
     pub blocked_fact_ids: Vec<String>,
@@ -276,6 +287,66 @@ impl ProbeResult {
         }
     }
 
+    /// Computes graded-relevance nDCG@k for this probe.
+    ///
+    /// Gains use the standard `2^grade - 1` form over the probe's 0-3 grades;
+    /// expected facts without an explicit grade count as grade 3, so binary
+    /// golden sets score identically to [`Self::ndcg_at`]. The ideal ordering
+    /// sorts grades descending, so misranking a grade-3 memory below a grade-1
+    /// memory is penalized even when both are retrieved.
+    #[must_use]
+    pub fn graded_ndcg_at(&self, k: usize) -> Option<f64> {
+        let expected = self.expected_fact_set();
+        if expected.is_empty() {
+            return None;
+        }
+
+        let grade_of = |fact_id: &str| -> u8 {
+            self.expected_fact_grades
+                .get(fact_id)
+                .copied()
+                .unwrap_or(MAX_RELEVANCE_GRADE)
+                .min(MAX_RELEVANCE_GRADE)
+        };
+        let gain_of = |grade: u8| -> f64 { (1_u64 << grade) as f64 - 1.0 };
+
+        let mut seen = BTreeSet::new();
+        let mut dcg = 0.0;
+        for candidate in self
+            .final_candidates()
+            .iter()
+            .filter(|candidate| candidate.rank > 0 && candidate.rank <= k)
+        {
+            // A candidate scores its best unseen expected fact, mirroring the
+            // binary metric's dedup across consolidation-equivalent facts.
+            let best = candidate
+                .matching_expected_fact_ids(&expected)
+                .filter(|fact_id| !seen.contains(*fact_id))
+                .max_by_key(|fact_id| grade_of(fact_id));
+            if let Some(fact_id) = best {
+                seen.insert(fact_id.to_string());
+                dcg += gain_of(grade_of(fact_id)) * discount(candidate.rank);
+            }
+        }
+
+        let mut ideal_grades = expected
+            .iter()
+            .map(|fact_id| grade_of(fact_id))
+            .collect::<Vec<_>>();
+        ideal_grades.sort_unstable_by(|a, b| b.cmp(a));
+        let ideal_dcg = ideal_grades
+            .iter()
+            .take(k)
+            .enumerate()
+            .map(|(index, grade)| gain_of(*grade) * discount(index + 1))
+            .sum::<f64>();
+        if ideal_dcg == 0.0 {
+            Some(0.0)
+        } else {
+            Some(dcg / ideal_dcg)
+        }
+    }
+
     /// Returns whether this probe has no expected recall within the top-25 candidates.
     #[must_use]
     pub fn zero_recall(&self) -> Option<bool> {
@@ -374,6 +445,76 @@ pub struct RetrievalMetrics {
     pub temporal_parse_mismatch_count: usize,
     /// Fraction of preference probes whose expected preference appears in digest or top-4 context.
     pub preference_context_rate: MetricSummary,
+    /// Mean graded-relevance nDCG@10 over probes with expected facts.
+    #[serde(default)]
+    pub graded_ndcg_at_10: MetricSummary,
+    /// Core ranking metrics sliced by probe type.
+    ///
+    /// Routing, rewrite, and graph-policy changes help some intents and hurt
+    /// others by construction; a global mean hides that (Simpson's paradox), so
+    /// budget gates should read the slice a change's mechanism can move.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub per_probe_type: BTreeMap<String, ProbeTypeSlice>,
+}
+
+/// Mean, dispersion, and support for one sliced metric.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct SliceStat {
+    /// Mean metric value over probes contributing to the slice.
+    pub mean: f64,
+    /// Standard error of the mean; `0.0` for slices with fewer than two probes.
+    pub std_error: f64,
+    /// Number of probes contributing to the slice.
+    pub count: usize,
+}
+
+impl SliceStat {
+    /// Summarizes one slice's per-probe metric values.
+    #[must_use]
+    pub fn from_values(values: &[f64]) -> Option<Self> {
+        if values.is_empty() {
+            return None;
+        }
+        let count = values.len();
+        let mean = values.iter().sum::<f64>() / count as f64;
+        let std_error = if count < 2 {
+            0.0
+        } else {
+            let variance = values
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>()
+                / (count - 1) as f64;
+            (variance / count as f64).sqrt()
+        };
+        Some(Self {
+            mean,
+            std_error,
+            count,
+        })
+    }
+}
+
+/// Per-probe-type ranking metrics for slice-gated budget checks.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProbeTypeSlice {
+    /// Probes of this type in the run.
+    pub probes: usize,
+    /// Graded nDCG@10 over this slice's probes with expected facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graded_ndcg_at_10: Option<SliceStat>,
+    /// Final-window recall@4 over this slice's probes with expected facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_at_4: Option<SliceStat>,
+    /// Pre-rerank recall@25 over this slice's probes with expected facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_at_25: Option<SliceStat>,
+    /// Reciprocal rank over this slice's probes with expected facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mrr: Option<SliceStat>,
+    /// Zero-recall rate over this slice's probes with expected facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zero_recall_rate: Option<SliceStat>,
 }
 
 /// Counts used to compute stored-Fact extraction precision.
@@ -637,7 +778,45 @@ fn aggregate_metrics(
         temporal_parse_rate: temporal_parse_rate(probe_results),
         temporal_parse_mismatch_count: temporal_parse_mismatch_count(probe_results),
         preference_context_rate: preference_context_rate(probe_results),
+        graded_ndcg_at_10: summarize_probe_values(probe_results, |probe| {
+            probe.graded_ndcg_at(NDCG_AT_10)
+        }),
+        per_probe_type: per_probe_type_slices(probe_results),
     }
+}
+
+/// Aggregates core ranking metrics per probe type.
+fn per_probe_type_slices(probe_results: &[ProbeResult]) -> BTreeMap<String, ProbeTypeSlice> {
+    let mut slices = BTreeMap::<String, ProbeTypeSlice>::new();
+    for probe in probe_results {
+        slices
+            .entry(probe.probe_type.as_str().to_string())
+            .or_default()
+            .probes += 1;
+    }
+    for (key, slice) in &mut slices {
+        let probes = probe_results
+            .iter()
+            .filter(|probe| probe.probe_type.as_str() == key)
+            .collect::<Vec<_>>();
+        slice.graded_ndcg_at_10 = slice_stat(&probes, |probe| probe.graded_ndcg_at(NDCG_AT_10));
+        slice.recall_at_4 = slice_stat(&probes, |probe| probe.post_rerank_recall_at(RECALL_AT_4));
+        slice.recall_at_25 = slice_stat(&probes, |probe| probe.pre_rerank_recall_at(RECALL_AT_25));
+        slice.mrr = slice_stat(&probes, ProbeResult::reciprocal_rank);
+        slice.zero_recall_rate = slice_stat(&probes, |probe| probe.zero_recall().map(bool_value));
+    }
+    slices
+}
+
+fn slice_stat(
+    probes: &[&ProbeResult],
+    value: impl Fn(&ProbeResult) -> Option<f64>,
+) -> Option<SliceStat> {
+    let values = probes
+        .iter()
+        .filter_map(|probe| value(probe))
+        .collect::<Vec<_>>();
+    SliceStat::from_values(&values)
 }
 
 fn retrieved_expected_fact_ids(
@@ -932,6 +1111,7 @@ mod tests {
             user_id: "user-a".to_string(),
             probe_type: ProbeType::PointRecall,
             expected_fact_ids: vec!["fact-merged".to_string()],
+            expected_fact_grades: BTreeMap::new(),
             blocked_fact_ids: Vec::new(),
             candidates: vec![RetrievedCandidate {
                 uid: Uuid::from_u128(1),
@@ -965,6 +1145,7 @@ mod tests {
             user_id: "user-a".to_string(),
             probe_type: ProbeType::PreferenceApplication,
             expected_fact_ids: vec!["fact-a".to_string()],
+            expected_fact_grades: BTreeMap::new(),
             blocked_fact_ids: Vec::new(),
             candidates: vec![RetrievedCandidate {
                 uid: Uuid::from_u128(1),

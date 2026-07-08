@@ -9,10 +9,10 @@ use moa_core::{
     ContactId, MemoryDigestConfig, StoragePartitionId, TenantId, traits::EmbeddingProvider,
 };
 use moa_memory_graph::{
-    ExistingSupersessionIntent, GraphError, NodeEmbeddingIntent, NodeLabel,
+    ExistingSupersessionIntent, GraphError, NodeEmbeddingIntent, NodeIndexRow, NodeLabel,
     NodePropertyUpdateIntent, PiiClass, PostgresGraphStore,
 };
-use moa_memory_ingest::normalize_entity_name;
+use moa_memory_ingest::{EntityMergeVerifier, IngestError, normalize_entity_name};
 use moa_memory_vector::VectorStoreFactory;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,6 +41,9 @@ pub enum Error {
     /// Embedding provider call failed.
     #[error("embedding: {0}")]
     Embedding(#[from] moa_core::MoaError),
+    /// The entity merge verifier failed to adjudicate a candidate pair.
+    #[error("entity merge verifier: {0}")]
+    Verifier(#[from] IngestError),
     /// Stored graph row was malformed.
     #[error("invalid graph row: {0}")]
     InvalidRow(String),
@@ -142,6 +145,38 @@ pub struct BackfillStats {
     pub entity_embeddings_backfilled: u64,
     /// Alias mentions promoted onto entity node properties.
     pub aliases_promoted: u64,
+}
+
+/// Tuning for embedding-blocked entity resolution.
+///
+/// Blocking proposes near-duplicate candidate pairs by pgvector cosine distance;
+/// the structural gate and the [`EntityMergeVerifier`] then decide which pairs
+/// actually merge. Defaults follow the retrieval plan: a 0.15 cosine-distance
+/// ceiling and at most five nearest neighbours probed per entity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntityResolutionOptions {
+    /// Maximum cosine distance (`1 - cosine similarity`) for a proposed pair.
+    pub cosine_distance_threshold: f64,
+    /// Nearest neighbours probed per entity before the structural gate.
+    pub candidates_per_entity: i64,
+}
+
+impl Default for EntityResolutionOptions {
+    fn default() -> Self {
+        Self {
+            cosine_distance_threshold: 0.15,
+            candidates_per_entity: 5,
+        }
+    }
+}
+
+/// Outcome for the embedding-blocked entity-resolution pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntityResolutionStats {
+    /// Structurally-gated candidate pairs that reached the merge verifier.
+    pub pairs_adjudicated: u64,
+    /// Newer entities superseded into an older canonical entity.
+    pub entities_merged: u64,
 }
 
 /// Runs all v1 consolidation operations for one tenant.
@@ -462,6 +497,271 @@ pub async fn backfill_entities(
         entity_embeddings_backfilled: embeddings,
         aliases_promoted: aliases,
     })
+}
+
+/// Resolves near-duplicate entities by embedding blocking, a structural gate,
+/// and a merge verifier, superseding accepted duplicates into a canonical node.
+///
+/// This is the incremental, off-hot-path entity-resolution pass. It runs in
+/// three stages so paraphrase-level duplicates that name normalization misses
+/// still merge, without the over-merging that a pure embedding threshold causes:
+///
+/// 1. **Blocking.** A pgvector self-similarity join over active `Entity`
+///    embeddings proposes the nearest [`EntityResolutionOptions::candidates_per_entity`]
+///    neighbours (cosine distance below
+///    [`EntityResolutionOptions::cosine_distance_threshold`]) for every entity
+///    created at or after `since`. Only entities in the *same*
+///    `(storage_partition_id, contact_id)` scope are ever paired, so blocking
+///    never crosses tenant or contact ownership.
+/// 2. **Structural gate.** A proposed pair only survives when its endpoints
+///    share at least one active graph neighbour (`moa.edge_index`, `valid_to IS
+///    NULL`). Pairs that fail the gate never reach the verifier — embedding
+///    similarity alone is not allowed to trigger a merge.
+/// 3. **Adjudication and merge.** Surviving pairs go through `verifier`. On a
+///    yes, the newer entity is superseded into the older canonical one
+///    (canonical = earliest `valid_from`, uid tie-break, matching the
+///    exact-duplicate convention) through the node supersession write protocol,
+///    which closes the superseded node's incident edges in the same
+///    transaction. Entities are never deleted, so provenance is preserved.
+///
+/// `since` makes the pass incremental: only entities created at or after it are
+/// probed, but they are matched against the full active entity set. Transitive
+/// chains (`A`↔`B`↔`C`) collapse one hop per pass because a node already closed
+/// earlier in the same run is skipped; the remainder resolves on the next run.
+pub async fn resolve_entity_duplicates(
+    pool: &PgPool,
+    tenant_id: &TenantId,
+    verifier: &dyn EntityMergeVerifier,
+    since: DateTime<Utc>,
+    now: DateTime<Utc>,
+    opts: &EntityResolutionOptions,
+) -> Result<EntityResolutionStats> {
+    let pairs = block_entity_candidate_pairs(pool, tenant_id, since, opts).await?;
+    if pairs.is_empty() {
+        return Ok(EntityResolutionStats::default());
+    }
+
+    // Fetch the canonical (older) rows the verifier adjudicates against in one
+    // batch instead of one query per pair.
+    let canonical_uids = pairs
+        .iter()
+        .map(|pair| pair.canonical.uid)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let canonical_rows = active_entity_rows_by_uid(pool, &canonical_uids).await?;
+
+    let mut stores: BTreeMap<Option<Uuid>, PostgresGraphStore> = BTreeMap::new();
+    let mut closed = BTreeSet::new();
+    let mut stats = EntityResolutionStats::default();
+
+    for pair in pairs {
+        // A node already superseded earlier in this pass cannot be re-closed and
+        // must not become a canonical target; defer such transitive pairs.
+        if closed.contains(&pair.canonical.uid) || closed.contains(&pair.duplicate.uid) {
+            continue;
+        }
+        let Some(candidate_row) = canonical_rows.get(&pair.canonical.uid) else {
+            continue;
+        };
+        stats.pairs_adjudicated += 1;
+        if !verifier
+            .should_merge(&pair.duplicate.name, candidate_row)
+            .await?
+        {
+            continue;
+        }
+
+        let store = stores
+            .entry(pair.contact_id)
+            .or_insert_with(|| scoped_graph_for(pool, pair.scope_context(tenant_id)));
+        store
+            .close_existing_node_with_supersession(ExistingSupersessionIntent {
+                old_uid: pair.duplicate.uid,
+                replacement_uid: pair.canonical.uid,
+                valid_to: pair.duplicate.valid_from,
+                invalidated_at: now,
+                reason: "entity_resolution".to_string(),
+                actor_id: CONSOLIDATION_ACTOR.to_string(),
+                actor_kind: CONSOLIDATION_ACTOR_KIND.to_string(),
+            })
+            .await?;
+        closed.insert(pair.duplicate.uid);
+        stats.entities_merged += 1;
+    }
+
+    Ok(stats)
+}
+
+/// One structurally-gated near-duplicate entity pair, canonical endpoint first.
+#[derive(Debug, Clone)]
+struct EntityCandidatePair {
+    canonical: EntityCandidateEndpoint,
+    duplicate: EntityCandidateEndpoint,
+    contact_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone)]
+struct EntityCandidateEndpoint {
+    uid: Uuid,
+    name: String,
+    valid_from: DateTime<Utc>,
+}
+
+impl EntityCandidatePair {
+    fn scope_context(&self, tenant_id: &TenantId) -> RlsContext {
+        match self.contact_id {
+            Some(contact_id) => RlsContext::contact(*tenant_id, ContactId(contact_id)),
+            None => RlsContext::tenant(*tenant_id),
+        }
+    }
+}
+
+/// Proposes near-duplicate entity pairs by embedding blocking and the
+/// shared-active-neighbour structural gate.
+///
+/// The lateral self-join probes only entities created at or after `since`
+/// against every active same-scope entity, keeping the nearest neighbours under
+/// the cosine-distance ceiling. The `EXISTS` clause enforces the structural gate
+/// in SQL so pairs without a shared active neighbour never leave Postgres.
+/// Endpoints are ordered so the canonical entity (earliest `valid_from`, uid
+/// tie-break) is first, and each unordered pair is emitted once.
+async fn block_entity_candidate_pairs(
+    pool: &PgPool,
+    tenant_id: &TenantId,
+    since: DateTime<Utc>,
+    opts: &EntityResolutionOptions,
+) -> Result<Vec<EntityCandidatePair>> {
+    let rows = sqlx::query(
+        r#"
+        WITH probe AS (
+            SELECT node.uid,
+                   node.name,
+                   node.valid_from,
+                   node.storage_partition_id,
+                   node.contact_id,
+                   embedding.embedding
+            FROM moa.node_index AS node
+            JOIN moa.embeddings AS embedding
+              ON embedding.uid = node.uid
+             AND embedding.valid_to IS NULL
+            WHERE node.tenant_id = $1
+              AND node.label = 'Entity'
+              AND node.valid_to IS NULL
+              AND node.valid_from >= $2
+        )
+        SELECT probe.uid            AS probe_uid,
+               probe.name           AS probe_name,
+               probe.valid_from     AS probe_valid_from,
+               probe.contact_id     AS contact_id,
+               cand.uid             AS cand_uid,
+               cand.name            AS cand_name,
+               cand.valid_from      AS cand_valid_from
+        FROM probe
+        JOIN LATERAL (
+            SELECT other.uid,
+                   other.name,
+                   other.valid_from,
+                   probe.embedding <=> other_embedding.embedding AS distance
+            FROM moa.node_index AS other
+            JOIN moa.embeddings AS other_embedding
+              ON other_embedding.uid = other.uid
+             AND other_embedding.valid_to IS NULL
+            WHERE other.tenant_id = $1
+              AND other.label = 'Entity'
+              AND other.valid_to IS NULL
+              AND other.uid <> probe.uid
+              AND other.storage_partition_id IS NOT DISTINCT FROM probe.storage_partition_id
+              AND other.contact_id IS NOT DISTINCT FROM probe.contact_id
+              AND (probe.embedding <=> other_embedding.embedding) < $3
+            ORDER BY probe.embedding <=> other_embedding.embedding, other.uid
+            LIMIT $4
+        ) AS cand ON TRUE
+        WHERE EXISTS (
+            SELECT 1
+            FROM (
+                SELECT end_uid AS nbr FROM moa.edge_index
+                 WHERE start_uid = probe.uid AND valid_to IS NULL
+                UNION
+                SELECT start_uid AS nbr FROM moa.edge_index
+                 WHERE end_uid = probe.uid AND valid_to IS NULL
+            ) AS probe_nbr
+            JOIN (
+                SELECT end_uid AS nbr FROM moa.edge_index
+                 WHERE start_uid = cand.uid AND valid_to IS NULL
+                UNION
+                SELECT start_uid AS nbr FROM moa.edge_index
+                 WHERE end_uid = cand.uid AND valid_to IS NULL
+            ) AS cand_nbr ON probe_nbr.nbr = cand_nbr.nbr
+            WHERE probe_nbr.nbr <> probe.uid
+              AND probe_nbr.nbr <> cand.uid
+        )
+        "#,
+    )
+    .bind(tenant_id.0)
+    .bind(since)
+    .bind(opts.cosine_distance_threshold)
+    .bind(opts.candidates_per_entity)
+    .fetch_all(pool)
+    .await?;
+
+    // The lateral join can surface a pair from both directions (each endpoint
+    // probing the other); collapse to one canonical-first pair per uid set.
+    let mut pairs: BTreeMap<(Uuid, Uuid), EntityCandidatePair> = BTreeMap::new();
+    for row in rows {
+        let probe = EntityCandidateEndpoint {
+            uid: row.try_get("probe_uid")?,
+            name: row.try_get("probe_name")?,
+            valid_from: row.try_get("probe_valid_from")?,
+        };
+        let cand = EntityCandidateEndpoint {
+            uid: row.try_get("cand_uid")?,
+            name: row.try_get("cand_name")?,
+            valid_from: row.try_get("cand_valid_from")?,
+        };
+        let contact_id: Option<Uuid> = row.try_get("contact_id")?;
+        let (canonical, duplicate) = if (probe.valid_from, probe.uid) <= (cand.valid_from, cand.uid)
+        {
+            (probe, cand)
+        } else {
+            (cand, probe)
+        };
+        pairs.insert(
+            (canonical.uid, duplicate.uid),
+            EntityCandidatePair {
+                canonical,
+                duplicate,
+                contact_id,
+            },
+        );
+    }
+
+    Ok(pairs.into_values().collect())
+}
+
+/// Loads active `Entity` index rows for the merge verifier keyed by uid.
+async fn active_entity_rows_by_uid(
+    pool: &PgPool,
+    uids: &[Uuid],
+) -> Result<BTreeMap<Uuid, NodeIndexRow>> {
+    if uids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let rows = sqlx::query_as::<_, NodeIndexRow>(
+        r#"
+        SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
+               valid_to, valid_from, properties_summary, last_accessed_at,
+               COALESCE(quality_score, 0.5) AS quality_score
+        FROM moa.node_index
+        WHERE uid = ANY($1)
+          AND label = 'Entity'
+          AND valid_to IS NULL
+        "#,
+    )
+    .bind(uids)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|row| (row.uid, row)).collect())
 }
 
 /// Rebuilds deterministic standing digest rows for one tenant.
@@ -792,6 +1092,7 @@ async fn edge_aliases_for_entities(
         FROM moa.edge_index AS edge
         WHERE edge.storage_partition_id = $1
           AND edge.start_uid = ANY($2)
+          AND edge.valid_to IS NULL
           AND edge.properties ? 'alias_mention'
         UNION
         SELECT edge.end_uid AS entity_uid,
@@ -799,6 +1100,7 @@ async fn edge_aliases_for_entities(
         FROM moa.edge_index AS edge
         WHERE edge.storage_partition_id = $1
           AND edge.end_uid = ANY($2)
+          AND edge.valid_to IS NULL
           AND edge.properties ? 'alias_mention'
         "#,
     )

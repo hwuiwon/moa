@@ -5,7 +5,7 @@ use moa_core::RlsContext;
 use moa_core::TenantId;
 use moa_db::ScopedConn;
 use moa_memory_graph::{
-    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
+    EdgeLabel, EdgeWriteIntent, GraphStore, GraphWalkScoring, NodeLabel, NodeWriteIntent, PiiClass,
     PostgresGraphStore,
 };
 use moa_session::testing;
@@ -182,6 +182,7 @@ async fn create_superseded_neighbor_case(
             label: EdgeLabel::RelatesTo,
             start_uid: old_uid,
             end_uid: target_uid,
+            valid_from: old_valid_from,
             properties: json!({ "kind": "historical read_smoke" }),
             storage_partition_id: Some(storage_partition_id.to_string()),
             contact_id: None,
@@ -211,6 +212,7 @@ async fn create_superseded_neighbor_case(
             label: EdgeLabel::RelatesTo,
             start_uid: new_uid,
             end_uid: target_uid,
+            valid_from: new_valid_from,
             properties: json!({ "kind": "read_smoke" }),
             storage_partition_id: Some(storage_partition_id.to_string()),
             contact_id: None,
@@ -469,6 +471,7 @@ async fn expand_seeds_returns_two_hop_fact_via_shared_entity() {
         source_uid,
         entity_uid,
         "object",
+        valid_from,
     )
     .await;
     create_edge(
@@ -477,11 +480,12 @@ async fn expand_seeds_returns_two_hop_fact_via_shared_entity() {
         entity_uid,
         related_uid,
         "subject",
+        valid_from,
     )
     .await;
 
     let hits = graph
-        .expand_seeds(&[source_uid], 3, None)
+        .expand_seeds(&[source_uid], 3, None, &GraphWalkScoring::default())
         .await
         .expect("expand source fact");
     let related = hits
@@ -562,6 +566,7 @@ async fn expand_seeds_reaches_both_edge_directions_from_one_seed() {
         seed_uid,
         outgoing_uid,
         "object",
+        valid_from,
     )
     .await;
     create_edge(
@@ -570,11 +575,12 @@ async fn expand_seeds_reaches_both_edge_directions_from_one_seed() {
         incoming_uid,
         seed_uid,
         "subject",
+        valid_from,
     )
     .await;
 
     let hits = graph
-        .expand_seeds(&[seed_uid], 1, None)
+        .expand_seeds(&[seed_uid], 1, None, &GraphWalkScoring::default())
         .await
         .expect("expand seed in both edge directions");
     let hop_one = hits
@@ -658,6 +664,7 @@ async fn expand_seeds_traverses_incoming_subject_edge_from_fact_seed() {
         entity_uid,
         seed_uid,
         "subject",
+        valid_from,
     )
     .await;
     create_edge(
@@ -666,11 +673,12 @@ async fn expand_seeds_traverses_incoming_subject_edge_from_fact_seed() {
         entity_uid,
         related_uid,
         "subject",
+        valid_from,
     )
     .await;
 
     let hits = graph
-        .expand_seeds(&[seed_uid], 2, None)
+        .expand_seeds(&[seed_uid], 2, None, &GraphWalkScoring::default())
         .await
         .expect("expand fact seed through incoming subject edge");
     let entity = hits
@@ -767,6 +775,7 @@ async fn expand_seeds_respects_as_of_validity_at_every_hop() {
         seed_uid,
         old_entity_uid,
         "object",
+        old_valid_from,
     )
     .await;
     create_edge(
@@ -775,6 +784,7 @@ async fn expand_seeds_respects_as_of_validity_at_every_hop() {
         old_entity_uid,
         target_uid,
         "subject",
+        old_valid_from,
     )
     .await;
     let mut replacement = node_intent(
@@ -791,11 +801,16 @@ async fn expand_seeds_respects_as_of_validity_at_every_hop() {
         .expect("supersede intermediate entity");
 
     let current_hits = graph
-        .expand_seeds(&[seed_uid], 3, None)
+        .expand_seeds(&[seed_uid], 3, None, &GraphWalkScoring::default())
         .await
         .expect("expand present-time paths");
     let historical_hits = graph
-        .expand_seeds(&[seed_uid], 3, Some(old_valid_from + Duration::minutes(5)))
+        .expand_seeds(
+            &[seed_uid],
+            3,
+            Some(old_valid_from + Duration::minutes(5)),
+            &GraphWalkScoring::default(),
+        )
         .await
         .expect("expand historical paths");
 
@@ -843,6 +858,7 @@ async fn create_edge(
     start_uid: Uuid,
     end_uid: Uuid,
     role: &str,
+    valid_from: DateTime<Utc>,
 ) {
     graph
         .create_edge(EdgeWriteIntent {
@@ -850,6 +866,7 @@ async fn create_edge(
             label: EdgeLabel::RelatesTo,
             start_uid,
             end_uid,
+            valid_from,
             properties: json!({ "role": role, "source": "read_smoke_expand" }),
             storage_partition_id: Some(storage_partition_id.to_string()),
             contact_id: None,

@@ -20,6 +20,7 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
+async-trait.workspace = true
 moa-brain = { workspace = true }
 moa-test-support = { workspace = true }
 tokio.workspace = true

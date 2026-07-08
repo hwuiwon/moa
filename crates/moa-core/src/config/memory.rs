@@ -99,18 +99,37 @@ impl Default for MemoryRetrievalConfig {
         Self {
             reranker_model: "noop".to_string(),
             reranker_latency: None,
-            lineage_enabled: false,
+            // Lineage rows are the dashboard's provenance source of truth, so
+            // retrieval records them unless a deployment opts out.
+            lineage_enabled: true,
             ranking: MemoryRankingConfig::default(),
         }
     }
 }
 
 /// Deterministic ranking configuration for graph-memory retrieval.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryRankingConfig {
     /// Feature weights used by deterministic post-hydration ranking.
     pub weights: MemoryRankingWeights,
+    /// Per-hop decay applied inside the scored graph walk.
+    pub graph_walk_decay: f64,
+    /// In-walk prune threshold: branches scoring below this stop expanding.
+    pub graph_walk_prune_below: f64,
+    /// Minimum summed activation an anchored-rescue graph candidate needs.
+    pub graph_rescue_evidence_floor: f64,
+}
+
+impl Default for MemoryRankingConfig {
+    fn default() -> Self {
+        Self {
+            weights: MemoryRankingWeights::default(),
+            graph_walk_decay: 0.5,
+            graph_walk_prune_below: 0.05,
+            graph_rescue_evidence_floor: 0.10,
+        }
+    }
 }
 
 /// Weights used by deterministic graph-memory ranking.
@@ -167,6 +186,21 @@ pub struct MemoryVectorConfig {
     pub embedder: VectorEmbedderConfig,
     /// Optional Turbopuffer backend configuration.
     pub turbopuffer: TurbopufferVectorConfig,
+    /// Matryoshka (MRL) truncated-dim shortlist width for the pgvector KNN cascade.
+    ///
+    /// `None` (the default) keeps the single-stage full-dim search. `Some(d)`
+    /// enables a two-stage cascade: a cheap shortlist ordered by the truncated
+    /// `d`-dim prefix, then an exact full-dim rescore. `d` must be less than
+    /// [`crate`]'s 1024-dim embedding width.
+    ///
+    /// Only enable this when the tenant's embedder is MRL-trained (e.g.
+    /// `gemini:gemini-embedding-2`) so that a truncated prefix preserves
+    /// semantic ordering -- that is the operator's responsibility; MOA does not
+    /// verify it. The functional shortlist index in the base migration is built
+    /// on a 512-dim prefix, so the shortlist stage is index-accelerated only when
+    /// this is set to `512`; any other value forces a sequential shortlist scan
+    /// unless the migration's index expression is updated to match.
+    pub mrl_shortlist_dims: Option<usize>,
 }
 
 /// Turbopuffer graph-memory vector backend configuration.
@@ -229,5 +263,17 @@ impl Default for VectorEmbedderConfig {
             name: "gemini:gemini-embedding-2".to_string(),
             output_dim: 1024,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MemoryVectorConfig;
+
+    #[test]
+    fn memory_vector_config_defaults_disable_mrl_shortlist() {
+        // Pins: the Matryoshka cascade is opt-in. Default config keeps the
+        // single-stage full-dim pgvector path with no truncated-prefix shortlist.
+        assert_eq!(MemoryVectorConfig::default().mrl_shortlist_dims, None);
     }
 }

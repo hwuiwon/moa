@@ -967,6 +967,10 @@ CREATE TABLE IF NOT EXISTS moa.edge_index (
     scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     properties JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Bitemporal edge validity: relationships are closed, never deleted, so
+    -- as-of walks replay history and stale edges stop feeding live retrieval.
+    valid_from TIMESTAMPTZ NOT NULL DEFAULT now(),
+    valid_to TIMESTAMPTZ,
     CHECK (scope IS NOT NULL)
 );
 
@@ -982,6 +986,13 @@ CREATE INDEX IF NOT EXISTS edge_index_ws_start
     ON moa.edge_index (storage_partition_id, start_uid);
 CREATE INDEX IF NOT EXISTS edge_index_ws_end
     ON moa.edge_index (storage_partition_id, end_uid);
+-- Partial indexes keep the hot current-knowledge walk on live edges only.
+CREATE INDEX IF NOT EXISTS edge_index_active_start
+    ON moa.edge_index (start_uid, label)
+    WHERE valid_to IS NULL;
+CREATE INDEX IF NOT EXISTS edge_index_active_end
+    ON moa.edge_index (end_uid, label)
+    WHERE valid_to IS NULL;
 
 GRANT USAGE ON SCHEMA moa TO moa_app, moa_promoter;
 SELECT moa.apply_three_tier_rls('moa.edge_index'::REGCLASS);
@@ -1027,6 +1038,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS embeddings_storage_partition_uid_unique
     ON moa.embeddings (storage_partition_id, uid) NULLS NOT DISTINCT;
 CREATE INDEX IF NOT EXISTS embeddings_embedding_hnsw_idx
     ON moa.embeddings USING hnsw (embedding public.halfvec_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+-- Matryoshka (MRL) shortlist index: HNSW over the truncated 512-dim prefix of
+-- each embedding. When `memory.vector.mrl_shortlist_dims` is set (only valid for
+-- MRL-trained embedders), KNN runs a two-stage cascade -- a cheap truncated-prefix
+-- shortlist ordered by this index, then an exact full-dim rescore. The prefix
+-- length is hardcoded to 512 here; setting `mrl_shortlist_dims` to any other value
+-- requires editing this expression to match, otherwise the shortlist stage falls
+-- back to a sequential scan.
+CREATE INDEX IF NOT EXISTS embeddings_embedding_mrl512_hnsw_idx
+    ON moa.embeddings USING hnsw ((public.subvector(embedding, 1, 512)::public.halfvec(512)) public.halfvec_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 CREATE INDEX IF NOT EXISTS embeddings_ws_scope_label_idx
     ON moa.embeddings (storage_partition_id, scope, label)
@@ -1889,11 +1910,21 @@ CREATE TABLE IF NOT EXISTS moa.retrieval_lineage (
     scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     session_id UUID NOT NULL,
     turn_seq BIGINT NOT NULL,
+    -- Turn-scoped lineage linkage for `moa explain`-style turn trees.
+    turn_id UUID,
     uid UUID NOT NULL,
+    -- Denormalized chunk provenance so dashboards resolve a retrieval row to
+    -- its source document without joining moa.knowledge_chunks.
+    chunk_uid UUID,
+    document_version_uid UUID,
     rank INTEGER NOT NULL CHECK (rank > 0),
     retrieved_at TIMESTAMPTZ NOT NULL,
     CHECK (scope = 'contact')
 );
+
+CREATE INDEX IF NOT EXISTS retrieval_lineage_turn_id
+    ON moa.retrieval_lineage (turn_id)
+    WHERE turn_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS retrieval_lineage_ws_time
     ON moa.retrieval_lineage (storage_partition_id, retrieved_at);

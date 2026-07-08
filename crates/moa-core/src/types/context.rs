@@ -65,6 +65,22 @@ pub struct ContextSourceRef {
     /// Human-readable source label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Exact excerpt projected into the prompt when this ref is retrieval evidence.
+    ///
+    /// Citation verification treats each excerpt-bearing ref as one citable
+    /// source, so answer sentences resolve to individual retrieval hits instead
+    /// of the whole compiled message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<String>,
+    /// Tenant knowledge chunk identifier when the source is a knowledge chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_uid: Option<Uuid>,
+    /// Knowledge document version containing the cited chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_version_uid: Option<Uuid>,
+    /// Source URI for user-facing citations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_uri: Option<String>,
 }
 
 impl ContextSourceRef {
@@ -78,6 +94,10 @@ impl ContextSourceRef {
             event_sequence_num: Some(record.sequence_num),
             tool_id: None,
             label: Some(format!("{:?}", record.event_type).to_ascii_lowercase()),
+            excerpt: None,
+            chunk_uid: None,
+            document_version_uid: None,
+            source_uri: None,
         }
     }
 
@@ -121,7 +141,27 @@ impl ContextSourceRef {
             event_sequence_num: None,
             tool_id: None,
             label: Some(label.into()),
+            excerpt: None,
+            chunk_uid: None,
+            document_version_uid: None,
+            source_uri: None,
         }
+    }
+
+    /// Attaches the prompt excerpt and chunk provenance that make this ref a citable evidence block.
+    #[must_use]
+    pub fn with_evidence(
+        mut self,
+        excerpt: impl Into<String>,
+        chunk_uid: Option<Uuid>,
+        document_version_uid: Option<Uuid>,
+        source_uri: Option<String>,
+    ) -> Self {
+        self.excerpt = Some(excerpt.into());
+        self.chunk_uid = chunk_uid;
+        self.document_version_uid = document_version_uid;
+        self.source_uri = source_uri;
+        self
     }
 
     /// Creates a source ref for a synthesized context section.
@@ -134,6 +174,10 @@ impl ContextSourceRef {
             event_sequence_num: None,
             tool_id: None,
             label: Some(label.into()),
+            excerpt: None,
+            chunk_uid: None,
+            document_version_uid: None,
+            source_uri: None,
         }
     }
 }

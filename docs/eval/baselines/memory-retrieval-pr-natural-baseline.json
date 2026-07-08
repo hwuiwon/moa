@@ -154,6 +154,11 @@
       "numerator": 12.0,
       "denominator": 15,
       "value": 0.8
+    },
+    "graded_ndcg_at_10": {
+      "numerator": 0.0,
+      "denominator": 0,
+      "value": 0.0
     }
   },
   "probe_results": [

@@ -651,6 +651,7 @@ mod tests {
             session_store: Some(&store),
             cancel_token: None,
             memory_tool_executor: None,
+            memory_retrieval_executor: None,
         };
 
         let output = ToolResultReadTool
@@ -696,6 +697,7 @@ mod tests {
             session_store: Some(&store),
             cancel_token: None,
             memory_tool_executor: None,
+            memory_retrieval_executor: None,
         };
 
         let output = ToolResultSearchTool

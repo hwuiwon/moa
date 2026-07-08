@@ -8,7 +8,9 @@ use uuid::Uuid;
 use crate::{GraphError, Result};
 
 /// Supported edge labels for graph memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, sqlx::Type,
+)]
 #[sqlx(type_name = "text", rename_all = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum EdgeLabel {
@@ -107,6 +109,8 @@ pub struct EdgeWriteIntent {
     pub start_uid: Uuid,
     /// End node uid.
     pub end_uid: Uuid,
+    /// Application-time validity start for the relationship.
+    pub valid_from: chrono::DateTime<chrono::Utc>,
     /// Relationship properties stored in the relational edge row.
     pub properties: serde_json::Value,
     /// Storage partition scope for tenant and contact rows.

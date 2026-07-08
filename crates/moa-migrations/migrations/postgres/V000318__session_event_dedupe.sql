@@ -24,7 +24,7 @@
 -- already-RLS-scoped `sessions` row lock, and every row is reachable only through
 -- its owning `session_id` (itself tenant-scoped via `sessions`). It therefore
 -- carries no independent tenant columns. If stricter per-tenant isolation is later
--- required, mirror `V000315__session_blobs.sql`: add a `tenant_id` column, a
+-- required, mirror `V000314__session_blobs.sql`: add a `tenant_id` column, a
 -- BEFORE INSERT trigger that derives it from the session, and
 -- `moa.apply_tenant_rls(...)`.
 

@@ -3883,6 +3883,7 @@ dependencies = [
 name = "moa-memory-lifecycle"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "moa-brain",
  "moa-core",

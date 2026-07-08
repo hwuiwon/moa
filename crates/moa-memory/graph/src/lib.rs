@@ -28,7 +28,8 @@ pub use node::{
 pub use store::PostgresGraphStore;
 pub use validity::push_validity_filter;
 pub use write::{
-    close_existing_node_with_supersession, update_node_properties, upsert_node_embedding,
+    close_existing_node_with_supersession, invalidate_edge, update_node_properties,
+    upsert_node_embedding,
 };
 
 /// Result type returned by graph-memory helpers.
@@ -49,10 +50,50 @@ pub struct GraphExpansionHit {
     pub valid_from: DateTime<Utc>,
     /// One-based distance from the seed.
     pub hop: u8,
-    /// Edge labels along the shortest discovered path.
+    /// Decay- and edge-prior-weighted score of the best discovered path.
+    ///
+    /// Computed inside the walk as `decay^hop * product(edge priors)`, so
+    /// downstream ranking consumes graph proximity directly instead of
+    /// re-deriving it from `hop`.
+    pub path_score: f64,
+    /// Edge labels along the best discovered path.
     pub edges: Vec<EdgeLabel>,
     /// Traversal direction for each edge in `edges`.
     pub directions: Vec<GraphTraversalDirection>,
+}
+
+/// Scoring and pruning parameters for seed expansion walks.
+///
+/// The walk accumulates `decay^hop * product(edge priors)` per path and prunes
+/// branches whose score falls below `prune_below` inside the recursive CTE, so
+/// hub fan-out stops before it floods the candidate limit rather than being
+/// filtered afterwards.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphWalkScoring {
+    /// Per-hop decay factor in `(0, 1]`.
+    pub decay: f64,
+    /// Branches with a path score strictly below this threshold are pruned.
+    pub prune_below: f64,
+    /// Multiplicative prior per edge label; labels absent here default to 1.0.
+    pub edge_priors: std::collections::BTreeMap<EdgeLabel, f64>,
+}
+
+impl Default for GraphWalkScoring {
+    fn default() -> Self {
+        // Supersession and contradiction edges are provenance metadata, not
+        // evidence paths: at current time their prior is 0.0 so the walk prunes
+        // those branches at the first hop. As-of retrieval callers override the
+        // `SUPERSEDES` prior so historical expansion can cross from an active
+        // replacement seed to its superseded predecessor.
+        Self {
+            decay: 0.5,
+            prune_below: 0.05,
+            edge_priors: std::collections::BTreeMap::from([
+                (EdgeLabel::Supersedes, 0.0),
+                (EdgeLabel::Contradicts, 0.0),
+            ]),
+        }
+    }
 }
 
 /// Direction used to traverse one edge in an expansion path.
@@ -167,12 +208,16 @@ pub trait GraphStore: Send + Sync {
         as_of: Option<DateTime<Utc>>,
     ) -> Result<Vec<NodeIndexRow>>;
 
-    /// Expands a batch of seed nodes and returns bounded shortest labeled paths to visible nodes.
+    /// Expands a batch of seed nodes and returns every discovered scored
+    /// labeled path to visible nodes, pruning low-score branches inside the
+    /// walk. Multiple paths per (seed, candidate) may be returned so policy
+    /// layers can filter by path shape before deduplicating.
     async fn expand_seeds(
         &self,
         seeds: &[Uuid],
         max_hops: u8,
         as_of: Option<DateTime<Utc>>,
+        scoring: &GraphWalkScoring,
     ) -> Result<Vec<GraphExpansionHit>>;
 
     /// Looks up NER seed nodes by name through the sidecar full-text index.

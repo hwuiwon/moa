@@ -1782,6 +1782,7 @@ fn edge_intent(
         label: edge_label(&edge.relationship)?,
         start_uid,
         end_uid,
+        valid_from: chrono::Utc::now(),
         properties: compact_properties(edge.properties.clone()),
         storage_partition_id: Some(storage_partition_id),
         contact_id: None,

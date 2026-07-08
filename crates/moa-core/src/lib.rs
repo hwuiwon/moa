@@ -46,8 +46,9 @@ pub use session_replay::{
 pub use traits::{
     BlobStore, BranchManager, BuiltInTool, ContextProcessor, CredentialVault, EmbeddingProvider,
     ExperienceStore, HandProvider, LLMProvider, LearningCandidateStore, LineageHandle,
-    MemoryToolExecutor, NULL_LINEAGE_HANDLE, NullLineageHandle, SegmentStore,
-    SessionAttachmentStore, SessionStore, StageApply, StoredCredentialMetadata, ToolContext,
+    MemoryRetrievalExecutor, MemoryToolExecutor, NULL_LINEAGE_HANDLE, NullLineageHandle,
+    SegmentStore, SessionAttachmentStore, SessionStore, StageApply, StoredCredentialMetadata,
+    ToolContext,
 };
 pub use truncation::truncate_head_tail;
 pub use types::*;

@@ -9,7 +9,7 @@ use moa_memory_types::MemoryScope;
 use serde::{Deserialize, Serialize};
 
 /// Ranking pipeline version included in cache fingerprints.
-pub const RANKING_PIPELINE_VERSION: u32 = 8;
+pub const RANKING_PIPELINE_VERSION: u32 = 10;
 
 /// Weights used by the FeatureV1 deterministic scorer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,16 +58,37 @@ impl Default for RankingWeights {
 }
 
 /// Ranking configuration applied after candidate hydration.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RankingConfig {
     /// Feature weights used by deterministic post-hydration ranking.
     pub weights: RankingWeights,
+    /// Per-hop decay applied inside the scored graph walk.
+    pub graph_walk_decay: f64,
+    /// In-walk prune threshold: branches scoring below this stop expanding.
+    pub graph_walk_prune_below: f64,
+    /// Minimum summed activation an anchored-rescue graph candidate needs.
+    pub graph_rescue_evidence_floor: f64,
+}
+
+impl Default for RankingConfig {
+    fn default() -> Self {
+        Self {
+            weights: RankingWeights::default(),
+            graph_walk_decay: 0.5,
+            graph_walk_prune_below: 0.05,
+            graph_rescue_evidence_floor: 0.10,
+        }
+    }
 }
 
 impl From<&MemoryRankingConfig> for RankingConfig {
     fn from(value: &MemoryRankingConfig) -> Self {
         Self {
             weights: RankingWeights::from(&value.weights),
+            graph_walk_decay: value.graph_walk_decay,
+            graph_walk_prune_below: value.graph_walk_prune_below,
+            graph_rescue_evidence_floor: value.graph_rescue_evidence_floor,
         }
     }
 }

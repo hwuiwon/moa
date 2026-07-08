@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 use moa_core::RlsContext;
 use moa_db::ScopedConn;
 use moa_memory_graph::{
-    EdgeLabel, GraphExpansionHit, GraphStore, GraphTraversalDirection, NodeIndexRow, NodeLabel,
-    PiiClass, push_validity_filter,
+    EdgeLabel, GraphExpansionHit, GraphStore, GraphTraversalDirection, GraphWalkScoring,
+    NodeIndexRow, NodeLabel, PiiClass, push_validity_filter,
 };
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{TurbopufferStore, TurbopufferTextQuery, VectorQuery, VectorStore};
@@ -17,16 +17,21 @@ use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::retrieval::policy::GraphRetrievalPolicy;
-use crate::retrieval::ranking::normalize_tokens;
+use crate::retrieval::ranking::{RankingConfig, normalize_tokens};
 use crate::retrieval::types::{
     GraphPathTrace, GraphRetrievalDiagnostics, GraphSeedSource, LegSources, LineageContext, Result,
-    RetrievalRequest,
+    RetrievalLineageHit, RetrievalRequest,
 };
 
 /// Reciprocal-rank fusion denominator offset.
 pub const RRF_K: f64 = 60.0;
 /// Default graph-leg fusion weight.
-pub const GRAPH_WEIGHT: f64 = 0.4;
+///
+/// Calibrated 2026-07 on the PR golden corpus: with the anchored-rescue
+/// admission gates in place the graph leg is high-precision, and 0.6 beat the
+/// prior 0.4 on every headline metric (recall@4 0.929 -> 0.948, multi-hop
+/// slice 0.700 -> 0.783) with flat latency; 0.8 plateaued identically.
+pub const GRAPH_WEIGHT: f64 = 0.6;
 /// Default vector-leg fusion weight.
 pub const VECTOR_WEIGHT: f64 = 1.0;
 /// Default lexical-leg fusion weight.
@@ -39,8 +44,6 @@ pub const VECTOR_BUDGET: Duration = Duration::from_millis(250);
 pub const LEXICAL_BUDGET: Duration = Duration::from_secs(1);
 
 const GRAPH_HOPS: u8 = 3;
-const GRAPH_EXPANSION_DECAY: f64 = 0.5;
-const ANCHORED_RESCUE_MIN_GRAPH_EVIDENCE: f64 = 0.35;
 const GRAPH_TEMPORAL_HALF_LIFE_DAYS: f64 = 30.0;
 const MIN_LEG_CANDIDATE_LIMIT: usize = 20;
 const MAX_LEG_CANDIDATE_LIMIT: usize = 100;
@@ -64,27 +67,8 @@ pub(crate) struct GraphLegOutput {
     pub(crate) diagnostics: GraphRetrievalDiagnostics,
 }
 
-/// Runs the graph expansion leg from weighted planner and phase-one seeds.
-pub async fn graph_expansion_leg(
-    graph: &dyn GraphStore,
-    req: &RetrievalRequest,
-    seed_strengths: &[(Uuid, f64)],
-    seed_rows: &[NodeIndexRow],
-) -> Result<Vec<LegCandidate>> {
-    let seed_sources = HashMap::new();
-    Ok(graph_expansion_leg_with_diagnostics(
-        graph,
-        req,
-        seed_strengths,
-        seed_rows,
-        &seed_sources,
-        GraphRetrievalPolicy::LegacyBroadExpansion,
-    )
-    .await?
-    .candidates)
-}
-
 /// Runs the graph expansion leg and returns raw path diagnostics for reports.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn graph_expansion_leg_with_diagnostics(
     graph: &dyn GraphStore,
     req: &RetrievalRequest,
@@ -92,6 +76,8 @@ pub(crate) async fn graph_expansion_leg_with_diagnostics(
     seed_rows: &[NodeIndexRow],
     seed_sources: &HashMap<Uuid, GraphSeedSource>,
     policy: GraphRetrievalPolicy,
+    scoring: &GraphWalkScoring,
+    rescue_evidence_floor: f64,
 ) -> Result<GraphLegOutput> {
     if seed_strengths.is_empty() {
         return Ok(GraphLegOutput::default());
@@ -111,7 +97,12 @@ pub(crate) async fn graph_expansion_leg_with_diagnostics(
         .map(|row| (row.uid, row.label))
         .collect::<HashMap<_, _>>();
     let hits = graph
-        .expand_seeds(&seeds, graph_hops_for_policy(policy, req), req.as_of)
+        .expand_seeds(
+            &seeds,
+            graph_hops_for_policy(policy, req),
+            req.as_of,
+            scoring,
+        )
         .await?;
     let diagnostics = graph_path_diagnostics(&hits, seed_sources);
     let seed_candidates = exact_seed_candidates(
@@ -125,11 +116,11 @@ pub(crate) async fn graph_expansion_leg_with_diagnostics(
         score_expansion_for_policy(
             &hits,
             &strengths,
-            req.as_of,
             req.label_filter.as_deref(),
             policy,
             seed_sources,
             &seed_labels,
+            rescue_evidence_floor,
         ),
     );
     Ok(GraphLegOutput {
@@ -178,44 +169,22 @@ fn label_allowed_by_filter(label_filter: Option<&[NodeLabel]>, label: &NodeLabel
     label_filter.is_none_or(|labels| labels.is_empty() || labels.contains(label))
 }
 
-/// Scores graph expansion paths by seed strength, edge weight, and hop decay.
-///
-/// Edge weights are explicit for all current `EdgeLabel` variants:
-/// `RELATES_TO`, `DEPENDS_ON`, `OWNED_BY`, `DERIVED_FROM`, `MENTIONED_IN`,
-/// `CAUSED`, `LEARNED_FROM`, and `APPLIES_TO` carry weight 1.0; `CONTRADICTS` carries
-/// 0.0; `SUPERSEDES` carries 0.6 only for as-of retrieval. `supersede_node`
-/// creates `new -[:SUPERSEDES]-> old`, so historical as-of expansion can cross
-/// from an active replacement seed to its superseded predecessor.
-#[must_use]
-pub fn score_expansion(
-    hits: &[GraphExpansionHit],
-    strengths: &HashMap<Uuid, f64>,
-    as_of: Option<DateTime<Utc>>,
-    label_filter: Option<&[NodeLabel]>,
-) -> Vec<Uuid> {
-    score_expansion_for_policy(
-        hits,
-        strengths,
-        as_of,
-        label_filter,
-        GraphRetrievalPolicy::LegacyBroadExpansion,
-        &HashMap::new(),
-        &HashMap::new(),
-    )
-}
-
 fn score_expansion_for_policy(
     hits: &[GraphExpansionHit],
     strengths: &HashMap<Uuid, f64>,
-    as_of: Option<DateTime<Utc>>,
     label_filter: Option<&[NodeLabel]>,
     policy: GraphRetrievalPolicy,
     seed_sources: &HashMap<Uuid, GraphSeedSource>,
     seed_labels: &HashMap<Uuid, NodeLabel>,
+    rescue_evidence_floor: f64,
 ) -> Vec<Uuid> {
     let entity_explicitly_allowed =
         label_filter.is_some_and(|labels| labels.contains(&NodeLabel::Entity));
-    let mut activation_by_uid = HashMap::<Uuid, (f64, NodeLabel)>::new();
+    // Policy shape filtering runs over every discovered path, then the best
+    // admissible path per (seed, candidate) contributes to activation. Doing
+    // the dedup after filtering keeps an ill-shaped path from shadowing an
+    // equally scored admissible path to the same candidate.
+    let mut best_per_seed = HashMap::<(Uuid, Uuid), (f64, NodeLabel)>::new();
 
     for hit in hits {
         if hit.uid == hit.seed {
@@ -233,22 +202,30 @@ fn score_expansion_for_policy(
         let Some(seed_strength) = strengths.get(&hit.seed).copied() else {
             continue;
         };
-        let path_weight = path_weight(&hit.edges, as_of);
-        if path_weight <= 0.0 {
+        if hit.path_score <= 0.0 {
             continue;
         }
         let activation = seed_strength
-            * path_weight
-            * GRAPH_EXPANSION_DECAY.powi(i32::from(hit.hop))
+            * hit.path_score
             * temporal_coherence(hit.seed_valid_from, hit.valid_from);
         if activation <= 0.0 {
             continue;
         }
-        let entry = activation_by_uid.entry(hit.uid).or_insert((0.0, hit.label));
+        let entry = best_per_seed
+            .entry((hit.seed, hit.uid))
+            .or_insert((0.0, hit.label));
+        if activation > entry.0 {
+            entry.0 = activation;
+        }
+    }
+
+    let mut activation_by_uid = HashMap::<Uuid, (f64, NodeLabel)>::new();
+    for ((_, uid), (activation, label)) in best_per_seed {
+        let entry = activation_by_uid.entry(uid).or_insert((0.0, label));
         entry.0 += activation;
     }
 
-    let evidence_threshold = graph_evidence_threshold(policy);
+    let evidence_threshold = graph_evidence_threshold(policy, rescue_evidence_floor);
     let mut scored = activation_by_uid
         .into_iter()
         .filter_map(|(uid, (activation, label))| {
@@ -291,8 +268,7 @@ fn policy_allows_expansion_hit(
             }
             entity_local_search_allows_path(hit, seed_labels.get(&hit.seed).copied())
         }
-        GraphRetrievalPolicy::LegacyBroadExpansion
-        | GraphRetrievalPolicy::SourceGraph
+        GraphRetrievalPolicy::SourceGraph
         | GraphRetrievalPolicy::Propagation
         | GraphRetrievalPolicy::Community => true,
     }
@@ -335,7 +311,7 @@ fn entity_local_search_allows_semantic_step(
 }
 
 fn anchored_rescue_allows_path(hit: &GraphExpansionHit, seed_label: Option<NodeLabel>) -> bool {
-    if hit.edges.is_empty() || hit.edges.len() != hit.directions.len() || hit.hop > 2 {
+    if hit.edges.is_empty() || hit.edges.len() != hit.directions.len() || hit.hop > 3 {
         return false;
     }
     if hit.hop == 1 && hit.edges.len() == 1 && hit.directions.len() == 1 {
@@ -427,13 +403,14 @@ fn graph_hops_for_policy(policy: GraphRetrievalPolicy, req: &RetrievalRequest) -
     ) && tenant_chunk_only
     {
         1
-    } else if matches!(
-        policy,
-        GraphRetrievalPolicy::AnchoredRescue | GraphRetrievalPolicy::SourceGraph
-    ) || (policy == GraphRetrievalPolicy::EntityLocalSearch && tenant_chunk_only)
+    } else if policy == GraphRetrievalPolicy::SourceGraph
+        || (policy == GraphRetrievalPolicy::EntityLocalSearch && tenant_chunk_only)
     {
         2
     } else {
+        // AnchoredRescue walks three hops so an entity seed can cross
+        // fact -> bridging entity -> fact chains; the per-step semantic gate
+        // and in-walk score pruning keep the deeper walk precise and cheap.
         GRAPH_HOPS
     }
 }
@@ -446,12 +423,11 @@ fn request_is_tenant_chunk_only(req: &RetrievalRequest) -> bool {
             .is_some_and(|labels| labels == [NodeLabel::Chunk])
 }
 
-const fn graph_evidence_threshold(policy: GraphRetrievalPolicy) -> f64 {
+const fn graph_evidence_threshold(policy: GraphRetrievalPolicy, rescue_floor: f64) -> f64 {
     match policy {
-        GraphRetrievalPolicy::AnchoredRescue => ANCHORED_RESCUE_MIN_GRAPH_EVIDENCE,
+        GraphRetrievalPolicy::AnchoredRescue => rescue_floor,
         GraphRetrievalPolicy::Off
         | GraphRetrievalPolicy::ContextOnly
-        | GraphRetrievalPolicy::LegacyBroadExpansion
         | GraphRetrievalPolicy::SourceGraph
         | GraphRetrievalPolicy::EntityLocalSearch
         | GraphRetrievalPolicy::Propagation
@@ -459,11 +435,27 @@ const fn graph_evidence_threshold(policy: GraphRetrievalPolicy) -> f64 {
     }
 }
 
-fn path_weight(edges: &[EdgeLabel], as_of: Option<DateTime<Utc>>) -> f64 {
-    if edges.is_empty() {
-        return 0.0;
+/// Builds the in-walk scoring for one retrieval request.
+///
+/// Edge priors reuse [`edge_weight`] semantics: semantic relations carry 1.0,
+/// `CONTRADICTS` carries 0.0 (pruned inside the walk), and `SUPERSEDES`
+/// carries 0.6 only for as-of retrieval, where `new -[:SUPERSEDES]-> old`
+/// lets historical expansion cross from an active replacement seed to its
+/// superseded predecessor.
+pub(crate) fn walk_scoring(
+    config: &RankingConfig,
+    as_of: Option<DateTime<Utc>>,
+) -> GraphWalkScoring {
+    let edge_priors = EdgeLabel::ALL
+        .iter()
+        .map(|label| (*label, edge_weight(*label, as_of)))
+        .filter(|(_, prior)| *prior != 1.0)
+        .collect();
+    GraphWalkScoring {
+        decay: config.graph_walk_decay,
+        prune_below: config.graph_walk_prune_below,
+        edge_priors,
     }
-    edges.iter().map(|edge| edge_weight(*edge, as_of)).product()
 }
 
 fn edge_weight(edge: EdgeLabel, as_of: Option<DateTime<Utc>>) -> f64 {
@@ -914,15 +906,19 @@ pub async fn bump_last_accessed(
 }
 
 /// Writes narrow retrieval lineage rows for later quality-score computation.
+///
+/// Each row carries denormalized chunk provenance so dashboards resolve a
+/// retrieval to its source document without joining through
+/// `moa.knowledge_chunks`.
 pub async fn write_retrieval_lineage(
     pool: PgPool,
     scope: MemoryScope,
     lineage: LineageContext,
-    ranked_uids: Vec<Uuid>,
+    ranked_hits: Vec<RetrievalLineageHit>,
     retrieved_at: DateTime<Utc>,
     assume_app_role: bool,
 ) -> Result<()> {
-    if ranked_uids.is_empty() {
+    if ranked_hits.is_empty() {
         return Ok(());
     }
     let tenant_id = scope.tenant_id();
@@ -930,9 +926,9 @@ pub async fn write_retrieval_lineage(
     let mut conn = begin_scoped(&pool, &scope, assume_app_role).await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         "INSERT INTO moa.retrieval_lineage \
-         (tenant_id, contact_id, storage_partition_id, user_id, session_id, turn_seq, turn_id, uid, rank, retrieved_at) ",
+         (tenant_id, contact_id, storage_partition_id, user_id, session_id, turn_seq, turn_id, uid, chunk_uid, document_version_uid, rank, retrieved_at) ",
     );
-    builder.push_values(ranked_uids.iter().enumerate(), |mut row, (index, uid)| {
+    builder.push_values(ranked_hits.iter().enumerate(), |mut row, (index, hit)| {
         row.push_bind(tenant_id.0)
             .push_bind(contact_id.map(|id| id.0))
             .push_bind(tenant_id.to_string())
@@ -940,7 +936,9 @@ pub async fn write_retrieval_lineage(
             .push_bind(lineage.session_id.0)
             .push_bind(lineage.turn_seq)
             .push_bind(lineage.turn_id.map(|turn_id| turn_id.0))
-            .push_bind(*uid)
+            .push_bind(hit.uid)
+            .push_bind(hit.chunk_uid)
+            .push_bind(hit.document_version_uid)
             .push_bind(i32::try_from(index + 1).unwrap_or(i32::MAX))
             .push_bind(retrieved_at);
     });
@@ -1105,14 +1103,15 @@ mod tests {
     use uuid::Uuid;
 
     use crate::retrieval::policy::GraphRetrievalPolicy;
+    use crate::retrieval::ranking::RankingConfig;
     use crate::retrieval::types::{GraphPathTrace, GraphSeedSource};
 
     use super::{
         GRAPH_HOPS, GRAPH_WEIGHT, LEXICAL_WEIGHT, LegCandidate, RetrievalRequest, VECTOR_WEIGHT,
         exact_seed_candidates, graph_hops_for_policy, graph_path_diagnostics, leg_candidate_limit,
         lexical_fallback_terms, lexical_or_tsquery, lexical_prefix_tsquery, merge_ordered_uids,
-        prefer_lexical_fallback_first, rrf_fuse, score_expansion, score_expansion_for_policy,
-        should_run_lexical_fallback, vector_leg,
+        prefer_lexical_fallback_first, rrf_fuse, score_expansion_for_policy,
+        should_run_lexical_fallback, vector_leg, walk_scoring,
     };
 
     #[test]
@@ -1279,7 +1278,7 @@ mod tests {
     #[test]
     fn anchored_rescue_rejects_broad_fallback_paths() {
         // Pins: AnchoredRescue only admits planner, exact, or semantic anchors;
-        // broad phase-one fallback paths remain available only to legacy policy.
+        // broad-fallback-sourced paths are rejected outright.
         let seed = uid(1);
         let candidate = uid(2);
         let hit = expansion_hit(seed, candidate, 1, vec![EdgeLabel::RelatesTo]);
@@ -1291,10 +1290,10 @@ mod tests {
             &[hit],
             &strengths,
             None,
-            None,
             GraphRetrievalPolicy::AnchoredRescue,
             &seed_sources,
             &seed_labels,
+            0.10,
         );
 
         assert!(ordered.is_empty());
@@ -1317,20 +1316,20 @@ mod tests {
         let rejected = score_expansion_for_policy(
             &[wrong_direction],
             &strengths,
-            None,
             Some(&[NodeLabel::Chunk]),
             GraphRetrievalPolicy::AnchoredRescue,
             &seed_sources,
             &seed_labels,
+            0.10,
         );
         let admitted = score_expansion_for_policy(
             &[anchored_direction],
             &strengths,
-            None,
             Some(&[NodeLabel::Chunk]),
             GraphRetrievalPolicy::AnchoredRescue,
             &seed_sources,
             &seed_labels,
+            0.10,
         );
 
         assert!(rejected.is_empty());
@@ -1354,20 +1353,20 @@ mod tests {
         let rejected = score_expansion_for_policy(
             &[wrong_direction],
             &strengths,
-            None,
             Some(&[NodeLabel::Chunk]),
             GraphRetrievalPolicy::AnchoredRescue,
             &seed_sources,
             &seed_labels,
+            0.10,
         );
         let admitted = score_expansion_for_policy(
             &[evidence_direction],
             &strengths,
-            None,
             Some(&[NodeLabel::Chunk]),
             GraphRetrievalPolicy::AnchoredRescue,
             &seed_sources,
             &seed_labels,
+            0.10,
         );
 
         assert!(rejected.is_empty());
@@ -1376,8 +1375,10 @@ mod tests {
 
     #[test]
     fn anchored_rescue_filters_paths_below_evidence_threshold() {
-        // Pins: an anchored graph path must clear an explicit evidence floor
-        // before it can contribute a ranking candidate.
+        // Pins: an anchored graph path must clear the configured evidence floor
+        // before it can contribute a ranking candidate. A one-hop path carries
+        // path_score 0.5, so seed strength 0.15 lands at 0.075 < 0.10 while a
+        // full-strength seed lands at 0.5 >= 0.10.
         let seed = uid(1);
         let weak = uid(2);
         let strong = uid(3);
@@ -1386,21 +1387,21 @@ mod tests {
 
         let weak_ordered = score_expansion_for_policy(
             &[expansion_hit(seed, weak, 1, vec![EdgeLabel::RelatesTo])],
-            &strengths(&[(seed, 0.5)]),
-            None,
+            &strengths(&[(seed, 0.15)]),
             None,
             GraphRetrievalPolicy::AnchoredRescue,
             &seed_sources,
             &seed_labels,
+            0.10,
         );
         let strong_ordered = score_expansion_for_policy(
             &[expansion_hit(seed, strong, 1, vec![EdgeLabel::RelatesTo])],
             &strengths(&[(seed, 1.0)]),
             None,
-            None,
             GraphRetrievalPolicy::AnchoredRescue,
             &seed_sources,
             &seed_labels,
+            0.10,
         );
 
         assert!(weak_ordered.is_empty());
@@ -1453,11 +1454,11 @@ mod tests {
         let ordered = score_expansion_for_policy(
             &[direct_path, related_path, wrong_direction, structural_path],
             &strengths,
-            None,
             Some(&[NodeLabel::Chunk]),
             GraphRetrievalPolicy::EntityLocalSearch,
             &seed_sources,
             &seed_labels,
+            0.10,
         );
 
         assert_eq!(ordered, vec![direct_chunk, related_chunk]);
@@ -1479,11 +1480,11 @@ mod tests {
         let ordered = score_expansion_for_policy(
             &[path],
             &strengths,
-            None,
             Some(&[NodeLabel::Chunk]),
             GraphRetrievalPolicy::EntityLocalSearch,
             &seed_sources,
             &seed_labels,
+            0.10,
         );
 
         assert!(ordered.is_empty());
@@ -1513,18 +1514,18 @@ mod tests {
         let ordered = score_expansion_for_policy(
             &[sibling_path.clone()],
             &strengths,
-            None,
             Some(&[NodeLabel::Chunk]),
             GraphRetrievalPolicy::AnchoredRescue,
             &seed_sources,
             &seed_labels,
+            0.10,
         );
 
         assert!(ordered.is_empty());
         assert_eq!(
             score_expansion(&[sibling_path], &strengths, None, Some(&[NodeLabel::Chunk])),
             vec![sibling],
-            "legacy broad expansion still scores the historical structural path"
+            "an admit-all policy still scores the historical structural path"
         );
     }
 
@@ -1551,7 +1552,7 @@ mod tests {
             2
         );
         assert_eq!(
-            graph_hops_for_policy(GraphRetrievalPolicy::LegacyBroadExpansion, &request),
+            graph_hops_for_policy(GraphRetrievalPolicy::Propagation, &request),
             GRAPH_HOPS
         );
     }
@@ -1919,6 +1920,40 @@ mod tests {
         }
     }
 
+    /// Test shim for the deleted broad-expansion wrapper: recomputes each
+    /// hit's walk score from its edges (as the scored CTE would) and scores
+    /// through a policy that admits every path.
+    fn score_expansion(
+        hits: &[GraphExpansionHit],
+        strengths: &HashMap<Uuid, f64>,
+        as_of: Option<chrono::DateTime<chrono::Utc>>,
+        label_filter: Option<&[NodeLabel]>,
+    ) -> Vec<Uuid> {
+        let scoring = walk_scoring(&RankingConfig::default(), as_of);
+        let hits = hits
+            .iter()
+            .cloned()
+            .map(|mut hit| {
+                hit.path_score = scoring.decay.powi(i32::from(hit.hop))
+                    * hit
+                        .edges
+                        .iter()
+                        .map(|edge| scoring.edge_priors.get(edge).copied().unwrap_or(1.0))
+                        .product::<f64>();
+                hit
+            })
+            .collect::<Vec<_>>();
+        score_expansion_for_policy(
+            &hits,
+            strengths,
+            label_filter,
+            GraphRetrievalPolicy::Propagation,
+            &HashMap::new(),
+            &HashMap::new(),
+            0.10,
+        )
+    }
+
     fn expansion_hit(seed: Uuid, uid: Uuid, hop: u8, edges: Vec<EdgeLabel>) -> GraphExpansionHit {
         let valid_from = chrono::Utc
             .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
@@ -1939,6 +1974,9 @@ mod tests {
             uid,
             label: NodeLabel::Fact,
             seed,
+            // Mirror the scored walk's decay^hop so activation tests exercise
+            // production-shaped path scores.
+            path_score: 0.5_f64.powi(i32::from(hop)),
             seed_valid_from,
             valid_from,
             hop,

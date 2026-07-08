@@ -10,19 +10,29 @@ pub(super) struct RenderedMemoryContext {
 }
 
 /// Renders graph-memory hits into prompt context and matching source refs.
+///
+/// The per-hit excerpt is computed once and shared between the prompt section
+/// and the evidence refs, so citation verification checks the exact text the
+/// model saw for each hit.
 pub(super) fn render_memory_context(
     hits: &[crate::retrieval::RetrievalHit],
     per_hit_budget: usize,
 ) -> RenderedMemoryContext {
+    let excerpts = hits
+        .iter()
+        .map(|hit| truncate_excerpt(&hit_prompt_excerpt(hit, per_hit_budget), per_hit_budget))
+        .collect::<Vec<_>>();
     RenderedMemoryContext {
-        section: render_knowledge_context(hits, per_hit_budget),
+        section: render_knowledge_context(hits, &excerpts),
         items_included: hits
             .iter()
             .map(|hit| format!("graph:{}:{}", hit.node.label.as_str(), hit.uid))
             .collect(),
         source_refs: hits
             .iter()
-            .map(|hit| {
+            .zip(&excerpts)
+            .map(|(hit, excerpt)| {
+                let chunk = hit.knowledge_chunk.as_ref();
                 ContextSourceRef::graph_memory(
                     hit.uid,
                     format!(
@@ -32,6 +42,12 @@ pub(super) fn render_memory_context(
                         hit.node.name
                     ),
                 )
+                .with_evidence(
+                    excerpt.clone(),
+                    chunk.map(|chunk| chunk.chunk_uid),
+                    chunk.map(|chunk| chunk.document_version_uid),
+                    chunk.and_then(|chunk| chunk.source_uri.clone()),
+                )
             })
             .collect(),
     }
@@ -39,7 +55,7 @@ pub(super) fn render_memory_context(
 
 fn render_knowledge_context(
     hits: &[crate::retrieval::RetrievalHit],
-    per_hit_budget: usize,
+    excerpts: &[String],
 ) -> String {
     let mut section = String::from(
         "<knowledge_context>\n\
@@ -50,15 +66,15 @@ verify drift-prone facts before relying on them.\n\
     push_tier_context(
         &mut section,
         hits,
+        excerpts,
         crate::retrieval::SourceTier::TenantKnowledge,
-        per_hit_budget,
     );
     section.push_str("</tenant_knowledge>\n<user_memory>\n");
     push_tier_context(
         &mut section,
         hits,
+        excerpts,
         crate::retrieval::SourceTier::UserMemory,
-        per_hit_budget,
     );
     section.push_str("</user_memory>\n</knowledge_context>");
     section
@@ -67,20 +83,19 @@ verify drift-prone facts before relying on them.\n\
 fn push_tier_context(
     section: &mut String,
     hits: &[crate::retrieval::RetrievalHit],
+    excerpts: &[String],
     source_tier: crate::retrieval::SourceTier,
-    per_hit_budget: usize,
 ) {
-    for hit in hits.iter().filter(|hit| hit.source_tier == source_tier) {
-        push_hit_context(section, hit, per_hit_budget);
+    for (hit, excerpt) in hits
+        .iter()
+        .zip(excerpts)
+        .filter(|(hit, _)| hit.source_tier == source_tier)
+    {
+        push_hit_context(section, hit, excerpt);
     }
 }
 
-fn push_hit_context(
-    section: &mut String,
-    hit: &crate::retrieval::RetrievalHit,
-    per_hit_budget: usize,
-) {
-    let excerpt = truncate_excerpt(&hit_excerpt(hit), per_hit_budget);
+fn push_hit_context(section: &mut String, hit: &crate::retrieval::RetrievalHit, excerpt: &str) {
     section.push_str(&format!(
         "## {} [tier={} label={} graph_uid={} scope={} score={:.3} valid_from={} legs={}",
         hit_title(hit),
@@ -107,7 +122,7 @@ fn push_hit_context(
         }
     }
     section.push_str("]\n");
-    section.push_str(&excerpt);
+    section.push_str(excerpt);
     section.push_str("\n\n");
 }
 
@@ -130,6 +145,66 @@ pub(super) fn hit_excerpt(hit: &crate::retrieval::RetrievalHit) -> String {
         .filter(|text| !text.is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| graph_hit_excerpt(&hit.node))
+}
+
+/// Delimiter opening the matched chunk region inside an expanded excerpt.
+const MATCHED_OPEN: &str = "[matched chunk]";
+/// Delimiter closing the matched chunk region inside an expanded excerpt.
+const MATCHED_CLOSE: &str = "[/matched chunk]";
+
+/// Returns the prompt excerpt for a hit, expanding a matched knowledge chunk
+/// with its ordinal-adjacent neighbors (parent-document retrieval).
+///
+/// When the hit carries a non-empty `context_window`, the neighbors are stitched
+/// around the matched chunk in ordinal order with the matched region clearly
+/// delimited, so the model reads the surrounding context while citations still
+/// key on the matched chunk. Each neighbor is capped at a quarter of the per-hit
+/// budget; the caller still truncates the whole excerpt to `per_hit_budget`, so
+/// expansion never exceeds it. Hits without a context window fall back to the
+/// plain [`hit_excerpt`].
+pub(super) fn hit_prompt_excerpt(
+    hit: &crate::retrieval::RetrievalHit,
+    per_hit_budget: usize,
+) -> String {
+    let matched = hit_excerpt(hit);
+    let Some(chunk) = hit.knowledge_chunk.as_ref() else {
+        return matched;
+    };
+    if chunk.context_window.is_empty() || chunk.text.trim().is_empty() {
+        return matched;
+    }
+    stitch_context_window(chunk, &matched, per_hit_budget)
+}
+
+fn stitch_context_window(
+    chunk: &crate::retrieval::KnowledgeChunkHydration,
+    matched: &str,
+    per_hit_budget: usize,
+) -> String {
+    let neighbor_budget = (per_hit_budget / 4).max(1);
+    let mut parts = Vec::new();
+    for part in chunk
+        .context_window
+        .iter()
+        .filter(|part| part.ordinal < chunk.ordinal)
+    {
+        let text = truncate_excerpt(&part.text, neighbor_budget);
+        if !text.is_empty() {
+            parts.push(text);
+        }
+    }
+    parts.push(format!("{MATCHED_OPEN}\n{matched}\n{MATCHED_CLOSE}"));
+    for part in chunk
+        .context_window
+        .iter()
+        .filter(|part| part.ordinal > chunk.ordinal)
+    {
+        let text = truncate_excerpt(&part.text, neighbor_budget);
+        if !text.is_empty() {
+            parts.push(text);
+        }
+    }
+    parts.join("\n\n")
 }
 
 fn graph_hit_excerpt(row: &moa_memory_graph::NodeIndexRow) -> String {
@@ -183,4 +258,242 @@ pub(super) fn truncate_excerpt(excerpt: &str, max_tokens: usize) -> String {
     let mut truncated = excerpt.chars().take(max_chars).collect::<String>();
     truncated.push_str("...");
     truncated
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
+    use serde_json::Value;
+    use uuid::Uuid;
+
+    use crate::retrieval::{
+        KnowledgeChunkHydration, KnowledgeChunkWindowPart, LegSources, RetrievalHit, SourceTier,
+    };
+
+    use super::{MATCHED_CLOSE, MATCHED_OPEN, render_memory_context};
+
+    fn fact_hit(uid: Uuid, summary: &str) -> RetrievalHit {
+        RetrievalHit {
+            uid,
+            score: 0.9,
+            legs: LegSources {
+                graph: false,
+                vector: true,
+                lexical: false,
+            },
+            lexical_backend: None,
+            source_tier: SourceTier::UserMemory,
+            knowledge_chunk: None,
+            node: NodeIndexRow {
+                uid,
+                label: NodeLabel::Fact,
+                storage_partition_id: Some("tenant-a".to_string()),
+                contact_id: None,
+                scope: "contact".to_string(),
+                name: "fact".to_string(),
+                pii_class: PiiClass::None,
+                valid_to: None,
+                valid_from: Utc::now(),
+                properties_summary: Some(serde_json::json!({ "summary": summary })),
+                last_accessed_at: Utc::now(),
+                quality_score: 0.5,
+            },
+        }
+    }
+
+    fn chunk_hit(
+        uid: Uuid,
+        chunk_uid: Uuid,
+        document_version_uid: Uuid,
+        text: &str,
+    ) -> RetrievalHit {
+        let mut hit = fact_hit(uid, text);
+        hit.source_tier = SourceTier::TenantKnowledge;
+        hit.node.label = NodeLabel::Chunk;
+        hit.node.scope = "tenant".to_string();
+        hit.knowledge_chunk = Some(KnowledgeChunkHydration {
+            chunk_uid,
+            document_version_uid,
+            object_uid: Uuid::now_v7(),
+            chunk_hash: "hash".to_string(),
+            ordinal: 0,
+            heading_path: vec!["Guide".to_string()],
+            text: text.to_string(),
+            token_count: 12,
+            metadata: Value::Null,
+            source_uri: Some("https://kb.example.invalid/guide".to_string()),
+            source_title: Some("Guide".to_string()),
+            object_type: "document".to_string(),
+            context_window: Vec::new(),
+        });
+        hit
+    }
+
+    #[test]
+    fn source_refs_carry_per_hit_evidence_matching_the_rendered_prompt() {
+        // Pins: every rendered hit yields one evidence ref whose excerpt is the
+        // exact prompt text and whose chunk provenance matches the hydrated
+        // knowledge chunk; graph-only hits carry no chunk identifiers.
+        let fact_uid = Uuid::now_v7();
+        let chunk_node_uid = Uuid::now_v7();
+        let chunk_uid = Uuid::now_v7();
+        let document_version_uid = Uuid::now_v7();
+        let hits = vec![
+            chunk_hit(
+                chunk_node_uid,
+                chunk_uid,
+                document_version_uid,
+                "Access tokens authorize delegated API calls.",
+            ),
+            fact_hit(fact_uid, "OAuth uses access tokens."),
+        ];
+
+        let rendered = render_memory_context(&hits, 64);
+
+        assert_eq!(rendered.source_refs.len(), 2);
+        let chunk_ref = &rendered.source_refs[0];
+        assert_eq!(chunk_ref.source_uid, Some(chunk_node_uid));
+        assert_eq!(chunk_ref.chunk_uid, Some(chunk_uid));
+        assert_eq!(chunk_ref.document_version_uid, Some(document_version_uid));
+        assert_eq!(
+            chunk_ref.source_uri.as_deref(),
+            Some("https://kb.example.invalid/guide")
+        );
+        let chunk_excerpt = chunk_ref
+            .excerpt
+            .as_deref()
+            .expect("chunk evidence excerpt");
+        assert_eq!(
+            chunk_excerpt,
+            "Access tokens authorize delegated API calls."
+        );
+        assert!(
+            rendered.section.contains(chunk_excerpt),
+            "prompt must contain the exact excerpt the citation verifier checks"
+        );
+        let fact_ref = &rendered.source_refs[1];
+        assert_eq!(fact_ref.source_uid, Some(fact_uid));
+        assert_eq!(fact_ref.chunk_uid, None);
+        assert_eq!(fact_ref.document_version_uid, None);
+        assert_eq!(
+            fact_ref.excerpt.as_deref(),
+            Some("OAuth uses access tokens.")
+        );
+    }
+
+    #[test]
+    fn evidence_excerpt_matches_truncated_prompt_text_under_tight_budget() {
+        // Pins: when the per-hit budget truncates the excerpt, the evidence ref
+        // stores the truncated text (what the model saw), not the full chunk.
+        let long_text = "tokens ".repeat(400);
+        let hits = vec![fact_hit(Uuid::now_v7(), &long_text)];
+
+        let rendered = render_memory_context(&hits, 8);
+
+        let excerpt = rendered.source_refs[0]
+            .excerpt
+            .as_deref()
+            .expect("evidence excerpt");
+        assert!(excerpt.len() < long_text.len());
+        assert!(excerpt.ends_with("..."));
+        assert!(rendered.section.contains(excerpt));
+    }
+
+    #[test]
+    fn context_window_expands_matched_chunk_with_marked_neighbors_matching_evidence() {
+        // Pins: a matched chunk with ordinal-adjacent neighbors renders the
+        // neighbors before/after the clearly-marked matched region, and the
+        // evidence ref excerpt is exactly the expanded prompt text for the hit.
+        let chunk_node_uid = Uuid::now_v7();
+        let chunk_uid = Uuid::now_v7();
+        let document_version_uid = Uuid::now_v7();
+        let mut hit = chunk_hit(
+            chunk_node_uid,
+            chunk_uid,
+            document_version_uid,
+            "The matched chunk defines the escalation owner.",
+        );
+        let chunk = hit
+            .knowledge_chunk
+            .as_mut()
+            .expect("chunk hydration present");
+        chunk.ordinal = 1;
+        chunk.context_window = vec![
+            KnowledgeChunkWindowPart {
+                ordinal: 0,
+                text: "Preceding context introduces the escalation policy.".to_string(),
+            },
+            KnowledgeChunkWindowPart {
+                ordinal: 2,
+                text: "Following context lists the mitigation steps.".to_string(),
+            },
+        ];
+
+        let rendered = render_memory_context(&[hit], 256);
+
+        let excerpt = rendered.source_refs[0]
+            .excerpt
+            .as_deref()
+            .expect("chunk evidence excerpt");
+        // Neighbors surround the marked matched region in ordinal order.
+        let before = excerpt
+            .find("Preceding context introduces the escalation policy.")
+            .expect("preceding neighbor rendered");
+        let matched_open = excerpt.find(MATCHED_OPEN).expect("matched region marked");
+        let matched_body = excerpt
+            .find("The matched chunk defines the escalation owner.")
+            .expect("matched chunk rendered");
+        let matched_close = excerpt.find(MATCHED_CLOSE).expect("matched region closed");
+        let after = excerpt
+            .find("Following context lists the mitigation steps.")
+            .expect("following neighbor rendered");
+        assert!(before < matched_open);
+        assert!(matched_open < matched_body);
+        assert!(matched_body < matched_close);
+        assert!(matched_close < after);
+        // Contract: the evidence excerpt is exactly the prompt text for the hit.
+        assert!(
+            rendered.section.contains(excerpt),
+            "prompt must contain the exact expanded excerpt the citation verifier checks"
+        );
+        // Citation still keys on the matched chunk, not a neighbor.
+        assert_eq!(rendered.source_refs[0].chunk_uid, Some(chunk_uid));
+    }
+
+    #[test]
+    fn context_window_neighbors_are_capped_to_a_quarter_of_the_per_hit_budget() {
+        // Pins: neighbor expansion cannot blow the per-hit budget; each neighbor
+        // is truncated to roughly a quarter of it before the whole excerpt is
+        // truncated to the full budget.
+        let per_hit_budget = 40;
+        let long_neighbor = "escalate ".repeat(200);
+        let mut hit = chunk_hit(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            "Matched chunk body.",
+        );
+        let chunk = hit
+            .knowledge_chunk
+            .as_mut()
+            .expect("chunk hydration present");
+        chunk.ordinal = 1;
+        chunk.context_window = vec![KnowledgeChunkWindowPart {
+            ordinal: 0,
+            text: long_neighbor.clone(),
+        }];
+
+        let excerpt = super::hit_prompt_excerpt(&hit, per_hit_budget);
+
+        // The neighbor is truncated to ~per_hit_budget/4 tokens (chars = tokens*4)
+        // and marked with the truncation ellipsis, well under the full neighbor.
+        let neighbor_line = excerpt
+            .lines()
+            .find(|line| line.starts_with("escalate"))
+            .expect("neighbor line rendered");
+        assert!(neighbor_line.ends_with("..."));
+        assert!(neighbor_line.chars().count() <= (per_hit_budget / 4) * 4 + 3);
+        assert!(neighbor_line.chars().count() < long_neighbor.chars().count());
+    }
 }

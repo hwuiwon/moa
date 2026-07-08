@@ -10,8 +10,6 @@ pub enum GraphRetrievalPolicy {
     Off,
     /// Reserve graph structure for post-selection context organization.
     ContextOnly,
-    /// Preserve the pre-guardrail broad phase-one graph expansion behavior for A/B reports.
-    LegacyBroadExpansion,
     /// Use graph only to rescue candidates from precise anchors.
     #[default]
     AnchoredRescue,
@@ -32,7 +30,6 @@ impl GraphRetrievalPolicy {
         match self {
             Self::Off => "off",
             Self::ContextOnly => "context-only",
-            Self::LegacyBroadExpansion => "legacy-broad-expansion",
             Self::AnchoredRescue => "anchored-rescue",
             Self::SourceGraph => "source-graph",
             Self::EntityLocalSearch => "entity-local-search",
@@ -47,7 +44,6 @@ impl GraphRetrievalPolicy {
         match value {
             "off" => Some(Self::Off),
             "context-only" => Some(Self::ContextOnly),
-            "legacy-broad-expansion" => Some(Self::LegacyBroadExpansion),
             "anchored-rescue" => Some(Self::AnchoredRescue),
             "source-graph" => Some(Self::SourceGraph),
             "entity-local-search" => Some(Self::EntityLocalSearch),
@@ -63,12 +59,6 @@ impl GraphRetrievalPolicy {
         matches!(self, Self::Off | Self::ContextOnly)
     }
 
-    /// Returns whether this policy allows broad phase-one graph seeds.
-    #[must_use]
-    pub(crate) const fn allows_broad_phase_one_fallback(self) -> bool {
-        matches!(self, Self::LegacyBroadExpansion)
-    }
-
     /// Returns whether this policy allows semantic entity seeds.
     #[must_use]
     pub(crate) const fn allows_semantic_entity_seeds(self) -> bool {
@@ -76,12 +66,6 @@ impl GraphRetrievalPolicy {
             self,
             Self::EntityLocalSearch | Self::Propagation | Self::Community
         )
-    }
-
-    /// Returns whether graph-only candidates receive the legacy rescue bonus.
-    #[must_use]
-    pub(crate) const fn allows_graph_only_rescue_bonus(self) -> bool {
-        matches!(self, Self::LegacyBroadExpansion)
     }
 
     /// Returns whether this policy performs source-object ranking.

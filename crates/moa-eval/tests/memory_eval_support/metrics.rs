@@ -24,6 +24,7 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             user_id: "user-alice".to_string(),
             probe_type: ProbeType::PointRecall,
             expected_fact_ids: fact_ids(&["fact-runtime"]),
+            expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: Vec::new(),
             candidates: metric_candidates(
                 0x100,
@@ -49,6 +50,7 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             user_id: "user-alice".to_string(),
             probe_type: ProbeType::LatestValueAfterUpdate,
             expected_fact_ids: fact_ids(&["fact-rank-five"]),
+            expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: Vec::new(),
             candidates: metric_candidates(
                 0x200,
@@ -92,6 +94,7 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             user_id: "user-bob".to_string(),
             probe_type: ProbeType::MultiHop,
             expected_fact_ids: fact_ids(&["fact-service-owner", "fact-runbook"]),
+            expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: Vec::new(),
             candidates: metric_candidates(
                 0x300,
@@ -131,6 +134,7 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             user_id: "user-bob".to_string(),
             probe_type: ProbeType::TemporalAsOf,
             expected_fact_ids: fact_ids(&["fact-temporal-old"]),
+            expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: Vec::new(),
             candidates: metric_candidates(
                 0x400,
@@ -156,6 +160,7 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             user_id: "user-casey".to_string(),
             probe_type: ProbeType::PiiRedaction,
             expected_fact_ids: fact_ids(&["fact-pii-phone"]),
+            expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: Vec::new(),
             candidates: metric_candidates(
                 0x500,
@@ -181,6 +186,7 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             user_id: "user-casey".to_string(),
             probe_type: ProbeType::Abstention,
             expected_fact_ids: Vec::new(),
+            expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: Vec::new(),
             candidates: Vec::new(),
             post_rerank_candidates: None,
@@ -200,6 +206,7 @@ fn retrieval_metric_probe_results() -> Vec<ProbeResult> {
             user_id: "user-alice".to_string(),
             probe_type: ProbeType::CrossUserIsolation,
             expected_fact_ids: Vec::new(),
+            expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: fact_ids(&["fact-secret"]),
             candidates: metric_candidates(
                 0x700,
@@ -234,6 +241,7 @@ fn parse_metric_probe(
         user_id: "user-parser".to_string(),
         probe_type,
         expected_fact_ids: fact_ids(&["fact-parser"]),
+        expected_fact_grades: std::collections::BTreeMap::new(),
         blocked_fact_ids: Vec::new(),
         candidates: metric_candidates(
             0x1_0000,

@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::Duration;
-use moa_memory_graph::{EdgeLabel, NodeLabel};
+use moa_memory_graph::{EdgeLabel, GraphWalkScoring, NodeLabel};
 use moa_memory_ingest::{
     DeterministicEntityMergeVerifier, ScriptedFactExtractor, TurnChunk, extract_facts,
     ingest_turn_direct_with_ctx,
@@ -574,7 +574,7 @@ async fn slow_path_multi_hop_facts_expand_through_shared_object_entity() {
     let owner_uid = fact_uid_with_subject(&facts, "lib-audit-wire-test");
 
     let expanded = graph
-        .expand_seeds(&[dependency_uid], 3, None)
+        .expand_seeds(&[dependency_uid], 3, None, &GraphWalkScoring::default())
         .await
         .expect("expand dependency fact");
     let entities = active_tenant_entity_rows(test_db.store().pool(), storage_partition_id).await;

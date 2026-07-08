@@ -8,7 +8,6 @@ use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::retrieval::legs::{begin_scoped, hydrate_nodes};
-use crate::retrieval::policy::GraphRetrievalPolicy;
 use crate::retrieval::ranking::normalize_tokens;
 use crate::retrieval::types::{
     GraphSeedDiagnostics, GraphSeedSource, LegSources, Result, RetrievalRequest,
@@ -33,7 +32,6 @@ pub(crate) struct GraphSeedPlan {
 
 /// Builds the graph seed plan from planner, semantic entity, and phase-one hits.
 pub(crate) fn interim_graph_seed_plan(
-    policy: GraphRetrievalPolicy,
     planner_seeds: &[Uuid],
     semantic_entity_seed_uids: &[Uuid],
     interim: &[(Uuid, f64, LegSources)],
@@ -61,30 +59,21 @@ pub(crate) fn interim_graph_seed_plan(
         }
     }
 
+    // Only exact phase-one anchors seed the walk; the pre-guardrail broad
+    // fallback was deleted with the legacy expansion policy.
     let exact_seed_uids = exact_phase_one_seed_uids(phase_one_rows, query_text);
-    let use_broad_phase_one = policy.allows_broad_phase_one_fallback()
-        && planner_seeds.is_empty()
-        && exact_seed_uids.is_empty();
     let mut phase_one = interim
         .iter()
         .take(PHASE_ONE_GRAPH_SEED_LIMIT)
         .enumerate()
-        .filter_map(|(index, (uid, _, _))| {
-            let is_exact = exact_seed_uids.contains(uid);
-            (is_exact || use_broad_phase_one).then_some((*uid, index, is_exact))
-        })
+        .filter_map(|(index, (uid, _, _))| exact_seed_uids.contains(uid).then_some((*uid, index)))
         .collect::<Vec<_>>();
-    phase_one.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.1.cmp(&right.1)));
-    for (index, (uid, _, is_exact)) in phase_one.into_iter().enumerate() {
+    phase_one.sort_by_key(|(_, index)| *index);
+    for (index, (uid, _)) in phase_one.into_iter().enumerate() {
         if seen.insert(uid) {
             strengths.push((uid, PHASE_ONE_SEED_DECAY.powi(index as i32)));
-            if is_exact {
-                seed_counts.exact_phase_one += 1;
-                seed_sources.insert(uid, GraphSeedSource::ExactPhaseOne);
-            } else {
-                seed_counts.broad_fallback += 1;
-                seed_sources.insert(uid, GraphSeedSource::BroadFallback);
-            }
+            seed_counts.exact_phase_one += 1;
+            seed_sources.insert(uid, GraphSeedSource::ExactPhaseOne);
         }
     }
     GraphSeedPlan {
@@ -266,15 +255,7 @@ fn interim_graph_seed_strengths(
     phase_one_rows: &[NodeIndexRow],
     query_text: &str,
 ) -> Vec<(Uuid, f64)> {
-    interim_graph_seed_plan(
-        GraphRetrievalPolicy::LegacyBroadExpansion,
-        planner_seeds,
-        &[],
-        interim,
-        phase_one_rows,
-        query_text,
-    )
-    .strengths
+    interim_graph_seed_plan(planner_seeds, &[], interim, phase_one_rows, query_text).strengths
 }
 
 #[cfg(test)]
@@ -291,14 +272,7 @@ mod tests {
             .map(|value| (Uuid::from_u128(value), 1.0, LegSources::default()))
             .collect::<Vec<_>>();
 
-        let plan = interim_graph_seed_plan(
-            GraphRetrievalPolicy::AnchoredRescue,
-            &[],
-            &[],
-            &interim,
-            &[],
-            "generic query",
-        );
+        let plan = interim_graph_seed_plan(&[], &[], &interim, &[], "generic query");
 
         assert!(plan.strengths.is_empty());
         assert_eq!(plan.seed_counts, GraphSeedDiagnostics::default());
@@ -316,7 +290,6 @@ mod tests {
         semantic_row.label = NodeLabel::Entity;
 
         let plan = interim_graph_seed_plan(
-            GraphRetrievalPolicy::EntityLocalSearch,
             &[],
             &[semantic_seed],
             &interim,
@@ -350,30 +323,6 @@ mod tests {
     }
 
     #[test]
-    fn graph_seed_selection_caps_broad_phase_one_when_planner_and_exact_seeds_empty() {
-        // Pins: graph expansion can still run when NER finds no planner seeds.
-        let interim = (1_u128..=(PHASE_ONE_GRAPH_SEED_LIMIT as u128 + 4))
-            .map(|value| (Uuid::from_u128(value), 1.0, LegSources::default()))
-            .collect::<Vec<_>>();
-
-        let strengths = interim_graph_seed_strengths(&[], &interim, &[], "");
-
-        assert_eq!(strengths.len(), PHASE_ONE_GRAPH_SEED_LIMIT);
-        assert_eq!(strengths[0], (Uuid::from_u128(1), 1.0));
-        assert_eq!(strengths[1], (Uuid::from_u128(2), 0.85));
-        let (last_uid, last_strength) = strengths.last().expect("last seed should exist");
-        assert_eq!(
-            *last_uid,
-            Uuid::from_u128(PHASE_ONE_GRAPH_SEED_LIMIT as u128)
-        );
-        assert!(
-            (*last_strength - PHASE_ONE_SEED_DECAY.powi((PHASE_ONE_GRAPH_SEED_LIMIT - 1) as i32))
-                .abs()
-                < f64::EPSILON
-        );
-    }
-
-    #[test]
     fn default_graph_policy_suppresses_broad_phase_one_fallback() {
         // Pins: the production default uses AnchoredRescue guardrails and does
         // not seed graph traversal from generic phase-one vector/lexical hits.
@@ -381,57 +330,10 @@ mod tests {
             .map(|value| (Uuid::from_u128(value), 1.0, LegSources::default()))
             .collect::<Vec<_>>();
 
-        let plan = interim_graph_seed_plan(
-            GraphRetrievalPolicy::default(),
-            &[],
-            &[],
-            &interim,
-            &[],
-            "generic query",
-        );
+        let plan = interim_graph_seed_plan(&[], &[], &interim, &[], "generic query");
 
-        assert_eq!(
-            GraphRetrievalPolicy::default(),
-            GraphRetrievalPolicy::AnchoredRescue
-        );
         assert!(plan.strengths.is_empty());
         assert_eq!(plan.seed_counts, GraphSeedDiagnostics::default());
-    }
-
-    #[test]
-    fn explicit_legacy_graph_policy_preserves_broad_phase_one_fallback() {
-        // Pins: the legacy A/B policy still exposes the old broad fallback
-        // behavior without making it the default.
-        let interim = (1_u128..=3)
-            .map(|value| (Uuid::from_u128(value), 1.0, LegSources::default()))
-            .collect::<Vec<_>>();
-
-        let plan = interim_graph_seed_plan(
-            GraphRetrievalPolicy::LegacyBroadExpansion,
-            &[],
-            &[],
-            &interim,
-            &[],
-            "generic query",
-        );
-
-        assert_eq!(
-            plan.strengths,
-            vec![
-                (Uuid::from_u128(1), 1.0),
-                (Uuid::from_u128(2), PHASE_ONE_SEED_DECAY),
-                (Uuid::from_u128(3), PHASE_ONE_SEED_DECAY.powi(2)),
-            ]
-        );
-        assert_eq!(
-            plan.seed_counts,
-            GraphSeedDiagnostics {
-                planner: 0,
-                exact_phase_one: 0,
-                broad_fallback: 3,
-                semantic_entity: 0,
-            }
-        );
     }
 
     #[test]

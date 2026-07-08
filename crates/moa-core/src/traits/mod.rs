@@ -710,6 +710,26 @@ pub trait MemoryToolExecutor: Send + Sync {
     ) -> Result<ToolOutput>;
 }
 
+/// Executes read-only graph-memory retrieval tools for the agentic strategy.
+///
+/// This is the read counterpart of [`MemoryToolExecutor`]: it backs the
+/// `memory_search`/`memory_navigate` built-in tools that let the model iterate
+/// over its own memory (plan Task 11). It is a distinct trait so retrieval reads
+/// stay separated from memory writes and can be installed independently by
+/// runtimes that own the retrieval stack. Implementations must derive the RLS
+/// scope from the session alone and never trust caller-supplied tenant or
+/// contact identifiers in the tool input.
+#[async_trait]
+pub trait MemoryRetrievalExecutor: Send + Sync {
+    /// Executes one read-only graph-memory retrieval tool for an active session.
+    async fn execute_retrieval_tool(
+        &self,
+        session: &SessionMeta,
+        tool_name: &str,
+        input: &Value,
+    ) -> Result<ToolOutput>;
+}
+
 /// Execution context passed to built-in tool implementations.
 pub struct ToolContext<'a> {
     /// Active session metadata.
@@ -722,6 +742,8 @@ pub struct ToolContext<'a> {
     pub cancel_token: Option<&'a CancellationToken>,
     /// Optional graph-memory executor installed by runtimes that support memory writes.
     pub memory_tool_executor: Option<&'a dyn MemoryToolExecutor>,
+    /// Optional graph-memory retrieval executor backing the read-only memory tools.
+    pub memory_retrieval_executor: Option<&'a dyn MemoryRetrievalExecutor>,
 }
 
 /// Async built-in tool handler.

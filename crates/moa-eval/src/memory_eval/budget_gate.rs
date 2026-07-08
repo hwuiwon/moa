@@ -758,6 +758,8 @@ mod tests {
             temporal_parse_rate: MetricSummary::default(),
             temporal_parse_mismatch_count: 0,
             preference_context_rate: MetricSummary::default(),
+            graded_ndcg_at_10: MetricSummary::default(),
+            per_probe_type: std::collections::BTreeMap::new(),
         }
     }
 

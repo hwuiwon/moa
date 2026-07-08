@@ -108,6 +108,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
             .await?;
             pipeline_compile_span.record("moa.pipeline.total_tokens", ctx.token_count as i64);
             register_selected_skill_files(tool_router.as_deref(), &session, &mut ctx).await;
+            augment_agentic_memory_tools(&mut ctx, tool_router.as_deref());
             let citation_sources =
                 emit_context_lineage(lineage.as_ref(), turn_id, &session, &ctx, &pipeline_compile_span);
 
@@ -428,4 +429,68 @@ async fn register_selected_skill_files(
         file_count,
         "registered selected skill package files for lazy sandbox installation"
     );
+}
+
+/// Surfaces the read-only agentic memory tools onto this turn when the memory
+/// stage gated them on (plan Task 11).
+///
+/// These tools are registered but excluded from the default prompt loadout, so
+/// they are appended here only when the router selected the agentic strategy or
+/// the injected retrieval returned nothing. This is deliberately a per-turn
+/// mutation of the tool loadout: it changes the cached prompt prefix for those
+/// turns only, which is the intended trade-off for the (rarer, costlier) agentic
+/// path while the common fast-with-hits turn keeps a stable prefix. The pinned
+/// agent tool policy is still honored so a tenant that denies a memory tool
+/// never sees it offered.
+fn augment_agentic_memory_tools(ctx: &mut WorkingContext, tool_router: Option<&ToolRouter>) {
+    let offer = ctx
+        .metadata()
+        .get(crate::pipeline::memory::OFFER_RETRIEVAL_TOOLS_METADATA_KEY)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !offer {
+        return;
+    }
+    let Some(router) = tool_router else {
+        return;
+    };
+
+    let tool_policy = ctx
+        .agent_context
+        .as_ref()
+        .and_then(|agent_context| agent_context.parsed_policy_snapshot().ok())
+        .map(|snapshot| snapshot.tool_policy);
+
+    let existing: std::collections::HashSet<String> = ctx
+        .tools()
+        .iter()
+        .filter_map(|schema| schema.get("name").and_then(serde_json::Value::as_str))
+        .map(ToString::to_string)
+        .collect();
+
+    let mut appended = Vec::new();
+    for schema in router.agentic_memory_tool_schemas() {
+        let Some(name) = schema.get("name").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if existing.contains(name) {
+            continue;
+        }
+        let allowed = tool_policy
+            .as_ref()
+            .map(|policy| policy.allows(name))
+            .unwrap_or(true);
+        if !allowed {
+            continue;
+        }
+        appended.push(name.to_string());
+        ctx.tools_mut().push(schema);
+    }
+
+    if !appended.is_empty() {
+        tracing::debug!(
+            tools = ?appended,
+            "surfaced agentic memory tools onto turn"
+        );
+    }
 }

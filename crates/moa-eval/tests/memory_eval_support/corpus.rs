@@ -488,6 +488,7 @@ fn probe(spec: ProbeSpec<'_>) -> Probe {
             .iter()
             .map(|fact_id| (*fact_id).to_string())
             .collect(),
+        expected_fact_grades: std::collections::BTreeMap::new(),
         blocked_fact_ids: spec
             .blocked_fact_ids
             .iter()

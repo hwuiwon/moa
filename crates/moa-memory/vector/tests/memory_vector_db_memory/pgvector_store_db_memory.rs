@@ -1035,6 +1035,170 @@ async fn pgvector_knn_hnsw_tuning_does_not_leak_past_transaction_db_memory() {
         .expect("drop isolated schema");
 }
 
+/// Seeds a 50-vector Matryoshka-friendly corpus. Cosine similarity to
+/// `mixed_vector(10.0, 0.0)` strictly decreases with the dim-1 component, and all
+/// signal lives in dims 0..2, so a 512-dim truncated prefix preserves the exact
+/// nearest-neighbor order. Returns the items in decreasing-similarity order
+/// (index 0 == nearest neighbor).
+async fn seed_mrl_prefix_ordered_corpus(
+    pool: &PgPool,
+    storage_partition_id: &str,
+) -> Vec<VectorItem> {
+    let items: Vec<_> = (0..50)
+        .map(|y| {
+            vector_item(
+                Uuid::now_v7(),
+                storage_partition_id,
+                "Fact",
+                mixed_vector(10.0, y as f32),
+            )
+        })
+        .collect();
+    insert_node_index_rows(pool, storage_partition_id, &items).await;
+    set_workspace_embedder_state(pool, storage_partition_id, "test-model").await;
+    let store = PgvectorStore::new_for_app_role(pool.clone(), tenant_scope(storage_partition_id));
+    store.upsert(&items).await.expect("upsert MRL corpus");
+    items
+}
+
+fn topk_query(k: usize) -> VectorQuery {
+    VectorQuery {
+        embedding: mixed_vector(10.0, 0.0),
+        k,
+        label_filter: Some(vec!["Fact".to_string()]),
+        max_pii_class: "restricted".to_string(),
+        include_global: false,
+        as_of: None,
+    }
+}
+
+#[tokio::test]
+async fn mrl_cascade_matches_exact_full_dim_topk_db_memory() {
+    // Pins: the Matryoshka two-stage cascade (truncated 512-dim prefix shortlist +
+    // exact full-dim rescore) returns the same top-k, in the same order and with the
+    // same full-dim scores, as an exact full-dim scan on a 50-vector corpus whose
+    // signal lives entirely in the prefix. Exercises the functional subvector index
+    // expression, the nested-CTE shape, filter/bind ordering, and the rescore end to
+    // end. Break either stage (e.g. drop the rescore or truncate the shortlist too
+    // hard) and the order or scores diverge from the exact baseline.
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = Uuid::now_v7().to_string();
+
+    let items = seed_mrl_prefix_ordered_corpus(session_store.pool(), &storage_partition_id).await;
+    let expected_order: Vec<Uuid> = items.iter().map(|item| item.uid).collect();
+
+    let exact_store = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(storage_partition_id.clone()),
+    )
+    .with_exact_search(true);
+    let exact = exact_store
+        .knn(&topk_query(10))
+        .await
+        .expect("exact full-dim knn");
+    let exact_uids: Vec<Uuid> = exact.iter().map(|row| row.uid).collect();
+    assert_eq!(
+        exact_uids,
+        expected_order[..10].to_vec(),
+        "exact full-dim search must return the constructed nearest-neighbor order"
+    );
+
+    let cascade_store = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(storage_partition_id.clone()),
+    )
+    .with_mrl_shortlist(Some(512));
+    let cascade = cascade_store
+        .knn(&topk_query(10))
+        .await
+        .expect("mrl cascade knn");
+    let cascade_uids: Vec<Uuid> = cascade.iter().map(|row| row.uid).collect();
+    assert_eq!(
+        cascade_uids, exact_uids,
+        "MRL cascade top-k must equal the exact full-dim top-k"
+    );
+    for (cascade_row, exact_row) in cascade.iter().zip(exact.iter()) {
+        assert!(
+            (cascade_row.score - exact_row.score).abs() < 1e-4,
+            "cascade rescores by full-dim distance, so scores match exact: {} vs {}",
+            cascade_row.score,
+            exact_row.score
+        );
+    }
+
+    exact_store
+        .delete(&expected_order)
+        .await
+        .expect("delete vectors");
+    delete_node_index_rows(session_store.pool(), &expected_order).await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn mrl_disabled_matches_exact_full_dim_topk_db_memory() {
+    // Pins: with the cascade disabled (mrl_shortlist_dims = None, the default) the KNN
+    // path is unchanged -- it returns the same top-k as an exact full-dim scan on the
+    // same corpus, exactly as before the MRL cascade was added. This is the "disabled
+    // path unchanged" guard: a store built without `with_mrl_shortlist` must never take
+    // the two-stage branch.
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = Uuid::now_v7().to_string();
+
+    let items = seed_mrl_prefix_ordered_corpus(session_store.pool(), &storage_partition_id).await;
+    let expected_order: Vec<Uuid> = items.iter().map(|item| item.uid).collect();
+
+    let exact_store = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(storage_partition_id.clone()),
+    )
+    .with_exact_search(true);
+    let exact_uids: Vec<Uuid> = exact_store
+        .knn(&topk_query(10))
+        .await
+        .expect("exact full-dim knn")
+        .into_iter()
+        .map(|row| row.uid)
+        .collect();
+
+    let disabled_store = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(storage_partition_id.clone()),
+    );
+    let disabled_uids: Vec<Uuid> = disabled_store
+        .knn(&topk_query(10))
+        .await
+        .expect("cascade-off knn")
+        .into_iter()
+        .map(|row| row.uid)
+        .collect();
+    assert_eq!(
+        disabled_uids,
+        expected_order[..10].to_vec(),
+        "cascade-off KNN must return the exact nearest-neighbor order"
+    );
+    assert_eq!(
+        disabled_uids, exact_uids,
+        "cascade-off KNN must match exact full-dim search (unchanged behavior)"
+    );
+
+    exact_store
+        .delete(&expected_order)
+        .await
+        .expect("delete vectors");
+    delete_node_index_rows(session_store.pool(), &expected_order).await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
 fn utc(value: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(value)
         .expect("test timestamp should be valid RFC3339")

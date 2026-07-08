@@ -29,6 +29,7 @@ fn memory_budget_probe_results(cross_user_leak: bool) -> Vec<ProbeResult> {
             user_id: "user-alice".to_string(),
             probe_type: ProbeType::LatestValueAfterUpdate,
             expected_fact_ids: fact_ids(&["fact-current"]),
+            expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: fact_ids(&["fact-old"]),
             candidates: metric_candidates(
                 0xa00,
@@ -60,6 +61,7 @@ fn memory_budget_probe_results(cross_user_leak: bool) -> Vec<ProbeResult> {
             user_id: "user-alice".to_string(),
             probe_type: ProbeType::CrossUserIsolation,
             expected_fact_ids: Vec::new(),
+            expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: fact_ids(&["fact-bob-secret"]),
             candidates: cross_user_candidates,
             post_rerank_candidates: None,
@@ -79,6 +81,7 @@ fn memory_budget_probe_results(cross_user_leak: bool) -> Vec<ProbeResult> {
             user_id: "user-alice".to_string(),
             probe_type: ProbeType::PiiRedaction,
             expected_fact_ids: fact_ids(&["fact-phone"]),
+            expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: Vec::new(),
             candidates: metric_candidates(
                 0xc00,
@@ -108,6 +111,7 @@ fn reranker_recall_regression_probe_results() -> Vec<ProbeResult> {
         user_id: "user-alice".to_string(),
         probe_type: ProbeType::PointRecall,
         expected_fact_ids: fact_ids(&["fact-owner"]),
+        expected_fact_grades: std::collections::BTreeMap::new(),
         blocked_fact_ids: Vec::new(),
         candidates: metric_candidates(
             0xe00,
@@ -142,6 +146,7 @@ fn reranker_latency_without_gain_probe_results() -> Vec<ProbeResult> {
         user_id: "user-alice".to_string(),
         probe_type: ProbeType::PointRecall,
         expected_fact_ids: fact_ids(&["fact-owner"]),
+        expected_fact_grades: std::collections::BTreeMap::new(),
         blocked_fact_ids: Vec::new(),
         candidates: metric_candidates(
             0xe20,
@@ -201,6 +206,7 @@ fn memory_budget_regression_probe_results(full_recall: bool) -> Vec<ProbeResult>
             user_id: "user-alice".to_string(),
             probe_type: ProbeType::MultiHop,
             expected_fact_ids: fact_ids(&["fact-owner", "fact-runbook"]),
+            expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: Vec::new(),
             candidates: metric_candidates(0xd00, &candidate_specs),
             post_rerank_candidates: None,
@@ -220,6 +226,7 @@ fn memory_budget_regression_probe_results(full_recall: bool) -> Vec<ProbeResult>
             user_id: "user-alice".to_string(),
             probe_type: ProbeType::CrossUserIsolation,
             expected_fact_ids: Vec::new(),
+            expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: fact_ids(&["fact-bob-secret"]),
             candidates: Vec::new(),
             post_rerank_candidates: None,

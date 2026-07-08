@@ -240,6 +240,12 @@ pub struct Probe {
     /// Facts that should support a successful answer.
     #[serde(default)]
     pub expected_fact_ids: Vec<String>,
+    /// Graded 0-3 relevance per expected fact for graded ranking metrics.
+    ///
+    /// Absent entries default to the maximum grade, so binary-labeled golden
+    /// sets stay valid while graded sets can rank partially relevant memories.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub expected_fact_grades: std::collections::BTreeMap<String, u8>,
     /// Facts that must not be returned or exposed for this probe.
     #[serde(default)]
     pub blocked_fact_ids: Vec<String>,
@@ -303,6 +309,24 @@ pub enum ProbeType {
     PreferenceApplication,
     /// Verify PII-bearing facts are redacted.
     PiiRedaction,
+}
+
+impl ProbeType {
+    /// Returns the stable snake_case slice key matching the serde wire form.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PointRecall => "point_recall",
+            Self::LatestValueAfterUpdate => "latest_value_after_update",
+            Self::Abstention => "abstention",
+            Self::CrossUserIsolation => "cross_user_isolation",
+            Self::TenantSharedFact => "tenant_shared_fact",
+            Self::MultiHop => "multi_hop",
+            Self::TemporalAsOf => "temporal_as_of",
+            Self::PreferenceApplication => "preference_application",
+            Self::PiiRedaction => "pii_redaction",
+        }
+    }
 }
 
 /// Reads and validates `manifest.json`.

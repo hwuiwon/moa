@@ -180,12 +180,14 @@ impl ToolRouter {
         };
 
         let memory_tool_executor = self.memory_tool_executor.read().await.clone();
+        let memory_retrieval_executor = self.memory_retrieval_executor.read().await.clone();
         let ctx = moa_core::ToolContext {
             session,
             lineage: self.lineage.as_ref(),
             session_store: self.session_store.as_deref(),
             cancel_token,
             memory_tool_executor: memory_tool_executor.as_deref(),
+            memory_retrieval_executor: memory_retrieval_executor.as_deref(),
         };
         let output = tool.execute(&invocation.input, &ctx).await?;
         Ok((

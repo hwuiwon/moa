@@ -27,7 +27,7 @@ use crate::retrieval::legs::{
     GRAPH_BUDGET, GRAPH_WEIGHT, LEXICAL_BUDGET, LEXICAL_WEIGHT, LegCandidate, RRF_K, VECTOR_BUDGET,
     VECTOR_WEIGHT, bump_last_accessed, graph_expansion_leg_with_diagnostics, hydrate_nodes,
     lexical_leg, rrf_fuse, timed_leg, turbopuffer_bm25_leg, vector_leg as run_vector_leg,
-    write_retrieval_lineage,
+    walk_scoring, write_retrieval_lineage,
 };
 use crate::retrieval::policy::{GraphRetrievalPolicy, effective_graph_policy};
 use crate::retrieval::ranking::{
@@ -37,9 +37,9 @@ use crate::retrieval::source_rank::{
     apply_source_object_graph_ranking, select_final_hits_for_policy,
 };
 use crate::retrieval::types::{
-    GraphCandidateCounts, GraphRetrievalDiagnostics, KnowledgeChunkHydration, LegSources,
-    LexicalBackend, Result, RetrievalError, RetrievalHit, RetrievalOutput, RetrievalRequest,
-    SourceTier,
+    GraphCandidateCounts, GraphRetrievalDiagnostics, KnowledgeChunkHydration,
+    KnowledgeChunkWindowPart, LegSources, LexicalBackend, Result, RetrievalError, RetrievalHit,
+    RetrievalLineageHit, RetrievalOutput, RetrievalRequest, SourceTier,
 };
 
 const MIN_FUSED_CANDIDATE_LIMIT: usize = 26;
@@ -238,7 +238,6 @@ impl HybridRetriever {
             GraphSeedPlan::default()
         } else {
             interim_graph_seed_plan(
-                graph_policy,
                 &req.seeds,
                 &semantic_entity_seed_uids,
                 &interim,
@@ -262,6 +261,8 @@ impl HybridRetriever {
                     &graph_seed_rows,
                     &graph_seed_plan.seed_sources,
                     graph_policy,
+                    &walk_scoring(&self.ranking_config, req.as_of),
+                    self.ranking_config.graph_rescue_evidence_floor,
                 ),
             )
             .await?;
@@ -360,7 +361,10 @@ impl HybridRetriever {
         if self.lineage_enabled
             && let Some(lineage) = req.lineage
         {
-            let ranked_uids = final_hits.iter().map(|hit| hit.uid).collect::<Vec<_>>();
+            let ranked_hits = final_hits
+                .iter()
+                .map(RetrievalLineageHit::from_hit)
+                .collect::<Vec<_>>();
             let pool = self.pool.clone();
             let scope = req.scope.clone();
             let assume_app_role = self.assume_app_role;
@@ -370,7 +374,7 @@ impl HybridRetriever {
                     pool,
                     scope,
                     lineage,
-                    ranked_uids,
+                    ranked_hits,
                     retrieved_at,
                     assume_app_role,
                 )
@@ -868,7 +872,6 @@ async fn hydrate_knowledge_chunks(
     .bind(&chunk_uids)
     .fetch_all(conn.as_mut())
     .await?;
-    conn.commit().await?;
 
     let mut chunks_by_graph_uid = rows
         .into_iter()
@@ -888,16 +891,96 @@ async fn hydrate_knowledge_chunks(
                     source_uri: row.source_uri,
                     source_title: row.source_title,
                     object_type: row.object_type,
+                    context_window: Vec::new(),
                 },
             )
         })
         .collect::<HashMap<_, _>>();
+
+    hydrate_context_windows(conn.as_mut(), scope, &mut chunks_by_graph_uid).await?;
+    conn.commit().await?;
+
     for hit in hits {
         if let Some(chunk) = chunks_by_graph_uid.remove(&hit.uid) {
             hit.knowledge_chunk = Some(chunk);
         }
     }
     Ok(())
+}
+
+/// Populates each hydrated chunk's `context_window` with its ordinal-adjacent
+/// siblings (ordinal ±1, same document version) for parent-document retrieval.
+///
+/// Neighbors are fetched in one batched query keyed by (document version,
+/// ordinal) pairs, so expansion never issues a per-chunk round trip. The matched
+/// chunk itself is excluded because its own ordinal is never requested.
+async fn hydrate_context_windows(
+    conn: &mut sqlx::PgConnection,
+    scope: &MemoryScope,
+    chunks_by_graph_uid: &mut HashMap<Uuid, KnowledgeChunkHydration>,
+) -> Result<()> {
+    let mut wanted_pairs = HashSet::new();
+    let mut version_ids = Vec::new();
+    let mut ordinals = Vec::new();
+    for chunk in chunks_by_graph_uid.values() {
+        for neighbor_ordinal in neighbor_ordinals(chunk.ordinal) {
+            if wanted_pairs.insert((chunk.document_version_uid, neighbor_ordinal)) {
+                version_ids.push(chunk.document_version_uid);
+                ordinals.push(neighbor_ordinal);
+            }
+        }
+    }
+    if wanted_pairs.is_empty() {
+        return Ok(());
+    }
+
+    let neighbor_rows = sqlx::query_as::<_, KnowledgeChunkNeighborRow>(
+        r#"
+        SELECT
+            c.document_version_id AS document_version_uid,
+            c.ordinal,
+            c.text
+        FROM moa.knowledge_chunks c
+        JOIN unnest($2::uuid[], $3::int4[]) AS wanted(document_version_uid, ordinal)
+          ON c.document_version_id = wanted.document_version_uid
+         AND c.ordinal = wanted.ordinal
+        WHERE c.tenant_id = $1
+          AND c.metadata->>'active' IS DISTINCT FROM 'false'
+        "#,
+    )
+    .bind(scope.tenant_id().0)
+    .bind(&version_ids)
+    .bind(&ordinals)
+    .fetch_all(conn)
+    .await?;
+
+    let neighbor_texts = neighbor_rows
+        .into_iter()
+        .map(|row| ((row.document_version_uid, row.ordinal), row.text))
+        .collect::<HashMap<_, _>>();
+    for chunk in chunks_by_graph_uid.values_mut() {
+        chunk.context_window = neighbor_ordinals(chunk.ordinal)
+            .into_iter()
+            .filter_map(|neighbor_ordinal| {
+                neighbor_texts
+                    .get(&(chunk.document_version_uid, neighbor_ordinal))
+                    .map(|text| KnowledgeChunkWindowPart {
+                        ordinal: neighbor_ordinal,
+                        text: text.clone(),
+                    })
+            })
+            .collect();
+    }
+    Ok(())
+}
+
+/// Returns the ordinal-adjacent neighbor ordinals to hydrate for a matched
+/// chunk, in ascending order and skipping negative ordinals.
+fn neighbor_ordinals(ordinal: i32) -> Vec<i32> {
+    [ordinal - 1, ordinal + 1]
+        .into_iter()
+        .filter(|neighbor_ordinal| *neighbor_ordinal >= 0)
+        .collect()
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -917,6 +1000,13 @@ struct KnowledgeChunkRow {
     object_type: String,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct KnowledgeChunkNeighborRow {
+    document_version_uid: Uuid,
+    ordinal: i32,
+    text: String,
+}
+
 fn source_tier_for_node(node: &NodeIndexRow) -> SourceTier {
     if node.scope == "tenant" && is_tenant_knowledge_label(node.label) {
         SourceTier::TenantKnowledge
@@ -934,13 +1024,7 @@ fn is_tenant_knowledge_label(label: NodeLabel) -> bool {
 
 #[cfg(test)]
 fn rank_hydrated_hits(hits: &mut [RetrievalHit], config: &RankingConfig, req: &RetrievalRequest) {
-    rank_hydrated_hits_for_policy(
-        hits,
-        config,
-        req,
-        GraphRetrievalPolicy::LegacyBroadExpansion,
-        None,
-    );
+    rank_hydrated_hits_for_policy(hits, config, req, GraphRetrievalPolicy::default(), None);
 }
 
 fn rank_hydrated_hits_for_policy(
@@ -950,7 +1034,7 @@ fn rank_hydrated_hits_for_policy(
     graph_policy: GraphRetrievalPolicy,
     vector_rank_one: Option<Uuid>,
 ) {
-    apply_feature_ranking(hits, config, req, graph_policy);
+    apply_feature_ranking(hits, config, req);
     preserve_vector_rank_one_for_policy(hits, graph_policy, vector_rank_one);
 }
 
@@ -958,7 +1042,6 @@ fn apply_feature_ranking(
     hits: &mut [RetrievalHit],
     config: &RankingConfig,
     req: &RetrievalRequest,
-    graph_policy: GraphRetrievalPolicy,
 ) {
     let max_fused_score = hits.iter().map(|hit| hit.score).fold(0.0_f64, f64::max);
     let query_tokens = normalize_tokens(&req.query_text);
@@ -975,11 +1058,10 @@ fn apply_feature_ranking(
         if hit.legs.lexical && !hit.legs.vector && !hit.legs.graph {
             hit.score += config.weights.overlap;
         }
-        if graph_policy.allows_graph_only_rescue_bonus()
-            && hit.legs.graph
-            && !hit.legs.vector
-            && !hit.legs.lexical
-        {
+        // Graph-only candidates already cleared the policy's admission gates
+        // (anchored seeds, path shape, evidence floor), so the rescue weight
+        // lifts them over same-feature noise the other legs never surfaced.
+        if hit.legs.graph && !hit.legs.vector && !hit.legs.lexical {
             hit.score += config.weights.graph_rescue;
         }
     }
@@ -1966,8 +2048,8 @@ mod tests {
 
     #[test]
     fn non_source_graph_selection_keeps_existing_support_order() {
-        // Pins: source-diverse selection does not change AnchoredRescue or
-        // legacy final-hit ordering.
+        // Pins: source-diverse selection does not change non-source-graph
+        // final-hit ordering.
         let article_a = Uuid::from_u128(10);
         let article_b = Uuid::from_u128(20);
         let a1_uid = Uuid::from_u128(101);
@@ -2582,6 +2664,7 @@ mod tests {
             source_uri: Some("https://support.example.invalid/domain".to_string()),
             source_title: Some("Custom domains".to_string()),
             object_type: "article".to_string(),
+            context_window: Vec::new(),
         }
     }
 
@@ -2610,6 +2693,7 @@ mod tests {
             source_uri: Some(format!("https://support.example.invalid/{object_uid}")),
             source_title: Some(source_title.to_string()),
             object_type: "article".to_string(),
+            context_window: Vec::new(),
         });
         hit
     }
@@ -2700,6 +2784,7 @@ mod tests {
             _seeds: &[Uuid],
             _max_hops: u8,
             _as_of: Option<DateTime<Utc>>,
+            _scoring: &moa_memory_graph::GraphWalkScoring,
         ) -> std::result::Result<Vec<moa_memory_graph::GraphExpansionHit>, GraphError> {
             Ok(Vec::new())
         }

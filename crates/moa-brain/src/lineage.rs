@@ -1,8 +1,9 @@
 //! Lineage emission helpers for streamed turns and production turn workflows.
 
 use moa_core::{
-    CompletionContent, CompletionResponse, ContextMessage, EventRecord, LineageHandle, MessageRole,
-    SessionMeta, StoragePartitionId, UserId, WorkingContext, estimate_text_tokens,
+    CompletionContent, CompletionResponse, ContextMessage, ContextSourceKind, EventRecord,
+    LineageHandle, MessageRole, SessionMeta, StoragePartitionId, UserId, WorkingContext,
+    estimate_text_tokens,
 };
 use moa_lineage_citation::{CascadeConfig, CascadeVerifier, ChunkRef, NliVerifier};
 use moa_lineage_core::{
@@ -33,7 +34,7 @@ pub fn emit_context_lineage(
         .collect::<Vec<_>>();
     let citation_sources = source_chunks
         .into_iter()
-        .filter_map(citation_source_chunk)
+        .flat_map(citation_source_chunks)
         .collect::<Vec<_>>();
     let record = ContextLineage {
         turn_id,
@@ -123,27 +124,54 @@ struct SourceContextChunk<'a> {
     message: &'a ContextMessage,
 }
 
-fn citation_source_chunk(source: SourceContextChunk<'_>) -> Option<ChunkRef> {
-    if !is_citable_source_message(source.message) {
-        return None;
+/// Expands one compiled context message into its citable evidence sources.
+///
+/// Retrieval-evidence refs fan out to one `ChunkRef` per hit, keyed by the
+/// knowledge chunk uid when present so citations resolve to the exact source
+/// chunk. Tool output stays citable as one whole-message source. Generic
+/// prompt text yields nothing.
+fn citation_source_chunks(source: SourceContextChunk<'_>) -> Vec<ChunkRef> {
+    let evidence = source
+        .message
+        .source_refs
+        .iter()
+        .filter(|source_ref| source_ref.kind == ContextSourceKind::GraphMemory)
+        .filter_map(evidence_chunk_ref)
+        .collect::<Vec<_>>();
+    if !evidence.is_empty() {
+        return evidence;
     }
-    Some(ChunkRef {
-        chunk_id: source.chunk.chunk_id,
-        source_node_uid: Some(source.chunk.source_uid),
-        text: source.message.content.clone(),
-        provider_doc_id: source.chunk.chunk_id.to_string(),
-    })
+
+    let content = source.message.content.trim();
+    if matches!(source.message.role, MessageRole::Tool) && !content.is_empty() {
+        return vec![ChunkRef {
+            chunk_id: source.chunk.chunk_id,
+            source_node_uid: Some(source.chunk.source_uid),
+            text: source.message.content.clone(),
+            provider_doc_id: source.chunk.chunk_id.to_string(),
+        }];
+    }
+    Vec::new()
 }
 
-fn is_citable_source_message(message: &ContextMessage) -> bool {
-    let content = message.content.trim();
-    if content.is_empty() {
-        return false;
-    }
-
-    matches!(message.role, MessageRole::Tool)
-        || content.contains("<memory-reminder>")
-        || content.contains("<graph_memory>")
+/// Builds a per-hit citation source from one evidence-bearing source ref.
+fn evidence_chunk_ref(source_ref: &moa_core::ContextSourceRef) -> Option<ChunkRef> {
+    let excerpt = source_ref
+        .excerpt
+        .as_deref()
+        .map(str::trim)
+        .filter(|excerpt| !excerpt.is_empty())?;
+    let source_uid = source_ref.source_uid?;
+    let chunk_id = source_ref.chunk_uid.unwrap_or(source_uid);
+    Some(ChunkRef {
+        chunk_id,
+        source_node_uid: Some(source_uid),
+        text: excerpt.to_string(),
+        provider_doc_id: source_ref
+            .source_uri
+            .clone()
+            .unwrap_or_else(|| chunk_id.to_string()),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -433,15 +461,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn context_lineage_returns_memory_and_tool_citation_sources() {
-        // Pins: citation candidates come from retrieved memory and tool output, not generic prompt text.
+    fn context_lineage_fans_out_one_citation_source_per_evidence_ref() {
+        // Pins: each evidence-bearing source ref becomes its own citation source
+        // keyed by the knowledge chunk uid (falling back to the graph uid), tool
+        // output stays citable whole, and generic prompt text yields nothing.
         let session = SessionMeta::default();
+        let fact_uid = Uuid::now_v7();
+        let chunk_node_uid = Uuid::now_v7();
+        let chunk_uid = Uuid::now_v7();
         let mut ctx = WorkingContext::new(&session, ModelCapabilities::default());
         ctx.append_message(ContextMessage::system("You are MOA."));
         ctx.append_message(ContextMessage::user("What does OAuth use?"));
-        ctx.append_message(ContextMessage::user(
-            "<memory-reminder>\n<graph_memory>OAuth uses access tokens.</graph_memory>\n</memory-reminder>",
-        ));
+        ctx.append_message(
+            ContextMessage::user("memory reminder body rendered from evidence").with_source_refs(
+                vec![
+                    ContextSourceRef::graph_memory(fact_uid, "user_memory:Fact:oauth")
+                        .with_evidence("OAuth uses access tokens.", None, None, None),
+                    ContextSourceRef::graph_memory(chunk_node_uid, "tenant_knowledge:Chunk:oauth")
+                        .with_evidence(
+                            "Access tokens authorize delegated API calls.",
+                            Some(chunk_uid),
+                            Some(Uuid::now_v7()),
+                            Some("https://kb.example.invalid/oauth".to_string()),
+                        ),
+                ],
+            ),
+        );
         ctx.append_message(ContextMessage::tool(
             "Fetched source: OAuth access tokens authorize delegated API calls.",
         ));
@@ -454,9 +499,17 @@ mod tests {
             &tracing::Span::none(),
         );
 
-        assert_eq!(sources.len(), 2);
-        assert!(sources[0].text.contains("<graph_memory>"));
-        assert!(sources[1].text.contains("Fetched source"));
+        assert_eq!(sources.len(), 3);
+        assert_eq!(sources[0].chunk_id, fact_uid);
+        assert_eq!(sources[0].source_node_uid, Some(fact_uid));
+        assert_eq!(sources[0].text, "OAuth uses access tokens.");
+        assert_eq!(sources[1].chunk_id, chunk_uid);
+        assert_eq!(sources[1].source_node_uid, Some(chunk_node_uid));
+        assert_eq!(
+            sources[1].provider_doc_id,
+            "https://kb.example.invalid/oauth"
+        );
+        assert!(sources[2].text.contains("Fetched source"));
     }
 
     #[test]

@@ -85,6 +85,11 @@ path = "tests/brain_turn_offline.rs"
 required-features = ["eval-harness"]
 
 [[test]]
+name = "agentic_memory_tools_offline"
+path = "tests/agentic_memory_tools_offline.rs"
+required-features = ["eval-harness"]
+
+[[test]]
 name = "skill_package_materialization_db_memory"
 path = "tests/skill_package_materialization_db_memory.rs"
 required-features = ["eval-harness"]

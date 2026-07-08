@@ -8,13 +8,20 @@ use serde_json::Value;
 
 /// Converts one retrieval hit into the public memory-hit DTO.
 pub(super) fn memory_hit_from_retrieval(hit: RetrievalHit) -> MemoryHit {
+    let chunk = hit.knowledge_chunk.as_ref();
     MemoryHit {
         uid: hit.uid,
         label: hit.node.label.as_str().to_string(),
         name: hit.node.name.clone(),
         score: hit.score,
-        snippet: node_snippet(&hit.node),
+        snippet: chunk
+            .map(|chunk| chunk.text.clone())
+            .unwrap_or_else(|| node_snippet(&hit.node)),
         legs: leg_trace(hit.legs),
+        chunk_uid: chunk.map(|chunk| chunk.chunk_uid),
+        document_version_uid: chunk.map(|chunk| chunk.document_version_uid),
+        source_uri: chunk.and_then(|chunk| chunk.source_uri.clone()),
+        source_title: chunk.and_then(|chunk| chunk.source_title.clone()),
         properties: hit.node.properties_summary,
     }
 }

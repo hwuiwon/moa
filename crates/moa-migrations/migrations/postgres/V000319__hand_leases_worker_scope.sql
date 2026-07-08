@@ -10,7 +10,7 @@
 ALTER TABLE moa.hand_leases
     ADD COLUMN IF NOT EXISTS worker_id TEXT NOT NULL DEFAULT '';
 
--- V000312 created the primary key unnamed, so Postgres named it hand_leases_pkey.
+-- V000311 created the primary key unnamed, so Postgres named it hand_leases_pkey.
 -- Drop-if-exists then re-add keeps the swap re-runnable.
 ALTER TABLE moa.hand_leases DROP CONSTRAINT IF EXISTS hand_leases_pkey;
 ALTER TABLE moa.hand_leases

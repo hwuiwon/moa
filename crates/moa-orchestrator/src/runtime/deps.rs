@@ -115,7 +115,10 @@ impl RuntimeDeps {
                 .await?
                 .with_hand_lease_store(Arc::new(PostgresHandLeaseStore::new(pool.clone())))
                 .with_rule_store(session_store.clone())
-                .with_session_store(session_store.clone()),
+                .with_session_store(session_store.clone())
+                .with_memory_retrieval_executor(Arc::new(
+                    crate::services::memory::OrchestratorMemoryRetrievalExecutor,
+                )),
         );
         validate_lineage_journal_startup(config.as_ref())?;
         let lineage = build_lineage_sink(config.as_ref(), pool.clone()).await?;

@@ -109,8 +109,6 @@ pub enum GraphExpansionEvalPolicy {
     Current,
     /// Disable graph expansion only for direct exact-anchor non-temporal probes.
     SkipExactDirect,
-    /// Preserve the pre-guardrail broad graph expansion behavior for A/B reports.
-    LegacyBroadExpansion,
 }
 
 impl GraphExpansionEvalPolicy {
@@ -120,7 +118,6 @@ impl GraphExpansionEvalPolicy {
         match self {
             Self::Current => "current",
             Self::SkipExactDirect => "skip-exact-direct",
-            Self::LegacyBroadExpansion => "legacy-broad-expansion",
         }
     }
 
@@ -129,7 +126,6 @@ impl GraphExpansionEvalPolicy {
     pub const fn graph_retrieval_policy(self) -> GraphRetrievalPolicy {
         match self {
             Self::Current | Self::SkipExactDirect => GraphRetrievalPolicy::AnchoredRescue,
-            Self::LegacyBroadExpansion => GraphRetrievalPolicy::LegacyBroadExpansion,
         }
     }
 }
@@ -1709,6 +1705,7 @@ fn probe_result_for(input: ProbeResultInput<'_>) -> Result<ProbeResult> {
         user_id: probe.user_id.as_str().to_string(),
         probe_type: probe.probe_type,
         expected_fact_ids: probe.expected_fact_ids.clone(),
+        expected_fact_grades: probe.expected_fact_grades.clone(),
         blocked_fact_ids: probe.blocked_fact_ids.clone(),
         candidates,
         post_rerank_candidates,
@@ -2669,9 +2666,9 @@ mod tests {
     }
 
     #[test]
-    fn graph_expansion_current_uses_guarded_default_and_legacy_is_explicit() {
-        // Pins: memory-eval reports can still request legacy broad expansion,
-        // but the ambient current lane follows the guarded production default.
+    fn graph_expansion_eval_lanes_follow_the_guarded_production_default() {
+        // Pins: every memory-eval lane runs the guarded production policy; the
+        // legacy broad-expansion A/B lane was deleted with the scored walk.
         assert_eq!(
             GraphExpansionEvalPolicy::Current.graph_retrieval_policy(),
             GraphRetrievalPolicy::AnchoredRescue
@@ -2679,10 +2676,6 @@ mod tests {
         assert_eq!(
             GraphExpansionEvalPolicy::SkipExactDirect.graph_retrieval_policy(),
             GraphRetrievalPolicy::AnchoredRescue
-        );
-        assert_eq!(
-            GraphExpansionEvalPolicy::LegacyBroadExpansion.graph_retrieval_policy(),
-            GraphRetrievalPolicy::LegacyBroadExpansion
         );
     }
 
@@ -2784,7 +2777,7 @@ mod tests {
             },
         }];
         let diagnostics = GraphRetrievalDiagnostics {
-            policy: GraphRetrievalPolicy::LegacyBroadExpansion,
+            policy: GraphRetrievalPolicy::AnchoredRescue,
             seed_counts: GraphSeedDiagnostics {
                 broad_fallback: 1,
                 ..GraphSeedDiagnostics::default()
@@ -2943,6 +2936,7 @@ mod tests {
             query_class: None,
             answer: "Use the tenant deploy runbook.".to_string(),
             expected_fact_ids: Vec::new(),
+            expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: Vec::new(),
             as_of: None,
             expected_redacted: false,
@@ -2993,6 +2987,7 @@ mod tests {
             query_class: None,
             answer: "Alice's phone is [PHONE].".to_string(),
             expected_fact_ids: vec!["fact-phone".to_string()],
+            expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: Vec::new(),
             as_of: None,
             expected_redacted: true,

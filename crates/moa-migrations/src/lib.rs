@@ -102,81 +102,77 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         sql: ACTION_POLICY_SCHEMA_MIGRATION_SQL,
     },
     SchemaMigration {
-        name: "V000304__retrieval_lineage_turn_id.sql",
-        sql: include_str!("../migrations/postgres/V000304__retrieval_lineage_turn_id.sql"),
+        name: "V000304__contacts.sql",
+        sql: include_str!("../migrations/postgres/V000304__contacts.sql"),
     },
     SchemaMigration {
-        name: "V000305__contacts.sql",
-        sql: include_str!("../migrations/postgres/V000305__contacts.sql"),
+        name: "V000305__session_channels.sql",
+        sql: include_str!("../migrations/postgres/V000305__session_channels.sql"),
     },
     SchemaMigration {
-        name: "V000306__session_channels.sql",
-        sql: include_str!("../migrations/postgres/V000306__session_channels.sql"),
+        name: "V000306__tenant_configurable_agents.sql",
+        sql: include_str!("../migrations/postgres/V000306__tenant_configurable_agents.sql"),
     },
     SchemaMigration {
-        name: "V000307__tenant_configurable_agents.sql",
-        sql: include_str!("../migrations/postgres/V000307__tenant_configurable_agents.sql"),
+        name: "V000307__tenant_runtime_boundaries.sql",
+        sql: include_str!("../migrations/postgres/V000307__tenant_runtime_boundaries.sql"),
     },
     SchemaMigration {
-        name: "V000308__tenant_runtime_boundaries.sql",
-        sql: include_str!("../migrations/postgres/V000308__tenant_runtime_boundaries.sql"),
+        name: "V000308__graph_changelog_append_only.sql",
+        sql: include_str!("../migrations/postgres/V000308__graph_changelog_append_only.sql"),
     },
     SchemaMigration {
-        name: "V000309__graph_changelog_append_only.sql",
-        sql: include_str!("../migrations/postgres/V000309__graph_changelog_append_only.sql"),
+        name: "V000309__tenant_knowledge_base.sql",
+        sql: include_str!("../migrations/postgres/V000309__tenant_knowledge_base.sql"),
     },
     SchemaMigration {
-        name: "V000310__tenant_knowledge_base.sql",
-        sql: include_str!("../migrations/postgres/V000310__tenant_knowledge_base.sql"),
-    },
-    SchemaMigration {
-        name: "V000311__knowledge_connection_source_selection.sql",
+        name: "V000310__knowledge_connection_source_selection.sql",
         sql: include_str!(
-            "../migrations/postgres/V000311__knowledge_connection_source_selection.sql"
+            "../migrations/postgres/V000310__knowledge_connection_source_selection.sql"
         ),
     },
     SchemaMigration {
-        name: "V000314__authz_outbox_claims.sql",
-        sql: include_str!("../migrations/postgres/V000314__authz_outbox_claims.sql"),
+        name: "V000313__authz_outbox_claims.sql",
+        sql: include_str!("../migrations/postgres/V000313__authz_outbox_claims.sql"),
     },
     SchemaMigration {
-        name: "V000315__session_blobs.sql",
-        sql: include_str!("../migrations/postgres/V000315__session_blobs.sql"),
+        name: "V000314__session_blobs.sql",
+        sql: include_str!("../migrations/postgres/V000314__session_blobs.sql"),
     },
     SchemaMigration {
-        name: "V000316__knowledge_sync_active_claims.sql",
-        sql: include_str!("../migrations/postgres/V000316__knowledge_sync_active_claims.sql"),
+        name: "V000315__knowledge_sync_active_claims.sql",
+        sql: include_str!("../migrations/postgres/V000315__knowledge_sync_active_claims.sql"),
     },
     SchemaMigration {
-        name: "V000317__session_attachments.sql",
-        sql: include_str!("../migrations/postgres/V000317__session_attachments.sql"),
+        name: "V000316__session_attachments.sql",
+        sql: include_str!("../migrations/postgres/V000316__session_attachments.sql"),
     },
     SchemaMigration {
-        name: "V000318__knowledge_visibility_cache_invalidation.sql",
+        name: "V000317__knowledge_visibility_cache_invalidation.sql",
         sql: include_str!(
-            "../migrations/postgres/V000318__knowledge_visibility_cache_invalidation.sql"
+            "../migrations/postgres/V000317__knowledge_visibility_cache_invalidation.sql"
         ),
     },
     SchemaMigration {
-        name: "V000319__session_event_dedupe.sql",
-        sql: include_str!("../migrations/postgres/V000319__session_event_dedupe.sql"),
+        name: "V000318__session_event_dedupe.sql",
+        sql: include_str!("../migrations/postgres/V000318__session_event_dedupe.sql"),
     },
     SchemaMigration {
-        name: "V000321__vector_sync_outbox.sql",
-        sql: include_str!("../migrations/postgres/V000321__vector_sync_outbox.sql"),
+        name: "V000320__vector_sync_outbox.sql",
+        sql: include_str!("../migrations/postgres/V000320__vector_sync_outbox.sql"),
     },
     SchemaMigration {
-        name: "V000322__contact_action_policy_rules.sql",
-        sql: include_str!("../migrations/postgres/V000322__contact_action_policy_rules.sql"),
+        name: "V000321__contact_action_policy_rules.sql",
+        sql: include_str!("../migrations/postgres/V000321__contact_action_policy_rules.sql"),
     },
     SchemaMigration {
-        name: "V000326__analytics_query_read_models.sql",
-        sql: include_str!("../migrations/postgres/V000326__analytics_query_read_models.sql"),
+        name: "V000325__analytics_query_read_models.sql",
+        sql: include_str!("../migrations/postgres/V000325__analytics_query_read_models.sql"),
     },
     SchemaMigration {
-        name: "V000327__knowledge_semantic_graph_extractions.sql",
+        name: "V000326__knowledge_semantic_graph_extractions.sql",
         sql: include_str!(
-            "../migrations/postgres/V000327__knowledge_semantic_graph_extractions.sql"
+            "../migrations/postgres/V000326__knowledge_semantic_graph_extractions.sql"
         ),
     },
 ];
@@ -187,8 +183,8 @@ const AUTH_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         sql: include_str!("../migrations/postgres/V000101__auth_baseline.sql"),
     },
     SchemaMigration {
-        name: "V000314__authz_outbox_claims.sql",
-        sql: include_str!("../migrations/postgres/V000314__authz_outbox_claims.sql"),
+        name: "V000313__authz_outbox_claims.sql",
+        sql: include_str!("../migrations/postgres/V000313__authz_outbox_claims.sql"),
     },
 ];
 
