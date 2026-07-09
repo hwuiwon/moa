@@ -372,11 +372,14 @@ fn render_worker_result_bundle(
          do not call list_workers or wait_worker for these worker ids unless more detail is required.\n",
         results.len()
     );
+    // The replay budget is an AGGREGATE for the whole bundle: per-worker
+    // truncation alone lets N-worker fan-out multiply it without ceiling.
+    let per_worker_chars = (tool_output.max_replay_chars / results.len().max(1)).max(2_000);
     for terminal in results {
         let result = &terminal.result;
         let output = result.error.as_deref().unwrap_or(result.output.as_str());
         let replayable_output =
-            truncate_head_tail(output, tool_output.max_replay_chars, tool_output.head_ratio).0;
+            truncate_head_tail(output, per_worker_chars, tool_output.head_ratio).0;
         rendered.push_str(&format!(
             "<worker_result worker_id=\"{}\" state=\"{}\" success=\"{}\" tokens_used=\"{}\" tools_invoked=\"{}\">\n{}\n</worker_result>\n",
             escape_xml(&result.worker_id),
@@ -580,6 +583,35 @@ fn truncate_tool_result_text(text: &str, tool_output: &ToolOutputConfig) -> Stri
 #[cfg(test)]
 mod tests {
     use crate::pipeline::history::test_support::prelude::*;
+
+    #[test]
+    fn worker_result_bundle_replay_budget_is_aggregate_across_workers() {
+        // Pins: N-worker fan-out cannot multiply the bundle's replay budget —
+        // each worker gets max_replay_chars / N (floored at 2k chars), so the
+        // rendered bundle stays near one budget regardless of fan-out.
+        let results = (0..8)
+            .map(|index| moa_core::WorkerTerminalResult {
+                state: moa_core::WorkerState::Completed,
+                result: moa_core::WorkerResult {
+                    worker_id: format!("w{index}"),
+                    success: true,
+                    output: "x".repeat(40_000),
+                    tokens_used: 1,
+                    tools_invoked: 0,
+                    error: None,
+                },
+            })
+            .collect::<Vec<_>>();
+        let config = ToolOutputConfig::default();
+
+        let rendered = super::render_worker_result_bundle(1, &results, &config);
+
+        assert!(
+            rendered.chars().count() <= config.max_replay_chars + 8 * 2_000,
+            "bundle stays near one aggregate budget, got {} chars",
+            rendered.chars().count()
+        );
+    }
 
     #[test]
     fn history_compiler_formats_user_and_assistant_turns() {

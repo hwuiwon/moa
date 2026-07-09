@@ -525,13 +525,51 @@ pub struct ProcessorOutput {
     pub duration: Duration,
 }
 
-/// Estimates token usage using a rough four-characters-per-token heuristic.
+/// Estimates token usage with a two-rate heuristic.
+///
+/// Prose averages roughly four characters per token, but code and JSON —
+/// dense in structural symbols the tokenizer splits on — run closer to 3.2.
+/// A single-rate chars/4 estimate systematically undercounts code-heavy
+/// content, so every budget sized with it silently overshoots and compaction
+/// triggers fire late. Text whose structural-symbol density reaches 5% uses
+/// the code rate.
 pub fn estimate_text_tokens(text: &str) -> usize {
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        0
+        return 0;
+    }
+    let mut chars = 0usize;
+    let mut symbols = 0usize;
+    for ch in trimmed.chars() {
+        chars += 1;
+        if matches!(
+            ch,
+            '{' | '}'
+                | '['
+                | ']'
+                | '('
+                | ')'
+                | '<'
+                | '>'
+                | ':'
+                | ';'
+                | '='
+                | '"'
+                | '/'
+                | '\\'
+                | '_'
+                | '|'
+                | '#'
+                | '`'
+        ) {
+            symbols += 1;
+        }
+    }
+    if symbols.saturating_mul(20) >= chars {
+        // ~3.2 characters per token for code/JSON-shaped text.
+        chars.saturating_mul(10).div_ceil(32)
     } else {
-        trimmed.chars().count().div_ceil(4)
+        chars.div_ceil(4)
     }
 }
 
@@ -586,6 +624,26 @@ mod tests {
         assert_eq!(message.tool_invocation, Some(invocation));
         assert!(message.content_blocks.is_none());
         assert!(message.tool_use_id.is_none());
+    }
+
+    #[test]
+    fn estimate_text_tokens_uses_code_rate_for_symbol_dense_text() {
+        // Pins: prose estimates at ~4 chars/token; code/JSON-shaped text
+        // (>=5% structural symbols) estimates at ~3.2, so budgets sized from
+        // estimates stop undercounting code-heavy content.
+        let prose = "The quick brown fox jumps over the lazy dog and keeps on running home.";
+        let code = "fn main() { let value = json!({\"key\": [1, 2, 3]}); }";
+
+        let prose_chars = prose.trim().chars().count();
+        let code_chars = code.trim().chars().count();
+
+        assert_eq!(super::estimate_text_tokens(prose), prose_chars.div_ceil(4));
+        assert_eq!(
+            super::estimate_text_tokens(code),
+            code_chars.saturating_mul(10).div_ceil(32),
+            "symbol-dense text uses the ~3.2 chars/token rate"
+        );
+        assert!(super::estimate_text_tokens(code) > code_chars.div_ceil(4));
     }
 
     #[test]

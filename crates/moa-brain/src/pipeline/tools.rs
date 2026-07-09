@@ -85,6 +85,13 @@ impl ContextProcessor for ToolDefinitionProcessor {
                     tool_schemas.push(tool.schema.clone());
                     tokens_added += tool.token_count;
                     items_included.push(tool.name.clone());
+                } else {
+                    // Cap exclusions must be observable: silent drops would
+                    // read as "every allowed tool was offered" when it wasn't.
+                    excluded_items.push(ExcludedItem {
+                        item: tool.name.clone(),
+                        reason: format!("omitted by the {MAX_TOOLS}-tool schema cap"),
+                    });
                 }
             } else {
                 excluded_items.push(ExcludedItem {
