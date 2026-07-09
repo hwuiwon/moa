@@ -55,6 +55,42 @@ pub(super) fn build_full_file_read_path_map(
     file_reads
 }
 
+/// Maps tool calls to a `(tool name, canonical input)` supersession key.
+///
+/// A later successful result with the same key makes the earlier result
+/// stale (a re-run of the same invocation is authoritative). Full file reads
+/// are excluded — they have their own content-hash-aware path — as are
+/// child-report tools, whose "results" are coordination signals rather than
+/// re-runnable outputs. `serde_json` maps are key-sorted, so serializing the
+/// input is deterministic.
+pub(super) fn build_tool_invocation_key_map(
+    events: &[&EventRecord],
+    file_read_paths: &HashMap<ToolCallId, String>,
+) -> HashMap<ToolCallId, String> {
+    let mut keys = HashMap::new();
+
+    for record in events {
+        let Event::ToolCall {
+            tool_id,
+            tool_name,
+            input,
+            ..
+        } = &record.event
+        else {
+            continue;
+        };
+        if file_read_paths.contains_key(tool_id) || moa_core::is_child_report_tool_name(tool_name) {
+            continue;
+        }
+        let Ok(serialized_input) = serde_json::to_string(input) else {
+            continue;
+        };
+        keys.insert(*tool_id, format!("{tool_name}\u{1f}{serialized_input}"));
+    }
+
+    keys
+}
+
 /// Hashes the replayed tool output text for content-identity comparison.
 ///
 /// Dedup compares the bytes the model would see again on replay, so hashing
@@ -64,15 +100,18 @@ pub(super) fn replayed_content_hash(rendered: &str) -> String {
     blake3::hash(rendered.as_bytes()).to_hex().to_string()
 }
 
-/// Per-tool-result replay decisions for full file reads.
+/// Per-tool-result replay decisions computed once from the event stream.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct FileReadRenderPlan {
     /// Results replayed as an unchanged-content pointer (new-side dedup).
     pub(super) pointer_results: HashSet<ToolCallId>,
     /// Full results that supersede an earlier stale read of the same path.
     pub(super) superseding_results: HashSet<ToolCallId>,
-    /// Stale results replayed as a placeholder (checkpoint-gated old-side).
+    /// Stale full-read results replayed as a placeholder (checkpoint-gated).
     pub(super) stale_results: HashSet<ToolCallId>,
+    /// Non-file-read results superseded by a newer successful run of the same
+    /// invocation, demoted to a placeholder (checkpoint-gated).
+    pub(super) demoted_results: HashSet<ToolCallId>,
 }
 
 /// Builds the render plan and the dedup walk state at the snapshot boundary.
@@ -85,6 +124,7 @@ pub(super) struct FileReadRenderPlan {
 pub(super) fn build_file_read_render_plan(
     visible_events: &[&EventRecord],
     file_read_paths: &HashMap<ToolCallId, String>,
+    invocation_keys: &HashMap<ToolCallId, String>,
     latest_checkpoint_seq: Option<SequenceNum>,
     seed_state: &FileReadDedupState,
     snapshot_boundary_seq: Option<SequenceNum>,
@@ -92,8 +132,14 @@ pub(super) fn build_file_read_render_plan(
     let mut plan = FileReadRenderPlan::default();
     let mut walk: HashMap<String, SnapshotFileReadState> = seed_state.latest_reads.clone();
     let mut boundary_state: Option<HashMap<String, SnapshotFileReadState>> = None;
-    // Stale candidates: (stale tool id, sequence of the superseding read).
+    // Stale candidates: (stale tool id, sequence of the superseding result).
     let mut stale_candidates: Vec<(ToolCallId, SequenceNum)> = Vec::new();
+    // Latest successful result per non-file-read invocation key. Demotion
+    // needs no cross-snapshot seed: it only fires once a checkpoint lands
+    // after the superseding result, and checkpoint deltas always fall back to
+    // full replay, so incremental compiles never apply new demotions.
+    let mut latest_invocations: HashMap<&str, ToolCallId> = HashMap::new();
+    let mut demotion_candidates: Vec<(ToolCallId, SequenceNum)> = Vec::new();
 
     for record in visible_events {
         if boundary_state.is_none()
@@ -103,11 +149,20 @@ pub(super) fn build_file_read_render_plan(
         }
 
         let Event::ToolResult {
-            tool_id, output, ..
+            tool_id,
+            output,
+            success,
+            ..
         } = &record.event
         else {
             continue;
         };
+        if *success && let Some(key) = invocation_keys.get(tool_id) {
+            if let Some(previous) = latest_invocations.insert(key.as_str(), *tool_id) {
+                demotion_candidates.push((previous, record.sequence_num));
+            }
+            continue;
+        }
         let Some(path) = file_read_paths.get(tool_id) else {
             continue;
         };
@@ -145,6 +200,11 @@ pub(super) fn build_file_read_render_plan(
             plan.stale_results.insert(stale_tool_id);
         }
     }
+    for (demoted_tool_id, superseding_seq) in demotion_candidates {
+        if latest_checkpoint_seq.is_some_and(|checkpoint_seq| checkpoint_seq > superseding_seq) {
+            plan.demoted_results.insert(demoted_tool_id);
+        }
+    }
 
     let boundary_state = match (boundary_state, snapshot_boundary_seq) {
         (Some(state), _) => state,
@@ -166,12 +226,15 @@ pub(super) fn build_file_read_render_plan(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct DeduplicationStats {
     pub(super) deduplicated_count: usize,
+    /// Non-file-read results demoted as superseded invocations.
+    pub(super) demoted_count: usize,
     pub(super) tokens_saved: usize,
 }
 
 impl DeduplicationStats {
     pub(super) fn absorb(&mut self, other: DeduplicationStats) {
         self.deduplicated_count += other.deduplicated_count;
+        self.demoted_count += other.demoted_count;
         self.tokens_saved += other.tokens_saved;
     }
 }
@@ -362,6 +425,162 @@ mod tests {
             "stale read collapses once a checkpoint lands: {}",
             first_after.content
         );
+    }
+
+    #[test]
+    fn history_compiler_demotes_superseded_invocations_only_after_a_checkpoint() {
+        // Pins: a repeated successful run of the same tool invocation demotes
+        // the OLDER result to a placeholder only once a Checkpoint event lands
+        // after the superseding run — never between checkpoints, so the frozen
+        // prefix stays byte-stable. Different inputs never demote.
+        let session = session();
+        let first = ToolCallId::new();
+        let second = ToolCallId::new();
+        let other_input = ToolCallId::new();
+        let mut events = Vec::new();
+        let mut seq = 0u64;
+        fn push(session: &SessionMeta, events: &mut Vec<EventRecord>, seq: &mut u64, event: Event) {
+            events.push(event_record(&session.id, *seq, event));
+            *seq += 1;
+        }
+        fn bash_exchange(
+            session: &SessionMeta,
+            events: &mut Vec<EventRecord>,
+            seq: &mut u64,
+            tool_id: ToolCallId,
+            cmd: &str,
+            out: &str,
+        ) {
+            push(
+                session,
+                events,
+                seq,
+                Event::ToolCall {
+                    tool_id,
+                    provider_tool_use_id: Some(format!("toolu_{tool_id}")),
+                    provider_thought_signature: None,
+                    tool_name: "bash".to_string(),
+                    input: json!({ "cmd": cmd }),
+                    hand_id: None,
+                },
+            );
+            push(
+                session,
+                events,
+                seq,
+                Event::ToolResult {
+                    tool_id,
+                    provider_tool_use_id: Some(format!("toolu_{tool_id}")),
+                    output: ToolOutput::text(out.repeat(40), Duration::default()),
+                    original_output_tokens: None,
+                    success: true,
+                    duration_ms: 1,
+                },
+            );
+        }
+        push(
+            &session,
+            &mut events,
+            &mut seq,
+            Event::UserMessage {
+                text: "first status".to_string(),
+                attachments: Vec::new(),
+            },
+        );
+        bash_exchange(
+            &session,
+            &mut events,
+            &mut seq,
+            first,
+            "git status",
+            "dirty-tree ",
+        );
+        bash_exchange(
+            &session,
+            &mut events,
+            &mut seq,
+            other_input,
+            "git log -1",
+            "latest-commit ",
+        );
+        push(
+            &session,
+            &mut events,
+            &mut seq,
+            Event::UserMessage {
+                text: "second status".to_string(),
+                attachments: Vec::new(),
+            },
+        );
+        bash_exchange(
+            &session,
+            &mut events,
+            &mut seq,
+            second,
+            "git status",
+            "clean-tree ",
+        );
+        let compiler = compiler_with_recent_turns(&session, &events, 0);
+
+        let before = compiler
+            .compile_messages_with_stats(&events, 100_000)
+            .expect("history should compile");
+        assert!(
+            before
+                .messages
+                .iter()
+                .all(|message| !message.content.contains(SUPERSEDED_TOOL_RESULT_PLACEHOLDER)),
+            "no checkpoint fired, so nothing is demoted"
+        );
+
+        events.push(event_record(
+            &session.id,
+            seq,
+            Event::Checkpoint {
+                summary: "summary".to_string(),
+                events_summarized: 1,
+                token_count: 2,
+                model: ModelId::new("claude-sonnet-4-6"),
+                model_tier: moa_core::ModelTier::Main,
+                input_tokens: 10,
+                output_tokens: 2,
+                cost_cents: 0,
+            },
+        ));
+        let after = compiler
+            .compile_messages_with_stats(&events, 100_000)
+            .expect("history should compile after checkpoint");
+        let first_message = after
+            .messages
+            .iter()
+            .find(|message| message.tool_use_id.as_deref() == Some(&format!("toolu_{first}")))
+            .expect("first status result present");
+        let second_message = after
+            .messages
+            .iter()
+            .find(|message| message.tool_use_id.as_deref() == Some(&format!("toolu_{second}")))
+            .expect("second status result present");
+        let other_message = after
+            .messages
+            .iter()
+            .find(|message| message.tool_use_id.as_deref() == Some(&format!("toolu_{other_input}")))
+            .expect("other invocation present");
+        assert!(
+            first_message
+                .content
+                .contains(SUPERSEDED_TOOL_RESULT_PLACEHOLDER),
+            "older run of the same invocation demotes after a checkpoint: {}",
+            first_message.content
+        );
+        assert!(
+            second_message.content.contains("clean-tree"),
+            "the newest run stays verbatim"
+        );
+        assert!(
+            other_message.content.contains("latest-commit"),
+            "a different invocation is never demoted"
+        );
+        assert_eq!(after.deduplication.demoted_count, 1);
     }
 
     #[test]

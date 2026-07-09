@@ -183,10 +183,26 @@ fn latest_user_message(request: &CompletionRequest) -> Option<String> {
         .messages
         .iter()
         .rev()
-        .find(|message| {
-            message.role == MessageRole::User && !message.content.starts_with("<system-reminder>")
-        })
+        .find(|message| message.role == MessageRole::User && !is_synthetic_user_section(message))
         .map(|message| message.content.clone())
+}
+
+/// Pipeline-injected user-role sections that are not the human turn.
+///
+/// The context pipeline inserts these near the active user turn (after
+/// replayed history) so they cannot disturb prompt-cache reuse of the frozen
+/// history region; transcript matching must skip them when locating the real
+/// user message.
+fn is_synthetic_user_section(message: &moa_core::ContextMessage) -> bool {
+    [
+        "<system-reminder>",
+        "<available_skills>",
+        "<memory-reminder",
+        "<memory_digest",
+        "<session_checkpoint",
+    ]
+    .iter()
+    .any(|prefix| message.content.starts_with(prefix))
 }
 
 fn is_compaction_request(request: &CompletionRequest) -> bool {

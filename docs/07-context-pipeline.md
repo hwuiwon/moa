@@ -253,6 +253,10 @@ prefix. Dedup decisions are deterministic over the event stream:
 - The budget boundary for older history is quantized to user-turn starts, so
   replay never opens mid-exchange and small per-turn budget variation does not
   churn the window.
+- Any non-file-read result superseded by a newer successful run of the same
+  `(tool, canonical input)` invocation is demoted to a placeholder under the
+  same checkpoint gate; the newest run stays verbatim and old output remains
+  reachable via `session_search`.
 
 The history stage also reports per-turn divergence attribution
 (`history_divergence_cause`, `history_divergence_index`,

@@ -123,9 +123,13 @@ impl HistoryCompiler {
         // after the superseding read). The seeded walk only decides how NEW
         // reads render, keeping the frozen prefix byte-identical.
         let snapshot_boundary_seq = older_events.last().map(|record| record.sequence_num);
+        // Invocation-supersession demotions are checkpoint-gated and checkpoint
+        // deltas fall back to full replay, so the delta walk never needs the
+        // invocation key map.
         let (render_plan, next_dedup_state) = build_file_read_render_plan(
             &delta_refs,
             &file_read_paths,
+            &std::collections::HashMap::new(),
             None,
             &snapshot.file_read_dedup_state,
             snapshot_boundary_seq,

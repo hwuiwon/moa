@@ -11,7 +11,10 @@ use moa_core::{
 use moa_security::wrap_untrusted_tool_output;
 
 use super::prune::{DeduplicationStats, FileReadRenderPlan};
-use super::{FILE_READ_DEDUP_PLACEHOLDER, FILE_READ_UNCHANGED_PLACEHOLDER};
+use super::{
+    FILE_READ_DEDUP_PLACEHOLDER, FILE_READ_UNCHANGED_PLACEHOLDER,
+    SUPERSEDED_TOOL_RESULT_PLACEHOLDER,
+};
 
 pub(super) fn compile_records(
     records: &[&EventRecord],
@@ -455,12 +458,18 @@ fn tool_result_context_message(
         Some(FILE_READ_UNCHANGED_PLACEHOLDER)
     } else if render_plan.stale_results.contains(&tool_id) {
         Some(FILE_READ_DEDUP_PLACEHOLDER)
+    } else if render_plan.demoted_results.contains(&tool_id) {
+        Some(SUPERSEDED_TOOL_RESULT_PLACEHOLDER)
     } else {
         None
     };
     if let Some(placeholder) = placeholder {
         let full_text = truncate_tool_result_text(&output.to_text(), tool_output);
-        stats.deduplicated_count += 1;
+        if placeholder == SUPERSEDED_TOOL_RESULT_PLACEHOLDER {
+            stats.demoted_count += 1;
+        } else {
+            stats.deduplicated_count += 1;
+        }
         stats.tokens_saved +=
             estimate_text_tokens(&full_text).saturating_sub(estimate_text_tokens(placeholder));
         return ContextMessage::tool_result(

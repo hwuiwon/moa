@@ -32,12 +32,18 @@ use budgeting::keep_budgeted_older_messages;
 use checkpoint::{SnapshotHistory, build_snapshot_state, snapshot_stage_inputs_hash};
 use conversion::{answered_worker_inputs, child_report_tool_ids, compile_records};
 pub(crate) use errors::preserved_error_messages;
-use prune::{DeduplicationStats, build_file_read_render_plan, build_full_file_read_path_map};
+use prune::{
+    DeduplicationStats, build_file_read_render_plan, build_full_file_read_path_map,
+    build_tool_invocation_key_map,
+};
 
 pub(crate) const FILE_READ_DEDUP_PLACEHOLDER: &str =
     "[file previously read — see latest version below]";
 pub(crate) const FILE_READ_UNCHANGED_PLACEHOLDER: &str = "[file content unchanged since the \
      earlier read of this path above; re-read the file if that copy is no longer visible]";
+pub(crate) const SUPERSEDED_TOOL_RESULT_PLACEHOLDER: &str = "[superseded tool result — a newer \
+     run of the same invocation appears later in this session; use session_search if the old \
+     output is needed]";
 pub(crate) const HISTORY_START_INDEX_METADATA_KEY: &str = "_moa.history.start_index";
 pub(crate) const HISTORY_END_INDEX_METADATA_KEY: &str = "_moa.history.end_index";
 /// Metadata key used by the history stage to expose the latest reusable context snapshot.
@@ -119,10 +125,12 @@ impl HistoryCompiler {
             recent_turn_boundary(&visible_events, self.compaction.recent_turns_verbatim);
         let (older_events, recent_events) = visible_events.split_at(recent_start);
         let file_read_paths = build_full_file_read_path_map(&visible_events);
+        let invocation_keys = build_tool_invocation_key_map(&visible_events, &file_read_paths);
         let snapshot_boundary_seq = older_events.last().map(|record| record.sequence_num);
         let (render_plan, dedup_state) = build_file_read_render_plan(
             &visible_events,
             &file_read_paths,
+            &invocation_keys,
             latest_checkpoint_seq,
             &FileReadDedupState::default(),
             snapshot_boundary_seq,
@@ -415,6 +423,10 @@ impl ContextProcessor for HistoryCompiler {
         metadata.insert(
             "tokens_saved_by_dedup".to_string(),
             json!(compiled.deduplication.tokens_saved),
+        );
+        metadata.insert(
+            "tool_results_demoted".to_string(),
+            json!(compiled.deduplication.demoted_count),
         );
         metadata.insert(
             "history_divergence_cause".to_string(),

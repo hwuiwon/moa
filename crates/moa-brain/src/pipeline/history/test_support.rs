@@ -37,6 +37,7 @@ pub(crate) mod prelude {
     };
     pub(crate) use crate::pipeline::history::{
         FILE_READ_DEDUP_PLACEHOLDER, FILE_READ_UNCHANGED_PLACEHOLDER, HistoryCompiler,
+        SUPERSEDED_TOOL_RESULT_PLACEHOLDER,
     };
 }
 

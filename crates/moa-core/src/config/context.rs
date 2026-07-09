@@ -140,6 +140,10 @@ pub struct ToolBudgetConfig {
     /// Approximate token budget for `file_outline`.
     pub file_outline: u32,
     /// Approximate token budget for tools without a dedicated override, including MCP tools.
+    ///
+    /// Deliberately below `file_read`: MCP and other unclassified tools return
+    /// the most verbose, least-trusted output, and oversized results stay
+    /// recoverable through the claim-check artifact path.
     pub default: u32,
 }
 
@@ -168,7 +172,7 @@ impl Default for ToolBudgetConfig {
             file_search: 4_000,
             memory_search: 3_000,
             file_outline: 2_000,
-            default: 8_000,
+            default: 4_000,
         }
     }
 }
