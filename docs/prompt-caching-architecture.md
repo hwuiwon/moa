@@ -93,9 +93,16 @@ When adding prompt content:
 - Put static instructions in the early pipeline stages.
 - Keep query rewriting, retrieved memory, replayed history, and runtime context
   out of the stable prefix.
-- Preserve the current dynamic order: query rewrite, skills, standing memory
-  digest, graph memory, history, delegation planning, runtime context,
-  compactor.
+- Preserve the current dynamic order: query rewrite, history, delegation
+  planning, skills, standing memory digest, graph memory, runtime context.
+  History compiles first so the per-turn sections insert near the active user
+  turn; anything inserted ahead of replayed history breaks provider
+  prompt-cache reuse of the whole history span. There is no separate
+  compactor — `HistoryCompiler` owns compaction.
+- Keep already-compiled history append-only between checkpoints. The history
+  stage publishes the frozen-history boundary via
+  `STABLE_HISTORY_END_METADATA_KEY`; the Anthropic adapter marks a moving
+  cache breakpoint on the last message under that boundary.
 - Put dynamic session or turn state in `RuntimeContextProcessor`.
 - Keep tool definitions sorted deterministically by tool name.
 - Keep rendered skill metadata deterministic, but do not place selected skills

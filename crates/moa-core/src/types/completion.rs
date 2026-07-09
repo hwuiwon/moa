@@ -16,6 +16,15 @@ use super::{ContextMessage, ModelId};
 /// Request metadata key that asks `LLMGateway` to return without appending a `BrainResponse`.
 pub const DEFER_BRAIN_RESPONSE_METADATA_KEY: &str = "_moa.defer_brain_response";
 
+/// Request metadata key carrying the index one past the last frozen-history
+/// message in `CompletionRequest.messages`.
+///
+/// Messages before this index replay byte-identically on later turns, so
+/// provider adapters may mark a cache breakpoint there; messages at or after
+/// it (per-turn reminders, the active user turn, live tool exchanges) change
+/// every turn.
+pub const STABLE_HISTORY_END_METADATA_KEY: &str = "_moa.cache.stable_history_end";
+
 /// Single tool invocation emitted by a provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolInvocation {

@@ -15,23 +15,37 @@ The implementation lives in `crates/moa-brain/src/pipeline/`.
 
 ## Current Stage Order
 
-The code reports fixed stage numbers through each `ContextProcessor`. With query rewriting and memory digests enabled, the default graph-backed pipeline contains eleven processors:
+The code reports fixed stage numbers through each `ContextProcessor`; execution
+order is the builder's stage list, which intentionally runs history before the
+per-turn dynamic sections. With query rewriting and memory digests enabled, the
+default graph-backed pipeline contains eleven processors, executed in this
+order:
 
-| Stage | Processor | Cache role | Purpose |
+| Execution | Processor | Cache role | Purpose |
 |---|---|---|---|
 | 1 | `IdentityProcessor` | Stable prefix | MOA identity and high-level behavior |
 | 2 | `AgentInstructionProcessor` | Stable prefix | session-pinned configured-agent instructions and procedure affordances |
-| 2 | `InstructionProcessor` | Stable prefix | tenant and contact/session instructions |
-| 3 | `ToolDefinitionProcessor` | Stable prefix | deterministic tool schema list, capped at 30 and filtered by pinned agent tool policy |
-| 4 | `QueryRewriter` | Dynamic metadata | retrieval query preparation and task transition signal |
-| 5 | `SkillInjector` | Dynamic tail | budgeted visible skill manifest ranked within pinned agent skill policy |
-| 6 | `DigestProcessor` | Dynamic tail | standing contact digest for contact sessions |
-| 7 | `MemoryRetriever` | Dynamic tail | tenant knowledge plus admitted contact memory filtered by pinned agent knowledge policy |
-| 8 | `HistoryCompiler` | Dynamic/history tail | replayed events, checkpoints, recent turns, errors, checkpoint compaction |
-| 8 | `DelegationPlanningProcessor` | Dynamic tail | conservative coordinator DAG candidate for high-confidence multi-workstream tasks |
-| 9 | `RuntimeContextProcessor` | Dynamic tail | current date, tenant, working directory, branch, and contact when present |
+| 3 | `InstructionProcessor` | Stable prefix | tenant and contact/session instructions |
+| 4 | `ToolDefinitionProcessor` | Stable prefix | deterministic tool schema list, capped at 30 and filtered by pinned agent tool policy |
+| 5 | `QueryRewriter` | Dynamic metadata | retrieval query preparation and task transition signal |
+| 6 | `HistoryCompiler` | Frozen history | replayed events, checkpoints, recent turns, errors, checkpoint compaction |
+| 7 | `DelegationPlanningProcessor` | Dynamic tail | conservative coordinator DAG candidate for high-confidence multi-workstream tasks |
+| 8 | `SkillInjector` | Dynamic tail | budgeted visible skill manifest ranked within pinned agent skill policy |
+| 9 | `DigestProcessor` | Dynamic tail | standing contact digest for contact sessions |
+| 10 | `MemoryRetriever` | Dynamic tail | tenant knowledge plus admitted contact memory filtered by pinned agent knowledge policy |
+| 11 | `RuntimeContextProcessor` | Dynamic tail | current date, tenant, working directory, branch, and contact when present |
 
-If query rewriting or memory digests are disabled, those processors are omitted; later processors keep their configured stage numbers.
+History runs before the skill manifest, digest, and memory retrieval so those
+per-turn sections insert near the active user turn instead of ahead of replayed
+history. If they preceded history, their per-turn byte churn would break
+provider prompt-cache reuse of the entire history span and invalidate the
+incremental context snapshot on every turn. The history stage publishes the
+frozen-history boundary in request metadata
+(`STABLE_HISTORY_END_METADATA_KEY`); provider adapters may mark a moving cache
+breakpoint there.
+
+If query rewriting or memory digests are disabled, those processors are
+omitted; later processors keep their configured stage numbers.
 
 ## Stable Prefix
 
@@ -222,6 +236,28 @@ These values are intentionally outside the stable prefix.
 ## Compaction
 
 There is no separate stage-10 compactor. Threshold checks, checkpoint writes, snapshot reuse, file-read deduplication, recent-turn preservation, and old-error carry-forward are all coordinated by `HistoryCompiler`. Keeping one owner prevents a later processor from rewriting already-budgeted history, mutating snapshots after history has produced them, or issuing a second summarization pass for the same turn.
+
+## Cache-Stable File-Read Deduplication
+
+Between checkpoints, compiled history is append-only: already-emitted messages
+are never rewritten, so provider prompt caches keep matching the frozen
+prefix. Dedup decisions are deterministic over the event stream:
+
+- A full re-read whose replayed text is byte-identical to the previous
+  content-bearing read of the same path renders as a short pointer on the
+  **new** side; the earlier read keeps its bytes.
+- A changed-content re-read renders in full with a `supersedes_stale_read`
+  marker; the stale older copy is replaced with a placeholder only once a
+  `Checkpoint` event lands after the superseding read — the same compile in
+  which the history head changes and the cache is invalidated anyway.
+- The budget boundary for older history is quantized to user-turn starts, so
+  replay never opens mid-exchange and small per-turn budget variation does not
+  churn the window.
+
+The history stage also reports per-turn divergence attribution
+(`history_divergence_cause`, `history_divergence_index`,
+`tokens_invalidated_downstream`) against the prior context snapshot so cache
+regressions surface as metadata instead of only as provider bills.
 
 ## Observability
 

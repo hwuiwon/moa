@@ -18,8 +18,24 @@ pub(super) fn build_request_body(
     let mut messages = Vec::new();
     let mut in_leading_system_prefix = true;
 
+    // Frozen-history boundary from the context pipeline: source messages
+    // before this index replay byte-identically on later turns, so the last
+    // built message under the boundary gets a moving cache breakpoint.
+    let stable_history_end = request
+        .metadata
+        .get(moa_core::STABLE_HISTORY_END_METADATA_KEY)
+        .and_then(Value::as_u64)
+        .map(|value| value as usize);
+    let mut frozen_history_position = None;
+
     let mut index = 0;
     while index < request.messages.len() {
+        if frozen_history_position.is_none()
+            && stable_history_end.is_some_and(|boundary| index >= boundary)
+            && !messages.is_empty()
+        {
+            frozen_history_position = Some(messages.len() - 1);
+        }
         let message = &request.messages[index];
         if in_leading_system_prefix && message.role == MessageRole::System {
             system_messages.push(anthropic_text_block(message.content.clone()));
@@ -47,6 +63,12 @@ pub(super) fn build_request_body(
 
         messages.push(anthropic_message(message)?);
         index += 1;
+    }
+    if frozen_history_position.is_none()
+        && stable_history_end.is_some_and(|boundary| boundary >= request.messages.len())
+        && !messages.is_empty()
+    {
+        frozen_history_position = Some(messages.len() - 1);
     }
 
     if messages.is_empty() {
@@ -85,6 +107,16 @@ pub(super) fn build_request_body(
     let cache_estimate = CacheTokenEstimate::from_request(request);
     if cache_estimate.should_mark_stable_prefix() {
         mark_stable_prefix_cache_control(&mut system_messages, &mut tools);
+    }
+    if cache_estimate.should_enable_automatic_cache_control()
+        && let Some(position) = frozen_history_position
+        && let Some(message) = messages.get_mut(position)
+    {
+        // Second breakpoint at the frozen-history end: bytes up to here match
+        // the previous turn's request (the pipeline keeps replayed history
+        // append-only between checkpoints), so this span cache-reads across
+        // turns even though everything after it changes per turn.
+        mark_message_cache_control(message);
     }
 
     body.insert("messages".to_string(), Value::Array(messages));
@@ -265,6 +297,33 @@ impl CacheTokenEstimate {
 
     fn should_mark_stable_prefix(&self) -> bool {
         self.tool_tokens + self.system_prefix_tokens >= MIN_CACHEABLE_TOKENS
+    }
+}
+
+/// Attaches an ephemeral cache marker to the last content block of one built
+/// message, normalizing string content into a block array when needed.
+fn mark_message_cache_control(message: &mut Value) {
+    let Some(content) = message.get_mut("content") else {
+        return;
+    };
+    match content {
+        Value::String(text) => {
+            if text.is_empty() {
+                return;
+            }
+            let text = std::mem::take(text);
+            *content = json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": { "type": "ephemeral" },
+            }]);
+        }
+        Value::Array(blocks) => {
+            if let Some(last) = blocks.last_mut().and_then(Value::as_object_mut) {
+                last.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
+            }
+        }
+        _ => {}
     }
 }
 

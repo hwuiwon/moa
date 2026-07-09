@@ -41,6 +41,15 @@ pub struct CacheReport {
     pub stable_prefix_fingerprint: u64,
     /// Stable fingerprint of the full request payload.
     pub full_request_fingerprint: u64,
+    /// Estimated tokens through the frozen-history boundary (tools + system
+    /// prefix + replayed history), when the request carries one.
+    #[serde(default)]
+    pub frozen_history_tokens_estimate: usize,
+    /// Fingerprint of the request through the frozen-history boundary, when
+    /// the request carries one. Equal values across turns mean the provider
+    /// can cache-read the whole replayed-history span.
+    #[serde(default)]
+    pub frozen_history_fingerprint: u64,
     /// Whether the previous request in the same session reused the same stable prefix.
     pub stable_prefix_reused: bool,
     /// Provider-reported prompt input tokens.
@@ -69,6 +78,8 @@ impl Default for CacheReport {
             stable_prefix_bytes: 0,
             stable_prefix_fingerprint: 0,
             full_request_fingerprint: 0,
+            frozen_history_tokens_estimate: 0,
+            frozen_history_fingerprint: 0,
             stable_prefix_reused: false,
             input_tokens: 0,
             cached_input_tokens: 0,
@@ -112,6 +123,13 @@ impl CacheReport {
         } else {
             cached_input_tokens as f64 / stable_total_tokens_estimate as f64
         };
+        let frozen_history_end = frozen_history_end(request);
+        let frozen_history_tokens_estimate = frozen_history_end
+            .map(|end| tool_tokens_estimate + sum_message_tokens(&request.messages[..end]))
+            .unwrap_or(0);
+        let frozen_history_fingerprint = frozen_history_end
+            .map(|end| fingerprint_json(&(&request.tools, &request.messages[..end])))
+            .unwrap_or(0);
 
         Self {
             provider: provider.into(),
@@ -128,6 +146,8 @@ impl CacheReport {
             stable_prefix_fingerprint: stable_prefix_fingerprint(request),
             full_request_fingerprint: full_request_fingerprint(request),
             stable_prefix_reused,
+            frozen_history_tokens_estimate,
+            frozen_history_fingerprint,
             input_tokens,
             cached_input_tokens,
             output_tokens,
@@ -140,6 +160,16 @@ impl CacheReport {
 pub fn stable_prefix_fingerprint(request: &CompletionRequest) -> u64 {
     let stable_message_count = stable_prefix_message_count(request);
     fingerprint_json(&(&request.tools, &request.messages[..stable_message_count]))
+}
+
+/// Returns the frozen-history end index carried in request metadata, clamped
+/// to the message list, when the context pipeline provided one.
+fn frozen_history_end(request: &CompletionRequest) -> Option<usize> {
+    request
+        .metadata
+        .get(super::completion::STABLE_HISTORY_END_METADATA_KEY)
+        .and_then(Value::as_u64)
+        .map(|end| (end as usize).min(request.messages.len()))
 }
 
 /// Returns a stable fingerprint for the full completion request payload.

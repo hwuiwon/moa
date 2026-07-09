@@ -180,6 +180,59 @@ fn completion_request_enables_top_level_cache_control_for_large_prompt() {
 }
 
 #[test]
+fn completion_request_marks_frozen_history_boundary_with_cache_control() {
+    // Pins: when the context pipeline reports a frozen-history boundary, the
+    // last built message under the boundary carries an ephemeral cache marker
+    // so the replayed-history span cache-reads across turns; nothing after
+    // the boundary is marked.
+    let mut metadata = std::collections::HashMap::new();
+    // Frozen region: system prefix + two replayed history messages (indexes
+    // 0..3); index 3 onward (memory reminder + active user turn) is per-turn.
+    metadata.insert(
+        moa_core::STABLE_HISTORY_END_METADATA_KEY.to_string(),
+        json!(3),
+    );
+    let request = CompletionRequest {
+        model: Some(ModelId::new(MODEL_SONNET_4_6)),
+        messages: vec![
+            ContextMessage::system("S".repeat(5_000)),
+            ContextMessage::user("replayed turn one"),
+            ContextMessage::assistant("replayed answer one"),
+            ContextMessage::user("<memory-reminder>fresh retrieval</memory-reminder>"),
+            ContextMessage::user("active turn"),
+        ],
+        tools: Vec::new(),
+        max_output_tokens: Some(512),
+        temperature: None,
+        response_format: None,
+        metadata,
+    };
+
+    let body = build_request_body(
+        &request,
+        &canonical_model_id(MODEL_SONNET_4_6).expect("valid model"),
+        &capabilities_for_model(MODEL_SONNET_4_6).expect("valid capabilities"),
+        false,
+    )
+    .expect("request should build");
+
+    let messages = body["messages"].as_array().expect("messages array");
+    // Built message 1 = "replayed answer one" (last under the boundary).
+    let boundary_blocks = messages[1]["content"]
+        .as_array()
+        .expect("boundary message content normalizes to blocks");
+    assert_eq!(
+        boundary_blocks.last().expect("last block")["cache_control"]["type"],
+        "ephemeral"
+    );
+    assert!(
+        !messages[2].to_string().contains("cache_control")
+            && !messages[3].to_string().contains("cache_control"),
+        "per-turn tail must stay unmarked"
+    );
+}
+
+#[test]
 fn completion_request_omits_top_level_cache_control_for_small_prompt() {
     // Pins: small Anthropic requests avoid sending cache_control when there is no cacheable prefix.
     let request = CompletionRequest {

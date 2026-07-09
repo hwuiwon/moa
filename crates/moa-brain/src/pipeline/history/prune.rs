@@ -1,17 +1,25 @@
-//! Pruning and file-read deduplication for budgeted history replay.
+//! Cache-stable file-read deduplication planning for budgeted history replay.
+//!
+//! History replay never rewrites already-compiled messages between
+//! checkpoints, so provider prompt caches keep matching the frozen prefix.
+//! Deduplication decisions are made once, deterministically, from the event
+//! stream:
+//!
+//! - a full re-read whose replayed text is byte-identical to the previous
+//!   content-bearing read of the same path renders as a short pointer on the
+//!   **new** side (`FILE_READ_UNCHANGED_PLACEHOLDER`), leaving old bytes
+//!   untouched;
+//! - a full re-read with changed content renders in full and marks the older
+//!   read stale; the stale copy is replaced with
+//!   `FILE_READ_DEDUP_PLACEHOLDER` only once a `Checkpoint` event lands after
+//!   the superseding read — the same moment the compiled history head changes
+//!   and the provider cache is invalidated anyway.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use moa_core::{
-    ContextMessage, Event, EventRecord, FileReadDedupState, SnapshotFileReadState, ToolCallId,
-    ToolContent,
+    Event, EventRecord, FileReadDedupState, SequenceNum, SnapshotFileReadState, ToolCallId,
 };
-use moa_security::wrap_untrusted_tool_output;
-
-use moa_core::estimate_text_tokens;
-
-use super::conversion::ToolResultReplayMeta;
-use super::{FILE_READ_DEDUP_PLACEHOLDER, conversion::CompiledRecordMessage};
 
 pub(super) fn build_full_file_read_path_map(
     events: &[&EventRecord],
@@ -47,119 +55,125 @@ pub(super) fn build_full_file_read_path_map(
     file_reads
 }
 
-pub(super) fn latest_full_file_read_results(
-    events: &[&EventRecord],
-    file_read_paths: &HashMap<ToolCallId, String>,
-) -> HashMap<String, ToolCallId> {
-    let mut latest_results = HashMap::new();
+/// Hashes the replayed tool output text for content-identity comparison.
+///
+/// Dedup compares the bytes the model would see again on replay, so hashing
+/// the persisted rendered text (post router budgeting) is exact: two results
+/// with identical replayed text are interchangeable by definition.
+pub(super) fn replayed_content_hash(rendered: &str) -> String {
+    blake3::hash(rendered.as_bytes()).to_hex().to_string()
+}
 
-    for record in events {
-        let Event::ToolResult { tool_id, .. } = &record.event else {
+/// Per-tool-result replay decisions for full file reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct FileReadRenderPlan {
+    /// Results replayed as an unchanged-content pointer (new-side dedup).
+    pub(super) pointer_results: HashSet<ToolCallId>,
+    /// Full results that supersede an earlier stale read of the same path.
+    pub(super) superseding_results: HashSet<ToolCallId>,
+    /// Stale results replayed as a placeholder (checkpoint-gated old-side).
+    pub(super) stale_results: HashSet<ToolCallId>,
+}
+
+/// Builds the render plan and the dedup walk state at the snapshot boundary.
+///
+/// The walk is deterministic over `(seed_state, visible events)` so full and
+/// incremental replay reach identical decisions. `snapshot_boundary_seq` marks
+/// the last event covered by the next snapshot; the returned state reflects the
+/// walk at that point (events past the boundary still influence the plan, not
+/// the persisted state).
+pub(super) fn build_file_read_render_plan(
+    visible_events: &[&EventRecord],
+    file_read_paths: &HashMap<ToolCallId, String>,
+    latest_checkpoint_seq: Option<SequenceNum>,
+    seed_state: &FileReadDedupState,
+    snapshot_boundary_seq: Option<SequenceNum>,
+) -> (FileReadRenderPlan, FileReadDedupState) {
+    let mut plan = FileReadRenderPlan::default();
+    let mut walk: HashMap<String, SnapshotFileReadState> = seed_state.latest_reads.clone();
+    let mut boundary_state: Option<HashMap<String, SnapshotFileReadState>> = None;
+    // Stale candidates: (stale tool id, sequence of the superseding read).
+    let mut stale_candidates: Vec<(ToolCallId, SequenceNum)> = Vec::new();
+
+    for record in visible_events {
+        if boundary_state.is_none()
+            && snapshot_boundary_seq.is_some_and(|boundary| record.sequence_num > boundary)
+        {
+            boundary_state = Some(walk.clone());
+        }
+
+        let Event::ToolResult {
+            tool_id, output, ..
+        } = &record.event
+        else {
             continue;
         };
-
         let Some(path) = file_read_paths.get(tool_id) else {
             continue;
         };
 
-        latest_results.insert(path.clone(), *tool_id);
-    }
-
-    latest_results
-}
-
-pub(super) fn deduplicate_file_reads(
-    messages: &mut [CompiledRecordMessage],
-    latest_file_reads: &HashMap<String, ToolCallId>,
-) -> DeduplicationStats {
-    let mut stats = DeduplicationStats::default();
-
-    for compiled in messages {
-        let Some(tool_result) = compiled.tool_result.as_ref() else {
-            continue;
-        };
-        let Some(latest_tool_id) = latest_file_reads.get(&tool_result.file_read_path) else {
-            continue;
-        };
-        if tool_result.tool_id == *latest_tool_id {
-            continue;
+        let content_hash = replayed_content_hash(&output.to_text());
+        match walk.get(path) {
+            Some(previous) if previous.content_hash == content_hash => {
+                plan.pointer_results.insert(*tool_id);
+            }
+            Some(previous) => {
+                plan.superseding_results.insert(*tool_id);
+                stale_candidates.push((previous.tool_id, record.sequence_num));
+                walk.insert(
+                    path.clone(),
+                    SnapshotFileReadState {
+                        tool_id: *tool_id,
+                        content_hash,
+                    },
+                );
+            }
+            None => {
+                walk.insert(
+                    path.clone(),
+                    SnapshotFileReadState {
+                        tool_id: *tool_id,
+                        content_hash,
+                    },
+                );
+            }
         }
-
-        let previous_tokens = estimate_text_tokens(&compiled.message.content);
-        compiled.message = placeholder_tool_result_message(tool_result);
-        let placeholder_tokens = estimate_text_tokens(&compiled.message.content);
-        stats.deduplicated_count += 1;
-        stats.tokens_saved += previous_tokens.saturating_sub(placeholder_tokens);
     }
 
-    stats
-}
-
-pub(super) fn build_file_read_dedup_state(
-    messages: &[CompiledRecordMessage],
-) -> FileReadDedupState {
-    let mut latest_reads = HashMap::new();
-
-    for (index, compiled) in messages.iter().enumerate() {
-        let Some(tool_result) = compiled.tool_result.as_ref() else {
-            continue;
-        };
-        if compiled
-            .message
-            .content
-            .contains(FILE_READ_DEDUP_PLACEHOLDER)
-        {
-            continue;
+    for (stale_tool_id, superseding_seq) in stale_candidates {
+        if latest_checkpoint_seq.is_some_and(|checkpoint_seq| checkpoint_seq > superseding_seq) {
+            plan.stale_results.insert(stale_tool_id);
         }
-
-        latest_reads.insert(
-            tool_result.file_read_path.clone(),
-            SnapshotFileReadState {
-                message_index: index,
-                tool_use_id: tool_result.tool_use_id.clone(),
-                tool_id: tool_result.tool_id,
-                success: tool_result.success,
-            },
-        );
     }
 
-    FileReadDedupState { latest_reads }
-}
+    let boundary_state = match (boundary_state, snapshot_boundary_seq) {
+        (Some(state), _) => state,
+        // No visible event lay past the boundary: the walk itself is the state.
+        (None, Some(_)) => walk,
+        // No snapshot boundary requested (no older events survive).
+        (None, None) => seed_state.latest_reads.clone(),
+    };
 
-pub(super) fn placeholder_tool_result_message(
-    tool_result: &ToolResultReplayMeta,
-) -> ContextMessage {
-    let placeholder = FILE_READ_DEDUP_PLACEHOLDER.to_string();
-
-    ContextMessage::tool_result(
-        tool_result.tool_use_id.clone(),
-        format!(
-            "<tool_result id=\"{}\" success=\"{}\">\n{}\n</tool_result>",
-            tool_result.tool_id,
-            tool_result.success,
-            wrap_untrusted_tool_output(&placeholder)
-        ),
-        Some(vec![ToolContent::Text { text: placeholder }]),
+    (
+        plan,
+        FileReadDedupState {
+            latest_reads: boundary_state,
+        },
     )
 }
 
-pub(super) fn placeholder_tool_result_from_snapshot(
-    file_read_path: &str,
-    tool_result: &SnapshotFileReadState,
-) -> ContextMessage {
-    let replay_meta = ToolResultReplayMeta {
-        tool_use_id: tool_result.tool_use_id.clone(),
-        tool_id: tool_result.tool_id,
-        success: tool_result.success,
-        file_read_path: file_read_path.to_string(),
-    };
-    placeholder_tool_result_message(&replay_meta)
-}
-
+/// Token savings recorded when render-plan placeholders replace full content.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct DeduplicationStats {
     pub(super) deduplicated_count: usize,
     pub(super) tokens_saved: usize,
+}
+
+impl DeduplicationStats {
+    pub(super) fn absorb(&mut self, other: DeduplicationStats) {
+        self.deduplicated_count += other.deduplicated_count;
+        self.tokens_saved += other.tokens_saved;
+    }
 }
 
 #[cfg(test)]
@@ -167,10 +181,88 @@ mod tests {
     use crate::pipeline::history::test_support::prelude::*;
 
     #[test]
-    fn history_compiler_deduplicates_repeated_full_file_reads() {
+    fn history_compiler_pointers_identical_full_file_rereads_on_the_new_side() {
+        // Pins: a byte-identical full re-read replays as a pointer on the NEW
+        // side while the earlier content-bearing read keeps its bytes, so the
+        // frozen history prefix stays cache-stable.
         let session = session();
         let foo_first = ToolCallId::new();
-        let bar = ToolCallId::new();
+        let foo_second = ToolCallId::new();
+        let content = (1..=80)
+            .map(|line| format!("fn same_version_{line}() {{}}\n"))
+            .collect::<String>();
+        let events = vec![
+            event_record(
+                &session.id,
+                0,
+                Event::UserMessage {
+                    text: "first read".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            file_read_tool_call(
+                &session.id,
+                1,
+                foo_first,
+                "toolu_foo_first",
+                json!({ "path": "src/foo.rs" }),
+            ),
+            file_read_tool_result(&session.id, 2, foo_first, "toolu_foo_first", &content),
+            event_record(
+                &session.id,
+                3,
+                Event::UserMessage {
+                    text: "second read".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            file_read_tool_call(
+                &session.id,
+                4,
+                foo_second,
+                "toolu_foo_second",
+                json!({ "path": "src/foo.rs" }),
+            ),
+            file_read_tool_result(&session.id, 5, foo_second, "toolu_foo_second", &content),
+        ];
+        let compiler = compiler_with_recent_turns(&session, &events, 0);
+
+        let compiled = compiler
+            .compile_messages_with_stats(&events, 100_000)
+            .expect("history should compile");
+
+        let first = compiled
+            .messages
+            .iter()
+            .find(|message| message.tool_use_id.as_deref() == Some("toolu_foo_first"))
+            .expect("first read present");
+        let second = compiled
+            .messages
+            .iter()
+            .find(|message| message.tool_use_id.as_deref() == Some("toolu_foo_second"))
+            .expect("second read present");
+
+        assert!(
+            first.content.contains("same_version_80"),
+            "content-bearing first read keeps its bytes"
+        );
+        assert!(
+            second.content.contains(FILE_READ_UNCHANGED_PLACEHOLDER),
+            "identical re-read replays as a pointer: {}",
+            second.content
+        );
+        assert_eq!(compiled.deduplication.deduplicated_count, 1);
+        assert!(compiled.deduplication.tokens_saved > 0);
+    }
+
+    #[test]
+    fn history_compiler_defers_stale_read_rewrite_until_a_checkpoint_lands() {
+        // Pins: a changed-content re-read never rewrites the older read's
+        // bytes between checkpoints; the older read is replaced with the stale
+        // placeholder only once a Checkpoint event lands after the superseding
+        // read.
+        let session = session();
+        let foo_first = ToolCallId::new();
         let foo_second = ToolCallId::new();
         let first_read = (1..=80)
             .map(|line| format!("fn first_version_{line}() {{}}\n"))
@@ -178,7 +270,7 @@ mod tests {
         let second_read = (1..=80)
             .map(|line| format!("fn latest_version_{line}() {{}}\n"))
             .collect::<String>();
-        let events = vec![
+        let mut events = vec![
             event_record(
                 &session.id,
                 0,
@@ -199,162 +291,76 @@ mod tests {
                 &session.id,
                 3,
                 Event::UserMessage {
-                    text: "bar read".to_string(),
+                    text: "second read".to_string(),
                     attachments: Vec::new(),
                 },
             ),
             file_read_tool_call(
                 &session.id,
                 4,
-                bar,
-                "toolu_bar",
-                json!({ "path": "src/bar.rs" }),
-            ),
-            file_read_tool_result(
-                &session.id,
-                5,
-                bar,
-                "toolu_bar",
-                "fn bar() {\n    keep_me();\n}",
-            ),
-            event_record(
-                &session.id,
-                6,
-                Event::UserMessage {
-                    text: "second foo read".to_string(),
-                    attachments: Vec::new(),
-                },
-            ),
-            file_read_tool_call(
-                &session.id,
-                7,
                 foo_second,
                 "toolu_foo_second",
                 json!({ "path": "src/foo.rs" }),
             ),
-            file_read_tool_result(&session.id, 8, foo_second, "toolu_foo_second", &second_read),
+            file_read_tool_result(&session.id, 5, foo_second, "toolu_foo_second", &second_read),
         ];
         let compiler = compiler_with_recent_turns(&session, &events, 0);
 
-        let compiled = compiler
+        let before_checkpoint = compiler
             .compile_messages_with_stats(&events, 100_000)
             .expect("history should compile");
-
-        let first_foo_result = compiled
+        let first_before = before_checkpoint
             .messages
             .iter()
             .find(|message| message.tool_use_id.as_deref() == Some("toolu_foo_first"))
-            .expect("first foo result present");
-        let second_foo_result = compiled
+            .expect("first read present");
+        let second_before = before_checkpoint
             .messages
             .iter()
             .find(|message| message.tool_use_id.as_deref() == Some("toolu_foo_second"))
-            .expect("second foo result present");
-        let bar_result = compiled
+            .expect("second read present");
+        assert!(
+            first_before.content.contains("first_version_80"),
+            "older read keeps its bytes before a checkpoint"
+        );
+        assert!(
+            second_before.content.contains("latest_version_80"),
+            "changed re-read replays in full"
+        );
+        assert!(
+            second_before.content.contains("supersedes_stale_read"),
+            "changed re-read carries the supersession marker: {}",
+            second_before.content
+        );
+
+        // A checkpoint that summarizes only the first user message leaves both
+        // reads visible while opening the old-side rewrite gate.
+        events.push(event_record(
+            &session.id,
+            6,
+            Event::Checkpoint {
+                summary: "summary".to_string(),
+                events_summarized: 1,
+                token_count: 2,
+                model: ModelId::new("claude-sonnet-4-6"),
+                model_tier: moa_core::ModelTier::Main,
+                input_tokens: 10,
+                output_tokens: 2,
+                cost_cents: 0,
+            },
+        ));
+        let after_checkpoint = compiler
+            .compile_messages_with_stats(&events, 100_000)
+            .expect("history should compile after checkpoint");
+        let first_after = after_checkpoint
             .messages
             .iter()
-            .find(|message| message.tool_use_id.as_deref() == Some("toolu_bar"))
-            .expect("bar result present");
-
-        assert_eq!(
-            first_foo_result.content_blocks,
-            Some(vec![ToolContent::Text {
-                text: FILE_READ_DEDUP_PLACEHOLDER.to_string(),
-            }])
-        );
-        assert_eq!(
-            first_foo_result.tool_use_id.as_deref(),
-            Some("toolu_foo_first")
-        );
-        assert!(second_foo_result.content.contains("latest_version_80"));
-        assert!(bar_result.content.contains("keep_me"));
-        assert_eq!(compiled.deduplication.deduplicated_count, 1);
-        assert!(compiled.deduplication.tokens_saved > 0);
-    }
-
-    #[test]
-    fn history_compiler_does_not_deduplicate_recent_turn_file_reads() {
-        let session = session();
-        let foo_first = ToolCallId::new();
-        let foo_second = ToolCallId::new();
-        let events = vec![
-            event_record(
-                &session.id,
-                0,
-                Event::UserMessage {
-                    text: "setup".to_string(),
-                    attachments: Vec::new(),
-                },
-            ),
-            event_record(
-                &session.id,
-                1,
-                Event::UserMessage {
-                    text: "first foo read".to_string(),
-                    attachments: Vec::new(),
-                },
-            ),
-            file_read_tool_call(
-                &session.id,
-                2,
-                foo_first,
-                "toolu_foo_first",
-                json!({ "path": "src/foo.rs" }),
-            ),
-            file_read_tool_result(
-                &session.id,
-                3,
-                foo_first,
-                "toolu_foo_first",
-                "fn foo() {\n    first_recent();\n}",
-            ),
-            event_record(
-                &session.id,
-                4,
-                Event::UserMessage {
-                    text: "second foo read".to_string(),
-                    attachments: Vec::new(),
-                },
-            ),
-            file_read_tool_call(
-                &session.id,
-                5,
-                foo_second,
-                "toolu_foo_second",
-                json!({ "path": "src/foo.rs" }),
-            ),
-            file_read_tool_result(
-                &session.id,
-                6,
-                foo_second,
-                "toolu_foo_second",
-                "fn foo() {\n    second_recent();\n}",
-            ),
-        ];
-        let compiler = compiler_with_recent_turns(&session, &events, 2);
-
-        let compiled = compiler
-            .compile_messages_with_stats(&events, 100_000)
-            .expect("history should compile");
-
-        assert_eq!(compiled.deduplication.deduplicated_count, 0);
+            .find(|message| message.tool_use_id.as_deref() == Some("toolu_foo_first"))
+            .expect("first read still present");
         assert!(
-            compiled
-                .messages
-                .iter()
-                .any(|message| message.content.contains("first_recent"))
-        );
-        assert!(
-            compiled
-                .messages
-                .iter()
-                .any(|message| message.content.contains("second_recent"))
-        );
-        assert!(
-            compiled
-                .messages
-                .iter()
-                .all(|message| !message.content.contains(FILE_READ_DEDUP_PLACEHOLDER))
+            first_after.content.contains(FILE_READ_DEDUP_PLACEHOLDER),
+            "stale read collapses once a checkpoint lands: {}",
+            first_after.content
         );
     }
 
@@ -430,23 +436,23 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn history_processor_reports_file_read_deduplication_metadata() {
+    #[test]
+    fn recompiling_after_identical_reread_keeps_frozen_prefix_byte_identical() {
+        // Pins: compiling turn N and then turn N+1 (which re-reads a file with
+        // identical content) leaves every turn-N message byte-identical, so
+        // the provider prompt cache keeps matching the frozen prefix.
         let session = session();
         let foo_first = ToolCallId::new();
         let foo_second = ToolCallId::new();
-        let first_read = (1..=80)
-            .map(|line| format!("fn first_version_{line}() {{}}\n"))
+        let content = (1..=40)
+            .map(|line| format!("fn stable_{line}() {{}}\n"))
             .collect::<String>();
-        let second_read = (1..=80)
-            .map(|line| format!("fn latest_version_{line}() {{}}\n"))
-            .collect::<String>();
-        let events = vec![
+        let turn_one = vec![
             event_record(
                 &session.id,
                 0,
                 Event::UserMessage {
-                    text: "first foo read".to_string(),
+                    text: "read foo".to_string(),
                     attachments: Vec::new(),
                 },
             ),
@@ -454,15 +460,18 @@ mod tests {
                 &session.id,
                 1,
                 foo_first,
-                "toolu_foo_first",
+                "toolu_first",
                 json!({ "path": "src/foo.rs" }),
             ),
-            file_read_tool_result(&session.id, 2, foo_first, "toolu_foo_first", &first_read),
+            file_read_tool_result(&session.id, 2, foo_first, "toolu_first", &content),
+        ];
+        let mut both_turns = turn_one.clone();
+        both_turns.extend([
             event_record(
                 &session.id,
                 3,
                 Event::UserMessage {
-                    text: "second foo read".to_string(),
+                    text: "read foo again".to_string(),
                     attachments: Vec::new(),
                 },
             ),
@@ -470,34 +479,24 @@ mod tests {
                 &session.id,
                 4,
                 foo_second,
-                "toolu_foo_second",
+                "toolu_second",
                 json!({ "path": "src/foo.rs" }),
             ),
-            file_read_tool_result(&session.id, 5, foo_second, "toolu_foo_second", &second_read),
-        ];
-        let mut ctx = WorkingContext::new(&session, capabilities());
-        let compiler = compiler_with_recent_turns(&session, &events, 0);
+            file_read_tool_result(&session.id, 5, foo_second, "toolu_second", &content),
+        ]);
+        let compiler = compiler_with_recent_turns(&session, &both_turns, 0);
 
-        let output = compiler
-            .process(&mut ctx)
-            .await
-            .expect("history should process");
+        let first_compile = compiler
+            .compile_messages_with_stats(&turn_one, 100_000)
+            .expect("turn one should compile");
+        let second_compile = compiler
+            .compile_messages_with_stats(&both_turns, 100_000)
+            .expect("both turns should compile");
 
         assert_eq!(
-            output.metadata.get("file_reads_deduplicated"),
-            Some(&json!(1))
-        );
-        assert!(
-            output
-                .metadata
-                .get("tokens_saved_by_dedup")
-                .and_then(serde_json::Value::as_u64)
-                .is_some_and(|value| value > 0)
-        );
-        assert!(
-            ctx.messages
-                .iter()
-                .any(|message| message.content.contains(FILE_READ_DEDUP_PLACEHOLDER))
+            &second_compile.messages[..first_compile.messages.len()],
+            &first_compile.messages[..],
+            "turn-one messages must stay byte-identical after the re-read"
         );
     }
 }

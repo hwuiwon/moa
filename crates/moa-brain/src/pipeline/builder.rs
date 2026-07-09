@@ -176,6 +176,13 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
     if let Some(query_rewriter) = query_rewriter {
         stages.push(query_rewriter);
     }
+    // History compiles before the per-turn dynamic sections (skill manifest,
+    // digest, retrieved memory) so those sections insert near the active user
+    // turn instead of landing ahead of history, where their per-turn byte
+    // churn would break provider prompt-cache reuse of the entire replayed
+    // history and invalidate the incremental context snapshot every turn.
+    stages.push(history);
+    stages.push(Box::new(DelegationPlanningProcessor::new()) as Box<dyn ContextProcessor>);
     let skill_injector = shared_skill_injector.unwrap_or_else(|| {
         let injector = SkillInjector::new(graph_pool.clone())
             .with_session_store(session_store.clone())
@@ -196,8 +203,6 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
     }
     stages.extend([
         graph_memory,
-        history,
-        Box::new(DelegationPlanningProcessor::new()) as Box<dyn ContextProcessor>,
         Box::new(RuntimeContextProcessor::default()) as Box<dyn ContextProcessor>,
     ]);
 

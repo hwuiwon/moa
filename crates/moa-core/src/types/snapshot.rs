@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::{ContextMessage, SequenceNum, SessionId, ToolCallId};
 
 /// Current serialized context snapshot format version.
-pub const CONTEXT_SNAPSHOT_FORMAT_VERSION: u32 = 3;
+pub const CONTEXT_SNAPSHOT_FORMAT_VERSION: u32 = 4;
 
 /// Serializable cache of compiled history state for one session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,19 +41,22 @@ impl ContextSnapshot {
 /// File-read deduplication state preserved in a snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileReadDedupState {
-    /// Latest full-file read result currently present in the compiled history, keyed by path.
+    /// Latest content-bearing full-file read per path, as of the snapshot's
+    /// last sequence number, so incremental replay can extend the dedup walk
+    /// without reloading pre-snapshot events.
     pub latest_reads: HashMap<String, SnapshotFileReadState>,
 }
 
-/// Metadata needed to replace an older full-file read with a placeholder.
+/// Identity of the latest content-bearing full-file read for one path.
+///
+/// History replay never rewrites already-snapshotted messages between
+/// checkpoints; a later identical re-read is replaced on the *new* side with a
+/// pointer, so this state only needs to identify the content-bearing read and
+/// its replayed-text hash for identity comparison.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotFileReadState {
-    /// Index of the full-file read tool-result message within `ContextSnapshot.messages`.
-    pub message_index: usize,
-    /// Provider-visible tool use identifier used to keep tool history structurally valid.
-    pub tool_use_id: String,
-    /// Internal tool call identifier for the file-read result.
+    /// Internal tool call identifier for the content-bearing file-read result.
     pub tool_id: ToolCallId,
-    /// Whether the original tool result was successful.
-    pub success: bool,
+    /// BLAKE3 hex digest of the replayed tool output text.
+    pub content_hash: String,
 }

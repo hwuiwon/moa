@@ -878,6 +878,13 @@ fn live_cache_config(provider: &str, model: &str, repo_root: &Path) -> MoaConfig
     config.general.workspace_instructions =
         Some("Cache audit static padding. Keep this prefix identical across turns.\n".repeat(220));
     config.local.sandbox_dir = repo_root.display().to_string();
+    // This audit drives real read-only tool turns against the repo checkout,
+    // which requires the development-only local hand provider.
+    config
+        .cloud
+        .hands
+        .get_or_insert_with(Default::default)
+        .allow_local_provider = true;
     config
 }
 

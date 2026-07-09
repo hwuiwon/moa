@@ -6,8 +6,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_core::{
     CONTEXT_SNAPSHOT_FORMAT_VERSION, CompactionConfig, ContextMessage, ContextProcessor,
-    ContextSnapshot, ContextSnapshotConfig, EventRange, EventRecord, LLMProvider, ProcessorOutput,
-    Result, SessionStore, ToolOutputConfig, WorkingContext,
+    ContextSnapshot, ContextSnapshotConfig, Event, EventRange, EventRecord, FileReadDedupState,
+    LLMProvider, ProcessorOutput, Result, SequenceNum, SessionStore, ToolOutputConfig,
+    WorkingContext,
 };
 use serde_json::json;
 
@@ -15,7 +16,7 @@ use crate::compaction::{
     latest_checkpoint_state, non_checkpoint_events, recent_turn_boundary, unsummarized_events,
 };
 
-use moa_core::estimate_text_tokens;
+use moa_core::{estimate_text_tokens, sum_message_tokens};
 
 mod budgeting;
 mod checkpoint;
@@ -29,17 +30,14 @@ mod test_support;
 
 use budgeting::keep_budgeted_older_messages;
 use checkpoint::{SnapshotHistory, build_snapshot_state, snapshot_stage_inputs_hash};
-use conversion::{
-    CompiledRecordMessage, answered_worker_inputs, child_report_tool_ids, compile_records,
-};
+use conversion::{answered_worker_inputs, child_report_tool_ids, compile_records};
 pub(crate) use errors::preserved_error_messages;
-use prune::{
-    DeduplicationStats, build_full_file_read_path_map, deduplicate_file_reads,
-    latest_full_file_read_results,
-};
+use prune::{DeduplicationStats, build_file_read_render_plan, build_full_file_read_path_map};
 
 pub(crate) const FILE_READ_DEDUP_PLACEHOLDER: &str =
     "[file previously read — see latest version below]";
+pub(crate) const FILE_READ_UNCHANGED_PLACEHOLDER: &str = "[file content unchanged since the \
+     earlier read of this path above; re-read the file if that copy is no longer visible]";
 pub(crate) const HISTORY_START_INDEX_METADATA_KEY: &str = "_moa.history.start_index";
 pub(crate) const HISTORY_END_INDEX_METADATA_KEY: &str = "_moa.history.end_index";
 /// Metadata key used by the history stage to expose the latest reusable context snapshot.
@@ -114,15 +112,23 @@ impl HistoryCompiler {
         remaining_budget: usize,
     ) -> Result<CompiledHistory> {
         let checkpoint = latest_checkpoint_state(events);
+        let latest_checkpoint_seq = latest_checkpoint_sequence(events);
         let all_non_checkpoint = non_checkpoint_events(events);
         let visible_events = unsummarized_events(events);
         let recent_start =
             recent_turn_boundary(&visible_events, self.compaction.recent_turns_verbatim);
         let (older_events, recent_events) = visible_events.split_at(recent_start);
         let file_read_paths = build_full_file_read_path_map(&visible_events);
-        let latest_file_reads = latest_full_file_read_results(&visible_events, &file_read_paths);
+        let snapshot_boundary_seq = older_events.last().map(|record| record.sequence_num);
+        let (render_plan, dedup_state) = build_file_read_render_plan(
+            &visible_events,
+            &file_read_paths,
+            latest_checkpoint_seq,
+            &FileReadDedupState::default(),
+            snapshot_boundary_seq,
+        );
 
-        let mut stable_prefix = Vec::new();
+        let mut stable_prefix: Vec<ContextMessage> = Vec::new();
         let mut stable_prefix_tokens = 0usize;
 
         if self.compaction.preserve_errors {
@@ -132,7 +138,7 @@ impl HistoryCompiler {
                 .unwrap_or(0);
             for message in preserved_error_messages(&all_non_checkpoint[..summarized_end]) {
                 stable_prefix_tokens += estimate_text_tokens(&message.content);
-                stable_prefix.push(CompiledRecordMessage::plain(message));
+                stable_prefix.push(message);
             }
         }
 
@@ -148,7 +154,7 @@ impl HistoryCompiler {
                 checkpoint.events_summarized, checkpoint.summary
             ));
             stable_prefix_tokens += estimate_text_tokens(&checkpoint_message.content);
-            stable_prefix.push(CompiledRecordMessage::plain(checkpoint_message));
+            stable_prefix.push(checkpoint_message);
         }
 
         // Compute child-report tool ids and answered worker-input requests over the FULL visible
@@ -157,25 +163,23 @@ impl HistoryCompiler {
         // per-slice would emit a dangling provider `tool_result` with no matching `tool_use`.
         let answered_input_requests = answered_worker_inputs(&visible_events);
         let child_report_ids = child_report_tool_ids(&visible_events);
-        let recent_messages = compile_records(
+        let (recent_messages, recent_stats) = compile_records(
             recent_events,
             &self.tool_output,
-            &file_read_paths,
+            &render_plan,
             &answered_input_requests,
             &child_report_ids,
         )?;
-        let mut older_messages = compile_records(
+        let (older_messages, older_stats) = compile_records(
             older_events,
             &self.tool_output,
-            &file_read_paths,
+            &render_plan,
             &answered_input_requests,
             &child_report_ids,
         )?;
-        let deduplication = deduplicate_file_reads(&mut older_messages, &latest_file_reads);
-        let recent_tokens = recent_messages
-            .iter()
-            .map(|compiled| estimate_text_tokens(&compiled.message.content))
-            .sum::<usize>();
+        let mut deduplication = older_stats;
+        deduplication.absorb(recent_stats);
+        let recent_tokens = sum_message_tokens(&recent_messages);
         let (kept_older, tokens_used) = keep_budgeted_older_messages(
             stable_prefix_tokens,
             &older_messages,
@@ -184,18 +188,18 @@ impl HistoryCompiler {
             remaining_budget,
         );
 
-        let mut snapshot_records = stable_prefix.clone();
-        snapshot_records.extend(kept_older.iter().cloned());
-        let snapshot = older_events
-            .last()
-            .map(|record| build_snapshot_state(&snapshot_records, record.sequence_num));
+        let mut snapshot_messages = stable_prefix;
+        snapshot_messages.extend(kept_older);
+        let snapshot = older_events.last().map(|record| {
+            build_snapshot_state(
+                snapshot_messages.clone(),
+                record.sequence_num,
+                dedup_state.clone(),
+            )
+        });
 
-        let mut final_records = snapshot_records.clone();
-        final_records.extend(recent_messages);
-        let messages = final_records
-            .iter()
-            .map(|compiled| compiled.message.clone())
-            .collect();
+        let mut messages = snapshot_messages;
+        messages.extend(recent_messages);
 
         Ok(CompiledHistory {
             messages,
@@ -204,6 +208,81 @@ impl HistoryCompiler {
             snapshot,
             compaction: Default::default(),
         })
+    }
+}
+
+/// Returns the sequence number of the newest `Checkpoint` event in the log.
+fn latest_checkpoint_sequence(events: &[EventRecord]) -> Option<SequenceNum> {
+    events.iter().rev().find_map(|record| {
+        matches!(record.event, Event::Checkpoint { .. }).then_some(record.sequence_num)
+    })
+}
+
+/// Where and why this turn's compiled history diverged from the prior turn's.
+///
+/// The prior context snapshot covers the stable-prefix and kept-older region
+/// only, so byte churn inside the recent window is not measured here; the
+/// snapshot region is exactly the span provider prompt caches can reuse.
+struct HistoryDivergenceReport {
+    cause: &'static str,
+    first_divergent_index: Option<usize>,
+    /// Estimated tokens of previously compiled history past the divergence
+    /// point — the span a provider prompt cache can no longer serve.
+    tokens_invalidated_downstream: usize,
+}
+
+fn divergence_report(
+    prior: Option<&ContextSnapshot>,
+    current: &[ContextMessage],
+    checkpoint_emitted: bool,
+) -> HistoryDivergenceReport {
+    let Some(prior) = prior else {
+        return HistoryDivergenceReport {
+            cause: "no_prior_snapshot",
+            first_divergent_index: None,
+            tokens_invalidated_downstream: 0,
+        };
+    };
+
+    let shared = prior
+        .messages
+        .iter()
+        .zip(current.iter())
+        .take_while(|(previous, next)| previous == next)
+        .count();
+    if shared == prior.messages.len() {
+        return HistoryDivergenceReport {
+            cause: "append_only",
+            first_divergent_index: None,
+            tokens_invalidated_downstream: 0,
+        };
+    }
+
+    let cause = if checkpoint_emitted {
+        "checkpoint"
+    } else if current.get(shared).is_some_and(|message| {
+        message.content.contains(FILE_READ_DEDUP_PLACEHOLDER)
+            || message.content.contains(FILE_READ_UNCHANGED_PLACEHOLDER)
+    }) {
+        "dedup_rewrite"
+    } else if current.get(shared).is_some_and(|next| {
+        // A head drop removes prior messages, so the current message at the
+        // divergence point reappears further along the prior sequence.
+        prior.messages[shared..]
+            .iter()
+            .skip(1)
+            .take(16)
+            .any(|previous| previous == next)
+    }) {
+        "budget_head_drop"
+    } else {
+        "unknown"
+    };
+
+    HistoryDivergenceReport {
+        cause,
+        first_divergent_index: Some(shared),
+        tokens_invalidated_downstream: sum_message_tokens(&prior.messages[shared..]),
     }
 }
 
@@ -222,6 +301,9 @@ impl ContextProcessor for HistoryCompiler {
         let remaining_budget = ctx.token_budget.saturating_sub(ctx.token_count);
         let stage_inputs_hash = snapshot_stage_inputs_hash(ctx);
         let gate_open = self.compaction_gate_open(ctx).await?;
+        // Loaded unconditionally: gate-open turns full-replay, but the prior
+        // snapshot is still the comparison base for divergence attribution.
+        let snapshot_load = self.load_snapshot(ctx, stage_inputs_hash).await?;
         let mut loaded_snapshot = None;
 
         let (compiled, delete_snapshot_if_empty) = if gate_open {
@@ -233,9 +315,8 @@ impl ContextProcessor for HistoryCompiler {
                 self.snapshot_config.enabled,
             )
         } else {
-            let snapshot_load = self.load_snapshot(ctx, stage_inputs_hash).await?;
             let stored_snapshot_present = snapshot_load.stored_snapshot_present;
-            if let Some(snapshot) = snapshot_load.snapshot {
+            if let Some(snapshot) = snapshot_load.snapshot.clone() {
                 loaded_snapshot = Some(snapshot.clone());
                 // Fast path: the gate proved compaction cannot fire, so replay only
                 // the bounded delta on top of the reusable snapshot — no full read.
@@ -267,6 +348,11 @@ impl ContextProcessor for HistoryCompiler {
                 )
             }
         };
+        let divergence = divergence_report(
+            snapshot_load.snapshot.as_ref(),
+            &compiled.messages,
+            compiled.compaction.checkpoint_emitted,
+        );
 
         if compiled.deduplication.deduplicated_count > 0 {
             tracing::info!(
@@ -285,6 +371,16 @@ impl ContextProcessor for HistoryCompiler {
         ctx.extend_messages(messages);
         ctx.insert_metadata(HISTORY_START_INDEX_METADATA_KEY, json!(history_start_index));
         ctx.insert_metadata(HISTORY_END_INDEX_METADATA_KEY, json!(ctx.messages.len()));
+        // Frozen-history boundary for provider cache breakpoints: everything
+        // before the trailing user run replays byte-identically next turn.
+        // Later stages insert per-turn sections at (not before) this index,
+        // so the boundary stays valid in the final request message order.
+        ctx.insert_metadata(
+            moa_core::STABLE_HISTORY_END_METADATA_KEY,
+            json!(crate::pipeline::trailing_user_insertion_index(
+                &ctx.messages
+            )),
+        );
         if self.snapshot_config.enabled {
             if let Some(snapshot) = compiled.snapshot.as_ref() {
                 let next_snapshot = ContextSnapshot {
@@ -319,6 +415,17 @@ impl ContextProcessor for HistoryCompiler {
         metadata.insert(
             "tokens_saved_by_dedup".to_string(),
             json!(compiled.deduplication.tokens_saved),
+        );
+        metadata.insert(
+            "history_divergence_cause".to_string(),
+            json!(divergence.cause),
+        );
+        if let Some(index) = divergence.first_divergent_index {
+            metadata.insert("history_divergence_index".to_string(), json!(index));
+        }
+        metadata.insert(
+            "tokens_invalidated_downstream".to_string(),
+            json!(divergence.tokens_invalidated_downstream),
         );
         metadata.insert(
             "checkpoint_emitted".to_string(),
@@ -408,6 +515,100 @@ mod tests {
         assert_eq!(ctx.messages.len(), 1);
         assert_eq!(ctx.messages[0].content, "Hello");
         assert!(output.tokens_added > 0);
+    }
+
+    #[tokio::test]
+    async fn history_processor_reports_append_only_divergence_against_prior_snapshot() {
+        // Pins: with a prior snapshot whose messages are a byte-prefix of this
+        // turn's compiled history, the divergence report is append_only with
+        // no invalidated downstream tokens — the signal that provider prompt
+        // caches keep matching.
+        let session = session();
+        let events = vec![
+            event_record(
+                &session.id,
+                0,
+                Event::UserMessage {
+                    text: "turn one".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            event_record(
+                &session.id,
+                1,
+                Event::BrainResponse {
+                    text: "answer one".to_string(),
+                    thought_signature: None,
+                    model: ModelId::new("claude-sonnet-4-6"),
+                    model_tier: moa_core::ModelTier::Main,
+                    input_tokens_uncached: 1,
+                    input_tokens_cache_write: 0,
+                    input_tokens_cache_read: 0,
+                    output_tokens: 1,
+                    cost_cents: 0,
+                    duration_ms: 1,
+                },
+            ),
+            event_record(
+                &session.id,
+                2,
+                Event::UserMessage {
+                    text: "turn two".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            event_record(
+                &session.id,
+                3,
+                Event::BrainResponse {
+                    text: "answer two".to_string(),
+                    thought_signature: None,
+                    model: ModelId::new("claude-sonnet-4-6"),
+                    model_tier: moa_core::ModelTier::Main,
+                    input_tokens_uncached: 1,
+                    input_tokens_cache_write: 0,
+                    input_tokens_cache_read: 0,
+                    output_tokens: 1,
+                    cost_cents: 0,
+                    duration_ms: 1,
+                },
+            ),
+            event_record(
+                &session.id,
+                4,
+                Event::UserMessage {
+                    text: "turn three".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+        ];
+        let store = Arc::new(MockSessionStore::new(session.clone(), events.clone()));
+        let compiler = compiler_with_recent_turns(&session, &events, 1);
+        let mut ctx = WorkingContext::new(&session, capabilities());
+        let prefix = compiler
+            .compile_messages_with_stats(&events[..4], 100_000)
+            .expect("prefix should compile");
+        let mut snapshot = compiled_snapshot(&session, &prefix).expect("prefix yields snapshot");
+        snapshot.stage_inputs_hash = snapshot_stage_inputs_hash(&ctx);
+        store
+            .put_snapshot(session.id, snapshot)
+            .await
+            .expect("store snapshot");
+        let compiler = HistoryCompiler::new(store).with_compaction_config(CompactionConfig {
+            recent_turns_verbatim: 1,
+            ..CompactionConfig::default()
+        });
+
+        let output = compiler.process(&mut ctx).await.expect("history compiles");
+
+        assert_eq!(
+            output.metadata.get("history_divergence_cause"),
+            Some(&json!("append_only"))
+        );
+        assert_eq!(
+            output.metadata.get("tokens_invalidated_downstream"),
+            Some(&json!(0))
+        );
     }
 
     #[tokio::test]

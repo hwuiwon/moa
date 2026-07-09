@@ -50,8 +50,8 @@ pub use channel::{
 };
 pub use completion::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
-    DEFER_BRAIN_RESPONSE_METADATA_KEY, JsonResponseFormat, ProviderToolCallMetadata, StopReason,
-    TokenUsage, ToolCallContent, ToolInvocation,
+    DEFER_BRAIN_RESPONSE_METADATA_KEY, JsonResponseFormat, ProviderToolCallMetadata,
+    STABLE_HISTORY_END_METADATA_KEY, StopReason, TokenUsage, ToolCallContent, ToolInvocation,
 };
 pub use contact::{
     ContactId, ContactPointId, ContactPointInput, ContactPointKind, ContactPointRef, ContactRef,

@@ -244,7 +244,11 @@ impl ContextProcessor for SkillInjector {
         let apply: StageApply = Box::new(move |ctx: &mut WorkingContext| {
             let tokens_before = ctx.token_count;
             if !manifest.is_empty() {
-                ctx.append_message(ContextMessage::user(manifest));
+                // Insert before the active user turn (after replayed history)
+                // so per-turn manifest ranking cannot churn bytes inside the
+                // frozen history region provider caches reuse.
+                let insertion_index = crate::pipeline::trailing_user_insertion_index(&ctx.messages);
+                ctx.insert_message(insertion_index, ContextMessage::user(manifest));
             }
 
             ctx.insert_metadata(
@@ -538,7 +542,8 @@ mod tests {
             .await
             .expect("second manifest should render");
 
-        assert_eq!(first.messages[1].content, second.messages[1].content);
+        // The manifest inserts before the trailing user turn.
+        assert_eq!(first.messages[0].content, second.messages[0].content);
     }
 
     #[tokio::test]
@@ -563,7 +568,8 @@ mod tests {
             .await
             .expect("second manifest should render");
 
-        assert_eq!(first.messages[1].content, second.messages[1].content);
+        // The manifest inserts before the trailing user turn.
+        assert_eq!(first.messages[0].content, second.messages[0].content);
     }
 
     #[tokio::test]

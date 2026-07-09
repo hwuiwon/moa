@@ -40,8 +40,11 @@ const MEMORY_REMINDER_PREFIX: &str = "<memory-reminder>";
 
 #[tokio::test]
 async fn digest_processor_registers_at_documented_position() {
-    // Pins: standing digests are assembled after stable skills/query rewriting and before graph memory,
-    // and history compilation remains the only compaction/checkpoint owner.
+    // Pins: history compiles before the per-turn dynamic sections (skill
+    // manifest, standing digest, graph memory) so those sections insert near
+    // the active user turn instead of ahead of replayed history — per-turn
+    // churn there would break provider prompt-cache reuse of the whole
+    // history span. History compilation remains the only compaction owner.
     let mut config = MoaConfig::default();
     config.memory.digest.enabled = true;
     let pool = PgPoolOptions::new()
@@ -82,9 +85,9 @@ async fn digest_processor_registers_at_documented_position() {
         .position(|name| *name == "history")
         .expect("history processor should be registered");
 
+    assert!(history < digest);
     assert!(digest < graph_memory);
     assert_eq!(names[digest + 1], "graph_memory");
-    assert!(graph_memory < history);
     assert!(
         !names.contains(&"compactor"),
         "history owns checkpoint compaction; stage-10 compactor must stay removed"

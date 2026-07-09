@@ -1,33 +1,40 @@
 //! Event-record to `ContextMessage` conversion for history replay.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use moa_core::{
     ChildSignalKind, ContextMessage, ContextSourceRef, Event, EventRecord, InputAudience, Result,
     ToolCallId, ToolContent, ToolOutput, ToolOutputConfig, WorkerState, WorkerTerminalResult,
-    is_child_report_tool_name, render_user_message_with_attachments, truncate_head_tail,
+    estimate_text_tokens, is_child_report_tool_name, render_user_message_with_attachments,
+    truncate_head_tail,
 };
 use moa_security::wrap_untrusted_tool_output;
+
+use super::prune::{DeduplicationStats, FileReadRenderPlan};
+use super::{FILE_READ_DEDUP_PLACEHOLDER, FILE_READ_UNCHANGED_PLACEHOLDER};
 
 pub(super) fn compile_records(
     records: &[&EventRecord],
     tool_output: &ToolOutputConfig,
-    file_read_paths: &HashMap<ToolCallId, String>,
+    render_plan: &FileReadRenderPlan,
     answered_input_requests: &HashSet<String>,
     child_report_tool_ids: &HashSet<ToolCallId>,
-) -> Result<Vec<CompiledRecordMessage>> {
-    records
+) -> Result<(Vec<ContextMessage>, DeduplicationStats)> {
+    let mut stats = DeduplicationStats::default();
+    let messages = records
         .iter()
         .filter_map(|record| {
             event_to_context_message(
                 record,
                 tool_output,
-                file_read_paths,
+                render_plan,
                 answered_input_requests,
                 child_report_tool_ids,
+                &mut stats,
             )
         })
-        .collect::<Result<Vec<_>>>()
+        .collect::<Result<Vec<_>>>()?;
+    Ok((messages, stats))
 }
 
 /// Tool-call ids of child-report tools (`request_input`/`report_to_parent`) across the given
@@ -48,29 +55,28 @@ pub(super) fn child_report_tool_ids(records: &[&EventRecord]) -> HashSet<ToolCal
 fn event_to_context_message(
     record: &EventRecord,
     tool_output: &ToolOutputConfig,
-    file_read_paths: &HashMap<ToolCallId, String>,
+    render_plan: &FileReadRenderPlan,
     answered_input_requests: &HashSet<String>,
     child_report_tool_ids: &HashSet<ToolCallId>,
-) -> Option<Result<CompiledRecordMessage>> {
+    stats: &mut DeduplicationStats,
+) -> Option<Result<ContextMessage>> {
     match &record.event {
-        Event::UserMessage { text, attachments } => {
-            Some(Ok(CompiledRecordMessage::plain(sourced_message(
-                ContextMessage::user(render_user_message_with_attachments(text, attachments)),
-                record,
-            ))))
-        }
+        Event::UserMessage { text, attachments } => Some(Ok(sourced_message(
+            ContextMessage::user(render_user_message_with_attachments(text, attachments)),
+            record,
+        ))),
         Event::QueuedMessage { .. } => None,
         Event::BrainResponse {
             text,
             thought_signature,
             ..
-        } => Some(Ok(CompiledRecordMessage::plain(sourced_message(
+        } => Some(Ok(sourced_message(
             ContextMessage::assistant_with_thought_signature(
                 text.clone(),
                 thought_signature.clone(),
             ),
             record,
-        )))),
+        ))),
         Event::ToolCall {
             tool_id,
             provider_tool_use_id,
@@ -80,32 +86,28 @@ fn event_to_context_message(
             ..
         } => Some(serde_json::to_string(input).map(|serialized| {
             if is_child_report_tool_name(tool_name) {
-                return CompiledRecordMessage::plain(
-                    ContextMessage::system(format!(
+                return ContextMessage::system(format!(
                         "<child_report_tool_call id=\"{tool_id}\" name=\"{}\">{}</child_report_tool_call>",
                         escape_xml(tool_name),
                         escape_xml(&serialized)
                     ))
-                    .with_source_ref(ContextSourceRef::tool_call_event(record, *tool_id)),
-                );
+                    .with_source_ref(ContextSourceRef::tool_call_event(record, *tool_id));
             }
 
-                    CompiledRecordMessage::plain(
-                        ContextMessage::assistant_tool_call_with_thought_signature(
-                            moa_core::ToolInvocation {
-                                id: Some(
-                                    provider_tool_use_id
-                                        .clone()
-                                        .unwrap_or_else(|| tool_id.to_string()),
-                                ),
-                                name: tool_name.clone(),
-                                input: input.clone(),
-                            },
-                            format!("<tool_call name=\"{tool_name}\">{serialized}</tool_call>"),
-                            provider_thought_signature.clone(),
-                        )
-                        .with_source_ref(ContextSourceRef::tool_call_event(record, *tool_id)),
+                    ContextMessage::assistant_tool_call_with_thought_signature(
+                        moa_core::ToolInvocation {
+                            id: Some(
+                                provider_tool_use_id
+                                    .clone()
+                                    .unwrap_or_else(|| tool_id.to_string()),
+                            ),
+                            name: tool_name.clone(),
+                            input: input.clone(),
+                        },
+                        format!("<tool_call name=\"{tool_name}\">{serialized}</tool_call>"),
+                        provider_thought_signature.clone(),
                     )
+                    .with_source_ref(ContextSourceRef::tool_call_event(record, *tool_id))
                 })
                 .map_err(Into::into)),
         Event::ToolResult {
@@ -133,7 +135,8 @@ fn event_to_context_message(
                 *success,
                 output,
                 tool_output,
-                file_read_paths.get(tool_id).cloned(),
+                render_plan,
+                stats,
             )))
         }
         Event::ToolError {
@@ -141,15 +144,14 @@ fn event_to_context_message(
             tool_id,
             provider_tool_use_id,
             ..
-        } => Some(Ok(CompiledRecordMessage::plain(
-            if child_report_tool_ids.contains(tool_id) {
-                ContextMessage::system(format!(
-                    "<child_report_tool_error id=\"{tool_id}\">{}</child_report_tool_error>",
-                    escape_xml(error)
-                ))
-                .with_source_ref(ContextSourceRef::tool_error_event(record, *tool_id))
-            } else {
-                match provider_tool_use_id.as_ref() {
+        } => Some(Ok(if child_report_tool_ids.contains(tool_id) {
+            ContextMessage::system(format!(
+                "<child_report_tool_error id=\"{tool_id}\">{}</child_report_tool_error>",
+                escape_xml(error)
+            ))
+            .with_source_ref(ContextSourceRef::tool_error_event(record, *tool_id))
+        } else {
+            match provider_tool_use_id.as_ref() {
                 Some(call_id) => {
                     let replayable_error = truncate_tool_result_text(error, tool_output);
                     ContextMessage::tool_result(
@@ -163,82 +165,75 @@ fn event_to_context_message(
                     "<tool_error id=\"{tool_id}\">{error}</tool_error>"
                 ))
                 .with_source_ref(ContextSourceRef::tool_error_event(record, *tool_id)),
-                }
-            },
-        ))),
+            }
+        })),
         Event::Warning { message } => {
             let message = escape_xml(message);
-            Some(Ok(CompiledRecordMessage::plain(sourced_message(
+            Some(Ok(sourced_message(
                 ContextMessage::system(format!("<warning>{message}</warning>")),
                 record,
-            ))))
+            )))
         }
-        Event::MemoryRead { path, scope } => Some(Ok(CompiledRecordMessage::plain(
-            ContextMessage::system(format!(
-                "<memory_event kind=\"read\" scope=\"{}\">{}</memory_event>",
-                escape_xml(&scope.to_string()),
-                escape_xml(path)
-            ))
-            .with_source_ref(ContextSourceRef::session_event(record)),
-        ))),
-        Event::MemoryWrite { path, summary, .. } => Some(Ok(CompiledRecordMessage::plain(
-            ContextMessage::system(format!(
-                "<memory_write path=\"{}\">{}</memory_write>",
-                escape_xml(path),
-                escape_xml(summary)
-            ))
-            .with_source_ref(ContextSourceRef::session_event(record)),
-        ))),
+        Event::MemoryRead { path, scope } => Some(Ok(ContextMessage::system(format!(
+            "<memory_event kind=\"read\" scope=\"{}\">{}</memory_event>",
+            escape_xml(&scope.to_string()),
+            escape_xml(path)
+        ))
+        .with_source_ref(ContextSourceRef::session_event(record)))),
+        Event::MemoryWrite { path, summary, .. } => Some(Ok(ContextMessage::system(format!(
+            "<memory_write path=\"{}\">{}</memory_write>",
+            escape_xml(path),
+            escape_xml(summary)
+        ))
+        .with_source_ref(ContextSourceRef::session_event(record)))),
         Event::MemoryIngest {
             source_name,
             source_path,
             ..
-        } => Some(Ok(CompiledRecordMessage::plain(
-            ContextMessage::system(format!(
-                "<memory_ingest source_name=\"{}\" source_path=\"{}\" />",
-                escape_xml(source_name),
-                escape_xml(source_path)
-            ))
-            .with_source_ref(ContextSourceRef::session_event(record)),
-        ))),
+        } => Some(Ok(ContextMessage::system(format!(
+            "<memory_ingest source_name=\"{}\" source_path=\"{}\" />",
+            escape_xml(source_name),
+            escape_xml(source_path)
+        ))
+        .with_source_ref(ContextSourceRef::session_event(record)))),
         // A guarded coordinator resume seeds the model with the system-generated
         // instruction here (kind/summary + unread-signal context folded into `reason`),
         // rather than a fake `UserMessage`. Rendered as a system directive so it is not
         // misattributed to the human user.
         Event::WorkerParentResumeRequested { reason, .. } => {
             let reason = escape_xml(reason);
-            Some(Ok(CompiledRecordMessage::plain(sourced_message(
+            Some(Ok(sourced_message(
                 ContextMessage::system(format!(
                     "<coordinator_resume>{reason}</coordinator_resume>"
                 )),
                 record,
-            ))))
+            )))
         }
         Event::WorkerResultBundle {
             user_sequence_num,
             results,
-        } => Some(Ok(CompiledRecordMessage::plain(sourced_message(
+        } => Some(Ok(sourced_message(
             ContextMessage::system(render_worker_result_bundle(
                 *user_sequence_num,
                 results,
                 tool_output,
             )),
             record,
-        )))),
+        ))),
         Event::WorkerResultSynthesisRequested { reason, .. } => {
             let reason = escape_xml(reason);
-            Some(Ok(CompiledRecordMessage::plain(sourced_message(
+            Some(Ok(sourced_message(
                 ContextMessage::system(format!(
                     "<worker_result_synthesis>{reason}</worker_result_synthesis>"
                 )),
                 record,
-            ))))
+            )))
         }
         Event::WorkerNotificationDelivered {
             worker_id,
             state,
             summary,
-        } => Some(Ok(CompiledRecordMessage::plain(sourced_message(
+        } => Some(Ok(sourced_message(
             ContextMessage::system(render_worker_notification(
                 worker_id,
                 *state,
@@ -246,7 +241,7 @@ fn event_to_context_message(
                 tool_output,
             )),
             record,
-        )))),
+        ))),
         // Control-plane child signals are surfaced into the coordinator's context so ANY
         // turn (including a plain `UserMessage` turn, not only a guarded `ChildSignal`
         // resume) can see and act on an unaddressed signal. For `NeedsInput` the directive
@@ -312,7 +307,7 @@ fn render_child_signal(
     summary: &str,
     input_request_id: Option<&str>,
     input_audience: Option<InputAudience>,
-) -> Option<Result<CompiledRecordMessage>> {
+) -> Option<Result<ContextMessage>> {
     let worker_id = escape_xml(worker_id);
     let summary = escape_xml(summary);
     let escaped_request_id = input_request_id.map(escape_xml);
@@ -357,10 +352,10 @@ fn render_child_signal(
             )
         }
     };
-    Some(Ok(CompiledRecordMessage::plain(sourced_message(
+    Some(Ok(sourced_message(
         ContextMessage::system(directive),
         record,
-    ))))
+    )))
 }
 
 fn render_worker_result_bundle(
@@ -442,6 +437,7 @@ fn sourced_message(message: ContextMessage, record: &EventRecord) -> ContextMess
     message.with_source_ref(ContextSourceRef::session_event(record))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tool_result_context_message(
     record: &EventRecord,
     tool_use_id: String,
@@ -449,8 +445,42 @@ fn tool_result_context_message(
     success: bool,
     output: &ToolOutput,
     tool_output: &ToolOutputConfig,
-    file_read_path: Option<String>,
-) -> CompiledRecordMessage {
+    render_plan: &FileReadRenderPlan,
+    stats: &mut DeduplicationStats,
+) -> ContextMessage {
+    // Render-plan placeholders replace the full replay text once, at compile
+    // time, and stay byte-stable on every later compile — already-emitted
+    // history is never rewritten between checkpoints.
+    let placeholder = if render_plan.pointer_results.contains(&tool_id) {
+        Some(FILE_READ_UNCHANGED_PLACEHOLDER)
+    } else if render_plan.stale_results.contains(&tool_id) {
+        Some(FILE_READ_DEDUP_PLACEHOLDER)
+    } else {
+        None
+    };
+    if let Some(placeholder) = placeholder {
+        let full_text = truncate_tool_result_text(&output.to_text(), tool_output);
+        stats.deduplicated_count += 1;
+        stats.tokens_saved +=
+            estimate_text_tokens(&full_text).saturating_sub(estimate_text_tokens(placeholder));
+        return ContextMessage::tool_result(
+            tool_use_id,
+            format!(
+                "<tool_result id=\"{tool_id}\" success=\"{success}\">\n{}\n</tool_result>",
+                wrap_untrusted_tool_output(placeholder)
+            ),
+            Some(vec![ToolContent::Text {
+                text: placeholder.to_string(),
+            }]),
+        )
+        .with_source_ref(ContextSourceRef::tool_result_event(record, tool_id));
+    }
+
+    let supersedes_attr = if render_plan.superseding_results.contains(&tool_id) {
+        " supersedes_stale_read=\"true\""
+    } else {
+        ""
+    };
     let replayable_text = truncate_tool_result_text(&output.to_text(), tool_output);
     let artifact_attrs = output
         .artifact
@@ -464,23 +494,15 @@ fn tool_result_context_message(
             )
         })
         .unwrap_or_default();
-    CompiledRecordMessage {
-        message: ContextMessage::tool_result(
-            tool_use_id.clone(),
-            format!(
-                "<tool_result id=\"{tool_id}\" success=\"{success}\"{artifact_attrs}>\n{}\n</tool_result>",
-                wrap_untrusted_tool_output(&replayable_text)
-            ),
-            replayable_tool_content_blocks(output, &replayable_text, tool_output),
-        )
-        .with_source_ref(ContextSourceRef::tool_result_event(record, tool_id)),
-        tool_result: file_read_path.as_ref().map(|path| ToolResultReplayMeta {
-            tool_use_id,
-            tool_id,
-            success,
-            file_read_path: path.clone(),
-        }),
-    }
+    ContextMessage::tool_result(
+        tool_use_id,
+        format!(
+            "<tool_result id=\"{tool_id}\" success=\"{success}\"{supersedes_attr}{artifact_attrs}>\n{}\n</tool_result>",
+            wrap_untrusted_tool_output(&replayable_text)
+        ),
+        replayable_tool_content_blocks(output, &replayable_text, tool_output),
+    )
+    .with_source_ref(ContextSourceRef::tool_result_event(record, tool_id))
 }
 
 fn child_report_tool_result_message(
@@ -489,15 +511,13 @@ fn child_report_tool_result_message(
     success: bool,
     output: &ToolOutput,
     tool_output: &ToolOutputConfig,
-) -> CompiledRecordMessage {
+) -> ContextMessage {
     let replayable_text = truncate_tool_result_text(&output.to_text(), tool_output);
-    CompiledRecordMessage::plain(
-        ContextMessage::system(format!(
-            "<child_report_tool_result id=\"{tool_id}\" success=\"{success}\">\n{}\n</child_report_tool_result>",
-            wrap_untrusted_tool_output(&replayable_text)
-        ))
-        .with_source_ref(ContextSourceRef::tool_result_event(record, tool_id)),
-    )
+    ContextMessage::system(format!(
+        "<child_report_tool_result id=\"{tool_id}\" success=\"{success}\">\n{}\n</child_report_tool_result>",
+        wrap_untrusted_tool_output(&replayable_text)
+    ))
+    .with_source_ref(ContextSourceRef::tool_result_event(record, tool_id))
 }
 
 fn replayable_tool_content_blocks(
@@ -546,29 +566,6 @@ fn tool_content_char_len(content: &ToolContent) -> usize {
 
 fn truncate_tool_result_text(text: &str, tool_output: &ToolOutputConfig) -> String {
     truncate_head_tail(text, tool_output.max_replay_chars, tool_output.head_ratio).0
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct CompiledRecordMessage {
-    pub(super) message: ContextMessage,
-    pub(super) tool_result: Option<ToolResultReplayMeta>,
-}
-
-impl CompiledRecordMessage {
-    pub(super) fn plain(message: ContextMessage) -> Self {
-        Self {
-            message,
-            tool_result: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct ToolResultReplayMeta {
-    pub(super) tool_use_id: String,
-    pub(super) tool_id: ToolCallId,
-    pub(super) success: bool,
-    pub(super) file_read_path: String,
 }
 
 #[cfg(test)]
@@ -874,8 +871,6 @@ mod tests {
         // sits in `recent`. The suppression set is computed over the full visible window, so the
         // recent-slice result still renders as system evidence — not a dangling provider
         // `tool_result` with no matching `tool_use` (which the provider rejects with a 400).
-        use std::collections::HashMap;
-
         use moa_core::ToolOutputConfig;
 
         use super::{answered_worker_inputs, child_report_tool_ids, compile_records};
@@ -911,45 +906,29 @@ mod tests {
         let visible = vec![&call, &result];
         let recent = vec![&result];
         let tool_output = ToolOutputConfig::default();
-        let file_read_paths = HashMap::new();
+        let render_plan = super::FileReadRenderPlan::default();
         let answered = answered_worker_inputs(&visible);
 
         // Computed over the full window (includes the call): the result is system evidence.
         let union_ids = child_report_tool_ids(&visible);
-        let paired = compile_records(
-            &recent,
-            &tool_output,
-            &file_read_paths,
-            &answered,
-            &union_ids,
-        )
-        .unwrap();
+        let (paired, _) =
+            compile_records(&recent, &tool_output, &render_plan, &answered, &union_ids).unwrap();
         assert_eq!(paired.len(), 1);
-        assert!(paired[0].message.tool_invocation.is_none());
-        assert!(
-            paired[0]
-                .message
-                .content
-                .contains("<child_report_tool_result")
-        );
+        assert!(paired[0].tool_invocation.is_none());
+        assert!(paired[0].content.contains("<child_report_tool_result"));
 
         // Control: computed over the recent slice alone (missing the call), the result would
         // fall back to a provider tool_result — the cross-slice bug this fix prevents.
         let recent_only_ids = child_report_tool_ids(&recent);
-        let broken = compile_records(
+        let (broken, _) = compile_records(
             &recent,
             &tool_output,
-            &file_read_paths,
+            &render_plan,
             &answered,
             &recent_only_ids,
         )
         .unwrap();
-        assert!(
-            !broken[0]
-                .message
-                .content
-                .contains("<child_report_tool_result")
-        );
+        assert!(!broken[0].content.contains("<child_report_tool_result"));
     }
 
     #[test]

@@ -635,18 +635,7 @@ fn retrieval_scopes_from_context(
     default_retrieval_plan(ctx, policy)
 }
 
-fn trailing_user_insertion_index(messages: &[ContextMessage]) -> usize {
-    let mut insertion_index = messages.len();
-    while insertion_index > 0
-        && matches!(
-            messages[insertion_index - 1].role,
-            moa_core::MessageRole::User
-        )
-    {
-        insertion_index -= 1;
-    }
-    insertion_index
-}
+use super::trailing_user_insertion_index;
 
 /// Builds the processor-output metadata that records the router's chosen
 /// strategy, so evals and tests can observe the routing decision for a turn.

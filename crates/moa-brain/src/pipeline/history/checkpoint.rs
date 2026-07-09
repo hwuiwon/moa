@@ -3,29 +3,23 @@
 //! This remains one module because snapshot loading, replay, and migration
 //! helpers share compiled-history state and must preserve replay ordering.
 
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use moa_core::{
     CONTEXT_SNAPSHOT_FORMAT_VERSION, ContextMessage, ContextSnapshot, Event, EventRecord,
-    FileReadDedupState, Result, SequenceNum, SnapshotFileReadState, WorkingContext,
+    FileReadDedupState, Result, SequenceNum, WorkingContext,
 };
 use moa_observability::record_turn_snapshot_load;
 
 use crate::compaction::recent_turn_boundary;
-use moa_core::{estimate_text_tokens, sum_message_tokens};
+use moa_core::sum_message_tokens;
 
 use super::budgeting::keep_budgeted_older_messages;
-use super::conversion::{
-    CompiledRecordMessage, answered_worker_inputs, child_report_tool_ids, compile_records,
-};
-use super::prune::{
-    build_file_read_dedup_state, build_full_file_read_path_map, deduplicate_file_reads,
-    latest_full_file_read_results, placeholder_tool_result_from_snapshot,
-};
-use super::{CompiledHistory, FILE_READ_DEDUP_PLACEHOLDER, HistoryCompiler};
+use super::conversion::{answered_worker_inputs, child_report_tool_ids, compile_records};
+use super::prune::{build_file_read_render_plan, build_full_file_read_path_map};
+use super::{CompiledHistory, HistoryCompiler};
 
 const MAX_INCREMENTAL_DELTA_EVENTS: usize = 50;
 
@@ -123,72 +117,49 @@ impl HistoryCompiler {
         let recent_start = recent_turn_boundary(&delta_refs, self.compaction.recent_turns_verbatim);
         let (older_events, recent_events) = delta_refs.split_at(recent_start);
         let file_read_paths = build_full_file_read_path_map(&delta_refs);
-        let replay_latest_reads = latest_full_file_read_results(&delta_refs, &file_read_paths);
+        // Delta compiles never rewrite snapshotted messages: the checkpoint
+        // fallback above guarantees no checkpoint lies in the delta, so no
+        // old-side stale placeholder can fire here (its gate is a checkpoint
+        // after the superseding read). The seeded walk only decides how NEW
+        // reads render, keeping the frozen prefix byte-identical.
+        let snapshot_boundary_seq = older_events.last().map(|record| record.sequence_num);
+        let (render_plan, next_dedup_state) = build_file_read_render_plan(
+            &delta_refs,
+            &file_read_paths,
+            None,
+            &snapshot.file_read_dedup_state,
+            snapshot_boundary_seq,
+        );
 
         // Suppression sets are computed over the full replay delta (both slices) so a call/result
         // pair split across the older/recent boundary stays paired (no dangling `tool_result`).
         let answered_input_requests = answered_worker_inputs(&delta_refs);
         let child_report_ids = child_report_tool_ids(&delta_refs);
-        let recent_messages = match compile_records(
+        let (recent_messages, recent_stats) = match compile_records(
             recent_events,
             &self.tool_output,
-            &file_read_paths,
+            &render_plan,
             &answered_input_requests,
             &child_report_ids,
         ) {
             Ok(records) => records,
             Err(error) => return Some(Err(error)),
         };
-        let mut older_messages = match compile_records(
+        let (older_messages, older_stats) = match compile_records(
             older_events,
             &self.tool_output,
-            &file_read_paths,
+            &render_plan,
             &answered_input_requests,
             &child_report_ids,
         ) {
             Ok(records) => records,
             Err(error) => return Some(Err(error)),
         };
+        let mut deduplication = older_stats;
+        deduplication.absorb(recent_stats);
 
-        let mut latest_tool_ids = snapshot
-            .file_read_dedup_state
-            .latest_reads
-            .iter()
-            .map(|(path, state)| (path.clone(), state.tool_id))
-            .collect::<HashMap<_, _>>();
-        latest_tool_ids.extend(
-            replay_latest_reads
-                .iter()
-                .map(|(path, tool_id)| (path.clone(), *tool_id)),
-        );
-
-        let mut deduplication = deduplicate_file_reads(&mut older_messages, &latest_tool_ids);
-        let mut snapshotted_messages = snapshot.messages.clone();
-        let mut next_snapshot_state = snapshot.file_read_dedup_state.clone();
-
-        for path in replay_latest_reads.keys() {
-            let Some(previous) = next_snapshot_state.latest_reads.remove(path) else {
-                continue;
-            };
-            if previous.message_index >= snapshotted_messages.len() {
-                continue;
-            }
-
-            let previous_tokens =
-                estimate_text_tokens(&snapshotted_messages[previous.message_index].content);
-            snapshotted_messages[previous.message_index] =
-                placeholder_tool_result_from_snapshot(path, &previous);
-            let placeholder_tokens =
-                estimate_text_tokens(&snapshotted_messages[previous.message_index].content);
-            deduplication.deduplicated_count += 1;
-            deduplication.tokens_saved += previous_tokens.saturating_sub(placeholder_tokens);
-        }
-
-        let snapshotted_tokens = sum_message_tokens(&snapshotted_messages);
-        let recent_tokens = recent_messages
-            .iter()
-            .map(|compiled| estimate_text_tokens(&compiled.message.content))
-            .sum::<usize>();
+        let snapshotted_tokens = sum_message_tokens(&snapshot.messages);
+        let recent_tokens = sum_message_tokens(&recent_messages);
         let (kept_older, tokens_used) = keep_budgeted_older_messages(
             snapshotted_tokens,
             &older_messages,
@@ -197,32 +168,13 @@ impl HistoryCompiler {
             remaining_budget,
         );
 
-        let mut next_snapshot_messages = snapshotted_messages.clone();
-        for compiled in &kept_older {
-            let message_index = next_snapshot_messages.len();
-            if let Some(tool_result) = compiled.tool_result.as_ref()
-                && !compiled
-                    .message
-                    .content
-                    .contains(FILE_READ_DEDUP_PLACEHOLDER)
-            {
-                next_snapshot_state.latest_reads.insert(
-                    tool_result.file_read_path.clone(),
-                    SnapshotFileReadState {
-                        message_index,
-                        tool_use_id: tool_result.tool_use_id.clone(),
-                        tool_id: tool_result.tool_id,
-                        success: tool_result.success,
-                    },
-                );
-            }
-            next_snapshot_messages.push(compiled.message.clone());
-        }
+        let mut next_snapshot_messages = snapshot.messages.clone();
+        next_snapshot_messages.extend(kept_older);
 
         let mut messages = next_snapshot_messages.clone();
-        messages.extend(recent_messages.into_iter().map(|compiled| compiled.message));
+        messages.extend(recent_messages);
 
-        let snapshot = if next_snapshot_messages.is_empty() {
+        let next_snapshot = if next_snapshot_messages.is_empty() {
             None
         } else {
             Some(SnapshotHistory {
@@ -232,7 +184,7 @@ impl HistoryCompiler {
                     .last()
                     .map(|record| record.sequence_num)
                     .unwrap_or(snapshot.last_sequence_num),
-                file_read_dedup_state: next_snapshot_state,
+                file_read_dedup_state: next_dedup_state,
             })
         };
 
@@ -240,7 +192,7 @@ impl HistoryCompiler {
             messages,
             tokens_used,
             deduplication,
-            snapshot,
+            snapshot: next_snapshot,
             compaction: Default::default(),
         }))
     }
@@ -313,20 +265,15 @@ fn hash_serialize<T: serde::Serialize>(hasher: &mut impl Hasher, value: &T) {
 }
 
 pub(super) fn build_snapshot_state(
-    records: &[CompiledRecordMessage],
+    messages: Vec<ContextMessage>,
     last_sequence_num: SequenceNum,
+    file_read_dedup_state: FileReadDedupState,
 ) -> SnapshotHistory {
-    let messages = records
-        .iter()
-        .map(|compiled| compiled.message.clone())
-        .collect::<Vec<_>>();
-    let token_count = sum_message_tokens(&messages);
-
     SnapshotHistory {
         last_sequence_num,
+        token_count: sum_message_tokens(&messages),
         messages,
-        token_count,
-        file_read_dedup_state: build_file_read_dedup_state(records),
+        file_read_dedup_state,
     }
 }
 
@@ -343,7 +290,10 @@ mod tests {
     use crate::pipeline::history::test_support::prelude::*;
 
     #[test]
-    fn incremental_history_replaces_prior_full_file_reads_across_turns() {
+    fn incremental_history_keeps_prior_full_file_reads_frozen_across_turns() {
+        // Pins: a changed-content re-read in the delta never rewrites the
+        // snapshotted older read (no checkpoint fired), the superseding read
+        // carries its marker, and incremental replay matches full replay.
         let session = session();
         let foo_first = ToolCallId(uuid::Uuid::from_u128(1));
         let foo_second = ToolCallId(uuid::Uuid::from_u128(2));
@@ -445,11 +395,20 @@ mod tests {
             .iter()
             .find(|message| message.tool_use_id.as_deref() == Some("toolu_first"))
             .expect("first foo read should still exist");
-        assert_eq!(
-            first_foo_result.content_blocks,
-            Some(vec![ToolContent::Text {
-                text: FILE_READ_DEDUP_PLACEHOLDER.to_string(),
-            }])
+        assert!(
+            first_foo_result.content.contains("first_version"),
+            "older read keeps its bytes until a checkpoint lands: {}",
+            first_foo_result.content
+        );
+        let second_foo_result = incremental
+            .messages
+            .iter()
+            .find(|message| message.tool_use_id.as_deref() == Some("toolu_second"))
+            .expect("second foo read should exist");
+        assert!(
+            second_foo_result.content.contains("supersedes_stale_read"),
+            "changed re-read carries the supersession marker: {}",
+            second_foo_result.content
         );
     }
 

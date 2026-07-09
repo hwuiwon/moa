@@ -22,3 +22,22 @@ pub use builder::{
     build_default_graph_memory_retriever, build_graph_memory_retriever,
 };
 pub use runner::{ContextPipeline, PipelineStageReport};
+
+/// Insertion point just before the trailing run of user messages.
+///
+/// Dynamic per-turn sections (skill manifest, memory digest, retrieved memory,
+/// runtime reminder) insert here — after replayed history, immediately before
+/// the active user turn — so their per-turn byte churn lands past the frozen
+/// history region and provider prompt caches keep matching it.
+pub(crate) fn trailing_user_insertion_index(messages: &[moa_core::ContextMessage]) -> usize {
+    let mut insertion_index = messages.len();
+    while insertion_index > 0
+        && matches!(
+            messages[insertion_index - 1].role,
+            moa_core::MessageRole::User
+        )
+    {
+        insertion_index -= 1;
+    }
+    insertion_index
+}

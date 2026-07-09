@@ -61,6 +61,11 @@ name = "chat_harness"
 path = "examples/chat_harness.rs"
 required-features = ["eval-harness"]
 
+[[example]]
+name = "replay_corpus"
+path = "examples/replay_corpus.rs"
+required-features = ["eval-harness"]
+
 [[test]]
 name = "brain_turn_cache_replay_db_memory"
 path = "tests/brain_turn_cache_replay_db_memory.rs"

@@ -35,7 +35,9 @@ pub(crate) mod prelude {
         compiler_with_recent_turns, event_record, file_read_tool_call, file_read_tool_result,
         session,
     };
-    pub(crate) use crate::pipeline::history::{FILE_READ_DEDUP_PLACEHOLDER, HistoryCompiler};
+    pub(crate) use crate::pipeline::history::{
+        FILE_READ_DEDUP_PLACEHOLDER, FILE_READ_UNCHANGED_PLACEHOLDER, HistoryCompiler,
+    };
 }
 
 fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {

@@ -338,8 +338,9 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
     );
     assert_eq!(
         dynamic_cache_control_count(&turn_six_body),
-        0,
-        "dynamic messages and tools should not carry provider block-level cache markers"
+        1,
+        "exactly one message-region marker: the moving frozen-history boundary \
+         breakpoint that lets replayed history cache-read across turns"
     );
 
     let turn_seven_request = requests
@@ -352,31 +353,38 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
         .iter()
         .filter(|message| message.role == moa_core::MessageRole::Tool)
         .collect::<Vec<_>>();
+    // Turn 5 re-read the file after turn 4 changed it. Between checkpoints,
+    // already-compiled history is append-only: the stale older read keeps its
+    // bytes (so the provider prompt cache keeps matching the frozen prefix)
+    // and the superseding read carries the stale marker. No checkpoint fires
+    // in this session, so no dedup placeholder appears.
     assert!(
         turn_seven_tool_messages
             .iter()
-            .any(|message| message.content.contains(FILE_READ_DEDUP_PLACEHOLDER)),
-        "older full-file reads should be replaced with the dedup placeholder"
+            .all(|message| !message.content.contains(FILE_READ_DEDUP_PLACEHOLDER)),
+        "no checkpoint fired, so the stale read must keep its bytes"
     );
     assert_eq!(
         turn_seven_tool_messages
             .iter()
             .filter(|message| message.content.contains(FULL_READ_HEADER))
             .count(),
+        2,
+        "both full auth.rs reads stay verbatim between checkpoints"
+    );
+    assert_eq!(
+        turn_seven_tool_messages
+            .iter()
+            .filter(|message| message.content.contains("supersedes_stale_read=\"true\""))
+            .count(),
         1,
-        "only the latest full-file auth.rs read should remain verbatim in replayed history"
+        "the changed-content re-read carries the supersession marker"
     );
     assert!(
         turn_seven_tool_messages
             .iter()
             .any(|message| message.content.contains(PARTIAL_READ_HEADER)),
         "partial reads should never be deduplicated"
-    );
-    assert!(
-        turn_seven_tool_messages.iter().any(|message| {
-            message.content.contains(FILE_READ_DEDUP_PLACEHOLDER) && message.tool_use_id.is_some()
-        }),
-        "deduplicated tool results must preserve tool_use_id for provider replay"
     );
     let bash_artifact_message = turn_seven_tool_messages
         .iter()

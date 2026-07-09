@@ -1522,6 +1522,8 @@ mod tests {
                 stable_prefix_bytes,
                 stable_prefix_fingerprint: 42,
                 full_request_fingerprint: sequence_num,
+                frozen_history_tokens_estimate: 0,
+                frozen_history_fingerprint: 0,
                 stable_prefix_reused,
                 input_tokens,
                 cached_input_tokens,
