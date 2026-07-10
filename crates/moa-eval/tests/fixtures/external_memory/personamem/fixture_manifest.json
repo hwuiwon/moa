@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "dataset": "personamem-32k-tiny",
+  "source": {
+    "repository": "bowen-upenn/PersonaMem-v1",
+    "revision": "73dfd752d477d0c466cd441f1669397f5726d7ab"
+  },
+  "source_files": [
+    {
+      "path": "questions_32k.csv",
+      "size_bytes": 1305366,
+      "sha256": "cccd34cf53e0bc4d9536c04cff5ca045156d9a4e227e83327112482840bbc93c"
+    },
+    {
+      "path": "shared_contexts_32k.jsonl",
+      "size_bytes": 5613210,
+      "sha256": "217247ebfec9e8442fc53570c795ab69f21aad08745f7de78d9beab51b122d4a"
+    }
+  ],
+  "fixture_files": [
+    {
+      "path": "questions_32k_tiny.csv",
+      "size_bytes": 913,
+      "sha256": "4f5e2b31576af7fde7c3e9bfb984bd55515e4e0932e4412dc9f1d9b80e11a79d"
+    },
+    {
+      "path": "shared_contexts_32k_tiny.jsonl",
+      "size_bytes": 740,
+      "sha256": "feac0d35dbff3028995071fa10039a7a25a7633275f7d63fe25381c8205b5708"
+    }
+  ],
+  "selected_question_ids": [
+    "fixture-question-alpha",
+    "fixture-question-beta",
+    "fixture-question-alpha-slice"
+  ],
+  "selection_rationale": "Synthetic rows target parser and projection edge cases without copying gated benchmark examples.",
+  "content_origin": "synthetic_contract_fixture",
+  "counts": {
+    "questions": 3,
+    "personas": 2,
+    "contexts": 2
+  }
+}

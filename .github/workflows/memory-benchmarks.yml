@@ -1,0 +1,274 @@
+# Repository administrators must configure the `memory-benchmarks` environment
+# for main-branch deployments only, with required reviewers enabled and
+# prevent-self-review enabled. This workflow never changes that policy.
+name: external memory benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      dataset:
+        description: Pinned external-memory dataset
+        required: true
+        type: choice
+        options:
+          - personamem-32k
+          - longmemeval-s-cleaned
+      formation_mode:
+        description: Protected runs support live formation only
+        required: true
+        default: live
+        type: choice
+        options:
+          - live
+      extractor_model:
+        description: Explicit fact-extractor provider:model
+        required: true
+        default: openai:gpt-5.4-mini
+        type: string
+      merge_verifier_model:
+        description: Explicit entity-merge verifier provider:model
+        required: true
+        default: openai:gpt-5.4-mini
+        type: string
+      embedding_selector:
+        description: Explicit embedding provider:model
+        required: true
+        default: gemini:gemini-embedding-2
+        type: string
+      reader_model:
+        description: Explicit answer-reader provider:model
+        required: true
+        default: openai:gpt-5.4-mini
+        type: string
+      judge_model:
+        description: LongMemEval-only absolute-judge provider:model
+        required: true
+        default: anthropic:claude-sonnet-4-6
+        type: string
+      reader_context_window:
+        description: Reader context-window tokens
+        required: true
+        default: 400000
+        type: number
+      reader_output_token_reserve:
+        description: Tokens reserved for the reader response
+        required: true
+        default: 4096
+        type: number
+      controls:
+        description: Exact required control set
+        required: true
+        default: no-memory,full-context,oracle-evidence
+        type: choice
+        options:
+          - no-memory,full-context,oracle-evidence
+      evidence_token_budget:
+        description: Primary evidence-rendering budget
+        required: true
+        default: "1024"
+        type: choice
+        options:
+          - "512"
+          - "1024"
+          - "2048"
+      budget_usd:
+        description: Positive cumulative USD ceiling across every mode
+        required: true
+        default: 50
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  require-main:
+    name: require main branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject non-main refs
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          if [[ "$WORKFLOW_REF" != "refs/heads/main" ]]; then
+            echo "external memory benchmarks must run from refs/heads/main" >&2
+            exit 1
+          fi
+
+  memory-benchmark:
+    name: protected external memory benchmark
+    needs: require-main
+    runs-on: ubuntu-latest
+    environment: memory-benchmarks
+    timeout-minutes: 360
+    services:
+      postgres:
+        image: ghcr.io/hwuiwon/moa-postgres:pg17-pgvector0.8.2-pgaudit
+        ports:
+          - "5432:5432"
+        env:
+          POSTGRES_DB: moa
+          POSTGRES_PASSWORD: ci
+        options: >-
+          --health-cmd "pg_isready -U postgres -d moa"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      MOA_DATABASE_URL: postgres://postgres:ci@localhost:5432/moa
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Validate protected live inputs
+        env:
+          DATASET: ${{ inputs.dataset }}
+          FORMATION_MODE: ${{ inputs.formation_mode }}
+          EXTRACTOR_MODEL: ${{ inputs.extractor_model }}
+          MERGE_VERIFIER_MODEL: ${{ inputs.merge_verifier_model }}
+          EMBEDDING_SELECTOR: ${{ inputs.embedding_selector }}
+          READER_MODEL: ${{ inputs.reader_model }}
+          JUDGE_MODEL: ${{ inputs.judge_model }}
+          READER_CONTEXT_WINDOW: ${{ inputs.reader_context_window }}
+          READER_OUTPUT_TOKEN_RESERVE: ${{ inputs.reader_output_token_reserve }}
+          CONTROLS: ${{ inputs.controls }}
+          EVIDENCE_TOKEN_BUDGET: ${{ inputs.evidence_token_budget }}
+          BUDGET_USD: ${{ inputs.budget_usd }}
+        run: |
+          set -euo pipefail
+          [[ "$FORMATION_MODE" == "live" ]]
+          [[ "$CONTROLS" == "no-memory,full-context,oracle-evidence" ]]
+          [[ "$EVIDENCE_TOKEN_BUDGET" =~ ^(512|1024|2048)$ ]]
+          [[ "$READER_CONTEXT_WINDOW" =~ ^[1-9][0-9]*$ ]]
+          [[ "$READER_OUTPUT_TOKEN_RESERVE" =~ ^[1-9][0-9]*$ ]]
+          awk -v value="$BUDGET_USD" 'BEGIN { exit !(value + 0 > 0) }'
+          [[ "$EXTRACTOR_MODEL" == openai:* ]]
+          [[ "$MERGE_VERIFIER_MODEL" == openai:* ]]
+          [[ "$EMBEDDING_SELECTOR" == gemini:* || "$EMBEDDING_SELECTOR" == google:* ]]
+          [[ "$READER_MODEL" == openai:* ]]
+          if [[ "$DATASET" == "longmemeval-s-cleaned" ]]; then
+            [[ "$JUDGE_MODEL" == anthropic:* ]]
+          fi
+
+      - name: Fetch and verify PersonaMem package
+        if: inputs.dataset == 'personamem-32k'
+        env:
+          MOA_RUN_NETWORK_MEMORY_BENCHMARKS: "1"
+        run: >-
+          cargo run -p xtask --locked --release -- fetch-memory-benchmark
+          --dataset personamem-32k
+          --revision 73dfd752d477d0c466cd441f1669397f5726d7ab
+          --output target/memory-benchmarks/personamem-32k
+          --summary-output target/memory-benchmarks/personamem-32k-fetch-summary.json
+
+      - name: Fetch and verify LongMemEval package
+        if: inputs.dataset == 'longmemeval-s-cleaned'
+        env:
+          MOA_RUN_NETWORK_MEMORY_BENCHMARKS: "1"
+        run: >-
+          cargo run -p xtask --locked --release -- fetch-memory-benchmark
+          --dataset longmemeval-s-cleaned
+          --revision 98d7416c24c778c2fee6e6f3006e7a073259d48f
+          --output target/memory-benchmarks/longmemeval-s-cleaned
+          --summary-output target/memory-benchmarks/longmemeval-s-cleaned-fetch-summary.json
+
+      - name: Run PersonaMem primary and controls
+        if: inputs.dataset == 'personamem-32k'
+        env:
+          MOA_RUN_LIVE_MEMORY_BENCHMARKS: "1"
+          MOA_OPENAI_API_KEY: ${{ secrets.MOA_OPENAI_API_KEY }}
+          MOA_GOOGLE_API_KEY: ${{ secrets.MOA_GOOGLE_API_KEY }}
+          FORMATION_MODE: ${{ inputs.formation_mode }}
+          EXTRACTOR_MODEL: ${{ inputs.extractor_model }}
+          MERGE_VERIFIER_MODEL: ${{ inputs.merge_verifier_model }}
+          EMBEDDING_SELECTOR: ${{ inputs.embedding_selector }}
+          READER_MODEL: ${{ inputs.reader_model }}
+          READER_CONTEXT_WINDOW: ${{ inputs.reader_context_window }}
+          READER_OUTPUT_TOKEN_RESERVE: ${{ inputs.reader_output_token_reserve }}
+          CONTROLS: ${{ inputs.controls }}
+          EVIDENCE_TOKEN_BUDGET: ${{ inputs.evidence_token_budget }}
+          BUDGET_USD: ${{ inputs.budget_usd }}
+        run: |
+          set -euo pipefail
+          cargo run -p xtask --locked --release -- run-external-memory-eval \
+            --dataset personamem-32k \
+            --data target/memory-benchmarks/personamem-32k \
+            --package-manifest target/memory-benchmarks/personamem-32k/package.json \
+            --fetch-summary target/memory-benchmarks/personamem-32k-fetch-summary.json \
+            --migrate-database \
+            --formation-mode "$FORMATION_MODE" \
+            --extractor-model "$EXTRACTOR_MODEL" \
+            --merge-verifier-model "$MERGE_VERIFIER_MODEL" \
+            --embedding-selector "$EMBEDDING_SELECTOR" \
+            --reader-model "$READER_MODEL" \
+            --reader-context-window "$READER_CONTEXT_WINDOW" \
+            --reader-output-token-reserve "$READER_OUTPUT_TOKEN_RESERVE" \
+            --controls "$CONTROLS" \
+            --evidence-token-budget "$EVIDENCE_TOKEN_BUDGET" \
+            --budget-usd "$BUDGET_USD" \
+            --output target/memory-benchmarks/personamem-32k-report.json
+
+      - name: Run LongMemEval primary and controls
+        if: inputs.dataset == 'longmemeval-s-cleaned'
+        env:
+          MOA_RUN_LIVE_MEMORY_BENCHMARKS: "1"
+          MOA_OPENAI_API_KEY: ${{ secrets.MOA_OPENAI_API_KEY }}
+          MOA_GOOGLE_API_KEY: ${{ secrets.MOA_GOOGLE_API_KEY }}
+          MOA_ANTHROPIC_API_KEY: ${{ secrets.MOA_ANTHROPIC_API_KEY }}
+          FORMATION_MODE: ${{ inputs.formation_mode }}
+          EXTRACTOR_MODEL: ${{ inputs.extractor_model }}
+          MERGE_VERIFIER_MODEL: ${{ inputs.merge_verifier_model }}
+          EMBEDDING_SELECTOR: ${{ inputs.embedding_selector }}
+          READER_MODEL: ${{ inputs.reader_model }}
+          JUDGE_MODEL: ${{ inputs.judge_model }}
+          READER_CONTEXT_WINDOW: ${{ inputs.reader_context_window }}
+          READER_OUTPUT_TOKEN_RESERVE: ${{ inputs.reader_output_token_reserve }}
+          CONTROLS: ${{ inputs.controls }}
+          EVIDENCE_TOKEN_BUDGET: ${{ inputs.evidence_token_budget }}
+          BUDGET_USD: ${{ inputs.budget_usd }}
+        run: |
+          set -euo pipefail
+          cargo run -p xtask --locked --release -- run-external-memory-eval \
+            --dataset longmemeval-s-cleaned \
+            --data target/memory-benchmarks/longmemeval-s-cleaned \
+            --package-manifest target/memory-benchmarks/longmemeval-s-cleaned/package.json \
+            --fetch-summary target/memory-benchmarks/longmemeval-s-cleaned-fetch-summary.json \
+            --migrate-database \
+            --formation-mode "$FORMATION_MODE" \
+            --extractor-model "$EXTRACTOR_MODEL" \
+            --merge-verifier-model "$MERGE_VERIFIER_MODEL" \
+            --embedding-selector "$EMBEDDING_SELECTOR" \
+            --reader-model "$READER_MODEL" \
+            --judge-model "$JUDGE_MODEL" \
+            --reader-context-window "$READER_CONTEXT_WINDOW" \
+            --reader-output-token-reserve "$READER_OUTPUT_TOKEN_RESERVE" \
+            --controls "$CONTROLS" \
+            --evidence-token-budget "$EVIDENCE_TOKEN_BUDGET" \
+            --budget-usd "$BUDGET_USD" \
+            --output target/memory-benchmarks/longmemeval-s-cleaned-report.json
+
+      # Reports are uploaded for review. This workflow deliberately has no
+      # repository or baseline write step.
+      - name: Upload external-memory evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: external-memory-${{ inputs.dataset }}-${{ github.run_id }}
+          retention-days: 30
+          path: |
+            target/memory-benchmarks/*/package.json
+            target/memory-benchmarks/*-fetch-summary.json
+            target/memory-benchmarks/*-report.json
+          if-no-files-found: error

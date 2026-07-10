@@ -48,12 +48,12 @@ use super::scope::{
 };
 use super::{
     BootstrapConfig, CachedEmbeddingFixture, CachedEmbeddingProvider, CorpusManifest,
-    DEFAULT_BOOTSTRAP_RESAMPLES, DeterministicJudge, EmbeddingInput, ExtractionPrecisionCounts,
-    GoldPiiStatus, GoldResolutionReport, GraphImpact, JudgeInput, JudgeOutcome, LedgerFact, Probe,
-    ProbeGraphComparison, ProbeGraphPathDiagnostic, ProbeResult, ProbeType, RetrievedCandidate,
-    SyntheticSession, candidates_from_retrieval_hits, embedding_text_hash,
-    read_embedding_inputs_jsonl, read_embeddings_jsonl, read_ledger_jsonl, read_manifest_json,
-    read_probes_jsonl, read_sessions_jsonl, resolve_gold_nodes, validate_corpus,
+    DEFAULT_BOOTSTRAP_RESAMPLES, EmbeddingInput, ExtractionPrecisionCounts, GoldPiiStatus,
+    GoldResolutionReport, GraphImpact, LedgerFact, Probe, ProbeGraphComparison,
+    ProbeGraphPathDiagnostic, ProbeResult, ProbeType, RetrievedCandidate, SyntheticSession,
+    candidates_from_retrieval_hits, embedding_text_hash, read_embedding_inputs_jsonl,
+    read_embeddings_jsonl, read_ledger_jsonl, read_manifest_json, read_probes_jsonl,
+    read_sessions_jsonl, resolve_gold_nodes, validate_corpus,
 };
 use crate::kernel::{
     CostLedger, CountingEmbedder, CountingExtractor, CountingMergeVerifier, CountingReranker,
@@ -610,7 +610,7 @@ async fn run_memory_retrieval_eval_in_store(
             preference_context_hit,
             graph_diagnostics: Some(retrieval.graph_diagnostics),
             graph_comparison,
-        })?);
+        }));
         if options.lane == EvalLane::Live
             && (probe_index + 1) % 10 == 0
             && let Err(error) = check_budget(&providers.ledger).await
@@ -1656,7 +1656,7 @@ struct ProbeResultInput<'a> {
     graph_comparison: Option<ProbeGraphComparison>,
 }
 
-fn probe_result_for(input: ProbeResultInput<'_>) -> Result<ProbeResult> {
+fn probe_result_for(input: ProbeResultInput<'_>) -> ProbeResult {
     let ProbeResultInput {
         probe,
         candidates,
@@ -1668,40 +1668,29 @@ fn probe_result_for(input: ProbeResultInput<'_>) -> Result<ProbeResult> {
         graph_comparison,
     } = input;
     let final_candidates = post_rerank_candidates.as_deref().unwrap_or(&candidates);
-    let expected_found_at_4 = all_expected_found_at_k(
+    let all_expected_found_at_4_value = all_expected_found_at_k(
         final_candidates,
         &probe.expected_fact_ids,
         RETRIEVAL_EVAL_FINAL_K,
     );
-    let blocked_leaked = any_blocked_found_at_k(
-        &candidates,
+    let forbidden_fact_absent_at_4_value = !any_blocked_found_at_k(
+        final_candidates,
         &probe.blocked_fact_ids,
-        RETRIEVAL_EVAL_CANDIDATE_K,
+        RETRIEVAL_EVAL_FINAL_K,
     );
-    let pii_redacted = pii_redacted_for_probe(probe, gold_records_by_fact_id);
-    let judge_outcome = deterministic_judge_outcome_for_probe(
-        probe,
-        expected_found_at_4,
-        blocked_leaked,
-        pii_redacted,
-    )?;
-    let answer_faithful = judge_outcome
-        .as_ref()
-        .and_then(|outcome| outcome.answer_faithful)
-        .or_else(|| retrieval_answer_faithful_for_probe(probe, expected_found_at_4));
-    let abstention_correct = judge_outcome
-        .as_ref()
-        .and_then(|outcome| outcome.abstention_correct);
-    let pii_redacted = judge_outcome
-        .as_ref()
-        .and_then(|outcome| outcome.pii_redacted)
-        .or(pii_redacted);
-    let temporal_as_of_correct = judge_outcome
-        .as_ref()
-        .and_then(|outcome| outcome.temporal_as_of_correct);
+    let stored_pii_redacted = stored_pii_redacted_for_probe(probe, gold_records_by_fact_id);
+    let all_expected_found_at_4 =
+        (!probe.expected_fact_ids.is_empty()).then_some(all_expected_found_at_4_value);
+    let forbidden_fact_absent_at_4 = matches!(
+        probe.probe_type,
+        ProbeType::Abstention | ProbeType::CrossUserIsolation
+    )
+    .then_some(forbidden_fact_absent_at_4_value);
+    let retrieval_temporal_as_of_correct = (probe.probe_type == ProbeType::TemporalAsOf)
+        .then_some(all_expected_found_at_4_value && forbidden_fact_absent_at_4_value);
     let (temporal_filter_parsed, temporal_filter_matches_as_of) = temporal_parse_diagnostics(probe);
 
-    Ok(ProbeResult {
+    ProbeResult {
         probe_id: probe.probe_id.clone(),
         user_id: probe.user_id.as_str().to_string(),
         probe_type: probe.probe_type,
@@ -1711,79 +1700,15 @@ fn probe_result_for(input: ProbeResultInput<'_>) -> Result<ProbeResult> {
         candidates,
         post_rerank_candidates,
         retrieval_latency_ms,
-        answer_faithful,
-        abstention_correct,
-        pii_redacted,
-        temporal_as_of_correct,
+        all_expected_found_at_4,
+        forbidden_fact_absent_at_4,
+        stored_pii_redacted,
+        retrieval_temporal_as_of_correct,
         temporal_filter_parsed,
         temporal_filter_matches_as_of,
         preference_context_hit,
         graph_diagnostics,
         graph_comparison,
-    })
-}
-
-fn retrieval_answer_faithful_for_probe(probe: &Probe, expected_found_at_4: bool) -> Option<bool> {
-    match probe.probe_type {
-        _ if probe.expected_fact_ids.is_empty() => None,
-        _ => Some(expected_found_at_4),
-    }
-}
-
-fn deterministic_judge_outcome_for_probe(
-    probe: &Probe,
-    expected_found_at_4: bool,
-    blocked_leaked: bool,
-    pii_redacted: Option<bool>,
-) -> Result<Option<JudgeOutcome>> {
-    if !deterministic_judge_supports(probe.probe_type) {
-        return Ok(None);
-    }
-
-    let mut input = JudgeInput::new(
-        probe.probe_type,
-        probe.answer.clone(),
-        candidate_answer_for_deterministic_judge(probe, expected_found_at_4, blocked_leaked),
-    )
-    .with_query(probe.query.clone());
-
-    if matches!(
-        probe.probe_type,
-        ProbeType::Abstention | ProbeType::CrossUserIsolation
-    ) {
-        input = input.with_abstained(!blocked_leaked);
-    }
-    if probe.probe_type == ProbeType::PiiRedaction {
-        input = input.with_expected_redacted(probe.expected_redacted);
-        if let Some(redacted) = pii_redacted {
-            input = input.with_pii_redacted(redacted);
-        }
-    }
-
-    DeterministicJudge::new().judge_sync(&input).map(Some)
-}
-
-fn deterministic_judge_supports(probe_type: ProbeType) -> bool {
-    !matches!(
-        probe_type,
-        ProbeType::MultiHop | ProbeType::PreferenceApplication
-    )
-}
-
-fn candidate_answer_for_deterministic_judge(
-    probe: &Probe,
-    expected_found_at_4: bool,
-    blocked_leaked: bool,
-) -> String {
-    match probe.probe_type {
-        ProbeType::Abstention | ProbeType::CrossUserIsolation if !blocked_leaked => {
-            "I do not have enough information to answer.".to_string()
-        }
-        ProbeType::Abstention | ProbeType::CrossUserIsolation => {
-            "blocked memory leaked".to_string()
-        }
-        _ if expected_found_at_4 => probe.answer.clone(),
-        _ => String::new(),
     }
 }
 
@@ -1799,7 +1724,7 @@ fn temporal_parse_diagnostics(probe: &Probe) -> (Option<bool>, Option<bool>) {
     )
 }
 
-fn pii_redacted_for_probe(
+fn stored_pii_redacted_for_probe(
     probe: &Probe,
     gold_records_by_fact_id: &HashMap<String, super::GoldNodeRecord>,
 ) -> Option<bool> {
@@ -3039,36 +2964,215 @@ mod tests {
     }
 
     #[test]
-    fn retrieval_runner_scores_policy_probes_through_deterministic_judge() {
-        // Pins: hermetic retrieval eval reuses the memory-eval judge policy for answer outcomes.
+    fn retrieval_runner_reports_observed_signals_without_synthesizing_an_answer() {
+        // Pins: a gold answer remains corpus metadata and never becomes retrieval-report answer quality.
         let probe = Probe {
-            probe_id: "probe-pii".to_string(),
-            probe_type: ProbeType::PiiRedaction,
+            probe_id: "probe-point".to_string(),
+            probe_type: ProbeType::PointRecall,
             storage_partition_id: StoragePartitionId::new("workspace"),
             user_id: moa_core::UserId::new("user"),
-            query: "What is Alice's phone?".to_string(),
+            query: "Which repository does Alice use?".to_string(),
             rewrite_query: None,
             expected_rewrite: None,
             query_class: None,
-            answer: "Alice's phone is [PHONE].".to_string(),
-            expected_fact_ids: vec!["fact-phone".to_string()],
+            answer: "Alice uses repo-alpha.".to_string(),
+            expected_fact_ids: vec!["fact-repository".to_string()],
             expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: Vec::new(),
             as_of: None,
-            expected_redacted: true,
+            expected_redacted: false,
+        };
+        let candidate = RetrievedCandidate {
+            uid: Uuid::from_u128(0x6_0001),
+            rank: 1,
+            score: 1.0,
+            fact_id: Some("fact-repository".to_string()),
+            equivalent_fact_ids: Vec::new(),
+            legs: crate::memory_eval::CandidateLegs::default(),
         };
 
-        let unredacted = deterministic_judge_outcome_for_probe(&probe, true, false, Some(false))
-            .expect("judge should score deterministic PII probe")
-            .expect("PII probe should be deterministic");
-        let redacted = deterministic_judge_outcome_for_probe(&probe, true, false, Some(true))
-            .expect("judge should score deterministic PII probe")
-            .expect("PII probe should be deterministic");
+        let result = probe_result_for(ProbeResultInput {
+            probe: &probe,
+            candidates: vec![candidate.clone()],
+            post_rerank_candidates: Some(vec![candidate]),
+            retrieval_latency_ms: 0,
+            gold_records_by_fact_id: &HashMap::new(),
+            preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
+        });
 
-        assert_eq!(unredacted.answer_faithful, Some(false));
-        assert_eq!(unredacted.pii_redacted, Some(false));
-        assert_eq!(redacted.answer_faithful, Some(true));
-        assert_eq!(redacted.pii_redacted, Some(true));
+        assert_eq!(result.all_expected_found_at_4, Some(true));
+        assert_eq!(result.forbidden_fact_absent_at_4, None);
+        assert_eq!(result.retrieval_temporal_as_of_correct, None);
+        assert_eq!(result.stored_pii_redacted, None);
+        let serialized = serde_json::to_value(result).expect("probe result should serialize");
+        assert!(serialized.get("answer").is_none());
+        assert!(serialized.get("answer_faithful").is_none());
+    }
+
+    #[test]
+    fn retrieval_runner_derives_negative_temporal_and_stored_pii_signals() {
+        // Pins: retrieval-only policy signals come from final candidates and stored gold records.
+        let base_probe = Probe {
+            probe_id: "probe-base".to_string(),
+            probe_type: ProbeType::PointRecall,
+            storage_partition_id: StoragePartitionId::new("workspace"),
+            user_id: moa_core::UserId::new("user"),
+            query: "query".to_string(),
+            rewrite_query: None,
+            expected_rewrite: None,
+            query_class: None,
+            answer: "gold answer must not be used".to_string(),
+            expected_fact_ids: Vec::new(),
+            expected_fact_grades: std::collections::BTreeMap::new(),
+            blocked_fact_ids: Vec::new(),
+            as_of: None,
+            expected_redacted: false,
+        };
+        let candidate = |uid: u128, rank: usize, fact_id: &str| RetrievedCandidate {
+            uid: Uuid::from_u128(uid),
+            rank,
+            score: 1.0 / rank as f64,
+            fact_id: Some(fact_id.to_string()),
+            equivalent_fact_ids: Vec::new(),
+            legs: crate::memory_eval::CandidateLegs::default(),
+        };
+
+        let negative = Probe {
+            probe_id: "probe-negative".to_string(),
+            probe_type: ProbeType::CrossUserIsolation,
+            expected_fact_ids: Vec::new(),
+            blocked_fact_ids: vec!["fact-forbidden".to_string()],
+            ..base_probe.clone()
+        };
+        let harmless = candidate(0x6_1001, 1, "fact-harmless");
+        let negative_result = probe_result_for(ProbeResultInput {
+            probe: &negative,
+            candidates: vec![harmless.clone()],
+            post_rerank_candidates: Some(vec![harmless]),
+            retrieval_latency_ms: 0,
+            gold_records_by_fact_id: &HashMap::new(),
+            preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
+        });
+        assert_eq!(negative_result.all_expected_found_at_4, None);
+        assert_eq!(negative_result.forbidden_fact_absent_at_4, Some(true));
+        let forbidden_negative_candidate = candidate(0x6_1002, 1, "fact-forbidden");
+        let leaking_negative_result = probe_result_for(ProbeResultInput {
+            probe: &negative,
+            candidates: vec![forbidden_negative_candidate.clone()],
+            post_rerank_candidates: Some(vec![forbidden_negative_candidate]),
+            retrieval_latency_ms: 0,
+            gold_records_by_fact_id: &HashMap::new(),
+            preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
+        });
+        assert_eq!(
+            leaking_negative_result.forbidden_fact_absent_at_4,
+            Some(false)
+        );
+
+        let multi_hop = Probe {
+            probe_id: "probe-multi-hop".to_string(),
+            probe_type: ProbeType::MultiHop,
+            expected_fact_ids: vec!["fact-owner".to_string(), "fact-runbook".to_string()],
+            ..base_probe.clone()
+        };
+        let partial_support = candidate(0x6_1501, 1, "fact-owner");
+        let multi_hop_result = probe_result_for(ProbeResultInput {
+            probe: &multi_hop,
+            candidates: vec![partial_support.clone()],
+            post_rerank_candidates: Some(vec![partial_support]),
+            retrieval_latency_ms: 0,
+            gold_records_by_fact_id: &HashMap::new(),
+            preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
+        });
+        assert_eq!(
+            multi_hop_result.all_expected_found_at_4,
+            Some(false),
+            "one of two support facts is fractional recall, not complete support"
+        );
+
+        let temporal = Probe {
+            probe_id: "probe-temporal".to_string(),
+            probe_type: ProbeType::TemporalAsOf,
+            expected_fact_ids: vec!["fact-old".to_string()],
+            blocked_fact_ids: vec!["fact-new".to_string()],
+            as_of: Some(
+                DateTime::parse_from_rfc3339("2026-01-05T00:00:00Z")
+                    .expect("test timestamp should parse")
+                    .with_timezone(&Utc),
+            ),
+            ..base_probe.clone()
+        };
+        let expected = candidate(0x6_2001, 1, "fact-old");
+        let forbidden = candidate(0x6_2002, 2, "fact-new");
+        let temporal_result = probe_result_for(ProbeResultInput {
+            probe: &temporal,
+            candidates: vec![expected.clone(), forbidden.clone()],
+            post_rerank_candidates: Some(vec![expected, forbidden]),
+            retrieval_latency_ms: 0,
+            gold_records_by_fact_id: &HashMap::new(),
+            preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
+        });
+        assert_eq!(temporal_result.all_expected_found_at_4, Some(true));
+        assert_eq!(
+            temporal_result.retrieval_temporal_as_of_correct,
+            Some(false),
+            "a blocked temporal version in the final window must fail as-of retrieval"
+        );
+
+        let pii = Probe {
+            probe_id: "probe-pii".to_string(),
+            probe_type: ProbeType::PiiRedaction,
+            expected_fact_ids: vec!["fact-phone".to_string()],
+            expected_redacted: true,
+            ..base_probe
+        };
+        let expected_valid_from = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .expect("test timestamp should parse")
+            .with_timezone(&Utc);
+        let gold_records = HashMap::from([(
+            "fact-phone".to_string(),
+            crate::memory_eval::GoldNodeRecord {
+                fact_id: "fact-phone".to_string(),
+                node_uids: vec![Uuid::from_u128(0x6_3001)],
+                scope: Some("contact".to_string()),
+                active: true,
+                valid_from: Some(expected_valid_from),
+                valid_to: None,
+                resolution_status: crate::memory_eval::GoldResolutionStatus::Resolved,
+                expected_scope: "contact".to_string(),
+                expected_valid_from,
+                expected_valid_to: None,
+                pii_status: GoldPiiStatus::Unredacted,
+                stored_pii_classes: vec!["phone".to_string()],
+                supersedes: Vec::new(),
+                superseded_by: Vec::new(),
+                supersession_chain: vec!["fact-phone".to_string()],
+                nodes: Vec::new(),
+            },
+        )]);
+        let pii_candidate = candidate(0x6_3001, 1, "fact-phone");
+        let pii_result = probe_result_for(ProbeResultInput {
+            probe: &pii,
+            candidates: vec![pii_candidate.clone()],
+            post_rerank_candidates: Some(vec![pii_candidate]),
+            retrieval_latency_ms: 0,
+            gold_records_by_fact_id: &gold_records,
+            preference_context_hit: None,
+            graph_diagnostics: None,
+            graph_comparison: None,
+        });
+        assert_eq!(pii_result.all_expected_found_at_4, Some(true));
+        assert_eq!(pii_result.stored_pii_redacted, Some(false));
     }
 
     #[tokio::test]

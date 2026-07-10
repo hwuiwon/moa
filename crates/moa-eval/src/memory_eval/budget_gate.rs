@@ -507,7 +507,7 @@ fn pii_unredacted_probe_ids(probe_results: &[ProbeResult]) -> Vec<String> {
     probe_results
         .iter()
         .filter(|probe| probe.probe_type == ProbeType::PiiRedaction)
-        .filter(|probe| probe.pii_redacted == Some(false))
+        .filter(|probe| probe.stored_pii_redacted == Some(false))
         .map(|probe| probe.probe_id.clone())
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -752,10 +752,10 @@ mod tests {
             pre_rerank_recall_at_4: MetricSummary::default(),
             pre_rerank_recall_at_25: MetricSummary::default(),
             post_rerank_recall_at_4: MetricSummary::default(),
-            answer_faithfulness: MetricSummary::default(),
-            abstention_correctness: MetricSummary::default(),
-            pii_redaction_rate: MetricSummary::default(),
-            temporal_as_of_accuracy: MetricSummary::default(),
+            all_expected_found_at_4: MetricSummary::default(),
+            forbidden_fact_absent_at_4: MetricSummary::default(),
+            stored_pii_redacted: MetricSummary::default(),
+            retrieval_temporal_as_of_correct: MetricSummary::default(),
             temporal_parse_rate: MetricSummary::default(),
             temporal_parse_mismatch_count: 0,
             preference_context_rate: MetricSummary::default(),

@@ -18,10 +18,12 @@ publish = false
 aho-corasick = { version = "1" }
 axum = { version = "0.8", features = ["multipart"] }
 base64 = { version = "0.22" }
+bstr = { version = "1", default-features = false, features = ["std"] }
 byteorder = { version = "1" }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 clap_builder = { version = "4", default-features = false, features = ["color", "env", "help", "std", "suggestions", "usage"] }
+clickhouse = { version = "0.13", default-features = false, features = ["chrono", "lz4", "rustls-tls", "test-util", "uuid"] }
 concurrent-queue = { version = "2" }
 crossbeam-epoch = { version = "0.9" }
 crossbeam-utils = { version = "0.8" }
@@ -35,7 +37,6 @@ fastrand = { version = "2" }
 flate2 = { version = "1" }
 form_urlencoded = { version = "1" }
 futures-channel = { version = "0.3", features = ["sink"] }
-futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-task = { version = "0.3" }
@@ -46,7 +47,7 @@ hashbrown = { version = "0.16" }
 http = { version = "1" }
 httparse = { version = "1" }
 hyper = { version = "1", features = ["full"] }
-hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "native-tokio", "ring"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "native-tokio", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "server-auto", "server-graceful", "service"] }
 lalrpop-util = { version = "0.20", features = ["lexer"] }
 lazy_static = { version = "1", default-features = false, features = ["spin_no_std"] }
@@ -93,9 +94,9 @@ sqlx-postgres = { version = "0.8", default-features = false, features = ["chrono
 subtle = { version = "2" }
 time = { version = "0.3", features = ["formatting", "macros", "parsing", "serde"] }
 tokio = { version = "1", features = ["full", "test-util", "tracing"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 tower = { version = "0.5", default-features = false, features = ["balance", "buffer", "limit", "load-shed", "log"] }
-tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
 tracing-log = { version = "0.2", default-features = false, features = ["log-tracer", "std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -120,7 +121,6 @@ either = { version = "1", features = ["serde", "use_std"] }
 flate2 = { version = "1" }
 form_urlencoded = { version = "1" }
 futures-channel = { version = "0.3", features = ["sink"] }
-futures-core = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-task = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
@@ -161,7 +161,6 @@ time = { version = "0.3", features = ["formatting", "macros", "parsing", "serde"
 time-macros = { version = "0.2", default-features = false, features = ["formatting", "parsing", "serde"] }
 tokio = { version = "1", features = ["full", "test-util", "tracing"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
-tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
 typenum = { version = "1", default-features = false, features = ["const-generics"] }
 url = { version = "2", features = ["serde"] }
@@ -172,11 +171,10 @@ zeroize = { version = "1", features = ["derive"] }
 [target.x86_64-unknown-linux-gnu.dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
 getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
-hyper-rustls = { version = "0.27", default-features = false, features = ["tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-proxy"] }
 linux-raw-sys = { version = "0.12", default-features = false, features = ["auxvec", "elf", "errno", "general", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "xdp"] }
 rustix = { version = "1", features = ["event", "fs", "net", "pipe", "process", "time"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "ring", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "ring"] }
 tokio-util = { version = "0.7", default-features = false, features = ["io-util"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
@@ -193,10 +191,9 @@ tokio-util = { version = "0.7", default-features = false, features = ["io-util"]
 bitflags = { version = "2", default-features = false, features = ["std"] }
 errno = { version = "0.3" }
 getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
-hyper-rustls = { version = "0.27", default-features = false, features = ["tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-proxy"] }
 rustix = { version = "1", features = ["event", "fs", "net", "pipe", "process", "time"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "ring", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "ring"] }
 tokio-util = { version = "0.7", default-features = false, features = ["io-util"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
@@ -213,10 +210,9 @@ tokio-util = { version = "0.7", default-features = false, features = ["io-util"]
 bitflags = { version = "2", default-features = false, features = ["std"] }
 errno = { version = "0.3" }
 getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
-hyper-rustls = { version = "0.27", default-features = false, features = ["tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-proxy"] }
 rustix = { version = "1", features = ["event", "fs", "net", "pipe", "process", "time"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "ring", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "ring"] }
 tokio-util = { version = "0.7", default-features = false, features = ["io-util"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }

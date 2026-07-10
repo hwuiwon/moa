@@ -11,14 +11,15 @@ use std::str::FromStr;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use moa_brain::retrieval::RetrievalHit;
-use moa_core::{MemoryRetrievalExecutor, MoaError, Result, SessionMeta, ToolOutput};
+use moa_brain::retrieval::{MemoryAdmissionPolicy, RetrievalHit};
+use moa_core::{MemoryRetrievalExecutor, MoaConfig, MoaError, Result, SessionMeta, ToolOutput};
 use moa_memory_graph::EdgeLabel;
-use moa_memory_types::MemoryScope;
 use restate_sdk::prelude::HandlerError;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+use crate::OrchestratorCtx;
 
 use super::retrieval::{neighbors_for_tool, search_hits_for_tool};
 
@@ -37,6 +38,32 @@ const MAX_NAVIGATE_HOPS: u8 = 3;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OrchestratorMemoryRetrievalExecutor;
 
+impl OrchestratorMemoryRetrievalExecutor {
+    /// Executes one agentic memory tool with explicit runtime dependencies.
+    ///
+    /// Embedded hosts and DB integration tests use this entry point so the
+    /// production executor can be exercised without installing process-global
+    /// orchestrator state.
+    pub async fn execute_retrieval_tool_with_runtime(
+        &self,
+        session: &SessionMeta,
+        tool_name: &str,
+        input: &Value,
+        pool: &sqlx::PgPool,
+        config: &MoaConfig,
+    ) -> Result<ToolOutput> {
+        let started = Instant::now();
+        let policy = MemoryAdmissionPolicy::from_session(session)?;
+        match tool_name {
+            "memory_search" => memory_search_tool(pool, config, &policy, input, started).await,
+            "memory_navigate" => memory_navigate_tool(pool, &policy, input, started).await,
+            other => Err(MoaError::ToolError(format!(
+                "unknown memory retrieval tool `{other}`"
+            ))),
+        }
+    }
+}
+
 #[async_trait]
 impl MemoryRetrievalExecutor for OrchestratorMemoryRetrievalExecutor {
     async fn execute_retrieval_tool(
@@ -45,33 +72,11 @@ impl MemoryRetrievalExecutor for OrchestratorMemoryRetrievalExecutor {
         tool_name: &str,
         input: &Value,
     ) -> Result<ToolOutput> {
-        let started = Instant::now();
-        let scope = scope_from_session(session);
-        match tool_name {
-            "memory_search" => memory_search_tool(&scope, input, started).await,
-            "memory_navigate" => memory_navigate_tool(&scope, input, started).await,
-            other => Err(MoaError::ToolError(format!(
-                "unknown memory retrieval tool `{other}`"
-            ))),
-        }
-    }
-}
-
-/// Derives the retrieval RLS scope from the session, never from tool input.
-///
-/// A contact-bound session searches that contact's memory plus tenant
-/// knowledge; a session with no contact is tenant-scoped. This is the single
-/// source of scoping for the retrieval tools, so a tool call can never be
-/// pointed at another tenant or contact.
-fn scope_from_session(session: &SessionMeta) -> MemoryScope {
-    match &session.contact {
-        Some(contact) => MemoryScope::Contact {
-            tenant_id: session.tenant_id,
-            contact_id: contact.contact_id,
-        },
-        None => MemoryScope::Tenant {
-            tenant_id: session.tenant_id,
-        },
+        let runtime = OrchestratorCtx::current();
+        let pool = runtime.graph_pool();
+        let config = runtime.config();
+        self.execute_retrieval_tool_with_runtime(session, tool_name, input, &pool, config.as_ref())
+            .await
     }
 }
 
@@ -94,7 +99,9 @@ struct NavigateInput {
 }
 
 async fn memory_search_tool(
-    scope: &MemoryScope,
+    pool: &sqlx::PgPool,
+    config: &MoaConfig,
+    policy: &MemoryAdmissionPolicy,
     input: &Value,
     started: Instant,
 ) -> Result<ToolOutput> {
@@ -116,7 +123,7 @@ async fn memory_search_tool(
         ));
     }
 
-    let hits = search_hits_for_tool(scope, query, MEMORY_SEARCH_LIMIT)
+    let hits = search_hits_for_tool(pool, config, policy, query, MEMORY_SEARCH_LIMIT)
         .await
         .map_err(handler_error_to_tool_error)?;
     let payload: Vec<Value> = hits.iter().map(search_hit_json).collect();
@@ -175,7 +182,8 @@ fn hit_excerpt(hit: &RetrievalHit) -> String {
 }
 
 async fn memory_navigate_tool(
-    scope: &MemoryScope,
+    pool: &sqlx::PgPool,
+    policy: &MemoryAdmissionPolicy,
     input: &Value,
     started: Instant,
 ) -> Result<ToolOutput> {
@@ -187,7 +195,7 @@ async fn memory_navigate_tool(
         _ => None,
     };
 
-    let neighbors = neighbors_for_tool(scope, params.node_uid, hops, edge_filter)
+    let neighbors = neighbors_for_tool(pool, policy, params.node_uid, hops, edge_filter)
         .await
         .map_err(handler_error_to_tool_error)?;
     let payload: Vec<Value> = neighbors

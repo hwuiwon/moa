@@ -1,12 +1,14 @@
 //! End-to-end slow-path ingestion coverage through a local Restate ingress.
 
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
-use moa_core::{ContactId, SessionId, TenantId};
-use moa_memory_ingest::{IngestApplyReport, SessionTurn, should_ingest_degraded};
+use moa_core::{ContactId, SessionId, TenantId, config::MoaConfig};
+use moa_memory_ingest::{IngestApplyReport, IngestRuntime, SessionTurn, should_ingest_degraded};
 use moa_test_support::postgres::test_database_url;
 use sqlx::PgPool;
 use tempfile::TempDir;
@@ -28,6 +30,7 @@ struct LiveIngestionHarness {
     pool: PgPool,
     ingress: String,
     child: Child,
+    orchestrator_log: PathBuf,
     _memory_dir: TempDir,
     _sandbox_dir: TempDir,
 }
@@ -40,10 +43,17 @@ impl LiveIngestionHarness {
         let endpoint_url = deployment_endpoint_url(ports.restate);
         let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
         let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
+        let orchestrator_log = memory_dir.path().join("orchestrator.log");
         let pool = PgPool::connect(&test_database_url())
             .await
             .context("connect to test Postgres")?;
-        let child = spawn_orchestrator(ports, &admin_url, &memory_dir, &sandbox_dir)?;
+        let child = spawn_orchestrator(
+            ports,
+            &admin_url,
+            &memory_dir,
+            &sandbox_dir,
+            &orchestrator_log,
+        )?;
 
         wait_for_live(ports.health).await?;
         register_deployment(&admin_url, &endpoint_url).await?;
@@ -53,20 +63,29 @@ impl LiveIngestionHarness {
             pool,
             ingress,
             child,
+            orchestrator_log,
             _memory_dir: memory_dir,
             _sandbox_dir: sandbox_dir,
         })
     }
 
     async fn ingest(&self, turn: &SessionTurn) -> Result<IngestApplyReport> {
-        self.client
+        let response = self
+            .client
             .post(object_url(&self.ingress, turn))
             .json(turn)
             .send()
             .await
-            .context("call IngestionVO/ingest_turn via restate ingress")?
-            .error_for_status()
-            .context("ingestion request should succeed")?
+            .context("call IngestionVO/ingest_turn via restate ingress")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!(
+                "ingestion request should succeed; status={status} body={body}\n{}",
+                orchestrator_log_tail(&self.orchestrator_log)
+            );
+        }
+        response
             .json::<IngestApplyReport>()
             .await
             .context("decode ingestion report")
@@ -94,8 +113,13 @@ fn spawn_orchestrator(
     admin_url: &str,
     memory_dir: &TempDir,
     sandbox_dir: &TempDir,
+    log_path: &Path,
 ) -> Result<Child> {
     let postgres_url = test_database_url();
+    let stdout = File::create(log_path).context("create ingestion e2e orchestrator log")?;
+    let stderr = stdout
+        .try_clone()
+        .context("clone ingestion e2e orchestrator log")?;
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_moa-orchestrator-bin"));
     command
@@ -113,8 +137,8 @@ fn spawn_orchestrator(
         .env("MOA_LOCAL_DOCKER_ENABLED", "false")
         .env_remove("MOA_COHERE_API_KEY")
         .env("RUST_LOG", "info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
 
     if let Ok(pii_url) = std::env::var("MOA_PII_SERVICE_URL") {
         command.env("MOA_PII_SERVICE_URL", pii_url);
@@ -123,6 +147,23 @@ fn spawn_orchestrator(
     command
         .spawn()
         .context("spawn moa-orchestrator binary for ingestion e2e")
+}
+
+fn orchestrator_log_tail(log_path: &Path) -> String {
+    match fs::read_to_string(log_path) {
+        Ok(contents) if contents.trim().is_empty() => {
+            format!("orchestrator log {} was empty", log_path.display())
+        }
+        Ok(contents) => {
+            let lines = contents.lines().rev().take(120).collect::<Vec<_>>();
+            let tail = lines.into_iter().rev().collect::<Vec<_>>().join("\n");
+            format!("orchestrator log tail from {}:\n{tail}", log_path.display())
+        }
+        Err(error) => format!(
+            "failed to read orchestrator log {}: {error}",
+            log_path.display()
+        ),
+    }
 }
 
 fn restate_ingress_url() -> String {
@@ -320,6 +361,25 @@ async fn dlq_count(pool: &PgPool, turn: &SessionTurn) -> Result<i64> {
     .context("count dlq rows")
 }
 
+async fn dlq_errors(pool: &PgPool, turn: &SessionTurn) -> Result<Vec<String>> {
+    sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT error
+        FROM moa.ingest_dlq
+        WHERE storage_partition_id = $1
+          AND session_id = $2
+          AND turn_seq = $3
+        ORDER BY dlq_id
+        "#,
+    )
+    .bind(turn.tenant_id.to_string())
+    .bind(turn.session_id.0)
+    .bind(i64::try_from(turn.turn_seq).context("turn sequence fits i64")?)
+    .fetch_all(pool)
+    .await
+    .context("load dlq errors")
+}
+
 async fn changelog_count(pool: &PgPool, turn: &SessionTurn) -> Result<i64> {
     sqlx::query_scalar::<_, i64>(
         r#"
@@ -357,21 +417,69 @@ async fn fact_summaries(pool: &PgPool, turn: &SessionTurn) -> Result<Vec<String>
 }
 
 async fn set_slow_path_degraded(pool: &PgPool, tenant_id: TenantId, degraded: bool) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO moa.storage_partition_state (storage_partition_id, slow_path_degraded)
-        VALUES ($1, $2)
-        ON CONFLICT (storage_partition_id) DO UPDATE
-            SET slow_path_degraded = EXCLUDED.slow_path_degraded,
-                updated_at = now()
-        "#,
-    )
-    .bind(tenant_id.to_string())
-    .bind(degraded)
-    .execute(pool)
-    .await
-    .context("set workspace degraded flag")?;
+    let embedder_metadata = live_ingestion_embedder_metadata(pool.clone())?;
+    if let Some(metadata) = embedder_metadata {
+        sqlx::query(
+            r#"
+            INSERT INTO moa.storage_partition_state
+                (storage_partition_id, slow_path_degraded, embedding_model,
+                 embedding_model_version, embedding_dimension)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (storage_partition_id) DO UPDATE
+                SET slow_path_degraded = EXCLUDED.slow_path_degraded,
+                    embedding_model = EXCLUDED.embedding_model,
+                    embedding_model_version = EXCLUDED.embedding_model_version,
+                    embedding_dimension = EXCLUDED.embedding_dimension,
+                    updated_at = now()
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(degraded)
+        .bind(metadata.model_id)
+        .bind(metadata.model_version)
+        .bind(metadata.dimensions)
+        .execute(pool)
+        .await
+        .context("set workspace degraded flag with embedder metadata")?;
+    } else {
+        sqlx::query(
+            r#"
+            INSERT INTO moa.storage_partition_state (storage_partition_id, slow_path_degraded)
+            VALUES ($1, $2)
+            ON CONFLICT (storage_partition_id) DO UPDATE
+                SET slow_path_degraded = EXCLUDED.slow_path_degraded,
+                    updated_at = now()
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(degraded)
+        .execute(pool)
+        .await
+        .context("set workspace degraded flag")?;
+    }
     Ok(())
+}
+
+struct EmbedderMetadata {
+    model_id: String,
+    model_version: i32,
+    dimensions: i32,
+}
+
+fn live_ingestion_embedder_metadata(pool: PgPool) -> Result<Option<EmbedderMetadata>> {
+    let config = MoaConfig::load().context("load live ingestion config")?;
+    let runtime =
+        IngestRuntime::from_config(pool, &config).context("build live ingestion runtime")?;
+    let Some(embedder) = runtime.embedder() else {
+        return Ok(None);
+    };
+    let dimensions =
+        i32::try_from(embedder.dimensions()).context("embedding dimensions fit i32")?;
+    Ok(Some(EmbedderMetadata {
+        model_id: embedder.model_id().to_string(),
+        model_version: embedder.model_version(),
+        dimensions,
+    }))
 }
 
 #[tokio::test]
@@ -494,13 +602,14 @@ async fn degraded_workspace_still_ingests_sensitive_turn() -> Result<()> {
         set_slow_path_degraded(&harness.pool, turn.tenant_id, true).await?;
 
         let report = harness.ingest(&turn).await?;
+        let dlq_errors = dlq_errors(&harness.pool, &turn).await?;
         ensure!(
             report.inserted == 2,
-            "unexpected sensitive report: {report:?}"
+            "unexpected sensitive report: {report:?}; dlq={dlq_errors:?}"
         );
         ensure!(
             report.failed == 0,
-            "unexpected sensitive report: {report:?}"
+            "unexpected sensitive report: {report:?}; dlq={dlq_errors:?}"
         );
         wait_for_fact_count(&harness.pool, &turn, 2).await?;
         ensure!(dedup_count(&harness.pool, &turn).await? == 2);

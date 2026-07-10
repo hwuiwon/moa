@@ -1,12 +1,81 @@
 //! Prompt rendering and source-reference helpers for graph-memory context.
 
-use moa_core::ContextSourceRef;
+use moa_core::{ContextSourceRef, estimate_text_tokens};
 
 /// Prompt payload and metadata derived from admitted graph-memory hits.
 pub(super) struct RenderedMemoryContext {
     pub(super) section: String,
     pub(super) items_included: Vec<String>,
     pub(super) source_refs: Vec<ContextSourceRef>,
+}
+
+/// Prompt payload selected under one explicit evidence-token budget.
+pub(super) struct BudgetedRenderedMemoryContext {
+    pub(super) rendered: RenderedMemoryContext,
+    pub(super) hit_count: usize,
+    pub(super) consumed_tokens: usize,
+}
+
+/// Renders the largest ranked hit prefix that fits an explicit token budget.
+///
+/// Candidate prefixes and excerpts always flow through [`render_memory_context`],
+/// so the returned evidence and source refs use the exact stage-7 renderer. A
+/// budget too small for even one minimally rendered hit returns empty evidence
+/// instead of emitting an over-budget or structurally truncated section.
+pub(super) fn render_memory_context_with_budget(
+    hits: &[crate::retrieval::RetrievalHit],
+    token_budget: usize,
+) -> BudgetedRenderedMemoryContext {
+    if hits.is_empty() || token_budget == 0 {
+        return empty_budgeted_context();
+    }
+
+    for hit_count in (1..=hits.len()).rev() {
+        let selected_hits = &hits[..hit_count];
+        let mut lower = 1_usize;
+        let mut upper = token_budget;
+        let mut best = None;
+
+        while lower <= upper {
+            let per_hit_budget = lower + (upper - lower) / 2;
+            let rendered = render_memory_context(selected_hits, per_hit_budget);
+            let consumed_tokens = estimate_text_tokens(&rendered.section);
+            if consumed_tokens <= token_budget {
+                best = Some(BudgetedRenderedMemoryContext {
+                    rendered,
+                    hit_count,
+                    consumed_tokens,
+                });
+                if per_hit_budget == upper {
+                    break;
+                }
+                lower = per_hit_budget + 1;
+            } else {
+                if per_hit_budget == 1 {
+                    break;
+                }
+                upper = per_hit_budget - 1;
+            }
+        }
+
+        if let Some(best) = best {
+            return best;
+        }
+    }
+
+    empty_budgeted_context()
+}
+
+fn empty_budgeted_context() -> BudgetedRenderedMemoryContext {
+    BudgetedRenderedMemoryContext {
+        rendered: RenderedMemoryContext {
+            section: String::new(),
+            items_included: Vec::new(),
+            source_refs: Vec::new(),
+        },
+        hit_count: 0,
+        consumed_tokens: 0,
+    }
 }
 
 /// Renders graph-memory hits into prompt context and matching source refs.

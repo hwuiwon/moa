@@ -6,11 +6,11 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use moa_core::{MoaConfig, traits::EmbeddingProvider};
+use moa_core::{MoaConfig, MoaError, traits::EmbeddingProvider};
 use moa_memory_graph::GraphStore;
 use moa_memory_pii::{HeuristicPiiClassifier, OpenAiPrivacyFilterClassifier, PiiClassifier};
 use moa_memory_vector::{VectorStore, VectorStoreFactory};
-use moa_providers::CohereV4Embedder;
+use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
 use sqlx::PgPool;
 
 use crate::model_client::resolved_extraction_config;
@@ -25,6 +25,9 @@ static INGEST_RUNTIME: OnceLock<IngestRuntime> = OnceLock::new();
 /// Error returned when installing the process-local ingestion runtime fails.
 #[derive(Debug, thiserror::Error)]
 pub enum IngestRuntimeInstallError {
+    /// Runtime configuration could not construct a required dependency.
+    #[error("ingestion runtime configuration failed: {0}")]
+    Configuration(#[from] MoaError),
     /// A different runtime has already been installed in this process.
     #[error(
         "ingestion runtime already installed with incompatible dependencies: installed={installed}, requested={requested}"
@@ -41,8 +44,10 @@ pub enum IngestRuntimeInstallError {
 struct IngestRuntimeFingerprint {
     pool_options_hash: u64,
     pii_service_url: Option<String>,
-    cohere_api_key_configured: bool,
-    cohere_api_key_hash: u64,
+    embedder_available: bool,
+    embedder_model_id: Option<String>,
+    embedder_model_version: Option<i32>,
+    embedder_dimensions: Option<usize>,
     extractor_name: &'static str,
     entity_resolver_name: &'static str,
     entity_blocking_enabled: bool,
@@ -59,12 +64,15 @@ impl IngestRuntimeFingerprint {
         entity_resolver_name: &'static str,
         entity_blocking_enabled: bool,
         contradiction_detector_name: &'static str,
+        embedder: Option<&dyn EmbeddingProvider>,
     ) -> Self {
         Self {
             pool_options_hash: hash_debug(pool.connect_options().as_ref()),
             pii_service_url: config.memory.pii_service_url.clone(),
-            cohere_api_key_configured: !config.providers.cohere.api_key.trim().is_empty(),
-            cohere_api_key_hash: hash_debug(&config.providers.cohere.api_key),
+            embedder_available: embedder.is_some(),
+            embedder_model_id: embedder.map(|provider| provider.model_id().to_string()),
+            embedder_model_version: embedder.map(EmbeddingProvider::model_version),
+            embedder_dimensions: embedder.map(EmbeddingProvider::dimensions),
             extractor_name,
             entity_resolver_name,
             entity_blocking_enabled,
@@ -76,11 +84,15 @@ impl IngestRuntimeFingerprint {
 
     fn summary(&self) -> String {
         format!(
-            "pool={}, pii={}, cohere_api_key_configured={}, cohere_api_key_hash={}, extractor={}, entity_resolver={}, entity_blocking={}, contradiction={}, memory_config={}, observability_environment={}",
+            "pool={}, pii={}, embedder_available={}, embedder_model={}, embedder_version={}, embedder_dimensions={}, extractor={}, entity_resolver={}, entity_blocking={}, contradiction={}, memory_config={}, observability_environment={}",
             self.pool_options_hash,
             self.pii_service_url.as_deref().unwrap_or("<none>"),
-            self.cohere_api_key_configured,
-            self.cohere_api_key_hash,
+            self.embedder_available,
+            self.embedder_model_id.as_deref().unwrap_or("<none>"),
+            self.embedder_model_version
+                .map_or_else(|| "<none>".to_string(), |version| version.to_string()),
+            self.embedder_dimensions
+                .map_or_else(|| "<none>".to_string(), |dimensions| dimensions.to_string()),
             self.extractor_name,
             self.entity_resolver_name,
             self.entity_blocking_enabled,
@@ -195,7 +207,6 @@ impl IngestCtx {
 pub struct IngestRuntime {
     pool: PgPool,
     pii_service_url: Option<String>,
-    cohere_api_key: String,
     embedder: Option<Arc<dyn EmbeddingProvider>>,
     pii_classifier: Arc<dyn PiiClassifier>,
     extractor: Arc<dyn FactExtractor>,
@@ -212,53 +223,40 @@ pub struct IngestRuntime {
 
 impl IngestRuntime {
     /// Creates a runtime from a Postgres pool.
-    #[must_use]
-    pub fn new(pool: PgPool) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the default embedder selector is invalid or its
+    /// client cannot be constructed. Missing credentials keep ingestion in
+    /// no-vector mode.
+    pub fn new(pool: PgPool) -> std::result::Result<Self, IngestRuntimeInstallError> {
         let default_config = MoaConfig::default();
-        let contradiction_detector = Arc::new(RrfPlusJudgeDetector::from_config_or_heuristic(
-            &default_config,
-        ));
-        let extractor_name = "heuristic";
-        let entity_resolver_name = "deterministic";
-        let entity_blocking_enabled = false;
-        let contradiction_detector_name = "rrf_plus_judge";
-        let vector_store_factory = VectorStoreFactory::from_config(&default_config);
-        let fingerprint = IngestRuntimeFingerprint::new(
-            &pool,
-            &default_config,
-            extractor_name,
-            entity_resolver_name,
-            entity_blocking_enabled,
-            contradiction_detector_name,
-        );
-        let cohere_api_key = default_config.providers.cohere.api_key;
-        let embedder = build_shared_embedder(&cohere_api_key);
-        let pii_classifier = build_shared_pii_classifier(None);
-        Self {
-            pool,
-            pii_service_url: None,
-            cohere_api_key,
-            embedder,
-            pii_classifier,
-            extractor: Arc::new(HeuristicFactExtractor),
-            extractor_name,
-            entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
-            entity_resolver_name,
-            entity_blocking_enabled,
-            contradiction_detector,
-            contradiction_detector_name,
-            vector_store_factory,
-            fact_extraction_enabled: false,
-            fingerprint,
-        }
+        Self::from_config(pool, &default_config)
     }
 
     /// Creates a runtime from a Postgres pool and shared MOA config.
-    #[must_use]
-    pub fn from_config(pool: PgPool, config: &MoaConfig) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid embedder selectors, models, dimensions, or
+    /// client construction. Disabled selection and missing selected-provider
+    /// credentials install a no-vector runtime instead.
+    pub fn from_config(
+        pool: PgPool,
+        config: &MoaConfig,
+    ) -> std::result::Result<Self, IngestRuntimeInstallError> {
         let (extractor, extractor_name) = extractor_from_config(config);
         let (entity_resolver, entity_resolver_name) = entity_resolver_from_config(config);
-        let entity_blocking_enabled = entity_blocking_enabled_from_config(config);
+        let embedder = build_configured_ingestion_embedder(config)?;
+        let entity_blocking_enabled = embedder.is_some();
+        if let Some(provider) = embedder.as_deref() {
+            tracing::info!(
+                model = provider.model_id(),
+                model_version = provider.model_version(),
+                dimensions = provider.dimensions(),
+                "memory entity embedding block installed"
+            );
+        }
         let contradiction_detector_name = "rrf_plus_judge";
         let fingerprint = IngestRuntimeFingerprint::new(
             &pool,
@@ -267,13 +265,12 @@ impl IngestRuntime {
             entity_resolver_name,
             entity_blocking_enabled,
             contradiction_detector_name,
+            embedder.as_deref(),
         );
-        let embedder = build_shared_embedder(&config.providers.cohere.api_key);
         let pii_classifier = build_shared_pii_classifier(config.memory.pii_service_url.as_deref());
-        Self {
+        Ok(Self {
             pool,
             pii_service_url: config.memory.pii_service_url.clone(),
-            cohere_api_key: config.providers.cohere.api_key.clone(),
             embedder,
             pii_classifier,
             extractor,
@@ -288,7 +285,7 @@ impl IngestRuntime {
             vector_store_factory: VectorStoreFactory::from_config(config),
             fact_extraction_enabled: config.memory.extraction.enabled,
             fingerprint,
-        }
+        })
     }
 
     /// Returns a copy of this runtime that uses the provided fact extractor.
@@ -342,12 +339,6 @@ impl IngestRuntime {
     #[must_use]
     pub fn pii_service_url(&self) -> Option<&str> {
         self.pii_service_url.as_deref()
-    }
-
-    /// Returns the configured Cohere API key.
-    #[must_use]
-    pub fn cohere_api_key(&self) -> &str {
-        &self.cohere_api_key
     }
 
     /// Returns the process-shared fact embedder, when a credential is configured.
@@ -456,24 +447,37 @@ fn entity_resolver_from_config(config: &MoaConfig) -> (Arc<EntityResolver>, &'st
     )
 }
 
-/// Builds the process-shared fact embedder from a Cohere credential.
+/// Builds the configured session-ingestion embedder without crossing vector spaces.
 ///
-/// Returns `None` when the credential is absent or the HTTP client cannot be
-/// constructed; ingestion then stores facts without embeddings.
-pub(crate) fn build_shared_embedder(cohere_api_key: &str) -> Option<Arc<dyn EmbeddingProvider>> {
-    let api_key = cohere_api_key.trim();
-    if api_key.is_empty() {
-        return None;
+/// Disabled selection and a missing selected-provider credential return
+/// `Ok(None)` after one structured warning so slow ingestion can persist facts
+/// without vectors. Every other factory error is propagated.
+pub(crate) fn build_configured_ingestion_embedder(
+    config: &MoaConfig,
+) -> moa_core::Result<Option<Arc<dyn EmbeddingProvider>>> {
+    let selector = config.memory.vector.embedder.name.trim();
+    if selector.is_empty() || selector.eq_ignore_ascii_case("disabled") {
+        tracing::warn!(
+            selector,
+            credential_field = "<disabled>",
+            reason = "disabled",
+            "configured ingestion embedder unavailable; slow ingestion will store facts without vectors"
+        );
+        return Ok(None);
     }
-    match CohereV4Embedder::new(api_key.to_string()) {
-        Ok(embedder) => Some(Arc::new(embedder) as Arc<dyn EmbeddingProvider>),
-        Err(error) => {
+
+    match build_embedder_from_config(config, EmbedderConstructionRole::Ingestion) {
+        Ok(embedder) => Ok(Some(embedder)),
+        Err(MoaError::MissingEnvironmentVariable(credential_field)) => {
             tracing::warn!(
-                error = %error,
-                "cohere embedder init failed; ingestion will store facts without embeddings"
+                selector,
+                credential_field,
+                reason = "missing_credential",
+                "configured ingestion embedder unavailable; slow ingestion will store facts without vectors"
             );
-            None
+            Ok(None)
         }
+        Err(error) => Err(error),
     }
 }
 
@@ -492,16 +496,6 @@ pub(crate) fn build_shared_pii_classifier(pii_service_url: Option<&str>) -> Arc<
         }
     }
     Arc::new(HeuristicPiiClassifier)
-}
-
-fn entity_blocking_enabled_from_config(config: &MoaConfig) -> bool {
-    let enabled = !config.providers.cohere.api_key.trim().is_empty();
-    if enabled {
-        tracing::info!("memory entity embedding block installed: cohere");
-    } else {
-        tracing::info!("memory entity embedding block disabled; credential is absent");
-    }
-    enabled
 }
 
 fn extractor_from_config(config: &MoaConfig) -> (Arc<dyn FactExtractor>, &'static str) {
@@ -568,7 +562,7 @@ pub fn install_runtime(
 pub fn install_runtime_with_pool(
     pool: PgPool,
 ) -> std::result::Result<(), IngestRuntimeInstallError> {
-    install_runtime(IngestRuntime::new(pool))
+    install_runtime(IngestRuntime::new(pool)?)
 }
 
 /// Installs the process-local ingestion runtime from a Postgres pool and shared config.
@@ -576,7 +570,7 @@ pub fn install_runtime_with_config(
     pool: PgPool,
     config: &MoaConfig,
 ) -> std::result::Result<(), IngestRuntimeInstallError> {
-    install_runtime(IngestRuntime::from_config(pool, config))
+    install_runtime(IngestRuntime::from_config(pool, config)?)
 }
 
 /// Returns the installed process-local ingestion runtime.
@@ -595,15 +589,203 @@ fn hash_debug(value: &impl std::fmt::Debug) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::sync::Mutex;
 
-    use moa_core::MoaConfig;
+    use moa_core::{MoaConfig, MoaError};
     use sqlx::postgres::PgPoolOptions;
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
 
-    use super::{IngestRuntime, install_runtime};
+    use super::{IngestRuntime, IngestRuntimeInstallError, install_runtime};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct CapturedWarning {
+        fields: BTreeMap<String, String>,
+    }
+
+    #[derive(Clone, Default)]
+    struct WarningSubscriber {
+        warnings: Arc<Mutex<Vec<CapturedWarning>>>,
+    }
+
+    impl Subscriber for WarningSubscriber {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            *metadata.level() == tracing::Level::WARN
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut visitor = WarningVisitor::default();
+            event.record(&mut visitor);
+            self.warnings
+                .lock()
+                .expect("warning capture lock")
+                .push(CapturedWarning {
+                    fields: visitor.fields,
+                });
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+    }
+
+    #[derive(Default)]
+    struct WarningVisitor {
+        fields: BTreeMap<String, String>,
+    }
+
+    impl Visit for WarningVisitor {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    fn lazy_pool() -> sqlx::PgPool {
+        PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/moa_test")
+            .expect("lazy test pool should not connect")
+    }
+
+    #[tokio::test]
+    async fn runtime_uses_configured_ingestion_embedder() {
+        // Pins: production session ingestion follows memory.vector.embedder instead
+        // of silently constructing Cohere, and entity blocking shares that client.
+        let mut config = MoaConfig::default();
+        config.memory.vector.embedder.name = "gemini:gemini-embedding-2".to_string();
+        config.memory.vector.embedder.output_dim = 1_024;
+        config.providers.google.api_key = "test-google-key".to_string();
+
+        let runtime = IngestRuntime::from_config(lazy_pool(), &config)
+            .expect("configured Gemini ingestion runtime should build without a provider call");
+        let fact_embedder = runtime
+            .embedder()
+            .expect("configured ingestion embedder should be available");
+        let entity_embedder = runtime
+            .entity_blocking_embedder()
+            .expect("entity blocking should use the configured ingestion embedder");
+
+        assert_eq!(fact_embedder.model_id(), "gemini-embedding-2");
+        assert_eq!(fact_embedder.model_version(), 2);
+        assert_eq!(fact_embedder.dimensions(), 1_024);
+        assert!(Arc::ptr_eq(&fact_embedder, &entity_embedder));
+        assert!(runtime.fingerprint.embedder_available);
+        assert_eq!(
+            runtime.fingerprint.embedder_model_id.as_deref(),
+            Some("gemini-embedding-2")
+        );
+        assert_eq!(runtime.fingerprint.embedder_model_version, Some(2));
+        assert_eq!(runtime.fingerprint.embedder_dimensions, Some(1_024));
+    }
+
+    #[tokio::test]
+    async fn runtime_without_selected_provider_credentials_has_no_ingestion_embedder() {
+        // Pins: a missing selected-provider credential emits exactly one structured
+        // warning and leaves slow ingestion in its explicit no-vector mode.
+        let mut config = MoaConfig::default();
+        config.memory.vector.embedder.name = "gemini:gemini-embedding-2".to_string();
+        config.providers.google.api_key.clear();
+        let subscriber = WarningSubscriber::default();
+        let captured = subscriber.warnings.clone();
+
+        let runtime = tracing::subscriber::with_default(subscriber, || {
+            IngestRuntime::from_config(lazy_pool(), &config)
+        })
+        .expect("missing selected credential should preserve no-vector ingestion");
+
+        assert!(runtime.embedder().is_none());
+        assert!(runtime.entity_blocking_embedder().is_none());
+        assert!(!runtime.fingerprint.embedder_available);
+        assert_eq!(runtime.fingerprint.embedder_model_id, None);
+        let warnings = captured.lock().expect("warning capture lock");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0].fields.get("selector").map(String::as_str),
+            Some("gemini:gemini-embedding-2")
+        );
+        assert_eq!(
+            warnings[0]
+                .fields
+                .get("credential_field")
+                .map(String::as_str),
+            Some("MOA_GOOGLE_API_KEY")
+        );
+        assert_eq!(
+            warnings[0].fields.get("reason").map(String::as_str),
+            Some("missing_credential")
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_ingestion_embedder_emits_one_warning_and_stays_unavailable() {
+        // Pins: the explicit disabled selector has the same slow no-vector
+        // boundary as missing credentials and is diagnosed once at construction.
+        let mut config = MoaConfig::default();
+        config.memory.vector.embedder.name = "disabled".to_string();
+        let subscriber = WarningSubscriber::default();
+        let captured = subscriber.warnings.clone();
+
+        let runtime = tracing::subscriber::with_default(subscriber, || {
+            IngestRuntime::from_config(lazy_pool(), &config)
+        })
+        .expect("disabled ingestion embedder should preserve no-vector ingestion");
+
+        assert!(runtime.embedder().is_none());
+        let warnings = captured.lock().expect("warning capture lock");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0].fields.get("selector").map(String::as_str),
+            Some("disabled")
+        );
+        assert_eq!(
+            warnings[0]
+                .fields
+                .get("credential_field")
+                .map(String::as_str),
+            Some("<disabled>")
+        );
+        assert_eq!(
+            warnings[0].fields.get("reason").map(String::as_str),
+            Some("disabled")
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_ingestion_embedder_configuration_is_propagated() {
+        // Pins: an invalid selected model is a startup configuration error, not a
+        // silent no-vector downgrade or a cross-provider fallback.
+        let mut config = MoaConfig::default();
+        config.memory.vector.embedder.name = "gemini:not-a-real-model".to_string();
+        config.providers.google.api_key = "test-google-key".to_string();
+
+        let Err(error) = IngestRuntime::from_config(lazy_pool(), &config) else {
+            panic!("invalid selected ingestion model should fail runtime construction");
+        };
+
+        assert!(matches!(
+            error,
+            IngestRuntimeInstallError::Configuration(MoaError::ConfigError(message))
+                if message == "gemini embedder only supports gemini-embedding-2, got not-a-real-model"
+        ));
+    }
 
     #[tokio::test]
     async fn ingest_runtime_reuses_contradiction_detector() {
@@ -611,7 +793,7 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://localhost/moa_test")
             .expect("lazy test pool should not connect");
-        let runtime = IngestRuntime::new(pool);
+        let runtime = IngestRuntime::new(pool).expect("default runtime should build");
 
         let first = runtime.contradiction_detector();
         let second = runtime.contradiction_detector();
@@ -628,15 +810,18 @@ mod tests {
         let mut config = MoaConfig::default();
         config.memory.extraction.enabled = true;
 
-        let missing = IngestRuntime::from_config(pool.clone(), &config);
+        let missing = IngestRuntime::from_config(pool.clone(), &config)
+            .expect("missing extraction credential should keep the heuristic extractor");
         assert_eq!(missing.extractor_name(), "heuristic");
 
         config.providers.openai.api_key = "test-openai-key".to_string();
-        let credentialed = IngestRuntime::from_config(pool.clone(), &config);
+        let credentialed = IngestRuntime::from_config(pool.clone(), &config)
+            .expect("configured extraction credential should build the runtime");
         assert_eq!(credentialed.extractor_name(), "model");
 
         config.memory.extraction.enabled = false;
-        let disabled = IngestRuntime::from_config(pool, &config);
+        let disabled = IngestRuntime::from_config(pool, &config)
+            .expect("disabled extraction should build the runtime");
         assert_eq!(disabled.extractor_name(), "heuristic");
     }
 
@@ -661,13 +846,15 @@ mod tests {
             .expect("lazy test pool should not connect");
         let mut config = MoaConfig::default();
         config.memory.pii_service_url = Some("http://pii-a.test".to_string());
-        let installed = IngestRuntime::from_config(pool.clone(), &config);
+        let installed = IngestRuntime::from_config(pool.clone(), &config)
+            .expect("first runtime configuration should build");
 
         install_runtime(installed.clone()).expect("first runtime install should succeed");
         install_runtime(installed).expect("compatible runtime reinstall should be idempotent");
 
         config.memory.pii_service_url = Some("http://pii-b.test".to_string());
-        let requested = IngestRuntime::from_config(pool, &config);
+        let requested = IngestRuntime::from_config(pool, &config)
+            .expect("second runtime configuration should build");
         let error = install_runtime(requested)
             .expect_err("incompatible runtime install should fail clearly");
 

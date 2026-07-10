@@ -5,7 +5,7 @@ use moa_core::MoaConfig;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::model_client::{ModelTextClient, resolved_extraction_config};
+use crate::model_client::{ModelCallObserver, ModelTextClient, resolved_extraction_config};
 use crate::{
     ExtractedFact, ExtractedFactScopeHint, FactExtractor, IngestError, Result, TurnChunk,
     fact_hash, fact_uid_from_hash,
@@ -61,6 +61,18 @@ impl ModelFactExtractor {
             IngestError::ModelInference("memory.extraction.enabled is false".to_string())
         })?;
         let client = ModelTextClient::from_config(config, &extraction)?;
+        Ok(Self::new(client, extraction.max_facts_per_chunk))
+    }
+
+    /// Creates a configured model extractor with a provider-call observer.
+    pub fn from_config_with_observer(
+        config: &MoaConfig,
+        observer: std::sync::Arc<dyn ModelCallObserver>,
+    ) -> Result<Self> {
+        let extraction = resolved_extraction_config(config).ok_or_else(|| {
+            IngestError::ModelInference("memory.extraction.enabled is false".to_string())
+        })?;
+        let client = ModelTextClient::from_config_with_observer(config, &extraction, observer)?;
         Ok(Self::new(client, extraction.max_facts_per_chunk))
     }
 

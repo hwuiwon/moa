@@ -21,6 +21,7 @@ pub use builder::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
     build_default_graph_memory_retriever, build_graph_memory_retriever,
 };
+pub use memory::{MemoryEvidenceRequest, MemoryEvidenceResponse, MemoryEvidenceSourceMetadata};
 pub use runner::{ContextPipeline, PipelineStageReport};
 
 /// Insertion point just before the trailing run of user messages.

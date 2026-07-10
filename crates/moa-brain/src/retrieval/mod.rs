@@ -1,5 +1,6 @@
 //! Graph-memory retrieval for context assembly and planning.
 
+pub mod admission;
 pub mod cache;
 mod graph_seed;
 pub mod hybrid;
@@ -10,6 +11,7 @@ pub mod router;
 mod source_rank;
 pub mod types;
 
+pub use admission::{MemoryAdmissionPolicy, RetrievalScopePlan, dedupe_and_rank_hits};
 pub use cache::{CacheKey, CachedEntry, CachedHybridRetriever, PlannedRetriever, RetrievalBackend};
 pub use hybrid::HybridRetriever;
 pub use legs::{GRAPH_WEIGHT, LEXICAL_WEIGHT, RRF_K, VECTOR_WEIGHT, rrf_fuse};

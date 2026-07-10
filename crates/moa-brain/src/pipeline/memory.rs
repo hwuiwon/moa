@@ -5,12 +5,10 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures_util::future::try_join_all;
-#[cfg(test)]
-use moa_core::AgentKnowledgePolicy;
 use moa_core::RlsContext;
 use moa_core::{
-    AgentKnowledgeScopeMode, ContextMessage, ContextProcessor, ExcludedItem, LineageHandle,
-    MoaError, NullLineageHandle, ProcessorOutput, QueryRewriteResult, Result, StageApply,
+    ContextMessage, ContextProcessor, ContextSourceRef, ExcludedItem, LineageHandle, MoaError,
+    NullLineageHandle, ProcessorOutput, QueryRewriteResult, Result, SessionId, StageApply,
     WorkingContext, traits::EmbeddingProvider,
 };
 use moa_memory_graph::{GraphStore, PiiClass, PostgresGraphStore};
@@ -20,8 +18,8 @@ use sqlx::PgPool;
 
 use crate::planning::{PlannedQuery, Strategy};
 use crate::retrieval::{
-    PlannedRetriever, RetrievalHit, RetrievalRequest, RetrievalStrategy, decompose_query,
-    route_query,
+    MemoryAdmissionPolicy, PlannedRetriever, RetrievalHit, RetrievalRequest, RetrievalScopePlan,
+    RetrievalStrategy, decompose_query, dedupe_and_rank_hits, route_query,
 };
 
 /// Maximum number of scope-keyed retrieval runtimes retained process-wide.
@@ -39,17 +37,13 @@ fn build_scoped_runtime_cache() -> moka::future::Cache<MemoryScope, Arc<ScopedRe
 
 mod lineage;
 mod rendering;
-mod source_tiers;
 
 use lineage::lineage_context_from_context;
-use rendering::render_memory_context;
-use source_tiers::{
-    RetrievalScopePlan, admit_retrieval_hit, agent_knowledge_policy, dedupe_and_rank_hits,
-    default_retrieval_plan, effective_max_pii_class, effective_result_limit,
-};
+use rendering::{render_memory_context, render_memory_context_with_budget};
 
 const MEMORY_BUDGET_DIVISOR: usize = 5;
 const GRAPH_MEMORY_RESULTS: usize = 4;
+const MAX_MEMORY_EVIDENCE_RANKED_DEPTH: usize = 50;
 const MIN_PAGE_EXCERPT_TOKENS: usize = 96;
 pub(crate) const MEMORY_REMINDER_PREFIX: &str = "<memory-reminder>";
 
@@ -61,6 +55,84 @@ pub(crate) const MEMORY_REMINDER_PREFIX: &str = "<memory-reminder>";
 /// The harness reads this flag after compilation and, when it is `true`, appends
 /// the gated tool schemas to the request (plan Task 11).
 pub const OFFER_RETRIEVAL_TOOLS_METADATA_KEY: &str = "_moa.memory.offer_retrieval_tools";
+
+/// Explicit request for admitted, prompt-ready graph-memory evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryEvidenceRequest {
+    /// Natural-language query routed through the production memory planner.
+    pub query: String,
+    /// Maximum estimated tokens in the returned rendered evidence.
+    pub evidence_token_budget: usize,
+    /// Maximum admitted graph hits retained before evidence rendering.
+    ranked_occurrence_depth: usize,
+}
+
+impl MemoryEvidenceRequest {
+    /// Creates a memory-evidence request with one explicit token budget.
+    #[must_use]
+    pub fn new(query: impl Into<String>, evidence_token_budget: usize) -> Self {
+        Self {
+            query: query.into(),
+            evidence_token_budget,
+            ranked_occurrence_depth: GRAPH_MEMORY_RESULTS,
+        }
+    }
+
+    /// Overrides the admitted ranked-hit depth for evaluation retrieval.
+    pub fn with_ranked_occurrence_depth(mut self, depth: usize) -> Result<Self> {
+        if !(1..=MAX_MEMORY_EVIDENCE_RANKED_DEPTH).contains(&depth) {
+            return Err(MoaError::ValidationError(
+                "memory evidence ranked occurrence depth must be in 1..=50".to_string(),
+            ));
+        }
+        self.ranked_occurrence_depth = depth;
+        Ok(self)
+    }
+
+    /// Returns the admitted ranked-hit depth requested before rendering.
+    #[must_use]
+    pub const fn ranked_occurrence_depth(&self) -> usize {
+        self.ranked_occurrence_depth
+    }
+}
+
+/// Typed source metadata projected from one admitted graph-memory hit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryEvidenceSourceMetadata {
+    /// Stable graph node identifier for the rendered hit.
+    pub graph_uid: uuid::Uuid,
+    /// Finalized session that produced this memory, when recorded by ingestion.
+    pub source_session_id: Option<SessionId>,
+    /// Finalized turn sequence that produced this memory, when recorded by ingestion.
+    pub source_turn_seq: Option<u64>,
+}
+
+/// Admitted graph-memory evidence rendered exactly as stage 7 renders it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryEvidenceResponse {
+    /// Ranked admitted hits before token-budgeted evidence rendering.
+    pub hits: Vec<RetrievalHit>,
+    /// Exact `<knowledge_context>` payload produced by the stage-7 renderer.
+    pub rendered_evidence: String,
+    /// Estimated tokens consumed by `rendered_evidence`.
+    pub consumed_evidence_tokens: usize,
+    /// Citation refs for the rendered ranked-hit prefix only.
+    pub source_refs: Vec<ContextSourceRef>,
+    /// Typed ingestion provenance aligned one-to-one with all ranked `hits`.
+    pub source_metadata: Vec<MemoryEvidenceSourceMetadata>,
+}
+
+impl MemoryEvidenceResponse {
+    fn empty() -> Self {
+        Self {
+            hits: Vec::new(),
+            rendered_evidence: String::new(),
+            consumed_evidence_tokens: 0,
+            source_refs: Vec::new(),
+            source_metadata: Vec::new(),
+        }
+    }
+}
 
 /// Decides whether the agentic memory tools are offered on a turn.
 ///
@@ -274,18 +346,110 @@ impl GraphMemoryRetriever {
         self.embedder.is_some()
     }
 
+    /// Retrieves admitted graph-memory evidence through the production stage-7 path.
+    ///
+    /// The request is routed, planned, retrieved, admitted, fused, ranked, and
+    /// rendered by the same implementation used for prompt injection. The
+    /// Returned hits and source metadata are aligned in rank order before
+    /// rendering; source refs cover only the independently budgeted rendered
+    /// prefix. `consumed_evidence_tokens` never exceeds the request's positive
+    /// explicit evidence-token budget.
+    pub async fn retrieve_evidence(
+        &self,
+        ctx: &WorkingContext,
+        request: MemoryEvidenceRequest,
+    ) -> Result<MemoryEvidenceResponse> {
+        if request.evidence_token_budget == 0 {
+            return Err(MoaError::ValidationError(
+                "memory evidence token budget must be positive".to_string(),
+            ));
+        }
+        let query = request.query.trim();
+        if query.is_empty() {
+            return Err(MoaError::ValidationError(
+                "memory evidence query must not be empty".to_string(),
+            ));
+        }
+
+        let policy = MemoryAdmissionPolicy::from_working_context(ctx)?;
+        if !policy.is_enabled() {
+            return Ok(MemoryEvidenceResponse::empty());
+        }
+        let result_limit = policy
+            .result_limit(request.ranked_occurrence_depth)
+            .min(request.ranked_occurrence_depth);
+        let (_, hits) = self
+            .retrieve_admitted_hits(ctx, query, &policy, result_limit)
+            .await?;
+        if hits.is_empty() {
+            return Ok(MemoryEvidenceResponse::empty());
+        }
+
+        let budgeted = render_memory_context_with_budget(&hits, request.evidence_token_budget);
+        let source_metadata = hits
+            .iter()
+            .map(memory_evidence_source_metadata)
+            .collect::<Result<Vec<_>>>()?;
+        debug_assert_eq!(budgeted.hit_count, budgeted.rendered.source_refs.len());
+        debug_assert!(budgeted.consumed_tokens <= request.evidence_token_budget);
+
+        Ok(MemoryEvidenceResponse {
+            hits,
+            rendered_evidence: budgeted.rendered.section,
+            consumed_evidence_tokens: budgeted.consumed_tokens,
+            source_refs: budgeted.rendered.source_refs,
+            source_metadata,
+        })
+    }
+
+    /// Runs the production router and returns ranked hits after shared admission.
+    async fn retrieve_admitted_hits(
+        &self,
+        ctx: &WorkingContext,
+        query: &str,
+        policy: &MemoryAdmissionPolicy,
+        result_limit: usize,
+    ) -> Result<(RetrievalStrategy, Vec<RetrievalHit>)> {
+        let strategy = route_query(query);
+        if strategy == RetrievalStrategy::Skip {
+            return Ok((strategy, Vec::new()));
+        }
+
+        let retrieval_started = Instant::now();
+        let hits = match strategy {
+            RetrievalStrategy::Deep => {
+                self.retrieve_hits_deep(ctx, query, policy, result_limit)
+                    .await?
+            }
+            RetrievalStrategy::Fast | RetrievalStrategy::Agentic => {
+                self.retrieve_hits(ctx, query.to_string(), policy, result_limit)
+                    .await?
+            }
+            RetrievalStrategy::Skip => Vec::new(),
+        };
+        lineage::emit_retrieval_lineage(
+            self.lineage.as_ref(),
+            ctx,
+            query,
+            &hits,
+            retrieval_started.elapsed(),
+        );
+        Ok((strategy, hits))
+    }
+
     async fn retrieve_hits(
         &self,
         ctx: &WorkingContext,
         query: String,
+        policy: &MemoryAdmissionPolicy,
+        requested_result_limit: usize,
     ) -> Result<Vec<RetrievalHit>> {
-        let policy = agent_knowledge_policy(ctx)?;
-        let retrieval_plan = default_retrieval_plan(ctx, &policy);
+        let retrieval_plan = policy.plans();
         if retrieval_plan.is_empty() {
             return Ok(Vec::new());
         }
-        let result_limit = effective_result_limit(&policy, self.result_limit);
-        let max_pii_class = effective_max_pii_class(&policy)?;
+        let result_limit = requested_result_limit;
+        let max_pii_class = policy.max_pii_class()?;
         let query_str = query.as_str();
 
         // Plan every scope and probe its read-time cache in parallel, before
@@ -334,7 +498,7 @@ impl GraphMemoryRetriever {
             hits.extend(
                 results
                     .into_iter()
-                    .filter_map(|hit| admit_retrieval_hit(hit, probe.scope_plan, &policy)),
+                    .filter_map(|hit| policy.admit_hit(hit, probe.scope_plan)),
             );
         }
         Ok(dedupe_and_rank_hits(hits, result_limit))
@@ -352,18 +516,22 @@ impl GraphMemoryRetriever {
         &self,
         ctx: &WorkingContext,
         query: &str,
+        policy: &MemoryAdmissionPolicy,
+        requested_result_limit: usize,
     ) -> Result<Vec<RetrievalHit>> {
         let mut sub_queries = decompose_query(query);
         if sub_queries.is_empty() {
             sub_queries.push(query.to_string());
         }
 
-        let policy = agent_knowledge_policy(ctx)?;
-        let result_limit = effective_result_limit(&policy, self.result_limit);
+        let result_limit = requested_result_limit;
 
         let mut fused = Vec::new();
         for sub_query in sub_queries {
-            fused.extend(self.retrieve_hits(ctx, sub_query).await?);
+            fused.extend(
+                self.retrieve_hits(ctx, sub_query, policy, requested_result_limit)
+                    .await?,
+            );
         }
         Ok(dedupe_and_rank_hits(fused, result_limit))
     }
@@ -377,9 +545,9 @@ impl GraphMemoryRetriever {
         max_pii_class: PiiClass,
         result_limit: usize,
     ) -> Result<ScopeProbe<'a>> {
-        let runtime = self.runtime_for_scope(&scope_plan.scope).await?;
+        let runtime = self.runtime_for_scope(scope_plan.scope()).await?;
         let planning =
-            crate::planning::PlanningCtx::new(scope_plan.scope.clone(), runtime.graph.clone());
+            crate::planning::PlanningCtx::new(scope_plan.scope().clone(), runtime.graph.clone());
         let planned = self.planner.plan(query, &planning).await.map_err(|error| {
             MoaError::StorageError(format!("graph memory planning failed: {error}"))
         })?;
@@ -460,12 +628,12 @@ impl GraphMemoryRetriever {
             result_limit,
             true,
         );
-        if let Some(label_filter) = &scope_plan.label_filter {
-            request.label_filter = Some(label_filter.clone());
+        if let Some(label_filter) = scope_plan.label_filter() {
+            request.label_filter = Some(label_filter.to_vec());
         }
         request.disable_graph_expansion = should_disable_graph_expansion(scope_plan);
         if matches!(
-            scope_plan.source_tier,
+            scope_plan.source_tier(),
             crate::retrieval::SourceTier::TenantKnowledge
         ) {
             request.strategy = Some(Strategy::VectorFirst);
@@ -499,6 +667,58 @@ impl GraphMemoryRetriever {
     }
 }
 
+fn memory_evidence_source_metadata(hit: &RetrievalHit) -> Result<MemoryEvidenceSourceMetadata> {
+    let source_session_id = hit
+        .node
+        .properties_summary
+        .as_ref()
+        .and_then(|properties| properties.get("source_session_id"))
+        .filter(|value| !value.is_null());
+    let source_turn_seq = hit
+        .node
+        .properties_summary
+        .as_ref()
+        .and_then(|properties| properties.get("source_turn_seq"))
+        .filter(|value| !value.is_null());
+
+    match (source_session_id, source_turn_seq) {
+        (None, None) => Ok(MemoryEvidenceSourceMetadata {
+            graph_uid: hit.uid,
+            source_session_id: None,
+            source_turn_seq: None,
+        }),
+        (Some(session_id), Some(turn_seq)) => {
+            let session_id = session_id.as_str().ok_or_else(|| {
+                MoaError::ValidationError(format!(
+                    "graph memory hit {} has non-string source_session_id",
+                    hit.uid
+                ))
+            })?;
+            let session_id = uuid::Uuid::parse_str(session_id).map_err(|error| {
+                MoaError::ValidationError(format!(
+                    "graph memory hit {} has invalid source_session_id: {error}",
+                    hit.uid
+                ))
+            })?;
+            let turn_seq = turn_seq.as_u64().ok_or_else(|| {
+                MoaError::ValidationError(format!(
+                    "graph memory hit {} has invalid source_turn_seq",
+                    hit.uid
+                ))
+            })?;
+            Ok(MemoryEvidenceSourceMetadata {
+                graph_uid: hit.uid,
+                source_session_id: Some(SessionId(session_id)),
+                source_turn_seq: Some(turn_seq),
+            })
+        }
+        _ => Err(MoaError::ValidationError(format!(
+            "graph memory hit {} has incomplete source session metadata",
+            hit.uid
+        ))),
+    }
+}
+
 #[async_trait]
 impl ContextProcessor for GraphMemoryRetriever {
     fn name(&self) -> &str {
@@ -521,7 +741,8 @@ impl ContextProcessor for GraphMemoryRetriever {
     }
 
     async fn fetch(&self, ctx: &WorkingContext) -> Result<Option<StageApply>> {
-        if agent_knowledge_policy(ctx)?.mode == AgentKnowledgeScopeMode::Disabled {
+        let policy = MemoryAdmissionPolicy::from_working_context(ctx)?;
+        if !policy.is_enabled() {
             return Ok(Some(Box::new(|_ctx| {
                 Ok(ProcessorOutput {
                     items_excluded: vec!["graph_memory".to_string()],
@@ -545,7 +766,10 @@ impl ContextProcessor for GraphMemoryRetriever {
         // The router is the single dispatch point: it classifies the turn once
         // from lexical features (no LLM, no I/O) and every branch below keys on
         // the strategy enum rather than accreting boolean flags.
-        let strategy = route_query(&query);
+        let result_limit = policy.result_limit(self.result_limit);
+        let (strategy, hits) = self
+            .retrieve_admitted_hits(ctx, &query, &policy, result_limit)
+            .await?;
         let strategy_label: &'static str = strategy.as_str();
         if strategy == RetrievalStrategy::Skip {
             return Ok(Some(Box::new(move |ctx: &mut WorkingContext| {
@@ -562,21 +786,6 @@ impl ContextProcessor for GraphMemoryRetriever {
             })));
         }
 
-        let retrieval_started = Instant::now();
-        let hits = match strategy {
-            // Deep queries decompose into capped sub-queries and fuse the
-            // per-sub-query hits through the existing rank machinery.
-            RetrievalStrategy::Deep => self.retrieve_hits_deep(ctx, &query).await?,
-            // Fast and (until Task 11 claims it) Agentic run the single-shot path.
-            _ => self.retrieve_hits(ctx, query.clone()).await?,
-        };
-        lineage::emit_retrieval_lineage(
-            self.lineage.as_ref(),
-            ctx,
-            &query,
-            &hits,
-            retrieval_started.elapsed(),
-        );
         if hits.is_empty() {
             return Ok(Some(Box::new(move |ctx: &mut WorkingContext| {
                 set_offer_retrieval_tools(ctx, strategy, true);
@@ -627,14 +836,6 @@ async fn embed_query(embedder: &dyn EmbeddingProvider, query: &str) -> Result<Ve
     })
 }
 
-#[cfg(test)]
-fn retrieval_scopes_from_context(
-    ctx: &WorkingContext,
-    policy: &AgentKnowledgePolicy,
-) -> Vec<RetrievalScopePlan> {
-    default_retrieval_plan(ctx, policy)
-}
-
 use super::trailing_user_insertion_index;
 
 /// Builds the processor-output metadata that records the router's chosen
@@ -677,7 +878,7 @@ fn extract_search_query(ctx: &WorkingContext) -> Option<String> {
 
 fn should_disable_graph_expansion(scope_plan: &RetrievalScopePlan) -> bool {
     matches!(
-        scope_plan.source_tier,
+        scope_plan.source_tier(),
         crate::retrieval::SourceTier::TenantKnowledge
     )
 }
@@ -741,9 +942,9 @@ mod tests {
     use chrono::{DateTime, Utc};
     use moa_core::{
         AgentContext, AgentKnowledgePolicy, AgentKnowledgeScopeMode, AgentPolicySnapshot, Channel,
-        ContactId, ContactRef, ContactVerificationState, ContextProcessor, ModelCapabilities,
-        ModelId, QueryRewriteResult, SessionId, SessionMeta, TenantId, TokenPricing,
-        ToolCallFormat, WorkingContext,
+        ContactId, ContactRef, ContactVerificationState, ContextMessage, ContextProcessor,
+        ModelCapabilities, ModelId, QueryRewriteResult, SessionId, SessionMeta, TenantId,
+        TokenPricing, ToolCallFormat, WorkingContext,
     };
     use moa_lineage_core::TurnId;
     use moa_memory_graph::{
@@ -756,12 +957,20 @@ mod tests {
     use uuid::Uuid;
 
     use crate::planning::Strategy;
+    use crate::retrieval::{MemoryAdmissionPolicy, RetrievalScopePlan};
 
     use super::{
-        GraphMemoryRetriever, ScopedRetrievalRuntime, ScopedRetrievalRuntimeFactory,
-        SharedGraphMemoryRetriever, extract_search_keywords, extract_search_query,
-        retrieval_scopes_from_context, should_disable_graph_expansion,
+        GraphMemoryRetriever, MemoryEvidenceRequest, ScopedRetrievalRuntime,
+        ScopedRetrievalRuntimeFactory, SharedGraphMemoryRetriever, extract_search_keywords,
+        extract_search_query, should_disable_graph_expansion,
     };
+
+    fn retrieval_scopes_from_context(ctx: &WorkingContext) -> Vec<RetrievalScopePlan> {
+        MemoryAdmissionPolicy::from_working_context(ctx)
+            .expect("memory admission policy should parse")
+            .plans()
+            .to_vec()
+    }
 
     #[derive(Debug)]
     struct NoopGraphStore;
@@ -1347,32 +1556,42 @@ mod tests {
         let contact_id = ContactId::new();
         let session = contact_session(contact_id, ContactVerificationState::Verified, Vec::new());
         let ctx = WorkingContext::new(&session, capabilities());
-        let plan = retrieval_scopes_from_context(&ctx, &AgentKnowledgePolicy::default());
+        let plan = retrieval_scopes_from_context(&ctx);
 
+        assert_eq!(plan.len(), 2);
         assert_eq!(
-            plan,
-            vec![
-                super::RetrievalScopePlan {
-                    scope: MemoryScope::Tenant {
-                        tenant_id: session.tenant_id,
-                    },
-                    source_tier: crate::retrieval::SourceTier::TenantKnowledge,
-                    label_filter: Some(vec![
-                        NodeLabel::Document,
-                        NodeLabel::Chunk,
-                        NodeLabel::ContactGroup,
-                    ]),
-                },
-                super::RetrievalScopePlan {
-                    scope: MemoryScope::Contact {
-                        tenant_id: session.tenant_id,
-                        contact_id,
-                    },
-                    source_tier: crate::retrieval::SourceTier::UserMemory,
-                    label_filter: None,
-                },
-            ]
+            plan[0].scope(),
+            &MemoryScope::Tenant {
+                tenant_id: session.tenant_id,
+            }
         );
+        assert_eq!(
+            plan[0].source_tier(),
+            crate::retrieval::SourceTier::TenantKnowledge
+        );
+        assert_eq!(
+            plan[0].label_filter(),
+            Some(
+                [
+                    NodeLabel::Document,
+                    NodeLabel::Chunk,
+                    NodeLabel::ContactGroup,
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            plan[1].scope(),
+            &MemoryScope::Contact {
+                tenant_id: session.tenant_id,
+                contact_id,
+            }
+        );
+        assert_eq!(
+            plan[1].source_tier(),
+            crate::retrieval::SourceTier::UserMemory
+        );
+        assert_eq!(plan[1].label_filter(), None);
     }
 
     #[test]
@@ -1383,17 +1602,17 @@ mod tests {
         let contact_id = ContactId::new();
         let session = contact_session(contact_id, ContactVerificationState::Verified, Vec::new());
         let ctx = WorkingContext::new(&session, capabilities());
-        let plan = retrieval_scopes_from_context(&ctx, &AgentKnowledgePolicy::default());
+        let plan = retrieval_scopes_from_context(&ctx);
 
         let tenant_plan = plan
             .iter()
             .find(|scope_plan| {
-                scope_plan.source_tier == crate::retrieval::SourceTier::TenantKnowledge
+                scope_plan.source_tier() == crate::retrieval::SourceTier::TenantKnowledge
             })
             .expect("tenant knowledge plan should exist");
         let contact_plan = plan
             .iter()
-            .find(|scope_plan| scope_plan.source_tier == crate::retrieval::SourceTier::UserMemory)
+            .find(|scope_plan| scope_plan.source_tier() == crate::retrieval::SourceTier::UserMemory)
             .expect("contact memory plan should exist");
 
         assert!(should_disable_graph_expansion(tenant_plan));
@@ -1412,21 +1631,18 @@ mod tests {
             ..SessionMeta::default()
         };
         let ctx = WorkingContext::new(&session, capabilities());
-        let plan = retrieval_scopes_from_context(&ctx, &AgentKnowledgePolicy::default());
+        let plan = retrieval_scopes_from_context(&ctx);
 
+        assert_eq!(plan.len(), 1);
         assert_eq!(
-            plan,
-            vec![super::RetrievalScopePlan {
-                scope: MemoryScope::Tenant {
-                    tenant_id: session.tenant_id,
-                },
-                source_tier: crate::retrieval::SourceTier::TenantKnowledge,
-                label_filter: Some(vec![
-                    NodeLabel::Document,
-                    NodeLabel::Chunk,
-                    NodeLabel::ContactGroup,
-                ]),
-            }]
+            plan[0].scope(),
+            &MemoryScope::Tenant {
+                tenant_id: session.tenant_id,
+            }
+        );
+        assert_eq!(
+            plan[0].source_tier(),
+            crate::retrieval::SourceTier::TenantKnowledge
         );
     }
 
@@ -1441,18 +1657,18 @@ mod tests {
             vec![contact_id, linked_contact_id, linked_contact_id],
         );
         let ctx = WorkingContext::new(&session, capabilities());
-        let plan = retrieval_scopes_from_context(&ctx, &AgentKnowledgePolicy::default());
+        let plan = retrieval_scopes_from_context(&ctx);
 
         assert_eq!(plan.len(), 2);
         assert!(plan.iter().any(|scope_plan| {
-            scope_plan.scope
+            *scope_plan.scope()
                 == MemoryScope::Contact {
                     tenant_id: session.tenant_id,
                     contact_id,
                 }
         }));
         assert!(!plan.iter().any(|scope_plan| {
-            scope_plan.scope
+            *scope_plan.scope()
                 == MemoryScope::Contact {
                     tenant_id: session.tenant_id,
                     contact_id: linked_contact_id,
@@ -1900,6 +2116,391 @@ mod tests {
         );
     }
 
+    pub(super) async fn verify_evidence_rejects_zero_token_budget_before_retrieval() {
+        // Pins: callers must provide a positive explicit evidence budget; an
+        // invalid request fails before any graph/runtime access.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let retriever = scripted_graph_memory_retriever(calls.clone(), HashMap::new());
+        let session = tenant_only_session();
+        let ctx = WorkingContext::new(&session, capabilities());
+
+        let error = retriever
+            .retrieve_evidence(&ctx, MemoryEvidenceRequest::new("rotation policy", 0))
+            .await
+            .expect_err("zero evidence budget must fail");
+
+        assert!(
+            matches!(
+                error,
+                moa_core::MoaError::ValidationError(ref message)
+                    if message == "memory evidence token budget must be positive"
+            ),
+            "zero budget should return the dedicated validation error: {error}"
+        );
+        assert_eq!(
+            calls.lock().expect("scripted retriever calls lock").len(),
+            0,
+            "budget validation must happen before retrieval"
+        );
+    }
+
+    pub(super) async fn verify_evidence_returns_only_admitted_hits_with_aligned_typed_sources() {
+        // Pins: the public seam uses the same tenant-knowledge/current-contact
+        // admission policy as stage 7 and reverses slow-path source provenance
+        // without scraping the rendered prompt.
+        let contact_id = ContactId::new();
+        let other_contact_id = ContactId::new();
+        let session = contact_session(
+            contact_id,
+            ContactVerificationState::Verified,
+            vec![other_contact_id],
+        );
+        let tenant_scope = MemoryScope::Tenant {
+            tenant_id: session.tenant_id,
+        };
+        let contact_scope = MemoryScope::Contact {
+            tenant_id: session.tenant_id,
+            contact_id,
+        };
+        let source_session_id = SessionId::new();
+
+        let mut tenant_hits = vec![
+            retrieval_hit(
+                Uuid::from_u128(0x81),
+                session.tenant_id,
+                None,
+                NodeLabel::Fact,
+                "tenant",
+                crate::retrieval::SourceTier::TenantKnowledge,
+                "tenant fact",
+                "tenant fact must not cross the knowledge label admission boundary",
+                0.99,
+            ),
+            retrieval_hit(
+                Uuid::from_u128(0x82),
+                session.tenant_id,
+                None,
+                NodeLabel::Chunk,
+                "tenant",
+                crate::retrieval::SourceTier::TenantKnowledge,
+                "runbook",
+                "Tenant runbook evidence.",
+                0.90,
+            ),
+        ];
+        let mut contact_hit = retrieval_hit(
+            Uuid::from_u128(0x83),
+            session.tenant_id,
+            Some(contact_id),
+            NodeLabel::Fact,
+            "contact",
+            crate::retrieval::SourceTier::UserMemory,
+            "preference",
+            "Current contact prefers concise summaries.",
+            0.80,
+        );
+        contact_hit.node.properties_summary = Some(json!({
+            "summary": "Current contact prefers concise summaries.",
+            "source_session_id": source_session_id.to_string(),
+            "source_turn_seq": 7,
+        }));
+        let other_contact_hit = retrieval_hit(
+            Uuid::from_u128(0x84),
+            session.tenant_id,
+            Some(other_contact_id),
+            NodeLabel::Fact,
+            "contact",
+            crate::retrieval::SourceTier::UserMemory,
+            "other preference",
+            "Other contact memory must not leak.",
+            0.98,
+        );
+        let mut hits_by_scope = HashMap::new();
+        hits_by_scope.insert(tenant_scope.clone(), std::mem::take(&mut tenant_hits));
+        hits_by_scope.insert(contact_scope.clone(), vec![contact_hit, other_contact_hit]);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let retriever = scripted_graph_memory_retriever(calls.clone(), hits_by_scope);
+        let mut ctx = WorkingContext::new(&session, capabilities());
+        ctx.append_message(ContextMessage::user(
+            "What does memory say about summaries?",
+        ));
+        let original_messages = ctx.messages.clone();
+
+        let response = retriever
+            .retrieve_evidence(
+                &ctx,
+                MemoryEvidenceRequest::new("What does memory say about summaries?", 512),
+            )
+            .await
+            .expect("admitted evidence should render");
+
+        assert_eq!(
+            ctx.messages, original_messages,
+            "the evidence seam is read-only"
+        );
+        assert_eq!(
+            response.hits.iter().map(|hit| hit.uid).collect::<Vec<_>>(),
+            vec![Uuid::from_u128(0x82), Uuid::from_u128(0x83)]
+        );
+        assert_eq!(response.source_refs.len(), 2);
+        assert_eq!(response.source_metadata.len(), 2);
+        assert_eq!(
+            response
+                .source_refs
+                .iter()
+                .map(|source| source.source_uid)
+                .collect::<Vec<_>>(),
+            vec![Some(Uuid::from_u128(0x82)), Some(Uuid::from_u128(0x83))]
+        );
+        assert_eq!(
+            response.source_metadata,
+            vec![
+                super::MemoryEvidenceSourceMetadata {
+                    graph_uid: Uuid::from_u128(0x82),
+                    source_session_id: None,
+                    source_turn_seq: None,
+                },
+                super::MemoryEvidenceSourceMetadata {
+                    graph_uid: Uuid::from_u128(0x83),
+                    source_session_id: Some(source_session_id),
+                    source_turn_seq: Some(7),
+                },
+            ]
+        );
+        assert!(
+            response
+                .rendered_evidence
+                .contains("Tenant runbook evidence.")
+        );
+        assert!(
+            response
+                .rendered_evidence
+                .contains("Current contact prefers concise summaries.")
+        );
+        assert!(!response.rendered_evidence.contains("tenant fact must not"));
+        assert!(!response.rendered_evidence.contains("Other contact memory"));
+        for source in &response.source_refs {
+            let excerpt = source.excerpt.as_deref().expect("evidence excerpt");
+            assert!(
+                response.rendered_evidence.contains(excerpt),
+                "every source excerpt must exactly occur in rendered evidence"
+            );
+        }
+        assert_eq!(
+            response.consumed_evidence_tokens,
+            moa_core::estimate_text_tokens(&response.rendered_evidence)
+        );
+        assert!(response.consumed_evidence_tokens <= 512);
+        assert_eq!(
+            calls.lock().expect("scripted retriever calls lock").clone(),
+            vec![
+                RecordedRetrievalRequest {
+                    scope: tenant_scope,
+                    label_filter: Some(vec![
+                        NodeLabel::Document,
+                        NodeLabel::Chunk,
+                        NodeLabel::ContactGroup,
+                    ]),
+                    strategy: Some(Strategy::VectorFirst),
+                },
+                RecordedRetrievalRequest {
+                    scope: contact_scope,
+                    label_filter: None,
+                    strategy: Some(Strategy::Both),
+                },
+            ]
+        );
+    }
+
+    pub(super) async fn verify_evidence_token_budget_caps_exact_rendered_output() {
+        // Pins: a tight evidence budget truncates the production-rendered
+        // excerpt and reports the same token estimate used by context assembly.
+        let session = tenant_only_session();
+        let tenant_scope = MemoryScope::Tenant {
+            tenant_id: session.tenant_id,
+        };
+        let long_summary = "rotation evidence ".repeat(300);
+        let mut hits_by_scope = HashMap::new();
+        hits_by_scope.insert(
+            tenant_scope,
+            vec![retrieval_hit(
+                Uuid::from_u128(0x85),
+                session.tenant_id,
+                None,
+                NodeLabel::Chunk,
+                "tenant",
+                crate::retrieval::SourceTier::TenantKnowledge,
+                "rotation",
+                &long_summary,
+                0.90,
+            )],
+        );
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let retriever = scripted_graph_memory_retriever(calls, hits_by_scope);
+        let ctx = WorkingContext::new(&session, capabilities());
+        let token_budget = 256;
+
+        let response = retriever
+            .retrieve_evidence(
+                &ctx,
+                MemoryEvidenceRequest::new("What is the rotation evidence?", token_budget),
+            )
+            .await
+            .expect("tight evidence budget should render a truncated hit");
+
+        assert_eq!(response.hits.len(), 1, "top admitted hit should fit");
+        assert_eq!(response.source_refs.len(), 1);
+        assert_eq!(
+            response.consumed_evidence_tokens,
+            moa_core::estimate_text_tokens(&response.rendered_evidence)
+        );
+        assert!(
+            response.consumed_evidence_tokens <= token_budget,
+            "rendered evidence used {} tokens over budget {token_budget}",
+            response.consumed_evidence_tokens
+        );
+        let excerpt = response.source_refs[0]
+            .excerpt
+            .as_deref()
+            .expect("truncated evidence excerpt");
+        assert!(excerpt.ends_with("..."));
+        assert!(excerpt.len() < long_summary.len());
+        assert!(response.rendered_evidence.contains(excerpt));
+    }
+
+    pub(super) async fn verify_evidence_ranked_depth_is_request_local_and_rendering_is_separate() {
+        // Pins: evaluation can request more than the stage-7 default without
+        // mutating the retriever, and a tight reader budget does not erase the
+        // admitted ranking that retrieval metrics consume.
+        let mut session = tenant_only_session();
+        session.agent_context = Some(agent_context_with_knowledge_policy(AgentKnowledgePolicy {
+            retrieval_budget: Some(8),
+            ..AgentKnowledgePolicy::default()
+        }));
+        let tenant_scope = MemoryScope::Tenant {
+            tenant_id: session.tenant_id,
+        };
+        let hits = (0_u128..6)
+            .map(|index| {
+                retrieval_hit(
+                    Uuid::from_u128(0x900 + index),
+                    session.tenant_id,
+                    None,
+                    NodeLabel::Chunk,
+                    "tenant",
+                    crate::retrieval::SourceTier::TenantKnowledge,
+                    &format!("ranked-{index}"),
+                    &format!("{} {index}", "ranked evidence".repeat(120)),
+                    1.0 - (index as f64 * 0.01),
+                )
+            })
+            .collect();
+        let mut hits_by_scope = HashMap::new();
+        hits_by_scope.insert(tenant_scope, hits);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let retriever = scripted_graph_memory_retriever(calls, hits_by_scope);
+        let ctx = WorkingContext::new(&session, capabilities());
+
+        let default_response = retriever
+            .retrieve_evidence(
+                &ctx,
+                MemoryEvidenceRequest::new("What is the ranked evidence?", 256),
+            )
+            .await
+            .expect("default evidence retrieval");
+        let expanded_response = retriever
+            .retrieve_evidence(
+                &ctx,
+                MemoryEvidenceRequest::new("What is the ranked evidence?", 256)
+                    .with_ranked_occurrence_depth(6)
+                    .expect("valid ranked occurrence depth"),
+            )
+            .await
+            .expect("expanded evidence retrieval");
+
+        assert_eq!(default_response.hits.len(), 4);
+        assert_eq!(expanded_response.hits.len(), 6);
+        assert_eq!(expanded_response.source_metadata.len(), 6);
+        assert_eq!(
+            expanded_response
+                .hits
+                .iter()
+                .map(|hit| hit.uid)
+                .collect::<Vec<_>>(),
+            (0_u128..6)
+                .map(|index| Uuid::from_u128(0x900 + index))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            expanded_response.source_refs.len() < expanded_response.hits.len(),
+            "the tight evidence budget should render only a ranked prefix"
+        );
+        assert_eq!(
+            expanded_response
+                .source_refs
+                .iter()
+                .map(|source| source.source_uid.expect("graph source uid"))
+                .collect::<Vec<_>>(),
+            expanded_response
+                .hits
+                .iter()
+                .take(expanded_response.source_refs.len())
+                .map(|hit| hit.uid)
+                .collect::<Vec<_>>()
+        );
+        assert!(expanded_response.consumed_evidence_tokens <= 256);
+    }
+
+    pub(super) fn verify_evidence_ranked_depth_validation() {
+        // Pins: benchmark depth is bounded to the official LongMemEval maximum.
+        for invalid in [0, 51] {
+            let error = MemoryEvidenceRequest::new("ranked evidence", 256)
+                .with_ranked_occurrence_depth(invalid)
+                .expect_err("out-of-range ranked occurrence depth must fail");
+            assert!(matches!(
+                error,
+                moa_core::MoaError::ValidationError(ref message)
+                    if message == "memory evidence ranked occurrence depth must be in 1..=50"
+            ));
+        }
+        assert_eq!(
+            MemoryEvidenceRequest::new("ranked evidence", 256).ranked_occurrence_depth(),
+            4
+        );
+    }
+
+    pub(super) async fn verify_evidence_disabled_policy_returns_empty_without_retrieval() {
+        // Pins: the public seam cannot bypass an agent policy that disables
+        // memory, and it performs no backend work in that state.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let retriever = scripted_graph_memory_retriever(calls.clone(), HashMap::new());
+        let mut session = tenant_only_session();
+        session.agent_context = Some(agent_context_with_knowledge_policy(AgentKnowledgePolicy {
+            mode: AgentKnowledgeScopeMode::Disabled,
+            ..AgentKnowledgePolicy::default()
+        }));
+        let ctx = WorkingContext::new(&session, capabilities());
+
+        let response = retriever
+            .retrieve_evidence(
+                &ctx,
+                MemoryEvidenceRequest::new("What is my rotation policy?", 256),
+            )
+            .await
+            .expect("disabled policy should return empty evidence");
+
+        assert!(response.hits.is_empty());
+        assert!(response.rendered_evidence.is_empty());
+        assert_eq!(response.consumed_evidence_tokens, 0);
+        assert!(response.source_refs.is_empty());
+        assert!(response.source_metadata.is_empty());
+        assert_eq!(
+            calls.lock().expect("scripted retriever calls lock").len(),
+            0,
+            "disabled memory policy must not touch retrieval"
+        );
+    }
+
     fn scripted_graph_memory_retriever(
         calls: Arc<Mutex<Vec<RecordedRetrievalRequest>>>,
         hits_by_scope: HashMap<MemoryScope, Vec<crate::retrieval::RetrievalHit>>,
@@ -2024,5 +2625,48 @@ mod tests {
             },
             native_tools: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod evidence {
+    #[tokio::test]
+    async fn rejects_zero_token_budget_before_retrieval() {
+        // Pins: the public evidence seam rejects a zero budget before retrieval.
+        super::tests::verify_evidence_rejects_zero_token_budget_before_retrieval().await;
+    }
+
+    #[tokio::test]
+    async fn returns_only_admitted_hits_with_aligned_typed_sources() {
+        // Pins: returned hits obey production admission and align with typed provenance.
+        super::tests::verify_evidence_returns_only_admitted_hits_with_aligned_typed_sources().await;
+    }
+
+    #[tokio::test]
+    async fn token_budget_caps_exact_rendered_output() {
+        // Pins: exact rendered evidence never exceeds its explicit token budget.
+        super::tests::verify_evidence_token_budget_caps_exact_rendered_output().await;
+    }
+
+    #[tokio::test]
+    async fn disabled_policy_returns_empty_without_retrieval() {
+        // Pins: disabled memory policy cannot be bypassed through the public seam.
+        super::tests::verify_evidence_disabled_policy_returns_empty_without_retrieval().await;
+    }
+}
+
+#[cfg(test)]
+mod evidence_ranked {
+    #[tokio::test]
+    async fn evidence_ranked_request_local_depth_preserves_hits_before_rendering() {
+        // Pins: ranked retrieval depth and rendered reader evidence are independent.
+        super::tests::verify_evidence_ranked_depth_is_request_local_and_rendering_is_separate()
+            .await;
+    }
+
+    #[test]
+    fn evidence_ranked_validates_depth_and_preserves_stage_seven_default() {
+        // Pins: stage 7 remains four while eval depth is explicitly bounded.
+        super::tests::verify_evidence_ranked_depth_validation();
     }
 }

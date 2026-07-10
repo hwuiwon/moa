@@ -17,6 +17,7 @@ const COMPARED_METRICS: &[ComparedMetric] = &[
     ComparedMetric::Mrr,
     ComparedMetric::NdcgAt4,
 ];
+const DIRECT_BINARY_METRIC: &str = "all_expected_found_at_4";
 
 /// Error returned by paired report comparison.
 #[derive(Debug, thiserror::Error)]
@@ -96,7 +97,7 @@ pub struct EvalReportComparison {
     pub probes_paired: usize,
     /// Metric-level paired deltas and intervals.
     pub metrics: Vec<MetricComparison>,
-    /// McNemar binary comparisons after BH correction.
+    /// Directly observed binary comparisons after BH correction.
     pub mcnemar: Vec<PairedComparison>,
 }
 
@@ -109,33 +110,30 @@ impl EvalReportComparison {
             "corpus: {} (probes paired: {})\n",
             self.corpus_id, self.probes_paired
         ));
-        out.push_str(
-            "metric        baseline  candidate  delta    ci95             p_adj   verdict\n",
-        );
+        out.push_str("metric        baseline  candidate  delta    ci95             verdict\n");
         for metric in &self.metrics {
             out.push_str(&format!(
-                "{:<13} {:>8.3}  {:>9.3}  {:+.3}   [{:+.3},{:+.3}]  {:>6.3}  {}\n",
+                "{:<13} {:>8.3}  {:>9.3}  {:+.3}   [{:+.3},{:+.3}]  {}\n",
                 metric.metric_name,
                 metric.baseline,
                 metric.candidate,
                 metric.delta,
                 metric.ci95_lower,
                 metric.ci95_upper,
-                metric.adjusted_p_value,
                 metric.verdict
             ));
         }
-        if let Some(recall) = self
+        if let Some(direct) = self
             .mcnemar
             .iter()
-            .find(|comparison| comparison.metric_name == ComparedMetric::RecallAt4.name())
+            .find(|comparison| comparison.metric_name == DIRECT_BINARY_METRIC)
         {
             out.push_str(&format!(
-                "mcnemar: b={} c={} p={:.3} (adjusted {:.3})\n",
-                recall.control_only_successes,
-                recall.treatment_only_successes,
-                recall.p_value,
-                recall.adjusted_p_value
+                "mcnemar {DIRECT_BINARY_METRIC}: b={} c={} p={:.3} (adjusted {:.3})\n",
+                direct.control_only_successes,
+                direct.treatment_only_successes,
+                direct.p_value,
+                direct.adjusted_p_value
             ));
         }
         out
@@ -157,10 +155,6 @@ pub struct MetricComparison {
     pub ci95_lower: f64,
     /// Upper cluster-bootstrap confidence interval bound for the paired delta.
     pub ci95_upper: f64,
-    /// Raw McNemar p-value for this metric's binary success projection.
-    pub p_value: f64,
-    /// BH-adjusted p-value.
-    pub adjusted_p_value: f64,
     /// Ship verdict for this metric row.
     pub verdict: String,
 }
@@ -219,21 +213,14 @@ fn compare_reports(
     validate_pairing(&baseline, &candidate)?;
     let baseline_by_probe = baseline.probe_map();
     let candidate_by_probe = candidate.probe_map();
-    let mut mcnemar = COMPARED_METRICS
-        .iter()
-        .map(|metric| {
-            mcnemar_paired_test(
-                metric.name(),
-                &binary_outcomes(&baseline_by_probe, *metric, baseline.final_k),
-                &binary_outcomes(&candidate_by_probe, *metric, candidate.final_k),
-            )
-        })
-        .collect::<Vec<_>>();
-    mcnemar = benjamini_hochberg(mcnemar, 0.05);
-    let p_by_metric = mcnemar
-        .iter()
-        .map(|comparison| (comparison.metric_name.as_str(), comparison))
-        .collect::<BTreeMap<_, _>>();
+    let mcnemar = benjamini_hochberg(
+        vec![mcnemar_paired_test(
+            DIRECT_BINARY_METRIC,
+            &direct_binary_outcomes(&baseline_by_probe),
+            &direct_binary_outcomes(&candidate_by_probe),
+        )],
+        0.05,
+    );
 
     let metrics = COMPARED_METRICS
         .iter()
@@ -249,15 +236,7 @@ fn compare_reports(
                 ),
                 bootstrap_config,
             );
-            metric_comparison(
-                *metric,
-                &baseline.metrics,
-                &candidate.metrics,
-                &interval,
-                p_by_metric
-                    .get(metric.name())
-                    .expect("mcnemar comparison should exist for each metric"),
-            )
+            metric_comparison(*metric, &baseline.metrics, &candidate.metrics, &interval)
         })
         .collect();
 
@@ -314,12 +293,10 @@ fn metric_comparison(
     baseline: &RetrievalCoreMetrics,
     candidate: &RetrievalCoreMetrics,
     interval: &ClusterBootstrapReport,
-    p_value: &PairedComparison,
 ) -> MetricComparison {
     let baseline_value = metric.aggregate_value(baseline);
     let candidate_value = metric.aggregate_value(candidate);
     let delta = candidate_value - baseline_value;
-    let adjusted_p_value = p_value.adjusted_p_value;
     MetricComparison {
         metric_name: metric.name().to_string(),
         baseline: baseline_value,
@@ -327,9 +304,7 @@ fn metric_comparison(
         delta,
         ci95_lower: interval.lower,
         ci95_upper: interval.upper,
-        p_value: p_value.p_value,
-        adjusted_p_value,
-        verdict: if delta > 0.0 && interval.lower > 0.0 && adjusted_p_value < 0.05 {
+        verdict: if delta > 0.0 && interval.lower > 0.0 {
             "SHIP".to_string()
         } else {
             "HOLD".to_string()
@@ -361,17 +336,18 @@ fn paired_delta_observations(
         .collect()
 }
 
-fn binary_outcomes(
+fn direct_binary_outcomes(
     probes: &BTreeMap<String, ComparableProbeResult>,
-    metric: ComparedMetric,
-    final_k: usize,
 ) -> Vec<BinaryProbeOutcome> {
     probes
         .values()
-        .filter(|probe| !probe.expected_fact_ids.is_empty())
-        .map(|probe| BinaryProbeOutcome {
-            probe_id: probe.probe_id.clone(),
-            success: metric.binary_success(probe, final_k),
+        .filter_map(|probe| {
+            probe
+                .all_expected_found_at_4
+                .map(|success| BinaryProbeOutcome {
+                    probe_id: probe.probe_id.clone(),
+                    success,
+                })
         })
         .collect()
 }
@@ -417,6 +393,8 @@ struct ComparableProbeResult {
     candidates: Vec<ComparableCandidate>,
     #[serde(default)]
     post_rerank_candidates: Option<Vec<ComparableCandidate>>,
+    #[serde(default)]
+    all_expected_found_at_4: Option<bool>,
 }
 
 impl ComparableProbeResult {
@@ -435,6 +413,25 @@ impl ComparableProbeResult {
 struct ComparableCandidate {
     rank: usize,
     fact_id: Option<String>,
+    #[serde(default)]
+    equivalent_fact_ids: Vec<String>,
+}
+
+impl ComparableCandidate {
+    fn fact_ids(&self) -> impl Iterator<Item = &str> {
+        self.fact_id
+            .as_deref()
+            .into_iter()
+            .chain(self.equivalent_fact_ids.iter().map(String::as_str))
+    }
+
+    fn matching_expected_fact_ids<'a>(
+        &'a self,
+        expected: &'a BTreeSet<&'a str>,
+    ) -> impl Iterator<Item = &'a str> {
+        self.fact_ids()
+            .filter(|fact_id| expected.contains(*fact_id))
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -468,14 +465,6 @@ impl ComparedMetric {
             Self::NdcgAt4 => ndcg_at(probe, final_k),
         }
     }
-
-    fn binary_success(self, probe: &ComparableProbeResult, final_k: usize) -> bool {
-        match self {
-            Self::RecallAt4 => all_expected_found_at_k(probe, final_k),
-            Self::Mrr => reciprocal_rank(probe).is_some_and(|value| value > 0.0),
-            Self::NdcgAt4 => ndcg_at(probe, final_k).is_some_and(|value| value > 0.0),
-        }
-    }
 }
 
 fn recall_at(probe: &ComparableProbeResult, final_k: usize) -> Option<f64> {
@@ -498,9 +487,8 @@ fn reciprocal_rank(probe: &ComparableProbeResult) -> Option<f64> {
         .filter(|candidate| candidate.rank > 0)
         .filter_map(|candidate| {
             candidate
-                .fact_id
-                .as_deref()
-                .filter(|fact_id| expected.contains(*fact_id))
+                .matching_expected_fact_ids(&expected)
+                .next()
                 .map(|_| candidate.rank)
         })
         .min()
@@ -521,11 +509,11 @@ fn ndcg_at(probe: &ComparableProbeResult, final_k: usize) -> Option<f64> {
         .iter()
         .filter(|candidate| candidate.rank > 0 && candidate.rank <= final_k)
     {
-        let Some(fact_id) = candidate.fact_id.as_deref() else {
-            continue;
-        };
-        if expected.contains(fact_id) && seen.insert(fact_id.to_string()) {
-            dcg += discount(candidate.rank);
+        for fact_id in candidate.matching_expected_fact_ids(&expected) {
+            if seen.insert(fact_id.to_string()) {
+                dcg += discount(candidate.rank);
+                break;
+            }
         }
     }
 
@@ -538,13 +526,6 @@ fn ndcg_at(probe: &ComparableProbeResult, final_k: usize) -> Option<f64> {
     }
 }
 
-fn all_expected_found_at_k(probe: &ComparableProbeResult, final_k: usize) -> bool {
-    let expected = probe.expected_fact_set();
-    !expected.is_empty()
-        && retrieved_expected_fact_ids(probe.final_candidates(), final_k, &expected).len()
-            == expected.len()
-}
-
 fn retrieved_expected_fact_ids(
     candidates: &[ComparableCandidate],
     final_k: usize,
@@ -553,13 +534,8 @@ fn retrieved_expected_fact_ids(
     candidates
         .iter()
         .filter(|candidate| candidate.rank > 0 && candidate.rank <= final_k)
-        .filter_map(|candidate| {
-            candidate
-                .fact_id
-                .as_deref()
-                .filter(|fact_id| expected.contains(*fact_id))
-                .map(str::to_string)
-        })
+        .flat_map(|candidate| candidate.matching_expected_fact_ids(expected))
+        .map(str::to_string)
         .collect()
 }
 
@@ -624,8 +600,8 @@ mod tests {
     }
 
     #[test]
-    fn compare_reports_mcnemar_uses_mismatched_pairs_only() {
-        // Pins: McNemar counts only probes where the paired binary outcome differs.
+    fn compare_reports_mcnemar_uses_direct_all_expected_outcomes_only() {
+        // Pins: McNemar counts only direct all-expected-found outcomes, not numeric projections.
         let probes = ["probe-a", "probe-b", "probe-c", "probe-d"];
         let baseline = report_json("corpus-a", &[1], &probes, |index| {
             if index < 2 {
@@ -644,45 +620,297 @@ mod tests {
 
         let comparison = compare_eval_reports_with_config(&baseline, &candidate, test_bootstrap())
             .expect("paired reports should compare");
-        let recall = comparison
-            .mcnemar
-            .iter()
-            .find(|metric| metric.metric_name == "recall_at_4")
-            .expect("recall mcnemar should exist");
+        assert_eq!(comparison.mcnemar.len(), 1);
+        let direct = &comparison.mcnemar[0];
 
-        assert_eq!(recall.both_successes, 1);
-        assert_eq!(recall.both_failures, 1);
-        assert_eq!(recall.control_only_successes, 1);
-        assert_eq!(recall.treatment_only_successes, 1);
+        assert_eq!(direct.metric_name, "all_expected_found_at_4");
+        assert_eq!(direct.both_successes, 1);
+        assert_eq!(direct.both_failures, 1);
+        assert_eq!(direct.control_only_successes, 1);
+        assert_eq!(direct.treatment_only_successes, 1);
     }
 
     #[test]
-    fn compare_reports_applies_benjamini_hochberg_across_metrics() {
-        // Pins: p-values are adjusted across all reported metric rows.
-        let probes = [
-            "probe-a", "probe-b", "probe-c", "probe-d", "probe-e", "probe-f", "probe-g", "probe-h",
-        ];
-        let baseline = report_json("corpus-a", &[1], &probes, |_| Vec::new());
-        let candidate = report_json("corpus-a", &[1], &probes, |index| {
-            if index < 4 {
-                vec!["fact", "other"]
-            } else if index < 6 {
-                vec!["fact"]
-            } else {
-                Vec::new()
-            }
-        });
+    fn rank_one_to_four_changes_mrr_and_ndcg_but_not_recall_or_binary_gate() {
+        // Pins: a rank-only regression remains visible to MRR/nDCG without changing recall or the binary gate.
+        let baseline = report_with_metrics(
+            vec![probe_json(
+                "probe-a",
+                "user-a",
+                &["fact"],
+                vec![candidate_json(1, "fact", &[])],
+                Some(true),
+            )],
+            MetricValues::new(1.0, 1.0, 1.0),
+        );
+        let candidate = report_with_metrics(
+            vec![probe_json(
+                "probe-a",
+                "user-a",
+                &["fact"],
+                vec![candidate_json(4, "fact", &[])],
+                Some(true),
+            )],
+            MetricValues::new(1.0, 0.25, discount(4)),
+        );
 
         let comparison = compare_eval_reports_with_config(&baseline, &candidate, test_bootstrap())
             .expect("paired reports should compare");
 
-        assert_eq!(comparison.mcnemar.len(), 3);
-        assert!(
-            comparison
-                .mcnemar
-                .iter()
-                .all(|metric| metric.adjusted_p_value >= metric.p_value)
+        let recall = metric_row(&comparison, "recall_at_4");
+        let mrr = metric_row(&comparison, "mrr");
+        let ndcg = metric_row(&comparison, "ndcg_at_4");
+        assert_close(recall.delta, 0.0);
+        assert_close(recall.ci95_lower, 0.0);
+        assert_close(mrr.delta, -0.75);
+        assert_close(mrr.ci95_lower, -0.75);
+        assert_close(ndcg.delta, discount(4) - 1.0);
+        assert_close(ndcg.ci95_lower, discount(4) - 1.0);
+        assert_eq!(mrr.verdict, "HOLD");
+        assert_eq!(ndcg.verdict, "HOLD");
+        assert_eq!(comparison.mcnemar.len(), 1);
+        assert_eq!(comparison.mcnemar[0].metric_name, "all_expected_found_at_4");
+        assert_eq!(comparison.mcnemar[0].both_successes, 1);
+    }
+
+    #[test]
+    fn rank_four_to_one_ships_numeric_rank_metrics_without_binary_significance() {
+        // Pins: positive paired MRR/nDCG deltas ship from their bootstrap lower bounds alone.
+        let baseline = report_with_metrics(
+            vec![probe_json(
+                "probe-a",
+                "user-a",
+                &["fact"],
+                vec![candidate_json(4, "fact", &[])],
+                Some(true),
+            )],
+            MetricValues::new(1.0, 0.25, discount(4)),
         );
+        let candidate = report_with_metrics(
+            vec![probe_json(
+                "probe-a",
+                "user-a",
+                &["fact"],
+                vec![candidate_json(1, "fact", &[])],
+                Some(true),
+            )],
+            MetricValues::new(1.0, 1.0, 1.0),
+        );
+
+        let comparison = compare_eval_reports_with_config(&baseline, &candidate, test_bootstrap())
+            .expect("paired reports should compare");
+
+        for metric_name in ["mrr", "ndcg_at_4"] {
+            let metric = metric_row(&comparison, metric_name);
+            assert!(metric.delta > 0.0, "{metric_name} delta should be positive");
+            assert!(
+                metric.ci95_lower > 0.0,
+                "{metric_name} lower bound should be positive"
+            );
+            assert_eq!(metric.verdict, "SHIP");
+        }
+        assert_eq!(comparison.mcnemar[0].p_value, 1.0);
+    }
+
+    #[test]
+    fn positive_aggregate_delta_holds_when_paired_interval_includes_zero() {
+        // Pins: a positive aggregate is not enough to ship when user-cluster resampling includes a regression.
+        let baseline = report_with_metrics(
+            vec![
+                probe_json("probe-a", "user-a", &["fact"], Vec::new(), Some(false)),
+                probe_json(
+                    "probe-b",
+                    "user-b",
+                    &["fact", "other"],
+                    vec![
+                        candidate_json(1, "fact", &[]),
+                        candidate_json(2, "other", &[]),
+                    ],
+                    Some(true),
+                ),
+            ],
+            MetricValues::new(0.5, 0.5, 0.5),
+        );
+        let candidate = report_with_metrics(
+            vec![
+                probe_json(
+                    "probe-a",
+                    "user-a",
+                    &["fact"],
+                    vec![candidate_json(1, "fact", &[])],
+                    Some(true),
+                ),
+                probe_json(
+                    "probe-b",
+                    "user-b",
+                    &["fact", "other"],
+                    vec![candidate_json(1, "fact", &[])],
+                    Some(false),
+                ),
+            ],
+            MetricValues::new(0.75, 1.0, 0.75),
+        );
+
+        let comparison = compare_eval_reports_with_config(&baseline, &candidate, test_bootstrap())
+            .expect("paired reports should compare");
+        let recall = metric_row(&comparison, "recall_at_4");
+
+        assert_close(recall.delta, 0.25);
+        assert!(recall.ci95_lower < 0.0);
+        assert_eq!(recall.verdict, "HOLD");
+    }
+
+    #[test]
+    fn partial_to_full_support_ships_recall_and_changes_direct_binary_gate() {
+        // Pins: partial-to-full support changes fractional recall and the separately reported binary gate.
+        let baseline = report_with_metrics(
+            vec![probe_json(
+                "probe-a",
+                "user-a",
+                &["fact", "other"],
+                vec![candidate_json(1, "fact", &[])],
+                Some(false),
+            )],
+            MetricValues::new(0.5, 1.0, 1.0 / (1.0 + discount(2))),
+        );
+        let candidate = report_with_metrics(
+            vec![probe_json(
+                "probe-a",
+                "user-a",
+                &["fact", "other"],
+                vec![
+                    candidate_json(1, "fact", &[]),
+                    candidate_json(2, "other", &[]),
+                ],
+                Some(true),
+            )],
+            MetricValues::new(1.0, 1.0, 1.0),
+        );
+
+        let comparison = compare_eval_reports_with_config(&baseline, &candidate, test_bootstrap())
+            .expect("paired reports should compare");
+        let recall = metric_row(&comparison, "recall_at_4");
+
+        assert_close(recall.delta, 0.5);
+        assert_close(recall.ci95_lower, 0.5);
+        assert_eq!(recall.verdict, "SHIP");
+        assert_eq!(comparison.mcnemar.len(), 1);
+        assert_eq!(comparison.mcnemar[0].control_only_successes, 0);
+        assert_eq!(comparison.mcnemar[0].treatment_only_successes, 1);
+    }
+
+    #[test]
+    fn consolidation_aliases_count_for_all_numeric_metrics() {
+        // Pins: an expected pre-consolidation id matches a retrieved canonical fact through equivalent_fact_ids.
+        let baseline = report_with_metrics(
+            vec![probe_json(
+                "probe-a",
+                "user-a",
+                &["fact-alias"],
+                Vec::new(),
+                Some(false),
+            )],
+            MetricValues::new(0.0, 0.0, 0.0),
+        );
+        let candidate = report_with_metrics(
+            vec![probe_json(
+                "probe-a",
+                "user-a",
+                &["fact-alias"],
+                vec![candidate_json(1, "fact-canonical", &["fact-alias"])],
+                Some(true),
+            )],
+            MetricValues::new(1.0, 1.0, 1.0),
+        );
+
+        let comparison = compare_eval_reports_with_config(&baseline, &candidate, test_bootstrap())
+            .expect("paired reports should compare");
+
+        for metric_name in ["recall_at_4", "mrr", "ndcg_at_4"] {
+            let metric = metric_row(&comparison, metric_name);
+            assert_close(metric.delta, 1.0);
+            assert_close(metric.ci95_lower, 1.0);
+            assert_eq!(metric.verdict, "SHIP");
+        }
+    }
+
+    #[test]
+    fn direct_binary_comparison_excludes_none_outcomes_without_recomputation() {
+        // Pins: missing direct observations are excluded rather than inferred from retrieved candidates.
+        let baseline = report_with_metrics(
+            vec![
+                probe_json("probe-none", "user-a", &["fact"], Vec::new(), None),
+                probe_json("probe-paired", "user-b", &["fact"], Vec::new(), Some(false)),
+                probe_json(
+                    "probe-candidate-none",
+                    "user-c",
+                    &["fact"],
+                    Vec::new(),
+                    Some(true),
+                ),
+            ],
+            MetricValues::new(0.0, 0.0, 0.0),
+        );
+        let candidate = report_with_metrics(
+            vec![
+                probe_json("probe-none", "user-a", &["fact"], Vec::new(), None),
+                probe_json("probe-paired", "user-b", &["fact"], Vec::new(), Some(true)),
+                probe_json(
+                    "probe-candidate-none",
+                    "user-c",
+                    &["fact"],
+                    Vec::new(),
+                    None,
+                ),
+            ],
+            MetricValues::new(0.0, 0.0, 0.0),
+        );
+
+        let comparison = compare_eval_reports_with_config(&baseline, &candidate, test_bootstrap())
+            .expect("paired reports should compare");
+        let direct = &comparison.mcnemar[0];
+
+        assert_eq!(direct.total_pairs, 1);
+        assert_eq!(direct.both_successes, 0);
+        assert_eq!(direct.both_failures, 0);
+        assert_eq!(direct.control_only_successes, 0);
+        assert_eq!(direct.treatment_only_successes, 1);
+    }
+
+    #[test]
+    fn numeric_metric_schema_and_table_omit_p_values() {
+        // Pins: numeric rows expose paired intervals only; the sole McNemar row names its direct binary metric.
+        let report = report_with_metrics(
+            vec![probe_json(
+                "probe-a",
+                "user-a",
+                &["fact"],
+                vec![candidate_json(1, "fact", &[])],
+                Some(true),
+            )],
+            MetricValues::new(1.0, 1.0, 1.0),
+        );
+        let comparison = compare_eval_reports_with_config(&report, &report, test_bootstrap())
+            .expect("paired reports should compare");
+        let serialized = serde_json::to_value(&comparison).expect("comparison should serialize");
+
+        for metric in serialized["metrics"]
+            .as_array()
+            .expect("metrics should be an array")
+        {
+            assert!(metric.get("p_value").is_none());
+            assert!(metric.get("adjusted_p_value").is_none());
+        }
+        assert_eq!(serialized["mcnemar"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            serialized["mcnemar"][0]["metric_name"],
+            "all_expected_found_at_4"
+        );
+
+        let rendered = comparison.render_table();
+        assert!(!rendered.contains("p_adj"));
+        assert!(!rendered.lines().any(|line| line.starts_with("mcnemar:")));
+        assert!(rendered.contains("mcnemar all_expected_found_at_4:"));
     }
 
     fn report_json(
@@ -705,7 +933,8 @@ mod tests {
                     "user_id": format!("user-{}", index % 2),
                     "expected_fact_ids": ["fact", "other"],
                     "candidates": candidates,
-                    "post_rerank_candidates": candidates
+                    "post_rerank_candidates": candidates,
+                    "all_expected_found_at_4": candidates.iter().filter_map(|candidate| candidate["fact_id"].as_str()).collect::<BTreeSet<_>>() == BTreeSet::from(["fact", "other"])
                 })
             })
             .collect::<Vec<_>>();
@@ -757,6 +986,98 @@ mod tests {
             "denominator": denominator,
             "value": if denominator == 0 { 0.0 } else { numerator / denominator as f64 }
         })
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct MetricValues {
+        recall_at_4: f64,
+        mrr: f64,
+        ndcg_at_4: f64,
+    }
+
+    impl MetricValues {
+        fn new(recall_at_4: f64, mrr: f64, ndcg_at_4: f64) -> Self {
+            Self {
+                recall_at_4,
+                mrr,
+                ndcg_at_4,
+            }
+        }
+    }
+
+    fn report_with_metrics(probes: Vec<serde_json::Value>, values: MetricValues) -> String {
+        let denominator = probes.len();
+        serde_json::to_string(&json!({
+            "manifest": {
+                "corpus_id": "corpus-a",
+                "seeds": [1],
+            },
+            "final_k": 4,
+            "metrics": {
+                "recall_at_4": summary(values.recall_at_4 * denominator as f64, denominator),
+                "recall_at_25": summary(values.recall_at_4 * denominator as f64, denominator),
+                "mrr": summary(values.mrr * denominator as f64, denominator),
+                "ndcg_at_4": summary(values.ndcg_at_4 * denominator as f64, denominator),
+                "zero_recall_rate": summary(0.0, denominator),
+                "per_leg_recall": {
+                    "graph": summary(0.0, denominator),
+                    "vector": summary(0.0, denominator),
+                    "lexical": summary(0.0, denominator)
+                },
+                "p95_retrieval_latency_ms": 0,
+                "cross_user_leak_count": 0,
+                "pii_unredacted_count": 0
+            },
+            "probe_results": probes,
+        }))
+        .expect("fixture should serialize")
+    }
+
+    fn probe_json(
+        probe_id: &str,
+        user_id: &str,
+        expected_fact_ids: &[&str],
+        candidates: Vec<serde_json::Value>,
+        all_expected_found_at_4: Option<bool>,
+    ) -> serde_json::Value {
+        json!({
+            "probe_id": probe_id,
+            "user_id": user_id,
+            "expected_fact_ids": expected_fact_ids,
+            "candidates": candidates,
+            "post_rerank_candidates": candidates,
+            "all_expected_found_at_4": all_expected_found_at_4,
+        })
+    }
+
+    fn candidate_json(
+        rank: usize,
+        fact_id: &str,
+        equivalent_fact_ids: &[&str],
+    ) -> serde_json::Value {
+        json!({
+            "rank": rank,
+            "fact_id": fact_id,
+            "equivalent_fact_ids": equivalent_fact_ids,
+        })
+    }
+
+    fn metric_row<'a>(
+        comparison: &'a EvalReportComparison,
+        metric_name: &str,
+    ) -> &'a MetricComparison {
+        comparison
+            .metrics
+            .iter()
+            .find(|metric| metric.metric_name == metric_name)
+            .expect("named metric row should exist")
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-12,
+            "expected {expected}, got {actual}"
+        );
     }
 
     fn test_bootstrap() -> BootstrapConfig {

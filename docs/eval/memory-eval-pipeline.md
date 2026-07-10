@@ -1,8 +1,8 @@
 # Memory Eval Pipeline
 
 The memory eval pipeline gates memory architecture changes with a hermetic
-report before shipping new retrieval machinery. It decomposes failures into
-three ordered questions:
+retrieval-only report before shipping new retrieval machinery. It decomposes
+failures into three ordered questions:
 
 1. Did ingestion preserve the expected facts? Track `ingestion_coverage`.
    For production-shaped source text, also track `scope_match_rate` and
@@ -10,13 +10,14 @@ three ordered questions:
 2. Did retrieval surface the preserved facts? Track `recall_at_4`,
    `recall_at_25`, `mrr`, `ndcg_at_4`, `zero_recall_rate`, and
    `per_leg_recall`.
-3. Did the answer use retrieved evidence correctly? Track
-   `answer_faithfulness`, `abstention_correctness`, and
-   `temporal_as_of_accuracy`.
+3. Did directly observable policy and storage behavior hold? Track
+   `forbidden_fact_absent_at_4`, `retrieval_temporal_as_of_correct`, and
+   `stored_pii_redacted`.
 
-Do not skip the order. A faithful answer cannot recover a fact that ingestion
-lost, and recall metrics cannot explain a hallucinated answer unless ingestion
-coverage is already known.
+Do not skip the order. Retrieval cannot recover a fact that ingestion lost,
+and a final-window policy failure must remain distinguishable from a ranking
+miss. This report does not generate an answer or claim answer faithfulness;
+reader/agent answer quality belongs to a separate execution lane.
 
 ## Report Contract
 
@@ -41,16 +42,25 @@ The metric surface is:
 - `zero_recall_rate`
 - `p50_retrieval_latency_ms`
 - `p95_retrieval_latency_ms`
-- `answer_faithfulness`
-- `abstention_correctness`
+- `all_expected_found_at_4`
+- `forbidden_fact_absent_at_4`
 - `cross_user_leak_count`
 - `pii_unredacted_count`
-- `pii_redaction_rate`
-- `temporal_as_of_accuracy`
+- `stored_pii_redacted`
+- `retrieval_temporal_as_of_correct`
 - `temporal_parse_rate`
 - `temporal_parse_mismatch_count`
 - `preference_context_rate`
 - `per_leg_recall`
+
+`recall_at_4` is fractional over expected facts. By contrast,
+`all_expected_found_at_4` is a binary per-probe outcome whose aggregate counts
+only probes with complete final-window support. `forbidden_fact_absent_at_4`
+applies to negative probes and allows harmless distractor candidates; it fails
+only when a blocked fact enters the final top four.
+`retrieval_temporal_as_of_correct` requires all expected temporal facts and no
+blocked version in that same final window. `stored_pii_redacted` comes from the
+resolved stored node rather than generated text.
 
 Top-level query rewrite fields report the retrieval rewrite policy and call
 accounting: `query_rewrite_policy`, `query_rewrite_call_count`,
@@ -120,9 +130,10 @@ The guard test `kernel_sources_never_import_memory_eval` enforces that rule.
 `RetrievalCoreMetrics` contains the universal retrieval metrics: recall, MRR,
 nDCG, zero-recall rate, per-leg recall, latency, cross-user leak count, and
 unredacted-PII count. The memory suite flattens those core fields into
-`RetrievalMetrics` and keeps memory-specific fields such as ingestion,
-temporal, faithfulness, abstention, and redaction metrics as extensions.
-Promote the kernel to a separate crate only when a second suite needs it.
+`RetrievalMetrics` and keeps memory-specific fields such as ingestion, binary
+support completeness, forbidden-fact absence, temporal retrieval correctness,
+and stored redaction as extensions. Promote the kernel to a separate crate only
+when a second suite needs it.
 
 `CachedHybridRetriever` caches final ranked hits. Its key includes scope, query
 text and embedding fingerprint, cutoff, reranker flag, temporal filter, ranking
@@ -157,6 +168,47 @@ of improvements to recall, MRR, or nDCG.
 PR runs use deterministic post-hydration ranking. In PR runs without Cohere
 credentials, the reranker is `Noop`, so the post-rerank top 4 equals the
 pre-rerank top 4.
+
+## Protected Held-Out Acceptance
+
+Seeds `101`, `102`, and `103` are reserved for manual acceptance and cannot be
+passed through ordinary explicit `--seed` generation. The held-out flag owns
+the exact `memory-eval-pr-marked-101-102-103` corpus identity and remains
+provider-hermetic:
+
+```bash
+cargo run -p xtask -- generate-memory-eval-corpus \
+  --profile pr --held-out \
+  --output target/memory-eval/pr-held-out
+env -u COHERE_API_KEY -u MOA_COHERE_API_KEY \
+  MOA_DATABASE_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa \
+  cargo run -p xtask -- run-memory-retrieval-eval \
+  --corpus target/memory-eval/pr-held-out \
+  --lane pr \
+  --output target/memory-eval/held-out.json
+MOA_EVAL_PREVIOUS_MEMORY_REPORT=docs/eval/baselines/memory-retrieval-pr-held-out-baseline.json \
+  cargo run -p xtask -- check-eval-budgets \
+  --suite memory_retrieval \
+  --memory-eval-report target/memory-eval/held-out.json \
+  --max-regression-pct 5
+cargo run -p xtask -- compare-eval-reports \
+  --baseline docs/eval/baselines/memory-retrieval-pr-held-out-baseline.json \
+  --candidate target/memory-eval/held-out.json \
+  --output target/memory-eval/held-out-compare.json
+```
+
+This lane uses generated cached embeddings, heuristic extraction,
+deterministic merge verification, and noop reranking. Its hard privacy blockers
+and retrieval regression gate are normal production-path checks, but the
+report does not generate answers or measure reader/answer quality. Review
+semantic provenance and metrics; wall-clock latency fields are not expected to
+be byte-identical across hosts.
+
+`.github/workflows/memory-eval-held-out.yml` is `workflow_dispatch`-only,
+rejects refs other than `refs/heads/main`, and declares the
+`memory-eval-held-out` environment. A repository administrator must configure
+that environment with required reviewers, prevent self-review, and restrict
+deployment branches to `main` before the workflow is considered protected.
 
 ## Transcript styles
 
@@ -457,11 +509,19 @@ its latency and spend.
 
 ## Paired Comparison
 
-Ranking-affecting changes ship only when `compare-eval-reports` shows a paired
-`recall_at_4` delta with a cluster-bootstrap confidence interval excluding 0
-and a Benjamini-Hochberg-adjusted McNemar p-value below 0.05. MRR and nDCG
-should move in the same direction, and `recall_at_25` should stay unchanged
+`compare-eval-reports` makes separate decisions for `recall_at_4`, MRR, and
+nDCG@4 from their actual per-probe numeric values. Each row uses a paired
+candidate-minus-baseline delta and a user-cluster bootstrap interval. A numeric
+row is `SHIP` only when its delta is positive and the interval's lower bound is
+strictly above 0. Hard regression floors remain separate blockers; a positive
+paired decision does not waive them. `recall_at_25` should stay unchanged
 unless the change intentionally alters candidate generation.
+
+McNemar is reported separately and only for the directly observed
+`all_expected_found_at_4` probe field. Reports with `null` for that field are
+excluded from the binary pairing. Numeric recall, MRR, and nDCG values are not
+projected to binary outcomes and their JSON rows and human-readable table do
+not contain p-values.
 
 Run baseline and candidate reports on the same corpus, then compare them:
 
@@ -495,15 +555,19 @@ paired statistics.
 
 For the current deterministic scorer, the PR-profile sweep picked `overlap =
 0.35` and `subject_match = 0.5`: it improved `recall_at_4` by +0.098 over the
-previous baseline on the current corpus with CI `[+0.059,+0.142]` and adjusted
-p-value `0.010`.
+previous baseline on the current corpus with CI `[+0.059,+0.142]`. The old
+comparison artifact also recorded adjusted p-value `0.010` from a binary
+projection; that legacy value is not current numeric decision evidence.
 
 With stemmed tokens, first-person scope boost, graph-rescue weight, and the OR
 lexical leg on the era-linked marked corpus, the deterministic scorer improved
 `recall_at_4` by +0.187 over the previous baseline with CI `[+0.154,+0.239]`
-and adjusted p-value `0.000`. The remaining hermetic top-4 gap is concentrated
-in multi-hop probes, where both chain facts must fit the final window; that
-slice is reranker territory and should be judged in the live lane.
+and therefore met the current numeric `SHIP` rule. The old comparison artifact
+also recorded adjusted p-value `0.000` from a binary projection; that legacy
+value is not current numeric decision evidence. The remaining hermetic top-4
+gap is concentrated in multi-hop probes, where both chain facts must fit the
+final window; that slice is reranker territory and should be judged in the live
+lane.
 
 ## Nightly And Manual Scale Check
 
@@ -526,6 +590,35 @@ export MOA_EVAL_PREVIOUS_MEMORY_REPORT=target/memory-eval/previous-report.json
 Baseline regression gates compare `retrieval.recall_at_4`, `retrieval.mrr`,
 and `retrieval.ndcg_at_4` against `MOA_EVAL_PREVIOUS_MEMORY_REPORT`.
 
+## External Memory Evidence Lane
+
+PersonaMem 32k and LongMemEval-S Cleaned are a separate manual, billed lane.
+They answer whether the production formation/retrieval/reader path generalizes
+to pinned public packages and whether primary evidence improves over
+no-memory, full-context, and oracle-evidence controls. They do not replace the
+hermetic corpus above:
+
+- PR, held-out, and deterministic retrieval reports remain the shipping gate
+  for local retrieval mechanics and privacy blockers.
+- `.github/workflows/memory-benchmarks.yml` is `workflow_dispatch`-only,
+  protected by the `memory-benchmarks` environment, and restricted to `main`.
+- Public download authorization and provider-spend authorization are separate.
+- External reports are informational until retrieval authority is reviewed and
+  LongMemEval answer authority also passes the human calibration contract.
+- The workflow uploads evidence only. It never writes or commits a baseline and
+  cannot enable a projection or ranking change automatically.
+
+The external runner emits strict `ExternalMemoryReportV2` artifacts with one
+cumulative cost ledger and ordered `primary`, `no_memory`, `full_context`, and
+`oracle_evidence` modes. Each mode retains complete denominators, failures, and
+unsupported cases; reader fit is measured from the exact rendered provider
+request with `chars_div_4_v1`, never by truncating a control.
+
+See [External Memory Benchmarks](external-memory-benchmarks.md) for the protected
+workflow, exact V2/control wires, pinned fetch/run commands, LongMemEval
+calibration math and hashes, and the separate retrieval/answer promotion
+checklists.
+
 The current PR-profile baseline is checked in at:
 
 ```bash
@@ -536,6 +629,12 @@ The gated recorded natural PR-profile baseline is checked in at:
 
 ```bash
 docs/eval/baselines/memory-retrieval-pr-natural-baseline.json
+```
+
+The protected marked held-out acceptance baseline is checked in at:
+
+```bash
+docs/eval/baselines/memory-retrieval-pr-held-out-baseline.json
 ```
 
 Use it when evaluating an implementation candidate:
@@ -560,9 +659,9 @@ Examples:
   lexical bottleneck that graph and vector recall do not cover.
 - Add PPR only after graph leg attribution shows relationship expansion or
   ranking is the bottleneck.
-- Add profile digest injection only after ingestion and retrieval succeed but
-  answer faithfulness or preference-application probes still fail from missing
-  profile context.
+- Add profile digest injection only after ingestion succeeds but
+  `preference_context_rate` or preference-application retrieval slices show
+  the expected standing preference is missing from context.
 - Redesign consolidation only after gold resolution or temporal probes show
   facts were merged, superseded, or expired incorrectly.
 - Add outcome-weighting only after top-k candidates contain the right facts but
@@ -595,11 +694,12 @@ When the budget gate fails, triage in this order:
    Low graph recall with healthy vector and lexical recall now points at edge
    topology, entity resolution, or graph expansion latency rather than missing
    phase-one seeds.
-4. Answer behavior: inspect `answer_faithfulness`,
-   `abstention_correctness`, `pii_redaction_rate`, and
-   `temporal_as_of_accuracy`. For temporal failures, read
+4. Observed policy/storage behavior: inspect `all_expected_found_at_4`,
+   `forbidden_fact_absent_at_4`, `stored_pii_redacted`, and
+   `retrieval_temporal_as_of_correct`. For temporal failures, read
    `temporal_parse_rate` first: a low parse rate is a planner bug, while a high
-   parse rate with low accuracy is a retrieval-leg or validity-window bug.
+   parse rate with low retrieval correctness is a retrieval-leg or
+   validity-window bug.
 5. Baseline drift: when `MOA_EVAL_PREVIOUS_MEMORY_REPORT` is set, inspect
    regression failures for `retrieval.recall_at_4`, `retrieval.mrr`, and
    `retrieval.ndcg_at_4`.

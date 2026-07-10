@@ -4,9 +4,11 @@ use common::*;
 
 include!("memory_eval_support/metrics.rs");
 
+use moa_eval::kernel::compare::compare_eval_reports_with_config;
+
 #[test]
 fn retrieval_metrics_aggregate_exact_small_fixture() {
-    // Pins: retrieval metrics compute exact recall, ranking, safety, PII, temporal, and per-leg values.
+    // Pins: retrieval metrics compute exact ranking and directly observed retrieval/storage values.
     let report = aggregate_retrieval_eval_from_counts(
         4,
         5,
@@ -31,12 +33,12 @@ fn retrieval_metrics_aggregate_exact_small_fixture() {
         0.530_184_185_961_426_6,
     );
     assert_metric(report.metrics.zero_recall_rate, 1.0, 5, 0.2);
-    assert_metric(report.metrics.answer_faithfulness, 4.0, 5, 0.8);
-    assert_metric(report.metrics.abstention_correctness, 1.0, 2, 0.5);
+    assert_metric(report.metrics.all_expected_found_at_4, 3.0, 5, 0.6);
+    assert_metric(report.metrics.forbidden_fact_absent_at_4, 1.0, 2, 0.5);
     assert_eq!(report.metrics.cross_user_leak_count, 1);
     assert_eq!(report.metrics.pii_unredacted_count, 0);
-    assert_metric(report.metrics.pii_redaction_rate, 1.0, 1, 1.0);
-    assert_metric(report.metrics.temporal_as_of_accuracy, 0.0, 1, 0.0);
+    assert_metric(report.metrics.stored_pii_redacted, 1.0, 1, 1.0);
+    assert_metric(report.metrics.retrieval_temporal_as_of_correct, 0.0, 1, 0.0);
     assert_metric(report.metrics.temporal_parse_rate, 1.0, 1, 1.0);
     assert_eq!(report.metrics.temporal_parse_mismatch_count, 0);
     assert_metric(
@@ -81,6 +83,139 @@ fn retrieval_metrics_aggregate_exact_small_fixture() {
     assert_eq!(recall_bootstrap.cluster_count, 3);
     assert_eq!(recall_bootstrap.observation_count, 5);
     assert_close(recall_bootstrap.mean, 0.6);
+
+    let serialized = serde_json::to_value(&report).expect("retrieval report should serialize");
+    assert!(serialized["metrics"].get("answer_faithfulness").is_none());
+    assert!(
+        serialized["metrics"]
+            .get("abstention_correctness")
+            .is_none()
+    );
+    assert!(
+        serialized["probe_results"][0]
+            .get("answer_faithful")
+            .is_none()
+    );
+    assert!(serialized["probe_results"][0].get("answer").is_none());
+}
+
+#[test]
+fn retrieval_metrics_separate_fractional_recall_from_binary_observed_signals() {
+    // Pins: partial support, harmless negative distractors, temporal validity, and stored PII are distinct signals.
+    let probe = |probe_id: &str,
+                 probe_type: ProbeType,
+                 expected_fact_ids: Vec<String>,
+                 blocked_fact_ids: Vec<String>,
+                 candidates: Vec<RetrievedCandidate>,
+                 all_expected_found_at_4: Option<bool>,
+                 forbidden_fact_absent_at_4: Option<bool>,
+                 retrieval_temporal_as_of_correct: Option<bool>,
+                 stored_pii_redacted: Option<bool>| ProbeResult {
+        probe_id: probe_id.to_string(),
+        user_id: format!("user-{probe_id}"),
+        probe_type,
+        expected_fact_ids,
+        expected_fact_grades: std::collections::BTreeMap::new(),
+        blocked_fact_ids,
+        candidates,
+        post_rerank_candidates: None,
+        retrieval_latency_ms: 0,
+        all_expected_found_at_4,
+        forbidden_fact_absent_at_4,
+        retrieval_temporal_as_of_correct,
+        stored_pii_redacted,
+        temporal_filter_parsed: None,
+        temporal_filter_matches_as_of: None,
+        preference_context_hit: None,
+        graph_diagnostics: None,
+        graph_comparison: None,
+    };
+    let reports = vec![
+        probe(
+            "partial-support",
+            ProbeType::MultiHop,
+            fact_ids(&["fact-owner", "fact-runbook"]),
+            Vec::new(),
+            metric_candidates(
+                0x4_100,
+                &[CandidateSpec {
+                    fact_id: Some("fact-owner"),
+                    legs: legs(false, true, false),
+                }],
+            ),
+            Some(false),
+            None,
+            None,
+            None,
+        ),
+        probe(
+            "negative-harmless-distractor",
+            ProbeType::CrossUserIsolation,
+            Vec::new(),
+            fact_ids(&["fact-forbidden"]),
+            metric_candidates(
+                0x4_200,
+                &[CandidateSpec {
+                    fact_id: Some("fact-harmless"),
+                    legs: legs(false, false, true),
+                }],
+            ),
+            None,
+            Some(true),
+            None,
+            None,
+        ),
+        probe(
+            "temporal-correct",
+            ProbeType::TemporalAsOf,
+            fact_ids(&["fact-old"]),
+            fact_ids(&["fact-new"]),
+            metric_candidates(
+                0x4_300,
+                &[CandidateSpec {
+                    fact_id: Some("fact-old"),
+                    legs: legs(true, false, true),
+                }],
+            ),
+            Some(true),
+            None,
+            Some(true),
+            None,
+        ),
+        probe(
+            "pii-storage-unredacted",
+            ProbeType::PiiRedaction,
+            fact_ids(&["fact-phone"]),
+            Vec::new(),
+            metric_candidates(
+                0x4_400,
+                &[CandidateSpec {
+                    fact_id: Some("fact-phone"),
+                    legs: legs(false, true, true),
+                }],
+            ),
+            Some(true),
+            None,
+            None,
+            Some(false),
+        ),
+    ];
+
+    let report = aggregate_retrieval_eval_from_counts(
+        3,
+        3,
+        reports,
+        BootstrapConfig {
+            resamples: 25,
+            seed: 53,
+        },
+    );
+
+    assert_metric(report.metrics.recall_at_4, 2.5, 3, 5.0 / 6.0);
+    assert_metric(report.metrics.all_expected_found_at_4, 2.0, 3, 2.0 / 3.0);
+    assert_metric(report.metrics.forbidden_fact_absent_at_4, 1.0, 1, 1.0);
+    assert_metric(report.metrics.retrieval_temporal_as_of_correct, 1.0, 1, 1.0);
+    assert_metric(report.metrics.stored_pii_redacted, 0.0, 1, 0.0);
 }
 
 #[test]
@@ -165,10 +300,10 @@ fn backend_probe(probe_id: &str, fact_id: &str, backend: LexicalBackend, uid: u1
         }],
         post_rerank_candidates: None,
         retrieval_latency_ms: 0,
-        answer_faithful: Some(true),
-        abstention_correct: None,
-        pii_redacted: None,
-        temporal_as_of_correct: None,
+        all_expected_found_at_4: Some(true),
+        forbidden_fact_absent_at_4: None,
+        stored_pii_redacted: None,
+        retrieval_temporal_as_of_correct: None,
         temporal_filter_parsed: None,
         temporal_filter_matches_as_of: None,
         preference_context_hit: None,
@@ -246,10 +381,10 @@ fn memory_eval_report_serializes_probe_graph_harm_path() -> TestResult {
         candidates: graph_candidates,
         post_rerank_candidates: None,
         retrieval_latency_ms: 11,
-        answer_faithful: Some(false),
-        abstention_correct: None,
-        pii_redacted: None,
-        temporal_as_of_correct: None,
+        all_expected_found_at_4: Some(false),
+        forbidden_fact_absent_at_4: None,
+        stored_pii_redacted: None,
+        retrieval_temporal_as_of_correct: None,
         temporal_filter_parsed: None,
         temporal_filter_matches_as_of: None,
         preference_context_hit: None,
@@ -458,10 +593,10 @@ fn reranker_metrics_track_pre_post_windows_and_p95_latency() {
                     }],
                 )),
                 retrieval_latency_ms: 2_400,
-                answer_faithful: Some(true),
-                abstention_correct: None,
-                pii_redacted: None,
-                temporal_as_of_correct: None,
+                all_expected_found_at_4: Some(true),
+                forbidden_fact_absent_at_4: None,
+                stored_pii_redacted: None,
+                retrieval_temporal_as_of_correct: None,
                 temporal_filter_parsed: None,
                 temporal_filter_matches_as_of: None,
                 preference_context_hit: None,
@@ -490,10 +625,10 @@ fn reranker_metrics_track_pre_post_windows_and_p95_latency() {
                     }],
                 )),
                 retrieval_latency_ms: 100,
-                answer_faithful: Some(true),
-                abstention_correct: None,
-                pii_redacted: None,
-                temporal_as_of_correct: None,
+                all_expected_found_at_4: Some(true),
+                forbidden_fact_absent_at_4: None,
+                stored_pii_redacted: None,
+                retrieval_temporal_as_of_correct: None,
                 temporal_filter_parsed: None,
                 temporal_filter_matches_as_of: None,
                 preference_context_hit: None,
@@ -517,7 +652,7 @@ fn reranker_metrics_track_pre_post_windows_and_p95_latency() {
 
 #[test]
 fn retrieval_metrics_stats_pin_bootstrap_mcnemar_and_bh() {
-    // Pins: statistical comparisons resample user clusters and correct paired binary tests.
+    // Pins: statistical primitives resample user clusters and correct generic paired binary tests.
     let report = aggregate_retrieval_eval_from_counts(
         4,
         5,
@@ -536,7 +671,7 @@ fn retrieval_metrics_stats_pin_bootstrap_mcnemar_and_bh() {
     assert_close(recall_bootstrap.upper, 1.0);
 
     let comparison_a = mcnemar_paired_test(
-        "retrieval.recall_at_4",
+        "binary.gate_a",
         &binary_outcomes("abcdef", |_| false),
         &binary_outcomes("abcdef", |_| true),
     );
@@ -546,7 +681,7 @@ fn retrieval_metrics_stats_pin_bootstrap_mcnemar_and_bh() {
     assert_close(comparison_a.p_value, 0.03125);
 
     let comparison_b = mcnemar_paired_test(
-        "retrieval.mrr",
+        "binary.gate_b",
         &binary_outcomes("abcdef", |index| index == 0),
         &binary_outcomes("abcdef", |index| index > 0),
     );
@@ -555,7 +690,7 @@ fn retrieval_metrics_stats_pin_bootstrap_mcnemar_and_bh() {
     assert_close(comparison_b.p_value, 0.21875);
 
     let comparison_c = mcnemar_paired_test(
-        "retrieval.ndcg_at_4",
+        "binary.gate_c",
         &binary_outcomes("abcdef", |index| index < 3),
         &binary_outcomes("abcdef", |index| index >= 3),
     );
@@ -571,15 +706,47 @@ fn retrieval_metrics_stats_pin_bootstrap_mcnemar_and_bh() {
         ],
         0.1,
     );
-    assert_eq!(corrected[0].metric_name, "retrieval.mrr");
+    assert_eq!(corrected[0].metric_name, "binary.gate_b");
     assert_close(corrected[0].adjusted_p_value, 0.328125);
     assert!(!corrected[0].significant);
-    assert_eq!(corrected[1].metric_name, "retrieval.ndcg_at_4");
+    assert_eq!(corrected[1].metric_name, "binary.gate_c");
     assert_close(corrected[1].adjusted_p_value, 1.0);
     assert!(!corrected[1].significant);
-    assert_eq!(corrected[2].metric_name, "retrieval.recall_at_4");
+    assert_eq!(corrected[2].metric_name, "binary.gate_a");
     assert_close(corrected[2].adjusted_p_value, 0.09375);
     assert!(corrected[2].significant);
+}
+
+#[test]
+fn paired_report_public_schema_separates_numeric_intervals_from_direct_binary_test() {
+    // Pins: serialized real memory reports compare through the public kernel contract without numeric p-values.
+    let report = memory_budget_report(retrieval_metric_probe_results());
+    let report_json = serde_json::to_string(&report).expect("memory eval report should serialize");
+
+    let comparison = compare_eval_reports_with_config(
+        &report_json,
+        &report_json,
+        BootstrapConfig {
+            resamples: 64,
+            seed: 29,
+        },
+    )
+    .expect("identical paired reports should compare");
+    let serialized = serde_json::to_value(&comparison).expect("comparison should serialize");
+
+    assert_eq!(serialized["metrics"].as_array().map(Vec::len), Some(3));
+    for metric in serialized["metrics"]
+        .as_array()
+        .expect("metrics should be an array")
+    {
+        assert!(metric.get("p_value").is_none());
+        assert!(metric.get("adjusted_p_value").is_none());
+    }
+    assert_eq!(serialized["mcnemar"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        serialized["mcnemar"][0]["metric_name"],
+        "all_expected_found_at_4"
+    );
 }
 
 #[test]
@@ -612,10 +779,10 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
                 ),
                 post_rerank_candidates: None,
                 retrieval_latency_ms: 0,
-                answer_faithful: Some(true),
-                abstention_correct: None,
-                pii_redacted: None,
-                temporal_as_of_correct: None,
+                all_expected_found_at_4: Some(true),
+                forbidden_fact_absent_at_4: None,
+                stored_pii_redacted: None,
+                retrieval_temporal_as_of_correct: None,
                 temporal_filter_parsed: None,
                 temporal_filter_matches_as_of: None,
                 preference_context_hit: None,
@@ -632,10 +799,10 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
                 candidates: Vec::new(),
                 post_rerank_candidates: None,
                 retrieval_latency_ms: 0,
-                answer_faithful: Some(true),
-                abstention_correct: Some(true),
-                pii_redacted: None,
-                temporal_as_of_correct: None,
+                all_expected_found_at_4: None,
+                forbidden_fact_absent_at_4: Some(true),
+                stored_pii_redacted: None,
+                retrieval_temporal_as_of_correct: None,
                 temporal_filter_parsed: None,
                 temporal_filter_matches_as_of: None,
                 preference_context_hit: None,
@@ -658,10 +825,10 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
                 ),
                 post_rerank_candidates: None,
                 retrieval_latency_ms: 0,
-                answer_faithful: Some(false),
-                abstention_correct: None,
-                pii_redacted: Some(false),
-                temporal_as_of_correct: None,
+                all_expected_found_at_4: Some(false),
+                forbidden_fact_absent_at_4: None,
+                stored_pii_redacted: Some(false),
+                retrieval_temporal_as_of_correct: None,
                 temporal_filter_parsed: None,
                 temporal_filter_matches_as_of: None,
                 preference_context_hit: None,
@@ -678,24 +845,100 @@ fn retrieval_metrics_security_counts_ignore_non_cross_user_blocked_leaks_and_cou
     assert_eq!(report.metrics.cross_user_leak_count, 0);
     assert_eq!(report.cross_user_leak_probe_ids, Vec::<String>::new());
     assert_eq!(report.metrics.pii_unredacted_count, 1);
-    assert_metric(report.metrics.pii_redaction_rate, 0.0, 1, 0.0);
+    assert_metric(report.metrics.stored_pii_redacted, 0.0, 1, 0.0);
     // The update probe retrieved its superseded blocked fact, so the staleness
     // slice counts it: one leaking probe out of one update probe.
     assert_metric(report.metrics.staleness_leak_rate, 1.0, 1, 1.0);
 }
 
 #[test]
-fn retrieval_metrics_flatten_round_trips_checked_in_baseline() -> TestResult {
-    // Pins: splitting core metrics into a flattened Rust field does not change report JSON.
+fn retrieval_metrics_flatten_round_trips_checked_in_baselines() -> TestResult {
+    // Pins: every durable retrieval baseline uses exactly the current report schema.
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for relative_path in [
+        "docs/eval/baselines/memory-retrieval-pr-baseline.json",
+        "docs/eval/baselines/memory-retrieval-pr-natural-baseline.json",
+        "docs/eval/baselines/memory-retrieval-pr-held-out-baseline.json",
+    ] {
+        let baseline_path = repository_root.join(relative_path);
+        let raw = std::fs::read_to_string(&baseline_path)?;
+        let before: serde_json::Value = serde_json::from_str(&raw)?;
+        let report: MemoryRetrievalEvalReport = serde_json::from_str(&raw)?;
+        let after = serde_json::to_value(report)?;
+
+        assert_eq!(after, before, "baseline should round trip: {relative_path}");
+    }
+    Ok(())
+}
+
+#[test]
+fn held_out_baseline_pins_hermetic_provenance_and_retrieval_only_scope() -> TestResult {
+    // Pins: the protected baseline is the marked 101-103 PR run with only deterministic local
+    // providers, zero spend/privacy blockers, and no generated-answer quality claims.
     let baseline_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("docs/eval/baselines/memory-retrieval-pr-baseline.json");
+        .join("docs/eval/baselines/memory-retrieval-pr-held-out-baseline.json");
     let raw = std::fs::read_to_string(&baseline_path)?;
-    let before: serde_json::Value = serde_json::from_str(&raw)?;
+    let value: serde_json::Value = serde_json::from_str(&raw)?;
     let report: MemoryRetrievalEvalReport = serde_json::from_str(&raw)?;
-    let after = serde_json::to_value(report)?;
 
-    assert_eq!(after, before);
+    assert_eq!(
+        report.manifest.corpus_id,
+        "memory-eval-pr-marked-101-102-103"
+    );
+    assert_eq!(
+        report.manifest.profile,
+        moa_eval::memory_eval::CorpusProfile::Pr
+    );
+    assert_eq!(
+        report.manifest.seeds,
+        moa_eval::memory_eval::HELD_OUT_GOLDEN_SEEDS
+    );
+    assert_eq!(
+        report.manifest.transcript_style,
+        moa_eval::memory_eval::TranscriptStyle::Marked
+    );
+    assert!(!report.reranker_enabled);
+    assert!(!report.aborted_over_budget);
+
+    let providers = report
+        .providers
+        .as_ref()
+        .expect("held-out report should preserve deterministic provider provenance");
+    assert_eq!(providers.lane, "pr");
+    assert_eq!(
+        providers.embedding_model,
+        moa_eval::memory_eval::CACHED_EMBEDDING_MODEL
+    );
+    assert_eq!(providers.extractor_model, "heuristic");
+    assert_eq!(providers.extraction_prompt_version, None);
+    assert_eq!(providers.merge_verifier_model, "deterministic");
+    assert_eq!(providers.merge_prompt_version, None);
+    assert_eq!(providers.reranker_model, "noop");
+
+    let cost = report
+        .cost
+        .as_ref()
+        .expect("held-out report should preserve zero-spend accounting");
+    assert_eq!(cost.embed_input_tokens, 0);
+    assert_eq!(cost.chat_input_tokens, 0);
+    assert_eq!(cost.chat_output_tokens, 0);
+    assert_eq!(cost.rerank_calls, 0);
+    assert_eq!(cost.est_usd, 0.0);
+    assert_eq!(cost.budget_usd, 0.0);
+    assert_eq!(report.metrics.cross_user_leak_count, 0);
+    assert_eq!(report.metrics.pii_unredacted_count, 0);
+
+    assert!(value.get("answer").is_none());
+    assert!(value.get("answer_quality").is_none());
+    assert!(value["metrics"].get("answer_faithfulness").is_none());
+    assert!(
+        value["probe_results"]
+            .as_array()
+            .expect("probe_results should be an array")
+            .iter()
+            .all(|probe| probe.get("answer").is_none() && probe.get("answer_faithful").is_none())
+    );
     Ok(())
 }
 
@@ -809,10 +1052,10 @@ fn graded_ndcg_penalizes_misranking_a_high_grade_memory_below_a_low_grade_one() 
         candidates,
         post_rerank_candidates: None,
         retrieval_latency_ms: 0,
-        answer_faithful: None,
-        abstention_correct: None,
-        pii_redacted: None,
-        temporal_as_of_correct: None,
+        all_expected_found_at_4: Some(true),
+        forbidden_fact_absent_at_4: None,
+        stored_pii_redacted: None,
+        retrieval_temporal_as_of_correct: None,
         temporal_filter_parsed: None,
         temporal_filter_matches_as_of: None,
         preference_context_hit: None,

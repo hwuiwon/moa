@@ -17,7 +17,7 @@ use crate::memory_eval::{
     ExtractionPrecisionCounts, GoldResolutionReport, GraphImpact, ProbeResult, RetrievalMetrics,
 };
 
-/// JSON report written by `run-memory-retrieval-eval`.
+/// Retrieval-only JSON report written by `run-memory-retrieval-eval`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryRetrievalEvalReport {
     /// Corpus manifest loaded for this run.
@@ -80,9 +80,9 @@ pub struct MemoryRetrievalEvalReport {
     /// Optional provider provenance for the run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub providers: Option<ProviderProvenance>,
-    /// Aggregated retrieval metrics.
+    /// Aggregated retrieval and storage metrics; generated-answer quality is out of scope.
     pub metrics: RetrievalMetrics,
-    /// Per-probe retrieval results with candidate attribution.
+    /// Per-probe observed retrieval/storage results with candidate attribution.
     pub probe_results: Vec<ProbeResult>,
     /// Cluster-bootstrap confidence intervals by user.
     pub bootstrap: Vec<ClusterBootstrapReport>,

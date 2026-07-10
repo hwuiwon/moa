@@ -1,0 +1,639 @@
+{
+  "schema_version": 1,
+  "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "role": "labeler_a",
+  "status": "completed",
+  "identity_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "items": [
+    {
+      "question_id": "fixture-knowledge-update-00",
+      "stratum": "knowledge-update",
+      "question": "Synthetic calibration question knowledge-update 0",
+      "reference_answer": "Reference knowledge-update 0",
+      "candidate_answer": "Candidate knowledge-update 0",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-knowledge-update-01",
+      "stratum": "knowledge-update",
+      "question": "Synthetic calibration question knowledge-update 1",
+      "reference_answer": "Reference knowledge-update 1",
+      "candidate_answer": "Candidate knowledge-update 1",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-knowledge-update-02",
+      "stratum": "knowledge-update",
+      "question": "Synthetic calibration question knowledge-update 2",
+      "reference_answer": "Reference knowledge-update 2",
+      "candidate_answer": "Candidate knowledge-update 2",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-knowledge-update-03",
+      "stratum": "knowledge-update",
+      "question": "Synthetic calibration question knowledge-update 3",
+      "reference_answer": "Reference knowledge-update 3",
+      "candidate_answer": "Candidate knowledge-update 3",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-knowledge-update-04",
+      "stratum": "knowledge-update",
+      "question": "Synthetic calibration question knowledge-update 4",
+      "reference_answer": "Reference knowledge-update 4",
+      "candidate_answer": "Candidate knowledge-update 4",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-knowledge-update-05",
+      "stratum": "knowledge-update",
+      "question": "Synthetic calibration question knowledge-update 5",
+      "reference_answer": "Reference knowledge-update 5",
+      "candidate_answer": "Candidate knowledge-update 5",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-knowledge-update-06",
+      "stratum": "knowledge-update",
+      "question": "Synthetic calibration question knowledge-update 6",
+      "reference_answer": "Reference knowledge-update 6",
+      "candidate_answer": "Candidate knowledge-update 6",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-knowledge-update-07",
+      "stratum": "knowledge-update",
+      "question": "Synthetic calibration question knowledge-update 7",
+      "reference_answer": "Reference knowledge-update 7",
+      "candidate_answer": "Candidate knowledge-update 7",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-knowledge-update-08",
+      "stratum": "knowledge-update",
+      "question": "Synthetic calibration question knowledge-update 8",
+      "reference_answer": "Reference knowledge-update 8",
+      "candidate_answer": "Candidate knowledge-update 8",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-knowledge-update-09",
+      "stratum": "knowledge-update",
+      "question": "Synthetic calibration question knowledge-update 9",
+      "reference_answer": "Reference knowledge-update 9",
+      "candidate_answer": "Candidate knowledge-update 9",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-multi-session-00",
+      "stratum": "multi-session",
+      "question": "Synthetic calibration question multi-session 0",
+      "reference_answer": "Reference multi-session 0",
+      "candidate_answer": "Candidate multi-session 0",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-multi-session-01",
+      "stratum": "multi-session",
+      "question": "Synthetic calibration question multi-session 1",
+      "reference_answer": "Reference multi-session 1",
+      "candidate_answer": "Candidate multi-session 1",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-multi-session-02",
+      "stratum": "multi-session",
+      "question": "Synthetic calibration question multi-session 2",
+      "reference_answer": "Reference multi-session 2",
+      "candidate_answer": "Candidate multi-session 2",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-multi-session-03",
+      "stratum": "multi-session",
+      "question": "Synthetic calibration question multi-session 3",
+      "reference_answer": "Reference multi-session 3",
+      "candidate_answer": "Candidate multi-session 3",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-multi-session-04",
+      "stratum": "multi-session",
+      "question": "Synthetic calibration question multi-session 4",
+      "reference_answer": "Reference multi-session 4",
+      "candidate_answer": "Candidate multi-session 4",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-multi-session-05",
+      "stratum": "multi-session",
+      "question": "Synthetic calibration question multi-session 5",
+      "reference_answer": "Reference multi-session 5",
+      "candidate_answer": "Candidate multi-session 5",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-multi-session-06",
+      "stratum": "multi-session",
+      "question": "Synthetic calibration question multi-session 6",
+      "reference_answer": "Reference multi-session 6",
+      "candidate_answer": "Candidate multi-session 6",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-multi-session-07",
+      "stratum": "multi-session",
+      "question": "Synthetic calibration question multi-session 7",
+      "reference_answer": "Reference multi-session 7",
+      "candidate_answer": "Candidate multi-session 7",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-multi-session-08",
+      "stratum": "multi-session",
+      "question": "Synthetic calibration question multi-session 8",
+      "reference_answer": "Reference multi-session 8",
+      "candidate_answer": "Candidate multi-session 8",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-multi-session-09",
+      "stratum": "multi-session",
+      "question": "Synthetic calibration question multi-session 9",
+      "reference_answer": "Reference multi-session 9",
+      "candidate_answer": "Candidate multi-session 9",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-single-session-assistant-00",
+      "stratum": "single-session-assistant",
+      "question": "Synthetic calibration question single-session-assistant 0",
+      "reference_answer": "Reference single-session-assistant 0",
+      "candidate_answer": "Candidate single-session-assistant 0",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-single-session-assistant-01",
+      "stratum": "single-session-assistant",
+      "question": "Synthetic calibration question single-session-assistant 1",
+      "reference_answer": "Reference single-session-assistant 1",
+      "candidate_answer": "Candidate single-session-assistant 1",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-single-session-assistant-02",
+      "stratum": "single-session-assistant",
+      "question": "Synthetic calibration question single-session-assistant 2",
+      "reference_answer": "Reference single-session-assistant 2",
+      "candidate_answer": "Candidate single-session-assistant 2",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-single-session-assistant-03",
+      "stratum": "single-session-assistant",
+      "question": "Synthetic calibration question single-session-assistant 3",
+      "reference_answer": "Reference single-session-assistant 3",
+      "candidate_answer": "Candidate single-session-assistant 3",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-single-session-assistant-04",
+      "stratum": "single-session-assistant",
+      "question": "Synthetic calibration question single-session-assistant 4",
+      "reference_answer": "Reference single-session-assistant 4",
+      "candidate_answer": "Candidate single-session-assistant 4",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-single-session-assistant-05",
+      "stratum": "single-session-assistant",
+      "question": "Synthetic calibration question single-session-assistant 5",
+      "reference_answer": "Reference single-session-assistant 5",
+      "candidate_answer": "Candidate single-session-assistant 5",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-single-session-assistant-06",
+      "stratum": "single-session-assistant",
+      "question": "Synthetic calibration question single-session-assistant 6",
+      "reference_answer": "Reference single-session-assistant 6",
+      "candidate_answer": "Candidate single-session-assistant 6",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-single-session-assistant-07",
+      "stratum": "single-session-assistant",
+      "question": "Synthetic calibration question single-session-assistant 7",
+      "reference_answer": "Reference single-session-assistant 7",
+      "candidate_answer": "Candidate single-session-assistant 7",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-single-session-assistant-08",
+      "stratum": "single-session-assistant",
+      "question": "Synthetic calibration question single-session-assistant 8",
+      "reference_answer": "Reference single-session-assistant 8",
+      "candidate_answer": "Candidate single-session-assistant 8",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-single-session-assistant-09",
+      "stratum": "single-session-assistant",
+      "question": "Synthetic calibration question single-session-assistant 9",
+      "reference_answer": "Reference single-session-assistant 9",
+      "candidate_answer": "Candidate single-session-assistant 9",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-single-session-preference-00",
+      "stratum": "single-session-preference",
+      "question": "Synthetic calibration question single-session-preference 0",
+      "reference_answer": "Reference single-session-preference 0",
+      "candidate_answer": "Candidate single-session-preference 0",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-single-session-preference-01",
+      "stratum": "single-session-preference",
+      "question": "Synthetic calibration question single-session-preference 1",
+      "reference_answer": "Reference single-session-preference 1",
+      "candidate_answer": "Candidate single-session-preference 1",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-single-session-preference-02",
+      "stratum": "single-session-preference",
+      "question": "Synthetic calibration question single-session-preference 2",
+      "reference_answer": "Reference single-session-preference 2",
+      "candidate_answer": "Candidate single-session-preference 2",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-single-session-preference-03",
+      "stratum": "single-session-preference",
+      "question": "Synthetic calibration question single-session-preference 3",
+      "reference_answer": "Reference single-session-preference 3",
+      "candidate_answer": "Candidate single-session-preference 3",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-single-session-preference-04",
+      "stratum": "single-session-preference",
+      "question": "Synthetic calibration question single-session-preference 4",
+      "reference_answer": "Reference single-session-preference 4",
+      "candidate_answer": "Candidate single-session-preference 4",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-single-session-preference-05",
+      "stratum": "single-session-preference",
+      "question": "Synthetic calibration question single-session-preference 5",
+      "reference_answer": "Reference single-session-preference 5",
+      "candidate_answer": "Candidate single-session-preference 5",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-single-session-preference-06",
+      "stratum": "single-session-preference",
+      "question": "Synthetic calibration question single-session-preference 6",
+      "reference_answer": "Reference single-session-preference 6",
+      "candidate_answer": "Candidate single-session-preference 6",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-single-session-preference-07",
+      "stratum": "single-session-preference",
+      "question": "Synthetic calibration question single-session-preference 7",
+      "reference_answer": "Reference single-session-preference 7",
+      "candidate_answer": "Candidate single-session-preference 7",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-single-session-preference-08",
+      "stratum": "single-session-preference",
+      "question": "Synthetic calibration question single-session-preference 8",
+      "reference_answer": "Reference single-session-preference 8",
+      "candidate_answer": "Candidate single-session-preference 8",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-single-session-preference-09",
+      "stratum": "single-session-preference",
+      "question": "Synthetic calibration question single-session-preference 9",
+      "reference_answer": "Reference single-session-preference 9",
+      "candidate_answer": "Candidate single-session-preference 9",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-single-session-user-00",
+      "stratum": "single-session-user",
+      "question": "Synthetic calibration question single-session-user 0",
+      "reference_answer": "Reference single-session-user 0",
+      "candidate_answer": "Candidate single-session-user 0",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-single-session-user-01",
+      "stratum": "single-session-user",
+      "question": "Synthetic calibration question single-session-user 1",
+      "reference_answer": "Reference single-session-user 1",
+      "candidate_answer": "Candidate single-session-user 1",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-single-session-user-02",
+      "stratum": "single-session-user",
+      "question": "Synthetic calibration question single-session-user 2",
+      "reference_answer": "Reference single-session-user 2",
+      "candidate_answer": "Candidate single-session-user 2",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-single-session-user-03",
+      "stratum": "single-session-user",
+      "question": "Synthetic calibration question single-session-user 3",
+      "reference_answer": "Reference single-session-user 3",
+      "candidate_answer": "Candidate single-session-user 3",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-single-session-user-04",
+      "stratum": "single-session-user",
+      "question": "Synthetic calibration question single-session-user 4",
+      "reference_answer": "Reference single-session-user 4",
+      "candidate_answer": "Candidate single-session-user 4",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-single-session-user-05",
+      "stratum": "single-session-user",
+      "question": "Synthetic calibration question single-session-user 5",
+      "reference_answer": "Reference single-session-user 5",
+      "candidate_answer": "Candidate single-session-user 5",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-single-session-user-06",
+      "stratum": "single-session-user",
+      "question": "Synthetic calibration question single-session-user 6",
+      "reference_answer": "Reference single-session-user 6",
+      "candidate_answer": "Candidate single-session-user 6",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-single-session-user-07",
+      "stratum": "single-session-user",
+      "question": "Synthetic calibration question single-session-user 7",
+      "reference_answer": "Reference single-session-user 7",
+      "candidate_answer": "Candidate single-session-user 7",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-single-session-user-08",
+      "stratum": "single-session-user",
+      "question": "Synthetic calibration question single-session-user 8",
+      "reference_answer": "Reference single-session-user 8",
+      "candidate_answer": "Candidate single-session-user 8",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-single-session-user-09",
+      "stratum": "single-session-user",
+      "question": "Synthetic calibration question single-session-user 9",
+      "reference_answer": "Reference single-session-user 9",
+      "candidate_answer": "Candidate single-session-user 9",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-temporal-reasoning-00",
+      "stratum": "temporal-reasoning",
+      "question": "Synthetic calibration question temporal-reasoning 0",
+      "reference_answer": "Reference temporal-reasoning 0",
+      "candidate_answer": "Candidate temporal-reasoning 0",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-temporal-reasoning-01",
+      "stratum": "temporal-reasoning",
+      "question": "Synthetic calibration question temporal-reasoning 1",
+      "reference_answer": "Reference temporal-reasoning 1",
+      "candidate_answer": "Candidate temporal-reasoning 1",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-temporal-reasoning-02",
+      "stratum": "temporal-reasoning",
+      "question": "Synthetic calibration question temporal-reasoning 2",
+      "reference_answer": "Reference temporal-reasoning 2",
+      "candidate_answer": "Candidate temporal-reasoning 2",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-temporal-reasoning-03",
+      "stratum": "temporal-reasoning",
+      "question": "Synthetic calibration question temporal-reasoning 3",
+      "reference_answer": "Reference temporal-reasoning 3",
+      "candidate_answer": "Candidate temporal-reasoning 3",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-temporal-reasoning-04",
+      "stratum": "temporal-reasoning",
+      "question": "Synthetic calibration question temporal-reasoning 4",
+      "reference_answer": "Reference temporal-reasoning 4",
+      "candidate_answer": "Candidate temporal-reasoning 4",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-temporal-reasoning-05",
+      "stratum": "temporal-reasoning",
+      "question": "Synthetic calibration question temporal-reasoning 5",
+      "reference_answer": "Reference temporal-reasoning 5",
+      "candidate_answer": "Candidate temporal-reasoning 5",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-temporal-reasoning-06",
+      "stratum": "temporal-reasoning",
+      "question": "Synthetic calibration question temporal-reasoning 6",
+      "reference_answer": "Reference temporal-reasoning 6",
+      "candidate_answer": "Candidate temporal-reasoning 6",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-temporal-reasoning-07",
+      "stratum": "temporal-reasoning",
+      "question": "Synthetic calibration question temporal-reasoning 7",
+      "reference_answer": "Reference temporal-reasoning 7",
+      "candidate_answer": "Candidate temporal-reasoning 7",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-temporal-reasoning-08",
+      "stratum": "temporal-reasoning",
+      "question": "Synthetic calibration question temporal-reasoning 8",
+      "reference_answer": "Reference temporal-reasoning 8",
+      "candidate_answer": "Candidate temporal-reasoning 8",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-temporal-reasoning-09",
+      "stratum": "temporal-reasoning",
+      "question": "Synthetic calibration question temporal-reasoning 9",
+      "reference_answer": "Reference temporal-reasoning 9",
+      "candidate_answer": "Candidate temporal-reasoning 9",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-abstention-00",
+      "stratum": "abstention",
+      "question": "Synthetic calibration question abstention 0",
+      "reference_answer": "Reference abstention 0",
+      "candidate_answer": "Candidate abstention 0",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-abstention-01",
+      "stratum": "abstention",
+      "question": "Synthetic calibration question abstention 1",
+      "reference_answer": "Reference abstention 1",
+      "candidate_answer": "Candidate abstention 1",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-abstention-02",
+      "stratum": "abstention",
+      "question": "Synthetic calibration question abstention 2",
+      "reference_answer": "Reference abstention 2",
+      "candidate_answer": "Candidate abstention 2",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-abstention-03",
+      "stratum": "abstention",
+      "question": "Synthetic calibration question abstention 3",
+      "reference_answer": "Reference abstention 3",
+      "candidate_answer": "Candidate abstention 3",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-abstention-04",
+      "stratum": "abstention",
+      "question": "Synthetic calibration question abstention 4",
+      "reference_answer": "Reference abstention 4",
+      "candidate_answer": "Candidate abstention 4",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-abstention-05",
+      "stratum": "abstention",
+      "question": "Synthetic calibration question abstention 5",
+      "reference_answer": "Reference abstention 5",
+      "candidate_answer": "Candidate abstention 5",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-abstention-06",
+      "stratum": "abstention",
+      "question": "Synthetic calibration question abstention 6",
+      "reference_answer": "Reference abstention 6",
+      "candidate_answer": "Candidate abstention 6",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-abstention-07",
+      "stratum": "abstention",
+      "question": "Synthetic calibration question abstention 7",
+      "reference_answer": "Reference abstention 7",
+      "candidate_answer": "Candidate abstention 7",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    },
+    {
+      "question_id": "fixture-abstention-08",
+      "stratum": "abstention",
+      "question": "Synthetic calibration question abstention 8",
+      "reference_answer": "Reference abstention 8",
+      "candidate_answer": "Candidate abstention 8",
+      "reader_failure_kind": null,
+      "label": "correct"
+    },
+    {
+      "question_id": "fixture-abstention-09",
+      "stratum": "abstention",
+      "question": "Synthetic calibration question abstention 9",
+      "reference_answer": "Reference abstention 9",
+      "candidate_answer": "Candidate abstention 9",
+      "reader_failure_kind": null,
+      "label": "incorrect"
+    }
+  ]
+}

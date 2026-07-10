@@ -66,8 +66,22 @@ exist only to confirm no regression at acceptance time — a proposal must win o
 data it did not iterate against, which is the post's reward-hacking defense. The
 same three seeds are pinned in code as
 `moa_eval::memory_eval::HELD_OUT_GOLDEN_SEEDS` so tooling and this document
-cannot drift. Do not regenerate corpora or baselines to add them; they are a
-reservation over existing seeds, kept disjoint from proposal-iteration seeds.
+cannot drift. `generate-memory-eval-corpus --held-out` is the only CLI path
+that may select them; ordinary explicit `--seed` generation rejects any
+intersection with the reservation. The protected lane uses the deterministic
+marked PR profile, cached embeddings, heuristic extraction, deterministic
+merge verification, and noop reranking. It is a retrieval/privacy acceptance
+mechanism, not a reader or generated-answer quality measurement.
+
+The manual workflow is `.github/workflows/memory-eval-held-out.yml`. It accepts
+only `workflow_dispatch` from `refs/heads/main`, declares the
+`memory-eval-held-out` GitHub environment, compares against the dedicated
+held-out baseline with an explicit five-percent regression ceiling, and uploads
+the corpus, report, and paired comparison. Before enabling the workflow, a
+repository administrator must configure that environment with required
+reviewers, prevent self-review, and restrict deployment branches to `main`.
+Those controls live in GitHub repository settings and cannot be enforced by the
+checked-in workflow alone.
 
 ## Labeling Protocol
 

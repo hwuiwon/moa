@@ -8,7 +8,7 @@ use std::sync::Arc;
 use chrono::Duration;
 use moa_memory_graph::{EdgeLabel, GraphWalkScoring, NodeLabel};
 use moa_memory_ingest::{
-    DeterministicEntityMergeVerifier, ScriptedFactExtractor, TurnChunk, extract_facts,
+    DeterministicEntityMergeVerifier, IngestError, ScriptedFactExtractor, TurnChunk, extract_facts,
     ingest_turn_direct_with_ctx,
 };
 use serde::Deserialize;
@@ -781,6 +781,54 @@ async fn slow_path_is_atomic_when_a_chunk_fails_partway_through_extraction() {
         user_fact_rows(test_db.store().pool(), storage_partition_id)
             .await
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn slow_path_abstained_pii_writes_no_plaintext_or_derived_rows_db_memory() {
+    // Pins: fail-closed PII abstention aborts the production direct-ingestion path
+    // before plaintext or any graph, changelog, vector, or dedup projection is durable.
+    let _guard = TEST_LOCK.lock().await;
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let storage_partition_id = Uuid::now_v7();
+    let ctx = ingest_ctx_with_pii(
+        test_db.store().pool(),
+        storage_partition_id,
+        Arc::new(support::FailClosedPiiClassifier::new(
+            "privacy-filter:test-fail-closed",
+        )),
+    )
+    .await;
+
+    let error = ingest_turn_direct_with_ctx(
+        ctx,
+        turn(
+            storage_partition_id,
+            "Fact: alice@example.com owns secret sk-live",
+            51,
+        ),
+    )
+    .await
+    .expect_err("fail-closed PII abstention should abort slow-path ingestion");
+
+    let source = std::error::Error::source(error.as_ref() as &(dyn std::error::Error + 'static))
+        .expect("retryable handler error should preserve the ingestion error source");
+    assert!(matches!(
+        source.downcast_ref::<IngestError>(),
+        Some(IngestError::PiiClassificationUnavailable { model_version })
+            if model_version == "privacy-filter:test-fail-closed"
+    ));
+    assert_eq!(
+        durable_ingest_counts(test_db.store().pool(), storage_partition_id).await,
+        DurableIngestCounts {
+            graph_nodes: 0,
+            graph_creates: 0,
+            vectors: 0,
+            dedup_rows: 0,
+        },
+        "abstaining PII classification must leave no durable memory side effects"
     );
 }
 

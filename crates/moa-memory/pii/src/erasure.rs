@@ -59,7 +59,7 @@ pub struct GraphErasureAudit {
     pub approval_token_jti: String,
 }
 
-/// Enumerates active graph-memory nodes attributable to one tenant-bound subject user.
+/// Enumerates all graph-memory versions attributable to one tenant-bound subject user.
 pub async fn enumerate_erase_candidates(
     pool: &PgPool,
     tenant_id: TenantId,
@@ -73,7 +73,6 @@ pub async fn enumerate_erase_candidates(
         SELECT uid, label, name, pii_class
         FROM moa.node_index
         WHERE storage_partition_id = $1
-          AND valid_to IS NULL
           AND (
               user_id = $2
               OR properties_summary->>'user_id' = $2

@@ -39,6 +39,7 @@ pub use fast_path::{
     IncidentRecord, execute_memory_tool, fast_forget, fast_remember, fast_supersede,
     is_fast_memory_tool, record_incident, record_incident_with_ctx,
 };
+pub use model_client::ModelCallObserver;
 pub use model_entity_merge::{
     EntityMergeFixtureRecord, MERGE_PROMPT_VERSION, ModelEntityMergeVerifier,
     RecordedEntityMergeStore, RecordedEntityMergeVerifier, merge_fixture_key,

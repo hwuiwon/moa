@@ -23,7 +23,6 @@ struct PairwiseJudgeEvalCase {
     baseline_answer: &'static str,
     verdicts: &'static [&'static str],
     expected_winner: Option<PairwiseWinner>,
-    expected_answer_faithful: Option<bool>,
     expected_explanation: &'static str,
 }
 
@@ -37,7 +36,6 @@ const PAIRWISE_JUDGE_EVAL_SET: &[PairwiseJudgeEvalCase] = &[
         baseline_answer: "Deploy to prod-us-east.",
         verdicts: &[r#"{"winner":"A"}"#, r#"{"winner":"B"}"#],
         expected_winner: Some(PairwiseWinner::Candidate),
-        expected_answer_faithful: Some(true),
         expected_explanation: "pairwise_judge_agreed_candidate",
     },
     PairwiseJudgeEvalCase {
@@ -49,7 +47,6 @@ const PAIRWISE_JUDGE_EVAL_SET: &[PairwiseJudgeEvalCase] = &[
         baseline_answer: "Use terse bullets and Rust examples.",
         verdicts: &[r#"{"winner":"B"}"#, r#"{"winner":"A"}"#],
         expected_winner: Some(PairwiseWinner::Baseline),
-        expected_answer_faithful: Some(false),
         expected_explanation: "pairwise_judge_agreed_baseline",
     },
     PairwiseJudgeEvalCase {
@@ -61,7 +58,6 @@ const PAIRWISE_JUDGE_EVAL_SET: &[PairwiseJudgeEvalCase] = &[
         baseline_answer: "Checkout depends on lib-auth.",
         verdicts: &[r#"{"winner":"A"}"#, r#"{"winner":"A"}"#],
         expected_winner: None,
-        expected_answer_faithful: None,
         expected_explanation: "pairwise_judge_no_agreement",
     },
 ];
@@ -192,8 +188,9 @@ async fn deterministic_judge_rejects_open_ended_probe_types() {
 }
 
 #[tokio::test]
-async fn pairwise_memory_eval_set_scores_open_ended_probes() -> TestResult {
-    // Pins: the pairwise judge is exercised by an eval-style case set, not only by one-off calls.
+async fn pairwise_memory_eval_set_reports_relative_winners_without_absolute_faithfulness()
+-> TestResult {
+    // Pins: pairwise judging reports only candidate-vs-baseline preference, never absolute faithfulness.
     for case in PAIRWISE_JUDGE_EVAL_SET {
         let provider = ScriptedJudgeProvider::new(case.verdicts.iter().copied());
         let judge = PairwiseLlmJudge::new(Arc::new(provider.clone()));
@@ -209,8 +206,8 @@ async fn pairwise_memory_eval_set_scores_open_ended_probes() -> TestResult {
             case.name
         );
         assert_eq!(
-            outcome.answer_faithful, case.expected_answer_faithful,
-            "{}: answer_faithful should follow the agreed pairwise winner",
+            outcome.answer_faithful, None,
+            "{}: a relative winner must not become an absolute faithfulness verdict",
             case.name
         );
         assert_eq!(

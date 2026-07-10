@@ -6,7 +6,7 @@ use moa_memory_graph::NodeIndexRow;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::model_client::{ModelTextClient, resolved_extraction_config};
+use crate::model_client::{ModelCallObserver, ModelTextClient, resolved_extraction_config};
 use crate::{EntityMergeVerifier, IngestError, Result, entity_resolution::normalize_entity_name};
 
 /// Merge-verifier prompt version used for recorded fixtures.
@@ -41,6 +41,21 @@ impl ModelEntityMergeVerifier {
         Ok(Self::new(ModelTextClient::from_config(
             config,
             &extraction,
+        )?))
+    }
+
+    /// Creates a configured merge verifier with a provider-call observer.
+    pub fn from_config_with_observer(
+        config: &MoaConfig,
+        observer: std::sync::Arc<dyn ModelCallObserver>,
+    ) -> Result<Self> {
+        let extraction = resolved_extraction_config(config).ok_or_else(|| {
+            IngestError::ModelInference("memory.extraction.enabled is false".to_string())
+        })?;
+        Ok(Self::new(ModelTextClient::from_config_with_observer(
+            config,
+            &extraction,
+            observer,
         )?))
     }
 }

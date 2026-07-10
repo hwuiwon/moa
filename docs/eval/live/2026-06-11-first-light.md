@@ -39,7 +39,11 @@ the reranker A/B and full natural run.
 | `pii_unredacted_count` | 0 | 0 | 0 |
 
 Paired comparison on `memory-eval-pr-natural-1-2-3`: `recall_at_4` shipped
-with CI95 `[+0.046,+0.179]`, adjusted `p = 0.022`.
+with CI95 `[+0.046,+0.179]`. The artifact also reported adjusted `p = 0.022`
+under the legacy binary-projection comparator. That p-value is retained here
+as historical artifact metadata, not as evidence for the current numeric
+decision rule; current numeric rows ship from a positive paired delta and a
+strictly positive user-cluster bootstrap lower bound.
 
 ## Cost Lines
 

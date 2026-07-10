@@ -170,6 +170,7 @@ globset = "0.4"
 hex = "0.4"
 hmac = "0.12"
 constant_time_eq = "0.3"
+csv = "1"
 insta = { version = "1", features = ["json", "redactions"] }
 jsonwebtoken = "9.3"
 liteparse = { version = "2.2.1", default-features = false }

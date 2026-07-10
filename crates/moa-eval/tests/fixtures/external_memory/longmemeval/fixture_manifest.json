@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "dataset": "longmemeval-s-cleaned-tiny",
+  "source": {
+    "repository": "xiaowu0162/longmemeval-cleaned",
+    "revision": "98d7416c24c778c2fee6e6f3006e7a073259d48f"
+  },
+  "evaluator_repository": "xiaowu0162/LongMemEval",
+  "evaluator_commit": "9e0b455f4ef0e2ab8f2e582289761153549043fc",
+  "content_origin": "synthetic_contract_fixture",
+  "selection_rationale": "Seven synthetic questions cover all six official types, abstention, numeric answers, chronological ties, duplicate raw session IDs, multiple evidence sessions, and independent session and turn labels without representing an official benchmark sample.",
+  "source_files": [
+    {
+      "path": "longmemeval_s_cleaned.json",
+      "size_bytes": 277383467,
+      "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
+    }
+  ],
+  "fixture_files": [
+    {
+      "path": "longmemeval_s_cleaned_tiny.json",
+      "size_bytes": 3988,
+      "sha256": "a312cb93f1a942456fdcf3cf37032c7feb130de6fb0dc7f44cf7e926317b6c56"
+    },
+    {
+      "path": "upstream_contract_v1.json",
+      "size_bytes": 5505,
+      "sha256": "dcd9227bafd16f408fa8661d057c815f32c8c16dd7bd19403029dd72adc94448"
+    }
+  ],
+  "selected_question_ids": [
+    "q-knowledge",
+    "q-multi",
+    "q-assistant",
+    "q-preference",
+    "q-user",
+    "q-temporal",
+    "q-user_abs"
+  ],
+  "counts": {
+    "questions": 7,
+    "abstentions": 1,
+    "retrieval": 6,
+    "question_types": {
+      "knowledge-update": 1,
+      "multi-session": 1,
+      "single-session-assistant": 1,
+      "single-session-preference": 1,
+      "single-session-user": 2,
+      "temporal-reasoning": 1
+    }
+  }
+}

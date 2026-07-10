@@ -65,6 +65,26 @@ impl PiiClassifier for FixedPiiClassifier {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct FailClosedPiiClassifier {
+    model_version: String,
+}
+
+impl FailClosedPiiClassifier {
+    pub(crate) fn new(model_version: impl Into<String>) -> Self {
+        Self {
+            model_version: model_version.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl PiiClassifier for FailClosedPiiClassifier {
+    async fn classify(&self, _text: &str) -> Result<PiiResult, PiiError> {
+        Ok(PiiResult::fail_closed(self.model_version.clone()))
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct FailOnNthPiiClassifier {
     nth: usize,

@@ -13,12 +13,10 @@ use moa_memory_vector::VECTOR_DIMENSION;
 use tracing::Span;
 use uuid::Uuid;
 
+use crate::retrieval::{MemoryAdmissionPolicy, RetrievalScopePlan};
+
 use super::MIN_PAGE_EXCERPT_TOKENS;
 use super::rendering::{hit_excerpt, hit_title, retrieval_leg_values, truncate_excerpt};
-use super::source_tiers::{
-    RetrievalScopePlan, agent_knowledge_policy, default_retrieval_plan,
-    tenant_knowledge_label_filter,
-};
 
 /// Records retrieval lineage, zero-recall scoring, and retrieval counters.
 pub(super) fn emit_retrieval_lineage(
@@ -172,39 +170,41 @@ fn retrieval_selected_hit(
 }
 
 fn lineage_searched_scopes_from_context(ctx: &moa_core::WorkingContext) -> Vec<String> {
-    let policy = agent_knowledge_policy(ctx).unwrap_or_default();
-    default_retrieval_plan(ctx, &policy)
-        .iter()
-        .map(lineage_scope_label)
-        .collect()
+    let Ok(policy) = MemoryAdmissionPolicy::from_working_context(ctx) else {
+        return Vec::new();
+    };
+    policy.plans().iter().map(lineage_scope_label).collect()
 }
 
 fn lineage_scope_label(plan: &RetrievalScopePlan) -> String {
-    match &plan.scope {
+    match plan.scope() {
         MemoryScope::Tenant { tenant_id } => {
-            format!("tenant:{tenant_id}:{}", plan.source_tier.as_str())
+            format!("tenant:{tenant_id}:{}", plan.source_tier().as_str())
         }
         MemoryScope::Contact {
             tenant_id,
             contact_id,
         } => format!(
             "contact:{tenant_id}:{contact_id}:{}",
-            plan.source_tier.as_str()
+            plan.source_tier().as_str()
         ),
     }
 }
 
 fn lineage_filters_from_context(ctx: &moa_core::WorkingContext) -> serde_json::Value {
-    let policy = agent_knowledge_policy(ctx).unwrap_or_default();
-    let plan = default_retrieval_plan(ctx, &policy);
+    let Ok(policy) = MemoryAdmissionPolicy::from_working_context(ctx) else {
+        return serde_json::json!({});
+    };
+    let agent_policy = policy.agent_policy();
     serde_json::json!({
-        "source_tiers": plan.iter().map(|scope| scope.source_tier.as_str()).collect::<Vec<_>>(),
-        "tenant_knowledge_labels": tenant_knowledge_label_filter()
-            .into_iter()
+        "source_tiers": policy.plans().iter().map(|scope| scope.source_tier().as_str()).collect::<Vec<_>>(),
+        "tenant_knowledge_labels": MemoryAdmissionPolicy::tenant_knowledge_labels()
+            .iter()
+            .copied()
             .map(NodeLabel::as_str)
             .collect::<Vec<_>>(),
-        "policy_filters": policy.filters,
-        "pii_floor": policy.pii_floor,
+        "policy_filters": agent_policy.filters.clone(),
+        "pii_floor": agent_policy.pii_floor.clone(),
     })
 }
 
@@ -217,10 +217,14 @@ fn duration_ms_u32(duration: std::time::Duration) -> u32 {
 }
 
 fn lineage_memory_scope_from_context(ctx: &moa_core::WorkingContext) -> MemoryScope {
-    let policy = agent_knowledge_policy(ctx).unwrap_or_default();
-    default_retrieval_plan(ctx, &policy)
-        .last()
-        .map(|scope_plan| scope_plan.scope.clone())
+    MemoryAdmissionPolicy::from_working_context(ctx)
+        .ok()
+        .and_then(|policy| {
+            policy
+                .plans()
+                .last()
+                .map(|scope_plan| scope_plan.scope().clone())
+        })
         .unwrap_or(MemoryScope::Tenant {
             tenant_id: ctx.tenant_id,
         })

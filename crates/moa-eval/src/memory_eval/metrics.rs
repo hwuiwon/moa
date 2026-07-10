@@ -82,7 +82,7 @@ pub struct RetrievedCandidate {
     pub legs: CandidateLegs,
 }
 
-/// Per-probe retrieval and answer-evaluation outcome.
+/// Per-probe retrieval and storage-evaluation outcome.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProbeResult {
     /// Stable probe identifier.
@@ -114,14 +114,14 @@ pub struct ProbeResult {
     /// End-to-end retrieval latency observed for this probe.
     #[serde(default)]
     pub retrieval_latency_ms: u64,
-    /// Whether the answer was faithful to gold evidence, when judged.
-    pub answer_faithful: Option<bool>,
-    /// Whether abstention behavior was correct, when applicable.
-    pub abstention_correct: Option<bool>,
-    /// Whether PII-bearing answer material was redacted, when applicable.
-    pub pii_redacted: Option<bool>,
-    /// Whether the returned answer matched the requested valid-time instant.
-    pub temporal_as_of_correct: Option<bool>,
+    /// Whether every expected fact appeared in the final top-four window.
+    pub all_expected_found_at_4: Option<bool>,
+    /// Whether every forbidden fact was absent from a negative probe's final top-four window.
+    pub forbidden_fact_absent_at_4: Option<bool>,
+    /// Whether PII-bearing content was redacted in resolved storage.
+    pub stored_pii_redacted: Option<bool>,
+    /// Whether the final window contained all expected temporal facts and no blocked version.
+    pub retrieval_temporal_as_of_correct: Option<bool>,
     /// Whether the planner parsed a temporal filter from this probe's query.
     #[serde(default)]
     pub temporal_filter_parsed: Option<bool>,
@@ -431,14 +431,14 @@ pub struct RetrievalMetrics {
     pub pre_rerank_recall_at_25: MetricSummary,
     /// Mean post-rerank recall@4 over probes with expected facts.
     pub post_rerank_recall_at_4: MetricSummary,
-    /// Fraction of judged answers that were faithful.
-    pub answer_faithfulness: MetricSummary,
-    /// Fraction of abstention-relevant probes that abstained correctly.
-    pub abstention_correctness: MetricSummary,
-    /// Fraction of PII-relevant probes with redacted answer material.
-    pub pii_redaction_rate: MetricSummary,
-    /// Fraction of temporal probes that answered for the requested valid-time instant.
-    pub temporal_as_of_accuracy: MetricSummary,
+    /// Fraction of expected-fact probes with complete support in the final top-four window.
+    pub all_expected_found_at_4: MetricSummary,
+    /// Fraction of negative probes with no forbidden fact in the final top-four window.
+    pub forbidden_fact_absent_at_4: MetricSummary,
+    /// Fraction of PII probes whose resolved stored content was redacted.
+    pub stored_pii_redacted: MetricSummary,
+    /// Fraction of temporal probes with correct expected and blocked facts in the final window.
+    pub retrieval_temporal_as_of_correct: MetricSummary,
     /// Fraction of temporal probes whose query text produced an absolute temporal filter.
     pub temporal_parse_rate: MetricSummary,
     /// Number of temporal probes where the parser fired but produced the wrong instant.
@@ -764,17 +764,17 @@ fn aggregate_metrics(
         pre_rerank_recall_at_4,
         pre_rerank_recall_at_25,
         post_rerank_recall_at_4,
-        answer_faithfulness: summarize_probe_values(probe_results, |probe| {
-            probe.answer_faithful.map(bool_value)
+        all_expected_found_at_4: summarize_probe_values(probe_results, |probe| {
+            probe.all_expected_found_at_4.map(bool_value)
         }),
-        abstention_correctness: summarize_probe_values(probe_results, |probe| {
-            probe.abstention_correct.map(bool_value)
+        forbidden_fact_absent_at_4: summarize_probe_values(probe_results, |probe| {
+            probe.forbidden_fact_absent_at_4.map(bool_value)
         }),
-        pii_redaction_rate: summarize_probe_values(probe_results, |probe| {
-            probe.pii_redacted.map(bool_value)
+        stored_pii_redacted: summarize_probe_values(probe_results, |probe| {
+            probe.stored_pii_redacted.map(bool_value)
         }),
-        temporal_as_of_accuracy: summarize_probe_values(probe_results, |probe| {
-            probe.temporal_as_of_correct.map(bool_value)
+        retrieval_temporal_as_of_correct: summarize_probe_values(probe_results, |probe| {
+            probe.retrieval_temporal_as_of_correct.map(bool_value)
         }),
         temporal_parse_rate: temporal_parse_rate(probe_results),
         temporal_parse_mismatch_count: temporal_parse_mismatch_count(probe_results),
@@ -876,7 +876,7 @@ fn pii_unredacted_count(probe_results: &[ProbeResult]) -> usize {
     probe_results
         .iter()
         .filter(|probe| probe.probe_type == ProbeType::PiiRedaction)
-        .filter(|probe| probe.pii_redacted == Some(false))
+        .filter(|probe| probe.stored_pii_redacted == Some(false))
         .count()
 }
 
@@ -1138,10 +1138,10 @@ mod tests {
             }],
             post_rerank_candidates: None,
             retrieval_latency_ms: 0,
-            answer_faithful: None,
-            abstention_correct: None,
-            pii_redacted: None,
-            temporal_as_of_correct: None,
+            all_expected_found_at_4: Some(true),
+            forbidden_fact_absent_at_4: None,
+            stored_pii_redacted: None,
+            retrieval_temporal_as_of_correct: None,
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
             preference_context_hit: None,
@@ -1177,10 +1177,10 @@ mod tests {
             }],
             post_rerank_candidates: None,
             retrieval_latency_ms: 0,
-            answer_faithful: None,
-            abstention_correct: None,
-            pii_redacted: None,
-            temporal_as_of_correct: None,
+            all_expected_found_at_4: Some(true),
+            forbidden_fact_absent_at_4: None,
+            stored_pii_redacted: None,
+            retrieval_temporal_as_of_correct: None,
             temporal_filter_parsed: None,
             temporal_filter_matches_as_of: None,
             preference_context_hit,

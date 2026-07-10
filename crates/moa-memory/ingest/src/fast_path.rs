@@ -20,7 +20,6 @@ use moa_memory_pii::{
 };
 use moa_memory_vector::VectorStoreFactory;
 use moa_memory_vector::{Error as VectorError, VECTOR_DIMENSION, VectorStore};
-use moa_providers::CohereV4Embedder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -73,7 +72,7 @@ pub struct FastPathCtx {
     graph: Arc<dyn GraphStore>,
     vector_factory: VectorStoreFactory,
     vector: Arc<OnceCell<Arc<dyn VectorStore>>>,
-    embedder: Arc<dyn EmbeddingProvider>,
+    embedder: Option<Arc<dyn EmbeddingProvider>>,
     pii: Arc<dyn PiiClassifier>,
     contradict: Arc<dyn ContradictionDetector>,
     assume_app_role: bool,
@@ -99,7 +98,7 @@ impl FastPathCtx {
             graph,
             vector_factory: VectorStoreFactory::default(),
             vector: Arc::new(vector_cell),
-            embedder,
+            embedder: Some(embedder),
             pii,
             contradict,
             assume_app_role: false,
@@ -114,6 +113,26 @@ impl FastPathCtx {
         graph: Arc<dyn GraphStore>,
         vector_factory: VectorStoreFactory,
         embedder: Arc<dyn EmbeddingProvider>,
+        pii: Arc<dyn PiiClassifier>,
+        contradict: Arc<dyn ContradictionDetector>,
+    ) -> Self {
+        Self::new_with_optional_embedder(
+            pool,
+            scope,
+            graph,
+            vector_factory,
+            Some(embedder),
+            pii,
+            contradict,
+        )
+    }
+
+    fn new_with_optional_embedder(
+        pool: PgPool,
+        scope: RlsContext,
+        graph: Arc<dyn GraphStore>,
+        vector_factory: VectorStoreFactory,
+        embedder: Option<Arc<dyn EmbeddingProvider>>,
         pii: Arc<dyn PiiClassifier>,
         contradict: Arc<dyn ContradictionDetector>,
     ) -> Self {
@@ -186,6 +205,9 @@ pub enum FastError {
     /// A latency budget expired.
     #[error("fast memory operation timed out: {0}")]
     Timeout(&'static str),
+    /// A vector-producing write was requested without the configured ingestion embedder.
+    #[error("configured ingestion embedder is unavailable for fast memory vector writes")]
+    ConfiguredEmbedderUnavailable,
     /// Graph write protocol failed.
     #[error("graph: {0}")]
     Graph(#[from] GraphError),
@@ -341,6 +363,7 @@ pub async fn record_incident_with_ctx(
     ctx: &FastPathCtx,
 ) -> Result<Option<Uuid>, FastError> {
     validate_incident_request(&req)?;
+    let embedder = require_configured_embedder(ctx.embedder.as_ref())?;
 
     let Some((attempted_safe, attempted_class)) = classify_and_redact(&req.attempted, ctx).await?
     else {
@@ -357,8 +380,7 @@ pub async fn record_incident_with_ctx(
         return Ok(None);
     }
 
-    let embedding = ctx
-        .embedder
+    let embedding = embedder
         .embed(std::slice::from_ref(&summary))
         .await?
         .into_iter()
@@ -392,8 +414,8 @@ pub async fn record_incident_with_ctx(
         confidence: Some(0.9),
         valid_from: Utc::now(),
         embedding: Some(embedding),
-        embedding_model: Some(ctx.embedder.model_id().to_string()),
-        embedding_model_version: Some(ctx.embedder.model_version()),
+        embedding_model: Some(embedder.model_id().to_string()),
+        embedding_model_version: Some(embedder.model_version()),
         embedding_text: None,
         actor_id: req.actor_id.to_string(),
         actor_kind: req.actor_kind.clone(),
@@ -525,6 +547,7 @@ async fn fast_remember_inner(
     ctx: &FastPathCtx,
 ) -> Result<Uuid, FastError> {
     validate_remember_request(&req)?;
+    let embedder = require_configured_embedder(ctx.embedder.as_ref())?;
 
     let pii_result = ctx.pii.classify(&req.text).await;
     let pii = match pii_result {
@@ -536,8 +559,7 @@ async fn fast_remember_inner(
     };
     let redacted_text = safe_fast_path_text(&req.text, &pii)?;
     let embed_input = vec![redacted_text.clone()];
-    let embedding = ctx
-        .embedder
+    let embedding = embedder
         .embed(&embed_input)
         .await?
         .into_iter()
@@ -608,8 +630,8 @@ async fn fast_remember_inner(
         &embedding,
         pii.class,
         confidence,
-        ctx.embedder.model_id(),
-        ctx.embedder.model_version(),
+        embedder.model_id(),
+        embedder.model_version(),
         &redacted_text,
     );
 
@@ -925,6 +947,11 @@ fn memory_tool_failure_output(tool_name: &str, error: &FastError, started: Insta
                 "{tool_name} did not persist memory because privacy classification is unavailable. Do not retry this memory tool in this turn; continue using the current session context."
             )
         }
+        FastError::ConfiguredEmbedderUnavailable => {
+            format!(
+                "{tool_name} did not persist memory because the configured ingestion embedder is unavailable. Do not retry this memory tool in this turn; continue using the current session context."
+            )
+        }
         FastError::Timeout(operation) => {
             format!(
                 "{tool_name} timed out while running {operation}. Do not retry this memory tool in this turn; continue using the current session context and retry later if needed."
@@ -983,6 +1010,13 @@ fn actor_id_from_session(session: &SessionMeta) -> Uuid {
 
 async fn runtime_fast_ctx(scope: RlsContext) -> Result<FastPathCtx, FastError> {
     let runtime = current_runtime()?;
+    runtime_fast_ctx_from_runtime(&runtime, scope).await
+}
+
+async fn runtime_fast_ctx_from_runtime(
+    runtime: &crate::IngestRuntime,
+    scope: RlsContext,
+) -> Result<FastPathCtx, FastError> {
     let pool = runtime.pool().clone();
     let vector_factory = runtime.vector_store_factory();
     let graph_vector =
@@ -992,17 +1026,14 @@ async fn runtime_fast_ctx(scope: RlsContext) -> Result<FastPathCtx, FastError> {
             .with_vector_store(graph_vector.vector_store())
             .with_vector_post_commit_sync(graph_vector.post_commit_sync()),
     );
-    let embedder = Arc::new(
-        CohereV4Embedder::new(cohere_api_key(runtime.cohere_api_key())?)
-            .map_err(FastError::from)?,
-    );
+    let embedder = runtime.embedder();
     let pii: Arc<dyn PiiClassifier> = match runtime.pii_service_url() {
         Some(url) => Arc::new(OpenAiPrivacyFilterClassifier::new(url)?),
         None => Arc::new(FailClosedClassifier),
     };
     let contradict = runtime.contradiction_detector();
 
-    Ok(FastPathCtx::new_with_vector_factory(
+    Ok(FastPathCtx::new_with_optional_embedder(
         pool,
         scope,
         graph,
@@ -1013,14 +1044,10 @@ async fn runtime_fast_ctx(scope: RlsContext) -> Result<FastPathCtx, FastError> {
     ))
 }
 
-fn cohere_api_key(api_key: &str) -> Result<String, FastError> {
-    let api_key = api_key.trim();
-    if api_key.is_empty() {
-        return Err(FastError::Invalid(
-            "MOA_COHERE_API_KEY is required for fast memory embedding".to_string(),
-        ));
-    }
-    Ok(api_key.to_string())
+fn require_configured_embedder(
+    embedder: Option<&Arc<dyn EmbeddingProvider>>,
+) -> Result<&Arc<dyn EmbeddingProvider>, FastError> {
+    embedder.ok_or(FastError::ConfiguredEmbedderUnavailable)
 }
 
 fn parse_node_label(value: Option<&str>) -> Result<NodeLabel, FastError> {
@@ -1045,12 +1072,158 @@ impl PiiClassifier for FailClosedClassifier {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        ContactId, ContactRef, ContactVerificationState, SessionMeta, TenantId, ToolContent,
+        ContactId, ContactRef, ContactVerificationState, MoaConfig, SessionMeta, TenantId,
+        ToolContent,
     };
     use serde_json::json;
+    use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
 
     use super::*;
+
+    fn lazy_pool() -> PgPool {
+        PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/moa_test")
+            .expect("lazy test pool should not connect")
+    }
+
+    #[tokio::test]
+    async fn runtime_fast_ctx_reuses_configured_ingestion_embedder() {
+        // Pins: installed slow, fast, and entity paths share one provider client;
+        // a fast command must not construct another client with the same model ID.
+        let mut config = MoaConfig::default();
+        config.memory.vector.embedder.name = "gemini:gemini-embedding-2".to_string();
+        config.providers.google.api_key = "test-google-key".to_string();
+        let runtime = crate::IngestRuntime::from_config(lazy_pool(), &config)
+            .expect("configured runtime should build without a provider call");
+        let slow_embedder = runtime
+            .embedder()
+            .expect("slow runtime embedder should be configured");
+        let entity_embedder = runtime
+            .entity_blocking_embedder()
+            .expect("entity blocking embedder should be configured");
+
+        let fast = runtime_fast_ctx_from_runtime(
+            &runtime,
+            RlsContext::tenant(TenantId::from(Uuid::from_u128(1))),
+        )
+        .await
+        .expect("fast context should reuse the configured runtime provider");
+        let fast_embedder = fast
+            .embedder
+            .as_ref()
+            .expect("fast vector writes should have the configured embedder");
+
+        assert_eq!(fast_embedder.model_id(), "gemini-embedding-2");
+        assert!(Arc::ptr_eq(&slow_embedder, fast_embedder));
+        assert!(Arc::ptr_eq(&entity_embedder, fast_embedder));
+    }
+
+    #[tokio::test]
+    async fn vector_operations_fail_with_configured_embedder_unavailable() {
+        // Pins: remember, supersede-via-remember, and incident writes all use one
+        // dedicated missing-embedder boundary before attempting provider or DB I/O.
+        let mut config = MoaConfig::default();
+        config.memory.vector.embedder.name = "disabled".to_string();
+        let runtime = crate::IngestRuntime::from_config(lazy_pool(), &config)
+            .expect("disabled embedding should leave fast graph access available");
+        let ctx = runtime_fast_ctx_from_runtime(
+            &runtime,
+            RlsContext::tenant(TenantId::from(Uuid::from_u128(3))),
+        )
+        .await
+        .expect("fast context should build without an embedder");
+        let remember_request = FastRememberRequest {
+            tenant_id: Uuid::from_u128(3),
+            contact_id: None,
+            scope: "tenant".to_string(),
+            text: "the api uses postgres".to_string(),
+            label: NodeLabel::Fact,
+            supersedes_specific: None,
+            actor_id: Uuid::from_u128(4),
+            actor_kind: "user".to_string(),
+        };
+
+        let remember_error = fast_remember(remember_request.clone(), &ctx)
+            .await
+            .expect_err("remember requires the configured ingestion embedder");
+        let supersede_error = fast_remember(
+            FastRememberRequest {
+                supersedes_specific: Some(Uuid::from_u128(5)),
+                ..remember_request
+            },
+            &ctx,
+        )
+        .await
+        .expect_err("supersede-via-remember requires the configured ingestion embedder");
+        let incident_error = record_incident_with_ctx(
+            IncidentRecord {
+                tenant_id: Uuid::from_u128(3),
+                contact_id: None,
+                scope: "tenant".to_string(),
+                session_id: Uuid::from_u128(6),
+                turn_seq: 1,
+                attempted: "memory_search".to_string(),
+                failure: "timeout".to_string(),
+                actor_id: Uuid::from_u128(4),
+                actor_kind: "system".to_string(),
+            },
+            &ctx,
+        )
+        .await
+        .expect_err("incident capture requires the configured ingestion embedder");
+
+        assert!(matches!(
+            remember_error,
+            FastError::ConfiguredEmbedderUnavailable
+        ));
+        assert!(matches!(
+            supersede_error,
+            FastError::ConfiguredEmbedderUnavailable
+        ));
+        assert!(matches!(
+            incident_error,
+            FastError::ConfiguredEmbedderUnavailable
+        ));
+        let output = memory_tool_failure_output("memory_remember", &remember_error, Instant::now());
+        let texts = output
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                ToolContent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts,
+            vec![
+                "memory_remember did not persist memory because the configured ingestion embedder is unavailable. Do not retry this memory tool in this turn; continue using the current session context."
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_fast_ctx_without_embedder_remains_available_for_forget() {
+        // Pins: privacy deletion can build its graph context when embedding is
+        // disabled; only a vector-producing operation asks for an embedder.
+        let mut config = MoaConfig::default();
+        config.memory.vector.embedder.name = "disabled".to_string();
+        let runtime = crate::IngestRuntime::from_config(lazy_pool(), &config)
+            .expect("disabled embedding should not disable graph deletion");
+
+        let fast = runtime_fast_ctx_from_runtime(
+            &runtime,
+            RlsContext::tenant(TenantId::from(Uuid::from_u128(2))),
+        )
+        .await
+        .expect("forget context should not require an embedding provider");
+
+        assert!(fast.embedder.is_none());
+        assert!(matches!(
+            require_configured_embedder(fast.embedder.as_ref()),
+            Err(FastError::ConfiguredEmbedderUnavailable)
+        ));
+    }
 
     #[test]
     fn requested_contact_scope_without_contact_detects_invalid_contact_write() {

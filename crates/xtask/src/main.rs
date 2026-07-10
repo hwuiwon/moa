@@ -8,13 +8,16 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+mod calibrate_external_memory_judge;
 mod check_architecture_boundaries;
 mod check_eval_budgets;
 mod compare_eval_reports;
 mod compute_memory_quality_scores;
+mod fetch_memory_benchmark;
 mod generate_memory_eval_corpus;
 mod record_memory_extractions;
 mod record_memory_merges;
+mod run_external_memory_eval;
 mod run_memory_retrieval_eval;
 mod wixqa_rag_eval;
 
@@ -28,11 +31,14 @@ fn main() -> Result<()> {
         Some("check-architecture-boundaries") => check_architecture_boundaries::run(),
         Some("check-migrations") => cmd_check_migrations(),
         Some("check-eval-budgets") => check_eval_budgets::run(args),
+        Some("calibrate-external-memory-judge") => calibrate_external_memory_judge::run(args),
         Some("compare-eval-reports") => compare_eval_reports::run(args),
         Some("compute-memory-quality-scores") => compute_memory_quality_scores::run(args),
+        Some("fetch-memory-benchmark") => fetch_memory_benchmark::run(args),
         Some("generate-memory-eval-corpus") => generate_memory_eval_corpus::run(args),
         Some("record-memory-extractions") => record_memory_extractions::run(args),
         Some("record-memory-merges") => record_memory_merges::run(args),
+        Some("run-external-memory-eval") => run_external_memory_eval::run(args),
         Some("run-memory-retrieval-eval") => run_memory_retrieval_eval::run(args),
         Some("wixqa-rag-eval") => wixqa_rag_eval::run(args),
         Some(command) => bail!("unknown xtask command: {command}"),
@@ -387,4 +393,55 @@ fn rg_forbid(label: &str, pattern: &str, paths: &[&str], options: &[&str]) -> Re
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod task_11_workflow_contract {
+    use std::path::Path;
+
+    #[test]
+    fn task_11_workflow_contract_is_manual_protected_and_read_only() {
+        // Pins: the paid lane is manual/main-only, protected, provenance-gated, and never writes baselines.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("xtask is beneath the workspace root");
+        let path = root.join(".github/workflows/memory-benchmarks.yml");
+        let text = std::fs::read_to_string(&path).expect("read memory benchmark workflow");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&text).expect("workflow YAML parses");
+        assert!(parsed.is_mapping());
+        assert!(text.contains("on:\n  workflow_dispatch:"));
+        assert!(!text.contains("pull_request:"));
+        assert!(!text.contains("schedule:"));
+        for exact in [
+            "permissions:\n  contents: read",
+            "environment: memory-benchmarks",
+            "refs/heads/main",
+            "ghcr.io/hwuiwon/moa-postgres:pg17-pgvector0.8.2-pgaudit",
+            "POSTGRES_DB: moa",
+            "POSTGRES_PASSWORD: ci",
+            "postgres://postgres:ci@localhost:5432/moa",
+            "MOA_RUN_NETWORK_MEMORY_BENCHMARKS: \"1\"",
+            "MOA_RUN_LIVE_MEMORY_BENCHMARKS: \"1\"",
+            "--fetch-summary",
+            "--migrate-database",
+            "--reader-context-window",
+            "--reader-output-token-reserve",
+            "--controls \"$CONTROLS\"",
+            "no-memory,full-context,oracle-evidence",
+            "--package-manifest",
+            "MOA_OPENAI_API_KEY: ${{ secrets.MOA_OPENAI_API_KEY }}",
+            "MOA_GOOGLE_API_KEY: ${{ secrets.MOA_GOOGLE_API_KEY }}",
+            "MOA_ANTHROPIC_API_KEY: ${{ secrets.MOA_ANTHROPIC_API_KEY }}",
+        ] {
+            assert!(
+                text.contains(exact),
+                "missing workflow contract marker: {exact}"
+            );
+        }
+        assert_eq!(text.matches("MOA_ANTHROPIC_API_KEY:").count(), 1);
+        assert!(!text.contains("git push"));
+        assert!(!text.contains("docs/eval/baselines/"));
+        assert!(!text.contains("contents: write"));
+    }
 }

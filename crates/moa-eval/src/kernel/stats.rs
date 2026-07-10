@@ -29,13 +29,16 @@ impl Default for BootstrapConfig {
 }
 
 /// One per-probe numeric metric observation owned by a user cluster.
+///
+/// Report comparisons store candidate-minus-baseline paired deltas in `value`
+/// so the bootstrap interval is computed over the numeric metric itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClusterObservation {
     /// User cluster identifier used for resampling.
     pub user_id: String,
     /// Probe identifier retained for report auditability.
     pub probe_id: String,
-    /// Per-probe metric value.
+    /// Per-probe metric value or paired numeric delta.
     pub value: f64,
 }
 
@@ -97,6 +100,9 @@ pub struct PairedComparison {
 }
 
 /// Computes a 2.5/97.5 percentile confidence interval by resampling users.
+///
+/// For paired report decisions, pass one candidate-minus-baseline numeric
+/// observation per probe rather than projecting the metric to a binary value.
 #[must_use]
 pub fn cluster_bootstrap_mean_by_user(
     metric_name: impl Into<String>,

@@ -1,0 +1,54 @@
+[
+  {
+    "schema_version": 1,
+    "isolation_key": "common-fixture-v1/question-1",
+    "sessions": [
+      {
+        "source_id": "q1-session-1",
+        "occurred_at": "2026-07-09T10:00:00Z",
+        "turns": [
+          {
+            "source_id": "q1-session-1-turn-1",
+            "occurred_at": "2026-07-09T10:00:00Z",
+            "role": "user",
+            "text": "The deployment owner is Ada."
+          }
+        ]
+      }
+    ],
+    "question": "Who owns the deployment?",
+    "options": ["Ada", "Lin"],
+    "answer": "Ada",
+    "category": "single_session",
+    "evidence_labels": {
+      "session_source_ids": ["q1-session-1"],
+      "turn_source_ids": ["q1-session-1-turn-1"]
+    }
+  },
+  {
+    "schema_version": 1,
+    "isolation_key": "common-fixture-v1/question-2",
+    "sessions": [
+      {
+        "source_id": "q2-session-1",
+        "occurred_at": "2026-07-09T11:00:00Z",
+        "turns": [
+          {
+            "source_id": "q2-session-1-turn-1",
+            "occurred_at": "2026-07-09T11:00:00Z",
+            "role": "user",
+            "text": "The rollout color is green."
+          }
+        ]
+      }
+    ],
+    "question": "What is the rollout color?",
+    "options": [],
+    "answer": "green",
+    "category": "single_session",
+    "evidence_labels": {
+      "session_source_ids": null,
+      "turn_source_ids": ["q2-session-1-turn-1"]
+    }
+  }
+]

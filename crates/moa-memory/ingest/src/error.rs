@@ -30,6 +30,12 @@ pub enum IngestError {
     /// Model-backed memory inference failed.
     #[error("model inference: {0}")]
     ModelInference(String),
+    /// PII classification abstained, so ingestion cannot safely persist the extracted text.
+    #[error("pii classification unavailable from model version `{model_version}`")]
+    PiiClassificationUnavailable {
+        /// Model or serving version that produced the abstaining result.
+        model_version: String,
+    },
     /// The process-local ingestion runtime was not installed.
     #[error("ingestion runtime has not been installed")]
     RuntimeNotInstalled,

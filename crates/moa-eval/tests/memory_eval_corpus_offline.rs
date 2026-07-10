@@ -206,6 +206,28 @@ async fn memory_eval_pr_generator_writes_byte_stable_ledger_first_corpus() {
 }
 
 #[test]
+fn held_out_pr_manifest_pins_reserved_marked_acceptance_identity() {
+    // Pins: the protected acceptance corpus has one stable manifest identity shared by local and
+    // workflow runs, independent of any provider recording or credential.
+    let corpus = generate_memory_eval_corpus(
+        CorpusProfile::Pr,
+        moa_eval::memory_eval::HELD_OUT_GOLDEN_SEEDS.to_vec(),
+    )
+    .expect("generate held-out PR memory eval corpus");
+
+    assert_eq!(
+        corpus.manifest.seeds,
+        moa_eval::memory_eval::HELD_OUT_GOLDEN_SEEDS
+    );
+    assert_eq!(corpus.manifest.profile, CorpusProfile::Pr);
+    assert_eq!(corpus.manifest.transcript_style, TranscriptStyle::Marked);
+    assert_eq!(
+        corpus.manifest.corpus_id,
+        "memory-eval-pr-marked-101-102-103"
+    );
+}
+
+#[test]
 fn generator_emits_four_temporal_variants_per_supersession_chain() {
     // Pins: each PR tenant supersession chain emits four absolute-date temporal probes.
     let corpus = generate_memory_eval_corpus(CorpusProfile::Pr, vec![1, 2, 3])

@@ -16,15 +16,24 @@ moa-db = { workspace = true }
 moa-eval = { workspace = true }
 moa-knowledge = { workspace = true }
 moa-memory-graph = { workspace = true }
+moa-memory-ingest = { workspace = true, features = ["test-util"] }
 moa-memory-lifecycle = { workspace = true }
+moa-memory-pii = { workspace = true }
 moa-memory-types = { workspace = true }
 moa-memory-vector = { workspace = true }
+moa-migrations = { workspace = true }
 moa-providers = { workspace = true }
 pgvector = { version = "0.4.1", features = ["sqlx", "halfvec"] }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "runtime-tokio-rustls", "postgres"] }
 tokio.workspace = true
 toml.workspace = true
 uuid.workspace = true
 workspace-hack = { workspace = true }
+
+[dev-dependencies]
+serde_yaml.workspace = true
+tempfile.workspace = true

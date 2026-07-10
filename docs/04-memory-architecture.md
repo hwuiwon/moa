@@ -103,15 +103,29 @@ Known scaling caveat: graph expansion uses bounded recursive SQL over
 tenant graph degree and traversal depth. The 250ms graph budget bounds latency
 and silently trims as-of expansion on large shared databases.
 
-Embedder selection is per tenant and uses a single `provider:model` selector,
-for example `cohere:embed-v4.0` or `gemini:gemini-embedding-2`.
-Those models use incompatible vector spaces, so switching a tenant requires
-re-embedding its graph nodes before retrieval can safely use the new model.
+Embedder selection is deployment/process configured through one
+`provider:model` selector, for example `cohere:embed-v4.0` or
+`gemini:gemini-embedding-2`. The resulting vector identity (model, version, and
+dimensions) is pinned per tenant storage partition. Those models use
+incompatible vector spaces, so switching the process configuration requires
+re-embedding each affected partition before retrieval can safely use the new
+model. Embedding construction never falls back across providers or models:
+ingestion and retrieval each build the selected provider with their respective
+role, and a failure stays within that vector space. Credential changes are
+startup-only configuration because the process runtime and its provider client
+are installed once.
 Gemini Embedding 2 is exposed as a text-only `Embedder` today; its API supports
 multimodal inputs, but MOA needs a separate multimodal chunker and embedder
 trait before image, audio, video, or PDF chunks are indexed.
 
-Gemini Embedding 2 does not use a `task_type` request field. MOA encodes asymmetric retrieval through role-specific prompt prefixes inside the embedder: ingestion-side embedders use the document prefix and retrieval-side embedders use a search-query prefix.
+Gemini Embedding 2 does not use a `task_type` request field. MOA encodes
+asymmetric retrieval through role-specific prompt prefixes inside the embedder:
+ingestion-side embedders use the document prefix and retrieval-side embedders
+use a search-query prefix. Session ingestion constructs one process-shared
+ingestion provider and reuses that exact client for slow-path facts, fast-path
+remember/supersede/incident writes, and entity blocking. Explicit-pool helpers
+build once per invocation and likewise share that client between fact and entity
+work.
 
 Indexes are write-incremental. There is no user-facing rebuild-index command for graph memory.
 
@@ -121,6 +135,15 @@ Session and contact memory enter the graph through two routes:
 
 - **Slow path**: `moa-memory-ingest` processes longer source text or turns through the ingestion VO. It chunks content, extracts facts/entities, classifies privacy, writes nodes and edges, embeds retrievable records, and records contradictions.
 - **Fast path**: short observations use remember/forget/supersede APIs for direct graph writes with the same scope and privacy controls.
+
+When the selected embedder is disabled or its selected-provider credential is
+missing, runtime construction emits one structured warning. Slow ingestion
+continues in explicit no-vector mode, preserving graph facts without embedding
+bytes or model identity. Vector-producing fast remember, supersede, and incident
+writes instead return a dedicated configured-embedder-unavailable error; fast
+forget and privacy deletion remain available because they do not create vectors.
+Invalid selectors, models, dimensions, or provider-client construction are
+configuration errors, not no-vector downgrades.
 
 Tenant knowledge ingestion is a third route owned by `moa-knowledge`, not by
 `Memory.ingest_documents`. It links external accounts through Nango or Merge,
@@ -155,9 +178,28 @@ not part of the fact identity hash, and malformed values degrade to the turn
 instant instead of failing extraction. Prompt v3 adds only this optional key,
 so recorded v2 fixtures remain replayable.
 
-PII classification runs before durable memory writes. Sensitive text is either filtered, redacted, or tagged according to the privacy class and policy.
+PII classification runs before redaction, embedding, or any durable memory
+write. A successful classification may redact sensitive spans and records the
+resulting privacy class. An abstaining classifier returns a retryable error and
+writes nothing; unclassified plaintext is never merely tagged and admitted.
+
+Privacy erasure follows attribution across every version of a subject's memory,
+including active, invalidated, expired, and superseded rows. It removes the
+attributable graph nodes and edges, vector projections, retrieval lineage, and
+audit-linked memory closure rather than limiting deletion to the active
+retrieval view. Historical bitemporal visibility does not override an erasure
+request.
 
 ## Context Pipeline Integration
+
+`MemoryAdmissionPolicy` is the shared authorization and visibility gate for
+prompt injection and the `memory_search` and `memory_navigate` tools. All three
+surfaces apply the same admitted scope before graph, lexical, or vector reads;
+tool execution cannot widen what the prompt path may see. Postgres row-level
+security remains defense in depth beneath this application policy, not a
+substitute for it. A contact session may receive tenant knowledge and admitted
+memory for its current contact only. Tenant operational/admin memory and every
+other contact's memory remain outside that boundary.
 
 The standing digest processor runs after query rewriting and before graph-memory
 retrieval when `memory.digest.enabled` is true. Contact sessions read exactly

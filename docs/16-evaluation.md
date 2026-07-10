@@ -9,10 +9,11 @@ multi-turn scenario runs. It catches regressions that appear only after
 context, cache, memory, and tool state accumulate across a realistic
 conversation.
 
-Memory retrieval and answer-faithfulness gates are documented separately in
-[Memory Eval Pipeline](eval/memory-eval-pipeline.md). That sequence keeps
-ingestion coverage, retrieval recall, and answer faithfulness separate so the
-report identifies the bottleneck before new memory architecture ships.
+The retrieval-only memory gate is documented in
+[Memory Eval Pipeline](eval/memory-eval-pipeline.md). It keeps ingestion,
+ranking, binary support completeness, temporal retrieval, privacy, and stored
+redaction separate. It does not synthesize an answer or claim answer
+faithfulness; reader/agent answer quality requires a separate execution lane.
 
 Retrieval-affecting changes additionally gate on the offline
 [Golden Retrieval Set](eval/golden-retrieval-set.md) before any live sweep:

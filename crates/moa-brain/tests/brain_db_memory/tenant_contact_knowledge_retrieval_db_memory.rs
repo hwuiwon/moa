@@ -1,5 +1,6 @@
 //! Integration coverage for tenant knowledge plus contact-memory retrieval.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
@@ -64,6 +65,16 @@ async fn mock_tenant_and_contact_retrieval() {
     seed_knowledge_chunk(&pool, tenant_id, chunk_graph_uid)
         .await
         .expect("seed tenant knowledge rows");
+    let tenant_operational_fact_uid = tenant_graph
+        .create_node(node_intent(
+            tenant_id,
+            None,
+            NodeLabel::Fact,
+            "pto runbook answer contact deployment preference answer",
+            json!({ "summary": "tenant operator memory must not appear in a contact session" }),
+        ))
+        .await
+        .expect("create tenant operational fact");
     let contact_fact_uid = contact_graph
         .create_node(node_intent(
             tenant_id,
@@ -101,29 +112,13 @@ async fn mock_tenant_and_contact_retrieval() {
         .await
         .expect("graph memory retrieval should assemble context");
 
-    assert!(
-        output
-            .items_included
-            .iter()
-            .any(|item| item == &format!("graph:Chunk:{chunk_graph_uid}")),
-        "{:?}",
-        output.items_included
-    );
-    assert!(
-        output
-            .items_included
-            .iter()
-            .any(|item| item == &format!("graph:Fact:{contact_fact_uid}")),
-        "{:?}",
-        output.items_included
-    );
-    assert!(
-        output
-            .items_included
-            .iter()
-            .all(|item| item != &format!("graph:Fact:{other_contact_fact_uid}")),
-        "{:?}",
-        output.items_included
+    assert_eq!(
+        output.items_included.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            format!("graph:Chunk:{chunk_graph_uid}"),
+            format!("graph:Fact:{contact_fact_uid}"),
+        ]),
+        "prompt retrieval must admit exactly tenant knowledge and current-contact memory"
     );
     let memory_message = ctx
         .messages
@@ -146,6 +141,11 @@ async fn mock_tenant_and_contact_retrieval() {
         !memory_message
             .content
             .contains("other contact private memory")
+    );
+    assert!(
+        !memory_message
+            .content
+            .contains("tenant operator memory must not appear")
     );
     assert_eq!(memory_message.source_refs.len(), 2);
     assert!(
@@ -267,6 +267,12 @@ async fn mock_tenant_and_contact_retrieval() {
 
     let _ = tenant_graph
         .hard_purge(chunk_graph_uid, "redacted:tenant-contact-knowledge-test")
+        .await;
+    let _ = tenant_graph
+        .hard_purge(
+            tenant_operational_fact_uid,
+            "redacted:tenant-contact-knowledge-test",
+        )
         .await;
     let _ = contact_graph
         .hard_purge(contact_fact_uid, "redacted:tenant-contact-knowledge-test")

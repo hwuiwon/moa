@@ -5,13 +5,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Utc;
-use moa_brain::retrieval::{HybridRetriever, RetrievalHit, RetrievalRequest};
+use moa_brain::retrieval::{
+    HybridRetriever, MemoryAdmissionPolicy, RetrievalHit, RetrievalRequest, SourceTier,
+    dedupe_and_rank_hits,
+};
 use moa_core::traits::{EmbeddingProvider, Identity};
 use moa_core::wire::memory::{
     MemoryRetrieveDebugRequest, MemoryRetrieveDebugResponse, MemorySearchRequest,
     MemorySearchResponse, MemoryShowRequest, MemoryShowResponse,
 };
-use moa_core::{SessionId, StoragePartitionId, UserId};
+use moa_core::{MoaConfig, SessionId, StoragePartitionId, UserId};
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage,
     RetrievalSelectedHit, RetrievalStage, StageTimings, TurnId, VecHit,
@@ -40,6 +43,8 @@ pub(super) async fn search_inner(
     let started = Instant::now();
     let (graph, retriever) = memory_stack(&scope).await?;
     let seeds = lookup_seed_uids(graph.as_ref(), &request.query, request.limit).await?;
+    let label_filter = parse_label_filter(request.label_filter)?;
+    let max_pii_class = parse_pii_class(request.max_pii_class)?;
     let hits = retrieve_hits(
         retriever.as_ref(),
         RetrievalInputs {
@@ -47,9 +52,10 @@ pub(super) async fn search_inner(
             query: request.query.clone(),
             limit: request.limit,
             scope,
-            label_filter: request.label_filter,
-            max_pii_class: request.max_pii_class,
+            label_filter,
+            max_pii_class,
             use_reranker: request.use_reranker,
+            disable_graph_expansion: false,
         },
     )
     .await?;
@@ -128,9 +134,10 @@ pub(super) async fn retrieve_debug_inner(
             query: request.query.clone(),
             limit: request.limit,
             scope: scope.clone(),
-            label_filter: Vec::new(),
-            max_pii_class: None,
+            label_filter: None,
+            max_pii_class: PiiClass::Restricted,
             use_reranker: true,
+            disable_graph_expansion: false,
         },
     )
     .await?;
@@ -168,9 +175,10 @@ struct RetrievalInputs {
     query: String,
     limit: u32,
     scope: MemoryScope,
-    label_filter: Vec<String>,
-    max_pii_class: Option<String>,
+    label_filter: Option<Vec<NodeLabel>>,
+    max_pii_class: PiiClass,
     use_reranker: bool,
+    disable_graph_expansion: bool,
 }
 
 /// Runs the same scoped hybrid retrieval the injection path uses for the
@@ -181,57 +189,96 @@ struct RetrievalInputs {
 /// is derived by the caller from the session alone; this function never accepts
 /// a caller-supplied tenant or contact id.
 pub(super) async fn search_hits_for_tool(
-    scope: &MemoryScope,
+    pool: &sqlx::PgPool,
+    config: &MoaConfig,
+    policy: &MemoryAdmissionPolicy,
     query: &str,
     limit: u32,
 ) -> Result<Vec<RetrievalHit>, HandlerError> {
-    let (graph, retriever) = memory_stack(scope).await?;
-    let seeds = lookup_seed_uids(graph.as_ref(), query, limit).await?;
-    retrieve_hits(
-        retriever.as_ref(),
-        RetrievalInputs {
-            seeds,
-            query: query.to_string(),
-            limit,
-            scope: scope.clone(),
-            label_filter: Vec::new(),
-            max_pii_class: None,
-            use_reranker: true,
-        },
-    )
-    .await
+    if !policy.is_enabled() {
+        return Ok(Vec::new());
+    }
+    let result_limit = policy.result_limit(limit as usize);
+    let retrieval_limit = u32::try_from(result_limit).unwrap_or(u32::MAX);
+    let max_pii_class = policy.max_pii_class().map_err(memory_handler_error)?;
+    let query_embedding = debug_query_embedding_with_config(config, query).await?;
+    let mut admitted = Vec::new();
+    for plan in policy.plans() {
+        let (graph, retriever) = memory_stack_with_runtime(pool, config, plan.scope()).await?;
+        let seeds = lookup_seed_uids(graph.as_ref(), query, retrieval_limit).await?;
+        let hits = retrieve_hits_with_embedding(
+            retriever.as_ref(),
+            RetrievalInputs {
+                seeds,
+                query: query.to_string(),
+                limit: retrieval_limit,
+                scope: plan.scope().clone(),
+                label_filter: plan.label_filter().map(<[NodeLabel]>::to_vec),
+                max_pii_class,
+                use_reranker: true,
+                disable_graph_expansion: plan.source_tier() == SourceTier::TenantKnowledge,
+            },
+            query_embedding.clone(),
+        )
+        .await?;
+        admitted.extend(
+            hits.into_iter()
+                .filter_map(|hit| policy.admit_hit(hit, plan)),
+        );
+    }
+    Ok(dedupe_and_rank_hits(admitted, result_limit))
 }
 
 /// Walks graph neighbors under the session scope for the `memory_navigate`
 /// agentic tool, applying the same RLS scope the injection path uses.
 pub(super) async fn neighbors_for_tool(
-    scope: &MemoryScope,
+    pool: &sqlx::PgPool,
+    policy: &MemoryAdmissionPolicy,
     seed: Uuid,
     hops: u8,
     edge_filter: Option<Vec<EdgeLabel>>,
 ) -> Result<Vec<NodeIndexRow>, HandlerError> {
-    let graph = graph_store(scope);
-    graph
+    if !policy.is_enabled() {
+        return Ok(Vec::new());
+    }
+    let graph = graph_store_with_pool(pool.clone(), &policy.traversal_scope());
+    let Some(seed_node) = graph.get_node(seed).await.map_err(memory_handler_error)? else {
+        return Ok(Vec::new());
+    };
+    if !policy.admits_node(&seed_node) {
+        return Ok(Vec::new());
+    }
+    let neighbors = graph
         .neighbors(seed, hops, edge_filter.as_deref(), None)
         .await
-        .map_err(memory_handler_error)
+        .map_err(memory_handler_error)?;
+    Ok(neighbors
+        .into_iter()
+        .filter(|node| policy.admits_node(node))
+        .collect())
 }
 
 async fn retrieve_hits(
     retriever: &HybridRetriever,
     inputs: RetrievalInputs,
 ) -> Result<Vec<RetrievalHit>, HandlerError> {
-    let label_filter = parse_label_filter(inputs.label_filter)?;
-    let max_pii_class = parse_pii_class(inputs.max_pii_class)?;
     let query_embedding = debug_query_embedding(&inputs.query).await?;
+    retrieve_hits_with_embedding(retriever, inputs, query_embedding).await
+}
+
+async fn retrieve_hits_with_embedding(
+    retriever: &HybridRetriever,
+    inputs: RetrievalInputs,
+    query_embedding: Vec<f32>,
+) -> Result<Vec<RetrievalHit>, HandlerError> {
     retriever
         .retrieve(RetrievalRequest {
             seeds: inputs.seeds,
             query_text: inputs.query,
             query_embedding,
             scope: inputs.scope,
-            label_filter,
-            max_pii_class,
+            label_filter: inputs.label_filter,
+            max_pii_class: inputs.max_pii_class,
             k_final: usize::try_from(inputs.limit).unwrap_or(usize::MAX),
             use_reranker: inputs.use_reranker,
             strategy: None,
@@ -239,18 +286,25 @@ async fn retrieve_hits(
             ranking_reference_time: None,
             lineage: None,
             disable_leg_timeouts: false,
-            disable_graph_expansion: false,
+            disable_graph_expansion: inputs.disable_graph_expansion,
         })
         .await
         .map_err(memory_handler_error)
 }
 
 async fn debug_query_embedding(query: &str) -> Result<Vec<f32>, HandlerError> {
+    let config = OrchestratorCtx::current_config();
+    debug_query_embedding_with_config(config.as_ref(), query).await
+}
+
+async fn debug_query_embedding_with_config(
+    config: &MoaConfig,
+    query: &str,
+) -> Result<Vec<f32>, HandlerError> {
     if query.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let config = OrchestratorCtx::current_config();
-    let embedder = match build_embedder_from_config(&config, EmbedderConstructionRole::Retrieval) {
+    let embedder = match build_embedder_from_config(config, EmbedderConstructionRole::Retrieval) {
         Ok(embedder) => embedder,
         Err(error) => {
             tracing::debug!(
@@ -289,24 +343,33 @@ async fn lookup_seed_uids(
 async fn memory_stack(
     scope: &MemoryScope,
 ) -> Result<(Arc<dyn GraphStore>, Arc<HybridRetriever>), HandlerError> {
-    let graph = Arc::new(graph_store(scope));
     let runtime = OrchestratorCtx::current();
     let pool = runtime.graph_pool();
     let config = runtime.config();
-    let vector_factory = VectorStoreFactory::from_config(config.as_ref());
+    memory_stack_with_runtime(&pool, config.as_ref(), scope).await
+}
+
+async fn memory_stack_with_runtime(
+    pool: &sqlx::PgPool,
+    config: &MoaConfig,
+    scope: &MemoryScope,
+) -> Result<(Arc<dyn GraphStore>, Arc<HybridRetriever>), HandlerError> {
+    let graph = Arc::new(graph_store_with_pool(pool.clone(), scope));
+    let vector_factory = VectorStoreFactory::from_config(config);
     let pgvector_source =
         vector_factory.pgvector_source_for_app_role(pool.clone(), scope.to_rls_context());
     let retriever =
-        HybridRetriever::from_config(config.as_ref(), pool, graph.clone(), pgvector_source)
+        HybridRetriever::from_config(config, pool.clone(), graph.clone(), pgvector_source)
             .with_assume_app_role(true);
     Ok((graph, Arc::new(retriever)))
 }
 
 fn graph_store(scope: &MemoryScope) -> PostgresGraphStore {
-    PostgresGraphStore::scoped_for_app_role(
-        OrchestratorCtx::current_graph_pool(),
-        scope.to_rls_context(),
-    )
+    graph_store_with_pool(OrchestratorCtx::current_graph_pool(), scope)
+}
+
+fn graph_store_with_pool(pool: sqlx::PgPool, scope: &MemoryScope) -> PostgresGraphStore {
+    PostgresGraphStore::scoped_for_app_role(pool, scope.to_rls_context())
 }
 
 fn parse_label_filter(labels: Vec<String>) -> Result<Option<Vec<NodeLabel>>, HandlerError> {

@@ -1,0 +1,111 @@
+[
+  {
+    "question_id": "q-knowledge",
+    "question_type": "knowledge-update",
+    "question": "What is the current deployment color?",
+    "question_date": "2024/02/03 (Sat) 10:00",
+    "answer": "updated",
+    "answer_session_ids": ["gold"],
+    "haystack_dates": [
+      "2024/02/02 (Fri) 10:00",
+      "2024/01/01 (Mon) 09:00",
+      "2024/01/01 (Mon) 09:00"
+    ],
+    "haystack_session_ids": ["shared", "gold", "gold"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "The old deployment color was blue."},
+        {"role": "assistant", "content": "I recorded the old color."}
+      ],
+      [
+        {"role": "user", "content": "The deployment color changed."},
+        {"role": "assistant", "content": "The current deployment color is updated.", "has_answer": true}
+      ],
+      [
+        {"role": "user", "content": "This duplicate raw session ID is a separate occurrence."}
+      ]
+    ]
+  },
+  {
+    "question_id": "q-multi",
+    "question_type": "multi-session",
+    "question": "Which two places were discussed?",
+    "question_date": "2024/03/03 (Sun) 12:00",
+    "answer": "Oslo and Lima",
+    "answer_session_ids": ["multi-a", "multi-b"],
+    "haystack_dates": ["2024/03/01 (Fri) 08:00", "2024/03/02 (Sat) 08:00"],
+    "haystack_session_ids": ["multi-a", "multi-b"],
+    "haystack_sessions": [
+      [{"role": "user", "content": "I visited Oslo.", "has_answer": true}],
+      [{"role": "assistant", "content": "You also mentioned Lima.", "has_answer": true}]
+    ]
+  },
+  {
+    "question_id": "q-assistant",
+    "question_type": "single-session-assistant",
+    "question": "What code did the assistant suggest?",
+    "question_date": "2024/04/02 (Tue) 13:30",
+    "answer": "ZX-9",
+    "answer_session_ids": ["shared"],
+    "haystack_dates": ["2024/04/01 (Mon) 13:30"],
+    "haystack_session_ids": ["shared"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "Suggest a short code."},
+        {"role": "assistant", "content": "Use ZX-9.", "has_answer": true}
+      ]
+    ]
+  },
+  {
+    "question_id": "q-preference",
+    "question_type": "single-session-preference",
+    "question": "How should the response be formatted?",
+    "question_date": "2024/05/02 (Thu) 07:15",
+    "answer": "Use terse bullet points",
+    "answer_session_ids": ["preference"],
+    "haystack_dates": ["2024/05/01 (Wed) 07:15"],
+    "haystack_session_ids": ["preference"],
+    "haystack_sessions": [
+      [{"role": "user", "content": "I prefer terse bullet points.", "has_answer": true}]
+    ]
+  },
+  {
+    "question_id": "q-user",
+    "question_type": "single-session-user",
+    "question": "What instrument does the user play?",
+    "question_date": "2024/06/02 (Sun) 17:45",
+    "answer": "cello",
+    "answer_session_ids": ["shared"],
+    "haystack_dates": ["2024/06/01 (Sat) 17:45"],
+    "haystack_session_ids": ["shared"],
+    "haystack_sessions": [
+      [{"role": "user", "content": "I play cello.", "has_answer": true}]
+    ]
+  },
+  {
+    "question_id": "q-temporal",
+    "question_type": "temporal-reasoning",
+    "question": "How many days elapsed?",
+    "question_date": "2024/07/02 (Tue) 09:05",
+    "answer": 42,
+    "answer_session_ids": ["temporal"],
+    "haystack_dates": ["2024/07/01 (Mon) 09:05"],
+    "haystack_session_ids": ["temporal"],
+    "haystack_sessions": [
+      [{"role": "assistant", "content": "The elapsed duration was 42 days.", "has_answer": true}]
+    ]
+  },
+  {
+    "question_id": "q-user_abs",
+    "question_type": "single-session-user",
+    "question": "What is the user's unmentioned favorite gemstone?",
+    "question_date": "2024/08/02 (Fri) 11:20",
+    "answer": "The favorite gemstone was never stated.",
+    "answer_session_ids": ["abs-embedded-label-is-ignored"],
+    "haystack_dates": ["2024/08/01 (Thu) 11:20"],
+    "haystack_session_ids": ["abs-embedded-label-is-ignored"],
+    "haystack_sessions": [
+      [{"role": "user", "content": "I enjoy mineral museums.", "has_answer": true}]
+    ]
+  }
+]

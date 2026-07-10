@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "evaluator_repository": "xiaowu0162/LongMemEval",
+  "evaluator_commit": "9e0b455f4ef0e2ab8f2e582289761153549043fc",
+  "evaluator_source_path": "src/evaluation/evaluate_qa.py",
+  "evaluator_source_sha256": "ecce9c4c79dc89d99534ac17b383a5cbb5b9f0c69ee98adaf0684742e3d95251",
+  "retrieval_sources": [
+    {
+      "path": "src/retrieval/eval_utils.py",
+      "sha256": "c98b8d1096877a15aa755c9de44fe33c195298466a2eb6f3c0f9f6bde8c72349"
+    },
+    {
+      "path": "src/retrieval/run_retrieval.py",
+      "sha256": "efd7fc5969a904717741fadca3c7dc73611ddbb2aaf3ef33117ebb6943b3e346"
+    }
+  ],
+  "rubrics": {
+    "abstention": {
+      "template": "I will give you an unanswerable question, an explanation, and a response from a model. Please answer yes if the model correctly identifies the question as unanswerable. The model could say that the information is incomplete, or some other information is given but the asked information is not.\n\nQuestion: {}\n\nExplanation: {}\n\nModel Response: {}\n\nDoes the model correctly identify the question as unanswerable? Answer yes or no only.",
+      "sha256": "5c0b365a1e1d06db36377c735432b56e122ca3c428f89faf61d43a0d5a7e050b"
+    },
+    "general": {
+      "template": "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. \n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only.",
+      "sha256": "fba020ba3d57982efdc9a937c1c01f897b789a608c7f88e60244121f6505e5bc"
+    },
+    "knowledge_update": {
+      "template": "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response contains some previous information along with an updated answer, the response should be considered as correct as long as the updated answer is the required answer.\n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only.",
+      "sha256": "183a9b3a6197ec620940f610cdc1207201ec98c1113dd633ea685cfc322fafac"
+    },
+    "single_session_preference": {
+      "template": "I will give you a question, a rubric for desired personalized response, and a response from a model. Please answer yes if the response satisfies the desired response. Otherwise, answer no. The model does not need to reflect all the points in the rubric. The response is correct as long as it recalls and utilizes the user's personal information correctly.\n\nQuestion: {}\n\nRubric: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only.",
+      "sha256": "741ee3bcbea7ff5e8ed359acef61d2f8ded3de021bbcff6ee13de455f2e2aa9b"
+    },
+    "temporal_reasoning": {
+      "template": "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. In addition, do not penalize off-by-one errors for the number of days. If the question asks for the number of days/weeks/months, etc., and the model makes off-by-one errors (e.g., predicting 19 days when the answer is 18), the model's response is still correct. \n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only.",
+      "sha256": "8d33a5fdd83afeeb4592454a965eab43d1fcb2dedc042d1d3892f4254be6c273"
+    }
+  },
+  "bundle_sha256": "afad47661d42ee6baa8d9cbab24b514ce61dc825eadb0e4184080b479ce11f67",
+  "type_mapping": {
+    "knowledge-update": "knowledge_update",
+    "multi-session": "general",
+    "single-session-assistant": "general",
+    "single-session-preference": "single_session_preference",
+    "single-session-user": "general",
+    "temporal-reasoning": "temporal_reasoning"
+  },
+  "abstention_question_id_marker": "_abs",
+  "retrieval_vectors": [
+    {
+      "name": "direct-binary-ndcg",
+      "ranked": ["miss", "gold-a", "gold-b", "tail"],
+      "corpus": ["miss", "gold-a", "gold-b", "tail"],
+      "gold": ["gold-a", "gold-b"],
+      "cutoff": 4,
+      "effective_unique": false,
+      "expected_scanned": 4,
+      "expected_recall_any": 1.0,
+      "expected_recall_all": 1.0,
+      "expected_ndcg": 0.8154648767857288
+    },
+    {
+      "name": "turn-to-session-effective-k",
+      "ranked": ["session-0", "session-0", "session-1", "session-2"],
+      "corpus": ["session-0", "session-0", "session-1", "session-2"],
+      "gold": ["session-1", "session-2"],
+      "cutoff": 3,
+      "effective_unique": true,
+      "expected_scanned": 4,
+      "expected_recall_any": 1.0,
+      "expected_recall_all": 1.0,
+      "expected_ndcg": 0.5654648767857288
+    }
+  ],
+  "parser": {
+    "upstream": "case-insensitive substring contains yes",
+    "moa": "trimmed case-insensitive exact yes or no",
+    "accepted_true": ["yes", " YES "],
+    "accepted_false": ["no", " NO "],
+    "rejected": ["yes, because", "not yes", "", "maybe"]
+  }
+}

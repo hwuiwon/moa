@@ -2,6 +2,18 @@
 
 #[path = "eval_offline/evaluators.rs"]
 mod evaluators;
+#[path = "eval_offline/external_memory.rs"]
+mod external_memory;
+#[path = "eval_offline/external_memory_calibration.rs"]
+mod external_memory_calibration;
+#[path = "eval_offline/external_memory_controls.rs"]
+mod external_memory_controls;
+#[path = "eval_offline/external_memory_execution.rs"]
+mod external_memory_execution;
+#[path = "eval_offline/external_memory_longmemeval.rs"]
+mod external_memory_longmemeval;
+#[path = "eval_offline/external_memory_personamem.rs"]
+mod external_memory_personamem;
 #[path = "eval_offline/loader.rs"]
 mod loader;
 #[path = "eval_offline/memory_eval_judge.rs"]

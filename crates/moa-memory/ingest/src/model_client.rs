@@ -3,13 +3,33 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use moa_core::config::MemoryExtractionConfig;
-use moa_core::{CompletionRequest, ContextMessage, LLMProvider, MoaConfig, ModelId};
+use moa_core::{
+    CompletionRequest, CompletionResponse, ContextMessage, LLMProvider, MoaConfig, ModelId,
+};
 use moa_providers::build_provider_from_model;
 use serde_json::json;
 use tokio::time::timeout;
 
 use crate::{IngestError, Result};
+
+/// Observer for one provider-backed memory-model call.
+///
+/// Evaluation lanes use this seam to reserve budget before provider execution
+/// and record normalized provider usage after a successful response. Production
+/// callers that do not install an observer retain the existing behavior.
+#[async_trait]
+pub trait ModelCallObserver: Send + Sync {
+    /// Runs after request construction and before the provider is invoked.
+    async fn before_call(&self, request: &CompletionRequest) -> Result<()>;
+
+    /// Records the aggregated provider response and its normalized usage.
+    async fn after_response(&self, response: &CompletionResponse) -> Result<()>;
+
+    /// Records that the provider call failed or timed out after reservation.
+    async fn after_failure(&self) {}
+}
 
 /// Shared model client used by memory extraction, entity merge, and judging.
 #[derive(Clone)]
@@ -17,6 +37,7 @@ pub(crate) struct ModelTextClient {
     provider: Arc<dyn LLMProvider>,
     model: ModelId,
     timeout: Duration,
+    observer: Option<Arc<dyn ModelCallObserver>>,
 }
 
 impl ModelTextClient {
@@ -35,7 +56,20 @@ impl ModelTextClient {
             provider,
             model,
             timeout: Duration::from_millis(timeout_ms),
+            observer: None,
         })
+    }
+
+    /// Creates a memory model client with a pre/post provider-call observer.
+    pub(crate) fn new_with_observer(
+        provider: Arc<dyn LLMProvider>,
+        model: ModelId,
+        timeout_ms: u64,
+        observer: Arc<dyn ModelCallObserver>,
+    ) -> Result<Self> {
+        let mut client = Self::new(provider, model, timeout_ms)?;
+        client.observer = Some(observer);
+        Ok(client)
     }
 
     /// Builds a memory model client through the shared provider registry.
@@ -52,6 +86,23 @@ impl ModelTextClient {
         let (provider, model_id) = build_provider_from_model(config, Some(model))
             .map_err(|error| IngestError::ModelInference(error.to_string()))?;
         Self::new(provider, model_id, extraction.timeout_ms)
+    }
+
+    /// Builds a configured memory model client with an explicit observer.
+    pub(crate) fn from_config_with_observer(
+        config: &MoaConfig,
+        extraction: &MemoryExtractionConfig,
+        observer: Arc<dyn ModelCallObserver>,
+    ) -> Result<Self> {
+        let model = extraction.model.trim();
+        if model.is_empty() {
+            return Err(IngestError::ModelInference(
+                "memory.extraction.model is required".to_string(),
+            ));
+        }
+        let (provider, model_id) = build_provider_from_model(config, Some(model))
+            .map_err(|error| IngestError::ModelInference(error.to_string()))?;
+        Self::new_with_observer(provider, model_id, extraction.timeout_ms, observer)
     }
 
     /// Returns the model id this client sends with each completion request.
@@ -82,7 +133,11 @@ impl ModelTextClient {
             .metadata
             .insert("moa.memory.task".to_string(), json!("ingestion"));
 
-        let response = timeout(self.timeout, async {
+        if let Some(observer) = &self.observer {
+            observer.before_call(&request).await?;
+        }
+
+        let response = match timeout(self.timeout, async {
             let stream = self
                 .provider
                 .complete(request)
@@ -94,12 +149,28 @@ impl ModelTextClient {
                 .map_err(|error| IngestError::ModelInference(error.to_string()))
         })
         .await
-        .map_err(|_| {
-            IngestError::ModelInference(format!(
-                "memory model request timed out after {} ms",
-                self.timeout.as_millis()
-            ))
-        })??;
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                if let Some(observer) = &self.observer {
+                    observer.after_failure().await;
+                }
+                return Err(error);
+            }
+            Err(_) => {
+                if let Some(observer) = &self.observer {
+                    observer.after_failure().await;
+                }
+                return Err(IngestError::ModelInference(format!(
+                    "memory model request timed out after {} ms",
+                    self.timeout.as_millis()
+                )));
+            }
+        };
+
+        if let Some(observer) = &self.observer {
+            observer.after_response(&response).await?;
+        }
 
         if response.text.trim().is_empty() {
             return Err(IngestError::ModelInference(
@@ -136,6 +207,7 @@ mod tests {
     struct CapturingProvider {
         request: Mutex<Option<CompletionRequest>>,
         response: String,
+        usage: TokenUsage,
     }
 
     #[async_trait]
@@ -172,7 +244,7 @@ mod tests {
                 content: Vec::new(),
                 stop_reason: StopReason::EndTurn,
                 model: ModelId::new("gpt-5.4-mini"),
-                usage: TokenUsage::default(),
+                usage: self.usage,
                 duration_ms: 1,
                 thought_signature: None,
             }))
@@ -214,6 +286,7 @@ mod tests {
         let provider = Arc::new(CapturingProvider {
             request: Mutex::new(None),
             response: "ok".to_string(),
+            usage: TokenUsage::default(),
         });
 
         let error = match ModelTextClient::new(provider, ModelId::new("gpt-5.4-mini"), 0) {
@@ -231,6 +304,7 @@ mod tests {
         let provider = Arc::new(CapturingProvider {
             request: Mutex::new(None),
             response: "assistant text".to_string(),
+            usage: TokenUsage::default(),
         });
         let client = ModelTextClient::new(provider.clone(), ModelId::new("gpt-5.4-mini"), 1_000)
             .expect("client should build");
@@ -251,5 +325,68 @@ mod tests {
         assert_eq!(request.messages[0], ContextMessage::system("system prompt"));
         assert_eq!(request.messages[1], ContextMessage::user("user prompt"));
         assert_eq!(request.temperature, Some(0.0));
+    }
+
+    #[derive(Default)]
+    struct CapturingObserver {
+        events: Mutex<Vec<&'static str>>,
+        usage: Mutex<Option<TokenUsage>>,
+    }
+
+    #[async_trait]
+    impl ModelCallObserver for CapturingObserver {
+        async fn before_call(&self, _request: &CompletionRequest) -> Result<()> {
+            self.events.lock().expect("observer events").push("before");
+            Ok(())
+        }
+
+        async fn after_response(&self, response: &CompletionResponse) -> Result<()> {
+            self.events.lock().expect("observer events").push("after");
+            *self.usage.lock().expect("observer usage") = Some(response.usage);
+            Ok(())
+        }
+
+        async fn after_failure(&self) {
+            self.events.lock().expect("observer events").push("failure");
+        }
+    }
+
+    #[tokio::test]
+    async fn model_text_client_observes_forecast_boundary_and_provider_usage() {
+        // Pins: benchmark accounting can reserve budget before the real memory-model call and
+        // receive the exact normalized provider usage after its response.
+        let expected_usage = TokenUsage {
+            input_tokens_uncached: 17,
+            input_tokens_cache_write: 3,
+            input_tokens_cache_read: 5,
+            output_tokens: 11,
+        };
+        let provider = Arc::new(CapturingProvider {
+            request: Mutex::new(None),
+            response: "assistant text".to_string(),
+            usage: expected_usage,
+        });
+        let observer = Arc::new(CapturingObserver::default());
+        let client = ModelTextClient::new_with_observer(
+            provider,
+            ModelId::new("gpt-5.4-mini"),
+            1_000,
+            observer.clone(),
+        )
+        .expect("observed client should build");
+
+        client
+            .complete_text("system prompt", "user prompt")
+            .await
+            .expect("observed completion should succeed");
+
+        assert_eq!(
+            *observer.events.lock().expect("observer events"),
+            vec!["before", "after"]
+        );
+        assert_eq!(
+            *observer.usage.lock().expect("observer usage"),
+            Some(expected_usage)
+        );
     }
 }

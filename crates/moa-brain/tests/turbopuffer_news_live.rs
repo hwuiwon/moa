@@ -7,7 +7,9 @@ use std::sync::Arc;
 use chrono::Utc;
 use moa_brain::retrieval::{HybridRetriever, RetrievalRequest};
 use moa_core::RlsContext;
-use moa_core::{ContactId, SessionId, StoragePartitionId, TenantId, traits::EmbeddingProvider};
+use moa_core::{
+    ContactId, MoaConfig, SessionId, StoragePartitionId, TenantId, traits::EmbeddingProvider,
+};
 use moa_db::ScopedConn;
 use moa_memory_graph::{PiiClass, PostgresGraphStore};
 use moa_memory_ingest::{SessionTurn, ingest_turn_direct_with_pool};
@@ -15,7 +17,7 @@ use moa_memory_types::MemoryScope;
 use moa_memory_vector::{
     PgvectorStore, PromotionOptions, TurbopufferStore, VectorPartitionPromotion, finalize_promotion,
 };
-use moa_providers::CohereV4Embedder;
+use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
 use moa_session::testing;
 use uuid::Uuid;
 
@@ -40,7 +42,6 @@ fn require_live_turbopuffer() -> TestResult<()> {
         return Err("set MOA_RUN_LIVE_TURBOPUFFER_TESTS=1 to run live Turbopuffer tests".into());
     }
     required_env("TURBOPUFFER_API_KEY")?;
-    cohere_api_key()?;
     Ok(())
 }
 
@@ -50,18 +51,6 @@ fn required_env(name: &str) -> TestResult<String> {
         return Err(format!("{name} must not be empty").into());
     }
     Ok(value)
-}
-
-fn cohere_api_key() -> TestResult<String> {
-    std::env::var("MOA_COHERE_API_KEY")
-        .map_err(|_| "MOA_COHERE_API_KEY is required".into())
-        .and_then(|value| {
-            if value.trim().is_empty() {
-                Err("Cohere API key must not be empty".into())
-            } else {
-                Ok(value)
-            }
-        })
 }
 
 async fn news_transcript() -> TestResult<String> {
@@ -83,9 +72,23 @@ Fact: NASA Artemis III core stage supports a 2027 crewed lunar mission using the
 }
 
 #[tokio::test]
-#[ignore = "live Turbopuffer plus Cohere e2e; requires MOA_RUN_LIVE_TURBOPUFFER_TESTS=1, TURBOPUFFER_API_KEY, and MOA_COHERE_API_KEY"]
+#[ignore = "live Turbopuffer plus configured embedding provider e2e; requires MOA_RUN_LIVE_TURBOPUFFER_TESTS=1, TURBOPUFFER_API_KEY, and the selected provider credential"]
 async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
     require_live_turbopuffer()?;
+    let config = MoaConfig::load_from_env()?;
+    let ingestion_embedder =
+        build_embedder_from_config(&config, EmbedderConstructionRole::Ingestion)?;
+    let retrieval_embedder =
+        build_embedder_from_config(&config, EmbedderConstructionRole::Retrieval)?;
+    assert_eq!(ingestion_embedder.model_id(), retrieval_embedder.model_id());
+    assert_eq!(
+        ingestion_embedder.model_version(),
+        retrieval_embedder.model_version()
+    );
+    assert_eq!(
+        ingestion_embedder.dimensions(),
+        retrieval_embedder.dimensions()
+    );
 
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store().await?;
     let pool = session_store.pool().clone();
@@ -95,8 +98,13 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
     let workspace_text = storage_partition_id.to_string();
     let tenant_scope = RlsContext::tenant(tenant_id);
     let contact_scope = RlsContext::contact(tenant_id, contact_id);
-    let embedder = CohereV4Embedder::new(cohere_api_key()?)?;
-    seed_workspace_embedder_state(&pool, &tenant_scope, &workspace_text, &embedder).await?;
+    seed_workspace_embedder_state(
+        &pool,
+        &tenant_scope,
+        &workspace_text,
+        ingestion_embedder.as_ref(),
+    )
+    .await?;
     let transcript = news_transcript().await?;
     let turn = SessionTurn {
         tenant_id,
@@ -124,7 +132,7 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
     .await?;
     assert!(
         embedding_count >= 3,
-        "expected Cohere-backed embeddings for ingested facts"
+        "expected configured-provider embeddings for ingested facts"
     );
 
     let promotion_pgvector = Arc::new(PgvectorStore::new_for_control_plane(
@@ -152,12 +160,12 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
     );
 
     let query_text = "Which Artemis mission core stage moved from Michoud to the Pegasus barge?";
-    let query_embedding = embedder
+    let query_embedding = retrieval_embedder
         .embed(&[query_text.to_string()])
         .await?
         .into_iter()
         .next()
-        .ok_or_else(|| std::io::Error::other("Cohere returned no query embedding"))?;
+        .ok_or_else(|| std::io::Error::other("configured embedder returned no query embedding"))?;
     let retrieval_pgvector = Arc::new(PgvectorStore::new_for_app_role(
         pool.clone(),
         contact_scope.clone(),
@@ -215,7 +223,7 @@ async fn seed_workspace_embedder_state(
     pool: &sqlx::PgPool,
     scope: &RlsContext,
     storage_partition_id: &str,
-    embedder: &CohereV4Embedder,
+    embedder: &dyn EmbeddingProvider,
 ) -> TestResult {
     let mut conn = ScopedConn::begin(pool, scope).await?;
     sqlx::query("SET LOCAL ROLE moa_app")

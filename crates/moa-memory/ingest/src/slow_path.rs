@@ -10,7 +10,7 @@ use crate::{
     ClassifiedFact, Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact,
     EntityResolutionPlan, EntityResolutionRequest, EntityResolver, ExtractedFact,
     ExtractedFactScopeHint, FactExtractor, HeuristicFactExtractor, IngestApplyReport, IngestCtx,
-    IngestDecision, RrfPlusJudgeDetector, SessionTurn, chunk_turn, current_runtime,
+    IngestDecision, IngestError, RrfPlusJudgeDetector, SessionTurn, chunk_turn, current_runtime,
     extraction_confidence_hint, fact_hash, fact_uid_from_hash, scoped_fact_uid,
     should_ingest_degraded,
 };
@@ -223,25 +223,8 @@ pub async fn ingest_turn_direct_with_pool(
     turn: SessionTurn,
 ) -> Result<IngestApplyReport, HandlerError> {
     let config = MoaConfig::load_from_env().map_err(HandlerError::from)?;
-    let contradiction_detector = Arc::new(RrfPlusJudgeDetector::from_config_or_heuristic(&config));
-    let vector_factory = VectorStoreFactory::from_config(&config);
-    let pii_classifier =
-        crate::ctx::build_shared_pii_classifier(config.memory.pii_service_url.as_deref());
-    let embedder = crate::ctx::build_shared_embedder(&config.providers.cohere.api_key);
-    ingest_turn_direct_with_pool_and_pii(
-        DirectIngestDeps {
-            pool,
-            pii_classifier,
-            embedder,
-            extractor: Arc::new(HeuristicFactExtractor),
-            entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
-            entity_blocking_embedder: None,
-            contradiction_detector,
-            vector_factory,
-        },
-        turn,
-    )
-    .await
+    let deps = direct_ingest_deps_from_config(pool, &config)?;
+    ingest_turn_direct_with_pool_and_pii(deps, turn).await
 }
 
 struct DirectIngestDeps {
@@ -253,6 +236,26 @@ struct DirectIngestDeps {
     entity_blocking_embedder: Option<Arc<dyn EmbeddingProvider>>,
     contradiction_detector: Arc<dyn ContradictionDetector>,
     vector_factory: VectorStoreFactory,
+}
+
+fn direct_ingest_deps_from_config(
+    pool: PgPool,
+    config: &MoaConfig,
+) -> Result<DirectIngestDeps, HandlerError> {
+    let embedder =
+        crate::ctx::build_configured_ingestion_embedder(config).map_err(HandlerError::from)?;
+    Ok(DirectIngestDeps {
+        pool,
+        pii_classifier: crate::ctx::build_shared_pii_classifier(
+            config.memory.pii_service_url.as_deref(),
+        ),
+        entity_blocking_embedder: embedder.clone(),
+        embedder,
+        extractor: Arc::new(HeuristicFactExtractor),
+        entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
+        contradiction_detector: Arc::new(RrfPlusJudgeDetector::from_config_or_heuristic(config)),
+        vector_factory: VectorStoreFactory::from_config(config),
+    })
 }
 
 async fn ingest_turn_direct_with_pool_and_pii(
@@ -401,6 +404,13 @@ async fn classify_facts_with(
         .try_collect()
         .await
         .map_err(HandlerError::from)?;
+
+    if let Some(result) = results.iter().find(|result| result.abstained) {
+        return Err(IngestError::PiiClassificationUnavailable {
+            model_version: result.model_version.clone(),
+        }
+        .into());
+    }
 
     Ok(facts
         .iter()
@@ -1467,18 +1477,20 @@ mod tests {
 
     use chrono::Utc;
     use moa_core::traits::EmbeddingProvider;
-    use moa_core::{ContactId, ContextMessage, SessionId, TenantId};
+    use moa_core::{ContactId, ContextMessage, MoaConfig, SessionId, TenantId};
     use moa_memory_graph::{EdgeLabel, PiiClass};
     use moa_memory_pii::{PiiCategory, PiiClassifier, PiiResult, PiiSpan, classify_heuristic};
+    use sqlx::postgres::PgPoolOptions;
 
     use super::{
-        classify_facts_with, direct_ingest_claim_key, entity_fact_edge_intent,
-        fact_entity_edge_intent, fact_object_edge_label, precompute_entity_embeddings, redact_fact,
-        turn_tenant_scope, turn_transcript,
+        classify_facts_with, direct_ingest_claim_key, direct_ingest_deps_from_config,
+        embed_batch_shared, entity_fact_edge_intent, fact_entity_edge_intent,
+        fact_object_edge_label, precompute_entity_embeddings, redact_fact, turn_tenant_scope,
+        turn_transcript,
     };
     use crate::{
         ClassifiedFact, EmbeddedFact, ExtractedFact, ExtractedFactScopeHint, IngestDecision,
-        fact_hash,
+        IngestError, fact_hash,
     };
 
     /// PII classifier that counts calls and echoes input so ordering can be pinned.
@@ -1496,6 +1508,16 @@ mod tests {
                 model_version: text.to_string(),
                 abstained: false,
             })
+        }
+    }
+
+    /// PII classifier that returns one fixed response for boundary tests.
+    struct FixedResultClassifier(PiiResult);
+
+    #[async_trait::async_trait]
+    impl PiiClassifier for FixedResultClassifier {
+        async fn classify(&self, _text: &str) -> moa_memory_pii::Result<PiiResult> {
+            Ok(self.0.clone())
         }
     }
 
@@ -1608,7 +1630,7 @@ mod tests {
     #[tokio::test]
     async fn precompute_entity_embeddings_is_empty_without_embedder() {
         // Pins: entity embedding blocking stays gated off when no embedder is
-        // configured (Cohere key absent), so no vectors are precomputed.
+        // configured, so no vectors are precomputed.
         let decisions = vec![embedded_decision("api", "db", "api uses db", None)];
 
         let map = precompute_entity_embeddings(None, &decisions)
@@ -1616,6 +1638,53 @@ mod tests {
             .expect("precompute without embedder");
 
         assert!(map.is_empty());
+    }
+
+    #[tokio::test]
+    async fn slow_path_without_configured_embedder_preserves_no_vector_facts() {
+        // Pins: disabled or uncredentialed runtime construction leaves the slow
+        // path writable while omitting vector bytes and their model identity.
+        let facts = vec![ClassifiedFact {
+            fact: plain_fact("the api uses postgres"),
+            pii_class: PiiClass::None,
+            pii_spans: Vec::new(),
+        }];
+
+        let embedded = embed_batch_shared(None, &facts)
+            .await
+            .expect("slow no-vector mode should preserve classified facts");
+
+        assert_eq!(embedded.len(), 1);
+        assert_eq!(embedded[0].classified.fact.summary, "the api uses postgres");
+        assert_eq!(embedded[0].embedding, None);
+        assert_eq!(embedded[0].embedding_model, None);
+        assert_eq!(embedded[0].embedding_model_version, None);
+    }
+
+    #[tokio::test]
+    async fn direct_helper_uses_configured_selector_and_reuses_one_embedder() {
+        // Pins: the explicit-pool helper builds the configured ingestion provider
+        // once per invocation and shares that exact Arc with entity blocking.
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/moa_test")
+            .expect("lazy test pool should not connect");
+        let mut config = MoaConfig::default();
+        config.memory.vector.embedder.name = "gemini:gemini-embedding-2".to_string();
+        config.providers.google.api_key = "test-google-key".to_string();
+
+        let deps = direct_ingest_deps_from_config(pool, &config)
+            .expect("direct helper dependencies should build without provider calls");
+        let fact_embedder = deps
+            .embedder
+            .as_ref()
+            .expect("configured direct helper embedder should be available");
+        let entity_embedder = deps
+            .entity_blocking_embedder
+            .as_ref()
+            .expect("entity blocking should reuse the direct helper embedder");
+
+        assert_eq!(fact_embedder.model_id(), "gemini-embedding-2");
+        assert!(Arc::ptr_eq(fact_embedder, entity_embedder));
     }
 
     fn plain_fact(summary: &str) -> ExtractedFact {
@@ -1657,6 +1726,56 @@ mod tests {
             assert_eq!(entry.fact.summary, format!("fact number {index}"));
             assert_eq!(entry.pii_class, PiiClass::None);
         }
+    }
+
+    #[tokio::test]
+    async fn classify_facts_with_rejects_abstained_results() {
+        // Pins: a fail-closed classifier abstention is a retryable ingestion error
+        // before plaintext can reach redaction, embedding, or durable graph writes.
+        let error = classify_facts_with(
+            &FixedResultClassifier(PiiResult::fail_closed("privacy-filter:v9")),
+            &[plain_fact("alice@example.com owns secret sk-live")],
+        )
+        .await
+        .expect_err("abstaining PII classification must abort ingestion");
+
+        let source =
+            std::error::Error::source(error.as_ref() as &(dyn std::error::Error + 'static))
+                .expect("retryable handler error should preserve the ingestion error source");
+        assert!(matches!(
+            source.downcast_ref::<IngestError>(),
+            Some(IngestError::PiiClassificationUnavailable { model_version })
+                if model_version == "privacy-filter:v9"
+        ));
+    }
+
+    #[tokio::test]
+    async fn classify_facts_with_preserves_successful_pii_redaction() {
+        // Pins: the abstention boundary does not reject a successful PII result;
+        // its class and spans still drive redaction and the redacted fact identity.
+        let fact = pii_fact("alice@example.com owns secret sk-live");
+        let result = pii_result(&fact.summary, "alice@example.com", PiiCategory::Email);
+
+        let classified = classify_facts_with(
+            &FixedResultClassifier(result.clone()),
+            std::slice::from_ref(&fact),
+        )
+        .await
+        .expect("non-abstaining PII classification should proceed");
+
+        assert_eq!(classified.len(), 1);
+        assert_eq!(classified[0].pii_class, PiiClass::Pii);
+        assert_eq!(classified[0].pii_spans, result.spans);
+        assert_eq!(
+            classified[0].fact.summary,
+            "[EMAIL_REDACTED] owns secret sk-live"
+        );
+        assert_ne!(classified[0].fact.uid, fact.uid);
+        let redacted_hash = fact_hash(&classified[0].fact).expect("redacted fact hashes");
+        assert_eq!(
+            classified[0].fact.uid,
+            crate::fact_uid_from_hash(&redacted_hash)
+        );
     }
 
     #[test]

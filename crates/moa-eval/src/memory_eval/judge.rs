@@ -96,7 +96,7 @@ pub enum PairwiseWinner {
     Baseline,
 }
 
-/// Judged answer outcome suitable for copying onto a `ProbeResult`.
+/// Standalone answer-judging outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JudgeOutcome {
     /// Whether the answer was faithful to the gold answer or policy.
@@ -133,7 +133,7 @@ impl JudgeOutcome {
 
     fn pairwise(pairwise_winner: Option<PairwiseWinner>) -> Self {
         Self {
-            answer_faithful: pairwise_winner.map(|winner| winner == PairwiseWinner::Candidate),
+            answer_faithful: None,
             abstention_correct: None,
             pii_redacted: None,
             temporal_as_of_correct: None,
@@ -243,7 +243,11 @@ impl AnswerJudge for DeterministicJudge {
     }
 }
 
-/// Pairwise LLM judge for open-ended memory-eval probes.
+/// Comparative LLM judge for open-ended memory-eval probes.
+///
+/// It reports only whether the candidate or baseline is preferred. A relative
+/// winner is not an absolute faithfulness verdict, so pairwise outcomes leave
+/// `JudgeOutcome::answer_faithful` unset.
 pub struct PairwiseLlmJudge {
     provider: Arc<dyn LLMProvider>,
 }
@@ -255,7 +259,7 @@ impl PairwiseLlmJudge {
         Self { provider }
     }
 
-    /// Runs A/B and B/A pairwise judging and returns a winner only on agreement.
+    /// Runs A/B and B/A comparative judging and returns a winner only on agreement.
     pub async fn judge_pairwise(&self, input: &JudgeInput) -> Result<JudgeOutcome> {
         ensure_llm_judgable(input.probe_type)?;
         let baseline_answer = input.baseline_answer.as_deref().ok_or_else(|| {

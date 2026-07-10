@@ -1,6 +1,10 @@
+#[path = "memory_eval_gold_db_memory/external_memory.rs"]
+mod external_memory;
+
 #[path = "memory_eval_support/common.rs"]
 mod common;
 use common::*;
+use moa_eval::memory_eval::ProbeType;
 
 include!("memory_eval_support/gold.rs");
 
@@ -93,6 +97,50 @@ async fn memory_retrieval_eval_runner_writes_report_from_cached_embeddings() -> 
             .all(|interval| interval.resamples == 200),
         "test bootstrap override should keep the runner test fast and deterministic"
     );
+    assert!(report.probe_results.iter().all(|probe| {
+        probe.all_expected_found_at_4.is_some() != probe.expected_fact_ids.is_empty()
+    }));
+    let negative_probes = report
+        .probe_results
+        .iter()
+        .filter(|probe| {
+            matches!(
+                probe.probe_type,
+                ProbeType::Abstention | ProbeType::CrossUserIsolation
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(negative_probes.len(), 21);
+    assert!(
+        negative_probes
+            .iter()
+            .all(|probe| probe.forbidden_fact_absent_at_4 == Some(true)),
+        "hermetic negative probes should keep every forbidden fact out of the final window"
+    );
+    assert!(
+        negative_probes.iter().any(|probe| {
+            !probe
+                .post_rerank_candidates
+                .as_deref()
+                .unwrap_or(&probe.candidates)
+                .is_empty()
+        }),
+        "forbidden-fact absence must allow harmless distractor candidates"
+    );
+    assert!(
+        report
+            .probe_results
+            .iter()
+            .filter(|probe| probe.probe_type == ProbeType::TemporalAsOf)
+            .all(|probe| probe.retrieval_temporal_as_of_correct == Some(true))
+    );
+    assert!(
+        report
+            .probe_results
+            .iter()
+            .filter(|probe| probe.probe_type == ProbeType::PiiRedaction)
+            .all(|probe| probe.stored_pii_redacted == Some(true))
+    );
 
     let report_json = tokio::fs::read_to_string(&report_path).await?;
     let value: serde_json::Value = serde_json::from_str(&report_json)?;
@@ -100,6 +148,27 @@ async fn memory_retrieval_eval_runner_writes_report_from_cached_embeddings() -> 
         value.get("metrics").is_some(),
         "report should contain metrics"
     );
+    let metrics = value
+        .get("metrics")
+        .and_then(serde_json::Value::as_object)
+        .expect("report metrics should be an object");
+    for removed in ["answer_faithfulness", "abstention_correctness"] {
+        assert!(
+            !metrics.contains_key(removed),
+            "retrieval metrics must not serialize answer-quality field {removed}"
+        );
+    }
+    for observed in [
+        "all_expected_found_at_4",
+        "forbidden_fact_absent_at_4",
+        "retrieval_temporal_as_of_correct",
+        "stored_pii_redacted",
+    ] {
+        assert!(
+            metrics.contains_key(observed),
+            "retrieval metrics should serialize observed field {observed}"
+        );
+    }
     assert!(
         value
             .get("probe_results")
@@ -107,6 +176,14 @@ async fn memory_retrieval_eval_runner_writes_report_from_cached_embeddings() -> 
             .is_some_and(|items| !items.is_empty()),
         "report should contain non-empty probe_results"
     );
+    for probe in value["probe_results"]
+        .as_array()
+        .expect("probe_results should be an array")
+    {
+        assert!(probe.get("answer").is_none());
+        assert!(probe.get("answer_faithful").is_none());
+        assert!(probe.get("abstention_correct").is_none());
+    }
     assert!(
         value
             .get("gold_resolution")
