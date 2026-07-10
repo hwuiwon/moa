@@ -99,6 +99,29 @@ Useful env overrides:
 - `MOA_SWEEP_IDS`: comma-separated session ids for focused lanes
 - `MOA_SWEEP_MODEL`: pinned model, usually `gpt-5.4-mini`
 - `MOA_SWEEP_REDIS_URL`: runtime-cache Redis URL, default `redis://127.0.0.1:10051/0`
+- `MOA_SWEEP_PROVIDER_MAX_IN_FLIGHT`: per-credential provider in-flight budget for the
+  sweep orchestrator, default `64`. Chat calls are bounded per provider credential by
+  default (16 unless configured), which a full sweep can saturate; the runner passes this
+  through as `MOA_OPENAI_MAX_CONCURRENT_REQUESTS` so the budget never shapes outcomes.
+  The runner also forces `MOA_PROVIDERS_CONCURRENCY_SCOPE=local` so the sweep never
+  shares Redis lease budgets with the long-running compose orchestrator.
+
+## Runtime-Behavior Notes (defaults changed 2026-07-10)
+
+Interpretation guidance for sweeps at or after the 2026-07-10 defaults changes:
+
+- **Non-builtin (MCP) tools default to admin review.** Sweep personas use builtin tools
+  only, so current cases are unaffected — but any future persona that registers an MCP
+  tool will stall on an approval unless the case seeds an operator allow rule or handles
+  the review flow. Do not read such a stall as a delegation/fan-in regression.
+- **Skill distillation now requires 8+ tool calls per segment** (was 5). This gates
+  skill *learning*, not skill *activation* — `F-SKILL-INJECT` reads persisted
+  `skills_activated` segment evidence and is unaffected. Expect fewer
+  distillation proposals from short sweep sessions; that is intended, not a regression.
+- **Provider chat concurrency is bounded per credential by default.** The runner sizes
+  the sweep budget via `MOA_SWEEP_PROVIDER_MAX_IN_FLIGHT` (see above). If a sweep shows
+  clustered latency spikes or rate-limit failovers, check that override before suspecting
+  a provider or orchestrator regression.
 
 ## Baseline Rules
 
