@@ -4,7 +4,7 @@ postgres
 postgresql
 restate
 cohere
-fly.io
+railway
 aws
 pgvector
 memory graph

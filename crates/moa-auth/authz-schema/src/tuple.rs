@@ -126,23 +126,6 @@ impl TupleKey {
             object: self.object_wire(),
         }
     }
-
-    /// Build the deterministic outbox idempotency key for this tuple.
-    ///
-    /// Format:
-    /// `{op}-{object_type}-{object_id}-{relation}-{user_type}-{user_id}-v{model_version}`.
-    pub fn idempotency_key(&self, op: TupleOp, model_version: u32) -> String {
-        format!(
-            "{}-{}-{}-{}-{}-{}-v{}",
-            op,
-            self.object_type,
-            self.object_id,
-            self.relation,
-            self.user_type,
-            self.user_id,
-            model_version,
-        )
-    }
 }
 
 /// Serializable OpenFGA tuple key shape.
@@ -272,33 +255,6 @@ mod tests {
     }
 
     #[test]
-    fn idempotency_key_is_deterministic_and_includes_model_version() {
-        // Pins: outbox idempotency keys include operation, tuple identity, and model version.
-        let user_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111")
-            .expect("fixture operator UUID should parse");
-        let tenant_id = Uuid::parse_str("22222222-2222-2222-2222-222222222222")
-            .expect("fixture tenant UUID should parse");
-        let tuple = TupleKey::new(
-            UserType::Operator,
-            user_id,
-            Relation::Operator,
-            ObjectType::Tenant,
-            tenant_id,
-        );
-
-        let first = tuple.idempotency_key(TupleOp::Write, 1);
-        let second = tuple.idempotency_key(TupleOp::Write, 1);
-        assert_eq!(first, second);
-        assert_eq!(
-            first,
-            "write-tenant-22222222-2222-2222-2222-222222222222-operator-operator-11111111-1111-1111-1111-111111111111-v1"
-        );
-
-        let v2 = tuple.idempotency_key(TupleOp::Write, 2);
-        assert_ne!(first, v2);
-    }
-
-    #[test]
     fn schema_v1_json_contains_security_contract_types_and_delegation() {
         // Pins: the deployed OpenFGA JSON model includes the auth object set and agent delegation.
         let schema: serde_json::Value =
@@ -380,5 +336,20 @@ mod tests {
                 "session must define relation {relation}"
             );
         }
+
+        // Pins: the session's bound contact is a participant via a same-object
+        // computed userset, not a reflexive tuple-to-userset that OpenFGA can
+        // never satisfy. A `tupleToUserset` on `contact->contact` would require
+        // a (contact:X, contact, contact:X) tuple nothing writes.
+        let participant_children = session_relations["participant"]["union"]["child"]
+            .as_array()
+            .expect("participant must be a union of children");
+        assert!(
+            participant_children.iter().any(|child| {
+                child["computedUserset"]["relation"] == "contact"
+                    && child.get("tupleToUserset").is_none()
+            }),
+            "participant must grant the session contact via a same-object computed userset"
+        );
     }
 }

@@ -14,12 +14,12 @@ use moa_skills::format::parse_skill_markdown;
 use moa_skills::regression::{
     SkillRegressionSummary, compare_scores, generate_skill_test_suite_source,
 };
-use support::{SESSION_WITH_5_TOOL_CALLS, load_session_fixture, skill_markdown};
+use support::{SESSION_WITH_8_TOOL_CALLS, load_session_fixture, skill_markdown};
 
 #[test]
 fn generated_suite_source_is_reviewable_without_writing_files() {
     // Pins: proposal generation can attach a regression suite as draft payload text.
-    let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
+    let loaded = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
     let markdown = skill_markdown(
         "suite-source-skill",
         "Generate suite source for review",
@@ -79,7 +79,7 @@ fn summary(average_score: f64, failed_runs: usize) -> SkillRegressionSummary {
 async fn generated_regression_suite_runs_green_against_the_skill_canonical_trajectory() {
     // Pins: a generated skill regression suite, executed offline through the eval
     // evaluators, passes for the skill's own canonical behavior and catches drift.
-    let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
+    let loaded = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
     let markdown = skill_markdown(
         "drift-guard-skill",
         "Run the learned OAuth-refresh workflow",

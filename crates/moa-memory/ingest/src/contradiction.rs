@@ -762,7 +762,7 @@ fn candidate_text(candidate: &NodeIndexRow) -> String {
 fn deployment_provider(text: &str) -> Option<&'static str> {
     let lower = text.to_ascii_lowercase();
     [
-        ("fly.io", &["fly.io", "flyio", "fly"][..]),
+        ("railway", &["railway", "railway.app"][..]),
         ("aws", &["aws", "amazon web services", "ec2"][..]),
         ("gcp", &["gcp", "google cloud", "cloud run"][..]),
         ("azure", &["azure"][..]),
@@ -861,11 +861,11 @@ mod tests {
 
     #[tokio::test]
     async fn contradiction_judge_restating_fact_returns_duplicate() {
-        let candidate = candidate("we deploy to fly.io", None);
+        let candidate = candidate("we deploy to railway", None);
         let detector = RrfPlusJudgeDetector::default();
 
         let conflict = detector
-            .judge_candidates("we deploy to fly.io", std::slice::from_ref(&candidate))
+            .judge_candidates("we deploy to railway", std::slice::from_ref(&candidate))
             .await
             .expect("judge duplicate");
 
@@ -874,7 +874,7 @@ mod tests {
 
     #[tokio::test]
     async fn contradiction_judge_provider_change_returns_supersede() {
-        let candidate = candidate("we deploy to fly.io", None);
+        let candidate = candidate("we deploy to railway", None);
         let detector = RrfPlusJudgeDetector::default();
 
         let conflict = detector
@@ -890,7 +890,7 @@ mod tests {
         let detector = RrfPlusJudgeDetector::default();
 
         let conflict = detector
-            .judge_candidates("we deploy to fly.io", &[])
+            .judge_candidates("we deploy to railway", &[])
             .await
             .expect("judge empty candidates");
 
@@ -915,7 +915,7 @@ mod tests {
     #[tokio::test]
     async fn contradiction_model_judge_parses_provider_response() {
         // Pins: the model-backed judge preserves prompt content and JSON verdict parsing.
-        let candidate = candidate("we deploy to fly.io", None);
+        let candidate = candidate("we deploy to railway", None);
         let provider = Arc::new(StaticJudgeProvider {
             response: format!(
                 "```json\n{{\"verdict\":\"CONTRADICTS\",\"candidate_uid\":\"{}\",\"rationale\":\"deployment provider changed\"}}\n```",
@@ -962,7 +962,7 @@ mod tests {
             Duration::from_secs(5),
             Duration::from_millis(10),
         );
-        let candidate = candidate("we deploy to fly.io", None);
+        let candidate = candidate("we deploy to railway", None);
 
         let conflict = detector
             .judge_candidates("we deploy to AWS", &[candidate])

@@ -156,14 +156,20 @@ pub enum ToolDiffStrategy {
 }
 
 /// Replay and retry semantics declared for one tool definition.
+///
+/// There is deliberately no keyed-idempotency class: the runtime cannot honor
+/// keyed idempotency end to end (a durable key is not threaded through the tool
+/// invocation and hands-recovery boundaries), so promising it in the type would
+/// let callers rely on behavior that is never enforced. Reintroduce a keyed class
+/// only once a real consumer threads the key through invocation and recovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdempotencyClass {
     /// Safe to retry freely because the effect is deterministic for the same input.
+    /// This is the only class the runtime automatically retries after uncertain execution.
     Idempotent,
-    /// Safe to retry only when the caller also supplies an explicit idempotency key.
-    IdempotentWithKey,
     /// Unsafe to retry automatically because repeated execution may duplicate side effects.
+    /// Automatic retry and route fallback are blocked once execution has begun.
     NonIdempotent,
 }
 
@@ -445,9 +451,6 @@ pub struct ToolCallRequest {
     pub tenant_id: TenantId,
     /// User scope used when the call is executed without a persisted session.
     pub user_id: UserId,
-    /// Explicit idempotency key required by `IdempotentWithKey` tools.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idempotency_key: Option<String>,
     /// Durable trusted sandbox file manifest selected during context compilation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted_sandbox_manifest: Option<TrustedSandboxFileManifestRef>,

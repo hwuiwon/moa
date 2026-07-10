@@ -160,9 +160,7 @@ fn build_ingestion_pipeline(
         false,
     );
     let graph_store = Arc::new(
-        PostgresGraphStore::scoped(pool, scope)
-            .with_vector_store(vector_backend.vector_store())
-            .with_vector_post_commit_sync(vector_backend.post_commit_sync()),
+        PostgresGraphStore::scoped(pool, scope).with_vector_store(vector_backend.vector_store()),
     );
     let graph = Arc::new(MemoryKnowledgeGraphWriter::new(
         graph_store,

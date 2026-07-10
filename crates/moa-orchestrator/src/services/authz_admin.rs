@@ -117,86 +117,67 @@ impl Authz for AuthzImpl {
         annotate_restate_handler_span("Authz", "write_tuple");
         let identity = require_identity(&ctx)?;
         let request = request.into_inner();
-        let pool = OrchestratorCtx::current_graph_pool();
-        let load_pool = pool.clone();
-        let load_request = request.clone();
-        let object_tenant_id = ctx
-            .run(|| async move {
-                load_api_key_tenant_for_tuple(load_pool, &load_request)
-                    .await
-                    .map(Json::from)
-            })
-            .name("authz_load_api_key_tenant")
-            .await?
-            .into_inner();
+
+        // Authorize the caller against the request's supplied tenant before any
+        // resource read. Loading the target API key first would let an
+        // authenticated but unauthorized principal probe key existence and
+        // cross-tenant ownership through distinguishable pre-authz errors.
         let fga = require_fga_client()?;
         require_authz_with_delegation(
             &fga,
             &identity,
             ObjectType::Tenant,
-            TenantId::from(object_tenant_id),
+            TenantId::from(request.tenant_id()),
             Relation::Admin,
         )
         .await
         .map_err(translate_authz_error)?;
 
+        let pool = OrchestratorCtx::current_graph_pool();
         Ok(ctx
-            .run(|| async move {
-                enqueue_typed_tuple_write_for_tenant(pool, request, object_tenant_id).await
-            })
+            .run(|| async move { enqueue_typed_tuple_write(pool, request).await })
             .name("authz_write_typed_tuple")
             .await?)
     }
 }
 
-/// Load and verify the target API-key tenant for a typed tuple write.
-pub async fn load_api_key_tenant_for_tuple(
-    pool: PgPool,
-    request: &WriteTupleRequest,
-) -> Result<Uuid, HandlerError> {
-    let api_key_id = request.api_key_id();
-    let stored_tenant_id: Option<Uuid> = sqlx::query_scalar(
-        r#"
-        SELECT tenant_id
-        FROM api_keys
-        WHERE id = $1 AND revoked_at IS NULL
-        "#,
-    )
-    .bind(api_key_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|error| TerminalError::new(format!("load api key for authz tuple: {error}")))?;
-    let Some(stored_tenant_id) = stored_tenant_id else {
-        return Err(TerminalError::new_with_code(404, "API key not found").into());
-    };
-    if stored_tenant_id != request.tenant_id() {
-        return Err(TerminalError::new_with_code(403, "API key tenant mismatch").into());
-    }
-    Ok(stored_tenant_id)
-}
-
-/// Enqueue one typed public tuple write after validating API-key ownership.
+/// Enqueue one typed public tuple write after confirming tenant-scoped ownership.
+///
+/// The API key is looked up by both its id and the request's tenant, with the
+/// active-key predicate, inside the same transaction that enqueues the outbox
+/// tuple. A nonexistent, revoked, or foreign-tenant key all yield the same
+/// not-found result so that a caller cannot distinguish key existence or
+/// cross-tenant ownership. Callers MUST authorize the request's supplied tenant
+/// before invoking this.
 pub async fn enqueue_typed_tuple_write(
     pool: PgPool,
     request: WriteTupleRequest,
 ) -> Result<(), HandlerError> {
-    let object_tenant_id = load_api_key_tenant_for_tuple(pool.clone(), &request).await?;
-    enqueue_typed_tuple_write_for_tenant(pool, request, object_tenant_id).await
-}
-
-async fn enqueue_typed_tuple_write_for_tenant(
-    pool: PgPool,
-    request: WriteTupleRequest,
-    object_tenant_id: Uuid,
-) -> Result<(), HandlerError> {
-    let tuple = request.tuple_key(object_tenant_id);
-    let op = request.tuple_op();
+    let tenant_id = request.tenant_id();
     let mut transaction = pool
         .begin()
         .await
         .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
 
-    enqueue(&mut *transaction, op, &tuple, Some(object_tenant_id))
+    let matched_key: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM api_keys
+        WHERE id = $1 AND tenant_id = $2 AND revoked_at IS NULL
+        "#,
+    )
+    .bind(request.api_key_id())
+    .bind(tenant_id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|error| TerminalError::new(format!("load api key for authz tuple: {error}")))?;
+    if matched_key.is_none() {
+        return Err(TerminalError::new_with_code(404, "API key not found").into());
+    }
+
+    let tuple = request.tuple_key(tenant_id);
+    let op = request.tuple_op();
+    enqueue(&mut *transaction, op, &tuple, Some(tenant_id))
         .await
         .map_err(|error| TerminalError::new(format!("authz outbox: {error}")))?;
     transaction

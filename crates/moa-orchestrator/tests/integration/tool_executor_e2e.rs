@@ -60,7 +60,6 @@ fn tool_request(
         session_id: Some(session_id),
         tenant_id: meta.tenant_id,
         user_id: fallback_tool_user_id(meta),
-        idempotency_key: None,
         trusted_sandbox_manifest: None,
         worker_id: None,
     }
@@ -83,7 +82,6 @@ fn tool_request_with_provider_id(
         session_id: Some(session_id),
         tenant_id: meta.tenant_id,
         user_id: fallback_tool_user_id(meta),
-        idempotency_key: None,
         trusted_sandbox_manifest: None,
         worker_id: None,
     }

@@ -85,6 +85,11 @@ impl ContactTokenVerifier {
         validation.set_required_spec_claims(&["exp", "nbf", "iat", "sub", "iss", "aud", "jti"]);
         validation.leeway = 30;
 
+        // Verification is stateless: `jti` is required for presence but is not
+        // checked against a revocation denylist, so the token's TTL is the only
+        // revocation window. A `jti` denylist (checked here) would let operators
+        // revoke a token before it expires — follow-up, not implemented.
+
         decode::<ContactTokenClaims>(token, &self.decoding_key, &validation)
             .map(|data| data.claims)
             .map_err(|error| match error.kind() {

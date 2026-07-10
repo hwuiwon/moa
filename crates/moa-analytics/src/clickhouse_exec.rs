@@ -34,7 +34,16 @@ fn is_unknown_table(error: &clickhouse::error::Error) -> bool {
 #[derive(Clone)]
 pub struct AnalyticsClickHouseClient {
     client: Client,
+    max_execution_time_secs: u64,
+    max_rows_to_read: u64,
+    max_bytes_to_read: u64,
 }
+
+/// Default ClickHouse per-query budgets applied when the caller does not
+/// override them from config. Mirror [`moa_core::config::AnalyticsConfig`].
+const DEFAULT_MAX_EXECUTION_TIME_SECS: u64 = 10;
+const DEFAULT_MAX_ROWS_TO_READ: u64 = 1_000_000_000;
+const DEFAULT_MAX_BYTES_TO_READ: u64 = 10_000_000_000;
 
 impl std::fmt::Debug for AnalyticsClickHouseClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -56,13 +65,33 @@ impl AnalyticsClickHouseClient {
         if let Some(password) = config.password.as_deref() {
             client = client.with_password(password);
         }
-        Self { client }
+        Self::from_client(client)
     }
 
     /// Wraps an existing client, used by tests to point at a mock server.
     #[must_use]
     pub fn from_client(client: Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            max_execution_time_secs: DEFAULT_MAX_EXECUTION_TIME_SECS,
+            max_rows_to_read: DEFAULT_MAX_ROWS_TO_READ,
+            max_bytes_to_read: DEFAULT_MAX_BYTES_TO_READ,
+        }
+    }
+
+    /// Overrides the per-query ClickHouse budgets (`max_execution_time`,
+    /// `max_rows_to_read`, `max_bytes_to_read`) so a runaway read is bounded.
+    #[must_use]
+    pub fn with_query_budgets(
+        mut self,
+        max_execution_time_secs: u64,
+        max_rows_to_read: u64,
+        max_bytes_to_read: u64,
+    ) -> Self {
+        self.max_execution_time_secs = max_execution_time_secs;
+        self.max_rows_to_read = max_rows_to_read;
+        self.max_bytes_to_read = max_bytes_to_read;
+        self
     }
 
     /// Deletes a tenant's rows from every analytics table during offboarding.
@@ -107,7 +136,17 @@ impl AnalyticsClickHouseClient {
         &self,
         compiled: &CompiledAnalyticsQuery,
     ) -> Result<Vec<Vec<AnalyticsCell>>> {
-        let mut query = self.client.query(&compiled.sql);
+        // Bound the read: a runaway scan is cancelled by ClickHouse instead of
+        // reading a tenant's full history to satisfy an exact ordered percentile.
+        let mut query = self
+            .client
+            .query(&compiled.sql)
+            .with_option(
+                "max_execution_time",
+                self.max_execution_time_secs.to_string(),
+            )
+            .with_option("max_rows_to_read", self.max_rows_to_read.to_string())
+            .with_option("max_bytes_to_read", self.max_bytes_to_read.to_string());
         for bind in &compiled.bind_values {
             query = match bind {
                 AnalyticsBindValue::String(value) => query.bind(value),

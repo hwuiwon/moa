@@ -206,6 +206,19 @@ pub trait KnowledgeRepository: Send + Sync {
     /// Gets the chunks attached to one document version.
     async fn chunks_for_version(&self, version_uid: Uuid) -> Result<Vec<KnowledgeChunk>>;
 
+    /// Returns every currently active (non-tombstoned) chunk for an object across
+    /// all of its document versions.
+    ///
+    /// Unlike [`Self::chunks_for_version`], this spans every version so
+    /// ingestion and deletion can reconcile against the object's true active
+    /// chunk set instead of a single remembered predecessor version. A failed or
+    /// retried version transition can leave stale-but-active chunks under an
+    /// older version; those must still be diffed against the new desired state so
+    /// they are invalidated rather than left retrievable. Chunks whose `active`
+    /// retrieval flag has been set to `false` by [`Self::tombstone_chunks`] are
+    /// excluded.
+    async fn active_chunks_for_object(&self, object_uid: Uuid) -> Result<Vec<KnowledgeChunk>>;
+
     /// Returns whether final object ingestion completed after a version timestamp.
     async fn object_ingestion_completed_since(
         &self,
@@ -1273,6 +1286,28 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             "#,
         )
         .bind(version_uid)
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await.map_err(map_moa_error)?;
+        rows.iter().map(chunk_from_row).collect()
+    }
+
+    async fn active_chunks_for_object(&self, object_uid: Uuid) -> Result<Vec<KnowledgeChunk>> {
+        let mut conn = self.begin().await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT c.chunk_uid, c.document_version_id, c.graph_node_uid, c.chunk_hash,
+                   c.block_hashes, c.heading_path, c.text, c.ordinal, c.token_count, c.metadata
+            FROM moa.knowledge_chunks c
+            JOIN moa.knowledge_document_versions v
+              ON v.document_version_uid = c.document_version_id
+            WHERE v.object_id = $1
+              AND COALESCE(c.metadata->>'active', 'true') <> 'false'
+            ORDER BY v.created_at ASC, c.ordinal ASC
+            "#,
+        )
+        .bind(object_uid)
         .fetch_all(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;

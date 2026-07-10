@@ -21,9 +21,23 @@ use crate::error::{AnalyticsError, Result};
 /// [`AnalyticsService::clickhouse`] compiles and executes against the ClickHouse
 /// read models. The edge selects the constructor by `[clickhouse]` presence and
 /// calls the matching `query` / `query_clickhouse` entrypoint.
-#[derive(Debug, Clone, Default)]
+/// Default Postgres `statement_timeout` applied to each analytics query when
+/// the caller does not override it from config.
+pub const DEFAULT_STATEMENT_TIMEOUT_MS: u64 = 10_000;
+
+#[derive(Debug, Clone)]
 pub struct AnalyticsService {
     compiler: AnalyticsCompiler,
+    statement_timeout_ms: u64,
+}
+
+impl Default for AnalyticsService {
+    fn default() -> Self {
+        Self {
+            compiler: AnalyticsCompiler::default(),
+            statement_timeout_ms: DEFAULT_STATEMENT_TIMEOUT_MS,
+        }
+    }
 }
 
 impl AnalyticsService {
@@ -39,7 +53,16 @@ impl AnalyticsService {
                 analytics_catalog(),
                 AnalyticsBackend::ClickHouse,
             ),
+            statement_timeout_ms: DEFAULT_STATEMENT_TIMEOUT_MS,
         }
+    }
+
+    /// Overrides the Postgres `statement_timeout` applied to each query, in
+    /// milliseconds, so a runaway scan is cancelled server-side.
+    #[must_use]
+    pub fn with_statement_timeout_ms(mut self, statement_timeout_ms: u64) -> Self {
+        self.statement_timeout_ms = statement_timeout_ms;
+        self
     }
 
     /// Returns the backend this service compiles and executes against.
@@ -65,6 +88,14 @@ impl AnalyticsService {
     ) -> Result<AnalyticsQueryResponse> {
         let compiled = self.compile(request)?;
         let mut conn = ScopedConn::begin_tenant(pool, compiled.effective_tenant_id)
+            .await
+            .map_err(|error| AnalyticsError::Execution(error.to_string()))?;
+        // Bound the database work: an unbounded ordered-percentile scan is
+        // cancelled server-side rather than holding a connection open. `SET LOCAL`
+        // scopes the timeout to this transaction only.
+        sqlx::query("SELECT set_config('statement_timeout', $1, true)")
+            .bind(self.statement_timeout_ms.to_string())
+            .execute(conn.as_mut())
             .await
             .map_err(|error| AnalyticsError::Execution(error.to_string()))?;
         let rows = execute_compiled(&compiled, conn.as_mut()).await?;

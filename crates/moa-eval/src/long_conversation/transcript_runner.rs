@@ -1208,9 +1208,27 @@ async fn build_score_card(
         .filter(|event| matches!(event, Event::Checkpoint { .. }))
         .count();
     let errors_total_pre_compaction = errors_before_first_checkpoint(&events);
-    let errors_preserved =
-        metadata_u32(case, "errors_preserved").unwrap_or(errors_total_pre_compaction);
-    let errors_preserved_strict = errors_preserved >= errors_total_pre_compaction;
+    // Error preservation is credited only from explicit evidence. Missing evidence
+    // is NOT defaulted to the favorable pre-compaction count: when errors existed
+    // before compaction and no preservation evidence is provided, the strict gate
+    // fails closed rather than trivially passing.
+    let errors_preserved_evidence = metadata_u32(case, "errors_preserved");
+    let errors_preserved = errors_preserved_evidence.unwrap_or(0);
+    let errors_preserved_strict = match errors_preserved_evidence {
+        Some(preserved) => preserved >= errors_total_pre_compaction,
+        None => errors_total_pre_compaction == 0,
+    };
+    // Per-turn completion latency samples for real percentiles, instead of copying
+    // one aggregate latency into every p50/p95 field.
+    let completion_latencies_ms = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::BrainResponse { duration_ms, .. } => Some(*duration_ms),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let completion_p50_ms = percentile_ms(&completion_latencies_ms, 0.50);
+    let completion_p95_ms = percentile_ms(&completion_latencies_ms, 0.95);
     let consolidation = count_consolidation_outcomes(&events);
     let brain_cost_cents = events
         .iter()
@@ -1256,16 +1274,18 @@ async fn build_score_card(
         timestamp,
         provider: provider.to_string(),
         functional: FunctionalScores {
-            task_completed: error_count == 0,
+            task_completed: task_completed_signal(&execution.response, error_count),
             turn_count,
             error_count,
             errors_preserved: errors_preserved_strict,
         },
         latency_ms: LatencyScores {
-            first_token_p50_ms: execution.metrics.latency_ms,
-            first_token_p95_ms: execution.metrics.latency_ms,
-            completion_p50_ms: execution.metrics.latency_ms,
-            completion_p95_ms: execution.metrics.latency_ms,
+            // Time-to-first-token is not measured per turn; report explicit absence
+            // rather than copying the aggregate turn latency.
+            first_token_p50_ms: None,
+            first_token_p95_ms: None,
+            completion_p50_ms,
+            completion_p95_ms,
         },
         cost: CostScores {
             input_tokens: score_input_tokens,
@@ -1319,6 +1339,33 @@ async fn build_score_card(
             event_records,
         )),
     }
+}
+
+/// Positive task-completion signal from the durable log.
+///
+/// A run is complete only when it produced a non-empty final response AND recorded
+/// no error events. Error-absence alone is insufficient: a run that died before
+/// producing a final answer (no response) has not completed its task.
+fn task_completed_signal(response: &Option<String>, error_count: u32) -> bool {
+    error_count == 0
+        && response
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+}
+
+/// Nearest-rank percentile (`p` in `0.0..=1.0`) of the samples, or `None` when empty.
+///
+/// Returns an explicit `None` for an empty sample set so callers can represent an
+/// unmeasured latency as absent rather than a fabricated zero.
+fn percentile_ms(samples: &[u64], p: f64) -> Option<u64> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let rank = (p * sorted.len() as f64).ceil() as usize;
+    let index = rank.clamp(1, sorted.len()) - 1;
+    Some(sorted[index])
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1652,6 +1699,154 @@ mod tests {
         assert_eq!(score_card.context.errors_preserved, 0);
         assert!(!score_card.context.errors_preserved_strict);
         assert!(!score_card.functional.errors_preserved);
+    }
+
+    #[tokio::test]
+    async fn score_card_missing_compaction_evidence_fails_strict() {
+        // Pins (F15): when a run compacted with pre-compaction errors but provides NO
+        // errors_preserved evidence, the strict gate fails closed instead of defaulting
+        // to the favorable pre-compaction count.
+        let session_id = SessionId::new();
+        let records = vec![
+            event_record(
+                session_id,
+                1,
+                Event::Error {
+                    message: "tool failure before compaction".to_string(),
+                    recoverable: true,
+                },
+            ),
+            event_record(
+                session_id,
+                2,
+                Event::Checkpoint {
+                    summary: "summary without the error".to_string(),
+                    events_summarized: 1,
+                    token_count: 8,
+                    model: ModelId::new("recorded-scripted"),
+                    model_tier: ModelTier::Auxiliary,
+                    input_tokens: 42,
+                    output_tokens: 8,
+                    cost_cents: 0,
+                },
+            ),
+        ];
+        // No "errors_preserved" metadata: evidence is absent.
+        let case = TestCase {
+            name: "absent-error-preservation".to_string(),
+            ..TestCase::default()
+        };
+        let session_store = RecordingSessionStore::default();
+
+        let score_card = build_score_card(
+            &case,
+            "recorded",
+            1,
+            &records,
+            &CollectedExecution::default(),
+            Utc::now(),
+            session_id,
+            &session_store,
+        )
+        .await;
+
+        assert_eq!(score_card.context.errors_total_pre_compaction, 1);
+        assert!(
+            !score_card.context.errors_preserved_strict,
+            "absent preservation evidence with pre-compaction errors must fail strict"
+        );
+    }
+
+    #[tokio::test]
+    async fn score_card_computes_completion_percentiles_and_absent_ttft() {
+        // Pins (F15): completion p50/p95 come from the real per-turn latency distribution
+        // (distinct for a skewed sample) and TTFT is explicitly absent, not a copy of one
+        // aggregate latency reused for every percentile.
+        let session_id = SessionId::new();
+        let durations = [10_u64, 10, 10, 10, 1_000];
+        let records = durations
+            .iter()
+            .enumerate()
+            .map(|(index, duration)| {
+                event_record(
+                    session_id,
+                    index as u64 + 1,
+                    brain_response_event(*duration),
+                )
+            })
+            .collect::<Vec<_>>();
+        let case = TestCase {
+            name: "latency-percentiles".to_string(),
+            ..TestCase::default()
+        };
+        let session_store = RecordingSessionStore::default();
+
+        let score_card = build_score_card(
+            &case,
+            "recorded",
+            durations.len(),
+            &records,
+            &CollectedExecution::default(),
+            Utc::now(),
+            session_id,
+            &session_store,
+        )
+        .await;
+
+        assert_eq!(score_card.latency_ms.completion_p50_ms, Some(10));
+        assert_eq!(score_card.latency_ms.completion_p95_ms, Some(1_000));
+        assert_ne!(
+            score_card.latency_ms.completion_p50_ms, score_card.latency_ms.completion_p95_ms,
+            "a skewed latency distribution must not collapse p50 and p95 into one value"
+        );
+        assert_eq!(
+            score_card.latency_ms.first_token_p50_ms, None,
+            "TTFT is not measured per turn and must be explicitly absent"
+        );
+        assert_eq!(score_card.latency_ms.first_token_p95_ms, None);
+    }
+
+    #[test]
+    fn percentile_ms_distinguishes_p50_and_p95_for_skewed_sample() {
+        // Pins: nearest-rank percentiles separate the median from the tail.
+        let samples = [10_u64, 10, 10, 10, 1_000];
+        assert_eq!(percentile_ms(&samples, 0.50), Some(10));
+        assert_eq!(percentile_ms(&samples, 0.95), Some(1_000));
+        assert_eq!(percentile_ms(&[], 0.50), None);
+    }
+
+    #[test]
+    fn task_completed_requires_response_and_no_errors() {
+        // Pins (F15): completion needs a positive final-response signal AND zero errors;
+        // error-absence alone (no response) is not completion.
+        assert!(task_completed_signal(&Some("final answer".to_string()), 0));
+        assert!(
+            !task_completed_signal(&None, 0),
+            "no final response is not completion even with zero errors"
+        );
+        assert!(
+            !task_completed_signal(&Some("final answer".to_string()), 1),
+            "a run with errors is not complete"
+        );
+        assert!(
+            !task_completed_signal(&Some("   ".to_string()), 0),
+            "a blank final response is not completion"
+        );
+    }
+
+    fn brain_response_event(duration_ms: u64) -> Event {
+        Event::BrainResponse {
+            text: "response".to_string(),
+            thought_signature: None,
+            model: ModelId::new("recorded-scripted"),
+            model_tier: ModelTier::Main,
+            input_tokens_uncached: 0,
+            input_tokens_cache_write: 0,
+            input_tokens_cache_read: 0,
+            output_tokens: 1,
+            cost_cents: 0,
+            duration_ms,
+        }
     }
 
     #[tokio::test]

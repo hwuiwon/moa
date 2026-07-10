@@ -8,7 +8,7 @@ MOA uses Agent Skills-style packages:
 
 ```text
 .moa/skills/
-  deploy-to-fly/
+  deploy-to-staging/
     SKILL.md
     scripts/
     references/

@@ -83,7 +83,12 @@ where
 {
     let token = generate();
     let prefix = prefix_of(&token)?;
-    let hash = hash_token(&token)?;
+    // Argon2 hashing is CPU-heavy; run it off the async runtime so session-token
+    // creation does not stall other tasks on the worker thread (mirrors verify).
+    let token_for_hash = token.clone();
+    let hash = tokio::task::spawn_blocking(move || hash_token(&token_for_hash))
+        .await
+        .map_err(|error| UserSessionTokenError::Hash(format!("hash task failed: {error}")))??;
     let id = Uuid::new_v4();
     sqlx::query(
         r#"

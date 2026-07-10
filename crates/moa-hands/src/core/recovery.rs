@@ -735,7 +735,6 @@ fn idempotency_blocked_failure(
 fn idempotency_class_label(idempotency_class: IdempotencyClass) -> &'static str {
     match idempotency_class {
         IdempotencyClass::Idempotent => "idempotent",
-        IdempotencyClass::IdempotentWithKey => "idempotent_with_key",
         IdempotencyClass::NonIdempotent => "non_idempotent",
     }
 }

@@ -140,17 +140,24 @@ impl Default for FunctionalScores {
 }
 
 /// Latency scores in milliseconds.
+///
+/// Every field is `None` when the corresponding latency was not measured, rather
+/// than copying an aggregate or defaulting to zero. Time-to-first-token is not
+/// captured per turn today, so both TTFT fields are always absent; completion
+/// percentiles are computed from the real per-turn sample set and are absent when
+/// no turn produced a latency sample. An absent completion percentile fails a
+/// configured upper-bound latency gate closed instead of passing on a fake zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LatencyScores {
-    /// Median submit-to-first-token latency.
-    pub first_token_p50_ms: u64,
-    /// P95 submit-to-first-token latency.
-    pub first_token_p95_ms: u64,
-    /// Median submit-to-completion latency.
-    pub completion_p50_ms: u64,
-    /// P95 submit-to-completion latency.
-    pub completion_p95_ms: u64,
+    /// Median submit-to-first-token latency. Absent: TTFT is not measured per turn.
+    pub first_token_p50_ms: Option<u64>,
+    /// P95 submit-to-first-token latency. Absent: TTFT is not measured per turn.
+    pub first_token_p95_ms: Option<u64>,
+    /// Median submit-to-completion latency, or `None` when no turn was sampled.
+    pub completion_p50_ms: Option<u64>,
+    /// P95 submit-to-completion latency, or `None` when no turn was sampled.
+    pub completion_p95_ms: Option<u64>,
 }
 
 /// Token and cost scores.
@@ -340,26 +347,34 @@ fn push_functional_rows(rows: &mut Vec<MetricRow>, scores: &FunctionalScores) {
 }
 
 fn push_latency_rows(rows: &mut Vec<MetricRow>, scores: &LatencyScores) {
-    push_row(
+    // Absent latencies emit no row: an unmeasured metric is explicitly missing
+    // from the flattened analytics rather than reported as a copied or zero value.
+    push_opt_latency_row(
         rows,
         "latency_ms.first_token_p50_ms",
-        number(scores.first_token_p50_ms),
+        scores.first_token_p50_ms,
     );
-    push_row(
+    push_opt_latency_row(
         rows,
         "latency_ms.first_token_p95_ms",
-        number(scores.first_token_p95_ms),
+        scores.first_token_p95_ms,
     );
-    push_row(
+    push_opt_latency_row(
         rows,
         "latency_ms.completion_p50_ms",
-        number(scores.completion_p50_ms),
+        scores.completion_p50_ms,
     );
-    push_row(
+    push_opt_latency_row(
         rows,
         "latency_ms.completion_p95_ms",
-        number(scores.completion_p95_ms),
+        scores.completion_p95_ms,
     );
+}
+
+fn push_opt_latency_row(rows: &mut Vec<MetricRow>, name: &str, value: Option<u64>) {
+    if let Some(value) = value {
+        push_row(rows, name, number(value));
+    }
 }
 
 fn push_cost_rows(rows: &mut Vec<MetricRow>, scores: &CostScores) {

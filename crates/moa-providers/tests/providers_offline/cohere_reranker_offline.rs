@@ -10,7 +10,7 @@ const QUERY: &str = "Where does MOA deploy the local validation service?";
 
 fn documents() -> Vec<String> {
     vec![
-        "MOA deploys its local validation service to fly.io.".to_string(),
+        "MOA deploys its local validation service to railway.".to_string(),
         "MOA stores memory facts in PostgreSQL tables with RLS.".to_string(),
         "The hosted API surfaces status output and approval prompts.".to_string(),
     ]
@@ -63,7 +63,7 @@ async fn cohere_reranker_offline_maps_out_of_order_hits_back_to_documents_and_dr
     );
     assert_eq!(
         documents[hits[1].index],
-        "MOA deploys its local validation service to fly.io."
+        "MOA deploys its local validation service to railway."
     );
 }
 

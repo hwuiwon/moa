@@ -273,6 +273,13 @@ async fn transactional_graph_vector_store_enqueues_only_external_backend_rows_db
             "upsert".to_string()
         )]
     );
+    // Queue-only (F10): the graph write enqueues the outbox row and returns; it is
+    // not synchronously drained, so the row stays pending for the background cron.
+    assert_eq!(
+        pending_outbox_count(&pool).await,
+        1,
+        "graph writes must leave the enqueued vector-sync row pending, not drain it inline"
+    );
 
     drop(store);
     testing::cleanup_test_schema(&database_url, &schema_name)
@@ -441,6 +448,7 @@ async fn vector_sync_outbox_drains_turbopuffer_upsert_and_delete_db_memory() {
             succeeded: 3,
             skipped: 0,
             failed: 0,
+            dead_lettered: 0,
         }
     );
     assert_eq!(pending_outbox_count(&pool).await, 0);
@@ -464,6 +472,7 @@ async fn vector_sync_outbox_drains_turbopuffer_upsert_and_delete_db_memory() {
             succeeded: 3,
             skipped: 0,
             failed: 0,
+            dead_lettered: 0,
         }
     );
     assert_eq!(pending_outbox_count(&pool).await, 0);
@@ -503,6 +512,245 @@ async fn vector_sync_outbox_drains_turbopuffer_upsert_and_delete_db_memory() {
         upsert_body.contains("deployment runbook abc-123"),
         "chunk text should be preserved across pgvector source reload: {upsert_body}"
     );
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+/// Seeds a Turbopuffer partition with one committed pgvector row and its queued
+/// external upsert, returning the partition, item, and a factory pointed at the
+/// mock backend.
+async fn setup_pending_upsert(
+    pool: &PgPool,
+    server_uri: String,
+) -> (String, VectorItem, VectorStoreFactory) {
+    let embedding_model = "test-embed";
+    let partition = Uuid::now_v7().to_string();
+    let item = vector_item(Uuid::now_v7(), embedding_model);
+    seed_storage_partition_state(pool, &partition, "turbopuffer", embedding_model).await;
+    insert_node_index_row(pool, &partition, &item).await;
+
+    let mut config = MoaConfig::default();
+    config.memory.vector.turbopuffer.api_key = "test-key".to_string();
+    config.memory.vector.turbopuffer.base_url = Some(server_uri);
+    config.memory.vector.turbopuffer.environment = Some("test".to_string());
+    let factory = VectorStoreFactory::from_config(&config);
+    let vector = factory
+        .transactional_graph_backend(pool.clone(), tenant_scope(&partition), true)
+        .vector_store();
+    let mut conn = scoped_conn(pool, &partition).await;
+    vector
+        .upsert_in_tx(conn.as_mut(), std::slice::from_ref(&item))
+        .await
+        .expect("queue external upsert");
+    conn.commit().await.expect("commit source upsert");
+    (partition, item, factory)
+}
+
+/// Returns `(attempts, dead_lettered, backed_off, has_error)` for one outbox row.
+async fn outbox_row_state(pool: &PgPool, uid: Uuid) -> (i32, bool, bool, bool) {
+    sqlx::query_as::<_, (i32, bool, bool, bool)>(
+        r#"
+        SELECT attempts,
+               dead_lettered_at IS NOT NULL AS dead_lettered,
+               available_at > now() AS backed_off,
+               last_error IS NOT NULL AS has_error
+          FROM moa.vector_sync_outbox
+         WHERE uid = $1
+        "#,
+    )
+    .bind(uid)
+    .fetch_one(pool)
+    .await
+    .expect("read vector sync outbox row state")
+}
+
+/// Returns the remaining backoff window, in seconds, for one outbox row.
+async fn seconds_until_available(pool: &PgPool, uid: Uuid) -> f64 {
+    sqlx::query_scalar::<_, f64>(
+        "SELECT EXTRACT(EPOCH FROM (available_at - now()))::float8
+           FROM moa.vector_sync_outbox WHERE uid = $1",
+    )
+    .bind(uid)
+    .fetch_one(pool)
+    .await
+    .expect("read available_at delta")
+}
+
+/// Simulates the backoff window elapsing so the next drain can reclaim the row.
+async fn make_available_now(pool: &PgPool, uid: Uuid) {
+    sqlx::query("UPDATE moa.vector_sync_outbox SET available_at = now() WHERE uid = $1")
+        .bind(uid)
+        .execute(pool)
+        .await
+        .expect("reset available_at");
+}
+
+#[tokio::test]
+async fn permanent_failure_dead_letters_and_is_excluded_from_claims_db_memory() {
+    // Pins (F25): a permanent (4xx) external failure quarantines the row on the
+    // first attempt and the claim predicate never reclaims it, so poison jobs
+    // cannot consume the drainer forever.
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = store.pool().clone();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("upsert_rows"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("schema mismatch"))
+        .mount(&server)
+        .await;
+    let (_partition, item, factory) = setup_pending_upsert(&pool, server.uri()).await;
+
+    let report = factory
+        .drain_external_sync(&pool, 10)
+        .await
+        .expect("drain applies the permanent failure");
+    assert_eq!(report.attempted, 1);
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.dead_lettered, 1);
+    assert_eq!(report.succeeded, 0);
+
+    let (_attempts, dead_lettered, _backed_off, has_error) =
+        outbox_row_state(&pool, item.uid).await;
+    assert!(dead_lettered, "a permanent failure must quarantine the row");
+    assert!(has_error, "the quarantined row retains its last error");
+
+    let second = factory
+        .drain_external_sync(&pool, 10)
+        .await
+        .expect("second drain");
+    assert_eq!(
+        second.attempted, 0,
+        "dead-lettered rows must be excluded from later claims"
+    );
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn transient_failure_backs_off_exponentially_then_succeeds_db_memory() {
+    // Pins (F25): a transient (5xx) failure is not quarantined; each retry backs
+    // off with a growing delay (not a flat 30s), and the row succeeds once the
+    // backend recovers.
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = store.pool().clone();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("upsert_rows"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("upstream unavailable"))
+        .mount(&server)
+        .await;
+    let (_partition, item, factory) = setup_pending_upsert(&pool, server.uri()).await;
+
+    let first = factory
+        .drain_external_sync(&pool, 10)
+        .await
+        .expect("first drain fails transiently");
+    assert_eq!(first.failed, 1);
+    assert_eq!(first.dead_lettered, 0);
+    let (attempts, dead_lettered, backed_off, has_error) = outbox_row_state(&pool, item.uid).await;
+    assert!(!dead_lettered, "a transient failure must not quarantine");
+    assert_eq!(attempts, 1);
+    assert!(backed_off, "a transient failure schedules a future retry");
+    assert!(has_error);
+    let backoff_after_first = seconds_until_available(&pool, item.uid).await;
+
+    make_available_now(&pool, item.uid).await;
+    let second = factory
+        .drain_external_sync(&pool, 10)
+        .await
+        .expect("second drain fails transiently again");
+    assert_eq!(second.failed, 1);
+    assert_eq!(second.dead_lettered, 0);
+    let backoff_after_second = seconds_until_available(&pool, item.uid).await;
+    assert!(
+        backoff_after_second > backoff_after_first + 20.0,
+        "retry backoff must grow exponentially: {backoff_after_first}s then {backoff_after_second}s"
+    );
+
+    // Backend recovers; after the backoff window the row drains successfully.
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("upsert_rows"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rows_affected": 1,
+            "rows_upserted": 1
+        })))
+        .mount(&server)
+        .await;
+    make_available_now(&pool, item.uid).await;
+    let third = factory
+        .drain_external_sync(&pool, 10)
+        .await
+        .expect("recovered drain succeeds");
+    assert_eq!(third.succeeded, 1);
+    assert_eq!(pending_outbox_count(&pool).await, 0);
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn redrive_returns_dead_lettered_rows_to_pending_db_memory() {
+    // Pins (F25): after remediation an operator redrive clears the quarantine and
+    // makes the rows immediately eligible for the drainer again.
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = store.pool().clone();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("upsert_rows"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+        .mount(&server)
+        .await;
+    let (partition, item, factory) = setup_pending_upsert(&pool, server.uri()).await;
+
+    let report = factory
+        .drain_external_sync(&pool, 10)
+        .await
+        .expect("drain quarantines the row");
+    assert_eq!(report.dead_lettered, 1);
+    let (_a, dead_lettered, _b, _c) = outbox_row_state(&pool, item.uid).await;
+    assert!(dead_lettered);
+
+    let redriven = factory
+        .redrive_dead_lettered_external_sync(&pool, Some(&partition))
+        .await
+        .expect("redrive quarantined rows");
+    assert_eq!(redriven, 1, "the one dead-lettered row is re-queued");
+    let (attempts, dead_lettered, backed_off, _has_error) = outbox_row_state(&pool, item.uid).await;
+    assert!(!dead_lettered, "redrive clears the quarantine");
+    assert_eq!(attempts, 0, "redrive resets the attempt counter");
+    assert!(!backed_off, "redriven rows are immediately eligible");
+
+    // The recovered backend now delivers the redriven row.
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("upsert_rows"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rows_affected": 1,
+            "rows_upserted": 1
+        })))
+        .mount(&server)
+        .await;
+    let after = factory
+        .drain_external_sync(&pool, 10)
+        .await
+        .expect("post-redrive drain");
+    assert_eq!(after.succeeded, 1);
+    assert_eq!(pending_outbox_count(&pool).await, 0);
 
     drop(store);
     testing::cleanup_test_schema(&database_url, &schema_name)

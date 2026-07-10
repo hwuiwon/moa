@@ -1,5 +1,6 @@
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::RlsContext;
+use moa_core::wire::experiments::ExperimentCancelRequest;
 use moa_core::{
     ActionRuleScope, ContactId, ModelId, Result, SessionId, StoragePartitionId, TenantId, UserId,
 };
@@ -783,6 +784,226 @@ async fn cancel_active_trials_marks_remaining_work_without_mutating_terminal_tri
         failed.trial_uid,
         ExperimentTrialStatus::Failed,
         Some(ExperimentTrialStopReason::Error),
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn cancel_run_and_active_trials_reconciles_behind_already_cancelled_parent_db() -> Result<()>
+{
+    // Pins (F19): the combined cancel reconciles stranded active trials even when the
+    // parent run is already terminal-cancelled, atomically in one transaction, without
+    // disturbing already-terminal trials or overwriting the original cancellation error.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let store = ExperimentStore::new(test_db.store().pool().clone());
+    let scope = tenant_scope("cancel-reconcile");
+    let plan_revision_uid = insert_artifact_revision(test_db.store().pool(), &scope).await?;
+    let run = store
+        .insert_run(
+            &scope,
+            new_experiment("cancel-reconcile-parent", None, Vec::new()),
+        )
+        .await?;
+    let running = store
+        .insert_trial(
+            &scope,
+            new_trial(run.run_uid, "running", plan_revision_uid, Vec::new()),
+        )
+        .await?;
+    store
+        .update_trial_status(
+            &scope,
+            running.trial_uid,
+            ExperimentTrialStatus::Running,
+            None,
+            None,
+            None,
+        )
+        .await?
+        .expect("running status update should return trial");
+    let completed = store
+        .insert_trial(
+            &scope,
+            new_trial(run.run_uid, "completed", plan_revision_uid, Vec::new()),
+        )
+        .await?;
+    store
+        .update_trial_status(
+            &scope,
+            completed.trial_uid,
+            ExperimentTrialStatus::Completed,
+            Some(ExperimentTrialStopReason::Success),
+            None,
+            Some(chrono::Utc::now()),
+        )
+        .await?
+        .expect("completed status update should return trial");
+
+    // Simulate a first cancel that updated the run projection but crashed before
+    // reconciling trials: the parent is Cancelled while the running trial is stranded.
+    store
+        .update_run_status(
+            &scope,
+            run.run_uid,
+            ExperimentRunStatus::Cancelled,
+            Some("first attempt".to_string()),
+            Some(chrono::Utc::now()),
+        )
+        .await?
+        .expect("run cancel should return run");
+
+    let (reconciled_run, cancelled_trials) = store
+        .cancel_run_and_active_trials(&scope, run.run_uid, "operator cancelled".to_string())
+        .await?;
+
+    let reconciled_run =
+        reconciled_run.expect("already-cancelled run is still cancellable for reconciliation");
+    assert_eq!(reconciled_run.status, ExperimentRunStatus::Cancelled);
+    assert_eq!(
+        reconciled_run.error.as_deref(),
+        Some("first attempt"),
+        "reconciliation preserves the original cancellation error"
+    );
+    assert_eq!(
+        cancelled_trials.len(),
+        1,
+        "only the stranded running trial is reconciled"
+    );
+    assert_eq!(cancelled_trials[0].trial_uid, running.trial_uid);
+
+    let trials = store.list_trials(&scope, run.run_uid, None, 10).await?;
+    assert_trial_status(
+        &trials,
+        running.trial_uid,
+        ExperimentTrialStatus::Cancelled,
+        Some(ExperimentTrialStopReason::Cancelled),
+    );
+    assert_trial_status(
+        &trials,
+        completed.trial_uid,
+        ExperimentTrialStatus::Completed,
+        Some(ExperimentTrialStopReason::Success),
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn cancel_run_and_active_trials_does_not_override_completed_run_db() -> Result<()> {
+    // Pins (F19): the combined cancel never flips a genuinely completed run to cancelled.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let store = ExperimentStore::new(test_db.store().pool().clone());
+    let scope = tenant_scope("cancel-completed");
+    let run = store
+        .insert_run(
+            &scope,
+            new_experiment("cancel-completed-parent", None, Vec::new()),
+        )
+        .await?;
+    store
+        .update_run_status(
+            &scope,
+            run.run_uid,
+            ExperimentRunStatus::Completed,
+            None,
+            Some(chrono::Utc::now()),
+        )
+        .await?
+        .expect("run completion should return run");
+
+    let (reconciled_run, cancelled_trials) = store
+        .cancel_run_and_active_trials(&scope, run.run_uid, "late cancel".to_string())
+        .await?;
+
+    assert!(
+        reconciled_run.is_none(),
+        "a completed run must not be transitioned to cancelled"
+    );
+    assert!(cancelled_trials.is_empty());
+    let reloaded = store
+        .load_run(&scope, run.run_uid)
+        .await?
+        .expect("run persists");
+    assert_eq!(reloaded.status, ExperimentRunStatus::Completed);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn cancel_run_app_reconciles_active_trials_behind_terminal_cancelled_parent_db() -> Result<()>
+{
+    // Pins (F19): a retried Experiments/cancel behind an already-cancelled parent no
+    // longer short-circuits on the terminal-parent early return; it still reconciles
+    // stranded active trial rows and reports the retry idempotently.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let store = ExperimentStore::new(pool.clone());
+    let scope = tenant_scope("app-cancel-retry");
+    let ActionRuleScope::Tenant { tenant_id } = scope else {
+        unreachable!("tenant_scope builds a tenant scope");
+    };
+    let plan_revision_uid = insert_artifact_revision(&pool, &scope).await?;
+    let run = store
+        .insert_run(
+            &scope,
+            new_experiment("app-cancel-retry-parent", None, Vec::new()),
+        )
+        .await?;
+    let running = store
+        .insert_trial(
+            &scope,
+            new_trial(run.run_uid, "running", plan_revision_uid, Vec::new()),
+        )
+        .await?;
+    store
+        .update_trial_status(
+            &scope,
+            running.trial_uid,
+            ExperimentTrialStatus::Running,
+            None,
+            None,
+            None,
+        )
+        .await?
+        .expect("running status update should return trial");
+    // Strand: the run projection is already cancelled but the trial is still active.
+    store
+        .update_run_status(
+            &scope,
+            run.run_uid,
+            ExperimentRunStatus::Cancelled,
+            Some("first attempt".to_string()),
+            Some(chrono::Utc::now()),
+        )
+        .await?
+        .expect("run cancel should return run");
+
+    let response = moa_experiments::app::cancel_run(
+        pool.clone(),
+        ExperimentCancelRequest {
+            tenant_id,
+            run_uid: run.run_uid,
+            reason: Some("retry".to_string()),
+        },
+    )
+    .await
+    .expect("retried cancel behind a cancelled parent should succeed");
+
+    assert!(
+        !response.cancelled,
+        "an idempotent retry behind an already-cancelled parent reports cancelled=false"
+    );
+    assert_eq!(response.status, "cancelled");
+    let trials = store.list_trials(&scope, run.run_uid, None, 10).await?;
+    assert_trial_status(
+        &trials,
+        running.trial_uid,
+        ExperimentTrialStatus::Cancelled,
+        Some(ExperimentTrialStopReason::Cancelled),
     );
     Ok(())
 }

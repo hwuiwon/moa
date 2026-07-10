@@ -2563,3 +2563,95 @@ async fn append_events_batches_inserts_aggregates_and_dedupe_db() {
 fn approx_eq(left: f64, right: f64, epsilon: f64) -> bool {
     (left - right).abs() <= epsilon
 }
+
+#[tokio::test]
+async fn analytics_mv_refresh_single_flights_under_advisory_lock_db() {
+    // Pins: the analytics materialized-view refresh is single-flighted by a
+    // Postgres advisory lock, so an overlapping run or replica that cannot take
+    // the lease returns without doing work (never herds a concurrent rebuild).
+    let (store, database_url, schema_name) = create_test_store().await;
+    let key = store.analytics_mv_refresh_lock_key();
+
+    let mut holder = store
+        .pool()
+        .acquire()
+        .await
+        .expect("acquire lease-holder connection");
+    let mut contender = store
+        .pool()
+        .acquire()
+        .await
+        .expect("acquire contender connection");
+
+    let held: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(key)
+        .fetch_one(holder.as_mut())
+        .await
+        .expect("take the refresh lease");
+    assert!(held, "the test should hold the refresh lease");
+
+    let contended: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(key)
+        .fetch_one(contender.as_mut())
+        .await
+        .expect("contend for the held lease");
+    assert!(!contended, "a second holder must not take the held lease");
+
+    // The refresh single-flights out: it returns Ok without doing work or hanging.
+    store
+        .refresh_analytics_materialized_views()
+        .await
+        .expect("a refresh that cannot take the lease returns ok");
+
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(key)
+        .execute(holder.as_mut())
+        .await
+        .expect("release the lease");
+
+    let reacquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(key)
+        .fetch_one(contender.as_mut())
+        .await
+        .expect("reacquire the released lease");
+    assert!(reacquired, "the lease is available once released");
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(key)
+        .execute(contender.as_mut())
+        .await
+        .expect("release the reacquired lease");
+
+    drop(holder);
+    drop(contender);
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+async fn analytics_mv_refresh_records_freshness_db() {
+    // Pins: a completed refresh persists its success time and duration so the edge
+    // can report read-model freshness without triggering work.
+    let (store, database_url, schema_name) = create_test_store().await;
+
+    store
+        .refresh_analytics_materialized_views()
+        .await
+        .expect("refresh runs and records state");
+
+    let (last_success, duration_ms): (Option<chrono::DateTime<Utc>>, Option<i64>) = sqlx::query_as(
+        "SELECT last_success_at, last_duration_ms \
+             FROM analytics.materialized_view_refresh_state WHERE id",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("read the refresh state row");
+    assert!(
+        last_success.is_some(),
+        "a completed refresh records a success time"
+    );
+    assert!(
+        duration_ms.is_some(),
+        "a completed refresh records its duration"
+    );
+
+    cleanup_schema(&database_url, &schema_name).await;
+}

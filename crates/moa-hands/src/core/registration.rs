@@ -98,7 +98,13 @@ impl RegisteredTool {
                 schema: tool.input_schema,
                 policy: ToolPolicySpec {
                     risk_level: moa_core::RiskLevel::High,
-                    default_effect: ActionPolicyEffect::Allow,
+                    // MCP/third-party tools have no considered per-tool descriptor
+                    // gate (unlike builtins), so they default to admin review rather
+                    // than a bare allow: unvetted external code should not execute
+                    // unattended. This is only the fallback effect — an explicit
+                    // operator rule or `permissions` config (allow/deny/admin_review)
+                    // still wins in `ActionPolicies::check`.
+                    default_effect: ActionPolicyEffect::AdminReview,
                     action_class: ActionClass::ExternalWrite,
                     input_shape: ToolInputShape::Json,
                     diff_strategy: ToolDiffStrategy::None,

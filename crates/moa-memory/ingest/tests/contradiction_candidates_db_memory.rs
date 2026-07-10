@@ -109,7 +109,7 @@ async fn candidates_merge_hydrates_lexical_and_vector_hits_excluding_inactive_db
         .create_node(fact_intent(
             &storage_partition_id,
             lexical_uid,
-            "checkout deploys flyio",
+            "checkout deploys railway",
         ))
         .await
         .expect("create lexical fact");
@@ -125,7 +125,7 @@ async fn candidates_merge_hydrates_lexical_and_vector_hits_excluding_inactive_db
         .create_node(fact_intent(
             &storage_partition_id,
             inactive_uid,
-            "checkout deploys flyio",
+            "checkout deploys railway",
         ))
         .await
         .expect("create inactive fact");
@@ -141,7 +141,7 @@ async fn candidates_merge_hydrates_lexical_and_vector_hits_excluding_inactive_db
 
     let candidates = detector
         .candidates(
-            "checkout deploys flyio",
+            "checkout deploys railway",
             &embedding,
             NodeLabel::Fact,
             PiiClass::None,
@@ -173,7 +173,7 @@ async fn candidates_merge_hydrates_lexical_and_vector_hits_excluding_inactive_db
             .find(|candidate| candidate.uid == lexical_uid)
             .expect("lexical row present")
             .name,
-        "checkout deploys flyio"
+        "checkout deploys railway"
     );
     assert_eq!(
         candidates

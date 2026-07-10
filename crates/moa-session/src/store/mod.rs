@@ -30,6 +30,10 @@ use moa_observability::{
 use moa_security::ActionPolicyRuleStore;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions, types::Json};
 use tracing::warn;
+
+/// Deployment-global advisory-lock key that single-flights the analytics
+/// materialized-view refresh across overlapping cron runs and edge replicas.
+const ANALYTICS_MV_REFRESH_LOCK_KEY: i64 = 4_924_002_001;
 use uuid::Uuid;
 
 use crate::attachment_storage::AttachmentObjectStore;
@@ -62,6 +66,7 @@ pub use dashboard::{
     DashboardEventTimelineItem, DashboardSessionDetail, DashboardSessionListCursor,
     DashboardSessionListPage, DashboardSessionListRequest,
 };
+pub use session_store::SessionCreateOutcome;
 
 fn local_rustfs_config() -> MoaConfig {
     let mut config = MoaConfig::default();
@@ -274,14 +279,79 @@ impl PostgresSessionStore {
         .await
     }
 
-    /// Refreshes materialized analytics views using concurrent refreshes.
+    /// Refreshes the analytics materialized views under a single-flight lease.
+    ///
+    /// Refresh ownership belongs to the durable maintenance cron. A Postgres
+    /// session-level advisory lock single-flights the work so overlapping cron
+    /// runs and edge replicas never rebuild the same views at once: a caller that
+    /// cannot take the lease returns without doing work. Each attempt records its
+    /// outcome (success, failure, duration) so the edge can report read-model
+    /// freshness. `CONCURRENTLY` keeps each view readable during its own rebuild.
     pub async fn refresh_analytics_materialized_views(&self) -> Result<()> {
+        let lock_key = self.analytics_mv_refresh_lock_key();
+        let mut conn = self.pool.acquire().await.map_err(map_sqlx_error)?;
+        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(lock_key)
+            .fetch_one(conn.as_mut())
+            .await
+            .map_err(map_sqlx_error)?;
+        if !acquired {
+            tracing::debug!(
+                "analytics materialized-view refresh skipped; another owner holds the lease"
+            );
+            return Ok(());
+        }
+
+        let started = std::time::Instant::now();
+        let result = self.run_analytics_mv_refreshes(conn.as_mut()).await;
+        let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+
+        // Always release the session-level lease, whatever the refresh outcome.
+        if let Err(error) = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(lock_key)
+            .execute(conn.as_mut())
+            .await
+        {
+            tracing::warn!(error = %error, "failed to release analytics MV refresh advisory lock");
+        }
+
+        // Persist freshness best-effort: a state-write failure must not mask the
+        // refresh result the caller (and retry policy) depends on.
+        match &result {
+            Ok(()) => self.record_analytics_refresh_success(duration_ms).await,
+            Err(error) => {
+                self.record_analytics_refresh_failure(duration_ms, &error.to_string())
+                    .await
+            }
+        }
+        result
+    }
+
+    /// Advisory-lock key that single-flights the analytics refresh.
+    ///
+    /// Production stores share the deployment-global key so every replica
+    /// contends for one lease. Schema-isolated test stores derive a per-schema
+    /// key so parallel tests do not skip each other's refresh.
+    pub fn analytics_mv_refresh_lock_key(&self) -> i64 {
+        match &self.schema_name {
+            None => ANALYTICS_MV_REFRESH_LOCK_KEY,
+            Some(schema) => {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                ANALYTICS_MV_REFRESH_LOCK_KEY.hash(&mut hasher);
+                schema.hash(&mut hasher);
+                hasher.finish() as i64
+            }
+        }
+    }
+
+    async fn run_analytics_mv_refreshes(&self, conn: &mut sqlx::PgConnection) -> Result<()> {
         for view_name in ["session_turn_metrics", "daily_storage_partition_metrics"] {
             let qualified = self.table_name(view_name);
             sqlx::query(&format!(
                 "REFRESH MATERIALIZED VIEW CONCURRENTLY {qualified}"
             ))
-            .execute(&self.pool)
+            .execute(&mut *conn)
             .await
             .map_err(map_sqlx_error)?;
         }
@@ -302,11 +372,50 @@ impl PostgresSessionStore {
             sqlx::query(&format!(
                 "REFRESH MATERIALIZED VIEW CONCURRENTLY {qualified}"
             ))
-            .execute(&self.pool)
+            .execute(&mut *conn)
             .await
             .map_err(map_sqlx_error)?;
         }
         Ok(())
+    }
+
+    async fn record_analytics_refresh_success(&self, duration_ms: i64) {
+        let query = sqlx::query(
+            "INSERT INTO analytics.materialized_view_refresh_state
+                 (id, last_success_at, last_duration_ms, last_error, updated_at)
+             VALUES (TRUE, now(), $1, NULL, now())
+             ON CONFLICT (id) DO UPDATE SET
+                 last_success_at = now(),
+                 last_duration_ms = $1,
+                 last_error = NULL,
+                 updated_at = now()",
+        )
+        .bind(duration_ms)
+        .execute(&self.pool)
+        .await;
+        if let Err(error) = query {
+            tracing::warn!(error = %error, "failed to record analytics MV refresh success");
+        }
+    }
+
+    async fn record_analytics_refresh_failure(&self, duration_ms: i64, error_text: &str) {
+        let query = sqlx::query(
+            "INSERT INTO analytics.materialized_view_refresh_state
+                 (id, last_failure_at, last_duration_ms, last_error, updated_at)
+             VALUES (TRUE, now(), $1, $2, now())
+             ON CONFLICT (id) DO UPDATE SET
+                 last_failure_at = now(),
+                 last_duration_ms = $1,
+                 last_error = $2,
+                 updated_at = now()",
+        )
+        .bind(duration_ms)
+        .bind(error_text)
+        .execute(&self.pool)
+        .await;
+        if let Err(error) = query {
+            tracing::warn!(error = %error, "failed to record analytics MV refresh failure");
+        }
     }
 
     async fn new_with_options_and_schema(

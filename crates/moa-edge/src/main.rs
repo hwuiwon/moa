@@ -92,9 +92,13 @@ async fn main() -> anyhow::Result<()> {
             .as_ref()
             .map(|clickhouse| Arc::new(moa_lineage_sink::ClickHouseStore::connect(clickhouse))),
         clickhouse_analytics: moa_config.clickhouse.as_ref().map(|clickhouse| {
-            Arc::new(moa_analytics::AnalyticsClickHouseClient::connect(
-                clickhouse,
-            ))
+            Arc::new(
+                moa_analytics::AnalyticsClickHouseClient::connect(clickhouse).with_query_budgets(
+                    moa_config.analytics.clickhouse_max_execution_time_secs,
+                    moa_config.analytics.clickhouse_max_rows_to_read,
+                    moa_config.analytics.clickhouse_max_bytes_to_read,
+                ),
+            )
         }),
     };
     let listener = tokio::net::TcpListener::bind(&args.bind)

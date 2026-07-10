@@ -292,7 +292,12 @@ where
 {
     let key = generate(new.env);
     let prefix = prefix_of(key.expose_secret())?;
-    let hash = hash_key(key.expose_secret())?;
+    // Argon2 hashing is CPU-heavy; run it off the async runtime so key creation
+    // does not stall other tasks on the worker thread (mirrors the verify path).
+    let key_secret = key.expose_secret().to_string();
+    let hash = tokio::task::spawn_blocking(move || hash_key(&key_secret))
+        .await
+        .map_err(|error| ApiKeyError::Hash(format!("hash task failed: {error}")))??;
     let id = Uuid::new_v4();
     let (owner_user_id, owner_agent_id) = match new.owner {
         KeyOwner::User(user_id) => (Some(user_id), None),

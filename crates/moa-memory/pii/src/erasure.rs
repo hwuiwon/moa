@@ -106,18 +106,92 @@ pub async fn hard_purge_erase_candidates(
     let mut erased_count = 0usize;
     for chunk in candidates.chunks(ERASE_CHUNK_SIZE) {
         for candidate in chunk {
-            hard_purge_with_audit(
+            match hard_purge_with_audit(
                 &graph,
                 candidate.uid,
                 &redaction_marker,
                 Some(erase_audit_metadata(audit)),
             )
-            .await?;
+            .await
+            {
+                Ok(()) => {}
+                // Idempotent erasure: a node already absent — because a
+                // concurrent purge removed it or a resumed job re-enumerated
+                // remaining candidates — is completed progress, not a failure.
+                // Restart-after-partial-progress must not terminate on the first
+                // already-purged node.
+                Err(moa_memory_graph::GraphError::NotFound(_)) => {
+                    tracing::debug!(
+                        uid = %candidate.uid,
+                        "erase candidate already absent; treating as purged"
+                    );
+                }
+                Err(error) => return Err(error.into()),
+            }
             erased_count = erased_count.saturating_add(1);
         }
     }
     emit_erase_summary(pool, audit, erased_count).await?;
     Ok(erased_count)
+}
+
+/// Deletes the subject's standing memory-digest rows during privacy erasure.
+///
+/// A contact whose active facts are all erased forms zero digest groups, so the
+/// lifecycle rebuild never reaches that identity and its rendered digest text
+/// would otherwise survive and be re-injected into prompts. This closes the
+/// contact-scoped digest directly, mirroring the full-tenant purge.
+pub async fn delete_subject_digests(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    subject_user_id: &str,
+) -> Result<u64> {
+    let contact_id = contact_id_from_subject(subject_user_id)?;
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
+    let mut tx = begin_app_scoped_tx(pool, tenant_id, subject_user_id).await?;
+    let deleted = sqlx::query(
+        r#"
+        DELETE FROM moa.memory_digests
+        WHERE storage_partition_id = $1
+          AND contact_id = $2
+        "#,
+    )
+    .bind(storage_partition_id)
+    .bind(contact_id.0)
+    .execute(tx.as_mut())
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    Ok(deleted)
+}
+
+/// Deletes the subject's retrieval-lineage rows during privacy erasure.
+///
+/// Retrieval-lineage rows carry attributable subject/session/UID/rank/time
+/// provenance and their `uid` has no foreign key to `node_index`, so purging
+/// graph nodes never removes them. They belong in erasure closure.
+pub async fn delete_subject_retrieval_lineage(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    subject_user_id: &str,
+) -> Result<u64> {
+    let contact_id = contact_id_from_subject(subject_user_id)?;
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
+    let mut tx = begin_app_scoped_tx(pool, tenant_id, subject_user_id).await?;
+    let deleted = sqlx::query(
+        r#"
+        DELETE FROM moa.retrieval_lineage
+        WHERE storage_partition_id = $1
+          AND contact_id = $2
+        "#,
+    )
+    .bind(storage_partition_id)
+    .bind(contact_id.0)
+    .execute(tx.as_mut())
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    Ok(deleted)
 }
 
 /// Begins a transaction scoped as `moa_app` for one tenant-bound contact subject.

@@ -198,19 +198,24 @@ pub enum LongSessionInterleaving {
     Phased,
 }
 
-/// Flexible expected-output rules for an agent response.
+/// Expected-output rules for an agent response.
+///
+/// Every field below is a hard requirement: the `output_match` evaluator emits a
+/// diagnostic fractional score plus an `output_match_required` boolean gate, and
+/// any unmet rule (a missing required fragment, a present exclusion, a regex or
+/// exact mismatch) fails the scenario regardless of the fractional score.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ExpectedOutput {
-    /// Response text must contain all of these fragments.
+    /// Response text must contain all of these fragments (required, all-of).
     pub contains: Vec<String>,
-    /// Response text must not contain any of these fragments.
+    /// Response text must not contain any of these fragments (required exclusion).
     pub not_contains: Vec<String>,
-    /// Regular expression the response should match.
+    /// Regular expression the response must match when set (required).
     pub regex: Option<String>,
-    /// Exact response text expected from the agent.
+    /// Exact response text the agent must return when set (required).
     pub exact: Option<String>,
-    /// Key facts that should appear in the response.
+    /// Key facts that must all appear in the response (required, all-of).
     pub facts: Vec<String>,
 }
 

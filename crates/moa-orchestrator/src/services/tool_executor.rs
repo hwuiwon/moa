@@ -362,23 +362,6 @@ pub fn tool_run_name(
             "tool_execute:idempotent:{}:{}",
             request.tool_name, request.tool_call_id
         )),
-        IdempotencyClass::IdempotentWithKey => {
-            let key = request
-                .idempotency_key
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    MoaError::ValidationError(format!(
-                        "tool {} requires idempotency_key",
-                        request.tool_name
-                    ))
-                })?;
-            Ok(format!(
-                "tool_execute:keyed:{}:{}:{}",
-                request.tool_name, request.tool_call_id, key
-            ))
-        }
         IdempotencyClass::NonIdempotent => Ok(format!(
             "tool_execute:non_idempotent:{}:{}",
             request.tool_name, request.tool_call_id
@@ -421,22 +404,6 @@ fn validate_request(
     definition: &ToolDefinition,
     request: &ToolCallRequest,
 ) -> moa_core::Result<()> {
-    if matches!(
-        definition.idempotency_class,
-        IdempotencyClass::IdempotentWithKey
-    ) && request
-        .idempotency_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_none()
-    {
-        return Err(MoaError::ValidationError(format!(
-            "tool {} requires idempotency_key",
-            request.tool_name
-        )));
-    }
-
     if matches!(
         definition.idempotency_class,
         IdempotencyClass::NonIdempotent
@@ -828,7 +795,7 @@ async fn append_agent_tool_policy_denied_event(
 fn tool_run_retry_policy(idempotency_class: IdempotencyClass) -> RunRetryPolicy {
     let max_attempts = retry_max_attempts_for(idempotency_class);
     match idempotency_class {
-        IdempotencyClass::Idempotent | IdempotencyClass::IdempotentWithKey => RunRetryPolicy::new()
+        IdempotencyClass::Idempotent => RunRetryPolicy::new()
             .initial_delay(Duration::from_millis(500))
             .exponentiation_factor(2.0)
             .max_delay(Duration::from_secs(5))
@@ -1048,7 +1015,6 @@ mod tests {
             session_id: None,
             tenant_id: TenantId::from(Uuid::from_u128(1)),
             user_id: UserId::new("user-1"),
-            idempotency_key: None,
             trusted_sandbox_manifest: None,
             worker_id: None,
         }
@@ -1125,7 +1091,6 @@ mod tests {
             session_id: Some(SessionId::new()),
             tenant_id: TenantId::from(Uuid::from_u128(1)),
             user_id: UserId::new("user-1"),
-            idempotency_key: None,
             trusted_sandbox_manifest: Some(manifest),
             worker_id,
         }

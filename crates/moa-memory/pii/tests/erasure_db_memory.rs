@@ -8,7 +8,8 @@ use moa_memory_graph::{
     PostgresGraphStore,
 };
 use moa_memory_pii::erasure::{
-    GraphErasureAudit, enumerate_erase_candidates, hard_purge_erase_candidates,
+    EraseCandidate, GraphErasureAudit, delete_subject_digests, delete_subject_retrieval_lineage,
+    enumerate_erase_candidates, hard_purge_erase_candidates,
 };
 use moa_session::testing;
 use serde_json::json;
@@ -201,6 +202,201 @@ async fn hard_purge_contact_candidates_writes_summary_under_app_role_db_memory()
     testing::cleanup_test_schema(&database_url, &schema_name)
         .await
         .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn hard_purge_tolerates_absent_candidate_db_memory() {
+    // Pins: an already-absent candidate counts as completed progress rather than a
+    // terminal NotFound error, so a resumed erasure that re-enumerates a partially
+    // purged subject never strands on the first missing node.
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let contact_id = ContactId::new();
+    let subject_user_id = format!("contact:{contact_id}");
+    let graph = PostgresGraphStore::scoped_for_app_role(
+        session_store.pool().clone(),
+        RlsContext::contact(tenant_id, contact_id),
+    );
+    let present_uid = Uuid::now_v7();
+    graph
+        .create_node(contact_node(
+            tenant_id,
+            contact_id,
+            present_uid,
+            "present fact",
+        ))
+        .await
+        .expect("seed present contact node");
+
+    let mut candidates =
+        enumerate_erase_candidates(session_store.pool(), tenant_id, &subject_user_id)
+            .await
+            .expect("enumerate contact erase candidates");
+    assert_eq!(candidates.len(), 1);
+    // Prepend a candidate whose node is already gone (concurrent purge or resume).
+    candidates.insert(
+        0,
+        EraseCandidate {
+            uid: Uuid::now_v7(),
+            label: "Fact".to_string(),
+            name: "already purged".to_string(),
+            pii_class: "phi".to_string(),
+        },
+    );
+
+    let audit = GraphErasureAudit {
+        tenant_id,
+        subject_user: contact_id.0,
+        subject_user_id,
+        reason: "resumed erasure request".to_string(),
+        approver_id: "admin@example.test".to_string(),
+        approval_token_jti: "approval-jti-absent-candidate-db-memory".to_string(),
+    };
+    let erased = hard_purge_erase_candidates(session_store.pool(), &audit, &candidates)
+        .await
+        .expect("hard purge tolerates already-absent candidate");
+    assert_eq!(erased, 2);
+    assert!(
+        graph
+            .get_node(present_uid)
+            .await
+            .expect("read purged present node")
+            .is_none(),
+        "the present candidate must still be purged"
+    );
+
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn delete_subject_digest_and_lineage_rows_db_memory() {
+    // Pins: erasure closure deletes the subject's standing memory-digest and
+    // retrieval-lineage rows, which graph-node purges never touch.
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let contact_id = ContactId::new();
+    let subject_user_id = format!("contact:{contact_id}");
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
+
+    seed_digest_row(
+        session_store.pool(),
+        tenant_id,
+        contact_id,
+        &storage_partition_id,
+    )
+    .await;
+    seed_lineage_row(
+        session_store.pool(),
+        tenant_id,
+        contact_id,
+        &storage_partition_id,
+    )
+    .await;
+
+    let digests_deleted = delete_subject_digests(session_store.pool(), tenant_id, &subject_user_id)
+        .await
+        .expect("delete subject digests");
+    assert_eq!(digests_deleted, 1);
+    let lineage_deleted =
+        delete_subject_retrieval_lineage(session_store.pool(), tenant_id, &subject_user_id)
+            .await
+            .expect("delete subject retrieval lineage");
+    assert_eq!(lineage_deleted, 1);
+
+    let remaining_digests = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM moa.memory_digests WHERE storage_partition_id = $1",
+    )
+    .bind(&storage_partition_id)
+    .fetch_one(session_store.pool())
+    .await
+    .expect("count remaining digest rows");
+    assert_eq!(remaining_digests, 0);
+    let remaining_lineage = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM moa.retrieval_lineage WHERE storage_partition_id = $1",
+    )
+    .bind(&storage_partition_id)
+    .fetch_one(session_store.pool())
+    .await
+    .expect("count remaining lineage rows");
+    assert_eq!(remaining_lineage, 0);
+
+    // A re-run is idempotent: nothing remains to delete.
+    let digests_deleted_again =
+        delete_subject_digests(session_store.pool(), tenant_id, &subject_user_id)
+            .await
+            .expect("re-run digest deletion");
+    assert_eq!(digests_deleted_again, 0);
+
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+async fn seed_digest_row(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    contact_id: ContactId,
+    storage_partition_id: &str,
+) {
+    let mut conn = ScopedConn::begin_contact(pool, tenant_id, contact_id)
+        .await
+        .expect("begin contact-scoped digest seed");
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(conn.as_mut())
+        .await
+        .expect("set app role for digest seed");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.memory_digests
+            (storage_partition_id, user_id, content, version, updated_at)
+        VALUES ($1, $2, $3, 1, now())
+        "#,
+    )
+    .bind(storage_partition_id)
+    .bind(contact_id.to_string())
+    .bind("What I know about this contact:\n- prefers dark mode\n")
+    .execute(conn.as_mut())
+    .await
+    .expect("seed memory digest row");
+    conn.commit().await.expect("commit digest seed");
+}
+
+async fn seed_lineage_row(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    contact_id: ContactId,
+    storage_partition_id: &str,
+) {
+    let mut conn = ScopedConn::begin_contact(pool, tenant_id, contact_id)
+        .await
+        .expect("begin contact-scoped lineage seed");
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(conn.as_mut())
+        .await
+        .expect("set app role for lineage seed");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.retrieval_lineage
+            (storage_partition_id, user_id, session_id, turn_seq, uid, rank, retrieved_at)
+        VALUES ($1, $2, $3, 1, $4, 1, now())
+        "#,
+    )
+    .bind(storage_partition_id)
+    .bind(contact_id.to_string())
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .execute(conn.as_mut())
+    .await
+    .expect("seed retrieval lineage row");
+    conn.commit().await.expect("commit lineage seed");
 }
 
 #[tokio::test]

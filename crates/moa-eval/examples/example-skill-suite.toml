@@ -1,5 +1,5 @@
 [suite]
-name = "deploy-to-fly-regression"
+name = "deploy-to-staging-regression"
 description = "Example regression suite for a single skill"
 default_timeout_seconds = 120
 tags = ["skill", "regression"]

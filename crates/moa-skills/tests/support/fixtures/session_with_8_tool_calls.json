@@ -1,5 +1,5 @@
 {
-  "comment": "Fixture: successful session with exactly five tool calls; proves the distillation threshold admits real multi-step runs.",
+  "comment": "Fixture: successful session with exactly eight tool calls; proves the distillation threshold admits real multi-step runs.",
   "session_id": "018f1a30-0000-7000-8000-000000000015",
   "storage_partition_id": "skills-distillation-workspace",
   "user_id": "skills-user",
@@ -9,7 +9,10 @@
     { "tool_name": "bash", "input": { "cmd": "cargo test auth_refresh" }, "output": "failing auth refresh test" },
     { "tool_name": "file_search", "input": { "query": "refresh token" }, "output": "found refresh handler" },
     { "tool_name": "file_read", "input": { "path": "auth.rs" }, "output": "refresh handler source" },
+    { "tool_name": "grep", "input": { "pattern": "refresh_token" }, "output": "call sites listed" },
     { "tool_name": "file_write", "input": { "path": "auth.rs" }, "output": "patched refresh handler" },
-    { "tool_name": "bash", "input": { "cmd": "cargo test auth_refresh" }, "output": "auth refresh test passed" }
+    { "tool_name": "bash", "input": { "cmd": "cargo build" }, "output": "build succeeded" },
+    { "tool_name": "bash", "input": { "cmd": "cargo test auth_refresh" }, "output": "auth refresh test passed" },
+    { "tool_name": "bash", "input": { "cmd": "cargo clippy" }, "output": "clippy clean" }
   ]
 }

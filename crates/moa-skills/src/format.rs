@@ -275,17 +275,17 @@ mod tests {
     use super::{SkillDocument, parse_skill_markdown, render_skill_markdown, slugify_skill_name};
 
     const VALID_SKILL: &str = r#"---
-name: deploy-to-fly
-description: "Deploy applications to Fly.io staging and production"
-compatibility: "Requires flyctl auth and repo write access"
+name: deploy-to-staging
+description: "Deploy applications to a staging and production environment"
+compatibility: "Requires deploy auth and repo write access"
 allowed-tools: bash file_read
 metadata:
   moa-version: "1.2"
-  moa-tags: "deployment, fly, devops"
+  moa-tags: "deployment, staging, devops"
   moa-estimated-tokens: "1200"
 ---
 
-# Deploy to Fly.io
+# Deploy to Staging
 
 Run the deploy flow.
 "#;
@@ -294,10 +294,10 @@ Run the deploy flow.
     fn parses_valid_skill_markdown() {
         let skill = parse_skill_markdown(VALID_SKILL).unwrap();
 
-        assert_eq!(skill.frontmatter.name, "deploy-to-fly");
+        assert_eq!(skill.frontmatter.name, "deploy-to-staging");
         assert_eq!(
             skill.frontmatter.tags(),
-            vec!["deployment", "fly", "devops"]
+            vec!["deployment", "staging", "devops"]
         );
         assert_eq!(skill.frontmatter.allowed_tools, vec!["bash", "file_read"]);
         assert_eq!(skill.frontmatter.estimated_tokens(&skill.body), 1200);
@@ -388,14 +388,17 @@ metadata:
 
     #[test]
     fn slugifies_skill_names_consistently() {
-        assert_eq!(slugify_skill_name("Deploy to Fly.io"), "deploy-to-fly-io");
+        assert_eq!(
+            slugify_skill_name("Deploy to Staging 2.0"),
+            "deploy-to-staging-2-0"
+        );
     }
 
     #[test]
     fn builds_sandbox_skill_path() {
         assert_eq!(
-            super::build_skill_path("Deploy to Fly.io"),
-            ".moa/skills/deploy-to-fly-io/SKILL.md"
+            super::build_skill_path("Deploy to Staging 2.0"),
+            ".moa/skills/deploy-to-staging-2-0/SKILL.md"
         );
     }
 
@@ -408,12 +411,12 @@ metadata:
         })
         .unwrap();
 
-        assert!(rendered.contains("name: deploy-to-fly"));
+        assert!(rendered.contains("name: deploy-to-staging"));
         assert!(rendered.contains("allowed-tools: bash file_read"));
         assert!(
             rendered.contains("moa-version: '1.2'") || rendered.contains("moa-version: \"1.2\"")
         );
-        assert!(rendered.contains("# Deploy to Fly.io"));
+        assert!(rendered.contains("# Deploy to Staging"));
     }
 
     #[test]

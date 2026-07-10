@@ -283,10 +283,13 @@ fn procedure_tool_definition(name: &str) -> Option<ToolDefinition> {
     let (risk_level, action_class, idempotency_class) = match kind {
         // Starting a run creates durable run state; individual side-effecting nodes
         // remain separately action-policy governed inside the procedure executor.
+        // Classified NonIdempotent because the runtime cannot thread a durable
+        // idempotency key through tool invocation and hands recovery, so an
+        // automatic retry after uncertain execution could start a duplicate run.
         Some(ProcedureToolKind::Run) => (
             RiskLevel::Medium,
             ActionClass::LocalWrite,
-            IdempotencyClass::IdempotentWithKey,
+            IdempotencyClass::NonIdempotent,
         ),
         // Polling only reads an existing run projection.
         _ => (

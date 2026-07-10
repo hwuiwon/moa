@@ -500,7 +500,6 @@ async fn create_pending_bash_review(
         session_id: Some(session_id),
         tenant_id: meta.tenant_id,
         user_id: fallback_tool_user_id(&meta),
-        idempotency_key: None,
         trusted_sandbox_manifest: None,
         worker_id: Some("worker-action-policy-e2e".to_string()),
     };

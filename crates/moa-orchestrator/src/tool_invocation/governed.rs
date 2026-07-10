@@ -447,7 +447,6 @@ fn tool_call_request(
         session_id: Some(request.session_id),
         tenant_id: request.session.tenant_id,
         user_id: storage_user_id(request.session),
-        idempotency_key: invocation.id.clone(),
         trusted_sandbox_manifest: request.trusted_sandbox_manifest.cloned(),
         worker_id: match request.origin {
             GovernedInvocationOrigin::RootTurn => None,
@@ -737,10 +736,6 @@ mod tests {
         assert_eq!(tool_request.session_id, Some(session.id));
         assert_eq!(tool_request.tenant_id, session.tenant_id);
         assert_eq!(tool_request.user_id, UserId::new(contact_id.to_string()));
-        assert_eq!(
-            tool_request.idempotency_key.as_deref(),
-            Some("provider-tool-1")
-        );
         assert_eq!(tool_request.trusted_sandbox_manifest, None);
         assert_eq!(tool_request.worker_id, None);
     }

@@ -1,8 +1,17 @@
 //! Shared session-lifecycle rules used by multiple orchestrator adapters.
 
-use crate::{Event, EventRecord, SessionMeta, SessionStatus};
+use crate::{EventRecord, ProcessingEffect, SessionMeta, SessionStatus};
 
 /// Returns whether the persisted session log indicates more work is required.
+///
+/// The tail is scanned newest-first and each event is classified by
+/// [`crate::Event::processing_effect`]. [`ProcessingEffect::Neutral`] events —
+/// passive telemetry, liveness, enrichment, and lifecycle breadcrumbs, several
+/// of which are appended asynchronously off the turn path — are skipped so they
+/// cannot mask an older trigger. The first non-neutral event decides:
+/// [`ProcessingEffect::Trigger`] means a model turn is pending;
+/// [`ProcessingEffect::Terminal`] means the loop has concluded or is suspended.
+/// A tail of only neutral events (or an empty tail) requires no processing.
 pub fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]) -> bool {
     if matches!(session.status, SessionStatus::Cancelled) {
         return false;
@@ -11,33 +20,10 @@ pub fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]
     events
         .iter()
         .rev()
-        .find_map(|record| match record.event {
-            Event::SessionStatusChanged { .. }
-            | Event::Warning { .. }
-            | Event::ProgressUpdate { .. }
-            | Event::GuardrailCheck { .. }
-            | Event::MemoryWrite { .. }
-            | Event::HandDestroyed { .. }
-            | Event::HandError { .. }
-            | Event::Checkpoint { .. }
-            | Event::QueuedMessage { .. }
-            | Event::WorkerStatusChanged { .. }
-            | Event::WorkerNotificationDelivered { .. }
-            | Event::WorkerSignalReceived { .. }
-            | Event::WorkerResultBundle { .. } => None,
-            Event::UserMessage { .. }
-            | Event::ToolResult { .. }
-            | Event::ToolError { .. }
-            | Event::ToolCall { .. }
-            // A guarded coordinator resume seeds its instruction via this control event
-            // (not a fake user message), so a trailing resume request must drive the loop.
-            | Event::WorkerParentResumeRequested { .. }
-            // Completed deterministic auto-delegation similarly seeds a synthesis turn via
-            // this control event, not another fake user message.
-            | Event::WorkerResultSynthesisRequested { .. } => Some(true),
-            // Action reviews are tenant-admin state and do not resume the turn loop by themselves.
-            Event::ActionReviewRequested { .. } | Event::ActionReviewDecided { .. } => Some(false),
-            _ => Some(false),
+        .find_map(|record| match record.event.processing_effect() {
+            ProcessingEffect::Neutral => None,
+            ProcessingEffect::Trigger => Some(true),
+            ProcessingEffect::Terminal => Some(false),
         })
         .unwrap_or(false)
 }
@@ -47,9 +33,12 @@ mod tests {
     use chrono::Utc;
     use uuid::Uuid;
 
+    use std::time::Duration;
+
     use crate::{
         AgentSignalId, ChildSignalKind, Event, EventRecord, EventType, GuardrailDirection,
-        GuardrailMode, InputAudience, ModelId, SessionId, SessionMeta, SignalSeverity, WorkerState,
+        GuardrailMode, InputAudience, ModelId, ModelTier, NarrationSource, SessionId, SessionMeta,
+        SignalSeverity, ToolCallId, ToolOutput, WorkerState,
     };
 
     use super::session_requires_processing;
@@ -67,6 +56,111 @@ mod tests {
             hand_id: None,
             token_count: None,
         }
+    }
+
+    fn tool_result_event() -> Event {
+        Event::ToolResult {
+            tool_id: ToolCallId::new(),
+            provider_tool_use_id: None,
+            output: ToolOutput::text("done", Duration::from_millis(5)),
+            original_output_tokens: None,
+            success: true,
+            duration_ms: 5,
+        }
+    }
+
+    fn brain_response_event() -> Event {
+        Event::BrainResponse {
+            text: "all set".to_string(),
+            thought_signature: None,
+            model: ModelId::new("anthropic:claude-sonnet-4-6"),
+            model_tier: ModelTier::Main,
+            input_tokens_uncached: 1,
+            input_tokens_cache_write: 0,
+            input_tokens_cache_read: 0,
+            output_tokens: 1,
+            cost_cents: 0,
+            duration_ms: 1,
+        }
+    }
+
+    fn progress_narrated_event() -> Event {
+        Event::ProgressNarrated {
+            source: NarrationSource::Coordinator,
+            text: "still working".to_string(),
+            segments: Vec::new(),
+            model: "none".to_string(),
+            tokens_used: 0,
+        }
+    }
+
+    fn stale_heartbeat_event() -> Event {
+        Event::WorkerHeartbeatStale {
+            worker_id: "worker-1".to_string(),
+            last_heartbeat_at: Utc::now(),
+            threshold_ms: 30_000,
+        }
+    }
+
+    #[test]
+    fn detached_narration_does_not_mask_pending_tool_result() {
+        // Pins: F04 — default-on `ProgressNarrated` is appended by a detached job that can
+        // land just after a `ToolResult`. It must not end the tool loop with work pending.
+        let session = SessionMeta::default();
+        let events = vec![
+            record(1, tool_result_event()),
+            record(2, progress_narrated_event()),
+        ];
+
+        assert!(session_requires_processing(&session, &events));
+        assert_eq!(events[1].event_type, EventType::ProgressNarrated);
+    }
+
+    #[test]
+    fn stale_heartbeat_does_not_mask_pending_tool_result() {
+        // Pins: F04 — the async watchdog `WorkerHeartbeatStale` is a second asynchronously
+        // appended vector and must not mask a pending `ToolResult`.
+        let session = SessionMeta::default();
+        let events = vec![
+            record(1, tool_result_event()),
+            record(2, stale_heartbeat_event()),
+        ];
+
+        assert!(session_requires_processing(&session, &events));
+        assert_eq!(events[1].event_type, EventType::WorkerHeartbeatStale);
+    }
+
+    #[test]
+    fn terminal_brain_response_requires_no_processing() {
+        // Pins: a completed assistant response ends the turn loop even when passive
+        // telemetry (`ProgressNarrated`) is appended after it.
+        let session = SessionMeta::default();
+        let events = vec![
+            record(
+                1,
+                Event::UserMessage {
+                    text: "hello".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            record(2, brain_response_event()),
+            record(3, progress_narrated_event()),
+        ];
+
+        assert!(!session_requires_processing(&session, &events));
+    }
+
+    #[test]
+    fn neutral_only_tail_requires_no_processing() {
+        // Pins: a tail of only passive liveness/telemetry events requires no turn, so a
+        // late async append on an otherwise-idle session does not resurrect the loop.
+        let session = SessionMeta::default();
+        let events = vec![
+            record(1, stale_heartbeat_event()),
+            record(2, progress_narrated_event()),
+        ];
+
+        assert!(!session_requires_processing(&session, &events));
     }
 
     #[test]

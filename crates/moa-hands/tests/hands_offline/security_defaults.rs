@@ -4,11 +4,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_core::{
-    ActionClass, ActionPolicyEffect, BuiltInTool, CloudHandsConfig, IdempotencyClass, MoaConfig,
-    MoaError, ModelId, Result, RiskLevel, SessionMeta, TenantId, ToolContext, ToolDiffStrategy,
-    ToolInputShape, ToolInvocation, ToolOutput, ToolPolicySpec,
+    ActionClass, ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, BuiltInTool,
+    CloudHandsConfig, IdempotencyClass, MoaConfig, MoaError, ModelId, Result, RiskLevel,
+    SessionMeta, TenantId, ToolContext, ToolDiffStrategy, ToolInputShape, ToolInvocation,
+    ToolOutput, ToolPolicySpec, UserId,
 };
-use moa_hands::{ToolRegistry, ToolRouter};
+use moa_hands::{McpDiscoveredTool, ToolRegistry, ToolRouter};
+use moa_security::ActionPolicyRuleStore;
 use opentelemetry::Value;
 use opentelemetry::trace::{Status, TracerProvider as _};
 use opentelemetry_sdk::trace::{
@@ -393,4 +395,125 @@ async fn local_hand_error_output_spans_redact_bodies_by_default() {
         Some(TOOL_ERROR_OUTPUT_STATUS)
     );
     assert_spans_do_not_contain(&spans, &[ERROR_SECRET]);
+}
+
+/// In-memory action-policy rule store returning fixed rules for a tool.
+struct StaticRuleStore {
+    rules: Vec<ActionPolicyRule>,
+}
+
+#[async_trait]
+impl ActionPolicyRuleStore for StaticRuleStore {
+    async fn list_action_policy_rules_for_tool(
+        &self,
+        _tenant_id: &TenantId,
+        _user_id: &UserId,
+        tool: &str,
+    ) -> Result<Vec<ActionPolicyRule>> {
+        Ok(self
+            .rules
+            .iter()
+            .filter(|rule| rule.tool == tool)
+            .cloned()
+            .collect())
+    }
+
+    async fn upsert_action_policy_rule(&self, _rule: ActionPolicyRule) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_action_policy_rule(
+        &self,
+        _tenant_id: &TenantId,
+        _user_id: Option<&UserId>,
+        _tool: &str,
+        _pattern: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
+fn discovered_mcp_tool(name: &str) -> McpDiscoveredTool {
+    McpDiscoveredTool {
+        name: name.to_string(),
+        description: "third-party MCP tool".to_string(),
+        input_schema: json!({ "type": "object" }),
+    }
+}
+
+fn mcp_invocation(name: &str) -> ToolInvocation {
+    ToolInvocation {
+        id: None,
+        name: name.to_string(),
+        input: json!({}),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mcp_tool_defaults_to_admin_review() {
+    // Pins: an MCP/third-party tool has no considered per-tool descriptor gate, so it
+    // resolves to AdminReview by default instead of a bare allow — unvetted external
+    // code must not execute unattended.
+    let mut registry = ToolRegistry::new();
+    registry
+        .register_mcp_tool("external-server", discovered_mcp_tool("external_action"))
+        .expect("register mcp tool");
+    let router = ToolRouter::new(registry, HashMap::new());
+
+    let check = router
+        .check_policy(&session(), &mcp_invocation("external_action"))
+        .await
+        .expect("policy check for mcp tool");
+
+    assert_eq!(check.effect, ActionPolicyEffect::AdminReview);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn builtin_tool_keeps_its_descriptor_default_effect() {
+    // Pins: the MCP admin-review default does not change builtin tools, which keep their
+    // own considered descriptor default (SecretErrorTool declares Allow).
+    let mut registry = ToolRegistry::new();
+    registry.register_builtin(Arc::new(SecretErrorTool));
+    let router = ToolRouter::new(registry, HashMap::new());
+
+    let check = router
+        .check_policy(&session(), &mcp_invocation("secret_error"))
+        .await
+        .expect("policy check for builtin tool");
+
+    assert_eq!(check.effect, ActionPolicyEffect::Allow);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn explicitly_allowed_mcp_tool_resolves_to_allow() {
+    // Pins: an explicit operator allow rule overrides the MCP admin-review default, so
+    // operator config still wins over the new secure default.
+    let session = session();
+    let mut registry = ToolRegistry::new();
+    registry
+        .register_mcp_tool("external-server", discovered_mcp_tool("external_action"))
+        .expect("register mcp tool");
+    let allow_rule = ActionPolicyRule {
+        id: uuid::Uuid::now_v7(),
+        scope: ActionRuleScope::Tenant {
+            tenant_id: session.tenant_id,
+        },
+        tool: "external_action".to_string(),
+        pattern: "*".to_string(),
+        effect: ActionPolicyEffect::Allow,
+        reason: Some("operator trusts this MCP tool".to_string()),
+        created_by: UserId::new("admin"),
+        created_at: chrono::Utc::now(),
+    };
+    let router =
+        ToolRouter::new(registry, HashMap::new()).with_rule_store(Arc::new(StaticRuleStore {
+            rules: vec![allow_rule],
+        }));
+
+    let check = router
+        .check_policy(&session, &mcp_invocation("external_action"))
+        .await
+        .expect("policy check for allowed mcp tool");
+
+    assert_eq!(check.effect, ActionPolicyEffect::Allow);
 }

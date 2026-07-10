@@ -550,8 +550,7 @@ async fn ingest_articles(
     let vector_backend =
         vector_factory.transactional_graph_backend(pool.clone(), scope.clone(), true);
     let graph_store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope.clone())
-        .with_vector_store(vector_backend.vector_store())
-        .with_vector_post_commit_sync(vector_backend.post_commit_sync());
+        .with_vector_store(vector_backend.vector_store());
     let graph_writer = Arc::new(MemoryKnowledgeGraphWriter::new(
         Arc::new(graph_store),
         MemoryScope::Tenant { tenant_id },

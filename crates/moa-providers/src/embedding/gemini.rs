@@ -11,12 +11,13 @@ use moa_core::{MoaError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_EMBEDDING_CONCURRENCY};
+use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_MAX_IN_FLIGHT};
 use crate::core::http::{
     build_json_http_client, decode_json_response, validate_embedding_count,
     validate_embedding_dimension,
 };
 use crate::core::pacer::{PacerConfig, RatePacer};
+use crate::core::rate_guard;
 
 const GEMINI_ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta";
 pub(super) const GEMINI_V2_MODEL: &str = "gemini-embedding-2";
@@ -69,7 +70,7 @@ impl GeminiEmbeddingEmbedder {
             role,
             // Pacing off by default; Gemini limits are tier-specific.
             pacer: RatePacer::new(PacerConfig::disabled()),
-            limiter: ConcurrencyLimiter::new(DEFAULT_EMBEDDING_CONCURRENCY),
+            limiter: ConcurrencyLimiter::new(DEFAULT_MAX_IN_FLIGHT),
         })
     }
 
@@ -89,6 +90,12 @@ impl GeminiEmbeddingEmbedder {
 
     /// Overrides the in-flight concurrency ceiling for embedding requests.
     #[must_use]
+    /// Replaces the in-flight concurrency limiter (config-driven or global).
+    pub(crate) fn with_limiter(mut self, limiter: ConcurrencyLimiter) -> Self {
+        self.limiter = limiter;
+        self
+    }
+
     pub fn with_max_concurrent_requests(mut self, max_in_flight: usize) -> Self {
         self.limiter = ConcurrencyLimiter::new(max_in_flight);
         self
@@ -100,7 +107,14 @@ impl GeminiEmbeddingEmbedder {
     /// embeddings preserve request order one-to-one with `texts`.
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         // In-flight slot first, then rate budget (see `ConcurrencyLimiter`).
-        let _permit = self.limiter.acquire().await;
+        let _permit = match self.limiter.acquire().await {
+            Some(lease) => lease,
+            None => {
+                return Err(rate_guard::rate_limited_saturated(
+                    self.limiter.block_threshold(),
+                ));
+            }
+        };
         self.pacer.acquire(1, texts.len() as u32).await;
         let requests = texts
             .iter()

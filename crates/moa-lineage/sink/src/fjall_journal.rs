@@ -102,6 +102,25 @@ impl Journal {
         self.partition.approximate_len()
     }
 
+    /// Returns the lowest-sequence pending entry, or `None` when the journal is empty.
+    ///
+    /// Used to report the oldest unacknowledged row's age. The scan starts at
+    /// sequence 0 and takes the first key, so it is bounded by the index seek
+    /// rather than the full pending set.
+    pub fn oldest_entry(&self) -> Result<Option<(u64, Vec<u8>)>> {
+        let read_tx = self.keyspace.read_tx();
+        let start = 0_u64.to_be_bytes();
+        let Some(kv) = read_tx.range(&self.partition, start..).next() else {
+            return Ok(None);
+        };
+        let (key, value) = kv.into_inner()?;
+        let bytes: [u8; 8] = key
+            .as_ref()
+            .try_into()
+            .map_err(|_| Error::InvalidJournalKey)?;
+        Ok(Some((u64::from_be_bytes(bytes), value.to_vec())))
+    }
+
     /// Returns the number of durability syncs issued so far.
     ///
     /// Exposed so group-commit tests can assert that a batch append performs exactly one sync.

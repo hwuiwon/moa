@@ -96,7 +96,12 @@ pub struct ContactTokenConfig {
     pub contact_point_hash_key_hex: String,
     /// TTL for unverified contact tokens.
     pub unverified_ttl_seconds: i64,
-    /// TTL for verified contact tokens.
+    /// TTL for verified contact tokens, in seconds.
+    ///
+    /// Contact-token verification is stateless (no jti denylist), so this TTL is
+    /// the effective revocation window: a leaked or revoked token remains usable
+    /// until it expires. Keep it short. A jti denylist would decouple revocation
+    /// from the TTL (follow-up, not implemented).
     pub verified_ttl_seconds: i64,
     /// TTL for one-time verification challenges.
     pub verification_ttl_seconds: i64,
@@ -112,7 +117,8 @@ impl Default for ContactTokenConfig {
             public_key_pem: String::new(),
             contact_point_hash_key_hex: String::new(),
             unverified_ttl_seconds: 3600,
-            verified_ttl_seconds: 86_400,
+            // 2h: the TTL bounds the stateless revocation window (see field doc).
+            verified_ttl_seconds: 7_200,
             verification_ttl_seconds: 600,
         }
     }

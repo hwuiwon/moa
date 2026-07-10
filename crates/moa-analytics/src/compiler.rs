@@ -729,7 +729,15 @@ mod tests {
                 aggregation: AnalyticsAggregation::P95,
                 alias: Some("p95_cost".to_string()),
             }],
-            filters: Vec::new(),
+            // Time-series datasets require a bounded window; a recent lower bound
+            // keeps the shared fixture valid against the wall clock.
+            filters: vec![AnalyticsFilter {
+                field: "finished_at".to_string(),
+                operator: AnalyticsFilterOperator::Gte,
+                value: Some(AnalyticsCell::String(
+                    (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339(),
+                )),
+            }],
             order_by: vec![AnalyticsOrderBy {
                 field: "p95_cost".to_string(),
                 direction: AnalyticsSortDirection::Desc,
@@ -748,7 +756,8 @@ mod tests {
         assert!(compiled.sql.contains("d.tenant_id = $1::UUID"));
         assert!(compiled.sql.contains("PERCENTILE_CONT(0.95)"));
         assert!(compiled.sql.contains("ORDER BY c1 DESC"));
-        assert_eq!(compiled.bind_values.len(), 1);
+        // Tenant scope bind plus the required time-window lower bound.
+        assert_eq!(compiled.bind_values.len(), 2);
         assert_eq!(compiled.limit, 25);
     }
 

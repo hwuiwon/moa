@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use moa_core::MoaConfig;
 use moa_core::RlsContext;
 use moa_db::ScopedConn;
-use moa_memory_graph::{GraphStore, NodeIndexRow, NodeLabel};
+use moa_memory_graph::{GraphError, GraphStore, NodeIndexRow, NodeLabel};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{Error as VectorError, PgvectorStore, TurbopufferStore};
 use moa_providers::{ConfiguredReranker, Reranker, build_reranker_from_config};
@@ -20,14 +20,14 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::planning::Strategy;
+use crate::retrieval::enrichment::EnrichmentHandle;
 use crate::retrieval::graph_seed::{
     GraphSeedPlan, hydrate_graph_seed_rows, interim_graph_seed_plan, semantic_entity_seed_uids,
 };
 use crate::retrieval::legs::{
     GRAPH_BUDGET, GRAPH_WEIGHT, LEXICAL_BUDGET, LEXICAL_WEIGHT, LegCandidate, RRF_K, VECTOR_BUDGET,
-    VECTOR_WEIGHT, bump_last_accessed, graph_expansion_leg_with_diagnostics, hydrate_nodes,
-    lexical_leg, rrf_fuse, timed_leg, turbopuffer_bm25_leg, vector_leg as run_vector_leg,
-    walk_scoring, write_retrieval_lineage,
+    VECTOR_WEIGHT, graph_expansion_leg_with_diagnostics, hydrate_nodes, lexical_leg, rrf_fuse,
+    timed_leg, turbopuffer_bm25_leg, vector_leg as run_vector_leg, walk_scoring,
 };
 use crate::retrieval::policy::{GraphRetrievalPolicy, effective_graph_policy};
 use crate::retrieval::ranking::{
@@ -61,6 +61,7 @@ pub struct HybridRetriever {
     lineage_enabled: bool,
     lineage_sample_rate: f64,
     graph_policy: GraphRetrievalPolicy,
+    enrichment: Option<EnrichmentHandle>,
 }
 
 /// Deterministically decides whether one turn's retrieval writes lineage rows.
@@ -108,7 +109,17 @@ impl HybridRetriever {
             lineage_enabled: false,
             lineage_sample_rate: 1.0,
             graph_policy: GraphRetrievalPolicy::default(),
+            enrichment: None,
         }
+    }
+
+    /// Attaches the shared bounded enrichment worker used for post-retrieval
+    /// `last_accessed_at` bumps and sampled lineage writes. When absent, those
+    /// best-effort writes are skipped.
+    #[must_use]
+    pub(crate) fn with_enrichment(mut self, enrichment: Option<EnrichmentHandle>) -> Self {
+        self.enrichment = enrichment;
+        self
     }
 
     /// Creates a hybrid retriever from shared config.
@@ -241,9 +252,13 @@ impl HybridRetriever {
             LEXICAL_BUDGET,
             self.lexical_leg(&req, &backend_state),
         );
-        let (vector_hits, lexical_hits) = tokio::join!(vector_future, lexical_future);
-        let mut vector_hits = vector_hits?;
-        let mut lexical_hits = lexical_hits?;
+        let (vector_outcome, lexical_outcome) = tokio::join!(vector_future, lexical_future);
+        // Reduce each leg to its usable hits: a fatal error aborts, a transient
+        // error or timeout degrades to empty while the peer leg's hits are kept.
+        let vector_leg = reduce_leg("vector", vector_outcome)?;
+        let vector_timed_out = vector_leg.timed_out;
+        let mut vector_hits = vector_leg.value;
+        let mut lexical_hits = reduce_leg("lexical", lexical_outcome)?.value;
         apply_lexical_boost_only_policy(&req, &vector_hits, &mut lexical_hits);
         let interim = rrf_fuse(
             &[],
@@ -284,7 +299,7 @@ impl HybridRetriever {
             Default::default()
         } else {
             let graph_started = std::time::Instant::now();
-            let mut output = run_leg(
+            let graph_outcome = run_leg(
                 req.disable_leg_timeouts,
                 "graph",
                 GRAPH_BUDGET,
@@ -299,7 +314,8 @@ impl HybridRetriever {
                     self.ranking_config.graph_rescue_evidence_floor,
                 ),
             )
-            .await?;
+            .await;
+            let mut output = reduce_leg("graph", graph_outcome)?.value;
             output.diagnostics.graph_latency_ms = duration_ms_u64(graph_started.elapsed());
             output
         };
@@ -320,12 +336,21 @@ impl HybridRetriever {
         if fused.is_empty()
             && should_retry_vector_after_empty_fusion(
                 &req,
-                &vector_hits,
+                vector_timed_out,
                 &lexical_hits.candidates,
                 &graph_hits,
             )
         {
-            vector_hits = self.vector_leg(&req, &backend_state).await?;
+            // Retry only an observed timeout, and under the same leg budget so a
+            // slow backend cannot turn one bounded timeout into an uncapped tail.
+            let retry_outcome = run_leg(
+                req.disable_leg_timeouts,
+                "vector",
+                VECTOR_BUDGET,
+                self.vector_leg(&req, &backend_state),
+            )
+            .await;
+            vector_hits = reduce_leg("vector", retry_outcome)?.value;
             fused = rrf_fuse(
                 &graph_hits,
                 &vector_hits,
@@ -379,45 +404,35 @@ impl HybridRetriever {
         metrics::histogram!("moa_retrieval_rrf_rerank_seconds")
             .record(fusion_started.elapsed().as_secs_f64());
 
-        if req.ranking_reference_time.is_none() {
-            let touched_uids = final_hits.iter().map(|hit| hit.uid).collect::<Vec<_>>();
-            let pool = self.pool.clone();
-            let scope = req.scope.clone();
-            let assume_app_role = self.assume_app_role;
-            tokio::spawn(async move {
-                if let Err(error) =
-                    bump_last_accessed(pool, scope, touched_uids, assume_app_role).await
-                {
-                    tracing::debug!(error = %error, "failed to bump graph-memory access timestamps");
-                }
-            });
-        }
-        if self.lineage_enabled
-            && let Some(lineage) = req.lineage
-            && lineage_turn_sampled(&lineage, self.lineage_sample_rate)
-        {
-            let ranked_hits = final_hits
-                .iter()
-                .map(RetrievalLineageHit::from_hit)
-                .collect::<Vec<_>>();
-            let pool = self.pool.clone();
-            let scope = req.scope.clone();
-            let assume_app_role = self.assume_app_role;
-            let retrieved_at = Utc::now();
-            tokio::spawn(async move {
-                if let Err(error) = write_retrieval_lineage(
-                    pool,
-                    scope,
+        // F20: post-retrieval enrichment is best-effort and is routed through the
+        // shared bounded worker (coalesced, drop-on-overflow, drained on shutdown)
+        // instead of an unbounded detached task per retrieval. When no worker is
+        // configured (unit/eval retrievers) the writes are simply skipped.
+        if let Some(enrichment) = &self.enrichment {
+            if req.ranking_reference_time.is_none() {
+                let touched_uids = final_hits.iter().map(|hit| hit.uid).collect::<Vec<_>>();
+                enrichment.enqueue_access_bump(
+                    req.scope.clone(),
+                    touched_uids,
+                    self.assume_app_role,
+                );
+            }
+            if self.lineage_enabled
+                && let Some(lineage) = req.lineage
+                && lineage_turn_sampled(&lineage, self.lineage_sample_rate)
+            {
+                let ranked_hits = final_hits
+                    .iter()
+                    .map(RetrievalLineageHit::from_hit)
+                    .collect::<Vec<_>>();
+                enrichment.enqueue_lineage(
+                    req.scope.clone(),
                     lineage,
                     ranked_hits,
-                    retrieved_at,
-                    assume_app_role,
-                )
-                .await
-                {
-                    tracing::debug!(error = %error, "failed to write graph-memory retrieval lineage");
-                }
-            });
+                    Utc::now(),
+                    self.assume_app_role,
+                );
+            }
         }
 
         Ok(RetrievalOutput {
@@ -562,11 +577,24 @@ impl HybridRetriever {
         hits: &[RetrievalHit],
     ) -> Result<Vec<RetrievalHit>> {
         let documents = hits.iter().map(rerank_document).collect::<Vec<_>>();
-        let reranked = self
+        let reranked = match self
             .reranker
             .rerank(&self.rerank_model, &req.query_text, &documents, req.k_final)
             .await
-            .map_err(|error| RetrievalError::Rerank(error.to_string()))?;
+        {
+            Ok(reranked) => reranked,
+            // Reranking is a best-effort refinement over already-fused hits: a
+            // provider failure must not abort otherwise-usable results. Fall back
+            // to the fused pre-rerank order, mirroring the empty-output fallback.
+            Err(error) => {
+                record_leg_degraded("rerank", "error");
+                tracing::warn!(
+                    error = %error,
+                    "reranker failed; falling back to fused pre-rerank order"
+                );
+                return Ok(hits.iter().take(req.k_final).cloned().collect());
+            }
+        };
         let mut out = Vec::with_capacity(req.k_final.min(reranked.len()));
         for hit in reranked {
             if let Some(candidate) = hits.get(hit.index) {
@@ -592,13 +620,16 @@ fn fused_candidate_limit(k_final: usize) -> usize {
 
 fn should_retry_vector_after_empty_fusion(
     req: &RetrievalRequest,
-    vector_hits: &[LegCandidate],
+    vector_timed_out: bool,
     lexical_hits: &[LegCandidate],
     graph_hits: &[LegCandidate],
 ) -> bool {
+    // Retry only when the vector leg specifically timed out: a genuinely empty
+    // vector result (or a degraded transient failure) is not masking candidates,
+    // so re-running it would only duplicate work.
     !req.disable_leg_timeouts
         && !req.query_embedding.is_empty()
-        && vector_hits.is_empty()
+        && vector_timed_out
         && lexical_hits.is_empty()
         && graph_hits.is_empty()
 }
@@ -777,20 +808,160 @@ fn weights_for(strategy: Strategy) -> (f64, f64, f64) {
     }
 }
 
-fn leg_or_empty<T>(
-    name: &'static str,
-    result: std::result::Result<Result<T>, tokio::time::error::Elapsed>,
-) -> Result<T>
-where
-    T: Default,
-{
-    match result {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(error)) => Err(error),
-        Err(_) => {
-            tracing::debug!(leg = name, "hybrid retrieval leg exceeded budget");
-            Ok(T::default())
+/// Classified outcome of one retrieval leg.
+///
+/// Threads the *reason* a leg produced no usable hits — instead of collapsing
+/// every non-success into an empty default — so the caller can keep a
+/// successful peer leg, decide whether a timeout is worth one bounded retry,
+/// and abort only on a fatal (RLS/privacy/scope/invalid-config) error.
+enum LegOutcome<T> {
+    /// The leg completed; `value` may be empty (a genuine empty result).
+    Completed(T),
+    /// The leg exceeded its time budget.
+    Timeout,
+    /// The leg hit a transient optional-backend/provider error; degrade it.
+    Transient(RetrievalError),
+    /// The leg hit an RLS/privacy/scope/invalid-config error; abort retrieval.
+    Fatal(RetrievalError),
+}
+
+/// One leg reduced to its usable value plus degradation signals.
+struct LegDegradation<T> {
+    /// Usable hits (empty when the leg degraded or genuinely returned nothing).
+    value: T,
+    /// Whether the leg degraded (a timeout or transient error, not a real empty).
+    #[allow(dead_code)]
+    degraded: bool,
+    /// Whether the leg specifically timed out; gates the bounded vector retry.
+    timed_out: bool,
+}
+
+/// Reduces a [`LegOutcome`] to usable hits.
+///
+/// A completed leg passes through. A timeout or transient error degrades to an
+/// empty result (recording a metric and warning) so the peer leg's hits are
+/// kept. A fatal error aborts the whole retrieval.
+fn reduce_leg<T: Default>(name: &'static str, outcome: LegOutcome<T>) -> Result<LegDegradation<T>> {
+    match outcome {
+        LegOutcome::Completed(value) => Ok(LegDegradation {
+            value,
+            degraded: false,
+            timed_out: false,
+        }),
+        LegOutcome::Timeout => {
+            record_leg_degraded(name, "timeout");
+            tracing::warn!(
+                leg = name,
+                "hybrid retrieval leg exceeded budget; degrading to empty and keeping peer legs"
+            );
+            Ok(LegDegradation {
+                value: T::default(),
+                degraded: true,
+                timed_out: true,
+            })
         }
+        LegOutcome::Transient(error) => {
+            record_leg_degraded(name, "transient");
+            tracing::warn!(
+                leg = name,
+                error = %error,
+                "hybrid retrieval leg failed transiently; degrading to empty and keeping peer legs"
+            );
+            Ok(LegDegradation {
+                value: T::default(),
+                degraded: true,
+                timed_out: false,
+            })
+        }
+        LegOutcome::Fatal(error) => Err(error),
+    }
+}
+
+fn record_leg_degraded(leg: &'static str, reason: &'static str) {
+    metrics::counter!("moa_retrieval_leg_degraded_total", "leg" => leg, "reason" => reason)
+        .increment(1);
+}
+
+fn classify_leg_result<T>(error: RetrievalError) -> LegOutcome<T> {
+    if is_fatal_retrieval_error(&error) {
+        LegOutcome::Fatal(error)
+    } else {
+        LegOutcome::Transient(error)
+    }
+}
+
+/// Classifies a retrieval error as fatal (abort) or transient (degrade).
+///
+/// Fatal covers RLS/privacy/scope failures and invalid-configuration/contract
+/// errors that will not self-heal and must not be silently degraded. Transient
+/// covers ordinary optional backend, provider, network, and query failures that
+/// should degrade one leg while its peers are kept.
+fn is_fatal_retrieval_error(error: &RetrievalError) -> bool {
+    match error {
+        // Scope/RLS transaction setup failed: privacy boundary, abort.
+        RetrievalError::Scope(_) => true,
+        // A direct sidecar query failure in the fusion/hydration path is an
+        // ordinary backend error.
+        RetrievalError::Sqlx(_) => false,
+        RetrievalError::Graph(error) => is_fatal_graph_error(error),
+        RetrievalError::Vector(error) => is_fatal_vector_error(error),
+    }
+}
+
+fn is_fatal_graph_error(error: &GraphError) -> bool {
+    match error {
+        // RLS/privacy/scope invariants.
+        GraphError::RlsDenied | GraphError::MissingScope | GraphError::Scope(_) => true,
+        // Invalid data/config invariants that will not self-heal.
+        GraphError::MissingEmbeddingMetadata
+        | GraphError::Conflict(_)
+        | GraphError::BiTemporal(_)
+        | GraphError::UnknownNodeLabel(_)
+        | GraphError::UnknownEdgeLabel(_)
+        | GraphError::UnknownPiiClass(_)
+        | GraphError::ChangelogScopeMismatch { .. }
+        | GraphError::InvalidChangelogScope => true,
+        // Ordinary backend/query failures degrade this leg.
+        GraphError::GraphQuery(_)
+        | GraphError::Sidecar(_)
+        | GraphError::NotFound(_)
+        | GraphError::Json(_) => false,
+        // Delegate to the vector classification.
+        GraphError::Vector(error) => is_fatal_vector_error(error),
+    }
+}
+
+fn is_fatal_vector_error(error: &VectorError) -> bool {
+    match error {
+        // Embedding/index shape, privacy, backend-capability, and configuration
+        // invariants: retrying or degrading would hide a real misconfiguration.
+        VectorError::DimensionMismatch { .. }
+        | VectorError::UnknownPiiClass(_)
+        | VectorError::EmbedderConfig(_)
+        | VectorError::EmbedderMismatch { .. }
+        | VectorError::StoragePartitionEmbedderStateMissing { .. }
+        | VectorError::EmbedderModelMismatch { .. }
+        | VectorError::QueryLimitTooLarge(_)
+        | VectorError::StoragePartitionRequired { .. }
+        | VectorError::TurbopufferUnavailable { .. }
+        | VectorError::TurbopufferBaaRequired { .. }
+        | VectorError::TurbopufferConfig(_)
+        | VectorError::PromotionValidationFailed { .. }
+        | VectorError::InvalidPromotionState { .. }
+        | VectorError::TransactionalWritesUnsupported(_)
+        | VectorError::InvalidVectorSyncOperation(_)
+        | VectorError::UnsupportedVectorBackend { .. }
+        | VectorError::UnsupportedQueryFeature { .. } => true,
+        // Transient backend/provider/network/response failures degrade the leg.
+        VectorError::EmbeddingResponseLength { .. }
+        | VectorError::ProviderStatus { .. }
+        | VectorError::VectorProviderStatus { .. }
+        | VectorError::ReembedInProgress { .. }
+        | VectorError::TurbopufferResponse(_)
+        | VectorError::Core(_)
+        | VectorError::Sqlx(_)
+        | VectorError::Reqwest(_)
+        | VectorError::SerdeJson(_) => false,
     }
 }
 
@@ -799,15 +970,22 @@ async fn run_leg<T, F>(
     name: &'static str,
     budget: std::time::Duration,
     future: F,
-) -> Result<T>
+) -> LegOutcome<T>
 where
     T: Default,
     F: std::future::Future<Output = Result<T>>,
 {
     if disable_timeout {
-        return future.await;
+        return match future.await {
+            Ok(value) => LegOutcome::Completed(value),
+            Err(error) => classify_leg_result(error),
+        };
     }
-    leg_or_empty(name, timed_leg(name, budget, future).await)
+    match timed_leg(name, budget, future).await {
+        Ok(Ok(value)) => LegOutcome::Completed(value),
+        Ok(Err(error)) => classify_leg_result(error),
+        Err(_elapsed) => LegOutcome::Timeout,
+    }
 }
 
 fn build_hits(fused: Vec<(Uuid, f64, LegSources)>, nodes: Vec<NodeIndexRow>) -> Vec<RetrievalHit> {
@@ -2366,36 +2544,37 @@ mod tests {
     }
 
     #[test]
-    fn empty_fusion_retries_vector_when_timeout_can_mask_candidates() {
-        // Pins: a timed-out vector leg can otherwise make retrieval return no
-        // candidates for an embedded query; one uncapped vector retry is allowed.
+    fn empty_fusion_retries_vector_only_after_an_observed_timeout() {
+        // Pins: F09 — a timed-out vector leg can mask candidates for an embedded
+        // query, so exactly one bounded retry is allowed. A genuinely empty (or
+        // transiently degraded) vector leg is NOT retried, avoiding duplicate work.
         let req = vector_request();
 
-        assert!(should_retry_vector_after_empty_fusion(&req, &[], &[], &[]));
+        assert!(should_retry_vector_after_empty_fusion(&req, true, &[], &[]));
+        assert!(!should_retry_vector_after_empty_fusion(
+            &req,
+            false,
+            &[],
+            &[]
+        ));
     }
 
     #[test]
-    fn empty_fusion_vector_retry_stays_off_when_any_leg_has_candidates() {
-        // Pins: the retry is only for complete candidate loss, not for normal
-        // low-recall or graph/lexical-only retrieval states.
+    fn empty_fusion_vector_retry_stays_off_when_a_peer_leg_has_candidates() {
+        // Pins: the timeout retry is only for complete candidate loss, not when
+        // lexical or graph already produced candidates.
         let req = vector_request();
         let candidate = leg_candidate(Uuid::from_u128(1));
 
         assert!(!should_retry_vector_after_empty_fusion(
             &req,
-            &[candidate],
-            &[],
-            &[]
-        ));
-        assert!(!should_retry_vector_after_empty_fusion(
-            &req,
-            &[],
+            true,
             &[candidate],
             &[]
         ));
         assert!(!should_retry_vector_after_empty_fusion(
             &req,
-            &[],
+            true,
             &[],
             &[candidate]
         ));
@@ -2403,12 +2582,168 @@ mod tests {
 
     #[test]
     fn empty_fusion_vector_retry_respects_timeout_override() {
-        // Pins: callers that disabled leg timeouts already asked for uncapped
-        // leg execution, so the empty-fusion retry would only duplicate work.
+        // Pins: callers that disabled leg timeouts asked for uncapped execution,
+        // so there is no bounded timeout to retry.
         let mut req = vector_request();
         req.disable_leg_timeouts = true;
 
-        assert!(!should_retry_vector_after_empty_fusion(&req, &[], &[], &[]));
+        assert!(!should_retry_vector_after_empty_fusion(
+            &req,
+            true,
+            &[],
+            &[]
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_leg_classifies_success_transient_fatal_and_timeout() {
+        // Pins: F09 — run_leg threads the reason a leg produced no hits instead of
+        // collapsing everything to an empty default.
+        let success = run_leg::<Vec<LegCandidate>, _>(false, "vector", VECTOR_BUDGET, async {
+            Ok(vec![leg_candidate(Uuid::from_u128(1))])
+        })
+        .await;
+        assert!(matches!(success, LegOutcome::Completed(ref hits) if hits.len() == 1));
+
+        let transient = run_leg::<Vec<LegCandidate>, _>(false, "vector", VECTOR_BUDGET, async {
+            Err(RetrievalError::Vector(VectorError::VectorProviderStatus {
+                provider: "turbopuffer",
+                status: 503,
+                body: "unavailable".to_string(),
+            }))
+        })
+        .await;
+        assert!(matches!(transient, LegOutcome::Transient(_)));
+
+        let fatal = run_leg::<Vec<LegCandidate>, _>(false, "vector", VECTOR_BUDGET, async {
+            Err(RetrievalError::Vector(
+                VectorError::TurbopufferUnavailable {
+                    storage_partition_id: "sp".to_string(),
+                },
+            ))
+        })
+        .await;
+        assert!(matches!(fatal, LegOutcome::Fatal(_)));
+
+        let timeout = run_leg::<Vec<LegCandidate>, _>(
+            false,
+            "vector",
+            std::time::Duration::from_millis(1),
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                Ok(Vec::new())
+            },
+        )
+        .await;
+        assert!(matches!(timeout, LegOutcome::Timeout));
+    }
+
+    #[test]
+    fn reduce_leg_degrades_transient_and_timeout_but_aborts_fatal() {
+        // Pins: F09 — a transient error or timeout degrades one leg to empty
+        // (keeping peers), while a fatal error aborts. This is the degrade-keeps-
+        // peer decision: mutating the Transient arm to return Err breaks this.
+        let transient = reduce_leg::<Vec<LegCandidate>>(
+            "vector",
+            LegOutcome::Transient(RetrievalError::Vector(VectorError::VectorProviderStatus {
+                provider: "turbopuffer",
+                status: 503,
+                body: "unavailable".to_string(),
+            })),
+        )
+        .expect("a transient leg error must degrade, not abort");
+        assert!(transient.value.is_empty());
+        assert!(transient.degraded);
+        assert!(!transient.timed_out);
+
+        let timeout = reduce_leg::<Vec<LegCandidate>>("vector", LegOutcome::Timeout)
+            .expect("a timed-out leg must degrade, not abort");
+        assert!(timeout.value.is_empty());
+        assert!(timeout.timed_out);
+
+        let completed = reduce_leg::<Vec<LegCandidate>>(
+            "vector",
+            LegOutcome::Completed(vec![leg_candidate(Uuid::from_u128(1))]),
+        )
+        .expect("a completed leg passes through");
+        assert_eq!(completed.value.len(), 1);
+        assert!(!completed.degraded);
+
+        let fatal = reduce_leg::<Vec<LegCandidate>>(
+            "vector",
+            LegOutcome::Fatal(RetrievalError::Scope(moa_core::MoaError::StorageError(
+                "rls setup failed".to_string(),
+            ))),
+        );
+        assert!(fatal.is_err(), "a fatal leg error must abort retrieval");
+    }
+
+    #[test]
+    fn retrieval_error_classification_matches_fatal_transient_table() {
+        // Pins: F09 — RLS/privacy/scope/invalid-config errors are fatal; ordinary
+        // backend/provider/network/query errors are transient.
+        assert!(is_fatal_retrieval_error(&RetrievalError::Scope(
+            moa_core::MoaError::StorageError("scope".to_string())
+        )));
+        assert!(is_fatal_retrieval_error(&RetrievalError::Graph(
+            GraphError::RlsDenied
+        )));
+        assert!(is_fatal_retrieval_error(&RetrievalError::Graph(
+            GraphError::MissingScope
+        )));
+        assert!(is_fatal_retrieval_error(&RetrievalError::Vector(
+            VectorError::TurbopufferBaaRequired {
+                storage_partition_id: "sp".to_string(),
+            }
+        )));
+        assert!(is_fatal_retrieval_error(&RetrievalError::Vector(
+            VectorError::DimensionMismatch {
+                expected: 1024,
+                actual: 768,
+            }
+        )));
+
+        assert!(!is_fatal_retrieval_error(&RetrievalError::Vector(
+            VectorError::VectorProviderStatus {
+                provider: "turbopuffer",
+                status: 503,
+                body: "down".to_string(),
+            }
+        )));
+        assert!(!is_fatal_retrieval_error(&RetrievalError::Vector(
+            VectorError::ReembedInProgress {
+                storage_partition_id: "sp".to_string(),
+            }
+        )));
+        assert!(!is_fatal_retrieval_error(&RetrievalError::Graph(
+            GraphError::GraphQuery("backend hiccup".to_string())
+        )));
+    }
+
+    #[tokio::test]
+    async fn rerank_failure_falls_back_to_fused_pre_rerank_order() {
+        // Pins: F09 — a reranker provider failure must not abort otherwise-usable
+        // fused hits; it degrades to the fused pre-rerank order.
+        let pool = PgPool::connect_lazy("postgres://unused")
+            .expect("lazy pool construction should not connect");
+        let retriever = HybridRetriever::new(
+            pool.clone(),
+            Arc::new(EmptyGraph),
+            lazy_pgvector_source(&pool),
+        )
+        .with_reranker(Arc::new(FailingReranker));
+        let mut req = vector_request();
+        req.k_final = 2;
+        req.use_reranker = true;
+        let first = hit(Uuid::from_u128(1), "workspace", 2.0);
+        let second = hit(Uuid::from_u128(2), "workspace", 1.0);
+
+        let out = retriever
+            .rerank_hits(&req, &[first.clone(), second.clone()])
+            .await
+            .expect("reranker failure must degrade, not abort");
+
+        assert_eq!(out, vec![first, second]);
     }
 
     #[tokio::test]
@@ -2897,6 +3232,23 @@ mod tests {
                     relevance_score: 1.0,
                 })
                 .collect())
+        }
+    }
+
+    struct FailingReranker;
+
+    #[async_trait]
+    impl Reranker for FailingReranker {
+        async fn rerank(
+            &self,
+            _model: &str,
+            _query: &str,
+            _documents: &[String],
+            _top_n: usize,
+        ) -> moa_core::Result<Vec<RerankHit>> {
+            Err(moa_core::MoaError::ProviderError(
+                "injected rerank failure".to_string(),
+            ))
         }
     }
 

@@ -5,6 +5,7 @@ use restate_sdk::prelude::*;
 
 pub mod consolidate;
 pub(crate) mod errors;
+pub(crate) mod experiment_cancel;
 pub(crate) mod experiment_errors;
 pub mod experiment_run;
 pub mod experiment_trial_run;

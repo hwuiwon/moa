@@ -2,6 +2,7 @@
 
 pub mod admission;
 pub mod cache;
+pub(crate) mod enrichment;
 mod graph_seed;
 pub mod hybrid;
 pub mod legs;

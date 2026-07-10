@@ -327,12 +327,6 @@ pub struct CompactionConfig {
     pub recent_turns_verbatim: usize,
     /// Whether old error events must stay verbatim in the compiled view.
     pub preserve_errors: bool,
-    /// Trigger cache-aware trimming when older history exceeds this many blocks.
-    pub tier2_trigger_blocks_past_bp4: usize,
-    /// Trigger summarization when the turn approaches this fraction of the model context window.
-    pub tier3_trigger_fraction: f64,
-    /// Hard ceiling for input tokens per turn after compaction.
-    pub max_input_tokens_per_turn: usize,
 }
 
 impl Default for CompactionConfig {
@@ -343,9 +337,6 @@ impl Default for CompactionConfig {
             token_ratio_threshold: 0.7,
             recent_turns_verbatim: 5,
             preserve_errors: true,
-            tier2_trigger_blocks_past_bp4: 14,
-            tier3_trigger_fraction: 0.9,
-            max_input_tokens_per_turn: 160_000,
         }
     }
 }

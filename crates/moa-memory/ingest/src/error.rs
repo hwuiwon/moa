@@ -27,6 +27,16 @@ pub enum IngestError {
     /// Fact extraction failed.
     #[error("fact extraction: {0}")]
     Extraction(String),
+    /// An embedding provider returned a different number of vectors than inputs,
+    /// violating the provider cardinality contract. The whole batch is rejected
+    /// rather than silently zipped (which would drop or misalign facts).
+    #[error("embedding provider returned {actual} vectors for {expected} inputs")]
+    EmbeddingCardinalityMismatch {
+        /// Number of inputs sent to the embedding provider.
+        expected: usize,
+        /// Number of vectors the provider returned.
+        actual: usize,
+    },
     /// Model-backed memory inference failed.
     #[error("model inference: {0}")]
     ModelInference(String),

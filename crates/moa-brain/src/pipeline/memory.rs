@@ -39,7 +39,7 @@ mod lineage;
 mod rendering;
 
 use lineage::lineage_context_from_context;
-use rendering::{render_memory_context, render_memory_context_with_budget};
+use rendering::render_memory_context_with_budget;
 
 const MEMORY_BUDGET_DIVISOR: usize = 5;
 const GRAPH_MEMORY_RESULTS: usize = 4;
@@ -232,8 +232,11 @@ pub trait ScopedRetrievalRuntimeFactory: Send + Sync {
     ) -> Result<ScopedRetrievalRuntime>;
 }
 
-#[derive(Debug, Default)]
-struct PostgresScopedRetrievalRuntimeFactory;
+struct PostgresScopedRetrievalRuntimeFactory {
+    /// Shared bounded enrichment worker handle, cloned into each scoped
+    /// [`HybridRetriever`]. `None` when constructed outside a Tokio runtime.
+    enrichment: Option<crate::retrieval::enrichment::EnrichmentHandle>,
+}
 
 #[async_trait]
 impl ScopedRetrievalRuntimeFactory for PostgresScopedRetrievalRuntimeFactory {
@@ -264,7 +267,8 @@ impl ScopedRetrievalRuntimeFactory for PostgresScopedRetrievalRuntimeFactory {
                 graph.clone(),
                 pgvector_source,
             )
-            .with_assume_app_role(assume_app_role),
+            .with_assume_app_role(assume_app_role)
+            .with_enrichment(self.enrichment.clone()),
         );
         let cached: Arc<dyn PlannedRetriever> = if assume_app_role {
             Arc::new(crate::retrieval::CachedHybridRetriever::new_for_app_role(
@@ -295,6 +299,12 @@ impl GraphMemoryRetriever {
         pool: PgPool,
         embedder: Option<Arc<dyn EmbeddingProvider>>,
     ) -> Self {
+        // F20: spawn the single shared bounded enrichment worker when a Tokio
+        // runtime is available (production and async tests). Sync callers
+        // (eval/unit setup) get no worker and skip best-effort enrichment.
+        let enrichment = tokio::runtime::Handle::try_current()
+            .ok()
+            .map(|_| crate::retrieval::enrichment::spawn_enrichment_worker(pool.clone()));
         Self {
             pool,
             embedder,
@@ -304,7 +314,7 @@ impl GraphMemoryRetriever {
             result_limit: GRAPH_MEMORY_RESULTS,
             planner: crate::planning::QueryPlanner::new(),
             scoped_runtimes: build_scoped_runtime_cache(),
-            runtime_factory: Arc::new(PostgresScopedRetrievalRuntimeFactory),
+            runtime_factory: Arc::new(PostgresScopedRetrievalRuntimeFactory { enrichment }),
         }
     }
 
@@ -464,7 +474,25 @@ impl GraphMemoryRetriever {
         let needs_backend = probes.iter().any(|probe| probe.cached_hits.is_none());
         let query_embedding = if needs_backend {
             match self.embedder.as_deref() {
-                Some(embedder) => embed_query(embedder, query_str).await?,
+                // A query-embedding failure must degrade to lexical-only
+                // retrieval rather than abort the turn: an empty embedding makes
+                // the vector leg return nothing while the lexical leg still runs.
+                Some(embedder) => match embed_query(embedder, query_str).await {
+                    Ok(embedding) => embedding,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "query embedding failed; degrading to lexical-only retrieval"
+                        );
+                        metrics::counter!(
+                            "moa_retrieval_leg_degraded_total",
+                            "leg" => "embedding",
+                            "reason" => "error",
+                        )
+                        .increment(1);
+                        Vec::new()
+                    }
+                },
                 None => Vec::new(),
             }
         } else {
@@ -526,12 +554,17 @@ impl GraphMemoryRetriever {
 
         let result_limit = requested_result_limit;
 
-        let mut fused = Vec::new();
-        for sub_query in sub_queries {
-            fused.extend(
+        // F23: run the (≤2) decomposed sub-queries concurrently instead of
+        // serially. `try_join_all` preserves the decomposition input order in its
+        // output, so fusion stays deterministic before `dedupe_and_rank_hits`.
+        let sub_results =
+            try_join_all(sub_queries.into_iter().map(|sub_query| {
                 self.retrieve_hits(ctx, sub_query, policy, requested_result_limit)
-                    .await?,
-            );
+            }))
+            .await?;
+        let mut fused = Vec::new();
+        for hits in sub_results {
+            fused.extend(hits);
         }
         Ok(dedupe_and_rank_hits(fused, result_limit))
     }
@@ -801,8 +834,38 @@ impl ContextProcessor for GraphMemoryRetriever {
             let tokens_before = ctx.token_count;
             let memory_budget =
                 (ctx.token_budget / MEMORY_BUDGET_DIVISOR).max(MIN_PAGE_EXCERPT_TOKENS);
-            let per_hit_budget = (memory_budget / hits.len().max(1)).max(MIN_PAGE_EXCERPT_TOKENS);
-            let rendered = render_memory_context(&hits, per_hit_budget);
+            // F23: cap the whole injected block by the memory budget rather than a
+            // per-hit floor (which let N hits reach 96·N > memory_budget). Reserve
+            // the outer memory-reminder wrapper so the injected message — not just
+            // the inner rendered section — stays within budget, then render the
+            // largest ranked-hit prefix that fits.
+            let evidence_budget = memory_budget.saturating_sub(memory_reminder_wrapper_tokens());
+            let budgeted = render_memory_context_with_budget(&hits, evidence_budget);
+            let omitted = hits.len().saturating_sub(budgeted.hit_count);
+            if omitted > 0 {
+                tracing::debug!(
+                    omitted_hits = omitted,
+                    rendered_hits = budgeted.hit_count,
+                    evidence_budget,
+                    "graph-memory injection omitted ranked hits to fit the memory budget"
+                );
+                metrics::counter!("moa_memory_injection_omitted_hits_total")
+                    .increment(omitted as u64);
+            }
+            if budgeted.hit_count == 0 {
+                // The budget could not fit even one hit; inject nothing rather than
+                // an empty reminder wrapper.
+                return Ok(ProcessorOutput {
+                    items_excluded: vec!["graph_memory".to_string()],
+                    excluded_items: vec![ExcludedItem {
+                        item: "graph_memory".to_string(),
+                        reason: "memory budget too small to render any ranked hit".to_string(),
+                    }],
+                    metadata: router_strategy_metadata(strategy_label),
+                    ..ProcessorOutput::default()
+                });
+            }
+            let rendered = budgeted.rendered;
 
             let reminder = format!(
                 "{MEMORY_REMINDER_PREFIX}\n{}\n</memory-reminder>",
@@ -837,6 +900,13 @@ async fn embed_query(embedder: &dyn EmbeddingProvider, query: &str) -> Result<Ve
 }
 
 use super::trailing_user_insertion_index;
+
+/// Token cost of the outer `<memory-reminder>` wrapper added around the rendered
+/// memory section, reserved from the memory budget so the whole injected message
+/// stays within budget.
+fn memory_reminder_wrapper_tokens() -> usize {
+    moa_core::estimate_text_tokens(&format!("{MEMORY_REMINDER_PREFIX}\n\n</memory-reminder>"))
+}
 
 /// Builds the processor-output metadata that records the router's chosen
 /// strategy, so evals and tests can observe the routing decision for a turn.

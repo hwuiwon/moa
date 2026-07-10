@@ -301,7 +301,14 @@ pub async fn cancel_run(
         .unwrap_or_else(|| "cancelled".to_string());
     let store = ExperimentStore::new(pool);
     let existing = load_required_run(&store, &scope, request.run_uid).await?;
-    if existing.status.is_terminal() {
+    // A genuinely finished run has nothing to cancel or reconcile. An
+    // already-`cancelled` run is deliberately NOT short-circuited here: a retry
+    // must still reconcile any active trial rows that were stranded when a prior
+    // attempt updated the run projection but crashed before cancelling trials.
+    if matches!(
+        existing.status,
+        ExperimentRunStatus::Completed | ExperimentRunStatus::Failed
+    ) {
         return Ok(ExperimentCancelResponse {
             tenant_id: request.tenant_id,
             run_uid: existing.run_uid,
@@ -310,25 +317,20 @@ pub async fn cancel_run(
             reason,
         });
     }
-    let run = store
-        .update_run_status(
-            &scope,
-            request.run_uid,
-            ExperimentRunStatus::Cancelled,
-            Some(reason.clone()),
-            Some(Utc::now()),
-        )
-        .await?
-        .ok_or_else(|| run_not_found(request.run_uid))?;
-    store
-        .cancel_active_trials(&scope, request.run_uid, reason.clone())
+    // Cancel the run and reconcile its active trials atomically in one
+    // transaction so the parent projection and trial rows can never diverge.
+    let (run, _cancelled_trials) = store
+        .cancel_run_and_active_trials(&scope, request.run_uid, reason.clone())
         .await?;
+    let run = run.ok_or_else(|| run_not_found(request.run_uid))?;
     record_experiment_run(run.status.as_str(), run.target_kind.as_str());
 
     Ok(ExperimentCancelResponse {
         tenant_id: request.tenant_id,
         run_uid: run.run_uid,
-        cancelled: true,
+        // `true` on the first cancel; `false` for an idempotent retry behind an
+        // already-cancelled parent (which still reconciles active trials above).
+        cancelled: existing.status != ExperimentRunStatus::Cancelled,
         status: run.status.as_str().to_string(),
         reason,
     })

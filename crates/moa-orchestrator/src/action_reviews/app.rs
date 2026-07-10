@@ -308,7 +308,6 @@ mod tests {
                 session_id: None,
                 tenant_id: TenantId::from(Uuid::from_u128(1)),
                 user_id: UserId::new("user-1"),
-                idempotency_key: None,
                 trusted_sandbox_manifest: None,
                 worker_id: None,
             },
@@ -352,7 +351,6 @@ mod tests {
                 session_id: None,
                 tenant_id: TenantId::from(Uuid::from_u128(1)),
                 user_id: UserId::new("user-1"),
-                idempotency_key: None,
                 trusted_sandbox_manifest: None,
                 worker_id: None,
             },
@@ -386,7 +384,6 @@ mod tests {
             session_id: None,
             tenant_id: TenantId::from(Uuid::from_u128(1)),
             user_id: UserId::new("user-1"),
-            idempotency_key: None,
             trusted_sandbox_manifest: None,
             worker_id: None,
         };

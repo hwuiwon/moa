@@ -4,16 +4,20 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use moa_core::{
-    ContactId, ContactVerificationState, Event, EventFilter, EventRange, ModelId, SessionActorRef,
-    SessionMeta, SessionStatus, SessionStore, TenantId,
-    traits::{Identity, IdentityType},
+    ChannelRef, ContactId, ContactVerificationState, Event, EventFilter, EventRange, ModelId,
+    SessionActorRef, SessionChannelBindingId, SessionId, SessionMeta, SessionStatus, SessionStore,
+    StoragePartitionId, TenantId,
+    traits::{Identity, IdentityType, SessionChannelBindingUpdate},
 };
 use moa_session::testing;
 use moa_test_support::fixtures::{contact_ref_fixture, session_meta_fixture};
 use uuid::Uuid;
 
 use super::SessionStoreImpl;
-use super::inner::create_session_for_identity;
+use super::inner::{
+    change_contact_session_channel_atomic, create_session_for_identity,
+    initialize_contact_session_atomic,
+};
 
 #[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
 struct AuthzOutboxTuple {
@@ -190,6 +194,288 @@ async fn create_contact_session_for_identity_db_enqueues_contact_session_tuple()
         tuple_object: session_object,
         tenant_id: Some(tenant_id.0),
     }));
+
+    cleanup(&database_url, &schema_name).await
+}
+
+fn contact_session_meta(
+    tenant_id: TenantId,
+    contact_id: ContactId,
+    session_id: SessionId,
+) -> SessionMeta {
+    let contact = contact_ref_fixture(contact_id, tenant_id, ContactVerificationState::Verified);
+    SessionMeta {
+        id: session_id,
+        tenant_id,
+        contact: Some(contact),
+        created_by: Some(SessionActorRef::Contact { id: contact_id }),
+        model: ModelId::new("test-model"),
+        ..SessionMeta::default()
+    }
+}
+
+fn contact_identity_for(tenant_id: TenantId, contact_id: ContactId) -> Identity {
+    Identity {
+        identity_type: IdentityType::Contact,
+        id: contact_id.0,
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    }
+}
+
+/// Inserts the verified `contacts` row that the channel-binding foreign key
+/// requires (production creates it during contact token issuance).
+async fn insert_verified_contact(
+    service: &SessionStoreImpl,
+    tenant_id: TenantId,
+    contact_id: ContactId,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO contacts (id, tenant_id, storage_partition_id, contact_id, state) \
+         VALUES ($1, $2, $3, $4, 'verified')",
+    )
+    .bind(contact_id.0)
+    .bind(tenant_id.0)
+    .bind(StoragePartitionId::for_tenant(tenant_id).as_str())
+    .bind(contact_id.0)
+    .execute(service.store.pool())
+    .await?;
+    Ok(())
+}
+
+fn slack_channel_ref(thread_ts: &str) -> ChannelRef {
+    ChannelRef::Slack {
+        team_id: Some("T123".to_string()),
+        slack_channel_id: Some("C123".to_string()),
+        thread_ts: Some(thread_ts.to_string()),
+        user_id: Some("U123".to_string()),
+    }
+}
+
+fn binding_update(
+    tenant_id: TenantId,
+    contact_id: ContactId,
+    session_id: SessionId,
+    channel_ref: &ChannelRef,
+) -> SessionChannelBindingUpdate {
+    SessionChannelBindingUpdate {
+        tenant_id,
+        storage_partition_id: StoragePartitionId::for_tenant(tenant_id),
+        session_id,
+        contact_id,
+        channel_account_id: None,
+        contact_point_id: None,
+        channel_ref: channel_ref.clone(),
+        reason: Some("test".to_string()),
+    }
+}
+
+fn session_created_event(
+    tenant_id: TenantId,
+    contact_id: ContactId,
+    channel_ref: &ChannelRef,
+) -> Event {
+    Event::SessionCreated {
+        tenant_id,
+        contact_id: Some(contact_id),
+        created_by: Some(SessionActorRef::Contact { id: contact_id }),
+        model: ModelId::new("test-model"),
+        channel: channel_ref.channel(),
+    }
+}
+
+async fn count_scalar(service: &SessionStoreImpl, sql: &str, bind: Uuid) -> Result<i64> {
+    Ok(sqlx::query_scalar(sql)
+        .bind(bind)
+        .fetch_one(service.store.pool())
+        .await?)
+}
+
+async fn count_sessions(service: &SessionStoreImpl, session_id: SessionId) -> Result<i64> {
+    count_scalar(
+        service,
+        "SELECT COUNT(*) FROM sessions WHERE id = $1",
+        session_id.0,
+    )
+    .await
+}
+
+async fn count_events(service: &SessionStoreImpl, session_id: SessionId) -> Result<i64> {
+    count_scalar(
+        service,
+        "SELECT COUNT(*) FROM events WHERE session_id = $1",
+        session_id.0,
+    )
+    .await
+}
+
+async fn count_active_bindings(service: &SessionStoreImpl, session_id: SessionId) -> Result<i64> {
+    count_scalar(
+        service,
+        "SELECT COUNT(*) FROM session_channel_bindings WHERE session_id = $1 AND ended_at IS NULL",
+        session_id.0,
+    )
+    .await
+}
+
+async fn count_session_tuples(service: &SessionStoreImpl, session_id: SessionId) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT COUNT(*) FROM authz_outbox WHERE tuple_object = $1")
+            .bind(format!("session:{session_id}"))
+            .fetch_one(service.store.pool())
+            .await?,
+    )
+}
+
+#[tokio::test]
+async fn initialize_contact_session_atomic_is_idempotent_on_replay_db() -> Result<()> {
+    // Pins: replaying contact session creation with the same stable id inserts no
+    // second session, binding, SessionCreated event, or authz outbox tuple.
+    let (service, database_url, schema_name) = test_service().await?;
+    install_authz_outbox(&service).await?;
+    let tenant_id = TenantId::new();
+    let contact_id = ContactId::new();
+    let session_id = SessionId::new();
+    insert_verified_contact(&service, tenant_id, contact_id).await?;
+    let meta = contact_session_meta(tenant_id, contact_id, session_id);
+    let identity = contact_identity_for(tenant_id, contact_id);
+    let channel_ref = slack_channel_ref("1712668800.000100");
+
+    // First creation, then a handler replay that reuses the same session id but
+    // (as a real replay would) allocates a fresh binding id inside the closure.
+    for binding_id in [
+        SessionChannelBindingId::new(),
+        SessionChannelBindingId::new(),
+    ] {
+        initialize_contact_session_atomic(
+            service.store.as_ref(),
+            &service.pool,
+            meta.clone(),
+            identity.clone(),
+            binding_id,
+            binding_update(tenant_id, contact_id, session_id, &channel_ref),
+            session_created_event(tenant_id, contact_id, &channel_ref),
+        )
+        .await
+        .map_err(into_anyhow)?;
+    }
+
+    assert_eq!(count_sessions(&service, session_id).await?, 1);
+    assert_eq!(count_events(&service, session_id).await?, 1);
+    assert_eq!(count_active_bindings(&service, session_id).await?, 1);
+    assert_eq!(
+        count_session_tuples(&service, session_id).await?,
+        3,
+        "owner, tenant, and contact tuples are enqueued exactly once"
+    );
+
+    cleanup(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+async fn initialize_contact_session_atomic_rolls_back_on_late_failure_db() -> Result<()> {
+    // Pins: a failure after the session insert (the binding targets a session id
+    // that does not exist) rolls back the whole product transaction, leaving no
+    // orphan session row, event, or authz tuple.
+    let (service, database_url, schema_name) = test_service().await?;
+    install_authz_outbox(&service).await?;
+    let tenant_id = TenantId::new();
+    let contact_id = ContactId::new();
+    let session_id = SessionId::new();
+    insert_verified_contact(&service, tenant_id, contact_id).await?;
+    let meta = contact_session_meta(tenant_id, contact_id, session_id);
+    let identity = contact_identity_for(tenant_id, contact_id);
+    let channel_ref = slack_channel_ref("1712668800.000100");
+    let mismatched_session = SessionId::new();
+
+    let result = initialize_contact_session_atomic(
+        service.store.as_ref(),
+        &service.pool,
+        meta,
+        identity,
+        SessionChannelBindingId::new(),
+        binding_update(tenant_id, contact_id, mismatched_session, &channel_ref),
+        session_created_event(tenant_id, contact_id, &channel_ref),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a late binding failure must abort session creation"
+    );
+
+    assert_eq!(
+        count_sessions(&service, session_id).await?,
+        0,
+        "the session insert must not survive a later failure in the same transaction"
+    );
+    assert_eq!(count_events(&service, session_id).await?, 0);
+    assert_eq!(count_session_tuples(&service, session_id).await?, 0);
+
+    cleanup(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+async fn change_contact_session_channel_atomic_is_idempotent_on_replay_db() -> Result<()> {
+    // Pins: replaying a channel change with the same stable binding id produces
+    // exactly one new binding and one SessionChannelChanged event.
+    let (service, database_url, schema_name) = test_service().await?;
+    install_authz_outbox(&service).await?;
+    let tenant_id = TenantId::new();
+    let contact_id = ContactId::new();
+    let session_id = SessionId::new();
+    insert_verified_contact(&service, tenant_id, contact_id).await?;
+    let initial_channel = slack_channel_ref("1712668800.000100");
+    initialize_contact_session_atomic(
+        service.store.as_ref(),
+        &service.pool,
+        contact_session_meta(tenant_id, contact_id, session_id),
+        contact_identity_for(tenant_id, contact_id),
+        SessionChannelBindingId::new(),
+        binding_update(tenant_id, contact_id, session_id, &initial_channel),
+        session_created_event(tenant_id, contact_id, &initial_channel),
+    )
+    .await
+    .map_err(into_anyhow)?;
+
+    let new_channel = slack_channel_ref("1712668900.000200");
+    let binding_id = SessionChannelBindingId::new();
+    for _ in 0..2 {
+        let changed_event = Event::SessionChannelChanged {
+            from: initial_channel.channel(),
+            to: new_channel.channel(),
+            contact_id: Some(contact_id),
+            from_binding_id: None,
+            to_binding_id: Some(binding_id),
+            changed_by: Some(SessionActorRef::Contact { id: contact_id }),
+            reason: Some("switch".to_string()),
+        };
+        change_contact_session_channel_atomic(
+            service.store.as_ref(),
+            &service.pool,
+            binding_id,
+            binding_update(tenant_id, contact_id, session_id, &new_channel),
+            changed_event,
+        )
+        .await
+        .map_err(into_anyhow)?;
+    }
+
+    // SessionCreated (1) + exactly one SessionChannelChanged despite the replay.
+    assert_eq!(count_events(&service, session_id).await?, 2);
+    let binding_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM session_channel_bindings WHERE id = $1")
+            .bind(binding_id.0)
+            .fetch_one(service.store.pool())
+            .await?;
+    assert_eq!(binding_rows, 1, "the replayed binding id is inserted once");
+    let active = service
+        .store
+        .get_active_session_channel_binding(session_id)
+        .await
+        .map_err(into_anyhow)?
+        .expect("session should have an active binding");
+    assert_eq!(active.binding_id, binding_id);
 
     cleanup(&database_url, &schema_name).await
 }

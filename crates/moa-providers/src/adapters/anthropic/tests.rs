@@ -661,3 +661,15 @@ fn provider_accepts_documented_default_models() {
         ModelId::new(MODEL_SONNET_4_6)
     );
 }
+
+#[test]
+fn default_chat_provider_uses_a_bounded_concurrency_gate() {
+    // Pins: a chat provider built from defaults gates in-flight requests with a
+    // finite bound rather than queueing unbounded, so one process cannot open an
+    // unlimited number of concurrent connections to the provider.
+    let provider = AnthropicProvider::new("test-key", MODEL_HAIKU_4_5).unwrap();
+    assert!(
+        provider.limiter.is_bounded(),
+        "chat concurrency must default to a bounded in-flight gate"
+    );
+}

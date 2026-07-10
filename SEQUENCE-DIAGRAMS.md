@@ -57,7 +57,7 @@ sequenceDiagram
     Pipe-->>Brain: WorkingContext (cache_breakpoint marked)
 
     Brain->>LLM: complete(compiled_context)
-    LLM-->>Brain: ToolCall { bash: "fly deploy --app staging" }
+    LLM-->>Brain: ToolCall { bash: "deploy --app staging" }
 
     Brain->>Log: emit ApprovalRequested
     Orch->>Messaging: observe event
@@ -70,7 +70,7 @@ sequenceDiagram
     Orch->>Brain: deliver signal
     Brain->>Log: emit ApprovalDecided
 
-    Brain->>Router: execute("bash", "fly deploy ...")
+    Brain->>Router: execute("bash", "deploy ...")
     Router->>Hand: provision (lazy, first call)
     Hand-->>Router: HandHandle
     Router->>Hand: execute(bash, input)
@@ -384,7 +384,7 @@ sequenceDiagram
 
     OldBrain->>Log: emit ToolCall
     OldBrain->>Log: emit ToolResult
-    Note over OldBrain: 💥 process crash / machine restart<br/>(panic, OOM, Fly.io suspend, Ctrl+C)
+    Note over OldBrain: 💥 process crash / machine restart<br/>(panic, OOM, host suspend, Ctrl+C)
 
     Note over Orch: On next signal OR startup scan
     Orch->>Log: list_sessions(status in [Running, WaitingApproval])

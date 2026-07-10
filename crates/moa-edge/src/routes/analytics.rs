@@ -12,18 +12,7 @@ use moa_core::TenantId;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::analytics::AnalyticsQueryRequest;
 use serde::Deserialize;
-use std::sync::{Mutex, OnceLock, PoisonError};
-use std::time::{Duration, Instant};
 use uuid::Uuid;
-
-/// Minimum spacing between analytics materialized-view refreshes, process-wide.
-const MV_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(60);
-
-static LAST_MV_REFRESH: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-
-fn last_mv_refresh() -> &'static Mutex<Option<Instant>> {
-    LAST_MV_REFRESH.get_or_init(|| Mutex::new(None))
-}
 
 use super::{
     AppState, RouteTranslation, authenticate_direct_request, parse_json_body, require_direct_authz,
@@ -97,8 +86,10 @@ pub(super) async fn handle_query(
     {
         return response;
     }
-    // ClickHouse serving needs no matview refresh; the throttled rebuild is a
-    // Postgres-backend concern only.
+    // The edge request path is read-only for both backends. Materialized-view
+    // refresh is owned by the durable maintenance cron (single-flighted under a
+    // Postgres advisory lock), not triggered per request; the query serves the
+    // current read-model state and reports its freshness.
     let result = if let Some(clickhouse) = state.clickhouse_analytics.as_deref() {
         let response = AnalyticsService::clickhouse()
             .query_clickhouse(clickhouse, request)
@@ -112,8 +103,18 @@ pub(super) async fn handle_query(
             Err(error) => Err(error),
         }
     } else {
-        maybe_refresh_analytics_materialized_views(&state);
-        AnalyticsService::new().query(&state.pool, request).await
+        let response = AnalyticsService::new()
+            .with_statement_timeout_ms(state.config.analytics.statement_timeout_ms)
+            .query(&state.pool, request)
+            .await;
+        match response {
+            Ok(mut response) => {
+                response.metadata.read_model_updated_at =
+                    postgres_read_model_updated_at(&state.pool).await;
+                Ok(response)
+            }
+            Err(error) => Err(error),
+        }
     };
     match result {
         Ok(response) => Json(response).into_response(),
@@ -135,6 +136,21 @@ async fn clickhouse_read_model_updated_at(
         .flatten()
 }
 
+/// Freshness of the Postgres materialized-view read models: the last successful
+/// maintenance refresh. `None` when no refresh has succeeded yet (or the state
+/// table is missing) — absence of freshness data must not fail the query.
+async fn postgres_read_model_updated_at(
+    pool: &sqlx::PgPool,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    sqlx::query_scalar(
+        "SELECT last_success_at FROM analytics.materialized_view_refresh_state WHERE id",
+    )
+    .fetch_one(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
 fn analytics_target_tenant(
     identity: &Identity,
     tenant_id: Option<TenantId>,
@@ -153,36 +169,6 @@ fn analytics_error_response(error: AnalyticsError) -> Response {
         AnalyticsError::Execution(_) => route_error(error),
         other => (StatusCode::BAD_REQUEST, other.to_string()).into_response(),
     }
-}
-
-/// Trigger an analytics materialized-view refresh at most once per interval.
-///
-/// The refresh runs in the background so the current request never waits for it,
-/// and the timestamp is stamped before spawning so concurrent requests do not
-/// each fire a refresh (single-flight). Queries proceed against the current
-/// materialized-view state; a failed refresh is logged, not surfaced.
-fn maybe_refresh_analytics_materialized_views(state: &AppState) {
-    let due = {
-        let mut guard = last_mv_refresh()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        match *guard {
-            Some(last) if last.elapsed() < MV_REFRESH_MIN_INTERVAL => false,
-            _ => {
-                *guard = Some(Instant::now());
-                true
-            }
-        }
-    };
-    if !due {
-        return;
-    }
-    let store = state.session_store.clone();
-    tokio::spawn(async move {
-        if let Err(error) = store.refresh_analytics_materialized_views().await {
-            tracing::warn!(error = %error, "analytics materialized view refresh failed");
-        }
-    });
 }
 
 pub(super) fn translate(

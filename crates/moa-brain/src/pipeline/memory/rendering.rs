@@ -347,7 +347,38 @@ mod tests {
         KnowledgeChunkHydration, KnowledgeChunkWindowPart, LegSources, RetrievalHit, SourceTier,
     };
 
-    use super::{MATCHED_CLOSE, MATCHED_OPEN, render_memory_context};
+    use super::{
+        MATCHED_CLOSE, MATCHED_OPEN, render_memory_context, render_memory_context_with_budget,
+    };
+
+    #[test]
+    fn budgeted_render_caps_aggregate_tokens_and_omits_excess_hits() {
+        // Pins: F23 — the aggregate renderer caps the whole rendered section at
+        // the token budget and drops ranked hits that do not fit, instead of a
+        // per-hit floor that let N hits reach 96·N tokens well past the budget.
+        let long_excerpt = "escalation ".repeat(60);
+        let hits = (0..8_u128)
+            .map(|index| fact_hit(Uuid::from_u128(index + 1), &long_excerpt))
+            .collect::<Vec<_>>();
+        let token_budget = 200;
+
+        let budgeted = render_memory_context_with_budget(&hits, token_budget);
+
+        assert!(budgeted.hit_count >= 1, "at least one hit fits the budget");
+        assert!(
+            budgeted.hit_count < hits.len(),
+            "excess ranked hits are omitted under the aggregate budget"
+        );
+        assert!(
+            moa_core::estimate_text_tokens(&budgeted.rendered.section) <= token_budget,
+            "the rendered section stays within the aggregate token budget"
+        );
+        assert_eq!(
+            budgeted.consumed_tokens,
+            moa_core::estimate_text_tokens(&budgeted.rendered.section),
+            "reported consumed tokens match the rendered section"
+        );
+    }
 
     fn fact_hit(uid: Uuid, summary: &str) -> RetrievalHit {
         RetrievalHit {

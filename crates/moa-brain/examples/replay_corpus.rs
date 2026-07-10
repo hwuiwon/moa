@@ -34,7 +34,7 @@ use moa_session::testing;
 use serde::Serialize;
 use serde_json::json;
 
-/// Per-turn compile budget, matching `CompactionConfig::max_input_tokens_per_turn`.
+/// Per-turn compile budget used by this offline replay-cost example.
 const TURN_BUDGET: usize = 160_000;
 /// Reference input price for uncached tokens, dollars per MTok.
 const FRESH_PER_MTOK: f64 = 3.0;

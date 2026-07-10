@@ -1,9 +1,6 @@
 //! Integration coverage for atomic graph-memory write modes.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use moa_core::RlsContext;
@@ -13,9 +10,7 @@ use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
     PostgresGraphStore,
 };
-use moa_memory_vector::{
-    PgvectorStore, VectorItem, VectorPostCommitSync, VectorQuery, VectorStore,
-};
+use moa_memory_vector::{PgvectorStore, VectorItem, VectorQuery, VectorStore};
 use moa_session::testing;
 use moa_test_support::fixtures::stable_uuid_from_label;
 use serde_json::json;
@@ -38,13 +33,6 @@ struct EdgeIndexRow {
 }
 
 struct RecordingVectorStore {}
-
-struct RecordingPostCommitSync {
-    pool: PgPool,
-    target_uid: Uuid,
-    post_commit_calls: Arc<AtomicUsize>,
-    visible_rows_at_sync: Arc<AtomicUsize>,
-}
 
 #[async_trait::async_trait]
 impl VectorStore for RecordingVectorStore {
@@ -84,21 +72,6 @@ impl VectorStore for RecordingVectorStore {
         _conn: &mut sqlx::PgConnection,
         _uids: &[Uuid],
     ) -> Result<(), moa_memory_vector::Error> {
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl VectorPostCommitSync for RecordingPostCommitSync {
-    async fn sync_post_commit(&self) -> Result<(), moa_memory_vector::Error> {
-        let visible_rows =
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM moa.node_index WHERE uid = $1")
-                .bind(self.target_uid)
-                .fetch_one(&self.pool)
-                .await?;
-        self.visible_rows_at_sync
-            .store(visible_rows as usize, Ordering::SeqCst);
-        self.post_commit_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -615,9 +588,12 @@ async fn erase_payload_hash_exists(pool: &PgPool, storage_partition_id: &str, ui
 }
 
 #[tokio::test]
-async fn graph_write_runs_vector_sync_after_commit_db_memory() {
-    // Pins: external vector sync is a post-commit hook. The hook reads the node
-    // through a separate connection and must see the committed graph row.
+async fn graph_write_with_vector_store_commits_node_state_db_memory() {
+    // Pins: a graph create with an attached vector store commits the node and its
+    // embedder state. External projection is queue-only (F10): the write path runs
+    // no synchronous external drain — the vector-sync outbox row it enqueues is
+    // delivered by the background cron — so a slow or failing external backend
+    // never blocks the authoritative write.
     let _guard = TEST_LOCK.lock().await;
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
@@ -626,33 +602,21 @@ async fn graph_write_runs_vector_sync_after_commit_db_memory() {
     let intent = node_intent(
         &storage_partition_id,
         NodeLabel::Fact,
-        "post commit vector sync fact",
+        "queue only vector sync fact",
         Utc::now(),
         Some(basis_vector(0)),
     );
-    let post_commit_calls = Arc::new(AtomicUsize::new(0));
-    let visible_rows_at_sync = Arc::new(AtomicUsize::new(0));
-    let vector = RecordingVectorStore {};
-    let hook = RecordingPostCommitSync {
-        pool: session_store.pool().clone(),
-        target_uid: intent.uid,
-        post_commit_calls: post_commit_calls.clone(),
-        visible_rows_at_sync: visible_rows_at_sync.clone(),
-    };
     let graph = PostgresGraphStore::scoped_for_app_role(
         session_store.pool().clone(),
         tenant_scope(storage_partition_id.clone()),
     )
-    .with_vector_store(Arc::new(vector))
-    .with_vector_post_commit_sync(Arc::new(hook));
+    .with_vector_store(Arc::new(RecordingVectorStore {}));
 
     let uid = graph
         .create_node(intent)
         .await
-        .expect("create node with vector post-commit hook");
+        .expect("create node commits without a synchronous vector drain");
 
-    assert_eq!(post_commit_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(visible_rows_at_sync.load(Ordering::SeqCst), 1);
     assert_eq!(
         embedding_model_for_partition(session_store.pool(), &storage_partition_id).await,
         "test-model"

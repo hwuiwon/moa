@@ -24,7 +24,8 @@ use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
-use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_BLOCK_THRESHOLD};
+use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_MAX_IN_FLIGHT};
+use crate::core::concurrency_factory::{CallKind, ProviderConcurrency};
 use crate::core::http::build_http_client;
 use crate::core::instrumentation::LLMSpanRecorder;
 use crate::core::pacer::{PacerConfig, RatePacer};
@@ -119,8 +120,9 @@ impl GeminiProvider {
             retry_policy: RetryPolicy::default().with_max_retries(DEFAULT_MAX_RETRIES),
             web_search_enabled: true,
             pacer: RatePacer::new(PacerConfig::disabled()),
-            // LLM concurrency is unbounded by default; operators opt in per key.
-            limiter: ConcurrencyLimiter::unbounded(),
+            // Direct construction uses the flat per-provider default; the config
+            // path overrides it per credential (0 opts back into unbounded).
+            limiter: ConcurrencyLimiter::new(DEFAULT_MAX_IN_FLIGHT),
             guard: RateGuard::new(),
         })
     }
@@ -141,7 +143,7 @@ impl GeminiProvider {
         )?;
 
         let mut provider = Self::new_with_reasoning_effort(
-            api_key,
+            api_key.clone(),
             default_model,
             config.general.reasoning_effort.clone(),
         )?
@@ -149,9 +151,12 @@ impl GeminiProvider {
         if let Some(max) = config.providers.google.max_requests_per_min {
             provider = provider.with_rate_limits(PacerConfig::requests_per_min(max));
         }
-        if let Some(max) = config.providers.google.max_concurrent_requests {
-            provider = provider.with_max_concurrent_requests(max as usize);
-        }
+        provider.limiter = ProviderConcurrency::from_config(config).limiter(
+            CallKind::Chat,
+            "google",
+            &api_key,
+            config.providers.google.max_concurrent_requests,
+        );
         Ok(provider)
     }
 
@@ -256,10 +261,10 @@ impl LLMProvider for GeminiProvider {
 
         // Take an in-flight slot before dispatching; a gate that stays saturated
         // past the block threshold is a failover-eligible block, not a queue.
-        let permit = match self.limiter.acquire_within(DEFAULT_BLOCK_THRESHOLD).await {
+        let permit = match self.limiter.acquire().await {
             Some(lease) => lease,
             None => {
-                let error = rate_guard::rate_limited_saturated(DEFAULT_BLOCK_THRESHOLD);
+                let error = rate_guard::rate_limited_saturated(self.limiter.block_threshold());
                 span_recorder.fail_at_stage("transport", &error);
                 return Err(error);
             }

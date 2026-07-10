@@ -39,6 +39,11 @@ SWEEP_REDIS_URL = os.environ.get("MOA_SWEEP_REDIS_URL", "redis://127.0.0.1:10051
 # Minimum contiguous match length (chars) that counts as the final reply leaking raw worker output.
 RAW_LEAK_MIN_CHARS = 120
 MAX_WORKERS = int(os.environ.get("MOA_SWEEP_CONCURRENCY", "4"))
+# Provider in-flight budget for the sweep's single live key. Chat calls are
+# bounded per provider credential by default (16 unless configured), which a
+# full sweep (MOA_SWEEP_CONCURRENCY sessions x coordinator + spawned workers)
+# can saturate; size generously so the budget never shapes sweep outcomes.
+PROVIDER_MAX_IN_FLIGHT = os.environ.get("MOA_SWEEP_PROVIDER_MAX_IN_FLIGHT", "64")
 SESSION_TIMEOUT_S = int(os.environ.get("MOA_SWEEP_SESSION_TIMEOUT_S", "260"))
 TURN_LIMIT = int(os.environ.get("MOA_SWEEP_MAX_TURNS", "6"))
 CASE_LIMIT = int(os.environ.get("MOA_SWEEP_LIMIT", "0"))
@@ -279,6 +284,12 @@ def start_orchestrator(env):
             "MOA_LOCAL_DOCKER_ENABLED": "false",
             "MOA_RUNTIME_CACHE_BACKEND": "redis",
             "MOA_RUNTIME_CACHE_REDIS_URL": SWEEP_REDIS_URL,
+            # The sweep shares the compose Redis; force local concurrency scope
+            # so an inherited global scope can never make the sweep orchestrator
+            # share provider lease budgets with the long-running compose stack.
+            "MOA_PROVIDERS_CONCURRENCY_SCOPE": "local",
+            # Sweep model is routed through the OpenAI provider credential.
+            "MOA_OPENAI_MAX_CONCURRENT_REQUESTS": PROVIDER_MAX_IN_FLIGHT,
             "RUST_LOG": os.environ.get("RUST_LOG", "info,moa_orchestrator=info"),
         }
     )

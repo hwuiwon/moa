@@ -1,8 +1,8 @@
 {
   "uid_seed": "01",
   "label": "Fact",
-  "name": "fact01 auth-service deployment flyio bluegreen Monday release window",
-  "summary": "fact01 auth-service deployment flyio bluegreen Monday release window",
+  "name": "fact01 auth-service deployment railway bluegreen Monday release window",
+  "summary": "fact01 auth-service deployment railway bluegreen Monday release window",
   "entity_uids": [
     "auth-service",
     "deployment"

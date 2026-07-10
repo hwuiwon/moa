@@ -6,7 +6,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use moa_core::RlsContext;
-use moa_core::wire::privacy::ContactErasureScope;
+use moa_core::wire::privacy::{ContactErasureScope, PrivacyEraseStatus};
 use moa_core::{ContactId, TenantId};
 use moa_lineage_audit::PiiVault;
 use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
@@ -517,9 +517,177 @@ async fn privacy_erase_idempotent() {
 }
 
 #[tokio::test]
+async fn privacy_erase_same_request_replay_resumes_db_memory() {
+    // Pins: replaying the SAME erase request (identical approval JTI and request
+    // parameters) resumes the durable job idempotently and returns the persisted
+    // result, rather than failing as a spent-token replay and stranding the
+    // erasure. This is the Restate re-execution path.
+    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let (tenant_id, storage_partition_id) = tenant_workspace();
+    let subject = Uuid::now_v7();
+    let uid = create_erase_test_node(
+        store.pool(),
+        tenant_id,
+        subject,
+        &storage_partition_id,
+        &subject.to_string(),
+        "resumable erasure fact",
+    )
+    .await;
+    // One signed approval token (one JTI) reused for the identical request.
+    let claims = valid_claims_for(subject, tenant_id, "erase");
+    let make_ctx = || PrivacyEraseContext {
+        pool: store.pool().clone(),
+        tenant_id: TenantId::from(tenant_id),
+        storage_partition_id: storage_partition_id.clone(),
+        subject_user: subject,
+        subject_user_id: subject.to_string(),
+        reason: "gdpr erasure request".to_string(),
+        dry_run: false,
+        contact_erasure_scope: None,
+        claims: claims.clone(),
+        pii_vault_secret: None,
+    };
+
+    let first = run_privacy_erase(make_ctx()).await.expect("first erase");
+    assert_eq!(first.candidate_count, 1);
+    assert_eq!(first.erased_count, 1);
+    assert_eq!(node_count(store.pool(), uid).await, 0);
+
+    // Identical request replays the same JTI: resume, do not reject.
+    let replay = run_privacy_erase(make_ctx())
+        .await
+        .expect("identical replay resumes without error");
+    assert!(matches!(replay.status, PrivacyEraseStatus::Completed));
+    assert_eq!(replay.candidate_count, 1);
+    assert_eq!(replay.erased_count, 1);
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn privacy_erase_deletes_digest_and_lineage_db_memory() {
+    // Pins: the erase operation closes the digest and retrieval-lineage stores,
+    // which graph-node purges never touch, so erased memory cannot survive in a
+    // standing digest or as attributable retrieval provenance.
+    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let (tenant_id, storage_partition_id) = tenant_workspace();
+    let subject = Uuid::now_v7();
+    create_erase_test_node(
+        store.pool(),
+        tenant_id,
+        subject,
+        &storage_partition_id,
+        &subject.to_string(),
+        "digest-and-lineage erasure fact",
+    )
+    .await;
+    seed_digest_and_lineage(store.pool(), tenant_id, subject, &storage_partition_id).await;
+
+    let ctx = PrivacyEraseContext {
+        pool: store.pool().clone(),
+        tenant_id: TenantId::from(tenant_id),
+        storage_partition_id: storage_partition_id.clone(),
+        subject_user: subject,
+        subject_user_id: subject.to_string(),
+        reason: "gdpr erasure request".to_string(),
+        dry_run: false,
+        contact_erasure_scope: None,
+        claims: valid_claims_for(subject, tenant_id, "erase"),
+        pii_vault_secret: None,
+    };
+
+    let response = run_privacy_erase(ctx).await.expect("run erasure");
+    assert_eq!(response.digest_deleted, 1);
+    assert_eq!(response.lineage_deleted, 1);
+    assert_eq!(
+        digest_row_count(store.pool(), &storage_partition_id).await,
+        0
+    );
+    assert_eq!(
+        lineage_row_count(store.pool(), &storage_partition_id).await,
+        0
+    );
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+async fn seed_digest_and_lineage(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    subject: Uuid,
+    storage_partition_id: &str,
+) {
+    let mut conn = begin_app_scoped_tx(pool, TenantId::from(tenant_id), &subject.to_string())
+        .await
+        .expect("begin contact-scoped digest/lineage seed");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.memory_digests
+            (storage_partition_id, user_id, content, version, updated_at)
+        VALUES ($1, $2, $3, 1, now())
+        "#,
+    )
+    .bind(storage_partition_id)
+    .bind(subject.to_string())
+    .bind("What I know about this contact:\n- prefers dark mode\n")
+    .execute(conn.as_mut())
+    .await
+    .expect("seed memory digest row");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.retrieval_lineage
+            (storage_partition_id, user_id, session_id, turn_seq, uid, rank, retrieved_at)
+        VALUES ($1, $2, $3, 1, $4, 1, now())
+        "#,
+    )
+    .bind(storage_partition_id)
+    .bind(subject.to_string())
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .execute(conn.as_mut())
+    .await
+    .expect("seed retrieval lineage row");
+    conn.commit().await.expect("commit digest/lineage seed");
+}
+
+async fn digest_row_count(pool: &PgPool, storage_partition_id: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM moa.memory_digests WHERE storage_partition_id = $1",
+    )
+    .bind(storage_partition_id)
+    .fetch_one(pool)
+    .await
+    .expect("count digest rows")
+}
+
+async fn lineage_row_count(pool: &PgPool, storage_partition_id: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM moa.retrieval_lineage WHERE storage_partition_id = $1",
+    )
+    .bind(storage_partition_id)
+    .fetch_one(pool)
+    .await
+    .expect("count lineage rows")
+}
+
+#[tokio::test]
 async fn approval_jti_replay_blocked_through_erase_db_memory() {
-    // Pins: the DB-backed single-use guard rejects a second erase that reuses the same approval
-    // token JTI, even though the first erase already consumed it from moa.audit_jti_used.
+    // Pins: reusing one approval JTI for a DIFFERENT erase request (a different
+    // request fingerprint) is rejected, so a durable, resumable erasure job never
+    // lets an approval token become generally reusable across requests.
     let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await

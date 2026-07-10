@@ -164,7 +164,6 @@ pub async fn execute_procedure_node_action(
         session_id: action_context.session_id,
         tenant_id: action_context.tenant_id,
         user_id: storage_user_id(&session),
-        idempotency_key,
         trusted_sandbox_manifest: None,
         worker_id: None,
     };

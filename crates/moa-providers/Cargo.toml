@@ -33,6 +33,7 @@ workspace-hack = { workspace = true }
 
 [dev-dependencies]
 insta.workspace = true
+moa-runtime-store = { workspace = true, features = ["redis"] }
 moa-test-support = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 wiremock.workspace = true

@@ -1023,8 +1023,7 @@ async fn runtime_fast_ctx_from_runtime(
         vector_factory.transactional_graph_backend(pool.clone(), scope.clone(), false);
     let graph = Arc::new(
         PostgresGraphStore::scoped(pool.clone(), scope.clone())
-            .with_vector_store(graph_vector.vector_store())
-            .with_vector_post_commit_sync(graph_vector.post_commit_sync()),
+            .with_vector_store(graph_vector.vector_store()),
     );
     let embedder = runtime.embedder();
     let pii: Arc<dyn PiiClassifier> = match runtime.pii_service_url() {

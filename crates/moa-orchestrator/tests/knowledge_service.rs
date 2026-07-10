@@ -4951,6 +4951,31 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
         self.with_state(|state| state.chunks.get(&version_uid).cloned().unwrap_or_default())
     }
 
+    async fn active_chunks_for_object(
+        &self,
+        object_uid: Uuid,
+    ) -> moa_knowledge::Result<Vec<KnowledgeChunk>> {
+        self.record_op("active_chunks_for_object")?;
+        self.with_state(|state| {
+            let Some(version) = state.versions.get(&object_uid) else {
+                return Vec::new();
+            };
+            state
+                .chunks
+                .get(&version.version_uid)
+                .map(|chunks| {
+                    chunks
+                        .iter()
+                        .filter(|chunk| {
+                            chunk.metadata.get("active").and_then(Value::as_bool) != Some(false)
+                        })
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    }
+
     async fn object_ingestion_completed_since(
         &self,
         object_uid: Uuid,

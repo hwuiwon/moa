@@ -530,7 +530,105 @@ pub enum Event {
     },
 }
 
+/// Effect a persisted [`Event`] has on session turn scheduling.
+///
+/// Every event is classified into exactly one effect by
+/// [`Event::processing_effect`] so the reverse tail scan in
+/// [`crate::session_engine::session_requires_processing`] can decide whether
+/// turn work is still pending without any wildcard fallback. Because the
+/// classification match is exhaustive, adding a new [`Event`] variant fails to
+/// compile until its effect is declared deliberately — closing the class of
+/// bugs where an asynchronously appended passive event (for example a detached
+/// `ProgressNarrated` or a watchdog `WorkerHeartbeatStale` landing just after a
+/// `ToolResult`) silently masked pending work and stalled the turn loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProcessingEffect {
+    /// The event carries unaddressed work: if it is the newest meaningful event
+    /// in the tail, a model turn must be compiled. Tool call/result/error
+    /// events, fresh user messages, and system-seeded coordinator
+    /// resume/synthesis requests are triggers.
+    Trigger,
+    /// The event is a passive breadcrumb — telemetry, liveness, enrichment, or a
+    /// lifecycle marker — that neither demands a turn nor concludes one. The tail
+    /// scan looks straight through it to older events, so a late asynchronous
+    /// append can never mask an earlier trigger.
+    Neutral,
+    /// The event concludes or suspends the turn loop: an assistant response,
+    /// successful session completion, a turn-halting error, or a tenant-admin
+    /// action review that is resumed by a separate decision handler rather than
+    /// by re-scanning the tail. If it is the newest meaningful event, no turn is
+    /// pending and the scan stops.
+    Terminal,
+}
+
 impl Event {
+    /// Classifies how this event affects session turn scheduling.
+    ///
+    /// See [`ProcessingEffect`] for the meaning of each effect. The match is
+    /// deliberately exhaustive with no wildcard arm so that a newly added
+    /// [`Event`] variant forces an explicit scheduling decision at compile time.
+    pub fn processing_effect(&self) -> ProcessingEffect {
+        match self {
+            // Triggers: unaddressed work that a model turn must consume.
+            Self::UserMessage { .. }
+            | Self::ToolCall { .. }
+            | Self::ToolResult { .. }
+            | Self::ToolError { .. }
+            // A guarded coordinator resume seeds its instruction via this control
+            // event (not a fake user message), so a trailing resume must drive the loop.
+            | Self::WorkerParentResumeRequested { .. }
+            // Completed deterministic auto-delegation seeds a synthesis turn via this
+            // control event, not another fake user message.
+            | Self::WorkerResultSynthesisRequested { .. } => ProcessingEffect::Trigger,
+
+            // Terminals: the turn loop has concluded or is suspended awaiting an
+            // out-of-band decision; the tail alone implies no pending model turn.
+            Self::BrainResponse { .. }
+            | Self::SessionCompleted { .. }
+            // An error halts the turn; recovery is driven by durable Restate retry,
+            // not by re-scanning and re-triggering the tail.
+            | Self::Error { .. }
+            // Tenant-admin action review state is resumed by the decision handler
+            // (which appends the follow-on tool result), not by the scheduler
+            // re-reading the tail, so neither review event resumes the loop itself.
+            | Self::ActionReviewRequested { .. }
+            | Self::ActionReviewDecided { .. } => ProcessingEffect::Terminal,
+
+            // Neutrals: passive telemetry, liveness, enrichment, and lifecycle
+            // breadcrumbs. Several are appended asynchronously off the turn path
+            // (ProgressNarrated, WorkerHeartbeatStale, TurnMetrics, CacheReport,
+            // MemoryRead, MemoryIngest, BrainThinking); classifying them transparent
+            // is precisely what stops a late append from masking pending work.
+            Self::SessionCreated { .. }
+            | Self::SessionStatusChanged { .. }
+            | Self::SessionChannelChanged { .. }
+            | Self::SegmentStarted { .. }
+            | Self::SegmentCompleted { .. }
+            | Self::QueuedMessage { .. }
+            | Self::BrainThinking { .. }
+            | Self::ProgressUpdate { .. }
+            | Self::GuardrailCheck { .. }
+            | Self::WorkerSpawned { .. }
+            | Self::WorkerMessageSent { .. }
+            | Self::WorkerStatusChanged { .. }
+            | Self::WorkerNotificationDelivered { .. }
+            | Self::WorkerResultBundle { .. }
+            | Self::TurnMetrics { .. }
+            | Self::WorkerSignalReceived { .. }
+            | Self::WorkerHeartbeatStale { .. }
+            | Self::ProgressNarrated { .. }
+            | Self::MemoryRead { .. }
+            | Self::MemoryWrite { .. }
+            | Self::MemoryIngest { .. }
+            | Self::HandProvisioned { .. }
+            | Self::HandDestroyed { .. }
+            | Self::HandError { .. }
+            | Self::Checkpoint { .. }
+            | Self::CacheReport { .. }
+            | Self::Warning { .. } => ProcessingEffect::Neutral,
+        }
+    }
+
     /// Returns the event discriminator.
     pub fn event_type(&self) -> EventType {
         EventType::from(self)
@@ -1034,6 +1132,102 @@ mod tests {
             "tool_call".parse::<EventType>().is_err(),
             "DB parser should keep using PascalCase names"
         );
+    }
+
+    #[test]
+    fn processing_effect_classifies_scheduling_contract() {
+        // Pins: the turn-scheduling classification (F04). Triggers carry pending work;
+        // terminals conclude or suspend the loop; the asynchronously appended passive
+        // vectors (ProgressNarrated, WorkerHeartbeatStale, TurnMetrics, CacheReport,
+        // MemoryRead/Ingest, BrainThinking) are Neutral so they cannot mask a trigger.
+        use crate::ProcessingEffect;
+
+        let triggers = [
+            Event::UserMessage {
+                text: "hi".to_string(),
+                attachments: Vec::new(),
+            },
+            Event::ToolResult {
+                tool_id: ToolCallId::new(),
+                provider_tool_use_id: None,
+                output: crate::ToolOutput::text("ok", std::time::Duration::from_millis(1)),
+                original_output_tokens: None,
+                success: true,
+                duration_ms: 1,
+            },
+            Event::WorkerResultSynthesisRequested {
+                user_sequence_num: 1,
+                turn_id: "turn-1".to_string(),
+                reason: "bundle ready".to_string(),
+            },
+        ];
+        for event in triggers {
+            assert_eq!(
+                event.processing_effect(),
+                ProcessingEffect::Trigger,
+                "{event:?} must be a Trigger"
+            );
+        }
+
+        let terminals = [
+            Event::BrainResponse {
+                text: "done".to_string(),
+                thought_signature: None,
+                model: ModelId::new("anthropic:claude-sonnet-4-6"),
+                model_tier: ModelTier::Main,
+                input_tokens_uncached: 1,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens: 1,
+                cost_cents: 0,
+                duration_ms: 1,
+            },
+            Event::SessionCompleted {
+                summary: "wrapped".to_string(),
+                total_turns: 1,
+            },
+            Event::Error {
+                message: "boom".to_string(),
+                recoverable: false,
+            },
+        ];
+        for event in terminals {
+            assert_eq!(
+                event.processing_effect(),
+                ProcessingEffect::Terminal,
+                "{event:?} must be Terminal"
+            );
+        }
+
+        let neutrals = [
+            Event::ProgressNarrated {
+                source: NarrationSource::Coordinator,
+                text: "working".to_string(),
+                segments: Vec::new(),
+                model: "none".to_string(),
+                tokens_used: 0,
+            },
+            Event::WorkerHeartbeatStale {
+                worker_id: "child-1".to_string(),
+                last_heartbeat_at: Utc::now(),
+                threshold_ms: 30_000,
+            },
+            Event::MemoryRead {
+                path: "notes".to_string(),
+                scope: "session".to_string(),
+            },
+            Event::BrainThinking {
+                summary: "thinking".to_string(),
+                token_count: 3,
+            },
+        ];
+        for event in neutrals {
+            assert_eq!(
+                event.processing_effect(),
+                ProcessingEffect::Neutral,
+                "{event:?} must be Neutral"
+            );
+        }
     }
 
     #[test]

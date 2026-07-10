@@ -104,6 +104,9 @@ impl RuntimeDeps {
         )
         .context("build providers bundle")?;
         let runtime_cache = build_runtime_cache_store(config.as_ref()).await?;
+        // Give provider concurrency limiters the shared coordination store before
+        // any provider is built, so `global` scope can coordinate across replicas.
+        moa_providers::install_coordination_store(Arc::clone(&runtime_cache));
 
         let providers = Arc::new(build_provider_registry(
             config.as_ref(),

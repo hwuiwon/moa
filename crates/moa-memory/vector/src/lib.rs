@@ -20,7 +20,9 @@ pub use promotion::{
     PROMOTION_BATCH_SIZE, PROMOTION_OVERLAP_THRESHOLD, PromotionOptions, PromotionReport,
     VectorPartitionPromotion, finalize_promotion, rollback_promotion,
 };
-pub use sync::{VECTOR_SYNC_POST_COMMIT_LIMIT, VectorSyncOperation, VectorSyncReport};
+pub use sync::{
+    VECTOR_SYNC_MAX_ATTEMPTS, VECTOR_SYNC_POST_COMMIT_LIMIT, VectorSyncOperation, VectorSyncReport,
+};
 pub use turbopuffer::{TurbopufferStore, TurbopufferTextQuery};
 
 /// Fixed graph-memory embedding dimensionality.
@@ -197,6 +199,57 @@ pub enum Error {
     SerdeJson(#[from] serde_json::Error),
 }
 
+impl Error {
+    /// Returns whether this failure is permanent for vector-sync retry purposes.
+    ///
+    /// Permanent failures (dimension, schema/embedder, backend configuration, or
+    /// 4xx client responses other than throttling/timeout) will never succeed on
+    /// retry without operator remediation, so the vector-sync drainer quarantines
+    /// them immediately instead of retrying forever. Transient failures (network,
+    /// Postgres, 5xx/429/408, malformed responses, in-progress re-embedding) stay
+    /// eligible for backed-off retries.
+    #[must_use]
+    pub fn is_permanent(&self) -> bool {
+        match self {
+            Self::DimensionMismatch { .. }
+            | Self::UnknownPiiClass(_)
+            | Self::EmbeddingResponseLength { .. }
+            | Self::EmbedderConfig(_)
+            | Self::EmbedderMismatch { .. }
+            | Self::EmbedderModelMismatch { .. }
+            | Self::StoragePartitionEmbedderStateMissing { .. }
+            | Self::StoragePartitionRequired { .. }
+            | Self::QueryLimitTooLarge(_)
+            | Self::TurbopufferUnavailable { .. }
+            | Self::TurbopufferBaaRequired { .. }
+            | Self::TurbopufferConfig(_)
+            | Self::PromotionValidationFailed { .. }
+            | Self::InvalidPromotionState { .. }
+            | Self::TransactionalWritesUnsupported(_)
+            | Self::InvalidVectorSyncOperation(_)
+            | Self::UnsupportedVectorBackend { .. }
+            | Self::UnsupportedQueryFeature { .. } => true,
+            Self::ProviderStatus { status, .. } | Self::VectorProviderStatus { status, .. } => {
+                is_permanent_http_status(*status)
+            }
+            Self::ReembedInProgress { .. }
+            | Self::TurbopufferResponse(_)
+            | Self::Core(_)
+            | Self::Sqlx(_)
+            | Self::Reqwest(_)
+            | Self::SerdeJson(_) => false,
+        }
+    }
+}
+
+/// Returns whether an HTTP status from a vector/embedding backend is permanent.
+///
+/// 4xx client errors will not self-heal, except `408 Request Timeout` and
+/// `429 Too Many Requests`, which are transient and should be retried.
+fn is_permanent_http_status(status: u16) -> bool {
+    (400..500).contains(&status) && status != 408 && status != 429
+}
+
 impl From<Error> for moa_core::MoaError {
     fn from(error: Error) -> Self {
         match error {
@@ -298,15 +351,6 @@ pub trait VectorStore: Send + Sync {
         let _ = conn;
         let _ = uids;
         Err(Error::TransactionalWritesUnsupported(self.backend()))
-    }
-}
-
-/// Post-commit sync hook for graph writes that maintain external vector projections.
-#[async_trait]
-pub trait VectorPostCommitSync: Send + Sync {
-    /// Flushes durable post-commit work owned by a graph-vector attachment.
-    async fn sync_post_commit(&self) -> Result<()> {
-        Ok(())
     }
 }
 

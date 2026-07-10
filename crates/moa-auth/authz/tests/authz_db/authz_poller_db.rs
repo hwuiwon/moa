@@ -174,16 +174,15 @@ async fn insert_outbox_row(
     let sql = format!(
         r#"
         INSERT INTO authz_outbox
-            (id, idempotency_key, op, tuple_user, tuple_relation, tuple_object,
+            (id, op, tuple_user, tuple_relation, tuple_object,
              model_version, status, next_attempt_at, lease_token, lease_expires_at)
         VALUES
-            ($1, $2, 'write', $3, 'operator', $4, 1, $5,
-             NOW() - INTERVAL '1 minute', $6, {lease_expires_at_sql})
+            ($1, 'write', $2, 'operator', $3, 1, $4,
+             NOW() - INTERVAL '1 minute', $5, {lease_expires_at_sql})
         "#
     );
     sqlx::query(&sql)
         .bind(row_id)
-        .bind(format!("test-key-{row_id}"))
         .bind(format!("operator:{}", Uuid::new_v4()))
         .bind(format!("tenant:{}", Uuid::new_v4()))
         .bind(status)

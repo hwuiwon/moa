@@ -33,9 +33,6 @@ pub enum RetrievalError {
     /// Scoped Postgres connection setup failed.
     #[error("scope setup: {0}")]
     Scope(#[from] moa_core::MoaError),
-    /// Reranking failed.
-    #[error("rerank: {0}")]
-    Rerank(String),
 }
 
 /// Retrieval request supplied by the query planner.

@@ -505,7 +505,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
         None,
     );
     let seed_uid = graph.create_node(seed).await.expect("create seed node");
-    let exact_text = "auth service deployment provider is fly.io";
+    let exact_text = "auth service deployment provider is railway";
     let exact = node_intent(
         &storage_partition_id,
         NodeLabel::Fact,

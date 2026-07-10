@@ -5,30 +5,25 @@ use moa_agents::AgentResolver;
 use moa_authz::{enqueue, enqueue_raw};
 use moa_authz_schema::{ObjectType, Relation, TupleKey, TupleOp, UserType};
 use moa_core::{
-    ActionRuleScope, AgentContext, AgentSessionSelection, ModelId,
-    traits::{Identity, IdentityType},
+    ActionRuleScope, AgentContext, AgentSessionSelection, ModelId, SessionChannelBindingId,
+    traits::{Identity, IdentityType, SessionChannelBindingUpdate},
 };
+use moa_session::SessionChannelBindingReplacement;
+use sqlx::{Postgres, Transaction};
 
-/// Creates a session row and enqueues the authorization tuples needed by its first caller.
-pub(crate) async fn create_session_for_identity(
-    store: &PostgresSessionStore,
-    pool: &sqlx::PgPool,
-    meta: SessionMeta,
-    identity: Identity,
-) -> Result<SessionId, HandlerError> {
-    let (owner_user_type, owner_id) = owner_tuple_subject(&identity)?;
-    let tenant_id = meta.tenant_id;
-    let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
-    let mut transaction = pool
-        .begin()
-        .await
-        .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
-
-    let session_id = store
-        .create_session_in_tx(&mut transaction, meta)
-        .await
-        .map_err(HandlerError::from)?;
-
+/// Enqueues the authorization outbox tuples that grant a session's first caller
+/// ownership plus the tenant and (optional) contact parent edges.
+///
+/// Runs inside the caller-owned transaction so the tuples commit atomically with
+/// the session row. Enqueue is a desired-state upsert, so repeating it is safe.
+async fn enqueue_session_authz_tuples(
+    transaction: &mut Transaction<'_, Postgres>,
+    identity: &Identity,
+    session_id: SessionId,
+    tenant_id: moa_core::TenantId,
+    contact_id: Option<moa_core::ContactId>,
+) -> Result<(), HandlerError> {
+    let (owner_user_type, owner_id) = owner_tuple_subject(identity)?;
     let owner_tuple = TupleKey::new(
         owner_user_type,
         owner_id,
@@ -37,7 +32,7 @@ pub(crate) async fn create_session_for_identity(
         session_id.0,
     );
     enqueue(
-        &mut *transaction,
+        &mut **transaction,
         TupleOp::Write,
         &owner_tuple,
         Some(tenant_id.0),
@@ -46,7 +41,7 @@ pub(crate) async fn create_session_for_identity(
     .map_err(|error| TerminalError::new(format!("authz outbox owner tuple: {error}")))?;
 
     enqueue_raw(
-        &mut *transaction,
+        &mut **transaction,
         TupleOp::Write,
         &format!("tenant:{tenant_id}"),
         "tenant",
@@ -58,7 +53,7 @@ pub(crate) async fn create_session_for_identity(
 
     if let Some(contact_id) = contact_id {
         enqueue_raw(
-            &mut *transaction,
+            &mut **transaction,
             TupleOp::Write,
             &format!("contact:{contact_id}"),
             "contact",
@@ -67,6 +62,39 @@ pub(crate) async fn create_session_for_identity(
         )
         .await
         .map_err(|error| TerminalError::new(format!("authz outbox contact tuple: {error}")))?;
+    }
+    Ok(())
+}
+
+/// Creates a session row and enqueues the authorization tuples needed by its first caller.
+pub(crate) async fn create_session_for_identity(
+    store: &PostgresSessionStore,
+    pool: &sqlx::PgPool,
+    meta: SessionMeta,
+    identity: Identity,
+) -> Result<SessionId, HandlerError> {
+    let tenant_id = meta.tenant_id;
+    let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
+
+    let outcome = store
+        .create_session_in_tx(&mut transaction, meta)
+        .await
+        .map_err(HandlerError::from)?;
+    let session_id = outcome.session_id;
+
+    if outcome.inserted {
+        enqueue_session_authz_tuples(
+            &mut transaction,
+            &identity,
+            session_id,
+            tenant_id,
+            contact_id,
+        )
+        .await?;
     }
 
     transaction
@@ -77,6 +105,137 @@ pub(crate) async fn create_session_for_identity(
     // background timer, so session creation does not run a COUNT(*) here.
 
     Ok(session_id)
+}
+
+/// Atomically initializes a contact-backed session and its first channel binding.
+///
+/// The entire product write — session row, agent sidecar, authorization outbox
+/// tuples, initial channel binding, and the `SessionCreated` event — runs in one
+/// transaction keyed on a replay-stable `meta.id`. The session insert is
+/// idempotent (`ON CONFLICT (id) DO NOTHING`); on a handler replay of an
+/// already-committed creation it reports `inserted = false`, all dependent
+/// writes are skipped, and the same `session_id` is returned. This prevents both
+/// partial rows (atomicity) and duplicate complete sessions (stable identity),
+/// which the separate-commit path could not guarantee.
+///
+/// `binding_id` must likewise be replay-stable so the binding insert is
+/// idempotent across replays.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn initialize_contact_session_atomic(
+    store: &PostgresSessionStore,
+    pool: &sqlx::PgPool,
+    meta: SessionMeta,
+    identity: Identity,
+    binding_id: SessionChannelBindingId,
+    binding: SessionChannelBindingUpdate,
+    created_event: Event,
+) -> Result<SessionId, HandlerError> {
+    let tenant_id = meta.tenant_id;
+    let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
+    let session_id = meta.id;
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
+
+    let outcome = store
+        .create_session_in_tx(&mut transaction, meta)
+        .await
+        .map_err(HandlerError::from)?;
+
+    if outcome.inserted {
+        enqueue_session_authz_tuples(
+            &mut transaction,
+            &identity,
+            session_id,
+            tenant_id,
+            contact_id,
+        )
+        .await?;
+
+        store
+            .replace_session_channel_binding_in_tx(
+                &mut transaction,
+                binding_id,
+                SessionChannelBindingReplacement {
+                    tenant_id: binding.tenant_id,
+                    storage_partition_id: &binding.storage_partition_id,
+                    session_id: binding.session_id,
+                    contact_id: binding.contact_id,
+                    channel_account_id: binding.channel_account_id,
+                    contact_point_id: binding.contact_point_id,
+                    channel_ref: &binding.channel_ref,
+                    reason: binding.reason.as_deref(),
+                },
+            )
+            .await
+            .map_err(session_store_handler_error)?;
+
+        store
+            .append_event_in_tx(&mut transaction, session_id, created_event, None)
+            .await
+            .map_err(session_store_handler_error)?;
+    }
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
+
+    Ok(outcome.session_id)
+}
+
+/// Atomically applies a contact session channel change: a replay-stable binding
+/// replacement and its `SessionChannelChanged` event in one transaction.
+///
+/// The binding insert is idempotent on `binding_id`, so a replay finds the
+/// binding already present, makes no further changes, and returns without
+/// appending a duplicate event.
+pub(crate) async fn change_contact_session_channel_atomic(
+    store: &PostgresSessionStore,
+    pool: &sqlx::PgPool,
+    binding_id: SessionChannelBindingId,
+    binding: SessionChannelBindingUpdate,
+    changed_event: Event,
+) -> Result<(), HandlerError> {
+    let session_id = binding.session_id;
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
+
+    let inserted = store
+        .replace_session_channel_binding_in_tx(
+            &mut transaction,
+            binding_id,
+            SessionChannelBindingReplacement {
+                tenant_id: binding.tenant_id,
+                storage_partition_id: &binding.storage_partition_id,
+                session_id: binding.session_id,
+                contact_id: binding.contact_id,
+                channel_account_id: binding.channel_account_id,
+                contact_point_id: binding.contact_point_id,
+                channel_ref: &binding.channel_ref,
+                reason: binding.reason.as_deref(),
+            },
+        )
+        .await
+        .map_err(session_store_handler_error)?;
+
+    if inserted {
+        store
+            .append_event_in_tx(&mut transaction, session_id, changed_event, None)
+            .await
+            .map_err(session_store_handler_error)?;
+    }
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
+
+    Ok(())
 }
 
 /// Creates a session after resolving and pinning a tenant-configured agent policy.
@@ -210,6 +369,17 @@ impl SessionStoreImpl {
             .create_session(meta)
             .await
             .map_err(HandlerError::from)
+    }
+}
+
+/// Maps a session-store [`MoaError`] to a Restate handler error, surfacing a
+/// missing session as a 404 and other failures as a generic terminal error.
+fn session_store_handler_error(error: moa_core::MoaError) -> HandlerError {
+    match error {
+        moa_core::MoaError::SessionNotFound(_) => {
+            TerminalError::new_with_code(404, "session not found").into()
+        }
+        error => TerminalError::new(format!("session store error: {error}")).into(),
     }
 }
 

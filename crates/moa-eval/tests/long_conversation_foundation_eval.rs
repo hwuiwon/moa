@@ -71,10 +71,10 @@ fn score_card() -> ScoreCard {
             errors_preserved: true,
         },
         latency_ms: LatencyScores {
-            first_token_p50_ms: 10,
-            first_token_p95_ms: 15,
-            completion_p50_ms: 40,
-            completion_p95_ms: 50,
+            first_token_p50_ms: Some(10),
+            first_token_p95_ms: Some(15),
+            completion_p50_ms: Some(40),
+            completion_p95_ms: Some(50),
         },
         cost: CostScores {
             input_tokens: 100,
@@ -357,7 +357,7 @@ fn compute_prefix_stability_returns_false_when_byte_layout_drifts_at_turn_3() {
 #[test]
 fn budgets_evaluate_reports_each_violation_with_metric_name_and_actual_value() {
     let mut card = score_card();
-    card.latency_ms.completion_p95_ms = 200;
+    card.latency_ms.completion_p95_ms = Some(200);
     card.safety.canary_leaks = 1;
     let budgets = Budgets {
         latency_p95_ms_max: Some(100),
