@@ -5,9 +5,12 @@ use moa_core::{MoaError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_RERANK_CONCURRENCY};
+use crate::core::concurrency::{
+    ConcurrencyLimiter, DEFAULT_BLOCK_THRESHOLD, DEFAULT_RERANK_CONCURRENCY,
+};
 use crate::core::http::{build_json_http_client, post_json};
 use crate::core::pacer::{PacerConfig, RatePacer};
+use crate::core::rate_guard;
 
 use super::{RerankHit, Reranker};
 
@@ -111,7 +114,10 @@ impl Reranker for ZeroEntropyReranker {
         }
 
         // In-flight slot first, then rate budget (see `ConcurrencyLimiter`).
-        let _permit = self.limiter.acquire().await;
+        let _permit = match self.limiter.acquire_within(DEFAULT_BLOCK_THRESHOLD).await {
+            Some(lease) => lease,
+            None => return Err(rate_guard::rate_limited_saturated(DEFAULT_BLOCK_THRESHOLD)),
+        };
         self.pacer.acquire(1, 0).await;
         let body: ZeroEntropyRerankResponse = post_json(
             &self.client,

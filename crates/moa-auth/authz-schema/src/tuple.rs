@@ -336,5 +336,20 @@ mod tests {
                 "session must define relation {relation}"
             );
         }
+
+        // Pins: the session's bound contact is a participant via a same-object
+        // computed userset, not a reflexive tuple-to-userset that OpenFGA can
+        // never satisfy. A `tupleToUserset` on `contact->contact` would require
+        // a (contact:X, contact, contact:X) tuple nothing writes.
+        let participant_children = session_relations["participant"]["union"]["child"]
+            .as_array()
+            .expect("participant must be a union of children");
+        assert!(
+            participant_children.iter().any(|child| {
+                child["computedUserset"]["relation"] == "contact"
+                    && child.get("tupleToUserset").is_none()
+            }),
+            "participant must grant the session contact via a same-object computed userset"
+        );
     }
 }

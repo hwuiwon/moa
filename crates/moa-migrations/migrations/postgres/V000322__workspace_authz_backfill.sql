@@ -67,7 +67,7 @@ BEGIN
         'workspace:' || default_workspace_id,
         'workspace',
         'tenant:' || tenant_id,
-        4,
+        5,
         tenant_id,
         1, 'pending', 0, NOW()
     FROM workspace_authz_backfill_tenants

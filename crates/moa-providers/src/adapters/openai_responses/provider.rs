@@ -12,7 +12,9 @@ use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use crate::adapters::openai_responses::{build_responses_request, stream_responses_with_retry};
-use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_BLOCK_THRESHOLD};
+use crate::core::concurrency::{
+    ConcurrencyLimiter, DEFAULT_BLOCK_THRESHOLD, DEFAULT_LLM_CONCURRENCY,
+};
 use crate::core::instrumentation::LLMSpanRecorder;
 use crate::core::models::{self, PROVIDER_OPENAI};
 use crate::core::pacer::{PacerConfig, RatePacer};
@@ -89,8 +91,9 @@ impl OpenAIProvider {
             retry_policy: RetryPolicy::default().with_max_retries(DEFAULT_MAX_RETRIES),
             web_search_enabled: true,
             pacer: RatePacer::new(PacerConfig::disabled()),
-            // LLM concurrency is unbounded by default; operators opt in per key.
-            limiter: ConcurrencyLimiter::unbounded(),
+            // LLM concurrency defaults to a per-key in-flight bound; operators can
+            // override it (0 opts back into unbounded).
+            limiter: ConcurrencyLimiter::new(DEFAULT_LLM_CONCURRENCY),
             guard: RateGuard::new(),
         })
     }

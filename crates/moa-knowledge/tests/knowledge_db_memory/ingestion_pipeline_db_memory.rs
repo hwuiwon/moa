@@ -209,6 +209,27 @@ impl EmbeddingProvider for CountingEmbedder {
     }
 }
 
+/// Embedder that returns one fewer vector than it was given, simulating a
+/// provider that violates the embedding cardinality contract.
+#[derive(Debug, Default)]
+struct MiscountingEmbedder;
+
+#[async_trait]
+impl EmbeddingProvider for MiscountingEmbedder {
+    fn model_id(&self) -> &str {
+        "test-model"
+    }
+
+    fn dimensions(&self) -> usize {
+        1024
+    }
+
+    async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+        let short = inputs.len().saturating_sub(1);
+        Ok((0..short).map(|_| vec![0.0; 1024]).collect())
+    }
+}
+
 #[derive(Debug, Default)]
 struct FakeGraphWriter {
     nodes: Mutex<HashMap<Uuid, Value>>,
@@ -800,6 +821,173 @@ async fn deletion_writes_terminal_status_last_and_stays_retryable_on_invalidatio
 }
 
 #[tokio::test]
+async fn embedding_cardinality_mismatch_rejects_batch_without_graph_write_db_memory() {
+    // Pins: F08 — a provider that returns fewer vectors than inputs fails the
+    // version ingestion with a typed cardinality error and writes nothing to the
+    // graph, instead of silently zipping and dropping/misaligning chunks.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated Postgres");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let scope = RlsContext::tenant(tenant_id);
+    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        scope,
+    ));
+    let graph = Arc::new(FakeGraphWriter::default());
+    let pipeline = KnowledgeIngestionPipeline::new(
+        repository.clone(),
+        Arc::new(ParagraphParser),
+        Arc::new(MiscountingEmbedder),
+        graph.clone(),
+        KnowledgeIngestionPipelineConfig {
+            chunking: ChunkingConfig {
+                target_tokens: 1,
+                max_tokens: 16,
+                min_tokens: 1,
+            },
+            provider: "test_provider".to_string(),
+            parser_label: "test_parser".to_string(),
+        },
+    );
+    repository
+        .upsert_connection(KnowledgeConnection {
+            connection_uid,
+            tenant_id,
+            provider: "test_provider".to_string(),
+            connector: "docs".to_string(),
+            provider_account_id: "acct_1".to_string(),
+            credential_ref: "vault://knowledge/test".to_string(),
+            status: ConnectionStatus::Active,
+            metadata: credentialish_metadata(),
+            source_selection: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_synced_at: None,
+        })
+        .await
+        .expect("upsert connection");
+
+    let run = create_run(&repository, tenant_id, connection_uid).await;
+    // Two paragraphs -> two chunks -> two embedding inputs; the embedder returns one.
+    let result = pipeline
+        .ingest_record_page(
+            run,
+            connection_uid,
+            tenant_id,
+            RecordPage {
+                records: vec![record("tok-1", false, "Alpha one.\n\nBeta one.")],
+                next_cursor: None,
+            },
+        )
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(moa_knowledge::Error::EmbeddingCardinalityMismatch { .. })
+        ),
+        "expected a typed cardinality error, got {result:?}"
+    );
+    assert_eq!(
+        graph.vector_count(),
+        0,
+        "no vectors are written when the embedding batch is rejected"
+    );
+}
+
+#[tokio::test]
+async fn ingest_record_page_processes_records_concurrently_with_accurate_report_db_memory() {
+    // Pins: F26 — a page of distinct records all ingest under bounded concurrency
+    // and the folded report is accurate.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated Postgres");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let scope = RlsContext::tenant(tenant_id);
+    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        scope,
+    ));
+    let pipeline = KnowledgeIngestionPipeline::new(
+        repository.clone(),
+        Arc::new(ParagraphParser),
+        Arc::new(CountingEmbedder::default()),
+        Arc::new(FakeGraphWriter::default()),
+        KnowledgeIngestionPipelineConfig {
+            chunking: ChunkingConfig {
+                target_tokens: 1,
+                max_tokens: 16,
+                min_tokens: 1,
+            },
+            provider: "test_provider".to_string(),
+            parser_label: "test_parser".to_string(),
+        },
+    );
+    repository
+        .upsert_connection(KnowledgeConnection {
+            connection_uid,
+            tenant_id,
+            provider: "test_provider".to_string(),
+            connector: "docs".to_string(),
+            provider_account_id: "acct_1".to_string(),
+            credential_ref: "vault://knowledge/test".to_string(),
+            status: ConnectionStatus::Active,
+            metadata: credentialish_metadata(),
+            source_selection: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_synced_at: None,
+        })
+        .await
+        .expect("upsert connection");
+
+    let record_count = 6_u64;
+    let records = (0..record_count)
+        .map(|index| {
+            record_with_source(
+                &format!("doc-{index}"),
+                "tok-1",
+                false,
+                &format!("Alpha {index}.\n\nBeta {index}."),
+            )
+        })
+        .collect::<Vec<_>>();
+    let run = create_run(&repository, tenant_id, connection_uid).await;
+
+    let report = pipeline
+        .ingest_record_page(
+            run,
+            connection_uid,
+            tenant_id,
+            RecordPage {
+                records,
+                next_cursor: None,
+            },
+        )
+        .await
+        .expect("page of distinct records ingests concurrently");
+
+    assert_eq!(report.records_listed, record_count);
+    assert_eq!(report.records_ingested, record_count);
+    assert_eq!(report.records_skipped, 0);
+    assert_eq!(report.records_deleted, 0);
+    // Every distinct object was persisted with an active version.
+    for index in 0..record_count {
+        let object_uid = object_uid_for_source(connection_uid, &format!("doc-{index}"));
+        assert_eq!(
+            version_count(&pool, object_uid).await,
+            1,
+            "each concurrently ingested record has one document version"
+        );
+    }
+}
+
+#[tokio::test]
 async fn semantic_graph_extraction_is_cached_reported_and_written_db_memory() {
     // Pins: semantic graph extraction is a persisted ingestion-time cache with
     // reported hit/miss counters and graph-visible typed edges.
@@ -875,14 +1063,38 @@ async fn semantic_graph_extraction_is_cached_reported_and_written_db_memory() {
     let second_counters =
         semantic_graph_step_counters(&pool, sync_run_uid, second_object_uid).await;
     assert_eq!(first_counters["chunks_total"], 2);
-    assert_eq!(first_counters["cache_hits"], 0);
-    assert_eq!(first_counters["cache_misses"], 2);
     assert_eq!(second_counters["chunks_total"], 2);
-    assert_eq!(second_counters["cache_hits"], 2);
-    assert_eq!(second_counters["cache_misses"], 0);
-    assert!(first_counters["entities_extracted"].as_u64().unwrap_or(0) > 0);
-    assert!(first_counters["relations_extracted"].as_u64().unwrap_or(0) > 0);
-    assert!(first_counters["semantic_chunk_links"].as_u64().unwrap_or(0) > 0);
+    // With bounded page concurrency the two same-content records may run in
+    // parallel, so deterministic intra-page semantic-extraction cache reuse is no
+    // longer guaranteed. What must hold regardless of interleaving: each record
+    // accounts for both chunks (hits + misses == chunks_total), each distinct
+    // chunk hash is computed at least once (2..=4 total misses), and the cache
+    // converges to exactly two idempotent rows.
+    for counters in [&first_counters, &second_counters] {
+        let hits = counters["cache_hits"].as_u64().unwrap_or(0);
+        let misses = counters["cache_misses"].as_u64().unwrap_or(0);
+        assert_eq!(hits + misses, 2, "each record accounts for both chunks");
+    }
+    let total_misses = first_counters["cache_misses"].as_u64().unwrap_or(0)
+        + second_counters["cache_misses"].as_u64().unwrap_or(0);
+    assert!(
+        (2..=4).contains(&total_misses),
+        "each distinct chunk hash is computed at least once, got {total_misses} misses"
+    );
+    let total_entities = first_counters["entities_extracted"].as_u64().unwrap_or(0)
+        + second_counters["entities_extracted"].as_u64().unwrap_or(0);
+    let total_relations = first_counters["relations_extracted"].as_u64().unwrap_or(0)
+        + second_counters["relations_extracted"].as_u64().unwrap_or(0);
+    let total_links = first_counters["semantic_chunk_links"].as_u64().unwrap_or(0)
+        + second_counters["semantic_chunk_links"]
+            .as_u64()
+            .unwrap_or(0);
+    assert!(total_entities > 0, "semantic entities are extracted");
+    assert!(total_relations > 0, "semantic relations are extracted");
+    assert!(
+        total_links > 0,
+        "same-document semantic chunk links are created"
+    );
     assert_eq!(semantic_graph_cache_row_count(&pool, tenant_id).await, 2);
 
     let edge_json = graph.edge_properties_json();

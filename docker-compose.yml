@@ -242,6 +242,9 @@ services:
       MOA_SESSION_ATTACHMENT_ALLOW_HTTP: "true"
       MOA_SESSION_ATTACHMENT_VIRTUAL_HOSTED_STYLE: "false"
       MOA_PROVIDERS_OVERRIDE: ${MOA_PROVIDERS_OVERRIDE:-}
+      # Development-only: the local hand provider is fail-closed by default
+      # and must be opted into explicitly outside production.
+      MOA_CLOUD_HANDS_ALLOW_LOCAL: "true"
       MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS: "false"
       MOA_DEREGISTER_ON_SHUTDOWN: "false"
       MOA_METRICS_ENABLED: ${MOA_METRICS_ENABLED:-true}

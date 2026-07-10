@@ -76,7 +76,9 @@ pub struct ProviderCredentialConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_inputs_per_min: Option<u32>,
     /// Optional in-flight concurrency cap; `None` keeps the provider default
-    /// (embedding/rerank default to a small window; chat/LLM default unbounded).
+    /// (embedding/rerank default to a small window; chat/LLM default to a
+    /// generous per-key in-flight bound). An explicit `0` opts back into
+    /// unbounded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_requests: Option<u32>,
 }

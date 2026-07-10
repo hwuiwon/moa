@@ -1003,6 +1003,200 @@ fn restore_env_prefix(message: &str) -> String {
     }
 }
 
+/// Environment variable that switches the unknown-`MOA_*` audit from warn to
+/// fail. Set to a truthy value (`1`, `true`, `yes`, `on`) in production to fail
+/// startup on a misspelled overlay variable instead of silently ignoring it.
+pub const CONFIG_ENV_STRICT_VAR: &str = "MOA_CONFIG_ENV_STRICT";
+
+/// Maximum edit distance for a "did you mean" suggestion against a known key.
+const SUGGESTION_MAX_DISTANCE: usize = 3;
+
+/// Approved `MOA_*` variable-name prefixes that are read directly by tooling,
+/// deploy scripts, live-test gates, or provider credential lookups rather than
+/// through the typed overlay. Each is verified to share no prefix with a real
+/// overlay field, so allowlisting the namespace cannot mask an overlay typo.
+///
+/// Evidence: `grep -roE 'var(_os)?\("MOA_..."'` across `crates/`, plus `MOA_*`
+/// names in `scripts/`, `Makefile`, `docker-compose*.yml`, and `.env*`.
+const ALLOWLIST_PREFIXES: &[&str] = &[
+    "MOA_RUN_",                // live/docker/chaos test gates (MOA_RUN_LIVE_*, ...)
+    "MOA_TEST_",               // test-only config (Auth0 test tenant, ...)
+    "MOA_FIXTURE_",            // integration-test fixtures (fixture OpenFGA, ...)
+    "MOA_PENTEST_",            // cross-tenant pentest harness knobs
+    "MOA_LOADTEST_",           // k6/loadtest harness knobs
+    "MOA_CLEAN_E2E_",          // run-clean-e2e.sh harness knobs
+    "MOA_FLY_",                // Fly.io deploy script knobs
+    "MOA_RUSTFS_",             // local compose object-store ports
+    "MOA_FGA_",                // OpenFGA bootstrap script knobs
+    "MOA_BOOTSTRAP_",          // tenant/user bootstrap script knobs
+    "MOA_EVAL_",               // eval harness knobs
+    "MOA_TRACE_",              // tracing/debug sampling toggles
+    "MOA_TWILIO_",             // Twilio live-messaging credentials
+    "MOA_DAYTONA_",            // Daytona sandbox credentials (compose)
+    "MOA_NEON_",               // Neon branching credentials (deploy/tests)
+    "MOA_OPENFGA_",            // OpenFGA compose/bootstrap vars (not MOA_AUTHZ_OPENFGA_*)
+    "MOA_POSTMARK_",           // Postmark live-email credentials
+    "MOA_E2B_",                // E2B sandbox credentials
+    "MOA_OPENROUTER_",         // OpenRouter credentials (deploy)
+    "MOA_EDGE_",               // edge binary bind/upstream (not an overlay field)
+    "MOA_RESTATE_DEPLOYMENT_", // Restate deploy-registration vars (not overlay)
+];
+
+/// Approved `MOA_*` variables that live in a namespace shared with real overlay
+/// fields (so a prefix would be unsafe) or that stand alone. Kept exact.
+const ALLOWLIST_EXACT: &[&str] = &[
+    "MOA__DATABASE__URL",    // `config`-crate double-underscore nested form
+    "MOA_CONFIG_ENV_STRICT", // this audit's own strictness switch
+    "MOA_AUDIT_BUCKET",      // audit shipper (MOA_AUDIT_ collides with overlay)
+    "MOA_AUDIT_OBJECT_LOCK_MODE",
+    "MOA_AUDIT_RETENTION_YEARS",
+    "MOA_AUTH_HEADER_TRUST",
+    "MOA_AUTH0_CLIENT_ID",
+    "MOA_AUTHZ_DECISION_CACHE_TTL_MS", // MOA_AUTHZ_ collides with overlay
+    "MOA_AUTHZ_OPENFGA_STORE_NAME",
+    "MOA_DEREGISTER_ON_SHUTDOWN",
+    "MOA_DOCKER_SECCOMP_PROFILE",
+    "MOA_LINEAGE_SINK",
+    "MOA_MEMORY_AUTO_BOOTSTRAP", // MOA_MEMORY_ collides with overlay
+    "MOA_MEMORY_EXTRACTION_MAX_FACTS_PER_CHUNK",
+    "MOA_MEMORY_EXTRACTION_MODEL",
+    "MOA_MEMORY_EXTRACTION_TIMEOUT_MS",
+    "MOA_ORCHESTRATOR_BIN", // MOA_ORCHESTRATOR_ collides with overlay
+    "MOA_ORCHESTRATOR_FEATURES",
+    "MOA_PERSIST_TURN_METRICS",
+    "MOA_PROVIDERS_OVERRIDE",
+    "MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS",
+    "MOA_SCIM_BASE_URL",
+    "MOA_SKIP_FGA",
+    "MOA_TOXIPROXY_URL",
+    "MOA_TURBOPUFFER_LIVE_NEWS_FACTS", // MOA_TURBOPUFFER_ collides with overlay
+    "MOA_VENDOR_NAME",
+];
+
+/// Set of `MOA_*` environment variable names recognized by the typed overlay,
+/// derived at runtime from the overlay struct itself (serde is the source of
+/// truth, so a renamed field updates this set automatically).
+fn known_overlay_env_keys() -> std::collections::BTreeSet<String> {
+    match serde_json::to_value(MoaEnvOverlay::default()) {
+        Ok(Value::Object(map)) => map
+            .keys()
+            .map(|field| format!("MOA_{}", field.to_uppercase()))
+            .collect(),
+        _ => std::collections::BTreeSet::new(),
+    }
+}
+
+/// Returns true when `name` matches an approved allowlist prefix or exact entry.
+fn is_allowlisted(name: &str) -> bool {
+    ALLOWLIST_EXACT.contains(&name)
+        || ALLOWLIST_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
+/// Returns the sorted, de-duplicated `MOA_*` variable names in `names` that are
+/// neither a known overlay field nor allowlisted.
+fn unknown_moa_env_vars<I>(names: I) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let known = known_overlay_env_keys();
+    let mut unknown = names
+        .into_iter()
+        .map(|name| name.to_uppercase())
+        .filter(|name| name.starts_with("MOA_"))
+        .filter(|name| !known.contains(name) && !is_allowlisted(name))
+        .collect::<Vec<_>>();
+    unknown.sort();
+    unknown.dedup();
+    unknown
+}
+
+/// Returns the closest known overlay key to `name` within
+/// [`SUGGESTION_MAX_DISTANCE`], for a "did you mean" hint.
+fn nearest_known_key(name: &str) -> Option<String> {
+    known_overlay_env_keys()
+        .into_iter()
+        .map(|candidate| {
+            let distance = levenshtein(name, &candidate);
+            (distance, candidate)
+        })
+        .filter(|(distance, _)| *distance <= SUGGESTION_MAX_DISTANCE)
+        .min()
+        .map(|(_, candidate)| candidate)
+}
+
+/// Iterative Levenshtein edit distance (in-tree; no dependency).
+fn levenshtein(left: &str, right: &str) -> usize {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0usize; right.len() + 1];
+    for (i, &lchar) in left.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, &rchar) in right.iter().enumerate() {
+            let cost = usize::from(lchar != rchar);
+            current[j + 1] = (previous[j] + cost)
+                .min(previous[j + 1] + 1)
+                .min(current[j] + 1);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
+}
+
+impl MoaEnvOverlay {
+    /// Audits process `MOA_*` environment variables against the overlay registry.
+    ///
+    /// envy silently ignores unrecognized prefixed variables, so a typo like
+    /// `MOA_MODELS_MIAN` falls back to defaults with no signal. This flags any
+    /// `MOA_*` name that is neither a typed overlay field nor an approved special
+    /// key: in strict mode it fails startup listing the offenders (with a
+    /// nearest-match suggestion); otherwise it logs a warning.
+    pub fn audit_env_registry<I>(names: I, strict: bool) -> Result<()>
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let unknown = unknown_moa_env_vars(names);
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        let report = unknown
+            .iter()
+            .map(|name| match nearest_known_key(name) {
+                Some(suggestion) => format!("{name} (did you mean {suggestion}?)"),
+                None => name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        if strict {
+            Err(MoaError::ConfigError(format!(
+                "unrecognized MOA_* environment variable(s): {report}"
+            )))
+        } else {
+            tracing::warn!(
+                unrecognized = %report,
+                "ignoring unrecognized MOA_* environment variable(s) (typo?); \
+                 set MOA_CONFIG_ENV_STRICT=1 to fail startup instead"
+            );
+            Ok(())
+        }
+    }
+
+    /// Reads [`CONFIG_ENV_STRICT_VAR`] as a boolean strictness flag.
+    #[must_use]
+    pub fn env_registry_strict_from_env() -> bool {
+        std::env::var(CONFIG_ENV_STRICT_VAR)
+            .ok()
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+    }
+}
+
 /// Deserializes a comma-separated env value into a trimmed, non-empty list.
 /// Deserializes an env value where an empty string means "unset".
 ///
@@ -1098,6 +1292,77 @@ pub(in crate::config) fn any_present(values: &[bool]) -> bool {
 mod tests {
     use super::*;
     use crate::config::TurbopufferVectorType;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    #[test]
+    fn registry_flags_unknown_overlay_typo() {
+        // Pins: a misspelled overlay var (which envy silently ignores) is detected.
+        let unknown = unknown_moa_env_vars(names(&["MOA_MODELS_MIAN"]));
+        assert_eq!(unknown, vec!["MOA_MODELS_MIAN".to_string()]);
+    }
+
+    #[test]
+    fn registry_accepts_known_field_and_allowlisted_specials() {
+        // Pins: a real overlay field, a prefix-allowlisted gate, and an exact
+        // allowlisted special key are all recognized (no false positives).
+        let clean = unknown_moa_env_vars(names(&[
+            "MOA_MODELS_MAIN",                // real overlay field
+            "MOA_RUN_LIVE_COHERE_TESTS",      // MOA_RUN_ prefix allowlist
+            "MOA_SKIP_FGA",                   // exact allowlist
+            "MOA_CONFIG_ENV_STRICT",          // this audit's own switch
+            "MOA_AUTH_CONTACT_TOKENS_ISSUER", // real overlay field
+        ]));
+        assert!(clean.is_empty(), "expected no unknown vars, got {clean:?}");
+    }
+
+    #[test]
+    fn registry_ignores_non_moa_and_lowercase_prefix_boundary() {
+        // Pins: only `MOA_`-prefixed names are considered; `MOALITE` and unrelated
+        // vars are left alone.
+        let unknown = unknown_moa_env_vars(names(&["PATH", "HOME", "MOALITE", "AWS_MOA_X"]));
+        assert!(
+            unknown.is_empty(),
+            "non-MOA_ vars must be ignored, got {unknown:?}"
+        );
+    }
+
+    #[test]
+    fn strict_mode_errors_and_lists_every_unknown() {
+        // Pins: strict mode fails startup and names every offending variable.
+        let error = MoaEnvOverlay::audit_env_registry(
+            names(&["MOA_MODELS_MIAN", "MOA_TOTALLY_MADE_UP", "MOA_MODELS_MAIN"]),
+            true,
+        )
+        .expect_err("strict mode must reject unknown vars");
+        let rendered = error.to_string();
+        assert!(rendered.contains("MOA_MODELS_MIAN"), "got: {rendered}");
+        assert!(rendered.contains("MOA_TOTALLY_MADE_UP"), "got: {rendered}");
+        assert!(
+            !rendered.contains("MOA_MODELS_MAIN,"),
+            "known field must not be listed: {rendered}"
+        );
+    }
+
+    #[test]
+    fn warn_mode_is_ok_for_unknown_vars() {
+        // Pins: non-strict mode tolerates unknown vars (returns Ok, logs a warning).
+        MoaEnvOverlay::audit_env_registry(names(&["MOA_MODELS_MIAN"]), false)
+            .expect("warn mode returns ok");
+    }
+
+    #[test]
+    fn strict_mode_suggests_the_nearest_known_key() {
+        // Pins: a near-miss carries a "did you mean" suggestion for the real field.
+        let error = MoaEnvOverlay::audit_env_registry(names(&["MOA_MODELS_MIAN"]), true)
+            .expect_err("near-miss should error in strict mode");
+        assert!(
+            error.to_string().contains("did you mean MOA_MODELS_MAIN"),
+            "expected a suggestion, got: {error}"
+        );
+    }
 
     #[test]
     fn every_flat_overlay_field_resolves_to_a_config_path() {

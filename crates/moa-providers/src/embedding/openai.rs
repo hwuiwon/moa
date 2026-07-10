@@ -6,11 +6,14 @@ use moa_core::traits::EmbeddingProvider;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_EMBEDDING_CONCURRENCY};
+use crate::core::concurrency::{
+    ConcurrencyLimiter, DEFAULT_BLOCK_THRESHOLD, DEFAULT_EMBEDDING_CONCURRENCY,
+};
 use crate::core::http::{
     build_json_http_client, post_json, validate_embedding_count, validate_embedding_dimension,
 };
 use crate::core::pacer::{PacerConfig, RatePacer};
+use crate::core::rate_guard;
 
 const OPENAI_EMBEDDINGS_URL: &str = "https://api.openai.com/v1/embeddings";
 const OPENAI_DIMENSIONS: usize = 1_536;
@@ -69,7 +72,10 @@ impl OpenAIEmbedding {
     /// returned embeddings preserve request order one-to-one with `inputs`.
     async fn embed_chunk(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
         // In-flight slot first, then rate budget (see `ConcurrencyLimiter`).
-        let _permit = self.limiter.acquire().await;
+        let _permit = match self.limiter.acquire_within(DEFAULT_BLOCK_THRESHOLD).await {
+            Some(lease) => lease,
+            None => return Err(rate_guard::rate_limited_saturated(DEFAULT_BLOCK_THRESHOLD)),
+        };
         self.pacer.acquire(1, inputs.len() as u32).await;
         let payload: OpenAIEmbeddingResponse = post_json(
             &self.client,
@@ -136,4 +142,68 @@ struct OpenAIEmbeddingResponse {
 struct OpenAIEmbeddingData {
     index: usize,
     embedding: Vec<f32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use moa_core::MoaError;
+    use moa_core::traits::EmbeddingProvider;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    use super::OpenAIEmbedding;
+
+    // Real-time (not paused): the holder keeps its slot by parking on a live,
+    // never-responding socket, which reqwest's IO driver cannot drive under a
+    // paused clock. The wait is bounded by `DEFAULT_BLOCK_THRESHOLD`.
+    #[tokio::test]
+    async fn embedding_reports_bounded_error_when_concurrency_gate_saturates() {
+        // Pins (F21): an embedding client whose single in-flight slot is already
+        // held returns a bounded, retryable RateLimited error once the block
+        // threshold elapses, instead of queueing indefinitely ahead of the HTTP
+        // timeout.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (ready_tx, ready_rx) = oneshot::channel();
+
+        // Accept the first request, signal that its in-flight slot is held, then
+        // keep the connection open (never respond) so the slot stays occupied.
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0_u8; 2048];
+            let _ = socket.read(&mut buffer).await;
+            let _ = ready_tx.send(());
+            std::future::pending::<()>().await;
+        });
+
+        let client = Arc::new(
+            OpenAIEmbedding::new("test-key", "text-embedding-3-small")
+                .unwrap()
+                .with_embeddings_url(format!("http://{address}/v1/embeddings"))
+                .with_max_concurrent_requests(1),
+        );
+
+        // The first call takes the only slot and parks in the server.
+        let holder = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move { client.embed(&["hold the slot".to_string()]).await })
+        };
+        ready_rx
+            .await
+            .expect("the first request should reach the server and hold the slot");
+
+        // The second call finds the gate saturated and must fail fast at the
+        // threshold rather than waiting on the 60s HTTP timeout.
+        let blocked = client.embed(&["blocked".to_string()]).await;
+        assert!(
+            matches!(blocked, Err(MoaError::RateLimited { .. })),
+            "a saturated embedding gate must return a bounded RateLimited error, got {blocked:?}"
+        );
+
+        holder.abort();
+        server.abort();
+    }
 }

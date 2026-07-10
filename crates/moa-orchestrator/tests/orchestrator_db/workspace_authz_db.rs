@@ -93,10 +93,10 @@ fn workspace_authz_backfill_migration_uses_current_model_version_static() {
         "V000322 inserted model_version must match moa_authz_schema::MODEL_VERSION"
     );
     assert!(
-        !sql.contains("model_version = 3")
-            && !sql.contains("\n        3,\n")
-            && !sql.contains("-v3"),
-        "V000322 must not retain stale model_version 3 literals"
+        !sql.contains("model_version = 4")
+            && !sql.contains("\n        4,\n")
+            && !sql.contains("-v4"),
+        "V000322 must not retain stale model_version 4 literals"
     );
 }
 

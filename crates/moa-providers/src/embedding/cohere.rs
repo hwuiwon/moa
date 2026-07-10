@@ -7,11 +7,14 @@ use moa_core::{MoaError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_EMBEDDING_CONCURRENCY};
+use crate::core::concurrency::{
+    ConcurrencyLimiter, DEFAULT_BLOCK_THRESHOLD, DEFAULT_EMBEDDING_CONCURRENCY,
+};
 use crate::core::http::{
     build_json_http_client, post_json, validate_embedding_count, validate_embedding_dimension,
 };
 use crate::core::pacer::{PacerConfig, RatePacer};
+use crate::core::rate_guard;
 
 const COHERE_EMBEDDINGS_URL: &str = "https://api.cohere.com/v2/embed";
 pub(super) const COHERE_DEFAULT_MODEL: &str = "embed-v4.0";
@@ -97,7 +100,10 @@ impl CohereEmbedding {
     async fn embed_chunk(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
         // Take an in-flight slot before spending rate budget, then hold it across
         // the round trip (see `ConcurrencyLimiter` for the ordering rationale).
-        let _permit = self.limiter.acquire().await;
+        let _permit = match self.limiter.acquire_within(DEFAULT_BLOCK_THRESHOLD).await {
+            Some(lease) => lease,
+            None => return Err(rate_guard::rate_limited_saturated(DEFAULT_BLOCK_THRESHOLD)),
+        };
         // Cohere Embed is limited by inputs/min; pace on this chunk's input count.
         self.pacer.acquire(1, inputs.len() as u32).await;
         let payload: CohereEmbeddingResponse = post_json(

@@ -7,6 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use futures_util::{StreamExt, TryStreamExt, stream};
 use moa_core::traits::EmbeddingProvider;
 use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
@@ -45,6 +46,12 @@ use crate::{
 
 /// Maximum objects fetched and tombstoned per source-selection prune page.
 const PRUNE_BATCH_SIZE: i64 = 500;
+
+/// Maximum number of provider records (or prune targets) processed concurrently
+/// within one page/batch. Record-level version claims are the idempotency
+/// boundary, so distinct objects are safe to process in parallel; this small
+/// fixed cap bounds shared connection-pool and embedding-provider load.
+const MAX_CONCURRENT_PAGE_RECORDS: usize = 4;
 
 /// Graph write report returned by the tenant-knowledge graph sink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -339,31 +346,64 @@ where
         )
         .await?;
 
+        // Process the page's records with bounded concurrency. Each record has a
+        // distinct object and is guarded by its own document-version ingestion
+        // claim, so parallel records do not conflict; the shared sqlx pool and the
+        // atomic-increment sync-run counters are concurrency-safe. Results are
+        // folded deterministically after completion (per-record step ordering may
+        // interleave, but nothing depends on global step order). A record error
+        // aborts the page, preserving the serial `?` contract.
+        let contributions = stream::iter(page.records.into_iter().map(|record| {
+            let object = self.materialize_object(connection_uid, tenant_id, &record);
+            self.process_page_record(sync_run_uid, object, record)
+        }))
+        .buffer_unordered(MAX_CONCURRENT_PAGE_RECORDS)
+        .try_collect::<Vec<_>>()
+        .await?;
+
         let mut report = PageIngestionReport {
             records_listed,
             ..PageIngestionReport::default()
         };
-        for record in page.records {
-            let object = self.materialize_object(connection_uid, tenant_id, &record);
-            if record.deleted {
-                let deleted = self
-                    .handle_deleted_record(sync_run_uid, object, record)
-                    .await?;
-                report.records_deleted = report.records_deleted.saturating_add(deleted);
-                continue;
-            }
-            match self.ingest_record(sync_run_uid, object, record).await? {
-                RecordIngestionOutcome::Ingested { embeddings_created } => {
+        for contribution in contributions {
+            match contribution {
+                PageRecordContribution::Deleted(deleted) => {
+                    report.records_deleted = report.records_deleted.saturating_add(deleted);
+                }
+                PageRecordContribution::Ingested { embeddings_created } => {
                     report.records_ingested = report.records_ingested.saturating_add(1);
                     report.embeddings_created =
                         report.embeddings_created.saturating_add(embeddings_created);
                 }
-                RecordIngestionOutcome::Skipped => {
+                PageRecordContribution::Skipped => {
                     report.records_skipped = report.records_skipped.saturating_add(1);
                 }
             }
         }
         Ok(report)
+    }
+
+    /// Processes one provider record (delete, ingest, or skip) and returns its
+    /// contribution to the page report. Extracted so a page's records can run
+    /// concurrently while the report is aggregated deterministically afterward.
+    async fn process_page_record(
+        &self,
+        sync_run_uid: Uuid,
+        object: KnowledgeObject,
+        record: ProviderRecord,
+    ) -> Result<PageRecordContribution> {
+        if record.deleted {
+            let deleted = self
+                .handle_deleted_record(sync_run_uid, object, record)
+                .await?;
+            return Ok(PageRecordContribution::Deleted(deleted));
+        }
+        match self.ingest_record(sync_run_uid, object, record).await? {
+            RecordIngestionOutcome::Ingested { embeddings_created } => {
+                Ok(PageRecordContribution::Ingested { embeddings_created })
+            }
+            RecordIngestionOutcome::Skipped => Ok(PageRecordContribution::Skipped),
+        }
     }
 
     /// Tombstones active local objects that were absent from an exhaustive selected-source sync.
@@ -412,10 +452,21 @@ where
             };
             cursor = Some((last.source_id.clone(), last.object_uid));
             let batch_len = batch.len();
-            for object in batch {
-                let deleted = self.handle_pruned_object(sync_run_uid, object).await?;
-                report.records_deleted = report.records_deleted.saturating_add(deleted);
-            }
+            // Prune each batch's objects with bounded concurrency (distinct
+            // objects, atomic counters — safe), keeping the keyset cursor
+            // sequential. An error aborts the prune, preserving the serial
+            // contract; per-batch deletes are summed after completion.
+            let deleted_counts = stream::iter(
+                batch
+                    .into_iter()
+                    .map(|object| self.handle_pruned_object(sync_run_uid, object)),
+            )
+            .buffer_unordered(MAX_CONCURRENT_PAGE_RECORDS)
+            .try_collect::<Vec<u64>>()
+            .await?;
+            report.records_deleted = report
+                .records_deleted
+                .saturating_add(deleted_counts.iter().sum());
             if batch_len < PRUNE_BATCH_SIZE as usize {
                 break;
             }
@@ -850,6 +901,18 @@ where
                     return Err(error);
                 }
             };
+            // F08: reject the batch on an embedding cardinality mismatch rather than
+            // zipping, which would silently drop or misalign chunk embeddings. The
+            // failed version claim stays retryable; no graph/vector write happens.
+            if vectors.len() != embedding_inputs.len() {
+                let error = Error::EmbeddingCardinalityMismatch {
+                    expected: embedding_inputs.len(),
+                    actual: vectors.len(),
+                };
+                self.record_failure_step(sync_run_uid, Some(object.object_uid), "embedded", &error)
+                    .await?;
+                return Err(error);
+            }
             embedding_uids
                 .into_iter()
                 .zip(vectors)
@@ -1559,6 +1622,15 @@ where
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecordIngestionOutcome {
+    Ingested { embeddings_created: u64 },
+    Skipped,
+}
+
+/// One record's contribution to a page report, collected from concurrent record
+/// processing and folded into `PageIngestionReport` deterministically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageRecordContribution {
+    Deleted(u64),
     Ingested { embeddings_created: u64 },
     Skipped,
 }

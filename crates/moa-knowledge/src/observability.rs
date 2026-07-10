@@ -151,6 +151,12 @@ pub fn classify_failure(stage: &str, error: &Error) -> FailureClassification {
             error_code: "embedder_failed_retryable",
             retryable: true,
         },
+        // A provider-contract violation (wrong vector count) will not self-heal on
+        // a plain retry, so it is terminal rather than retryable.
+        Error::EmbeddingCardinalityMismatch { .. } => FailureClassification {
+            error_code: "embedder_cardinality_mismatch",
+            retryable: false,
+        },
         Error::Repository(_) => FailureClassification {
             error_code: "repository_failed_retryable",
             retryable: true,

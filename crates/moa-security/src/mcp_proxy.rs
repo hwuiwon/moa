@@ -1,127 +1,54 @@
-//! Session-scoped credential proxying for MCP-backed tool calls.
+//! Session-scoped credential resolution for MCP-backed tool calls.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use moa_core::{
     Credential, CredentialVault, McpCredentialConfig, McpServerConfig, MoaError, Result, SessionId,
     StoredCredentialMetadata,
 };
-use moka::future::Cache;
 use tokio::sync::RwLock;
-use uuid::Uuid;
 
-const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(15 * 60);
-/// Upper bound on entries retained by each MCP proxy cache.
-const MAX_CACHED_ENTRIES: u64 = 100_000;
-
-#[derive(Debug, Clone)]
-struct ProxyGrant {
-    service: String,
-    scope: String,
-    expires_at: DateTime<Utc>,
-}
-
-/// Session-scoped opaque token for one proxied MCP credential grant.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct McpSessionToken(String);
-
-impl McpSessionToken {
-    /// Returns the opaque token string sent to the proxy boundary.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// MCP credential proxy that resolves real credentials via a vault only at call time.
+/// MCP credential resolver that reads real credentials from a vault only at call time.
 pub struct MCPCredentialProxy {
     vault: Arc<dyn CredentialVault>,
-    session_tokens: Cache<String, ProxyGrant>,
-    token_ttl: Duration,
 }
 
 impl MCPCredentialProxy {
-    /// Creates a new MCP credential proxy.
+    /// Creates a new MCP credential resolver backed by `vault`.
     pub fn new(vault: Arc<dyn CredentialVault>) -> Self {
-        Self {
-            vault,
-            session_tokens: build_token_cache(DEFAULT_TOKEN_TTL),
-            token_ttl: DEFAULT_TOKEN_TTL,
-        }
+        Self { vault }
     }
 
-    /// Overrides the default token time-to-live.
-    pub fn with_token_ttl(mut self, token_ttl: Duration) -> Self {
-        self.token_ttl = token_ttl;
-        self.session_tokens = build_token_cache(token_ttl);
-        self
-    }
-
-    /// Creates a new session-scoped opaque token for one service and scope.
-    pub async fn create_session_token(
-        &self,
-        session_id: &SessionId,
-        service: impl Into<String>,
-        scope: impl Into<String>,
-    ) -> Result<McpSessionToken> {
-        let token = format!("mcp_{}_{}", session_id, Uuid::now_v7());
-        let expires_at = Utc::now()
-            + chrono::Duration::from_std(self.token_ttl).map_err(|error| {
-                MoaError::ValidationError(format!("invalid MCP proxy token ttl: {error}"))
-            })?;
-        self.session_tokens
-            .insert(
-                token.clone(),
-                ProxyGrant {
-                    service: service.into(),
-                    scope: scope.into(),
-                    expires_at,
-                },
-            )
-            .await;
-        Ok(McpSessionToken(token))
-    }
-
-    /// Revokes a previously issued proxy token before it is used.
-    pub async fn revoke_session_token(&self, token: &McpSessionToken) {
-        self.session_tokens.invalidate(token.as_str()).await;
-    }
-
-    /// Resolves and injects credential headers for one opaque proxy token.
+    /// Resolves credential headers for one MCP call by reading the vault directly.
     ///
-    /// The proxy grant is consumed before the vault lookup so grants cannot be
-    /// reused across requests while MOA only has a process-local grant store.
+    /// This is trusted, in-process host-side resolution: `server` and `operation`
+    /// select the vault credential and `config` shapes the injected headers.
+    ///
+    /// No proxy token is minted here. The previous design minted an opaque token
+    /// and consumed it inside this same host function, so the token added cache,
+    /// expiry, and allocation cost without ever crossing an isolation boundary.
+    /// Reintroduce a single-use token returned from this call — bound to
+    /// `session_id`, `server`, `operation`, an expiry, and one use — only when a
+    /// real remote proxy boundary sits between this resolver and the MCP
+    /// transport that consumes the credential.
     pub async fn enrich_headers(
         &self,
-        token: &McpSessionToken,
+        session_id: &SessionId,
+        server: &str,
+        operation: &str,
         config: Option<&McpCredentialConfig>,
     ) -> Result<HashMap<String, String>> {
-        let grant = self.lookup_grant(token).await?;
-        let credential = self.vault.get(&grant.service, &grant.scope).await?;
+        let credential = self.vault.get(server, operation).await?;
+        tracing::debug!(
+            %session_id,
+            server,
+            operation,
+            "resolved MCP credential headers from vault"
+        );
         Ok(headers_from_credential(config, credential))
     }
-
-    async fn lookup_grant(&self, token: &McpSessionToken) -> Result<ProxyGrant> {
-        // Per-entry TTL eviction (moka) plus a belt-and-suspenders expiry check
-        // replace the previous full-scan prune on every lookup. `remove` also
-        // makes the grant single-use without a separate write.
-        match self.session_tokens.remove(token.as_str()).await {
-            Some(grant) if grant.expires_at > Utc::now() => Ok(grant),
-            _ => Err(MoaError::PermissionDenied(
-                "unknown or expired MCP proxy token".to_string(),
-            )),
-        }
-    }
-}
-
-fn build_token_cache(ttl: Duration) -> Cache<String, ProxyGrant> {
-    Cache::builder()
-        .max_capacity(MAX_CACHED_ENTRIES)
-        .time_to_live(ttl)
-        .build()
 }
 
 /// Environment-backed credential vault built from MCP server configuration.
@@ -256,14 +183,12 @@ fn headers_from_credential(
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::time::Duration;
 
     use async_trait::async_trait;
     use moa_core::{
         Credential, CredentialVault, McpCredentialConfig, McpServerConfig, SessionId,
         StoredCredentialMetadata,
     };
-    use tokio::time::sleep;
     use uuid::Uuid;
 
     use super::{EnvironmentCredentialVault, MCPCredentialProxy};
@@ -303,8 +228,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proxy_creates_tokens_and_injects_headers() {
-        // Pins: MCP proxy tokens are opaque credentials for one call only.
+    async fn enrich_headers_resolves_bearer_credential_from_vault() {
+        // Pins: trusted host dispatch resolves the (server, operation) vault credential
+        // directly and shapes it into an Authorization header, with no token indirection.
         let vault: Arc<dyn CredentialVault> = Arc::new(MockVault {
             values: HashMap::from([(
                 ("github".to_string(), "github".to_string()),
@@ -312,119 +238,42 @@ mod tests {
             )]),
         });
         let proxy = MCPCredentialProxy::new(vault);
-        let token = proxy
-            .create_session_token(&SessionId::new(), "github", "github")
-            .await
-            .unwrap();
 
         let headers = proxy
             .enrich_headers(
-                &token,
+                &SessionId::new(),
+                "github",
+                "github",
                 Some(&McpCredentialConfig::Bearer {
                     token_env: "GITHUB_TOKEN".to_string(),
                 }),
             )
             .await
-            .unwrap();
+            .expect("bearer credential should resolve into an Authorization header");
 
         assert_eq!(
             headers.get("Authorization"),
             Some(&"Bearer secret-token".to_string())
         );
-        assert!(!token.as_str().contains("secret-token"));
     }
 
     #[tokio::test]
-    async fn proxy_grants_are_single_use() {
-        // Pins: a process-local MCP credential grant cannot be exposed across requests.
-        let vault: Arc<dyn CredentialVault> = Arc::new(MockVault {
-            values: HashMap::from([(
-                ("github".to_string(), "github".to_string()),
-                Credential::Bearer("secret-token".to_string()),
-            )]),
-        });
+    async fn enrich_headers_fails_closed_on_missing_credential() {
+        // Pins: an unconfigured (server, operation) credential is a typed vault error,
+        // never an empty header map that would send the MCP call unauthenticated.
+        let vault: Arc<dyn CredentialVault> = Arc::new(
+            EnvironmentCredentialVault::from_mcp_servers(&[])
+                .expect("an empty server list builds an empty vault"),
+        );
         let proxy = MCPCredentialProxy::new(vault);
-        let token = proxy
-            .create_session_token(&SessionId::new(), "github", "github")
-            .await
-            .expect("test setup should create an MCP proxy token");
-
-        proxy
-            .enrich_headers(&token, None)
-            .await
-            .expect("first proxy enrichment should consume the grant");
 
         let error = proxy
-            .enrich_headers(&token, None)
+            .enrich_headers(&SessionId::new(), "unknown-server", "unknown-server", None)
             .await
-            .expect_err("second proxy enrichment should reject the consumed grant");
+            .expect_err("a missing credential must fail closed, not return empty headers");
 
         assert!(
-            matches!(error, moa_core::MoaError::PermissionDenied(ref message) if message.contains("unknown or expired MCP proxy token"))
-        );
-        assert!(
-            !error.to_string().contains(token.as_str()),
-            "proxy errors must not echo the full opaque grant"
-        );
-    }
-
-    #[tokio::test]
-    async fn proxy_token_is_rejected_after_ttl_expiry() {
-        // Pins: a session token past its TTL is rejected as unknown-or-expired, never silently honored.
-        let vault: Arc<dyn CredentialVault> = Arc::new(MockVault {
-            values: HashMap::from([(
-                ("github".to_string(), "github".to_string()),
-                Credential::Bearer("secret-token".to_string()),
-            )]),
-        });
-        let proxy = MCPCredentialProxy::new(vault).with_token_ttl(Duration::from_millis(1));
-        let token = proxy
-            .create_session_token(&SessionId::new(), "github", "github")
-            .await
-            .expect("test setup should create an MCP proxy token");
-
-        sleep(Duration::from_millis(25)).await;
-
-        let error = proxy
-            .enrich_headers(&token, None)
-            .await
-            .expect_err("an expired proxy token must not resolve credentials");
-        assert!(
-            matches!(error, moa_core::MoaError::PermissionDenied(ref message) if message.contains("unknown or expired MCP proxy token"))
-        );
-        assert!(
-            !error.to_string().contains(token.as_str()),
-            "expired-token errors must not echo the full opaque grant"
-        );
-    }
-
-    #[tokio::test]
-    async fn revoked_proxy_token_is_rejected() {
-        // Pins: revoking a session token before use prevents any later credential resolution.
-        let vault: Arc<dyn CredentialVault> = Arc::new(MockVault {
-            values: HashMap::from([(
-                ("github".to_string(), "github".to_string()),
-                Credential::Bearer("secret-token".to_string()),
-            )]),
-        });
-        let proxy = MCPCredentialProxy::new(vault);
-        let token = proxy
-            .create_session_token(&SessionId::new(), "github", "github")
-            .await
-            .expect("test setup should create an MCP proxy token");
-
-        proxy.revoke_session_token(&token).await;
-
-        let error = proxy
-            .enrich_headers(&token, None)
-            .await
-            .expect_err("a revoked proxy token must not resolve credentials");
-        assert!(
-            matches!(error, moa_core::MoaError::PermissionDenied(ref message) if message.contains("unknown or expired MCP proxy token"))
-        );
-        assert!(
-            !error.to_string().contains(token.as_str()),
-            "revoked-token errors must not echo the full opaque grant"
+            matches!(error, moa_core::MoaError::MissingEnvironmentVariable(message) if message.contains("credential not configured for service unknown-server"))
         );
     }
 
@@ -452,13 +301,11 @@ mod tests {
         });
         let proxy = MCPCredentialProxy::new(vault);
 
-        let api_token = proxy
-            .create_session_token(&SessionId::new(), "api", "api")
-            .await
-            .expect("test setup should create an API key proxy token");
         let api_headers = proxy
             .enrich_headers(
-                &api_token,
+                &SessionId::new(),
+                "api",
+                "api",
                 Some(&McpCredentialConfig::ApiKey {
                     header: "X-Configured-Header".to_string(),
                     value_env: "UNUSED_AT_CALL_TIME".to_string(),
@@ -473,12 +320,8 @@ mod tests {
         );
         assert!(!api_headers.contains_key("Authorization"));
 
-        let oauth_token = proxy
-            .create_session_token(&SessionId::new(), "oauth", "oauth")
-            .await
-            .expect("test setup should create an OAuth proxy token");
         let oauth_headers = proxy
-            .enrich_headers(&oauth_token, None)
+            .enrich_headers(&SessionId::new(), "oauth", "oauth", None)
             .await
             .expect("oauth enrichment should resolve an Authorization header");
         assert_eq!(

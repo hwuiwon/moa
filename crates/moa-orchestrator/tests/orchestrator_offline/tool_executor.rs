@@ -87,11 +87,7 @@ fn registry_with_tools(tools: Vec<Arc<dyn BuiltInTool>>) -> ToolRegistry {
     registry
 }
 
-fn tool_request(
-    tool_call_id: ToolCallId,
-    tool_name: &str,
-    idempotency_key: Option<&str>,
-) -> ToolCallRequest {
+fn tool_request(tool_call_id: ToolCallId, tool_name: &str) -> ToolCallRequest {
     ToolCallRequest {
         tool_call_id,
         provider_tool_use_id: None,
@@ -101,7 +97,6 @@ fn tool_request(
         session_id: None,
         tenant_id: TenantId::from(Uuid::from_u128(1)),
         user_id: UserId::new("user-1"),
-        idempotency_key: idempotency_key.map(ToOwned::to_owned),
         trusted_sandbox_manifest: None,
         worker_id: None,
     }
@@ -223,7 +218,7 @@ fn build_tool_run_plan_uses_max_attempts_one_for_idempotent_tools() {
         IdempotencyClass::Idempotent,
         read_tool_policy(ToolInputShape::Json),
     );
-    let request = tool_request(ToolCallId::new(), "mock_read", None);
+    let request = tool_request(ToolCallId::new(), "mock_read");
 
     let run_plan = build_tool_run_plan(&definition, &request).expect("build idempotent run plan");
 
@@ -247,21 +242,6 @@ fn non_idempotent_refuses_after_event_log_hit() {
 }
 
 #[test]
-fn keyed_tool_requires_idempotency_key() {
-    let definition = tool_definition(
-        "mock_keyed",
-        IdempotencyClass::IdempotentWithKey,
-        read_tool_policy(ToolInputShape::Json),
-    );
-    let request = tool_request(ToolCallId::new(), "mock_keyed", None);
-
-    let error = build_tool_run_plan(&definition, &request)
-        .expect_err("keyed tools should reject missing idempotency keys");
-
-    assert!(error.to_string().contains("requires idempotency_key"));
-}
-
-#[test]
 fn run_name_encodes_tool_call_id() {
     let tool_call_id = ToolCallId::new();
     let definition = tool_definition(
@@ -269,7 +249,7 @@ fn run_name_encodes_tool_call_id() {
         IdempotencyClass::Idempotent,
         read_tool_policy(ToolInputShape::Json),
     );
-    let request = tool_request(tool_call_id, "mock_read", None);
+    let request = tool_request(tool_call_id, "mock_read");
 
     let run_name = tool_run_name(&definition, &request).expect("build run name");
 

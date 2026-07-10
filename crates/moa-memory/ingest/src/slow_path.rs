@@ -515,6 +515,17 @@ async fn embed_batch_with(
         .map(|fact| fact.fact.summary.clone())
         .collect::<Vec<_>>();
     let embeddings = embedder.embed(&texts).await.map_err(HandlerError::from)?;
+    // F08: the embedding provider must return exactly one vector per input. Reject
+    // the whole batch on a cardinality mismatch instead of zipping, which would
+    // silently drop trailing facts (short response) or truncate vectors (long).
+    if embeddings.len() != texts.len() {
+        return Err(HandlerError::from(
+            IngestError::EmbeddingCardinalityMismatch {
+                expected: texts.len(),
+                actual: embeddings.len(),
+            },
+        ));
+    }
     Ok(facts
         .iter()
         .cloned()
@@ -1551,6 +1562,61 @@ mod tests {
                 })
                 .collect())
         }
+    }
+
+    /// Embedder that returns one fewer vector than it was given, violating the
+    /// provider cardinality contract.
+    struct MiscountingEmbedder {
+        dim: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for MiscountingEmbedder {
+        fn model_id(&self) -> &str {
+            "miscounting"
+        }
+
+        fn dimensions(&self) -> usize {
+            self.dim
+        }
+
+        async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+            let short = inputs.len().saturating_sub(1);
+            Ok((0..short).map(|_| vec![0.0; self.dim]).collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn embed_batch_rejects_provider_cardinality_mismatch() {
+        // Pins: F08 — an embedding provider that returns a different number of
+        // vectors than facts fails the whole batch with a typed error instead of
+        // silently zipping (which would drop the trailing fact).
+        let facts = vec![
+            ClassifiedFact {
+                fact: plain_fact("first fact"),
+                pii_class: PiiClass::None,
+                pii_spans: Vec::new(),
+            },
+            ClassifiedFact {
+                fact: plain_fact("second fact"),
+                pii_class: PiiClass::None,
+                pii_spans: Vec::new(),
+            },
+        ];
+        let embedder = MiscountingEmbedder { dim: 8 };
+
+        let result = super::embed_batch_with(&embedder, &facts).await;
+
+        let Err(error) = result else {
+            panic!("cardinality mismatch must fail the batch");
+        };
+        let rendered = format!("{error:?}");
+        assert!(
+            rendered.contains("EmbeddingCardinalityMismatch")
+                && rendered.contains("expected: 2")
+                && rendered.contains("actual: 1"),
+            "expected a typed cardinality error carrying the counts, got: {rendered}"
+        );
     }
 
     fn embedded_decision(

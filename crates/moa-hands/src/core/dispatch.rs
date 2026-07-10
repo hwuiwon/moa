@@ -290,13 +290,12 @@ impl ToolRouter {
         let extra_headers = if let (Some(proxy), Some(credentials)) =
             (&self.mcp_proxy, server.credentials.as_ref())
         {
-            // Keep MCP credential grants process-local and single-use: each MCP
-            // call mints one opaque grant and consumes it while enriching this
-            // request's headers.
-            let token = proxy
-                .create_session_token(&session.id, server_name, server_name)
-                .await?;
-            proxy.enrich_headers(&token, Some(credentials)).await?
+            // Trusted host-side credential resolution: read this server's vault
+            // credential directly and shape it into request headers. No proxy
+            // token is minted because nothing crosses an isolation boundary here.
+            proxy
+                .enrich_headers(&session.id, server_name, server_name, Some(credentials))
+                .await?
         } else {
             HashMap::new()
         };

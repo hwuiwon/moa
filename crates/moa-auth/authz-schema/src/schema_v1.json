@@ -310,13 +310,8 @@
                 }
               },
               {
-                "tupleToUserset": {
-                  "tupleset": {
-                    "relation": "contact"
-                  },
-                  "computedUserset": {
-                    "relation": "contact"
-                  }
+                "computedUserset": {
+                  "relation": "contact"
                 }
               }
             ]

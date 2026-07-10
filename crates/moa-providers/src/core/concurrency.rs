@@ -41,6 +41,15 @@ pub(crate) const DEFAULT_EMBEDDING_CONCURRENCY: usize = 8;
 /// Default in-flight ceiling for rerank providers.
 pub(crate) const DEFAULT_RERANK_CONCURRENCY: usize = 8;
 
+/// Default in-flight ceiling for chat/LLM providers, per API key.
+///
+/// A generous bound that still prevents one process from opening an unbounded
+/// number of simultaneous connections to a provider (exhausting sockets or the
+/// key's concurrency window) when many turns fan out at once. Operators can raise
+/// or lower it per key via `max_concurrent_requests`, and an explicit `0` opts
+/// back into unbounded.
+pub(crate) const DEFAULT_LLM_CONCURRENCY: usize = 32;
+
 /// How long a call waits for a concurrency slot before reporting "blocked".
 ///
 /// A wait beyond this is treated as a failover-eligible block rather than an
@@ -80,24 +89,10 @@ impl ConcurrencyLimiter {
         }
     }
 
-    /// Builds a limiter that never blocks (no in-flight ceiling).
-    pub(crate) fn unbounded() -> Self {
-        Self { inner: None }
-    }
-
-    /// Waits for an in-flight slot and returns a permit that frees it on drop.
-    ///
-    /// Returns `None` for an unbounded limiter. The caller must bind the returned
-    /// permit for the lifetime of the outbound call (`let _permit = ...`); dropping
-    /// it early releases the slot before the request completes.
-    pub(crate) async fn acquire(&self) -> Option<OwnedSemaphorePermit> {
-        match &self.inner {
-            // `acquire_owned` only errors if the semaphore is closed, which never
-            // happens here (the owning provider holds the `Arc` for its lifetime);
-            // fall back to unbounded rather than panicking if it ever does.
-            Some(semaphore) => Arc::clone(semaphore).acquire_owned().await.ok(),
-            None => None,
-        }
+    /// Returns whether this limiter imposes a finite in-flight ceiling.
+    #[cfg(test)]
+    pub(crate) fn is_bounded(&self) -> bool {
+        self.inner.is_some()
     }
 
     /// Takes an in-flight slot, waiting at most `max_wait` for one to free up.
@@ -148,7 +143,10 @@ mod tests {
             let in_flight = Arc::clone(&in_flight);
             let max_seen = Arc::clone(&max_seen);
             handles.push(tokio::spawn(async move {
-                let _permit = limiter.acquire().await;
+                let _permit = limiter
+                    .acquire_within(Duration::from_secs(3600))
+                    .await
+                    .expect("a slot frees within the wait");
                 let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                 max_seen.fetch_max(now, Ordering::SeqCst);
                 // Force overlap: hold the slot across an await so contending tasks
@@ -190,7 +188,7 @@ mod tests {
             "the slot frees for the next caller once the lease is dropped"
         );
         assert!(
-            super::ConcurrencyLimiter::unbounded()
+            super::ConcurrencyLimiter::new(0)
                 .acquire_within(Duration::ZERO)
                 .await
                 .is_some(),
@@ -199,14 +197,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unbounded_limiter_admits_all_callers_without_a_permit() {
-        // Pins: the unbounded (LLM default) limiter never gates, so acquire yields
-        // no permit and imposes no in-flight ceiling.
-        let limiter = ConcurrencyLimiter::unbounded();
-        assert!(limiter.acquire().await.is_none());
-
-        // A zero bound degrades to unbounded rather than a closed gate.
-        let zero = ConcurrencyLimiter::new(0);
-        assert!(zero.acquire().await.is_none());
+    async fn zero_bound_limiter_is_unbounded_and_never_gates() {
+        // Pins: a zero bound degrades to an unbounded gate (the explicit opt-out),
+        // so acquire_within always yields a lease without blocking.
+        let limiter = ConcurrencyLimiter::new(0);
+        assert!(
+            limiter.acquire_within(Duration::ZERO).await.is_some(),
+            "a zero-bound (unbounded) gate never blocks"
+        );
     }
 }

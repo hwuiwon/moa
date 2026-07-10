@@ -107,7 +107,7 @@ impl RetryPolicy {
             }
             let retry_eligible = Self::is_retryable_status(status) && attempt < self.max_retries;
             if retry_eligible && guard.allow_retry() {
-                let delay = rate_limit_delay.unwrap_or_else(|| self.delay_for_attempt(attempt));
+                let delay = self.retry_delay(rate_limit_delay, attempt);
                 tracing::warn!(
                     attempt = attempt + 1,
                     max_retries = self.max_retries,
@@ -136,6 +136,23 @@ impl RetryPolicy {
                 retry_after: retry_after_delay(status, Some(&headers)),
                 message,
             });
+        }
+    }
+
+    /// Returns the delay before the next in-call retry.
+    ///
+    /// A server-supplied `Retry-After` (`rate_limit_delay`) is honored but capped
+    /// at [`max_delay`](Self::max_delay), so a hostile or misconfigured header
+    /// cannot pin a retry far beyond the exponential-backoff ceiling; when no
+    /// header is present, exponential backoff for `attempt` is used.
+    pub(crate) fn retry_delay(
+        &self,
+        rate_limit_delay: Option<Duration>,
+        attempt: usize,
+    ) -> Duration {
+        match rate_limit_delay {
+            Some(delay) => delay.min(self.max_delay),
+            None => self.delay_for_attempt(attempt),
         }
     }
 
@@ -477,6 +494,33 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[test]
+    fn retry_after_is_capped_at_max_delay() {
+        // Pins: a server-supplied Retry-After above the backoff ceiling is capped
+        // at max_delay, a smaller hint is honored as-is, and an absent hint falls
+        // back to bounded exponential backoff.
+        let policy = RetryPolicy {
+            max_retries: 3,
+            initial_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(60),
+            backoff_factor: 2.0,
+        };
+        assert_eq!(
+            policy.retry_delay(Some(Duration::from_secs(3600)), 0),
+            Duration::from_secs(60),
+            "a hostile Retry-After must be capped at max_delay"
+        );
+        assert_eq!(
+            policy.retry_delay(Some(Duration::from_secs(5)), 0),
+            Duration::from_secs(5),
+            "a Retry-After within the ceiling is honored as-is"
+        );
+        assert!(
+            policy.retry_delay(None, 5) <= Duration::from_secs(60),
+            "the exponential fallback never exceeds max_delay"
+        );
     }
 
     #[test]
