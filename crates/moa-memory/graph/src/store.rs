@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use moa_core::RlsContext;
 use moa_db::ScopedConn;
-use moa_memory_vector::{VectorPostCommitSync, VectorStore};
+use moa_memory_vector::VectorStore;
 use sqlx::{PgConnection, PgPool};
 
 use crate::{
@@ -19,7 +19,6 @@ pub struct PostgresGraphStore {
     pub(crate) scope: Option<RlsContext>,
     pub(crate) assume_app_role: bool,
     pub(crate) vector: Option<Arc<dyn VectorStore>>,
-    pub(crate) vector_post_commit_sync: Option<Arc<dyn VectorPostCommitSync>>,
 }
 
 impl PostgresGraphStore {
@@ -33,7 +32,6 @@ impl PostgresGraphStore {
             scope: None,
             assume_app_role: false,
             vector: None,
-            vector_post_commit_sync: None,
         }
     }
 
@@ -44,7 +42,6 @@ impl PostgresGraphStore {
             scope: Some(scope),
             assume_app_role: false,
             vector: None,
-            vector_post_commit_sync: None,
         }
     }
 
@@ -58,19 +55,12 @@ impl PostgresGraphStore {
             scope: Some(scope),
             assume_app_role: true,
             vector: None,
-            vector_post_commit_sync: None,
         }
     }
 
     /// Attaches a vector backend used by graph write operations.
     pub fn with_vector_store(mut self, vector: Arc<dyn VectorStore>) -> Self {
         self.vector = Some(vector);
-        self
-    }
-
-    /// Attaches a post-commit hook for external vector projection sync.
-    pub fn with_vector_post_commit_sync(mut self, hook: Arc<dyn VectorPostCommitSync>) -> Self {
-        self.vector_post_commit_sync = Some(hook);
         self
     }
 
@@ -87,11 +77,6 @@ impl PostgresGraphStore {
     /// Returns the vector backend used by graph writes, when configured.
     pub fn vector(&self) -> Option<&dyn VectorStore> {
         self.vector.as_deref()
-    }
-
-    /// Returns the post-commit vector sync hook, when configured.
-    pub fn vector_post_commit_sync(&self) -> Option<&dyn VectorPostCommitSync> {
-        self.vector_post_commit_sync.as_deref()
     }
 
     /// Creates a node using a caller-owned scoped Postgres connection.

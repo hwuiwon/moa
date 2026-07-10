@@ -104,18 +104,33 @@ fn validate_session_create_meta(meta: &SessionMeta) -> Result<()> {
     Ok(())
 }
 
+/// Outcome of an idempotent session insert in a caller-owned transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionCreateOutcome {
+    /// The session identity that now exists (whether inserted here or already present).
+    pub session_id: moa_core::SessionId,
+    /// `true` when this call inserted the row; `false` when a row with the same
+    /// id already existed (a replay of a committed creation).
+    pub inserted: bool,
+}
+
 impl PostgresSessionStore {
     /// Insert a session metadata row using a caller-owned transaction.
     ///
     /// This lets higher-level handlers atomically persist the session and its
-    /// authorization outbox tuples. The caller owns commit/rollback and should
-    /// call [`PostgresSessionStore::refresh_active_session_metric`] after a
-    /// successful commit.
+    /// authorization outbox tuples. The insert is idempotent on the session id
+    /// (`ON CONFLICT (id) DO NOTHING`): a replay that reuses a replay-stable id
+    /// finds the row already present and reports `inserted = false` without
+    /// duplicating the row or its agent sidecar. The caller owns commit/rollback
+    /// and should gate any dependent writes on
+    /// [`SessionCreateOutcome::inserted`], then call
+    /// [`PostgresSessionStore::refresh_active_session_metric`] after a successful
+    /// commit.
     pub async fn create_session_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, Postgres>,
         meta: SessionMeta,
-    ) -> Result<moa_core::SessionId> {
+    ) -> Result<SessionCreateOutcome> {
         validate_session_create_meta(&meta)?;
         let session_id = meta.id;
         let tenant_id = meta.tenant_id;
@@ -124,9 +139,10 @@ impl PostgresSessionStore {
         let status = meta.status.clone();
         let agent_context = meta.agent_context.clone();
         let sessions = self.table_name("sessions");
-        sqlx::query(&format!(
+        let insert_result = sqlx::query(&format!(
             "INSERT INTO {sessions} ({SESSION_INSERT_COLUMNS}) VALUES \
-             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)"
+             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30) \
+             ON CONFLICT (id) DO NOTHING"
         ))
         .bind(session_id.0)
         .bind(tenant_id.0)
@@ -181,19 +197,28 @@ impl PostgresSessionStore {
         .execute(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
-        if let Some(agent_context) = agent_context.as_ref() {
-            self.insert_session_agent_context_in_tx(
-                tx,
-                session_id,
-                tenant_id,
-                actor_storage_key.as_str(),
-                agent_context,
-            )
-            .await?;
+        let inserted = insert_result.rows_affected() == 1;
+        // A conflict means a committed creation is being replayed with the same
+        // replay-stable id; leave the existing row and its sidecar untouched so
+        // the caller can short-circuit dependent writes.
+        if inserted {
+            if let Some(agent_context) = agent_context.as_ref() {
+                self.insert_session_agent_context_in_tx(
+                    tx,
+                    session_id,
+                    tenant_id,
+                    actor_storage_key.as_str(),
+                    agent_context,
+                )
+                .await?;
+            }
+            record_session_created(&tenant_id, &status);
         }
-        record_session_created(&tenant_id, &status);
 
-        Ok(session_id)
+        Ok(SessionCreateOutcome {
+            session_id,
+            inserted,
+        })
     }
 
     async fn insert_session_agent_context_in_tx(
@@ -237,34 +262,67 @@ impl PostgresSessionStore {
     }
 
     /// Replaces a session's active channel binding and current channel metadata.
+    ///
+    /// Allocates a fresh binding id and applies the replacement in its own
+    /// transaction. Handlers that must bind the channel change atomically with an
+    /// event or session creation should instead pass a replay-stable id to
+    /// [`PostgresSessionStore::replace_session_channel_binding_in_tx`].
     pub async fn replace_session_channel_binding(
         &self,
         replacement: SessionChannelBindingReplacement<'_>,
     ) -> Result<moa_core::SessionChannelBindingId> {
         let binding_id = moa_core::SessionChannelBindingId::new();
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        self.replace_session_channel_binding_in_tx(&mut tx, binding_id, replacement)
+            .await?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(binding_id)
+    }
+
+    /// Replaces a session's active channel binding within a caller-owned
+    /// transaction, using a caller-supplied binding id.
+    ///
+    /// The new-binding insert is idempotent on the binding id
+    /// (`ON CONFLICT (id) DO NOTHING`). A replay that reuses a replay-stable id
+    /// finds the binding already present, makes no further changes, and returns
+    /// `false`, so ending prior bindings and repointing the session run exactly
+    /// once. A fresh insert ends any other still-open bindings, repoints the
+    /// session to the new binding, and returns `true`. Returns
+    /// [`MoaError::SessionNotFound`] when the session row is absent.
+    pub async fn replace_session_channel_binding_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        binding_id: moa_core::SessionChannelBindingId,
+        replacement: SessionChannelBindingReplacement<'_>,
+    ) -> Result<bool> {
         let route = serde_json::to_value(replacement.channel_ref)
             .map_err(|error| MoaError::SerializationError(error.to_string()))?;
         let route_keys = channel_route_keys(replacement.channel_ref);
         let sessions = self.table_name("sessions");
         let bindings = self.table_name("session_channel_bindings");
-        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
 
+        // End any other still-open binding first so the partial unique
+        // "one active binding per session" index is satisfied when the new
+        // active binding is inserted. On a replay the new binding is already the
+        // only active one (its id is excluded), so this affects no rows.
         sqlx::query(&format!(
             "UPDATE {bindings} \
              SET ended_at = NOW(), last_used_at = NOW() \
-             WHERE session_id = $1 AND ended_at IS NULL"
+             WHERE session_id = $1 AND ended_at IS NULL AND id <> $2"
         ))
         .bind(replacement.session_id.0)
-        .execute(&mut *tx)
+        .bind(binding_id.0)
+        .execute(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
 
-        sqlx::query(&format!(
+        let inserted = sqlx::query(&format!(
             "INSERT INTO {bindings} \
                  (id, tenant_id, storage_partition_id, session_id, contact_id, channel_account_id, \
                   contact_point_id, channel, external_tenant_key, external_conversation_key, \
                   external_thread_key, route, reason) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
+             ON CONFLICT (id) DO NOTHING"
         ))
         .bind(binding_id.0)
         .bind(replacement.tenant_id.0)
@@ -279,9 +337,14 @@ impl PostgresSessionStore {
         .bind(route_keys.external_thread_key)
         .bind(route)
         .bind(replacement.reason)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
-        .map_err(map_sqlx_error)?;
+        .map_err(map_sqlx_error)?
+        .rows_affected()
+            == 1;
+        if !inserted {
+            return Ok(false);
+        }
 
         let affected = sqlx::query(&format!(
             "UPDATE {sessions} \
@@ -292,7 +355,7 @@ impl PostgresSessionStore {
         .bind(binding_id.0)
         .bind(replacement.session_id.0)
         .bind(replacement.tenant_id.0)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(map_sqlx_error)?
         .rows_affected();
@@ -300,8 +363,138 @@ impl PostgresSessionStore {
             return Err(MoaError::SessionNotFound(replacement.session_id));
         }
 
-        tx.commit().await.map_err(map_sqlx_error)?;
-        Ok(binding_id)
+        Ok(true)
+    }
+
+    /// Appends one event within a caller-owned transaction, returning its sequence.
+    ///
+    /// This is the single-event, transaction-scoped counterpart to
+    /// [`PostgresSessionStore::append_events`]. It locks the session row, assigns
+    /// the next sequence, encodes and inserts the event, honors an optional
+    /// dedupe key, and folds the aggregate deltas — all inside the caller's
+    /// transaction, so the append commits atomically with the caller's other
+    /// writes (session creation or a channel-binding replacement) instead of in a
+    /// separate commit. Blob offload runs before the row lock is taken. When
+    /// `dedupe_key` matches a prior entry the existing sequence is returned
+    /// without inserting a second event.
+    pub async fn append_event_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        session_id: moa_core::SessionId,
+        event: Event,
+        dedupe_key: Option<&str>,
+    ) -> Result<u64> {
+        let now = Utc::now();
+        let payload = encode_event_for_storage(
+            self.blob_store.as_ref(),
+            &session_id,
+            &event,
+            self.blob_threshold_bytes,
+        )
+        .await?;
+        let event_type = event.type_name().to_string();
+        let hand_id = event_hand_id(&event);
+        let token_count = event.token_count();
+
+        let sessions = self.table_name("sessions");
+        let events = self.table_name("events");
+        let dedupe = self.table_name("session_event_dedupe");
+
+        let locked = sqlx::query(&format!(
+            "SELECT event_count, tenant_id, storage_partition_id, user_id, contact_id \
+             FROM {sessions} WHERE id = $1 FOR UPDATE"
+        ))
+        .bind(session_id.0)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?
+        .ok_or(MoaError::SessionNotFound(session_id))?;
+        let sequence_num = locked.col::<i64>("event_count")? as u64;
+        let tenant_id = locked.col::<Uuid>("tenant_id")?;
+        let storage_partition_id = locked.col::<String>("storage_partition_id")?;
+        let actor_storage_key = locked.col::<String>("user_id")?;
+        let session_contact_id = locked.col::<Option<Uuid>>("contact_id")?;
+
+        if let Some(key) = dedupe_key
+            && let Some(row) = sqlx::query(&format!(
+                "SELECT sequence_num FROM {dedupe} WHERE session_id = $1 AND dedupe_key = $2"
+            ))
+            .bind(session_id.0)
+            .bind(key)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?
+        {
+            return Ok(row.col::<i64>("sequence_num")? as u64);
+        }
+
+        let payload_text = serde_json::to_string(&payload).map_err(|error| {
+            MoaError::SerializationError(format!("failed to encode event payload: {error}"))
+        })?;
+        sqlx::query(&format!(
+            "INSERT INTO {events} \
+             (id, session_id, tenant_id, contact_id, storage_partition_id, user_id, \
+              sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, NULL, $11, $12)"
+        ))
+        .bind(Uuid::now_v7())
+        .bind(session_id.0)
+        .bind(tenant_id)
+        .bind(session_contact_id)
+        .bind(&storage_partition_id)
+        .bind(&actor_storage_key)
+        .bind(sequence_num as i64)
+        .bind(&event_type)
+        .bind(&payload_text)
+        .bind(now)
+        .bind(hand_id)
+        .bind(token_count as i32)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        if let Some(key) = dedupe_key {
+            sqlx::query(&format!(
+                "INSERT INTO {dedupe} (session_id, dedupe_key, sequence_num) VALUES ($1, $2, $3)"
+            ))
+            .bind(session_id.0)
+            .bind(key)
+            .bind(sequence_num as i64)
+            .execute(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+
+        let mut delta = SessionAggregateDelta::default();
+        delta.add_event(&event, sequence_num);
+        sqlx::query(&format!(
+            "UPDATE {sessions} SET \
+                 event_count = event_count + $2, \
+                 turn_count = turn_count + $3, \
+                 total_input_tokens_uncached = total_input_tokens_uncached + $4, \
+                 total_input_tokens_cache_write = total_input_tokens_cache_write + $5, \
+                 total_input_tokens_cache_read = total_input_tokens_cache_read + $6, \
+                 total_output_tokens = total_output_tokens + $7, \
+                 total_cost_cents = total_cost_cents + $8, \
+                 last_checkpoint_seq = COALESCE($9, last_checkpoint_seq), \
+                 updated_at = GREATEST(updated_at, $10) \
+             WHERE id = $1"
+        ))
+        .bind(session_id.0)
+        .bind(delta.event_count)
+        .bind(delta.turn_count)
+        .bind(delta.input_tokens_uncached)
+        .bind(delta.input_tokens_cache_write)
+        .bind(delta.input_tokens_cache_read)
+        .bind(delta.output_tokens)
+        .bind(delta.cost_cents)
+        .bind(delta.last_checkpoint_seq)
+        .bind(now)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        Ok(sequence_num)
     }
 
     /// Loads the currently active channel binding route for a session, when one exists.
@@ -1005,12 +1198,12 @@ impl SessionStore for PostgresSessionStore {
     /// Creates a new session record.
     async fn create_session(&self, meta: SessionMeta) -> Result<moa_core::SessionId> {
         let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let session_id = self.create_session_in_tx(&mut transaction, meta).await?;
+        let outcome = self.create_session_in_tx(&mut transaction, meta).await?;
         transaction.commit().await.map_err(map_sqlx_error)?;
         // The active-session gauge is refreshed off the write path on a timer
         // (see `spawn_active_session_gauge_refresher`); no COUNT(*) here.
 
-        Ok(session_id)
+        Ok(outcome.session_id)
     }
 
     /// Appends an event to the session log.

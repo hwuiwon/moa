@@ -41,6 +41,7 @@ use crate::workflows::durable_utc_now;
 use crate::workflows::errors::{
     bad_request, handler_error_message, moa_error_to_handler_error, procedure_handler_error,
 };
+use crate::workflows::experiment_cancel::{K_CANCEL_IDENTITY, forward_child_cancellation};
 use crate::workflows::experiment_errors::{
     non_retryable_handler_error, plan_expansion_error_to_handler_error,
 };
@@ -58,6 +59,7 @@ use status::{procedure_status_response, status_response};
 use target_execution::{run_agent_loop_target, run_procedure_target};
 
 const K_RUN_UID: &str = "run_uid";
+const K_TENANT_ID: &str = "tenant_id";
 const K_SCORE_RUN_ID: &str = "score_run_id";
 const K_STATUS: &str = "status";
 const K_SESSION_ID: &str = "session_id";
@@ -100,6 +102,10 @@ pub trait ExperimentRun {
     async fn status(
         request: Json<ExperimentRunStatusRequest>,
     ) -> Result<Json<ExperimentRunStatusResponse>, HandlerError>;
+
+    /// Forwards cancellation to the run's own child target and every active trial.
+    #[shared]
+    async fn request_cancel(reason: Json<String>) -> Result<(), HandlerError>;
 }
 
 /// Concrete live behavior experiment workflow implementation.
@@ -120,8 +126,10 @@ impl ExperimentRun for ExperimentRunImpl {
         }
 
         ctx.set(K_RUN_UID, Json(request.run_uid));
+        ctx.set(K_TENANT_ID, Json(request.tenant_id));
         ctx.set(K_SCORE_RUN_ID, Json(request.score_run_id));
         ctx.set(K_STATUS, Json(ExperimentRunStatus::Running));
+        ctx.set(K_CANCEL_IDENTITY, Json(request.identity.clone()));
         annotate_run_span(&request, None);
 
         match run_experiment_target(&ctx, request.clone()).await {
@@ -169,6 +177,83 @@ impl ExperimentRun for ExperimentRunImpl {
             .name("experiment_run_status")
             .await?)
     }
+
+    #[tracing::instrument(skip(self, ctx, reason))]
+    // SAFETY: control-only cancellation forward after Experiments/cancel authz;
+    // the child Session, ProcedureExecution, and ExperimentTrialRun request_cancel
+    // handlers enforce their own authorization.
+    async fn request_cancel(
+        &self,
+        ctx: SharedWorkflowContext<'_>,
+        reason: Json<String>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("ExperimentRun", "request_cancel");
+        let reason = reason.into_inner();
+        // Single-target runs drive a child session/procedure directly.
+        forward_child_cancellation(&ctx, reason.clone()).await?;
+        // Plan runs fan cancellation out to every active trial workflow so their
+        // own child targets stop even while the main run loop is blocked waiting
+        // on a child completion signal.
+        fan_out_cancellation_to_active_trials(&ctx, reason).await?;
+        Ok(())
+    }
+}
+
+/// Signals `request_cancel` on every active trial workflow of this run.
+///
+/// Loads the run's trials and forwards cancellation to those still occupying a
+/// dispatch slot (`Dispatched`/`Running`), i.e. those with a live trial workflow
+/// to stop. The signal is idempotent and best-effort.
+async fn fan_out_cancellation_to_active_trials(
+    ctx: &SharedWorkflowContext<'_>,
+    reason: String,
+) -> Result<(), HandlerError> {
+    let Some(run_uid) = ctx
+        .get::<Json<Uuid>>(K_RUN_UID)
+        .await?
+        .map(Json::into_inner)
+    else {
+        return Ok(());
+    };
+    let Some(tenant_id) = ctx
+        .get::<Json<TenantId>>(K_TENANT_ID)
+        .await?
+        .map(Json::into_inner)
+    else {
+        return Ok(());
+    };
+    for trial_key in load_active_trial_keys(ctx, tenant_id, run_uid).await? {
+        ctx.workflow_client::<ExperimentTrialRunClient>(trial_workflow_key(run_uid, &trial_key))
+            .request_cancel(Json::from(reason.clone()))
+            .send();
+    }
+    Ok(())
+}
+
+/// Reads the deterministic keys of trials that currently hold a dispatch slot.
+async fn load_active_trial_keys(
+    ctx: &SharedWorkflowContext<'_>,
+    tenant_id: TenantId,
+    run_uid: Uuid,
+) -> Result<Vec<String>, HandlerError> {
+    let pool = OrchestratorCtx::current_graph_pool();
+    let scope = tenant_scope(tenant_id);
+    Ok(ctx
+        .run(|| async move {
+            let trials = ExperimentStore::new(pool)
+                .list_trials(&scope, run_uid, None, i64::MAX)
+                .await
+                .map_err(moa_error_to_handler_error)?;
+            let keys = trials
+                .into_iter()
+                .filter(|trial| plan_expansion::trial_status_occupies_dispatch_slot(trial.status))
+                .map(|trial| trial.trial_key)
+                .collect::<Vec<_>>();
+            Ok::<_, HandlerError>(Json::from(keys))
+        })
+        .name("experiment_run_active_trial_keys")
+        .await?
+        .into_inner())
 }
 
 async fn run_experiment_target(

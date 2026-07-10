@@ -5,9 +5,10 @@
 //! coverage:
 //! 1. graceful shutdown flushes the in-memory batch so pending rows land in
 //!    `analytics.turn_lineage`; and
-//! 2. a batch whose write fails non-retryably is persisted to
-//!    `analytics.lineage_dead_letters` and its journal sequence is left
-//!    unacknowledged (so it can be reprocessed).
+//! 2. a batch whose write fails non-retryably is persisted once to
+//!    `analytics.lineage_dead_letters` and its journal sequence is acknowledged
+//!    after the DLQ commit (F16), so the journal drains and a restart neither
+//!    replays the row into `turn_lineage` nor re-dead-letters it.
 //!
 //! They require `MOA_DATABASE_URL` to point at a reachable Postgres superuser
 //! role that can `CREATE DATABASE`; each test creates and drops its own database.
@@ -75,12 +76,13 @@ async fn lineage_writer_flush_on_shutdown_drains_pending_rows_db() -> TestResult
 }
 
 #[tokio::test]
-async fn lineage_writer_poison_batch_dead_letters_without_acking_journal_db() -> TestResult<()> {
-    // Pins: a batch whose write fails non-retryably is moved to
-    // `analytics.lineage_dead_letters`, and its journal sequence is NOT acked.
-    // The "not acked" guarantee is proven behaviorally: a fresh writer over the
-    // same journal replays the retained row and finally persists it once the
-    // write target is healthy again.
+async fn lineage_writer_poison_batch_dead_letters_and_acks_journal_db() -> TestResult<()> {
+    // Pins (F16): a batch whose write fails non-retryably is moved once to
+    // `analytics.lineage_dead_letters` AND its journal sequence is acknowledged
+    // after the DLQ commit, so the journal drains (depth 0) and a fresh writer
+    // over the same journal neither replays the row into `turn_lineage` nor
+    // re-dead-letters it. This is the inverse of the pre-F16 behavior, where the
+    // retained sequence was replayed on every restart.
     let (pool, database_name, cleanup_pool) = isolated_pool().await?;
     let journal = tempfile::tempdir()?;
     let journal_path = journal.path().to_path_buf();
@@ -112,9 +114,14 @@ async fn lineage_writer_poison_batch_dead_letters_without_acking_journal_db() ->
         stats.written, 0,
         "the poison batch must not count as written"
     );
+    // Note: `journal_depth` reflects fjall's approximate_len, which counts the
+    // removal tombstone alongside the original insert, so it is not a reliable
+    // exact-zero signal. The acknowledgement is instead proven deterministically
+    // below: a restart over the same journal does not replay the row (replay reads
+    // real keys, not the approximate count).
 
-    let dead_letters: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM analytics.lineage_dead_letters WHERE first_turn_id = $1",
+    let (dead_letters, row_count, partition): (i64, i32, String) = sqlx::query_as(
+        "SELECT COUNT(*), MAX(row_count), MAX(first_storage_partition_id) FROM analytics.lineage_dead_letters WHERE first_turn_id = $1",
     )
     .bind(turn_id)
     .fetch_one(&pool)
@@ -123,13 +130,6 @@ async fn lineage_writer_poison_batch_dead_letters_without_acking_journal_db() ->
         dead_letters, 1,
         "the poison batch should be persisted exactly once to dead-letter storage"
     );
-
-    let (row_count, partition): (i32, String) = sqlx::query_as(
-        "SELECT row_count, first_storage_partition_id FROM analytics.lineage_dead_letters WHERE first_turn_id = $1",
-    )
-    .bind(turn_id)
-    .fetch_one(&pool)
-    .await?;
     assert_eq!(
         row_count, 1,
         "the dead-letter row should record one buffered event"
@@ -139,17 +139,16 @@ async fn lineage_writer_poison_batch_dead_letters_without_acking_journal_db() ->
         "the dead-letter row should retain the source partition for triage"
     );
 
-    // Recovery: a new writer over the same journal (with the target restored by
-    // its own idempotent schema bootstrap) replays the retained, unacked row and
-    // finally persists it -- proving the journal kept it.
+    // Restart over the same journal with a healthy store (its schema bootstrap
+    // restores turn_lineage). Because the dead-lettered sequence was acked, the
+    // row is NOT replayed into turn_lineage and NOT re-dead-lettered.
     let (tx2, rx2) = mpsc::channel::<LineageEvent>(64);
     let handle2 = spawn_writer(rx2, config, LineageStore::Postgres(pool.clone())).await?;
     drop(tx2);
     let recovery_stats = handle2.shutdown().await?;
-    assert!(
-        recovery_stats.written >= 1,
-        "the replayed journal row should be written on recovery, got {}",
-        recovery_stats.written
+    assert_eq!(
+        recovery_stats.written, 0,
+        "the acked dead-letter row must not be replayed on restart"
     );
 
     let written_after_restart: i64 =
@@ -158,8 +157,67 @@ async fn lineage_writer_poison_batch_dead_letters_without_acking_journal_db() ->
             .fetch_one(&pool)
             .await?;
     assert_eq!(
-        written_after_restart, 1,
-        "the retained journal row must be replayed exactly once into turn_lineage"
+        written_after_restart, 0,
+        "the dead-lettered row lives only in the DLQ, never replayed into turn_lineage"
+    );
+
+    let dead_letters_after_restart: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM analytics.lineage_dead_letters WHERE first_turn_id = $1",
+    )
+    .bind(turn_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        dead_letters_after_restart, 1,
+        "restart must not create a duplicate dead-letter row"
+    );
+
+    pool.close().await;
+    drop_database(&cleanup_pool, &database_name).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn lineage_writer_repeated_dead_letter_of_same_batch_is_idempotent_db() -> TestResult<()> {
+    // Pins (F16): the crash-between-DLQ-commit-and-ack window is safe. Processing the
+    // identical batch twice (two fresh writer lifetimes over a still-poisoned target)
+    // re-derives the same content-addressed dead_letter_id and upserts it, so
+    // at-least-once dead-lettering yields exactly one DLQ row, never a duplicate.
+    let (pool, database_name, cleanup_pool) = isolated_pool().await?;
+    let turn_id = Uuid::now_v7();
+    let event = retrieval_event(turn_id, "idempotent-poison");
+
+    for _ in 0..2 {
+        let journal = tempfile::tempdir()?;
+        let config = MpscSinkConfig {
+            channel_capacity: 64,
+            batch_size: 100,
+            batch_max_age: Duration::from_secs(3600),
+            journal_path: journal.path().to_path_buf(),
+        };
+        let (tx, rx) = mpsc::channel::<LineageEvent>(64);
+        // spawn_writer bootstraps the schema, so drop the target AFTER it opens to
+        // keep the write path poisoned for this lifetime.
+        let handle = spawn_writer(rx, config, LineageStore::Postgres(pool.clone())).await?;
+        sqlx::query("DROP TABLE analytics.turn_lineage CASCADE")
+            .execute(&pool)
+            .await?;
+        tx.send(event.clone())
+            .await
+            .map_err(|error| test_error(format!("send should enqueue event: {error}")))?;
+        drop(tx);
+        handle.shutdown().await?;
+    }
+
+    let dead_letters: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM analytics.lineage_dead_letters WHERE first_turn_id = $1",
+    )
+    .bind(turn_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        dead_letters, 1,
+        "identical re-dead-lettered content must upsert to exactly one DLQ row"
     );
 
     pool.close().await;

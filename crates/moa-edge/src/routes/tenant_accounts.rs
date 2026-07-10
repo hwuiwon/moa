@@ -1557,7 +1557,6 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
     struct AuthzOutboxTupleRow {
-        idempotency_key: String,
         op: String,
         tuple_user: String,
         tuple_relation: String,
@@ -1714,7 +1713,7 @@ mod tests {
         ];
         let rows: Vec<AuthzOutboxTupleRow> = sqlx::query_as(
             r#"
-            SELECT idempotency_key, op, tuple_user, tuple_relation, tuple_object,
+            SELECT op, tuple_user, tuple_relation, tuple_object,
                    model_version, tenant_id
             FROM authz_outbox
             WHERE tuple_object = ANY($1)
@@ -1727,9 +1726,6 @@ mod tests {
 
         let mut expected = vec![
             AuthzOutboxTupleRow {
-                idempotency_key: format!(
-                    "delete-agent:{agent_with_operator_id}-can_act_as-operator:{delegate_user_id}-v{MODEL_VERSION}"
-                ),
                 op: "delete".to_string(),
                 tuple_user: format!("operator:{delegate_user_id}"),
                 tuple_relation: "can_act_as".to_string(),
@@ -1738,9 +1734,6 @@ mod tests {
                 tenant_id: Some(tenant_id),
             },
             AuthzOutboxTupleRow {
-                idempotency_key: format!(
-                    "delete-agent:{agent_with_operator_id}-operator-operator:{operator_user_id}-v{MODEL_VERSION}"
-                ),
                 op: "delete".to_string(),
                 tuple_user: format!("operator:{operator_user_id}"),
                 tuple_relation: "operator".to_string(),
@@ -1749,9 +1742,6 @@ mod tests {
                 tenant_id: Some(tenant_id),
             },
             AuthzOutboxTupleRow {
-                idempotency_key: format!(
-                    "delete-agent:{agent_with_operator_id}-tenant-tenant:{tenant_id}-v{MODEL_VERSION}"
-                ),
                 op: "delete".to_string(),
                 tuple_user: format!("tenant:{tenant_id}"),
                 tuple_relation: "tenant".to_string(),
@@ -1760,9 +1750,6 @@ mod tests {
                 tenant_id: Some(tenant_id),
             },
             AuthzOutboxTupleRow {
-                idempotency_key: format!(
-                    "delete-agent:{agent_without_operator_id}-tenant-tenant:{tenant_id}-v{MODEL_VERSION}"
-                ),
                 op: "delete".to_string(),
                 tuple_user: format!("tenant:{tenant_id}"),
                 tuple_relation: "tenant".to_string(),
@@ -1781,8 +1768,8 @@ mod tests {
         assert_eq!(rows, expected);
         assert!(
             rows.iter()
-                .all(|row| row.idempotency_key.ends_with(&format!("-v{MODEL_VERSION}"))),
-            "agent tuple deletes must use the current authz model suffix"
+                .all(|row| row.model_version == MODEL_VERSION as i32),
+            "agent tuple deletes must use the current authz model version"
         );
 
         testing::cleanup_test_schema(&database_url, &schema_name).await?;

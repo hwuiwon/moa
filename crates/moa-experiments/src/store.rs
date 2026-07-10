@@ -543,6 +543,89 @@ impl ExperimentStore {
         rows.iter().map(trial_from_row).collect()
     }
 
+    /// Atomically cancels a run and its active trials in a single transaction.
+    ///
+    /// The run-status transition to `Cancelled` and the active-trial
+    /// cancellation commit together, so a crash between them can never strand
+    /// active trial rows behind an already-terminal parent. The run update never
+    /// overrides a genuinely finished (`completed`/`failed`) run and is
+    /// idempotent for an already-`cancelled` run, so a retry behind a terminal
+    /// cancelled parent still reconciles any active trials. Returns the updated
+    /// run row (present whenever the run is cancellable) and the trials this call
+    /// transitioned to cancelled.
+    pub async fn cancel_run_and_active_trials(
+        &self,
+        scope: &ActionRuleScope,
+        run_uid: Uuid,
+        reason: String,
+    ) -> MoaResult<(Option<ExperimentRunRecord>, Vec<ExperimentTrialRecord>)> {
+        let parts = ScopeParts::from_scope(scope);
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
+        ensure_run_exists_in_scope(conn.as_mut(), scope, run_uid).await?;
+        let run_row = sqlx::query(&format!(
+            r#"
+            UPDATE moa.experiment_run
+            SET status = 'cancelled',
+                error = CASE
+                    WHEN status IN ('completed', 'failed', 'cancelled') THEN error
+                    ELSE $5
+                END,
+                completed_at = CASE
+                    WHEN status IN ('completed', 'failed', 'cancelled') THEN completed_at
+                    ELSE now()
+                END,
+                started_at = COALESCE(started_at, now()),
+                updated_at = now()
+            WHERE run_uid = $4
+              AND scope = $1
+              AND storage_partition_id IS NOT DISTINCT FROM $2
+              AND user_id IS NOT DISTINCT FROM $3
+              AND status NOT IN ('completed', 'failed')
+            RETURNING {RUN_COLUMNS}
+            "#
+        ))
+        .bind(parts.scope)
+        .bind(parts.storage_partition_id.as_deref())
+        .bind(parts.user_id.as_deref())
+        .bind(run_uid)
+        .bind(reason.clone())
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        let trial_rows = sqlx::query(&format!(
+            r#"
+            UPDATE moa.experiment_trial
+            SET status = 'cancelled',
+                stop_reason = 'cancelled',
+                error = $5,
+                completed_at = COALESCE(completed_at, now()),
+                started_at = COALESCE(started_at, now()),
+                updated_at = now()
+            WHERE run_uid = $4
+              AND scope = $1
+              AND storage_partition_id IS NOT DISTINCT FROM $2
+              AND user_id IS NOT DISTINCT FROM $3
+              AND status IN ('accepted', 'dispatched', 'running')
+            RETURNING {TRIAL_COLUMNS}
+            "#
+        ))
+        .bind(parts.scope)
+        .bind(parts.storage_partition_id.as_deref())
+        .bind(parts.user_id.as_deref())
+        .bind(run_uid)
+        .bind(reason)
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await?;
+        let run = run_row.as_ref().map(run_from_row).transpose()?;
+        let trials = trial_rows
+            .iter()
+            .map(trial_from_row)
+            .collect::<MoaResult<Vec<_>>>()?;
+        Ok((run, trials))
+    }
+
     /// Attaches a session to a scoped experiment trial.
     pub async fn attach_trial_session(
         &self,

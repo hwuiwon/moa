@@ -4,7 +4,7 @@
 //! audience, and JWKS URL. Claim names for tenant and identity type are
 //! intentionally simple for P1.7 and can be extended by config later.
 
-use crate::auth0_provider::{parse_identity_type, resolve_or_provision_static};
+use crate::auth0_provider::{map_jwks_error, parse_identity_type, resolve_or_provision_static};
 use crate::jwks_cache::JwksCache;
 use async_trait::async_trait;
 use jsonwebtoken::{Algorithm, Validation, decode, decode_header};
@@ -70,11 +70,7 @@ impl AuthProvider for OidcAuthProvider {
             return Err(AuthError::Rejected);
         }
         let kid = header.kid.ok_or(AuthError::InvalidFormat)?;
-        let key = self
-            .jwks
-            .key_for(&kid)
-            .await
-            .map_err(|error| AuthError::Unavailable(format!("jwks: {error}")))?;
+        let key = self.jwks.key_for(&kid).await.map_err(map_jwks_error)?;
 
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_issuer(&[&self.issuer]);

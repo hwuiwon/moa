@@ -26,7 +26,7 @@ use moa_experiments::app::{
     plan_generation_request, propose_improvement_candidate, scores, store_generated_plan,
     trial_status,
 };
-use moa_experiments::model::{ExperimentTrialStatus, ExperimentVariant};
+use moa_experiments::model::{ExperimentRunStatus, ExperimentTrialStatus, ExperimentVariant};
 use moa_experiments::store::ExperimentStore;
 use moa_observability::record_experiment_learning_candidates;
 use moa_observability::restate_observability::annotate_restate_handler_span;
@@ -273,11 +273,25 @@ impl Experiments for ExperimentsImpl {
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
+        let run_uid = request.run_uid;
 
-        Ok(ctx
+        let response = ctx
             .run(|| async move { cancel_inner(pool, request).await.map(Json::from) })
             .name("experiments_cancel")
-            .await?)
+            .await?
+            .into_inner();
+
+        // After the projection is cancelled, durably propagate cancellation to
+        // the run workflow so it stops live child work (its own target and every
+        // active trial). Best-effort one-way; only meaningful once the run is
+        // cancelled, so genuinely finished runs are not signaled.
+        if response.status == ExperimentRunStatus::Cancelled.as_str() {
+            ctx.workflow_client::<ExperimentRunClient>(run_uid.to_string())
+                .request_cancel(Json::from(response.reason.clone()))
+                .send();
+        }
+
+        Ok(Json::from(response))
     }
 
     #[tracing::instrument(skip(self, ctx, request))]

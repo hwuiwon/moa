@@ -272,6 +272,147 @@ impl SlackOutboundMessageRefs {
     }
 }
 
+/// Chunk-level Slack transport operations used by the tracked send and edit
+/// orchestration.
+///
+/// Extracting the three chunk-level API calls behind a trait lets the
+/// multi-chunk reference-persistence and compensation logic be exercised
+/// deterministically without a live Slack endpoint.
+#[async_trait]
+trait SlackChunkTransport: Send + Sync {
+    /// Posts one rendered chunk and returns its durable Slack reference.
+    async fn send_chunk(
+        &self,
+        target: &SlackTarget,
+        chunk: &SlackRenderChunk,
+    ) -> Result<SlackMessageRef>;
+
+    /// Updates one already-sent chunk in place.
+    async fn update_chunk(
+        &self,
+        message_ref: &SlackMessageRef,
+        chunk: &SlackRenderChunk,
+    ) -> Result<()>;
+
+    /// Deletes one already-sent chunk, tolerating an already-absent message.
+    async fn delete_ref(&self, message_ref: &SlackMessageRef) -> Result<()>;
+}
+
+/// Sends a fresh multi-chunk Slack message, persisting each confirmed chunk
+/// reference before the next send and compensating on a mid-message failure.
+///
+/// Recording references only after every chunk succeeds leaves a middle-chunk
+/// error with earlier chunks visible in Slack but untracked in the reference
+/// store, so retry, edit, and delete cannot repair them. This persists each
+/// confirmed reference immediately and, because the caller supplies no
+/// idempotency key to resume under, deletes the already-sent chunks on failure
+/// so Slack never shows a visible-but-untracked partial message.
+async fn send_multi_chunk_tracked<T: SlackChunkTransport + ?Sized>(
+    transport: &T,
+    refs: &SlackOutboundMessageRefs,
+    target: &SlackTarget,
+    message_id: &MessageId,
+    chunks: &[SlackRenderChunk],
+) -> Result<Vec<SlackMessageRef>> {
+    let mut sent_refs = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        match transport.send_chunk(target, chunk).await {
+            Ok(sent_ref) => {
+                sent_refs.push(sent_ref);
+                refs.record_after_external_side_effect(
+                    message_id,
+                    sent_refs.clone(),
+                    "chat.postMessage",
+                )
+                .await;
+            }
+            Err(error) => {
+                compensate_partial_send(transport, refs, message_id, &sent_refs).await;
+                return Err(error);
+            }
+        }
+    }
+    Ok(sent_refs)
+}
+
+/// Deletes the already-sent chunks and clears the partial reference record after
+/// a multi-chunk send fails partway through, so no visible-but-untracked message
+/// remains in Slack.
+async fn compensate_partial_send<T: SlackChunkTransport + ?Sized>(
+    transport: &T,
+    refs: &SlackOutboundMessageRefs,
+    message_id: &MessageId,
+    sent_refs: &[SlackMessageRef],
+) {
+    for message_ref in sent_refs {
+        if let Err(error) = transport.delete_ref(message_ref).await {
+            warn!(
+                message_id = %message_id,
+                slack.channel_id = %message_ref.channel_id,
+                slack.ts = %message_ref.ts,
+                error = %error,
+                "Slack multi-chunk send failed; compensating delete of an already-sent chunk also failed"
+            );
+        }
+    }
+    refs.remove_after_external_side_effect(message_id, "chat.postMessage_compensation")
+        .await;
+}
+
+/// Applies an edit to an existing Slack message, persisting each newly grown
+/// chunk reference incrementally.
+///
+/// When the rendered message grows, new chunks are sent before the updated
+/// reference list would historically be persisted, so a late failure left the
+/// new chunks visible but untracked. Persisting after each newly-sent chunk
+/// keeps every confirmed chunk tracked even if a later chunk fails.
+async fn apply_edit_tracked<T: SlackChunkTransport + ?Sized>(
+    transport: &T,
+    refs: &SlackOutboundMessageRefs,
+    message_id: &MessageId,
+    existing: &[SlackMessageRef],
+    rendered: &[SlackRenderChunk],
+) -> Result<Vec<SlackMessageRef>> {
+    let overlap = existing.len().min(rendered.len());
+    let mut updated_refs = Vec::with_capacity(rendered.len());
+
+    for index in 0..overlap {
+        let message_ref = existing[index].clone();
+        transport
+            .update_chunk(&message_ref, &rendered[index])
+            .await?;
+        updated_refs.push(message_ref);
+    }
+
+    if rendered.len() > existing.len() {
+        let target = existing
+            .last()
+            .cloned()
+            .map(|message_ref| message_ref.target())
+            .ok_or_else(|| {
+                MoaError::ValidationError(format!("slack message id {message_id} has no refs"))
+            })?;
+        for chunk in rendered.iter().skip(existing.len()) {
+            let sent_ref = transport.send_chunk(&target, chunk).await?;
+            updated_refs.push(sent_ref);
+            // Persist each newly-sent chunk before the next send so a mid-growth
+            // failure still leaves the chunk tracked, never visible-but-untracked.
+            refs.record_after_external_side_effect(message_id, updated_refs.clone(), "chat.update")
+                .await;
+        }
+    }
+
+    if existing.len() > rendered.len() {
+        for message_ref in existing.iter().skip(rendered.len()) {
+            transport.delete_ref(message_ref).await?;
+        }
+    }
+
+    refs.record_after_external_side_effect(message_id, updated_refs.clone(), "chat.update")
+        .await;
+    Ok(updated_refs)
+}
+
 /// Slack adapter implementing the generic channel abstraction.
 #[derive(Clone)]
 pub struct SlackAdapter {
@@ -387,75 +528,6 @@ impl SlackAdapter {
         ))
     }
 
-    async fn send_chunk(
-        &self,
-        target: &SlackTarget,
-        chunk: &SlackRenderChunk,
-    ) -> Result<SlackMessageRef> {
-        self.rate_limiter
-            .wait_for_channel_slot(target.channel_id.as_ref())
-            .await?;
-        let session = self.client.open_session(&self.bot_token);
-        let request = SlackApiChatPostMessageRequest {
-            channel: SlackChannelId(target.channel_id.to_string()),
-            content: slack_message_content(chunk),
-            as_user: None,
-            icon_emoji: None,
-            icon_url: None,
-            link_names: None,
-            parse: None,
-            thread_ts: target.thread_ts.clone().map(SlackTs),
-            username: None,
-            reply_broadcast: None,
-            unfurl_links: None,
-            unfurl_media: None,
-        };
-
-        async {
-            let response = session
-                .chat_post_message(&request)
-                .await
-                .map_err(|error| slack_client_error("chat.postMessage", error))?;
-            Ok(SlackMessageRef {
-                channel_id: Arc::<str>::from(response.channel.0),
-                ts: response.ts.0,
-                thread_ts: target.thread_ts.clone(),
-            })
-        }
-        .instrument(slack_api_span("slack_message_send", "chat.postMessage"))
-        .await
-    }
-
-    async fn update_chunk(
-        &self,
-        message_ref: &SlackMessageRef,
-        chunk: &SlackRenderChunk,
-    ) -> Result<()> {
-        self.rate_limiter
-            .wait_for_channel_slot(message_ref.channel_id.as_ref())
-            .await?;
-        let session = self.client.open_session(&self.bot_token);
-        let request = SlackApiChatUpdateRequest {
-            channel: SlackChannelId(message_ref.channel_id.to_string()),
-            content: slack_message_content(chunk),
-            ts: SlackTs(message_ref.ts.clone()),
-            as_user: None,
-            link_names: None,
-            parse: None,
-            reply_broadcast: None,
-        };
-
-        async {
-            session
-                .chat_update(&request)
-                .await
-                .map_err(|error| slack_client_error("chat.update", error))?;
-            Ok(())
-        }
-        .instrument(slack_api_span("slack_message_update", "chat.update"))
-        .await
-    }
-
     async fn record_edit_attempt(&self, message_id: &MessageId) {
         let min_interval = self.capabilities().min_edit_interval;
         let previous = self.last_edits.get(message_id.as_str()).await;
@@ -565,16 +637,33 @@ impl ChannelAdapter for SlackAdapter {
             .resolve_target(msg.reply_to.as_deref(), msg.channel_ref.as_ref())
             .await?;
         let rendered = self.renderer.render(&msg);
-        let mut sent_refs = Vec::with_capacity(rendered.len());
-        for chunk in &rendered {
-            let sent_ref = self.send_chunk(&target, chunk).await?;
-            sent_refs.push(sent_ref);
+
+        // A single-chunk (or empty) send has no partial-visibility window: the one
+        // send either fully succeeds or leaves nothing visible. Keep the
+        // deterministic id derived from the sole reference.
+        if rendered.len() <= 1 {
+            let mut sent_refs = Vec::with_capacity(rendered.len());
+            for chunk in &rendered {
+                sent_refs.push(self.send_chunk(&target, chunk).await?);
+            }
+            let message_id = sent_refs
+                .first()
+                .map(slack_message_id_from_ref)
+                .unwrap_or_else(|| MessageId::new(Uuid::now_v7().to_string()));
+            self.outbound_refs
+                .record_after_external_side_effect(&message_id, sent_refs, "chat.postMessage")
+                .await;
+            return Ok(message_id);
         }
-        let message_id = if sent_refs.len() == 1 {
-            slack_message_id_from_ref(&sent_refs[0])
-        } else {
-            MessageId::new(Uuid::now_v7().to_string())
-        };
+
+        // Multi-chunk: allocate the aggregate id up front so each confirmed chunk
+        // reference is persisted under a stable id as it is sent, and a
+        // mid-message failure compensates by deleting the already-sent chunks
+        // instead of orphaning visible messages.
+        let message_id = MessageId::new(Uuid::now_v7().to_string());
+        let sent_refs =
+            send_multi_chunk_tracked(self, &self.outbound_refs, &target, &message_id, &rendered)
+                .await?;
         self.outbound_refs
             .record_after_external_side_effect(&message_id, sent_refs, "chat.postMessage")
             .await;
@@ -605,82 +694,115 @@ impl SlackAdapter {
 
         let existing = self.outbound_refs.resolve(msg_id).await?;
         let rendered = self.renderer.render(&msg);
-        let overlap = existing.len().min(rendered.len());
-        let mut updated_refs = Vec::with_capacity(rendered.len());
-
-        for index in 0..overlap {
-            let message_ref = existing[index].clone();
-            self.update_chunk(&message_ref, &rendered[index]).await?;
-            updated_refs.push(message_ref);
-        }
-
-        if rendered.len() > existing.len() {
-            let target = existing
-                .last()
-                .cloned()
-                .map(|message_ref| message_ref.target())
-                .ok_or_else(|| {
-                    MoaError::ValidationError(format!("slack message id {msg_id} has no refs"))
-                })?;
-            for chunk in rendered.iter().skip(existing.len()) {
-                let sent_ref = self.send_chunk(&target, chunk).await?;
-                updated_refs.push(sent_ref);
-            }
-        }
-
-        if existing.len() > rendered.len() {
-            let session = self.client.open_session(&self.bot_token);
-            for message_ref in existing.iter().skip(rendered.len()) {
-                self.rate_limiter
-                    .wait_for_channel_slot(message_ref.channel_id.as_ref())
-                    .await?;
-                let request = SlackApiChatDeleteRequest {
-                    channel: SlackChannelId(message_ref.channel_id.to_string()),
-                    ts: SlackTs(message_ref.ts.clone()),
-                    as_user: None,
-                };
-                session
-                    .chat_delete(&request)
-                    .await
-                    .map_err(|error| slack_client_error("chat.delete", error))?;
-            }
-        }
-
-        self.outbound_refs
-            .record_after_external_side_effect(msg_id, updated_refs, "chat.update")
-            .await;
+        apply_edit_tracked(self, &self.outbound_refs, msg_id, &existing, &rendered).await?;
         Ok(())
     }
 
     async fn delete_locked(&self, msg_id: &MessageId) -> Result<()> {
         let refs = self.outbound_refs.resolve(msg_id).await?;
-        let session = self.client.open_session(&self.bot_token);
-        for message_ref in refs {
-            self.rate_limiter
-                .wait_for_channel_slot(message_ref.channel_id.as_ref())
-                .await?;
-            let request = SlackApiChatDeleteRequest {
-                channel: SlackChannelId(message_ref.channel_id.to_string()),
-                ts: SlackTs(message_ref.ts),
-                as_user: None,
-            };
-            match session.chat_delete(&request).await {
-                Ok(_) => {}
-                Err(SlackClientError::ApiError(api)) if api.code == "message_not_found" => {
-                    tracing::debug!(
-                        message_id = %msg_id,
-                        slack.channel_id = %message_ref.channel_id,
-                        slack.ts = %request.ts.0,
-                        "Slack delete retried a chunk that was already absent"
-                    );
-                }
-                Err(error) => return Err(slack_client_error("chat.delete", error)),
-            }
+        for message_ref in &refs {
+            self.delete_ref(message_ref).await?;
         }
         self.outbound_refs
             .remove_after_external_side_effect(msg_id, "chat.delete")
             .await;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl SlackChunkTransport for SlackAdapter {
+    async fn send_chunk(
+        &self,
+        target: &SlackTarget,
+        chunk: &SlackRenderChunk,
+    ) -> Result<SlackMessageRef> {
+        self.rate_limiter
+            .wait_for_channel_slot(target.channel_id.as_ref())
+            .await?;
+        let session = self.client.open_session(&self.bot_token);
+        let request = SlackApiChatPostMessageRequest {
+            channel: SlackChannelId(target.channel_id.to_string()),
+            content: slack_message_content(chunk),
+            as_user: None,
+            icon_emoji: None,
+            icon_url: None,
+            link_names: None,
+            parse: None,
+            thread_ts: target.thread_ts.clone().map(SlackTs),
+            username: None,
+            reply_broadcast: None,
+            unfurl_links: None,
+            unfurl_media: None,
+        };
+
+        async {
+            let response = session
+                .chat_post_message(&request)
+                .await
+                .map_err(|error| slack_client_error("chat.postMessage", error))?;
+            Ok(SlackMessageRef {
+                channel_id: Arc::<str>::from(response.channel.0),
+                ts: response.ts.0,
+                thread_ts: target.thread_ts.clone(),
+            })
+        }
+        .instrument(slack_api_span("slack_message_send", "chat.postMessage"))
+        .await
+    }
+
+    async fn update_chunk(
+        &self,
+        message_ref: &SlackMessageRef,
+        chunk: &SlackRenderChunk,
+    ) -> Result<()> {
+        self.rate_limiter
+            .wait_for_channel_slot(message_ref.channel_id.as_ref())
+            .await?;
+        let session = self.client.open_session(&self.bot_token);
+        let request = SlackApiChatUpdateRequest {
+            channel: SlackChannelId(message_ref.channel_id.to_string()),
+            content: slack_message_content(chunk),
+            ts: SlackTs(message_ref.ts.clone()),
+            as_user: None,
+            link_names: None,
+            parse: None,
+            reply_broadcast: None,
+        };
+
+        async {
+            session
+                .chat_update(&request)
+                .await
+                .map_err(|error| slack_client_error("chat.update", error))?;
+            Ok(())
+        }
+        .instrument(slack_api_span("slack_message_update", "chat.update"))
+        .await
+    }
+
+    async fn delete_ref(&self, message_ref: &SlackMessageRef) -> Result<()> {
+        self.rate_limiter
+            .wait_for_channel_slot(message_ref.channel_id.as_ref())
+            .await?;
+        let session = self.client.open_session(&self.bot_token);
+        let request = SlackApiChatDeleteRequest {
+            channel: SlackChannelId(message_ref.channel_id.to_string()),
+            ts: SlackTs(message_ref.ts.clone()),
+            as_user: None,
+        };
+        match session.chat_delete(&request).await {
+            Ok(_) => Ok(()),
+            Err(SlackClientError::ApiError(api)) if api.code == "message_not_found" => {
+                tracing::debug!(
+                    slack.channel_id = %message_ref.channel_id,
+                    slack.ts = %message_ref.ts,
+                    "Slack delete skipped a chunk that was already absent"
+                );
+                Ok(())
+            }
+            Err(error) => Err(slack_client_error("chat.delete", error)),
+        }
     }
 }
 
@@ -1648,5 +1770,246 @@ mod tests {
             MoaError::ProviderError(message)
                 if message == "slack Web API returned error code invalid_auth"
         ));
+    }
+
+    #[derive(Default)]
+    struct FakeChunkTransport {
+        fail_send_at: Option<usize>,
+        send_calls: std::sync::Mutex<usize>,
+        sent: std::sync::Mutex<Vec<SlackMessageRef>>,
+        deleted: std::sync::Mutex<Vec<String>>,
+        updated: std::sync::Mutex<Vec<String>>,
+        // When set, each send records how many references are already persisted
+        // for the aggregate id at the moment the send is issued, proving the
+        // incremental-persistence ordering.
+        persistence_probe: Option<(Arc<SlackOutboundMessageRefs>, MessageId)>,
+        persisted_before_send: std::sync::Mutex<Vec<usize>>,
+    }
+
+    impl FakeChunkTransport {
+        fn new(fail_send_at: Option<usize>) -> Self {
+            Self {
+                fail_send_at,
+                ..Default::default()
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SlackChunkTransport for FakeChunkTransport {
+        async fn send_chunk(
+            &self,
+            target: &SlackTarget,
+            _chunk: &SlackRenderChunk,
+        ) -> Result<SlackMessageRef> {
+            let index = {
+                let mut calls = self.send_calls.lock().expect("send_calls lock");
+                let index = *calls;
+                *calls += 1;
+                index
+            };
+            if let Some((refs, message_id)) = &self.persistence_probe {
+                let persisted = refs
+                    .load(message_id)
+                    .await
+                    .expect("probe load")
+                    .map_or(0, |refs| refs.len());
+                self.persisted_before_send
+                    .lock()
+                    .expect("probe lock")
+                    .push(persisted);
+            }
+            if self.fail_send_at == Some(index) {
+                return Err(MoaError::ProviderError(
+                    "simulated chunk send failure".to_string(),
+                ));
+            }
+            let sent_ref = SlackMessageRef {
+                channel_id: target.channel_id.clone(),
+                ts: format!("ts-{index}"),
+                thread_ts: target.thread_ts.clone(),
+            };
+            self.sent.lock().expect("sent lock").push(sent_ref.clone());
+            Ok(sent_ref)
+        }
+
+        async fn update_chunk(
+            &self,
+            message_ref: &SlackMessageRef,
+            _chunk: &SlackRenderChunk,
+        ) -> Result<()> {
+            self.updated
+                .lock()
+                .expect("updated lock")
+                .push(message_ref.ts.clone());
+            Ok(())
+        }
+
+        async fn delete_ref(&self, message_ref: &SlackMessageRef) -> Result<()> {
+            self.deleted
+                .lock()
+                .expect("deleted lock")
+                .push(message_ref.ts.clone());
+            Ok(())
+        }
+    }
+
+    fn test_chunk(text: &str) -> SlackRenderChunk {
+        SlackRenderChunk {
+            text: text.to_string(),
+        }
+    }
+
+    fn test_target() -> SlackTarget {
+        SlackTarget {
+            channel_id: Arc::<str>::from("C123"),
+            thread_ts: Some("1700000000.000100".to_string()),
+        }
+    }
+
+    fn memory_outbound_refs() -> SlackOutboundMessageRefs {
+        SlackOutboundMessageRefs::new(Some(Arc::new(MemoryRuntimeCacheStore::default())))
+    }
+
+    fn test_message_ref(ts: &str) -> SlackMessageRef {
+        SlackMessageRef {
+            channel_id: Arc::<str>::from("C123"),
+            ts: ts.to_string(),
+            thread_ts: Some("1700000000.000100".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_chunk_send_compensates_already_sent_chunk_on_middle_failure() {
+        // Pins: a middle-chunk send failure deletes the already-sent chunks and
+        // clears the partial record, so Slack never shows a visible-but-untracked
+        // partial message and no stale aggregate ref remains.
+        let refs = memory_outbound_refs();
+        let transport = FakeChunkTransport::new(Some(1));
+        let message_id = MessageId::new(Uuid::now_v7().to_string());
+        let chunks = vec![test_chunk("one"), test_chunk("two"), test_chunk("three")];
+
+        let result =
+            send_multi_chunk_tracked(&transport, &refs, &test_target(), &message_id, &chunks).await;
+
+        assert!(result.is_err(), "the middle-chunk failure should surface");
+        assert_eq!(
+            transport.deleted.lock().expect("deleted lock").as_slice(),
+            ["ts-0"],
+            "the one already-sent chunk must be compensated-deleted"
+        );
+        assert!(
+            refs.load(&message_id).await.expect("load refs").is_none(),
+            "no partial refs may remain for the aggregate id after compensation"
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_chunk_send_persists_each_chunk_before_the_next() {
+        // Pins: each confirmed chunk reference is persisted before the next chunk is
+        // sent, so an interruption never leaves a sent chunk unrecorded.
+        let refs = Arc::new(memory_outbound_refs());
+        let message_id = MessageId::new(Uuid::now_v7().to_string());
+        let mut transport = FakeChunkTransport::new(None);
+        transport.persistence_probe = Some((refs.clone(), message_id.clone()));
+        let chunks = vec![test_chunk("one"), test_chunk("two"), test_chunk("three")];
+
+        let sent =
+            send_multi_chunk_tracked(&transport, &refs, &test_target(), &message_id, &chunks)
+                .await
+                .expect("all chunks send");
+
+        assert_eq!(sent.len(), 3);
+        assert_eq!(
+            transport
+                .persisted_before_send
+                .lock()
+                .expect("probe lock")
+                .as_slice(),
+            [0, 1, 2],
+            "before sending chunk i, exactly chunks 0..i must already be persisted"
+        );
+        assert_eq!(
+            refs.load(&message_id)
+                .await
+                .expect("load refs")
+                .map(|refs| refs.len()),
+            Some(3)
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_growth_persists_new_chunk_before_a_later_new_chunk_fails() {
+        // Pins: when an edit grows the message, each newly-sent chunk is persisted
+        // before the next send, so a later new-chunk failure still leaves the earlier
+        // new chunk tracked rather than visible-but-untracked.
+        let refs = memory_outbound_refs();
+        let message_id = MessageId::new(Uuid::now_v7().to_string());
+        let existing = vec![test_message_ref("existing-0")];
+        refs.store(&message_id, existing.clone())
+            .await
+            .expect("seed existing refs");
+        // overlap = 1 update, then two new chunks; fail the second new send.
+        let transport = FakeChunkTransport::new(Some(1));
+        let rendered = vec![
+            test_chunk("edit-0"),
+            test_chunk("new-1"),
+            test_chunk("new-2"),
+        ];
+
+        let result = apply_edit_tracked(&transport, &refs, &message_id, &existing, &rendered).await;
+
+        assert!(
+            result.is_err(),
+            "the second new-chunk failure should surface"
+        );
+        let stored = refs
+            .load(&message_id)
+            .await
+            .expect("load refs")
+            .expect("refs remain after partial growth");
+        assert_eq!(
+            stored.len(),
+            2,
+            "the overlap chunk and the first new chunk must both stay tracked"
+        );
+        assert_eq!(stored[0].ts, "existing-0");
+        assert_eq!(stored[1].ts, "ts-0");
+    }
+
+    #[tokio::test]
+    async fn edit_growth_persists_all_new_chunks_on_success() {
+        // Pins: a successful growth edit updates overlap chunks in place and tracks
+        // every newly-sent chunk.
+        let refs = memory_outbound_refs();
+        let message_id = MessageId::new(Uuid::now_v7().to_string());
+        let existing = vec![test_message_ref("existing-0")];
+        refs.store(&message_id, existing.clone())
+            .await
+            .expect("seed existing refs");
+        let transport = FakeChunkTransport::new(None);
+        let rendered = vec![
+            test_chunk("edit-0"),
+            test_chunk("new-1"),
+            test_chunk("new-2"),
+        ];
+
+        let updated = apply_edit_tracked(&transport, &refs, &message_id, &existing, &rendered)
+            .await
+            .expect("edit grows the message");
+
+        assert_eq!(updated.len(), 3);
+        assert_eq!(
+            refs.load(&message_id)
+                .await
+                .expect("load refs")
+                .map(|refs| refs.len()),
+            Some(3)
+        );
+        assert_eq!(
+            transport.updated.lock().expect("updated lock").as_slice(),
+            ["existing-0"],
+            "only the overlap chunk is edited in place"
+        );
     }
 }

@@ -57,6 +57,21 @@ impl Default for VectorSyncDrainRequest {
     }
 }
 
+/// Request payload for redriving quarantined (dead-lettered) vector sync rows.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct VectorSyncRedriveRequest {
+    /// Optional storage-partition scope; `None` redrives every partition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_partition_id: Option<String>,
+}
+
+/// Report returned by a vector-sync redrive pass.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct VectorSyncRedriveReport {
+    /// Number of quarantined rows returned to the pending state.
+    pub redriven: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConsolidationDispatch {
     workflow_id: String,
@@ -73,6 +88,15 @@ pub trait GraphMemoryMaint {
     async fn sync_vectors(
         req: Json<VectorSyncDrainRequest>,
     ) -> Result<Json<VectorSyncReport>, HandlerError>;
+
+    /// Redrives quarantined vector sync rows after an operator remediates the fault.
+    ///
+    /// Operator-invoked, not cron-scheduled: quarantined (dead-lettered) rows only
+    /// return to the drainer when an operator calls this after fixing the
+    /// underlying permanent fault (embedder mismatch, backend auth/config).
+    async fn redrive_dead_lettered_vectors(
+        req: Json<VectorSyncRedriveRequest>,
+    ) -> Result<Json<VectorSyncRedriveReport>, HandlerError>;
 }
 
 /// Concrete graph-memory maintenance service implementation.
@@ -149,6 +173,38 @@ impl GraphMemoryMaint for GraphMemoryMaintImpl {
             })
             .name("graph-memory-vector-sync")
             .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: Internal operator/maintenance handler; re-queues quarantined vector projection outbox rows only.
+    async fn redrive_dead_lettered_vectors(
+        &self,
+        ctx: Context<'_>,
+        request: Json<VectorSyncRedriveRequest>,
+    ) -> Result<Json<VectorSyncRedriveReport>, HandlerError> {
+        annotate_restate_handler_span("GraphMemoryMaint", "redrive_dead_lettered_vectors");
+        let request = request.into_inner();
+        let scope_label = request.storage_partition_id.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
+        let config = OrchestratorCtx::current_config();
+        let partition = request.storage_partition_id;
+        let report = ctx
+            .run(|| async move {
+                let redriven = VectorStoreFactory::from_config(config.as_ref())
+                    .redrive_dead_lettered_external_sync(&pool, partition.as_deref())
+                    .await
+                    .map_err(|error| TerminalError::new(format!("redrive vector sync: {error}")))?;
+                Ok::<_, HandlerError>(Json::from(VectorSyncRedriveReport { redriven }))
+            })
+            .name("graph-memory-vector-redrive")
+            .await?
+            .into_inner();
+        tracing::info!(
+            storage_partition_id = ?scope_label,
+            redriven = report.redriven,
+            "graph-memory maintenance redrove quarantined vector-sync rows"
+        );
+        Ok(Json::from(report))
     }
 }
 

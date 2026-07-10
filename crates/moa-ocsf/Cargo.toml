@@ -11,6 +11,7 @@ chrono = { workspace = true, features = ["serde"] }
 constant_time_eq.workspace = true
 hex.workspace = true
 hmac.workspace = true
+metrics.workspace = true
 moa-core.workspace = true
 moka.workspace = true
 rand = { workspace = true, features = ["std", "std_rng"] }

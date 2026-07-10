@@ -227,6 +227,23 @@ impl DurableJournal {
         tokio::task::spawn_blocking(move || journal.approximate_len()).await?
     }
 
+    /// Returns the age in seconds of the oldest unacknowledged journal row.
+    ///
+    /// `None` when the journal is empty. Reads the lowest-sequence pending row and
+    /// derives the age from its event timestamp, so it reports how long the
+    /// oldest still-pending lineage record has waited to reach the row store.
+    async fn oldest_pending_age_seconds(&self) -> Result<Option<f64>> {
+        let journal = self.clone();
+        let oldest = tokio::task::spawn_blocking(move || journal.lock()?.oldest_entry()).await??;
+        let Some((_, payload)) = oldest else {
+            return Ok(None);
+        };
+        let row = decode_pending_row(&payload)
+            .map_err(|error| Error::Invalid(format!("decode oldest journal row: {error}")))?;
+        let age_ms = (Utc::now() - pending_row_ts(&row)).num_milliseconds();
+        Ok(Some((age_ms.max(0) as f64) / 1000.0))
+    }
+
     fn lock(&self) -> Result<StdMutexGuard<'_, Journal>> {
         self.inner
             .lock()
@@ -353,7 +370,7 @@ async fn run_writer(
         }
     }
 
-    record_journal_depth(&stats, journal.approximate_len_async().await? as u64);
+    record_journal_metrics(&journal, &stats).await?;
     Ok(stats.snapshot())
 }
 
@@ -401,7 +418,7 @@ async fn replay_pending(
     let cursor = journal.replay_cursor();
     let pending = journal.replay_from(cursor).await?;
     if pending.is_empty() {
-        record_journal_depth(stats, journal.approximate_len_async().await? as u64);
+        record_journal_metrics(journal, stats).await?;
         return Ok(());
     }
 
@@ -423,7 +440,7 @@ async fn replay_pending(
     if disposition == WriteDisposition::Written {
         record_flush(stats, rows.len());
     }
-    record_journal_depth(stats, journal.approximate_len_async().await? as u64);
+    record_journal_metrics(journal, stats).await?;
     Ok(())
 }
 
@@ -444,7 +461,7 @@ async fn flush_events(
         seqs.push(seq);
         rows.push(row);
     }
-    record_journal_depth(stats, journal.approximate_len_async().await? as u64);
+    record_journal_metrics(journal, stats).await?;
 
     let disposition = write_pending_rows_or_dead_letter(store, &rows).await?;
     if should_ack_journal(disposition) {
@@ -453,12 +470,25 @@ async fn flush_events(
     if disposition == WriteDisposition::Written {
         record_flush(stats, rows.len());
     }
-    record_journal_depth(stats, journal.approximate_len_async().await? as u64);
+    record_journal_metrics(journal, stats).await?;
     Ok(())
 }
 
 fn should_ack_journal(disposition: WriteDisposition) -> bool {
-    disposition == WriteDisposition::Written
+    // Both a successful write and a dead-letter acknowledge (remove) the journal
+    // sequences. A `DeadLettered` disposition is only returned AFTER the
+    // dead-letter row is durably committed to Postgres (see
+    // `write_pending_rows_or_dead_letter`), so acking here can never lose
+    // records: a crash between the DLQ commit and the ack replays the same
+    // journal bytes on restart, which re-derives the identical content-addressed
+    // `dead_letter_id` and upserts it (`ON CONFLICT DO UPDATE`) rather than
+    // duplicating the row. The dead-letter table is therefore the sole
+    // retention/redrive owner; leaving poison rows in the journal only grew local
+    // storage without bound and re-dead-lettered them on every restart.
+    matches!(
+        disposition,
+        WriteDisposition::Written | WriteDisposition::DeadLettered
+    )
 }
 
 async fn write_pending_rows_or_dead_letter(
@@ -567,6 +597,10 @@ async fn write_dead_letter_batch(
     .await?;
 
     metrics::counter!("moa_lineage_dead_lettered_total").increment(summary.row_count as u64);
+    // Batch-level commit counter: one increment per durably committed dead-letter
+    // batch (distinct from the row counter above), so operators can track
+    // dead-letter volume and drive redrive/alerting off the table.
+    metrics::counter!("moa_lineage_dead_letter_commits_total").increment(1);
     Ok(dead_letter_id)
 }
 
@@ -1236,6 +1270,26 @@ fn record_journal_depth(stats: &SharedWriterStats, depth: u64) {
     metrics::gauge!("moa_lineage_journal_depth").set(depth as f64);
 }
 
+/// Refreshes the journal-health gauges: pending depth and oldest-unacked age.
+///
+/// After the F16 fix both successful and dead-lettered batches are acknowledged,
+/// so a healthy writer keeps depth and oldest-age near zero; a rising oldest-age
+/// means rows are stuck pending (the row store is failing without dead-lettering
+/// yet), which the depth gauge alone cannot distinguish from steady throughput.
+async fn record_journal_metrics(journal: &DurableJournal, stats: &SharedWriterStats) -> Result<()> {
+    record_journal_depth(stats, journal.approximate_len_async().await? as u64);
+    let oldest_age = journal.oldest_pending_age_seconds().await?;
+    metrics::gauge!("moa_lineage_journal_oldest_age_seconds").set(oldest_age.unwrap_or(0.0));
+    Ok(())
+}
+
+fn pending_row_ts(row: &PendingRow) -> DateTime<Utc> {
+    match row {
+        PendingRow::Lineage(row) => row.ts,
+        PendingRow::Score(row) => row.ts,
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "table", content = "row", rename_all = "snake_case")]
 enum PendingRow {
@@ -1619,10 +1673,13 @@ mod tests {
     }
 
     #[test]
-    fn dead_letter_disposition_does_not_ack_journal() {
-        // Pins: poison batches remain pending so compliance verification can see the gap.
+    fn dead_letter_disposition_acks_journal() {
+        // Pins (F16): both successful writes and dead-letters acknowledge the journal
+        // sequences. Dead-lettered rows are durably committed to the DLQ table first,
+        // so acking removes them from the journal (bounding local storage) instead of
+        // retaining and re-dead-lettering them on every restart.
         assert!(super::should_ack_journal(super::WriteDisposition::Written));
-        assert!(!super::should_ack_journal(
+        assert!(super::should_ack_journal(
             super::WriteDisposition::DeadLettered
         ));
     }

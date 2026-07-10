@@ -91,6 +91,9 @@ impl OutboxPoller {
 
     /// Run one drain pass and return the number of rows applied successfully.
     pub async fn tick(&self) -> Result<usize, AuthzError> {
+        // Sample the backlog age every tick (including idle ticks) so a stalled
+        // drain surfaces as a rising gauge rather than only in logs.
+        self.record_backlog_gauge().await;
         let claimed = self.claim_batch().await?;
         if claimed.is_empty() {
             return Ok(0);
@@ -143,9 +146,9 @@ impl OutboxPoller {
                 updated_at = NOW()
             FROM candidate
             WHERE outbox.id = candidate.id
-            RETURNING outbox.id, outbox.idempotency_key, outbox.op,
+            RETURNING outbox.id, outbox.op,
                       outbox.tuple_user, outbox.tuple_relation, outbox.tuple_object,
-                      outbox.attempts, outbox.lease_token
+                      outbox.attempts, outbox.generation, outbox.lease_token
             "#,
         )
         .bind(limit_i64(self.cfg.batch_size))
@@ -178,6 +181,10 @@ impl OutboxPoller {
     }
 
     async fn record_success(&self, claim: &ClaimedOutboxRow) -> Result<bool, AuthzError> {
+        // Compare-and-set on generation: only mark succeeded if the desired state
+        // this poller applied is still current. A concurrent enqueue that changed
+        // the desired op reset the row to pending and bumped its generation, so
+        // this update matches zero rows and the newer state is applied next tick.
         let result = sqlx::query(
             r#"
             UPDATE authz_outbox
@@ -188,18 +195,21 @@ impl OutboxPoller {
             WHERE id=$1
               AND status = 'in_flight'
               AND lease_token = $2
+              AND generation = $3
             "#,
         )
         .bind(claim.row.id)
         .bind(claim.lease_token)
+        .bind(claim.row.generation)
         .execute(&self.pool)
         .await?;
         let completed = result.rows_affected() == 1;
         if !completed {
             tracing::debug!(
                 id = %claim.row.id,
-                key = %claim.row.idempotency_key,
-                "outbox row lease was lost before success could be recorded"
+                tuple = %claim.tuple_display(),
+                generation = claim.row.generation,
+                "outbox row desired state changed before success could be recorded"
             );
         }
         Ok(completed)
@@ -212,10 +222,14 @@ impl OutboxPoller {
     ) -> Result<(), AuthzError> {
         let row = &claim.row;
         let next_attempts = row.attempts + 1;
+        // Every failure update is fenced on generation as well as the lease, so a
+        // concurrent desired-state change (which reactivated the row at a higher
+        // generation) is never overwritten with stale retry/dead-letter state.
         if next_attempts >= self.cfg.max_attempts {
             tracing::error!(
                 id = %row.id,
-                key = %row.idempotency_key,
+                tuple = %claim.tuple_display(),
+                generation = row.generation,
                 attempts = next_attempts,
                 error = %error,
                 "outbox row exhausted retries; moving to dead_letter"
@@ -232,21 +246,25 @@ impl OutboxPoller {
                 WHERE id=$1
                   AND status = 'in_flight'
                   AND lease_token = $4
+                  AND generation = $5
                 "#,
             )
             .bind(row.id)
             .bind(next_attempts)
             .bind(error.to_string())
             .bind(claim.lease_token)
+            .bind(row.generation)
             .execute(&self.pool)
             .await?;
+            metrics::counter!("moa_authz_outbox_dead_letters_total").increment(1);
             return Ok(());
         }
 
         let backoff = self.backoff_for(next_attempts);
         tracing::warn!(
             id = %row.id,
-            key = %row.idempotency_key,
+            tuple = %claim.tuple_display(),
+            generation = row.generation,
             attempts = next_attempts,
             backoff_ms = backoff.as_millis() as u64,
             error = %error,
@@ -265,6 +283,7 @@ impl OutboxPoller {
             WHERE id=$1
               AND status = 'in_flight'
               AND lease_token = $5
+              AND generation = $6
             "#,
         )
         .bind(row.id)
@@ -272,9 +291,39 @@ impl OutboxPoller {
         .bind(error.to_string())
         .bind(duration_millis_string(backoff))
         .bind(claim.lease_token)
+        .bind(row.generation)
         .execute(&self.pool)
         .await?;
+        metrics::counter!("moa_authz_outbox_retries_total").increment(1);
         Ok(())
+    }
+
+    /// Samples the drain-backlog age gauge: how long the oldest ready-to-apply
+    /// pending row has waited. Best-effort; a sampling error never fails the tick.
+    async fn record_backlog_gauge(&self) {
+        match self.oldest_ready_pending_age_seconds().await {
+            Ok(age) => {
+                metrics::gauge!("moa_authz_outbox_oldest_pending_age_seconds").set(age);
+            }
+            Err(error) => {
+                tracing::debug!(error = %error, "failed to sample authz outbox backlog age");
+            }
+        }
+    }
+
+    /// Returns the age in seconds of the oldest pending row whose next attempt is
+    /// due, or `0.0` when nothing is waiting to be applied.
+    async fn oldest_ready_pending_age_seconds(&self) -> Result<f64, AuthzError> {
+        let age: Option<f64> = sqlx::query_scalar(
+            r#"
+            SELECT EXTRACT(EPOCH FROM (NOW() - MIN(next_attempt_at)))
+            FROM authz_outbox
+            WHERE status = 'pending' AND next_attempt_at <= NOW()
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(age.unwrap_or(0.0).max(0.0))
     }
 
     fn backoff_for(&self, attempt: i32) -> Duration {
@@ -288,12 +337,12 @@ impl OutboxPoller {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct ClaimedOutboxRecord {
     id: Uuid,
-    idempotency_key: String,
     op: String,
     tuple_user: String,
     tuple_relation: String,
     tuple_object: String,
     attempts: i32,
+    generation: i64,
     lease_token: Uuid,
 }
 
@@ -301,12 +350,12 @@ impl ClaimedOutboxRecord {
     fn row(&self) -> OutboxRow {
         OutboxRow {
             id: self.id,
-            idempotency_key: self.idempotency_key.clone(),
             op: self.op.clone(),
             tuple_user: self.tuple_user.clone(),
             tuple_relation: self.tuple_relation.clone(),
             tuple_object: self.tuple_object.clone(),
             attempts: self.attempts,
+            generation: self.generation,
         }
     }
 }
@@ -324,6 +373,16 @@ impl From<ClaimedOutboxRecord> for ClaimedOutboxRow {
 struct ClaimedOutboxRow {
     row: OutboxRow,
     lease_token: Uuid,
+}
+
+impl ClaimedOutboxRow {
+    /// Render the tuple identity for structured logs, e.g. `write user rel object`.
+    fn tuple_display(&self) -> String {
+        format!(
+            "{} {} {} {}",
+            self.row.op, self.row.tuple_user, self.row.tuple_relation, self.row.tuple_object
+        )
+    }
 }
 
 /// Handle for cleanly shutting down a spawned outbox poller.

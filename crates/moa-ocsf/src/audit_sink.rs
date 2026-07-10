@@ -46,12 +46,22 @@ impl AuditSink {
     fn enqueue(&self, item: QueuedAudit) {
         if self.tx.try_send(item).is_err() {
             let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+            record_dropped_metric("queue_full", 1);
             tracing::warn!(
                 dropped_total = dropped,
                 "security audit queue full; dropping event"
             );
         }
     }
+}
+
+/// Emits the alertable audit-drop counter alongside the in-process atomic.
+///
+/// The `DROPPED` atomic still backs the synchronous [`dropped_audit_count`]
+/// accessor; this counter makes the same loss visible to metrics/alerting,
+/// labeled by the reason the event was dropped.
+fn record_dropped_metric(reason: &'static str, count: u64) {
+    metrics::counter!("moa_ocsf_audit_events_dropped_total", "reason" => reason).increment(count);
 }
 
 /// Total number of audit events dropped since process start.
@@ -91,6 +101,7 @@ pub(crate) fn enqueue(tenant_id: Uuid, value: Value, target_resource_uid: Option
     let Some(sink) = SINK.get() else {
         // Uninitialized (e.g. no runtime configured): drop rather than fail.
         DROPPED.fetch_add(1, Ordering::Relaxed);
+        record_dropped_metric("uninitialized", 1);
         return;
     };
     sink.enqueue(QueuedAudit {
@@ -158,6 +169,7 @@ async fn flush_batch(pool: &PgPool, batch: &mut Vec<QueuedAudit>) {
             }),
             Err(error) => {
                 let dropped = DROPPED.fetch_add(1, Ordering::Relaxed) + 1;
+                record_dropped_metric("signing_failed", 1);
                 tracing::warn!(error = %error, dropped_total = dropped, "security audit signing failed; dropping event");
             }
         }
@@ -168,6 +180,7 @@ async fn flush_batch(pool: &PgPool, batch: &mut Vec<QueuedAudit>) {
     if let Err(error) = insert_rows(pool, &rows).await {
         let count = rows.len() as u64;
         let dropped = DROPPED.fetch_add(count, Ordering::Relaxed) + count;
+        record_dropped_metric("insert_failed", count);
         tracing::warn!(error = %error, dropped_total = dropped, batch = rows.len(), "security audit batch insert failed; dropping events");
     }
 }

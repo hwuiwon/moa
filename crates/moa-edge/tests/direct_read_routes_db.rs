@@ -695,6 +695,11 @@ async fn analytics_query_uses_requested_tenant_when_authorized_db() {
             "tenant_id": tenant_b,
             "dimensions": [{ "field": "tool_name" }],
             "measures": [{ "aggregation": "count", "alias": "calls" }],
+            "filters": [{
+                "field": "called_at",
+                "operator": "gte",
+                "value": (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339()
+            }],
             "order_by": [{ "field": "calls", "direction": "desc" }],
             "limit": 10
         }))
@@ -867,6 +872,11 @@ async fn analytics_query_uses_configured_schema_db() {
             "dataset": "events",
             "dimensions": [{ "field": "event_type" }, { "field": "session_id" }],
             "measures": [{ "aggregation": "count", "alias": "events" }],
+            "filters": [{
+                "field": "occurred_at",
+                "operator": "gte",
+                "value": (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339()
+            }],
             "limit": 5
         }))
         .send()

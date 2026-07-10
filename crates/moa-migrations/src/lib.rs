@@ -179,6 +179,18 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         name: "V000327__clickhouse_analytics_export_state.sql",
         sql: include_str!("../migrations/postgres/V000327__clickhouse_analytics_export_state.sql"),
     },
+    SchemaMigration {
+        name: "V000328__privacy_erasure_jobs.sql",
+        sql: include_str!("../migrations/postgres/V000328__privacy_erasure_jobs.sql"),
+    },
+    SchemaMigration {
+        name: "V000329__vector_sync_outbox_dead_letter.sql",
+        sql: include_str!("../migrations/postgres/V000329__vector_sync_outbox_dead_letter.sql"),
+    },
+    SchemaMigration {
+        name: "V000330__analytics_mv_refresh_state.sql",
+        sql: include_str!("../migrations/postgres/V000330__analytics_mv_refresh_state.sql"),
+    },
 ];
 
 const AUTH_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[

@@ -120,6 +120,20 @@ pub enum AnalyticsError {
         /// Maximum allowed time window in whole days.
         max_days: i64,
     },
+    /// A time-series dataset was queried without a bounded time window.
+    #[error(
+        "analytics dataset `{dataset}` requires a bounded time filter on `{time_field}` \
+         (a two-sided `between` within {max_days} days, or a lower bound `gte`/`gt`/`eq` \
+         no older than {max_days} days)"
+    )]
+    MissingTimeWindow {
+        /// Dataset that requires a bounded time window.
+        dataset: String,
+        /// Designated time field that must be bounded.
+        time_field: String,
+        /// Maximum allowed time window in whole days.
+        max_days: i64,
+    },
     /// A query tried to order by a field or alias that is not selected.
     #[error("order field `{field}` is not selected by the query")]
     UnknownOrderField {

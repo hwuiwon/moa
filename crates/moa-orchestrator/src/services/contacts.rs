@@ -24,8 +24,8 @@ use moa_core::{
     ContactSessionPromotionResponse, ContactTokenClaims, ContactTokenIssueRequest,
     ContactTokenIssueResponse, ContactVerificationCompleteRequest,
     ContactVerificationCompleteResponse, ContactVerificationStartRequest,
-    ContactVerificationStartResponse, Event, ModelId, SessionActorRef, SessionMeta, SessionStatus,
-    StoragePartitionId, TenantId,
+    ContactVerificationStartResponse, Event, ModelId, SessionActorRef, SessionChannelBindingId,
+    SessionId, SessionMeta, SessionStatus, StoragePartitionId, TenantId,
 };
 use moa_core::{MoaError, SessionStore};
 use moa_observability::restate_observability::annotate_restate_handler_span;
@@ -38,7 +38,8 @@ use crate::handlers::authz_shim::authorize_tenant;
 use crate::objects::session::SessionClient;
 use crate::restate_identity::with_identity_headers;
 use crate::services::session_store::inner::{
-    create_session_for_identity, resolve_agent_context_for_session,
+    change_contact_session_channel_atomic, initialize_contact_session_atomic,
+    resolve_agent_context_for_session,
 };
 
 /// Restate surface for contact identity and contact-scoped sessions.
@@ -377,7 +378,17 @@ impl Contacts for ContactsImpl {
             .name("contacts_prepare_session_channel")
             .await?
             .into_inner();
+        // Journal a replay-stable session id in a side-effect-free step so a
+        // handler replay reuses the same identity instead of minting a second
+        // complete session. The idempotent creation transaction below keys all
+        // product writes on this id.
+        let session_id: SessionId = ctx
+            .run(|| async move { Ok::<_, HandlerError>(Json::from(SessionId::new())) })
+            .name("contacts_allocate_session_id")
+            .await?
+            .into_inner();
         let meta = SessionMeta {
+            id: session_id,
             tenant_id,
             title: request.title,
             status: SessionStatus::Created,
@@ -395,7 +406,7 @@ impl Contacts for ContactsImpl {
         let storage_partition_id_for_create = storage_partition_id.clone();
         let resolver_pool = pool.clone();
         let create_pool = pool.clone();
-        let (session_id, meta_for_vo) = ctx
+        let meta_for_vo = ctx
             .run(|| async move {
                 let agent_context =
                     resolve_agent_context_for_session(resolver_pool, &meta, &agent_selection)
@@ -403,48 +414,47 @@ impl Contacts for ContactsImpl {
                 let mut meta = meta;
                 meta.agent_context = Some(agent_context);
                 let identity = contact_identity(contact.contact_id, tenant_id);
-                let session_id = create_session_for_identity(
+                let binding = SessionChannelBindingUpdate {
+                    tenant_id,
+                    storage_partition_id: storage_partition_id_for_create,
+                    session_id,
+                    contact_id: contact.contact_id,
+                    channel_account_id: channel_account
+                        .as_ref()
+                        .map(|account| account.channel_account_id),
+                    contact_point_id,
+                    channel_ref,
+                    reason: channel_reason,
+                };
+                let created_event = Event::SessionCreated {
+                    tenant_id,
+                    contact_id: Some(contact.contact_id),
+                    created_by: Some(SessionActorRef::Contact {
+                        id: contact.contact_id,
+                    }),
+                    model,
+                    channel: event_channel,
+                };
+                // Session row, agent sidecar, authz tuples, initial binding, and
+                // the SessionCreated event commit atomically here. The binding id
+                // is fresh but only consumed when the session is freshly
+                // inserted, so a replay (session already present) never creates a
+                // second binding or event.
+                initialize_contact_session_atomic(
                     store_backend.as_ref(),
                     &create_pool,
                     meta,
                     identity,
+                    SessionChannelBindingId::new(),
+                    binding,
+                    created_event,
                 )
                 .await?;
-                store
-                    .replace_session_channel_binding(SessionChannelBindingUpdate {
-                        tenant_id,
-                        storage_partition_id: storage_partition_id_for_create,
-                        session_id,
-                        contact_id: contact.contact_id,
-                        channel_account_id: channel_account
-                            .as_ref()
-                            .map(|account| account.channel_account_id),
-                        contact_point_id,
-                        channel_ref,
-                        reason: channel_reason,
-                    })
-                    .await
-                    .map_err(session_store_handler_error)?;
-                store
-                    .emit_event(
-                        session_id,
-                        Event::SessionCreated {
-                            tenant_id,
-                            contact_id: Some(contact.contact_id),
-                            created_by: Some(SessionActorRef::Contact {
-                                id: contact.contact_id,
-                            }),
-                            model,
-                            channel: event_channel,
-                        },
-                    )
-                    .await
-                    .map_err(session_store_handler_error)?;
                 let meta_for_vo = store
                     .get_session(session_id)
                     .await
                     .map_err(session_store_handler_error)?;
-                Ok::<_, HandlerError>(Json::from((session_id, meta_for_vo)))
+                Ok::<_, HandlerError>(Json::from(meta_for_vo))
             })
             .name("contacts_create_session")
             .await?
@@ -482,6 +492,18 @@ impl Contacts for ContactsImpl {
         let pool = OrchestratorCtx::current_graph_pool();
         let store = OrchestratorCtx::current_session_store();
         let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
+        let store_backend = OrchestratorCtx::current().session_store_backend();
+        let change_pool = pool.clone();
+        // Journal a replay-stable binding id so the channel-change transaction is
+        // idempotent: a replay reuses this id, the binding insert conflicts, and
+        // no duplicate binding or SessionChannelChanged event is written.
+        let binding_id: SessionChannelBindingId = ctx
+            .run(
+                || async move { Ok::<_, HandlerError>(Json::from(SessionChannelBindingId::new())) },
+            )
+            .name("contacts_allocate_channel_binding_id")
+            .await?
+            .into_inner();
 
         let ChannelChangeResult {
             contact,
@@ -507,39 +529,38 @@ impl Contacts for ContactsImpl {
                     resolve_contact_session_channel(&pool, &contact, request.channel_ref)
                         .await
                         .map_err(contact_error_handler_error)?;
-                let binding_id = store
-                    .replace_session_channel_binding(SessionChannelBindingUpdate {
-                        tenant_id,
-                        storage_partition_id,
-                        session_id,
-                        contact_id: contact.contact_id,
-                        channel_account_id: resolved
-                            .channel_account
-                            .as_ref()
-                            .map(|account| account.channel_account_id),
-                        contact_point_id: resolved.contact_point_id,
-                        channel_ref: resolved.channel_ref.clone(),
-                        reason: request.reason.clone(),
-                    })
-                    .await
-                    .map_err(session_store_handler_error)?;
-                store
-                    .emit_event(
-                        session_id,
-                        Event::SessionChannelChanged {
-                            from: existing_meta.channel,
-                            to: resolved.channel_ref.channel(),
-                            contact_id: Some(contact.contact_id),
-                            from_binding_id: existing_meta.active_channel_binding_id,
-                            to_binding_id: Some(binding_id),
-                            changed_by: Some(SessionActorRef::Contact {
-                                id: contact.contact_id,
-                            }),
-                            reason: request.reason,
-                        },
-                    )
-                    .await
-                    .map_err(session_store_handler_error)?;
+                let binding = SessionChannelBindingUpdate {
+                    tenant_id,
+                    storage_partition_id,
+                    session_id,
+                    contact_id: contact.contact_id,
+                    channel_account_id: resolved
+                        .channel_account
+                        .as_ref()
+                        .map(|account| account.channel_account_id),
+                    contact_point_id: resolved.contact_point_id,
+                    channel_ref: resolved.channel_ref.clone(),
+                    reason: request.reason.clone(),
+                };
+                let changed_event = Event::SessionChannelChanged {
+                    from: existing_meta.channel,
+                    to: resolved.channel_ref.channel(),
+                    contact_id: Some(contact.contact_id),
+                    from_binding_id: existing_meta.active_channel_binding_id,
+                    to_binding_id: Some(binding_id),
+                    changed_by: Some(SessionActorRef::Contact {
+                        id: contact.contact_id,
+                    }),
+                    reason: request.reason,
+                };
+                change_contact_session_channel_atomic(
+                    store_backend.as_ref(),
+                    &change_pool,
+                    binding_id,
+                    binding,
+                    changed_event,
+                )
+                .await?;
                 let meta = store
                     .get_session(session_id)
                     .await

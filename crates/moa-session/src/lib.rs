@@ -19,7 +19,9 @@ use moa_core::{MoaConfig, Result};
 
 pub use blob::FileBlobStore;
 pub use neon::NeonBranchManager;
-pub use store::{EventAppend, PostgresSessionStore};
+pub use store::{
+    EventAppend, PostgresSessionStore, SessionChannelBindingReplacement, SessionCreateOutcome,
+};
 
 /// Creates the shared Postgres session store from config and verifies connectivity.
 pub async fn create_session_store(config: &MoaConfig) -> Result<Arc<PostgresSessionStore>> {

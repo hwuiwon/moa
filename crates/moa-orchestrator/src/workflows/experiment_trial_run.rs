@@ -41,6 +41,7 @@ use crate::services::session_store::inner::{
 use crate::workflows::errors::{
     bad_request, handler_error_message, moa_error_to_handler_error, procedure_handler_error,
 };
+use crate::workflows::experiment_cancel::{K_CANCEL_IDENTITY, forward_child_cancellation};
 use crate::workflows::experiment_errors::{
     non_retryable_handler_error, plan_expansion_error_to_handler_error,
 };
@@ -138,6 +139,10 @@ pub trait ExperimentTrialRun {
     async fn status(
         request: Json<ExperimentTrialRunStatusRequest>,
     ) -> Result<Json<ExperimentTrialRunStatusResponse>, HandlerError>;
+
+    /// Forwards cancellation to this trial's live child target work.
+    #[shared]
+    async fn request_cancel(reason: Json<String>) -> Result<(), HandlerError>;
 }
 
 /// Concrete behavior-lab trial workflow implementation.
@@ -160,6 +165,7 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
 
         ctx.set(K_RUN_UID, Json(request.trial.run_uid));
         ctx.set(K_TRIAL_KEY, Json(request.trial.trial_key.clone()));
+        ctx.set(K_CANCEL_IDENTITY, Json(request.identity.clone()));
         annotate_trial_span(&request.trial, None);
 
         match run_trial(&ctx, request.clone()).await {
@@ -208,6 +214,18 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
             .run(|| async move { trial_status_response(pool, request).await.map(Json::from) })
             .name("experiment_trial_status")
             .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, reason))]
+    // SAFETY: control-only cancellation forward; the child Session and
+    // ProcedureExecution request_cancel handlers enforce their own authorization.
+    async fn request_cancel(
+        &self,
+        ctx: SharedWorkflowContext<'_>,
+        reason: Json<String>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("ExperimentTrialRun", "request_cancel");
+        forward_child_cancellation(&ctx, reason.into_inner()).await
     }
 }
 

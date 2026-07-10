@@ -182,6 +182,78 @@ async fn digest_row_schema_pinned_across_writer_and_reader() {
     cleanup_workspaces(test_db.store().pool(), &[&storage_partition_id]).await;
 }
 
+#[tokio::test]
+#[ignore = "requires MOA_DATABASE_URL and a reachable Postgres instance"]
+async fn digest_rebuild_deletes_identity_with_no_active_facts() {
+    // Pins: a persisted digest whose facts are all inactive is deleted by rebuild
+    // reconciliation, closing the erased-memory-in-prompt gap. Iterating only the
+    // formed active-fact groups can never reach a zero-fact identity.
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let tenant_id = TenantId::new();
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
+    let user_id = "forgotten-contact";
+    let now = Utc
+        .with_ymd_and_hms(2026, 6, 11, 0, 0, 0)
+        .single()
+        .expect("fixed timestamp");
+
+    seed_fact(
+        test_db.store().pool(),
+        &storage_partition_id,
+        Some(user_id),
+        "editor theme",
+        "prefers",
+        "dark mode",
+    )
+    .await;
+
+    let config = MemoryDigestConfig {
+        enabled: true,
+        max_tokens: 600,
+        rebuild_min_interval_hours: 6,
+    };
+    let stats = rebuild_digests(test_db.store().pool(), &tenant_id, now, &config)
+        .await
+        .expect("initial rebuild");
+    assert_eq!(stats.digests_rebuilt, 1);
+    assert_eq!(
+        digest_row_count(test_db.store().pool(), &storage_partition_id).await,
+        1
+    );
+
+    // Every active fact for the contact vanishes (erased or forgotten).
+    sqlx::query("DELETE FROM moa.node_index WHERE storage_partition_id = $1")
+        .bind(&storage_partition_id)
+        .execute(test_db.store().pool())
+        .await
+        .expect("remove active facts");
+
+    let later = now + chrono::Duration::hours(24);
+    let stats = rebuild_digests(test_db.store().pool(), &tenant_id, later, &config)
+        .await
+        .expect("reconciling rebuild");
+    assert_eq!(stats.digests_deleted, 1);
+    assert_eq!(stats.digests_rebuilt, 0);
+    assert_eq!(
+        digest_row_count(test_db.store().pool(), &storage_partition_id).await,
+        0
+    );
+
+    cleanup_workspaces(test_db.store().pool(), &[&storage_partition_id]).await;
+}
+
+async fn digest_row_count(pool: &PgPool, storage_partition_id: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM moa.memory_digests WHERE storage_partition_id = $1",
+    )
+    .bind(storage_partition_id)
+    .fetch_one(pool)
+    .await
+    .expect("count digest rows")
+}
+
 async fn seed_fact(
     pool: &PgPool,
     storage_partition_id: &str,

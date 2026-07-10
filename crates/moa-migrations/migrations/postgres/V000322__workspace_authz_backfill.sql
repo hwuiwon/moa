@@ -55,20 +55,32 @@ BEGIN
       AND tuple_object LIKE 'tenant:%'
       AND tuple_relation IN ('member', 'scim_admin');
 
+    -- Desired state = write the workspace->tenant edge. Mirror the outbox
+    -- upsert semantics: reactivate the identity only if it currently carries a
+    -- different op or was dead-lettered, so an already-pending/succeeded write
+    -- is left untouched.
     INSERT INTO authz_outbox
-        (idempotency_key, op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id)
+        (op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id,
+         generation, status, attempts, next_attempt_at)
     SELECT
-        format(
-            'write-tenant:%s-workspace-workspace:%s-v4',
-            tenant_id,
-            default_workspace_id
-        ),
         'write',
         'workspace:' || default_workspace_id,
         'workspace',
         'tenant:' || tenant_id,
         4,
-        tenant_id
+        tenant_id,
+        1, 'pending', 0, NOW()
     FROM workspace_authz_backfill_tenants
-    ON CONFLICT (idempotency_key) DO NOTHING;
+    ON CONFLICT (tuple_user, tuple_relation, tuple_object, model_version) DO UPDATE
+    SET op = EXCLUDED.op,
+        generation = authz_outbox.generation + 1,
+        status = 'pending',
+        attempts = 0,
+        last_error = NULL,
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        next_attempt_at = NOW(),
+        updated_at = NOW()
+    WHERE authz_outbox.op IS DISTINCT FROM EXCLUDED.op
+       OR authz_outbox.status = 'dead_letter';
 END $$;

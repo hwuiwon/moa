@@ -75,7 +75,7 @@ impl Budgets {
             score.functional.task_completed,
         );
         if let Some(max) = self.latency_p95_ms_max {
-            check_max(
+            check_max_measured(
                 &mut violations,
                 "latency_ms.completion_p95_ms",
                 max,
@@ -272,6 +272,28 @@ where
             expected: format!(">= {expected_min}"),
             actual: actual.to_string(),
         });
+    }
+}
+
+/// Upper-bound gate that fails closed when the gated metric was not measured.
+///
+/// An absent (`None`) latency can no longer default to zero and slip under an
+/// upper-bound budget: it records a "metric not measured" violation.
+fn check_max_measured<T>(
+    violations: &mut Vec<BudgetViolation>,
+    metric: &str,
+    expected_max: T,
+    actual: Option<T>,
+) where
+    T: std::fmt::Display + PartialOrd,
+{
+    match actual {
+        Some(actual) => check_max(violations, metric, expected_max, actual),
+        None => violations.push(BudgetViolation {
+            metric: metric.to_string(),
+            expected: format!("<= {expected_max} (measured)"),
+            actual: "metric not measured".to_string(),
+        }),
     }
 }
 

@@ -887,8 +887,7 @@ async fn fast_forget_does_not_select_read_vector_backend_db_memory() {
     );
     let graph = Arc::new(
         PostgresGraphStore::scoped_for_app_role(session_store.pool().clone(), scope.clone())
-            .with_vector_store(graph_vector.vector_store())
-            .with_vector_post_commit_sync(graph_vector.post_commit_sync()),
+            .with_vector_store(graph_vector.vector_store()),
     );
     let ctx = FastPathCtx::new_with_vector_factory(
         session_store.pool().clone(),

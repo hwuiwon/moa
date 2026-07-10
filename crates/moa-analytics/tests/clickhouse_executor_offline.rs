@@ -12,7 +12,8 @@ use clickhouse::test::{Mock, handlers};
 use moa_analytics::{AnalyticsClickHouseClient, AnalyticsService};
 use moa_core::TenantId;
 use moa_core::wire::analytics::{
-    AnalyticsAggregation, AnalyticsDimension, AnalyticsMeasure, AnalyticsQueryRequest,
+    AnalyticsAggregation, AnalyticsCell, AnalyticsDimension, AnalyticsFilter,
+    AnalyticsFilterOperator, AnalyticsMeasure, AnalyticsQueryRequest,
 };
 
 #[tokio::test]
@@ -38,7 +39,15 @@ async fn clickhouse_executor_returns_empty_result_and_metadata_offline() {
             aggregation: AnalyticsAggregation::P95,
             alias: None,
         }],
-        filters: Vec::new(),
+        // Time-series datasets require a bounded window; a recent lower bound
+        // satisfies the validator against the wall clock.
+        filters: vec![AnalyticsFilter {
+            field: "created_at".to_string(),
+            operator: AnalyticsFilterOperator::Gte,
+            value: Some(AnalyticsCell::String(
+                (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339(),
+            )),
+        }],
         order_by: Vec::new(),
         limit: Some(10),
     };

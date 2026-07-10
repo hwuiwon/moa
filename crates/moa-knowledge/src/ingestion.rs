@@ -628,16 +628,19 @@ where
             });
         }
 
-        let previous_chunks = if latest_version_completed {
-            latest_chunks
-        } else if latest_version
-            .as_ref()
-            .is_some_and(|latest| latest.content_hash == content_hash)
-        {
-            Vec::new()
-        } else {
-            latest_chunks
-        };
+        // F07: reconcile against every currently active chunk for the object, not
+        // just the latest version's chunks. A failed or retried same-hash version
+        // transition leaves the newest version incomplete; keying `previous_chunks`
+        // off that version (previously an empty list) forgot the real predecessor
+        // and left both versions' chunks active. The new version's chunk hashes are
+        // the desired state, and any active prior chunk whose hash is absent is
+        // invalidated in `persist_claimed_version` — so a same-hash chunk (including
+        // the current version's own chunks re-persisted on retry) is preserved while
+        // a stale predecessor is reliably orphaned.
+        let previous_chunks = self
+            .repository
+            .active_chunks_for_object(object.object_uid)
+            .await?;
         let version = if let Some(latest) = latest_version
             && latest.content_hash == content_hash
         {
@@ -1032,7 +1035,19 @@ where
         object: KnowledgeObject,
         _record: ProviderRecord,
     ) -> Result<u64> {
-        self.repository.upsert_object(object.clone()).await?;
+        // F06: persist the provider-deleted object's latest metadata in a
+        // non-terminal status before cleanup. `materialize_object` stamps
+        // provider-deleted records with terminal `deleted`; upserting that directly
+        // would strand active chunks the same way the old in-`delete_object`
+        // ordering did (a failed invalidation would leave a `deleted` row no prune
+        // pass revisits). `delete_object` writes the terminal status last, only
+        // after invalidation and tombstoning succeed.
+        let pre_cleanup_object = KnowledgeObject {
+            status: crate::domain::ObjectStatus::Active,
+            deleted_at: None,
+            ..object.clone()
+        };
+        self.repository.upsert_object(pre_cleanup_object).await?;
         self.delete_object(
             sync_run_uid,
             object,
@@ -1086,9 +1101,11 @@ where
             counter_delta,
         )
         .await?;
-        self.repository
-            .mark_object_deleted(object.object_uid, Utc::now())
-            .await?;
+        // F06: invalidate the graph and tombstone chunks FIRST (both idempotent),
+        // then write the terminal `deleted` status LAST. If invalidation fails the
+        // object stays non-terminal, so the next prune pass or deletion retry still
+        // selects it and finishes the cleanup — instead of a `deleted` row stranding
+        // active graph chunks that no later pass revisits.
         let latest = self
             .repository
             .latest_document_version(object.object_uid)
@@ -1166,6 +1183,12 @@ where
             })),
         )
         .await?;
+        // Terminal state written last: only now that invalidation and tombstoning
+        // have both succeeded is it safe to mark the object `deleted` and remove it
+        // from the prune/retry-eligible set.
+        self.repository
+            .mark_object_deleted(object.object_uid, Utc::now())
+            .await?;
         Ok(1)
     }
 

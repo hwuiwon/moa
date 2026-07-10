@@ -38,7 +38,7 @@ pub use coordination_counters::{
 };
 pub use diff::compute_unified_diff;
 pub use error::{MoaError, Result, ToolFailureClass, classify_tool_error};
-pub use events::Event;
+pub use events::{Event, ProcessingEffect};
 pub use session_replay::{
     TurnReplayCounters, TurnReplaySnapshot, record_pipeline_compile_duration,
     record_session_event_replay, scope_turn_replay_counters,

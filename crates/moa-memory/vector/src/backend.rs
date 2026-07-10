@@ -11,12 +11,12 @@ use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::{
-    Error, PgvectorStore, Result, TurbopufferStore, VectorItem, VectorPostCommitSync, VectorQuery,
-    VectorStore, VectorSyncOperation, VectorSyncReport,
+    Error, PgvectorStore, Result, TurbopufferStore, VectorItem, VectorQuery, VectorStore,
+    VectorSyncOperation, VectorSyncReport,
     sync::{
         VECTOR_SYNC_POST_COMMIT_LIMIT, VectorSyncJob, claim_pending_vector_sync,
         enqueue_external_vector_sync, fetch_current_vector_items, mark_vector_sync_failed_batch,
-        mark_vector_sync_processed_batch,
+        mark_vector_sync_processed_batch, redrive_dead_lettered_vector_sync,
     },
 };
 
@@ -157,6 +157,20 @@ impl VectorStoreFactory {
             .await
     }
 
+    /// Re-queues quarantined (dead-lettered) vector-sync rows after remediation.
+    ///
+    /// Intended for an operator/maintenance action once the permanent fault
+    /// (embedder mismatch, backend auth/config) has been fixed. Passing `None`
+    /// redrives every partition; a storage-partition id scopes the reset. Returns
+    /// the number of rows re-queued.
+    pub async fn redrive_dead_lettered_external_sync(
+        &self,
+        pool: &PgPool,
+        storage_partition_id: Option<&str>,
+    ) -> Result<u64> {
+        redrive_dead_lettered_vector_sync(pool, storage_partition_id).await
+    }
+
     async fn drain_external_sync_for_storage_partition(
         &self,
         pool: &PgPool,
@@ -183,8 +197,7 @@ impl VectorStoreFactory {
                 }
                 Err(error) => {
                     let job_refs = jobs.iter().collect::<Vec<_>>();
-                    mark_vector_sync_failed_batch(pool, &job_refs, &error).await?;
-                    report.failed += jobs.len() as u64;
+                    fail_vector_sync_jobs(pool, &job_refs, &error, &mut report).await?;
                     continue;
                 }
             };
@@ -241,15 +254,13 @@ impl VectorStoreFactory {
                             report.succeeded += found_upsert_jobs.len() as u64;
                         }
                         Err(error) => {
-                            mark_vector_sync_failed_batch(pool, &found_upsert_jobs, &error).await?;
-                            report.failed += found_upsert_jobs.len() as u64;
+                            fail_vector_sync_jobs(pool, &found_upsert_jobs, &error, report).await?;
                         }
                     }
                 }
             }
             Err(error) => {
-                mark_vector_sync_failed_batch(pool, &upsert_jobs, &error).await?;
-                report.failed += upsert_jobs.len() as u64;
+                fail_vector_sync_jobs(pool, &upsert_jobs, &error, report).await?;
             }
         }
 
@@ -272,8 +283,7 @@ impl VectorStoreFactory {
                 report.succeeded += delete_mark_jobs.len() as u64;
             }
             Err(error) => {
-                mark_vector_sync_failed_batch(pool, &delete_mark_jobs, &error).await?;
-                report.failed += delete_mark_jobs.len() as u64;
+                fail_vector_sync_jobs(pool, &delete_mark_jobs, &error, report).await?;
             }
         }
         Ok(())
@@ -316,6 +326,32 @@ impl VectorStoreFactory {
     }
 }
 
+/// Fails a batch of claimed vector-sync jobs, classifying transient vs permanent
+/// errors and folding the outcome into the drain report.
+///
+/// Permanent failures (and transient ones that exhaust the attempt budget) are
+/// quarantined and logged; recoverable failures back off for a later retry.
+async fn fail_vector_sync_jobs(
+    pool: &PgPool,
+    jobs: &[&VectorSyncJob],
+    error: &Error,
+    report: &mut VectorSyncReport,
+) -> Result<()> {
+    let permanent = error.is_permanent();
+    let dead_lettered = mark_vector_sync_failed_batch(pool, jobs, error, permanent).await?;
+    report.failed += jobs.len() as u64;
+    report.dead_lettered += dead_lettered;
+    if dead_lettered > 0 {
+        tracing::warn!(
+            dead_lettered,
+            permanent,
+            error = %error,
+            "quarantined vector-sync jobs after a permanent or exhausted failure"
+        );
+    }
+    Ok(())
+}
+
 fn group_jobs_by_partition(jobs: Vec<VectorSyncJob>) -> BTreeMap<String, Vec<VectorSyncJob>> {
     let mut grouped = BTreeMap::new();
     for job in jobs {
@@ -340,15 +376,13 @@ impl TransactionalGraphVectorBackend {
         self.store.clone()
     }
 
-    /// Returns the post-commit sync hook for external vector projections.
-    #[must_use]
-    pub fn post_commit_sync(&self) -> Arc<dyn VectorPostCommitSync> {
-        self.store.clone()
-    }
-
-    /// Runs the post-commit sync hook.
+    /// Drains this graph-vector attachment's committed outbox rows to its backend.
+    ///
+    /// Used by batch ingestion paths (e.g. slow-path memory ingest) that want an
+    /// explicit post-batch flush; ordinary graph writes are queue-only and rely
+    /// on the background cron drainer instead.
     pub async fn sync_post_commit(&self) -> Result<()> {
-        VectorPostCommitSync::sync_post_commit(self.store.as_ref()).await
+        self.store.sync_post_commit().await
     }
 }
 
@@ -406,8 +440,8 @@ impl VectorStore for TransactionalGraphVectorStore {
     }
 }
 
-#[async_trait]
-impl VectorPostCommitSync for TransactionalGraphVectorStore {
+impl TransactionalGraphVectorStore {
+    /// Drains this attachment's committed vector-sync outbox rows to its backend.
     async fn sync_post_commit(&self) -> Result<()> {
         self.factory
             .drain_external_sync_for_storage_partition(

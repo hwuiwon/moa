@@ -1349,9 +1349,7 @@ fn scoped_graph_for(pool: &PgPool, scope: RlsContext) -> PostgresGraphStore {
         scope.clone(),
         false,
     );
-    PostgresGraphStore::scoped(pool.clone(), scope)
-        .with_vector_store(vector_backend.vector_store())
-        .with_vector_post_commit_sync(vector_backend.post_commit_sync())
+    PostgresGraphStore::scoped(pool.clone(), scope).with_vector_store(vector_backend.vector_store())
 }
 
 /// Returns a scoped graph store for `row`, building and caching one store per

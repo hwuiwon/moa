@@ -3320,6 +3320,7 @@ dependencies = [
  "insta",
  "moa-core",
  "moa-db",
+ "moa-test-support",
  "serde_json",
  "sqlx",
  "thiserror 2.0.18",
@@ -3414,6 +3415,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "httpmock",
+ "metrics",
  "moa-authz-schema",
  "moa-core",
  "moa-migrations",
@@ -4117,6 +4119,7 @@ dependencies = [
  "constant_time_eq 0.3.1",
  "hex",
  "hmac",
+ "metrics",
  "moa-core",
  "moa-migrations",
  "moka",

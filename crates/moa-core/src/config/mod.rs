@@ -1,5 +1,6 @@
 //! Configuration for MOA, organized by sub-domain.
 
+mod analytics;
 mod async_authz;
 mod audit_security;
 mod auth;
@@ -24,6 +25,7 @@ mod session;
 mod telemetry;
 mod token_vault;
 
+pub use analytics::AnalyticsConfig;
 pub use async_authz::{AsyncAuthzConfig, AsyncAuthzKind};
 pub use audit_security::AuditSecurityConfig;
 pub use auth::{
@@ -122,6 +124,8 @@ pub struct MoaConfig {
     /// Optional ClickHouse analytics store; when present, high-volume
     /// append-only analytics rows are stored in ClickHouse instead of Postgres.
     pub clickhouse: Option<ClickHouseConfig>,
+    /// Per-query analytics budgets (Postgres statement timeout, ClickHouse limits).
+    pub analytics: AnalyticsConfig,
     /// Prometheus metrics export settings.
     pub metrics: MetricsConfig,
     /// Tenant budget enforcement settings.
@@ -199,6 +203,7 @@ impl MoaConfig {
         if let Some(clickhouse) = &self.clickhouse {
             clickhouse.validate()?;
         }
+        self.analytics.validate()?;
 
         Ok(())
     }

@@ -51,37 +51,76 @@ async fn api_key_tenant_role_grant_enqueues_typed_tuple_db() -> Result<()> {
 }
 
 #[tokio::test]
-async fn api_key_tenant_role_rejects_cross_tenant_key_db() -> Result<()> {
-    // Pins: the target API key must belong to the tenant object receiving the role.
+async fn api_key_tenant_role_uniform_not_found_across_key_states_db() -> Result<()> {
+    // Pins (F18): foreign-tenant, nonexistent, and revoked keys all fail with the
+    // same not-found result and enqueue nothing, so a caller cannot distinguish
+    // key existence or cross-tenant ownership from the tuple-write outcome.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let pool = test_db.store().pool().clone();
-    let key_tenant_id = Uuid::new_v4();
     let requested_tenant_id = Uuid::new_v4();
-    let api_key_id = Uuid::new_v4();
-    insert_api_key(&pool, api_key_id, key_tenant_id).await?;
 
+    // Foreign-tenant: the key exists but belongs to a different tenant.
+    let foreign_key_id = Uuid::new_v4();
+    insert_api_key(&pool, foreign_key_id, Uuid::new_v4()).await?;
+
+    // Nonexistent: no row for this id at all.
+    let missing_key_id = Uuid::new_v4();
+
+    // Revoked: the key belongs to the requested tenant but is revoked.
+    let revoked_key_id = Uuid::new_v4();
+    insert_api_key(&pool, revoked_key_id, requested_tenant_id).await?;
+    revoke_api_key(&pool, revoked_key_id).await?;
+
+    let foreign_error = tuple_write_error(&pool, foreign_key_id, requested_tenant_id).await?;
+    let missing_error = tuple_write_error(&pool, missing_key_id, requested_tenant_id).await?;
+    let revoked_error = tuple_write_error(&pool, revoked_key_id, requested_tenant_id).await?;
+
+    assert!(
+        foreign_error.contains("API key not found"),
+        "F18 leak: expected uniform not-found, got {foreign_error}"
+    );
+    assert!(
+        !foreign_error.contains("mismatch"),
+        "F18 leak: distinguishable tenant-mismatch error, got {foreign_error}"
+    );
+    assert_eq!(
+        foreign_error, missing_error,
+        "foreign-tenant and nonexistent keys must be indistinguishable"
+    );
+    assert_eq!(
+        foreign_error, revoked_error,
+        "foreign-tenant and revoked keys must be indistinguishable"
+    );
+
+    assert_eq!(
+        authz_rows(&pool, foreign_key_id).await?,
+        Vec::<AuthzTupleRow>::new(),
+        "foreign-tenant failure must not enqueue an outbox tuple"
+    );
+    assert_eq!(
+        authz_rows(&pool, revoked_key_id).await?,
+        Vec::<AuthzTupleRow>::new(),
+        "revoked-key failure must not enqueue an outbox tuple"
+    );
+    Ok(())
+}
+
+async fn tuple_write_error(
+    pool: &sqlx::PgPool,
+    api_key_id: Uuid,
+    tenant_id: Uuid,
+) -> Result<String> {
     let error = enqueue_typed_tuple_write(
         pool.clone(),
         WriteTupleRequest::GrantApiKeyTenantRole {
             api_key_id,
-            tenant_id: requested_tenant_id,
+            tenant_id,
             relation: ApiKeyTenantRole::Admin,
         },
     )
     .await
-    .expect_err("cross-tenant API-key grants must fail");
-
-    let error_text = format!("{error:?}");
-    assert!(
-        error_text.contains("API key tenant mismatch"),
-        "cross-tenant grant should fail on key ownership, got {error_text}"
-    );
-    assert_eq!(
-        authz_rows(&pool, api_key_id).await?,
-        Vec::<AuthzTupleRow>::new(),
-        "ownership failure must not enqueue an outbox tuple"
-    );
-    Ok(())
+    .expect_err("non-owned API-key grants must fail");
+    Ok(format!("{error:?}"))
 }
 
 async fn insert_api_key(pool: &sqlx::PgPool, api_key_id: Uuid, tenant_id: Uuid) -> Result<()> {
@@ -98,6 +137,14 @@ async fn insert_api_key(pool: &sqlx::PgPool, api_key_id: Uuid, tenant_id: Uuid) 
     .bind(tenant_id)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+async fn revoke_api_key(pool: &sqlx::PgPool, api_key_id: Uuid) -> Result<()> {
+    sqlx::query("UPDATE api_keys SET revoked_at = now() WHERE id = $1")
+        .bind(api_key_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

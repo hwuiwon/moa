@@ -81,6 +81,8 @@ pub struct DigestStats {
     pub digests_rebuilt: u64,
     /// Digest rows skipped because they are fresher than the configured interval.
     pub digests_skipped_fresh: u64,
+    /// Persisted digest rows deleted because their identity has no active facts.
+    pub digests_deleted: u64,
 }
 
 /// Renders one deterministic digest from active Fact rows.
@@ -158,6 +160,23 @@ pub(crate) async fn rebuild_storage_digests(
     }
 
     let mut stats = DigestStats::default();
+
+    // Reconcile persisted identities against the desired active-fact set. An
+    // identity whose facts were all erased, forgotten, or decayed forms zero
+    // groups above, so iterating only the formed groups can never reach it —
+    // its rendered digest text would otherwise survive and be re-injected into
+    // prompts. Enumerate persisted identities and delete the orphans.
+    let desired = groups
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    for identity in persisted_digest_identities(pool, storage_partition_id).await? {
+        if !desired.contains(&identity) {
+            delete_digest_identity(pool, storage_partition_id, identity.user_id.as_deref()).await?;
+            stats.digests_deleted += 1;
+        }
+    }
+
     for (identity, facts) in groups {
         if digest_is_fresh(
             pool,
@@ -279,6 +298,61 @@ async fn upsert_digest(
     .bind(source_fact_uids)
     .bind(DIGEST_RENDER_VERSION as i32)
     .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn persisted_digest_identities(
+    pool: &PgPool,
+    storage_partition_id: &StoragePartitionId,
+) -> Result<Vec<DigestIdentity>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT scope, user_id
+        FROM moa.memory_digests
+        WHERE storage_partition_id = $1
+        "#,
+    )
+    .bind(storage_partition_id.to_string())
+    .fetch_all(pool)
+    .await?;
+
+    let mut identities = Vec::with_capacity(rows.len());
+    for row in rows {
+        let scope = row.try_get::<String, _>("scope")?;
+        let user_id = row.try_get::<Option<String>, _>("user_id")?;
+        let scope_kind = match scope.as_str() {
+            "tenant" => DigestScopeKind::Tenant,
+            "contact" => DigestScopeKind::User,
+            other => {
+                return Err(Error::InvalidRow(format!(
+                    "memory_digests row has unexpected scope `{other}`"
+                )));
+            }
+        };
+        identities.push(DigestIdentity {
+            scope_kind,
+            user_id,
+        });
+    }
+    Ok(identities)
+}
+
+async fn delete_digest_identity(
+    pool: &PgPool,
+    storage_partition_id: &StoragePartitionId,
+    user_id: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM moa.memory_digests
+        WHERE storage_partition_id = $1
+          AND (($2::text IS NULL AND user_id IS NULL) OR user_id = $2)
+        "#,
+    )
+    .bind(storage_partition_id.to_string())
+    .bind(user_id)
     .execute(pool)
     .await?;
     Ok(())

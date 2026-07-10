@@ -45,14 +45,15 @@ pub(super) struct ResolvedPrivacySubjects {
 }
 
 /// Records an approval-token JTI and rejects token replay.
+///
+/// Used by the single-shot export path. Erasure uses [`claim_erasure_job`],
+/// which owns the JTI through a durable, resumable job instead of a single-use
+/// ledger insert.
 pub(super) async fn consume_approval_jti(
     pool: &PgPool,
     claims: &ApprovalClaims,
 ) -> Result<(), HandlerError> {
-    let expires_at = Utc
-        .timestamp_opt(claims.exp, 0)
-        .single()
-        .ok_or_else(|| TerminalError::new_with_code(400, "approval token exp is out of range"))?;
+    let expires_at = jti_expires_at(claims)?;
     let inserted = sqlx::query_scalar::<_, String>(
         r#"
         INSERT INTO moa.audit_jti_used
@@ -72,6 +73,264 @@ pub(super) async fn consume_approval_jti(
     .await
     .map_err(handler_error)?;
     ensure_jti_inserted(inserted.as_deref())
+}
+
+fn jti_expires_at(claims: &ApprovalClaims) -> Result<chrono::DateTime<Utc>, HandlerError> {
+    Utc.timestamp_opt(claims.exp, 0).single().ok_or_else(|| {
+        TerminalError::new_with_code(400, "approval token exp is out of range").into()
+    })
+}
+
+/// Ordered stages of a durable, resumable erasure job.
+///
+/// A resumed job jumps straight to the persisted stage and runs the remaining
+/// stages in order, so each stage runs at most once per completed job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ErasureJobStage {
+    /// PII vault subject keys not yet erased.
+    Vault,
+    /// Graph-memory candidates not yet purged.
+    Graph,
+    /// Standing memory-digest rows not yet deleted.
+    Digest,
+    /// Retrieval-lineage rows not yet deleted.
+    Lineage,
+    /// All stages complete.
+    Done,
+}
+
+impl ErasureJobStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Vault => "vault",
+            Self::Graph => "graph",
+            Self::Digest => "digest",
+            Self::Lineage => "lineage",
+            Self::Done => "done",
+        }
+    }
+
+    fn parse(raw: &str) -> Result<Self, HandlerError> {
+        match raw {
+            "vault" => Ok(Self::Vault),
+            "graph" => Ok(Self::Graph),
+            "digest" => Ok(Self::Digest),
+            "lineage" => Ok(Self::Lineage),
+            "done" => Ok(Self::Done),
+            other => Err(TerminalError::new(format!("unknown erasure job stage: {other}")).into()),
+        }
+    }
+}
+
+/// Accumulated per-store progress persisted on a durable erasure job.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ErasureJobProgress {
+    /// Stage the job should run next.
+    pub(super) stage: ErasureJobStage,
+    /// PII vault rows erased so far.
+    pub(super) pii_vault_erased: u64,
+    /// Graph-memory nodes purged so far.
+    pub(super) graph_erased: u64,
+    /// Standing memory-digest rows deleted so far.
+    pub(super) digest_deleted: u64,
+    /// Retrieval-lineage rows deleted so far.
+    pub(super) lineage_deleted: u64,
+}
+
+/// A durable erasure job after claiming or resuming ownership of its JTI.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ClaimedErasureJob {
+    /// True when this call inserted the job (rather than resuming an existing one).
+    pub(super) fresh: bool,
+    /// Whether the job already reached the completed terminal state.
+    pub(super) completed: bool,
+    /// Original candidate count enumerated when the job was first claimed.
+    pub(super) candidate_count: u64,
+    /// Resumable progress, seeded from the persisted counters.
+    pub(super) progress: ErasureJobProgress,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ErasureJobRow {
+    request_fingerprint: String,
+    status: String,
+    stage: String,
+    candidate_count: i64,
+    pii_vault_erased: i64,
+    graph_erased: i64,
+    digest_deleted: i64,
+    lineage_deleted: i64,
+}
+
+impl ErasureJobRow {
+    fn into_claimed(self, fresh: bool) -> Result<ClaimedErasureJob, HandlerError> {
+        Ok(ClaimedErasureJob {
+            fresh,
+            completed: self.status == "completed",
+            candidate_count: nonneg_u64(self.candidate_count),
+            progress: ErasureJobProgress {
+                stage: ErasureJobStage::parse(&self.stage)?,
+                pii_vault_erased: nonneg_u64(self.pii_vault_erased),
+                graph_erased: nonneg_u64(self.graph_erased),
+                digest_deleted: nonneg_u64(self.digest_deleted),
+                lineage_deleted: nonneg_u64(self.lineage_deleted),
+            },
+        })
+    }
+}
+
+fn nonneg_u64(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
+}
+
+fn u64_to_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+const ERASURE_JOB_RETURNING: &str = "jti, request_fingerprint, status, stage, candidate_count, \
+     pii_vault_erased, graph_erased, digest_deleted, lineage_deleted";
+
+/// Atomically binds an approval JTI to one idempotent, resumable erasure job.
+///
+/// A fresh request inserts the job and owns the JTI. A replay of the *same*
+/// request (matching `request_fingerprint`) resumes from the persisted stage
+/// instead of failing on the already-consumed token. A reuse of the token for a
+/// *different* request is rejected so approval tokens never become generally
+/// reusable. The audit-JTI ledger is written idempotently in the same
+/// transaction so both export and erase share one consumed-token record.
+pub(super) async fn claim_erasure_job(
+    pool: &PgPool,
+    claims: &ApprovalClaims,
+    request_fingerprint: &str,
+    tenant_id: Uuid,
+    candidate_count: u64,
+) -> Result<ClaimedErasureJob, HandlerError> {
+    let expires_at = jti_expires_at(claims)?;
+    let claims_json = serde_json::to_value(claims).map_err(handler_error)?;
+    let mut tx = pool.begin().await.map_err(handler_error)?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.audit_jti_used
+            (jti, op, subject_user_id, approver_id, approval_claims, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (jti) DO NOTHING
+        "#,
+    )
+    .bind(&claims.jti)
+    .bind(&claims.op)
+    .bind(&claims.subject_user_id)
+    .bind(&claims.sub)
+    .bind(&claims_json)
+    .bind(expires_at)
+    .execute(tx.as_mut())
+    .await
+    .map_err(handler_error)?;
+
+    let inserted = sqlx::query_as::<_, ErasureJobRow>(&format!(
+        r#"
+        INSERT INTO moa.erasure_jobs
+            (jti, tenant_id, subject_user_id, request_fingerprint, approver_id,
+             approval_claims, candidate_count)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (jti) DO NOTHING
+        RETURNING {ERASURE_JOB_RETURNING}
+        "#
+    ))
+    .bind(&claims.jti)
+    .bind(tenant_id)
+    .bind(&claims.subject_user_id)
+    .bind(request_fingerprint)
+    .bind(&claims.sub)
+    .bind(&claims_json)
+    .bind(u64_to_i64(candidate_count))
+    .fetch_optional(tx.as_mut())
+    .await
+    .map_err(handler_error)?;
+
+    let claimed = if let Some(row) = inserted {
+        row.into_claimed(true)?
+    } else {
+        let existing = sqlx::query_as::<_, ErasureJobRow>(&format!(
+            "SELECT {ERASURE_JOB_RETURNING} FROM moa.erasure_jobs WHERE jti = $1"
+        ))
+        .bind(&claims.jti)
+        .fetch_one(tx.as_mut())
+        .await
+        .map_err(handler_error)?;
+        if existing.request_fingerprint != request_fingerprint {
+            return Err(TerminalError::new_with_code(
+                409,
+                "approval token replayed for a different erasure request",
+            )
+            .into());
+        }
+        existing.into_claimed(false)?
+    };
+
+    tx.commit().await.map_err(handler_error)?;
+    Ok(claimed)
+}
+
+/// Persists resumable per-store progress for an in-flight erasure job.
+pub(super) async fn save_erasure_job_progress(
+    pool: &PgPool,
+    jti: &str,
+    progress: &ErasureJobProgress,
+) -> Result<(), HandlerError> {
+    sqlx::query(
+        r#"
+        UPDATE moa.erasure_jobs
+        SET stage = $2,
+            pii_vault_erased = $3,
+            graph_erased = $4,
+            digest_deleted = $5,
+            lineage_deleted = $6,
+            updated_at = now()
+        WHERE jti = $1
+        "#,
+    )
+    .bind(jti)
+    .bind(progress.stage.as_str())
+    .bind(u64_to_i64(progress.pii_vault_erased))
+    .bind(u64_to_i64(progress.graph_erased))
+    .bind(u64_to_i64(progress.digest_deleted))
+    .bind(u64_to_i64(progress.lineage_deleted))
+    .execute(pool)
+    .await
+    .map_err(handler_error)?;
+    Ok(())
+}
+
+/// Marks an erasure job completed after every store reached its erased state.
+pub(super) async fn complete_erasure_job(
+    pool: &PgPool,
+    jti: &str,
+    progress: &ErasureJobProgress,
+) -> Result<(), HandlerError> {
+    sqlx::query(
+        r#"
+        UPDATE moa.erasure_jobs
+        SET status = 'completed',
+            stage = 'done',
+            pii_vault_erased = $2,
+            graph_erased = $3,
+            digest_deleted = $4,
+            lineage_deleted = $5,
+            completed_at = now(),
+            updated_at = now()
+        WHERE jti = $1
+        "#,
+    )
+    .bind(jti)
+    .bind(u64_to_i64(progress.pii_vault_erased))
+    .bind(u64_to_i64(progress.graph_erased))
+    .bind(u64_to_i64(progress.digest_deleted))
+    .bind(u64_to_i64(progress.lineage_deleted))
+    .execute(pool)
+    .await
+    .map_err(handler_error)?;
+    Ok(())
 }
 
 pub(super) async fn resolve_privacy_subjects(
@@ -566,4 +825,28 @@ fn handler_error(error: impl std::fmt::Display) -> HandlerError {
 
 fn db_handler_error(context: &'static str, error: sqlx::Error) -> HandlerError {
     TerminalError::new(format!("{context}: {error}")).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn erasure_job_stage_round_trips_and_orders() {
+        // Pins: stage serialization is stable so a resumed job reads back the exact
+        // stage it persisted, and unknown stages fail closed instead of defaulting.
+        for stage in [
+            ErasureJobStage::Vault,
+            ErasureJobStage::Graph,
+            ErasureJobStage::Digest,
+            ErasureJobStage::Lineage,
+            ErasureJobStage::Done,
+        ] {
+            assert_eq!(
+                ErasureJobStage::parse(stage.as_str()).expect("round-trip"),
+                stage
+            );
+        }
+        assert!(ErasureJobStage::parse("unknown").is_err());
+    }
 }

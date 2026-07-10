@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -215,9 +215,16 @@ struct FakeGraphWriter {
     edges: Mutex<HashMap<Uuid, (String, Value)>>,
     vectors: Mutex<HashSet<Uuid>>,
     invalidated: Mutex<Vec<Uuid>>,
+    /// When set, `invalidate_chunks` fails for any non-empty request, simulating
+    /// a graph-invalidation backend error mid-transition or mid-deletion.
+    fail_nonempty_invalidate: AtomicBool,
 }
 
 impl FakeGraphWriter {
+    fn set_fail_invalidate(&self, fail: bool) {
+        self.fail_nonempty_invalidate.store(fail, Ordering::SeqCst);
+    }
+
     fn vector_count(&self) -> usize {
         self.vectors
             .lock()
@@ -307,6 +314,11 @@ impl KnowledgeGraphWriter for FakeGraphWriter {
         &self,
         graph_node_uids: &[Uuid],
     ) -> moa_knowledge::Result<GraphWriteReport> {
+        if !graph_node_uids.is_empty() && self.fail_nonempty_invalidate.load(Ordering::SeqCst) {
+            return Err(moa_knowledge::Error::Repository(
+                "injected invalidate_chunks failure".to_string(),
+            ));
+        }
         let mut deleted = 0_u64;
         let mut vectors = self
             .vectors
@@ -527,6 +539,264 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
 
     let graph_json = graph.properties_json();
     assert_no_secret_text(&graph_json);
+}
+
+#[tokio::test]
+async fn ingestion_reconciles_stale_predecessor_when_retrying_incomplete_same_hash_version_db_memory()
+ {
+    // Pins: F07 — a version transition that persists new chunks but fails before
+    // invalidating its predecessor leaves the newest version same-hash-incomplete.
+    // The retry must reconcile against every active chunk across all versions and
+    // orphan the real predecessor, instead of forgetting it (an empty
+    // `previous_chunks`) and leaving BOTH versions' chunks active and retrievable.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated Postgres");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let scope = RlsContext::tenant(tenant_id);
+    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        scope,
+    ));
+    let embedder = Arc::new(CountingEmbedder::default());
+    let graph = Arc::new(FakeGraphWriter::default());
+    let pipeline = KnowledgeIngestionPipeline::new(
+        repository.clone(),
+        Arc::new(ParagraphParser),
+        embedder.clone(),
+        graph.clone(),
+        KnowledgeIngestionPipelineConfig {
+            chunking: ChunkingConfig {
+                target_tokens: 1,
+                max_tokens: 16,
+                min_tokens: 1,
+            },
+            provider: "test_provider".to_string(),
+            parser_label: "test_parser".to_string(),
+        },
+    );
+    repository
+        .upsert_connection(KnowledgeConnection {
+            connection_uid,
+            tenant_id,
+            provider: "test_provider".to_string(),
+            connector: "docs".to_string(),
+            provider_account_id: "acct_1".to_string(),
+            credential_ref: "vault://knowledge/test".to_string(),
+            status: ConnectionStatus::Active,
+            metadata: credentialish_metadata(),
+            source_selection: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_synced_at: None,
+        })
+        .await
+        .expect("upsert connection");
+    let object_uid = object_uid(connection_uid);
+
+    // Attempt A: first content completes version V1 with two active chunks.
+    let run_a = create_run(&repository, tenant_id, connection_uid).await;
+    pipeline
+        .ingest_record_page(
+            run_a,
+            connection_uid,
+            tenant_id,
+            RecordPage {
+                records: vec![record("tok-a", false, "Alpha one.\n\nBeta one.")],
+                next_cursor: None,
+            },
+        )
+        .await
+        .expect("ingest first content");
+    assert_eq!(version_count(&pool, object_uid).await, 1);
+    assert_eq!(active_chunk_count(&pool, object_uid).await, 2);
+
+    // Attempt B: new content creates V2 and persists its chunks, then fails at
+    // predecessor invalidation. Both V1 and V2 chunks are now active.
+    graph.set_fail_invalidate(true);
+    let run_b = create_run(&repository, tenant_id, connection_uid).await;
+    let attempt_b = pipeline
+        .ingest_record_page(
+            run_b,
+            connection_uid,
+            tenant_id,
+            RecordPage {
+                records: vec![record("tok-b", false, "Gamma two.\n\nDelta two.")],
+                next_cursor: None,
+            },
+        )
+        .await;
+    assert!(
+        attempt_b.is_err(),
+        "failed predecessor invalidation must surface as an error"
+    );
+    assert_eq!(version_count(&pool, object_uid).await, 2);
+    assert_eq!(
+        active_chunk_count(&pool, object_uid).await,
+        4,
+        "both versions' chunks are stranded active before the retry"
+    );
+
+    // Attempt C: retry the same content (same hash, new change token). Invalidation
+    // now succeeds; reconciliation must orphan V1's chunks rather than forget them.
+    graph.set_fail_invalidate(false);
+    let run_c = create_run(&repository, tenant_id, connection_uid).await;
+    pipeline
+        .ingest_record_page(
+            run_c,
+            connection_uid,
+            tenant_id,
+            RecordPage {
+                records: vec![record("tok-c", false, "Gamma two.\n\nDelta two.")],
+                next_cursor: None,
+            },
+        )
+        .await
+        .expect("retry same content");
+    assert_eq!(
+        version_count(&pool, object_uid).await,
+        2,
+        "the same-hash retry reuses V2 rather than creating a third version"
+    );
+    assert_eq!(
+        active_chunk_count(&pool, object_uid).await,
+        2,
+        "only the newest version's chunks remain active after reconciliation"
+    );
+    assert_eq!(
+        tombstoned_chunk_count(&pool, object_uid).await,
+        2,
+        "the stale predecessor's chunks are invalidated, not left active"
+    );
+}
+
+#[tokio::test]
+async fn deletion_writes_terminal_status_last_and_stays_retryable_on_invalidation_failure_db_memory()
+ {
+    // Pins: F06 — a provider deletion whose graph invalidation fails must NOT leave
+    // the object in terminal `deleted` with active chunks stranded. The object stays
+    // non-terminal (so it is still selectable), and a later prune completes the
+    // deletion. This covers both the `handle_deleted_record` entry point (no direct
+    // upsert into terminal `deleted`) and the terminal-state-last ordering.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated Postgres");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let scope = RlsContext::tenant(tenant_id);
+    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        scope,
+    ));
+    let embedder = Arc::new(CountingEmbedder::default());
+    let graph = Arc::new(FakeGraphWriter::default());
+    let pipeline = KnowledgeIngestionPipeline::new(
+        repository.clone(),
+        Arc::new(ParagraphParser),
+        embedder.clone(),
+        graph.clone(),
+        KnowledgeIngestionPipelineConfig {
+            chunking: ChunkingConfig {
+                target_tokens: 1,
+                max_tokens: 16,
+                min_tokens: 1,
+            },
+            provider: "test_provider".to_string(),
+            parser_label: "test_parser".to_string(),
+        },
+    );
+    repository
+        .upsert_connection(KnowledgeConnection {
+            connection_uid,
+            tenant_id,
+            provider: "test_provider".to_string(),
+            connector: "docs".to_string(),
+            provider_account_id: "acct_1".to_string(),
+            credential_ref: "vault://knowledge/test".to_string(),
+            status: ConnectionStatus::Active,
+            metadata: credentialish_metadata(),
+            source_selection: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_synced_at: None,
+        })
+        .await
+        .expect("upsert connection");
+    let object_uid = object_uid(connection_uid);
+
+    // Ingest content so the object has one active version with two active chunks.
+    let run_a = create_run(&repository, tenant_id, connection_uid).await;
+    pipeline
+        .ingest_record_page(
+            run_a,
+            connection_uid,
+            tenant_id,
+            RecordPage {
+                records: vec![record("tok-a", false, "Alpha one.\n\nBeta one.")],
+                next_cursor: None,
+            },
+        )
+        .await
+        .expect("ingest content");
+    assert_eq!(active_chunk_count(&pool, object_uid).await, 2);
+    assert_eq!(object_status(&pool, object_uid).await, "active");
+
+    // Provider deletion with failing invalidation: the object must remain
+    // non-terminal (never upserted straight into `deleted`) and keep its chunks.
+    graph.set_fail_invalidate(true);
+    let run_del = create_run(&repository, tenant_id, connection_uid).await;
+    let failed = pipeline
+        .ingest_record_page(
+            run_del,
+            connection_uid,
+            tenant_id,
+            RecordPage {
+                records: vec![record("tok-del", true, "")],
+                next_cursor: None,
+            },
+        )
+        .await;
+    assert!(
+        failed.is_err(),
+        "failed deletion invalidation must surface as an error"
+    );
+    assert_eq!(
+        object_status(&pool, object_uid).await,
+        "active",
+        "terminal `deleted` must not be written before cleanup succeeds"
+    );
+    assert_eq!(
+        active_chunk_count(&pool, object_uid).await,
+        2,
+        "chunks stay active and selectable for a cleanup retry"
+    );
+
+    // Retry via prune: the still-active object is selected and deletion completes.
+    graph.set_fail_invalidate(false);
+    let run_prune = create_run(&repository, tenant_id, connection_uid).await;
+    pipeline
+        .prune_unseen_objects(
+            run_prune,
+            connection_uid,
+            tenant_id,
+            &std::collections::HashSet::new(),
+        )
+        .await
+        .expect("prune completes the stranded deletion");
+    assert_eq!(
+        object_status(&pool, object_uid).await,
+        "deleted",
+        "deletion completes once invalidation succeeds"
+    );
+    assert_eq!(
+        active_chunk_count(&pool, object_uid).await,
+        0,
+        "all chunks are invalidated once the deletion completes"
+    );
+    assert_eq!(tombstoned_chunk_count(&pool, object_uid).await, 2);
 }
 
 #[tokio::test]
@@ -2147,6 +2417,23 @@ async fn tombstoned_chunk_count(pool: &sqlx::PgPool, object_uid: Uuid) -> i64 {
     .fetch_one(pool)
     .await
     .expect("count tombstoned chunks")
+}
+
+async fn active_chunk_count(pool: &sqlx::PgPool, object_uid: Uuid) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM moa.knowledge_chunks c
+        JOIN moa.knowledge_document_versions v
+          ON v.document_version_uid = c.document_version_id
+        WHERE v.object_id = $1
+          AND COALESCE(c.metadata->>'active', 'true') <> 'false'
+        "#,
+    )
+    .bind(object_uid)
+    .fetch_one(pool)
+    .await
+    .expect("count active chunks")
 }
 
 async fn object_status(pool: &sqlx::PgPool, object_uid: Uuid) -> String {

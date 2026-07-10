@@ -3,8 +3,9 @@
 use chrono::{DateTime, Utc};
 use moa_core::TenantId;
 use moa_core::wire::analytics::{
-    AnalyticsAggregation, AnalyticsCatalogResponse, AnalyticsCell, AnalyticsField,
-    AnalyticsFieldKind, AnalyticsFieldRole, AnalyticsFilterOperator, AnalyticsQueryRequest,
+    AnalyticsAggregation, AnalyticsCatalogResponse, AnalyticsCell, AnalyticsDataset,
+    AnalyticsField, AnalyticsFieldKind, AnalyticsFieldRole, AnalyticsFilter,
+    AnalyticsFilterOperator, AnalyticsQueryRequest,
 };
 
 use crate::catalog::find_dataset;
@@ -38,6 +39,16 @@ pub struct ValidatedAnalyticsQuery {
 pub fn validate_query(
     catalog: &AnalyticsCatalogResponse,
     request: AnalyticsQueryRequest,
+) -> Result<ValidatedAnalyticsQuery> {
+    validate_query_at(catalog, request, Utc::now())
+}
+
+/// Validates a query against a caller-supplied `now`, used by tests to pin the
+/// time-window bound against a fixed clock.
+pub fn validate_query_at(
+    catalog: &AnalyticsCatalogResponse,
+    request: AnalyticsQueryRequest,
+    now: DateTime<Utc>,
 ) -> Result<ValidatedAnalyticsQuery> {
     let dataset =
         find_dataset(catalog, &request.dataset).ok_or_else(|| AnalyticsError::UnknownDataset {
@@ -117,6 +128,8 @@ pub fn validate_query(
         )?;
         validate_time_window(field, filter.operator, filter.value.as_ref())?;
     }
+
+    enforce_required_time_window(dataset, &request.filters, now)?;
 
     for order in &request.order_by {
         if !selected_field_or_alias(&request, &order.field) {
@@ -264,6 +277,74 @@ fn validate_time_window(
     Ok(())
 }
 
+/// Requires a time-series dataset to carry a filter that bounds its scan to a
+/// window no wider than [`MAX_TIME_WINDOW_DAYS`].
+///
+/// A dataset opts out of the requirement by declaring no `default_time_field`.
+/// Otherwise at least one filter on that field must close the window: a
+/// two-sided `between` (span already checked by [`validate_time_window`]), an
+/// `eq` point, or a lower bound (`gte`/`gt`) whose start is no older than the
+/// limit. An upper bound alone (`lt`/`lte`) leaves history unbounded and does
+/// not satisfy the requirement.
+fn enforce_required_time_window(
+    dataset: &AnalyticsDataset,
+    filters: &[AnalyticsFilter],
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let Some(time_field) = dataset.default_time_field.as_deref() else {
+        return Ok(());
+    };
+
+    let mut bounded = false;
+    for filter in filters {
+        if filter.field != time_field {
+            continue;
+        }
+        match filter.operator {
+            AnalyticsFilterOperator::Between | AnalyticsFilterOperator::Eq => {
+                bounded = true;
+            }
+            AnalyticsFilterOperator::Gte | AnalyticsFilterOperator::Gt => {
+                let start = lower_bound_timestamp(time_field, filter.value.as_ref())?;
+                let days = now.signed_duration_since(start).num_days();
+                if days > MAX_TIME_WINDOW_DAYS {
+                    return Err(AnalyticsError::TimeWindowTooLarge {
+                        days,
+                        max_days: MAX_TIME_WINDOW_DAYS,
+                    });
+                }
+                bounded = true;
+            }
+            _ => {}
+        }
+    }
+
+    if bounded {
+        Ok(())
+    } else {
+        Err(AnalyticsError::MissingTimeWindow {
+            dataset: dataset.id.clone(),
+            time_field: time_field.to_string(),
+            max_days: MAX_TIME_WINDOW_DAYS,
+        })
+    }
+}
+
+fn lower_bound_timestamp(field: &str, value: Option<&AnalyticsCell>) -> Result<DateTime<Utc>> {
+    let raw = value
+        .and_then(cell_as_string)
+        .ok_or_else(|| AnalyticsError::InvalidFilterValue {
+            field: field.to_string(),
+            reason: "timestamp lower bound must be an RFC3339 string".to_string(),
+        })?;
+    DateTime::parse_from_rfc3339(raw)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|error| AnalyticsError::InvalidFilterValue {
+            field: field.to_string(),
+            reason: error.to_string(),
+        })
+}
+
 fn parse_timestamp_json(field: &str, value: &serde_json::Value) -> Result<DateTime<Utc>> {
     let Some(value) = value.as_str() else {
         return Err(AnalyticsError::InvalidFilterValue {
@@ -333,5 +414,136 @@ fn role_name(role: AnalyticsFieldRole) -> &'static str {
         AnalyticsFieldRole::Dimension => "dimension",
         AnalyticsFieldRole::Measure => "measure",
         AnalyticsFieldRole::FilterOnly => "filter",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::analytics_catalog;
+    use chrono::TimeZone;
+    use moa_core::wire::analytics::{AnalyticsDimension, AnalyticsMeasure};
+
+    fn fixed_now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0)
+            .single()
+            .expect("now")
+    }
+
+    fn sessions_request(filters: Vec<AnalyticsFilter>) -> AnalyticsQueryRequest {
+        AnalyticsQueryRequest {
+            dataset: "sessions".to_string(),
+            tenant_id: Some(TenantId::new()),
+            dimensions: vec![AnalyticsDimension {
+                field: "channel".to_string(),
+                alias: None,
+            }],
+            measures: vec![AnalyticsMeasure {
+                field: None,
+                aggregation: AnalyticsAggregation::Count,
+                alias: None,
+            }],
+            filters,
+            order_by: Vec::new(),
+            limit: Some(10),
+        }
+    }
+
+    fn created_at(op: AnalyticsFilterOperator, value: &str) -> AnalyticsFilter {
+        AnalyticsFilter {
+            field: "created_at".to_string(),
+            operator: op,
+            value: Some(AnalyticsCell::String(value.to_string())),
+        }
+    }
+
+    #[test]
+    fn rejects_query_without_time_window() {
+        // Pins: a time-series dataset queried with no time filter is rejected so it
+        // cannot scan a tenant's full event history.
+        let error = validate_query_at(
+            &analytics_catalog(),
+            sessions_request(Vec::new()),
+            fixed_now(),
+        )
+        .expect_err("unbounded query must be rejected");
+        assert!(matches!(error, AnalyticsError::MissingTimeWindow { .. }));
+    }
+
+    #[test]
+    fn rejects_upper_bound_only_time_window() {
+        // Pins: an upper bound alone (`lt`/`lte`) leaves history unbounded.
+        let filters = vec![created_at(
+            AnalyticsFilterOperator::Lt,
+            "2026-07-01T00:00:00Z",
+        )];
+        let error = validate_query_at(&analytics_catalog(), sessions_request(filters), fixed_now())
+            .expect_err("upper-bound-only must be rejected");
+        assert!(matches!(error, AnalyticsError::MissingTimeWindow { .. }));
+    }
+
+    #[test]
+    fn rejects_lower_bound_older_than_max_window() {
+        // Pins: a lower bound older than the limit is a too-wide window, not a pass.
+        let filters = vec![created_at(
+            AnalyticsFilterOperator::Gte,
+            "2024-01-01T00:00:00Z",
+        )];
+        let error = validate_query_at(&analytics_catalog(), sessions_request(filters), fixed_now())
+            .expect_err("too-wide lower bound must be rejected");
+        assert!(matches!(error, AnalyticsError::TimeWindowTooLarge { .. }));
+    }
+
+    #[test]
+    fn accepts_recent_lower_bound() {
+        let filters = vec![created_at(
+            AnalyticsFilterOperator::Gte,
+            "2026-06-10T00:00:00Z",
+        )];
+        validate_query_at(&analytics_catalog(), sessions_request(filters), fixed_now())
+            .expect("a recent lower bound is accepted");
+    }
+
+    #[test]
+    fn accepts_between_within_window() {
+        let between = AnalyticsFilter {
+            field: "created_at".to_string(),
+            operator: AnalyticsFilterOperator::Between,
+            value: Some(AnalyticsCell::Json(serde_json::json!([
+                "2026-06-01T00:00:00Z",
+                "2026-07-01T00:00:00Z"
+            ]))),
+        };
+        validate_query_at(
+            &analytics_catalog(),
+            sessions_request(vec![between]),
+            fixed_now(),
+        )
+        .expect("a bounded between is accepted");
+    }
+
+    #[test]
+    fn accepts_eq_point_bound() {
+        let filters = vec![created_at(
+            AnalyticsFilterOperator::Eq,
+            "2026-06-10T00:00:00Z",
+        )];
+        validate_query_at(&analytics_catalog(), sessions_request(filters), fixed_now())
+            .expect("an eq point bound is accepted");
+    }
+
+    #[test]
+    fn dataset_without_time_field_is_exempt() {
+        // Pins: a dataset that declares no default_time_field opts out of the window
+        // requirement instead of being unqueryable.
+        let dataset = AnalyticsDataset {
+            id: "catalog_meta".to_string(),
+            label: "Meta".to_string(),
+            description: String::new(),
+            default_time_field: None,
+            fields: Vec::new(),
+        };
+        enforce_required_time_window(&dataset, &[], fixed_now())
+            .expect("a dataset without a time field is exempt");
     }
 }

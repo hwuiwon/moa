@@ -45,6 +45,74 @@ pub struct MergedSummary {
     pub resource_bill: ResourceBillReport,
 }
 
+/// Campaign identity that every merged worker report must share.
+///
+/// Merging sums rates/counts and adds histograms, which is only meaningful when
+/// the workers ran the SAME campaign shape. This fingerprint captures the run
+/// parameters that must match — mode, target endpoint, session profile, and the
+/// duration/warmup windows — so reports from different campaigns are rejected
+/// rather than silently combined into a meaningless aggregate. (There is no
+/// distinct campaign-id field on `LoadTestReport` today; these run parameters are
+/// what the report carries. A dedicated campaign id would need run-time wiring at
+/// report production — deferred.)
+#[derive(Debug, Clone, PartialEq)]
+struct CampaignFingerprint {
+    mode: LoadMode,
+    endpoint: String,
+    profile: SessionProfileKind,
+    duration_ms: f64,
+    warmup_ms: f64,
+}
+
+impl CampaignFingerprint {
+    fn from_report(report: &LoadTestReport) -> Self {
+        Self {
+            mode: report.mode,
+            endpoint: report.endpoint.clone(),
+            profile: report.profile,
+            duration_ms: report.duration_ms,
+            warmup_ms: report.warmup_ms,
+        }
+    }
+
+    /// Returns human-readable descriptions of every field that differs, so an
+    /// incompatible-merge error names exactly what did not match.
+    fn mismatched_fields(&self, other: &Self) -> Vec<String> {
+        let mut mismatches = Vec::new();
+        if self.mode != other.mode {
+            mismatches.push(format!("mode ({:?} != {:?})", self.mode, other.mode));
+        }
+        if self.endpoint != other.endpoint {
+            mismatches.push(format!(
+                "endpoint ({} != {})",
+                self.endpoint, other.endpoint
+            ));
+        }
+        if self.profile != other.profile {
+            mismatches.push(format!(
+                "profile ({:?} != {:?})",
+                self.profile, other.profile
+            ));
+        }
+        // Exact bit comparison for the config-derived window values, which are
+        // serialized identically across shards of the same campaign (and avoids
+        // the float-equality lint).
+        if self.duration_ms.to_bits() != other.duration_ms.to_bits() {
+            mismatches.push(format!(
+                "duration_ms ({} != {})",
+                self.duration_ms, other.duration_ms
+            ));
+        }
+        if self.warmup_ms.to_bits() != other.warmup_ms.to_bits() {
+            mismatches.push(format!(
+                "warmup_ms ({} != {})",
+                self.warmup_ms, other.warmup_ms
+            ));
+        }
+        mismatches
+    }
+}
+
 fn add_errors(total: &mut ErrorTaxonomy, part: &ErrorTaxonomy) {
     total.turn_start_failures += part.turn_start_failures;
     total.turn_timeouts += part.turn_timeouts;
@@ -88,6 +156,7 @@ pub fn merge_report_files(paths: &[impl AsRef<Path>]) -> Result<MergedSummary> {
         resource_bill: ResourceBillReport::default(),
     };
 
+    let mut fingerprint: Option<CampaignFingerprint> = None;
     for path in paths {
         let path = path.as_ref();
         let body = std::fs::read_to_string(path).map_err(|error| {
@@ -96,6 +165,22 @@ pub fn merge_report_files(paths: &[impl AsRef<Path>]) -> Result<MergedSummary> {
         let report: LoadTestReport = serde_json::from_str(&body).map_err(|error| {
             MoaError::SerializationError(format!("parse report {}: {error}", path.display()))
         })?;
+        // Refuse to merge reports from different campaigns: summing counts and
+        // adding histograms across mismatched runs produces a meaningless total.
+        let current_fingerprint = CampaignFingerprint::from_report(&report);
+        match &fingerprint {
+            None => fingerprint = Some(current_fingerprint),
+            Some(expected) => {
+                let mismatches = expected.mismatched_fields(&current_fingerprint);
+                if !mismatches.is_empty() {
+                    return Err(MoaError::ValidationError(format!(
+                        "cannot merge incompatible load-test report {}: mismatched campaign field(s): {}",
+                        path.display(),
+                        mismatches.join(", ")
+                    )));
+                }
+            }
+        }
         let hdr = report.hdr.as_ref().ok_or_else(|| {
             MoaError::ValidationError(format!(
                 "report {} has no embedded histograms; regenerate with --output json",
@@ -333,6 +418,95 @@ mod tests {
         );
         assert_eq!(merged.resource_bill.durable_event_rows, 100);
         assert_eq!(merged.resource_bill.durable_event_rows_per_turn, 1.0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mismatched_profile_reports_refuse_to_merge() {
+        // Pins (F29): reports from different campaigns (here different session profiles)
+        // are rejected rather than summed into a meaningless aggregate, and the error
+        // names the mismatched field.
+        let mut recorder =
+            LatencyRecorder::new(Duration::from_secs(10), Duration::ZERO).expect("recorder");
+        recorder
+            .record_turn(
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_millis(1_010),
+                None,
+                None,
+            )
+            .expect("turn");
+
+        let dir = std::env::temp_dir().join(format!("moa-merge-mismatch-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let mut short_report = template_report(&recorder);
+        short_report.profile = SessionProfileKind::Short;
+        let mut long_report = template_report(&recorder);
+        long_report.profile = SessionProfileKind::Long;
+
+        let short_path = dir.join("worker-short.json");
+        let long_path = dir.join("worker-long.json");
+        std::fs::write(
+            &short_path,
+            serde_json::to_string(&short_report).expect("serialize"),
+        )
+        .expect("write");
+        std::fs::write(
+            &long_path,
+            serde_json::to_string(&long_report).expect("serialize"),
+        )
+        .expect("write");
+
+        let error = merge_report_files(&[short_path, long_path])
+            .expect_err("reports from different profiles must not merge");
+        let message = error.to_string();
+        assert!(
+            message.contains("mismatched campaign field"),
+            "error should explain the incompatibility: {message}"
+        );
+        assert!(
+            message.contains("profile"),
+            "error must name the mismatched profile field: {message}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn matching_reports_merge_and_sum_totals() {
+        // Pins (F29): reports sharing a campaign fingerprint still merge, summing the
+        // per-worker counters as before the compatibility check was added.
+        let mut recorder =
+            LatencyRecorder::new(Duration::from_secs(10), Duration::ZERO).expect("recorder");
+        for _ in 0..2 {
+            recorder
+                .record_turn(
+                    Duration::from_secs(1),
+                    Duration::from_secs(1),
+                    Duration::from_millis(1_010),
+                    None,
+                    None,
+                )
+                .expect("turn");
+        }
+
+        let dir = std::env::temp_dir().join(format!("moa-merge-match-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let report = template_report(&recorder);
+        let mut paths = Vec::new();
+        for index in 0..2 {
+            let path = dir.join(format!("worker-{index}.json"));
+            std::fs::write(&path, serde_json::to_string(&report).expect("serialize"))
+                .expect("write");
+            paths.push(path);
+        }
+
+        let merged = merge_report_files(&paths).expect("matching reports merge");
+
+        assert_eq!(merged.workers, 2);
+        assert_eq!(merged.turns_completed, 2 * recorder.corrected_len());
+        assert_eq!(merged.requested_rate_qps, 20.0, "worker rates sum");
         std::fs::remove_dir_all(&dir).ok();
     }
 

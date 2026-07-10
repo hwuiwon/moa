@@ -9,6 +9,15 @@ use crate::{Error, Result, VectorItem, embedding_row::EmbeddingRow};
 /// Maximum outbox rows drained after a graph write commits.
 pub const VECTOR_SYNC_POST_COMMIT_LIMIT: i64 = 64;
 
+/// Transient-retry ceiling before a vector-sync row is quarantined (dead-lettered).
+pub const VECTOR_SYNC_MAX_ATTEMPTS: i32 = 10;
+
+/// Base delay, in seconds, for the exponential transient-retry backoff.
+const VECTOR_SYNC_BACKOFF_BASE_SECS: f64 = 30.0;
+
+/// Maximum delay, in seconds, that the transient-retry backoff can reach.
+const VECTOR_SYNC_BACKOFF_CAP_SECS: f64 = 3600.0;
+
 /// Operation persisted in `moa.vector_sync_outbox`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VectorSyncOperation {
@@ -48,6 +57,8 @@ pub struct VectorSyncReport {
     pub skipped: u64,
     /// Rows left pending after a processing failure.
     pub failed: u64,
+    /// Rows quarantined (dead-lettered) after a permanent or exhausted failure.
+    pub dead_lettered: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +118,7 @@ pub(crate) async fn claim_pending_vector_sync(
             SELECT sync_id
               FROM moa.vector_sync_outbox
              WHERE processed_at IS NULL
+               AND dead_lettered_at IS NULL
                AND available_at <= now()
                AND (claim_expires_at IS NULL OR claim_expires_at <= now())
                AND ($2::text IS NULL OR storage_partition_id = $2)
@@ -181,17 +193,25 @@ pub(crate) async fn mark_vector_sync_processed_batch(
     Ok(())
 }
 
-/// Marks claimed vector sync jobs as failed and available for a later retry.
+/// Marks claimed vector sync jobs as failed, returning how many were quarantined.
+///
+/// A `permanent` failure (or a transient one that has exhausted
+/// [`VECTOR_SYNC_MAX_ATTEMPTS`]) dead-letters the row: `dead_lettered_at` is set
+/// and the claim predicate no longer selects it. A recoverable transient failure
+/// instead schedules the next attempt with exponential backoff derived from the
+/// row's `attempts`, capped at [`VECTOR_SYNC_BACKOFF_CAP_SECS`]. The returned
+/// count is the number of rows that transitioned to the dead-letter state.
 pub(crate) async fn mark_vector_sync_failed_batch(
     pool: &PgPool,
     jobs: &[&VectorSyncJob],
     error: &Error,
-) -> Result<()> {
+    permanent: bool,
+) -> Result<u64> {
     if jobs.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     let (sync_ids, claim_tokens) = claim_pairs(jobs);
-    sqlx::query(
+    let rows = sqlx::query(
         r#"
         WITH claimed(sync_id, claim_token) AS (
             SELECT *
@@ -199,21 +219,71 @@ pub(crate) async fn mark_vector_sync_failed_batch(
         )
         UPDATE moa.vector_sync_outbox AS outbox
            SET last_error = left($3, 2048),
+               claim_token = NULL,
                claim_expires_at = NULL,
-               available_at = now() + INTERVAL '30 seconds',
-               updated_at = now()
+               updated_at = now(),
+               dead_lettered_at = CASE
+                   WHEN $4 OR outbox.attempts >= $5 THEN now()
+                   ELSE outbox.dead_lettered_at
+               END,
+               available_at = CASE
+                   WHEN $4 OR outbox.attempts >= $5 THEN outbox.available_at
+                   ELSE now() + make_interval(
+                       secs => LEAST($6, $7 * power(2, GREATEST(outbox.attempts - 1, 0)))
+                   )
+               END
           FROM claimed
          WHERE outbox.sync_id = claimed.sync_id
            AND outbox.claim_token = claimed.claim_token
            AND outbox.processed_at IS NULL
+        RETURNING (outbox.dead_lettered_at IS NOT NULL) AS dead_lettered
         "#,
     )
     .bind(sync_ids)
     .bind(claim_tokens)
     .bind(error.to_string())
+    .bind(permanent)
+    .bind(VECTOR_SYNC_MAX_ATTEMPTS)
+    .bind(VECTOR_SYNC_BACKOFF_CAP_SECS)
+    .bind(VECTOR_SYNC_BACKOFF_BASE_SECS)
+    .fetch_all(pool)
+    .await?;
+
+    let dead_lettered = rows
+        .iter()
+        .filter(|row| row.get::<bool, _>("dead_lettered"))
+        .count() as u64;
+    Ok(dead_lettered)
+}
+
+/// Resets quarantined (dead-lettered) vector-sync rows to pending for redrive.
+///
+/// Intended for an operator action after the permanent fault has been remediated.
+/// Clears `dead_lettered_at`, resets the attempt counter and claim, and makes the
+/// rows immediately eligible. Returns the number of rows re-queued.
+pub(crate) async fn redrive_dead_lettered_vector_sync(
+    pool: &PgPool,
+    storage_partition_id: Option<&str>,
+) -> Result<u64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE moa.vector_sync_outbox
+           SET dead_lettered_at = NULL,
+               attempts = 0,
+               available_at = now(),
+               last_error = NULL,
+               claim_token = NULL,
+               claim_expires_at = NULL,
+               updated_at = now()
+         WHERE dead_lettered_at IS NOT NULL
+           AND processed_at IS NULL
+           AND ($1::text IS NULL OR storage_partition_id = $1)
+        "#,
+    )
+    .bind(storage_partition_id)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(result.rows_affected())
 }
 
 /// Loads current pgvector source rows for queued upserts.

@@ -141,6 +141,22 @@ pub enum ContactErasureScope {
     SpecifiedAndLinkedContacts,
 }
 
+/// Terminal status of a privacy erase request.
+///
+/// The erase handler is synchronous within its Restate operation, so a
+/// successful call returns a terminal status. Non-terminal `running`/`failed`
+/// states are persisted on the durable `moa.erasure_jobs` row for resume and
+/// audit; a caller only observes them through job introspection, never as a
+/// successful response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyEraseStatus {
+    /// Candidates were enumerated without writing any erasure.
+    DryRun,
+    /// Every attributable store reached its erased end state.
+    Completed,
+}
+
 /// Response payload for a privacy erase request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrivacyEraseResponse {
@@ -148,12 +164,20 @@ pub struct PrivacyEraseResponse {
     pub tenant_id: TenantId,
     /// Subject user identifier erased.
     pub subject_user_id: UserId,
+    /// Terminal status of the erasure operation.
+    pub status: PrivacyEraseStatus,
     /// Number of candidate memory nodes found.
     pub candidate_count: u64,
     /// Number of memory nodes erased.
     pub erased_count: u64,
     /// Number of PII vault rows erased.
     pub pii_vault_erased: u64,
+    /// Number of standing memory-digest rows deleted.
+    #[serde(default)]
+    pub digest_deleted: u64,
+    /// Number of retrieval-lineage rows deleted.
+    #[serde(default)]
+    pub lineage_deleted: u64,
     /// Whether the request was a dry run.
     pub dry_run: bool,
     /// Sample erase candidates for dry-run output.

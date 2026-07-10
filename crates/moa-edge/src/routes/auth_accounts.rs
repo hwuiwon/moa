@@ -614,27 +614,21 @@ pub(super) async fn role_summary(state: &AppState, identity: &Identity) -> RoleS
         return RoleSummary::default();
     };
     let subject = fga_subject(identity);
-    let workspace_admin = fga
-        .check(
-            &subject,
-            "admin",
-            &format!("workspace:{}", moa_core::WORKSPACE_ID),
-        )
-        .await
-        .unwrap_or(false);
     let tenant_object = format!("tenant:{}", identity.tenant_id.0);
-    let tenant_admin = fga
-        .check(&subject, "admin", &tenant_object)
-        .await
-        .unwrap_or(false);
-    let tenant_operator = fga
-        .check(&subject, "operator", &tenant_object)
-        .await
-        .unwrap_or(false);
+    let workspace_object = format!("workspace:{}", moa_core::WORKSPACE_ID);
+    // Resolve all three roles in one batched OpenFGA request instead of three
+    // sequential round trips. A failed batch defaults every role to false,
+    // matching the previous per-check `unwrap_or(false)` fail-safe.
+    let checks = [
+        (subject.clone(), "admin".to_string(), workspace_object),
+        (subject.clone(), "admin".to_string(), tenant_object.clone()),
+        (subject, "operator".to_string(), tenant_object),
+    ];
+    let results = fga.batch_check(&checks).await.unwrap_or_default();
     RoleSummary {
-        workspace_admin,
-        tenant_admin,
-        tenant_operator,
+        workspace_admin: results.first().copied().unwrap_or(false),
+        tenant_admin: results.get(1).copied().unwrap_or(false),
+        tenant_operator: results.get(2).copied().unwrap_or(false),
     }
 }
 

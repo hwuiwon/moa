@@ -680,6 +680,27 @@ impl RestateSessionStore for SessionStoreImpl {
             .await?)
     }
 
+    #[tracing::instrument(skip(self, ctx, _request))]
+    // SAFETY: Internal maintenance handler refreshes derived materialized views only.
+    async fn refresh_analytics_materialized_views(
+        &self,
+        ctx: Context<'_>,
+        _request: Json<serde_json::Value>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SessionStore", "refresh_analytics_materialized_views");
+        let store = self.store.clone();
+
+        Ok(ctx
+            .run(|| async move {
+                store
+                    .refresh_analytics_materialized_views()
+                    .await
+                    .map_err(HandlerError::from)
+            })
+            .name("refresh_analytics_materialized_views")
+            .await?)
+    }
+
     #[tracing::instrument(skip(self, ctx, request))]
     // SAFETY: Internal learning telemetry write emitted by admitted session workflows.
     async fn record_segment_tool_use(

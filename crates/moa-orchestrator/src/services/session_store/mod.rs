@@ -158,6 +158,11 @@ pub trait RestateSessionStore {
         request: Json<serde_json::Value>,
     ) -> Result<(), HandlerError>;
 
+    /// Refreshes the analytics materialized views under a single-flight lease.
+    async fn refresh_analytics_materialized_views(
+        request: Json<serde_json::Value>,
+    ) -> Result<(), HandlerError>;
+
     /// Records a tool name on a session's active segment.
     async fn record_segment_tool_use(
         request: Json<RecordSegmentToolUseRequest>,
