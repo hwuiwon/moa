@@ -31,24 +31,19 @@ use std::time::Duration;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-/// Default in-flight ceiling for embedding providers.
-///
-/// Embedding calls fan out over document batches, so a small default keeps one
-/// busy ingestion run from opening an unbounded number of sockets to the provider
-/// while still overlapping enough round trips to stay throughput-bound.
-pub(crate) const DEFAULT_EMBEDDING_CONCURRENCY: usize = 8;
+use super::global_concurrency::{GlobalConcurrency, GlobalLeaseGuard};
 
-/// Default in-flight ceiling for rerank providers.
-pub(crate) const DEFAULT_RERANK_CONCURRENCY: usize = 8;
-
-/// Default in-flight ceiling for chat/LLM providers, per API key.
+/// Default in-flight ceiling used only by direct provider construction (`new`,
+/// `from_env`, tests) — one flat number per provider, not per call kind.
 ///
-/// A generous bound that still prevents one process from opening an unbounded
-/// number of simultaneous connections to a provider (exhausting sockets or the
-/// key's concurrency window) when many turns fan out at once. Operators can raise
-/// or lower it per key via `max_concurrent_requests`, and an explicit `0` opts
-/// back into unbounded.
-pub(crate) const DEFAULT_LLM_CONCURRENCY: usize = 32;
+/// Provider rate limits are a per-credential account-tier property, so a
+/// credential serving several call kinds shares one budget; there is no per-kind
+/// default. This mirrors the workspace fallback
+/// `ProviderConcurrencyConfig::default_max_in_flight`. The config-driven
+/// `from_config` path builds each provider's limiter per (provider, credential)
+/// and overrides this constant, so it applies only to providers built outside
+/// that path.
+pub(crate) const DEFAULT_MAX_IN_FLIGHT: usize = 16;
 
 /// How long a call waits for a concurrency slot before reporting "blocked".
 ///
@@ -59,40 +54,100 @@ pub(crate) const DEFAULT_BLOCK_THRESHOLD: Duration = Duration::from_secs(2);
 /// An acquired in-flight slot held for the lifetime of one outbound call.
 ///
 /// `Unbounded` carries no permit (the limiter imposes no ceiling); `Held` owns a
-/// semaphore permit that frees its slot on drop. Both keep the slot reserved for
-/// as long as the lease is bound, matching [`ConcurrencyLimiter::acquire`].
+/// semaphore permit that frees its slot on drop; `Global` owns a runtime-store
+/// lease that is released on drop (see [`GlobalLeaseGuard`]). All keep the slot
+/// reserved for as long as the lease is bound, matching
+/// [`ConcurrencyLimiter::acquire`].
 pub(crate) enum PermitLease {
     /// The limiter is unbounded; there is no slot to release.
     Unbounded,
     /// A held semaphore permit; the slot is reserved until this is dropped. The
     /// permit is never read — it exists purely for its `Drop` side effect.
     Held(#[allow(dead_code)] OwnedSemaphorePermit),
+    /// A held cross-replica lease; releasing it deletes the lease on drop.
+    Global(#[allow(dead_code)] GlobalLeaseGuard),
 }
 
 /// A cloneable in-flight concurrency gate for one provider instance.
 ///
-/// A `None` inner semaphore means unbounded: [`ConcurrencyLimiter::acquire`]
-/// returns immediately without allocating a permit.
+/// A local limiter with no ceiling is unbounded ([`ConcurrencyLimiter::acquire`]
+/// returns immediately without allocating a permit). A global limiter coordinates
+/// its ceiling across replicas through the runtime store. Every limiter carries a
+/// `block_threshold`: the wait [`acquire`](Self::acquire) allows before reporting
+/// a failover-eligible saturated signal.
 #[derive(Clone)]
 pub(crate) struct ConcurrencyLimiter {
-    inner: Option<Arc<Semaphore>>,
+    mode: LimiterMode,
+    block_threshold: Duration,
+}
+
+#[derive(Clone)]
+enum LimiterMode {
+    /// Process-local gate; `None` is unbounded.
+    Local(Option<Arc<Semaphore>>),
+    /// Cross-replica gate coordinated through the runtime store.
+    Global(Arc<GlobalConcurrency>),
 }
 
 impl ConcurrencyLimiter {
-    /// Builds a limiter that admits at most `max_in_flight` concurrent requests.
+    /// Builds a process-local limiter admitting at most `max_in_flight` requests,
+    /// with the default block threshold.
     ///
     /// A `max_in_flight` of zero is treated as unbounded rather than a permanently
     /// closed gate, matching the "unset means no limit" configuration semantics.
     pub(crate) fn new(max_in_flight: usize) -> Self {
+        Self::local(max_in_flight, DEFAULT_BLOCK_THRESHOLD)
+    }
+
+    /// Builds a process-local limiter with an explicit block threshold.
+    pub(crate) fn local(max_in_flight: usize, block_threshold: Duration) -> Self {
         Self {
-            inner: (max_in_flight > 0).then(|| Arc::new(Semaphore::new(max_in_flight))),
+            mode: LimiterMode::Local(
+                (max_in_flight > 0).then(|| Arc::new(Semaphore::new(max_in_flight))),
+            ),
+            block_threshold,
+        }
+    }
+
+    /// Builds a process-local limiter over a caller-provided (possibly shared)
+    /// semaphore. `None` is unbounded; passing one shared semaphore lets multiple
+    /// limiters contend for a single budget.
+    pub(crate) fn from_local_semaphore(
+        semaphore: Option<Arc<Semaphore>>,
+        block_threshold: Duration,
+    ) -> Self {
+        Self {
+            mode: LimiterMode::Local(semaphore),
+            block_threshold,
+        }
+    }
+
+    /// Builds a limiter that coordinates its ceiling across replicas.
+    pub(crate) fn global(limiter: GlobalConcurrency, block_threshold: Duration) -> Self {
+        Self {
+            mode: LimiterMode::Global(Arc::new(limiter)),
+            block_threshold,
         }
     }
 
     /// Returns whether this limiter imposes a finite in-flight ceiling.
     #[cfg(test)]
     pub(crate) fn is_bounded(&self) -> bool {
-        self.inner.is_some()
+        match &self.mode {
+            LimiterMode::Local(inner) => inner.is_some(),
+            LimiterMode::Global(_) => true,
+        }
+    }
+
+    /// Takes an in-flight slot, waiting up to this limiter's configured block
+    /// threshold. Returns `None` when the gate stays saturated for the whole wait.
+    pub(crate) async fn acquire(&self) -> Option<PermitLease> {
+        self.acquire_within(self.block_threshold).await
+    }
+
+    /// Returns the wait this limiter allows before reporting a saturated gate.
+    pub(crate) fn block_threshold(&self) -> Duration {
+        self.block_threshold
     }
 
     /// Takes an in-flight slot, waiting at most `max_wait` for one to free up.
@@ -104,16 +159,19 @@ impl ConcurrencyLimiter {
     /// which callers treat as a blocked signal eligible for failover instead of
     /// queueing indefinitely.
     pub(crate) async fn acquire_within(&self, max_wait: Duration) -> Option<PermitLease> {
-        let Some(semaphore) = &self.inner else {
-            return Some(PermitLease::Unbounded);
-        };
-        match tokio::time::timeout(max_wait, Arc::clone(semaphore).acquire_owned()).await {
-            // Acquired within the deadline.
-            Ok(Ok(permit)) => Some(PermitLease::Held(permit)),
-            // Semaphore closed (never in practice); degrade to unbounded.
-            Ok(Err(_)) => Some(PermitLease::Unbounded),
-            // Still saturated after `max_wait`: report blocked.
-            Err(_) => None,
+        match &self.mode {
+            LimiterMode::Local(None) => Some(PermitLease::Unbounded),
+            LimiterMode::Local(Some(semaphore)) => {
+                match tokio::time::timeout(max_wait, Arc::clone(semaphore).acquire_owned()).await {
+                    // Acquired within the deadline.
+                    Ok(Ok(permit)) => Some(PermitLease::Held(permit)),
+                    // Semaphore closed (never in practice); degrade to unbounded.
+                    Ok(Err(_)) => Some(PermitLease::Unbounded),
+                    // Still saturated after `max_wait`: report blocked.
+                    Err(_) => None,
+                }
+            }
+            LimiterMode::Global(limiter) => limiter.acquire(max_wait).await,
         }
     }
 }

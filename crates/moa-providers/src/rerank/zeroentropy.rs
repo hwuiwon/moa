@@ -5,9 +5,7 @@ use moa_core::{MoaError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::core::concurrency::{
-    ConcurrencyLimiter, DEFAULT_BLOCK_THRESHOLD, DEFAULT_RERANK_CONCURRENCY,
-};
+use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_MAX_IN_FLIGHT};
 use crate::core::http::{build_json_http_client, post_json};
 use crate::core::pacer::{PacerConfig, RatePacer};
 use crate::core::rate_guard;
@@ -67,7 +65,7 @@ impl ZeroEntropyReranker {
             latency: None,
             // Pacing off by default; ZeroEntropy limits are tier-specific.
             pacer: RatePacer::new(PacerConfig::disabled()),
-            limiter: ConcurrencyLimiter::new(DEFAULT_RERANK_CONCURRENCY),
+            limiter: ConcurrencyLimiter::new(DEFAULT_MAX_IN_FLIGHT),
         })
     }
 
@@ -87,6 +85,12 @@ impl ZeroEntropyReranker {
 
     /// Overrides the in-flight concurrency ceiling for rerank requests.
     #[must_use]
+    /// Replaces the in-flight concurrency limiter (config-driven or global).
+    pub(crate) fn with_limiter(mut self, limiter: ConcurrencyLimiter) -> Self {
+        self.limiter = limiter;
+        self
+    }
+
     pub fn with_max_concurrent_requests(mut self, max_in_flight: usize) -> Self {
         self.limiter = ConcurrencyLimiter::new(max_in_flight);
         self
@@ -114,9 +118,13 @@ impl Reranker for ZeroEntropyReranker {
         }
 
         // In-flight slot first, then rate budget (see `ConcurrencyLimiter`).
-        let _permit = match self.limiter.acquire_within(DEFAULT_BLOCK_THRESHOLD).await {
+        let _permit = match self.limiter.acquire().await {
             Some(lease) => lease,
-            None => return Err(rate_guard::rate_limited_saturated(DEFAULT_BLOCK_THRESHOLD)),
+            None => {
+                return Err(rate_guard::rate_limited_saturated(
+                    self.limiter.block_threshold(),
+                ));
+            }
         };
         self.pacer.acquire(1, 0).await;
         let body: ZeroEntropyRerankResponse = post_json(

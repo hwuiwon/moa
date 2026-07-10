@@ -10,6 +10,12 @@
 //! Pacing is process-local with no distributed coordination. Provider rate
 //! limits are enforced per API key, so a multi-instance fleet sharing one key
 //! should configure each instance with its fraction of the documented budget.
+//!
+//! Note: in-flight *concurrency* can now be coordinated across replicas via
+//! runtime-store leases (see
+//! [`global_concurrency`](super::global_concurrency)); per-minute *pacing* here
+//! deliberately remains process-local — a distributed token bucket was out of
+//! scope, and the per-instance-fraction guidance above still applies to pacing.
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;

@@ -11,7 +11,7 @@ use moa_core::{LearningCandidateStatus, LearningCandidateType};
 use moa_skills::distiller::{DistillationOutcome, distill_skill_from_experience_with_learning};
 use moa_skills::improver::{ImprovementResult, improve_skill_from_experience_with_learning};
 use support::{
-    BASELINE_SKILL, IMPROVED_SKILL, SESSION_WITH_5_TOOL_CALLS, active_semantic_version,
+    BASELINE_SKILL, IMPROVED_SKILL, SESSION_WITH_8_TOOL_CALLS, active_semantic_version,
     artifact_revision_count, experience_input, learning_store, load_optional_active_skill,
     load_session_fixture, scripted_router, seed_skill, session_storage_partition_id, setup_test_db,
     skill_markdown, skill_row_count, tenant_scope, test_config,
@@ -21,7 +21,7 @@ use support::{
 async fn skill_creation_proposal_stores_draft_artifact_without_active_skill_db() {
     // Pins: generated skill creation remains a draft artifact and review candidate until accepted.
     let test_db = setup_test_db().await;
-    let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
+    let loaded = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
     let proposed = skill_markdown(
         "draft-oauth-refresh",
@@ -117,7 +117,7 @@ async fn skill_creation_proposal_stores_draft_artifact_without_active_skill_db()
 async fn skill_improvement_proposal_stores_draft_artifact_without_replacing_active_skill_db() {
     // Pins: generated skill improvement stores a draft and leaves the active skill unchanged.
     let test_db = setup_test_db().await;
-    let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
+    let loaded = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
     let (_config, _temp_dir) = test_config(&test_db);
     let storage_partition_id = session_storage_partition_id(&loaded.session);
     let scope = tenant_scope(&storage_partition_id);
@@ -177,7 +177,7 @@ async fn skill_improvement_proposal_stores_draft_artifact_without_replacing_acti
 async fn skill_proposal_retry_reuses_candidate_id() {
     // Pins: retrying the same proposal reuses the candidate and draft artifact revision.
     let test_db = setup_test_db().await;
-    let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
+    let loaded = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
     let proposed = skill_markdown(
         "retry-stable-draft",
@@ -246,8 +246,8 @@ async fn open_proposal_for_same_skill_name_dedupes_across_sessions_db() {
     // skill name reuses the open Proposed candidate instead of filing a duplicate review
     // item and a second draft artifact revision.
     let test_db = setup_test_db().await;
-    let loaded_a = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
-    let mut loaded_b = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
+    let loaded_a = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
+    let mut loaded_b = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
     loaded_b.session.id = moa_core::SessionId::new();
     loaded_b.session.tenant_id = loaded_a.session.tenant_id;
     let (config, _temp_dir) = test_config(&test_db);
@@ -306,20 +306,20 @@ async fn open_proposal_for_same_task_fingerprint_dedupes_across_skill_names_db()
     // open Proposed candidate for that task fingerprint is reused instead of filing a
     // second near-duplicate review item under the new name.
     let test_db = setup_test_db().await;
-    let loaded_a = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
-    let mut loaded_b = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
+    let loaded_a = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
+    let mut loaded_b = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
     loaded_b.session.id = moa_core::SessionId::new();
     loaded_b.session.tenant_id = loaded_a.session.tenant_id;
     let (config, _temp_dir) = test_config(&test_db);
     let first_name = skill_markdown(
-        "deploy-to-fly",
-        "Deploy the service to Fly",
+        "deploy-to-staging",
+        "Deploy the service to staging",
         "Reusable deploy workflow.",
         "1.0",
     );
     let second_name = skill_markdown(
-        "fly-deployment",
-        "Deploy the service to Fly",
+        "staging-deployment",
+        "Deploy the service to staging",
         "Reusable deploy workflow.",
         "1.0",
     );
@@ -329,7 +329,7 @@ async fn open_proposal_for_same_task_fingerprint_dedupes_across_skill_names_db()
     let first = distill_skill_from_experience_with_learning(
         &config,
         &loaded_a.session,
-        experience_input(&loaded_a, "deploy service to fly"),
+        experience_input(&loaded_a, "deploy service to staging"),
         scripted_router([first_name]),
         Some(store.clone()),
     )
@@ -338,7 +338,7 @@ async fn open_proposal_for_same_task_fingerprint_dedupes_across_skill_names_db()
     // Empty scripted router: the fingerprint preflight must dedupe before any
     // LLM call, so an attempted generation would error the test.
     let _unused_second_name = second_name;
-    let input_b = experience_input(&loaded_b, "deploy service to fly");
+    let input_b = experience_input(&loaded_b, "deploy service to staging");
     let sibling_experience_id = input_b.experience.id;
     let second = distill_skill_from_experience_with_learning(
         &config,
@@ -362,11 +362,11 @@ async fn open_proposal_for_same_task_fingerprint_dedupes_across_skill_names_db()
         "same-fingerprint proposal must reuse the open candidate despite the new name"
     );
     assert_eq!(
-        artifact_revision_count(&test_db, &storage_partition_id, "deploy-to-fly").await,
+        artifact_revision_count(&test_db, &storage_partition_id, "deploy-to-staging").await,
         1
     );
     assert_eq!(
-        artifact_revision_count(&test_db, &storage_partition_id, "fly-deployment").await,
+        artifact_revision_count(&test_db, &storage_partition_id, "staging-deployment").await,
         0,
         "the differently-named duplicate must not create its own draft artifact"
     );
@@ -396,7 +396,7 @@ async fn open_proposal_for_same_task_fingerprint_dedupes_across_skill_names_db()
 async fn concurrent_skill_proposal_attempts_share_one_draft_artifact_db() {
     // Pins: duplicate workers proposing the same skill share one candidate and one draft revision.
     let test_db = setup_test_db().await;
-    let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
+    let loaded = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
     let proposed = skill_markdown(
         "concurrent-stable-draft",

@@ -38,7 +38,7 @@ async fn cohere_rerank_v4_fast_prioritizes_relevant_retrieval_candidate() {
     };
     let reranker = CohereReranker::new(api_key).expect("Cohere reranker should build");
     let documents = vec![
-        "MOA deploys its local validation service to fly.io.".to_string(),
+        "MOA deploys its local validation service to railway.".to_string(),
         "MOA stores memory facts in PostgreSQL tables with RLS.".to_string(),
         "The hosted API surfaces status output and approval prompts.".to_string(),
     ];

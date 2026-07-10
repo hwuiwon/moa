@@ -472,14 +472,14 @@ mod tests {
         let query_tokens = normalize_tokens("fact01 fact04 auth deploy release cadence");
         let explicit_identifier = row(
             "workspace",
-            "fact01 auth-service deployment flyio bluegreen Monday release window superseded",
+            "fact01 auth-service deployment railway bluegreen Monday release window superseded",
             reference_time,
             reference_time,
             None,
         );
         let missing_identifier = row(
             "workspace",
-            "fact99 auth-service deployment flyio bluegreen Monday release window superseded",
+            "fact99 auth-service deployment railway bluegreen Monday release window superseded",
             reference_time,
             reference_time,
             None,

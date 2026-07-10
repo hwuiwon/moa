@@ -78,6 +78,14 @@ pub struct MoaEnvOverlay {
     pub zeroentropy_max_inputs_per_min: Option<u32>,
     /// `MOA_ZEROENTROPY_MAX_CONCURRENT_REQUESTS`.
     pub zeroentropy_max_concurrent_requests: Option<u32>,
+    /// `MOA_PROVIDERS_CONCURRENCY_SCOPE` (`local` | `global`).
+    pub providers_concurrency_scope: Option<String>,
+    /// `MOA_PROVIDERS_CONCURRENCY_DEFAULT_MAX_IN_FLIGHT`.
+    pub providers_concurrency_default_max_in_flight: Option<u32>,
+    /// `MOA_PROVIDERS_CONCURRENCY_BLOCK_THRESHOLD_MS`.
+    pub providers_concurrency_block_threshold_ms: Option<u64>,
+    /// `MOA_PROVIDERS_CONCURRENCY_LEASE_TTL_MS`.
+    pub providers_concurrency_lease_ttl_ms: Option<u64>,
     /// `MOA_DATABASE_URL`.
     pub database_url: Option<String>,
     /// `MOA_DATABASE_ADMIN_URL`.
@@ -365,12 +373,6 @@ pub struct MoaEnvOverlay {
     pub compaction_recent_turns_verbatim: Option<usize>,
     /// `MOA_COMPACTION_PRESERVE_ERRORS`.
     pub compaction_preserve_errors: Option<bool>,
-    /// `MOA_COMPACTION_TIER2_TRIGGER_BLOCKS_PAST_BP4`.
-    pub compaction_tier2_trigger_blocks_past_bp4: Option<usize>,
-    /// `MOA_COMPACTION_TIER3_TRIGGER_FRACTION`.
-    pub compaction_tier3_trigger_fraction: Option<f64>,
-    /// `MOA_COMPACTION_MAX_INPUT_TOKENS_PER_TURN`.
-    pub compaction_max_input_tokens_per_turn: Option<usize>,
     /// `MOA_RESTATE_INGRESS_URL`.
     pub restate_ingress_url: Option<String>,
     /// `MOA_RESTATE_ADMIN_URL`.
@@ -807,6 +809,14 @@ fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
         "restate_ingress_url" => &["orchestrator", "restate_ingress_url"],
         "restate_admin_url" => &["orchestrator", "restate_admin_url"],
         "restate_llm_gateway_url" => &["orchestrator", "llm_gateway_url"],
+        "providers_concurrency_scope" => &["providers", "concurrency", "scope"],
+        "providers_concurrency_default_max_in_flight" => {
+            &["providers", "concurrency", "default_max_in_flight"]
+        }
+        "providers_concurrency_block_threshold_ms" => {
+            &["providers", "concurrency", "block_threshold_ms"]
+        }
+        "providers_concurrency_lease_ttl_ms" => &["providers", "concurrency", "lease_ttl_ms"],
         _ => return None,
     };
     Some(strings(path))
@@ -938,7 +948,8 @@ fn optional_section_seed(path: &[&str]) -> Option<Value> {
             "preshared_key": "",
             "store_id": "",
             "model_id": "",
-            "timeout_ms": 5000,
+            // Mirror OpenFgaConfig's serde default (OPENFGA_DEFAULT_TIMEOUT_MS).
+            "timeout_ms": 2000,
         })),
         ["clickhouse"] => Some(json!({
             "url": "",
@@ -1025,7 +1036,6 @@ const ALLOWLIST_PREFIXES: &[&str] = &[
     "MOA_PENTEST_",            // cross-tenant pentest harness knobs
     "MOA_LOADTEST_",           // k6/loadtest harness knobs
     "MOA_CLEAN_E2E_",          // run-clean-e2e.sh harness knobs
-    "MOA_FLY_",                // Fly.io deploy script knobs
     "MOA_RUSTFS_",             // local compose object-store ports
     "MOA_FGA_",                // OpenFGA bootstrap script knobs
     "MOA_BOOTSTRAP_",          // tenant/user bootstrap script knobs
@@ -1045,7 +1055,6 @@ const ALLOWLIST_PREFIXES: &[&str] = &[
 /// Approved `MOA_*` variables that live in a namespace shared with real overlay
 /// fields (so a prefix would be unsafe) or that stand alone. Kept exact.
 const ALLOWLIST_EXACT: &[&str] = &[
-    "MOA__DATABASE__URL",    // `config`-crate double-underscore nested form
     "MOA_CONFIG_ENV_STRICT", // this audit's own strictness switch
     "MOA_AUDIT_BUCKET",      // audit shipper (MOA_AUDIT_ collides with overlay)
     "MOA_AUDIT_OBJECT_LOCK_MODE",
@@ -1295,6 +1304,65 @@ mod tests {
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    /// Regeneration tool for `docs/23-environment-variables.md`.
+    ///
+    /// Dumps every overlay variable with its config path and default, derived
+    /// from `MoaEnvOverlay` (serde field enumeration) and `MoaConfig::default()`,
+    /// so the reference doc is never hand-transcribed. Run with:
+    /// `cargo test -p moa-core dump_env_var_reference -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "dev tool: regenerates the env-var reference doc table"]
+    fn dump_env_var_reference() {
+        let mut schema = serde_json::to_value(MoaConfig::default()).expect("serialize config");
+        seed_optional_sections(&mut schema).expect("seed optional sections");
+        let overlay = serde_json::to_value(MoaEnvOverlay::default()).expect("serialize overlay");
+        let Value::Object(fields) = overlay else {
+            panic!("overlay must serialize to an object");
+        };
+
+        let mut rows = Vec::new();
+        for field in fields.keys() {
+            let env = format!("MOA_{}", field.to_uppercase());
+            let path = overlay_path(field, &schema).expect("resolve overlay path");
+            let default = walk_default(&schema, &path);
+            // Secret = actual credential material. Suffix-matched so identifiers
+            // and counters that merely contain KEY/TOKEN (`_KEY_ID`, `_TOKENS`,
+            // `_TOKEN_ESTIMATES`, `_TTL_SECONDS`) are NOT flagged, while real
+            // keys/secrets/passwords/private-key and hex key material are.
+            let secret = env.ends_with("_KEY")
+                || env.ends_with("_KEY_HEX")
+                || env.ends_with("_SECRET")
+                || env.ends_with("_SECRET_HEX")
+                || env.ends_with("_PASSWORD")
+                || env.ends_with("_PRIVATE_KEY_PEM")
+                || env.ends_with("_AUTH_TOKEN")
+                || env.ends_with("_APP_TOKEN")
+                || env.ends_with("_BOT_TOKEN");
+            rows.push((path[0].clone(), env, path.join("."), default, secret));
+        }
+        rows.sort();
+        println!("SECTION\tENV_VAR\tCONFIG_PATH\tDEFAULT\tSECRET");
+        for (section, env, path, default, secret) in rows {
+            println!("{section}\t{env}\t{path}\t{default}\t{secret}");
+        }
+    }
+
+    fn walk_default(root: &Value, path: &[String]) -> String {
+        let mut cursor = root;
+        for segment in path {
+            match cursor.get(segment) {
+                Some(next) => cursor = next,
+                None => return "(unset)".to_string(),
+            }
+        }
+        match cursor {
+            Value::Null => "(none)".to_string(),
+            Value::String(text) if text.is_empty() => "(empty)".to_string(),
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        }
     }
 
     #[test]

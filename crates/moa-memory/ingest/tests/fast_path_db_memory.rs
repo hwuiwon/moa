@@ -518,7 +518,7 @@ async fn fast_remember_db_memory() {
 
     let started = Instant::now();
     let uid = fast_remember(
-        tenant_remember_request(tenant_id, "we deploy to fly.io"),
+        tenant_remember_request(tenant_id, "we deploy to railway"),
         &ctx,
     )
     .await
@@ -526,7 +526,7 @@ async fn fast_remember_db_memory() {
     assert!(started.elapsed() < Duration::from_millis(500));
     assert_eq!(
         node_name(session_store.pool(), tenant_id, uid).await,
-        "we deploy to fly.io"
+        "we deploy to railway"
     );
     assert_eq!(
         node_pii_class(session_store.pool(), tenant_id, uid).await,
@@ -551,7 +551,7 @@ async fn fast_remember_duplicate_reinforces_survivor_instead_of_dropping_db_memo
         .expect("create isolated Postgres store");
     let tenant_id = Uuid::now_v7();
     let seeded_uid =
-        seed_active_tenant_node(session_store.pool(), tenant_id, "we deploy to fly.io").await;
+        seed_active_tenant_node(session_store.pool(), tenant_id, "we deploy to railway").await;
     // Simulate a decayed fact: lowered confidence with an anchored base.
     let mut conn = tenant_scoped_conn(session_store.pool(), tenant_id).await;
     sqlx::query(
@@ -579,7 +579,7 @@ async fn fast_remember_duplicate_reinforces_survivor_instead_of_dropping_db_memo
     seed_tenant_embedder_state(session_store.pool(), tenant_id).await;
 
     let uid = fast_remember(
-        tenant_remember_request(tenant_id, "we deploy to fly.io"),
+        tenant_remember_request(tenant_id, "we deploy to railway"),
         &ctx,
     )
     .await
@@ -765,7 +765,7 @@ async fn fast_remember_explicit_supersede_invalidates_old_node_and_links_edge() 
     .await
     .expect("create old fact");
 
-    let mut req = tenant_remember_request(tenant_id, "deployments use fly.io");
+    let mut req = tenant_remember_request(tenant_id, "deployments use railway");
     req.supersedes_specific = Some(old_uid);
     let new_uid = fast_remember(req, &ctx).await.expect("supersede old fact");
 

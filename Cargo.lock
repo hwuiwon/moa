@@ -4228,6 +4228,7 @@ dependencies = [
  "metrics",
  "moa-core",
  "moa-observability",
+ "moa-runtime-store",
  "moa-test-support",
  "opentelemetry",
  "reqwest 0.13.4",

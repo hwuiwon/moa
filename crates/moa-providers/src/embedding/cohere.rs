@@ -7,9 +7,7 @@ use moa_core::{MoaError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::core::concurrency::{
-    ConcurrencyLimiter, DEFAULT_BLOCK_THRESHOLD, DEFAULT_EMBEDDING_CONCURRENCY,
-};
+use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_MAX_IN_FLIGHT};
 use crate::core::http::{
     build_json_http_client, post_json, validate_embedding_count, validate_embedding_dimension,
 };
@@ -54,7 +52,7 @@ impl CohereEmbedding {
             input_type: COHERE_DEFAULT_INPUT_TYPE.to_string(),
             dimensions: COHERE_DEFAULT_DIMENSIONS,
             pacer: RatePacer::new(PacerConfig::inputs_per_min(COHERE_EMBED_INPUTS_PER_MIN)),
-            limiter: ConcurrencyLimiter::new(DEFAULT_EMBEDDING_CONCURRENCY),
+            limiter: ConcurrencyLimiter::new(DEFAULT_MAX_IN_FLIGHT),
         })
     }
 
@@ -81,6 +79,12 @@ impl CohereEmbedding {
 
     /// Overrides the in-flight concurrency ceiling for embedding requests.
     #[must_use]
+    /// Replaces the in-flight concurrency limiter (config-driven or global).
+    pub(crate) fn with_limiter(mut self, limiter: ConcurrencyLimiter) -> Self {
+        self.limiter = limiter;
+        self
+    }
+
     pub fn with_max_concurrent_requests(mut self, max_in_flight: usize) -> Self {
         self.limiter = ConcurrencyLimiter::new(max_in_flight);
         self
@@ -100,9 +104,13 @@ impl CohereEmbedding {
     async fn embed_chunk(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
         // Take an in-flight slot before spending rate budget, then hold it across
         // the round trip (see `ConcurrencyLimiter` for the ordering rationale).
-        let _permit = match self.limiter.acquire_within(DEFAULT_BLOCK_THRESHOLD).await {
+        let _permit = match self.limiter.acquire().await {
             Some(lease) => lease,
-            None => return Err(rate_guard::rate_limited_saturated(DEFAULT_BLOCK_THRESHOLD)),
+            None => {
+                return Err(rate_guard::rate_limited_saturated(
+                    self.limiter.block_threshold(),
+                ));
+            }
         };
         // Cohere Embed is limited by inputs/min; pace on this chunk's input count.
         self.pacer.acquire(1, inputs.len() as u32).await;

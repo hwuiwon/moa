@@ -58,7 +58,10 @@ pub use memory::{
 };
 pub use messaging::MessagingConfig;
 pub use orchestrator::OrchestratorConfig;
-pub use providers::{GeneralConfig, ModelsConfig, ProviderCredentialConfig, ProvidersConfig};
+pub use providers::{
+    ConcurrencyScope, GeneralConfig, ModelsConfig, ProviderConcurrencyConfig,
+    ProviderCredentialConfig, ProvidersConfig,
+};
 pub use runtime_cache::{RuntimeCacheBackend, RuntimeCacheConfig};
 pub use sandbox::{
     CloudConfig, CloudHandsConfig, LocalConfig, McpCredentialConfig, McpServerConfig,
@@ -178,6 +181,15 @@ impl MoaConfig {
             ));
         }
 
+        if self.database.uses_builtin_dev_url() {
+            // Fails safe (the default targets localhost), so warn rather than reject:
+            // a real deployment should configure database.url / MOA_DATABASE_URL.
+            tracing::warn!(
+                "using built-in development database credentials; set database.url \
+                 (MOA_DATABASE_URL) for any non-development deployment"
+            );
+        }
+
         if self.general.default_provider.trim().is_empty() {
             return Err(MoaError::ConfigError(
                 "general.default_provider is required and must be a non-empty provider key"
@@ -199,6 +211,7 @@ impl MoaConfig {
         }
 
         self.session.validate()?;
+        self.providers.validate()?;
 
         if let Some(clickhouse) = &self.clickhouse {
             clickhouse.validate()?;

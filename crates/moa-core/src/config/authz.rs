@@ -7,7 +7,13 @@
 
 use serde::{Deserialize, Serialize};
 
-const OPENFGA_DEFAULT_TIMEOUT_MS: u64 = 5000;
+/// Default per-request OpenFGA timeout.
+///
+/// Authorization checks are on a fail-closed hot path evaluated for nearly every
+/// request, so a degraded OpenFGA must not stall each request for long. Kept
+/// short (2s) to fail fast rather than amplify an OpenFGA slowdown into
+/// request-wide latency.
+const OPENFGA_DEFAULT_TIMEOUT_MS: u64 = 2000;
 
 /// Authorization subsystem configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,7 +68,8 @@ pub struct OpenFgaConfig {
     pub store_id: String,
     /// OpenFGA authorization model ID.
     pub model_id: String,
-    /// Per-request HTTP timeout in milliseconds.
+    /// Per-request HTTP timeout in milliseconds. Kept short because authz is a
+    /// fail-closed hot path; a slow OpenFGA should fail fast, not stall requests.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
 }

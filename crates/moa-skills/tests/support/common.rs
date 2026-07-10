@@ -36,7 +36,7 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 /// Successful session fixture with exactly five tool calls.
-pub const SESSION_WITH_5_TOOL_CALLS: &str = include_str!("fixtures/session_with_5_tool_calls.json");
+pub const SESSION_WITH_8_TOOL_CALLS: &str = include_str!("fixtures/session_with_8_tool_calls.json");
 /// Successful session fixture below the distillation threshold.
 pub const SESSION_WITH_4_TOOL_CALLS: &str = include_str!("fixtures/session_with_4_tool_calls.json");
 /// Baseline skill fixture used by improvement and regression tests.

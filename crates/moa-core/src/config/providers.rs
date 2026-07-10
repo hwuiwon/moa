@@ -2,6 +2,83 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::MoaError;
+
+/// Where provider in-flight concurrency is coordinated.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConcurrencyScope {
+    /// Each process enforces its own in-flight ceiling (single-node/dev default).
+    #[default]
+    Local,
+    /// The ceiling is shared across replicas via the runtime coordination store,
+    /// so an autoscaled fleet does not multiply a shared provider/API-key quota.
+    Global,
+}
+
+/// In-flight concurrency limits applied to outbound provider calls.
+///
+/// Provider rate limits are tied to the account's tier (Anthropic tier N, a
+/// Cohere trial vs production key, etc.), so the in-flight ceiling is expressed
+/// **per provider** via that provider's `max_concurrent_requests` — the natural
+/// place an operator states their tier. That one budget is shared across every
+/// call kind the credential serves (e.g. Cohere embed + rerank on one key).
+/// [`default_max_in_flight`](Self::default_max_in_flight) is the workspace-wide
+/// fallback for any provider that sets no explicit limit, so nothing is unbounded
+/// by accident (`0` = explicitly unbounded). `scope` selects process-local
+/// enforcement (default) or cross-replica coordination through the runtime store;
+/// `global` scope additionally uses `lease_ttl_ms` as the crash backstop for a
+/// held slot (see the limiter's TTL derivation).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderConcurrencyConfig {
+    /// Whether the ceiling is enforced per process or shared across replicas.
+    pub scope: ConcurrencyScope,
+    /// Fallback in-flight ceiling for any provider that sets no
+    /// `max_concurrent_requests` of its own (`0` = unbounded). Operators express
+    /// their per-provider account tier via each provider's own setting; this
+    /// keeps unconfigured providers bounded rather than unbounded.
+    pub default_max_in_flight: u32,
+    /// How long a caller waits for a slot before reporting "saturated", in ms.
+    pub block_threshold_ms: u64,
+    /// Global-scope lease time-to-live, in ms: the crash backstop for a held slot.
+    ///
+    /// Must exceed the longest provider call. Non-streaming calls are bounded by
+    /// the 60s HTTP request timeout; streaming chat has no whole-request timeout,
+    /// so this is the operator-tunable ceiling for the longest expected stream. A
+    /// killed replica's slots self-expire after this TTL.
+    pub lease_ttl_ms: u64,
+}
+
+impl Default for ProviderConcurrencyConfig {
+    fn default() -> Self {
+        Self {
+            scope: ConcurrencyScope::Local,
+            default_max_in_flight: 16,
+            block_threshold_ms: 2_000,
+            lease_ttl_ms: 600_000,
+        }
+    }
+}
+
+impl ProviderConcurrencyConfig {
+    /// Validates the concurrency settings, rejecting nonsensical durations.
+    pub fn validate(&self) -> Result<(), MoaError> {
+        if self.block_threshold_ms == 0 {
+            return Err(MoaError::ConfigError(
+                "providers.concurrency.block_threshold_ms must be greater than zero".to_string(),
+            ));
+        }
+        if self.scope == ConcurrencyScope::Global && self.lease_ttl_ms == 0 {
+            return Err(MoaError::ConfigError(
+                "providers.concurrency.lease_ttl_ms must be greater than zero for global scope"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// General runtime settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -75,10 +152,11 @@ pub struct ProviderCredentialConfig {
     /// Optional per-minute input-rate cap; `None` keeps the provider default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_inputs_per_min: Option<u32>,
-    /// Optional in-flight concurrency cap; `None` keeps the provider default
-    /// (embedding/rerank default to a small window; chat/LLM default to a
-    /// generous per-key in-flight bound). An explicit `0` opts back into
-    /// unbounded.
+    /// In-flight concurrency ceiling for this provider account — the natural
+    /// place to express the credential's tier. This one budget is shared across
+    /// every call kind the credential serves (chat, embedding, rerank). `None`
+    /// falls back to `providers.concurrency.default_max_in_flight`; an explicit
+    /// `0` opts back into unbounded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_requests: Option<u32>,
 }
@@ -115,11 +193,67 @@ pub struct ProvidersConfig {
     pub cohere: ProviderCredentialConfig,
     /// ZeroEntropy credentials.
     pub zeroentropy: ProviderCredentialConfig,
+    /// In-flight concurrency limits and coordination scope for provider calls.
+    #[serde(default)]
+    pub concurrency: ProviderConcurrencyConfig,
+}
+
+impl ProvidersConfig {
+    /// Validates provider configuration, currently the concurrency settings.
+    pub fn validate(&self) -> Result<(), MoaError> {
+        self.concurrency.validate()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ProviderCredentialConfig;
+    use super::{
+        ConcurrencyScope, ProviderConcurrencyConfig, ProviderCredentialConfig, ProvidersConfig,
+    };
+
+    #[test]
+    fn provider_concurrency_config_defaults_to_local_bounded_scope() {
+        // Pins: single-node/dev behavior defaults to process-local scope with a
+        // bounded fallback ceiling (nothing unbounded by accident), and validates.
+        let config = ProviderConcurrencyConfig::default();
+        assert_eq!(config.scope, ConcurrencyScope::Local);
+        assert_eq!(config.default_max_in_flight, 16);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn provider_concurrency_config_parses_global_scope_and_rejects_bad_durations() {
+        // Pins: operators opt into global coordination via config; a zero block
+        // threshold and a zero global lease TTL are rejected.
+        let parsed: ProvidersConfig = serde_json::from_value(serde_json::json!({
+            "concurrency": { "scope": "global", "default_max_in_flight": 64, "lease_ttl_ms": 300000 }
+        }))
+        .expect("providers config with global concurrency should parse");
+        assert_eq!(parsed.concurrency.scope, ConcurrencyScope::Global);
+        assert_eq!(parsed.concurrency.default_max_in_flight, 64);
+        assert!(parsed.validate().is_ok());
+
+        let bad = ProviderConcurrencyConfig {
+            block_threshold_ms: 0,
+            ..ProviderConcurrencyConfig::default()
+        };
+        assert!(bad.validate().is_err(), "zero block threshold is invalid");
+
+        let mut bad_ttl = ProviderConcurrencyConfig {
+            scope: ConcurrencyScope::Global,
+            lease_ttl_ms: 0,
+            ..ProviderConcurrencyConfig::default()
+        };
+        assert!(
+            bad_ttl.validate().is_err(),
+            "global scope with zero lease TTL is invalid"
+        );
+        bad_ttl.scope = ConcurrencyScope::Local;
+        assert!(
+            bad_ttl.validate().is_ok(),
+            "a zero lease TTL is only rejected under global scope"
+        );
+    }
 
     #[test]
     fn provider_credential_config_round_trips_rate_and_concurrency_caps() {

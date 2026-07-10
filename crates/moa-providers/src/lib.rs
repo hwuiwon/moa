@@ -20,6 +20,7 @@ pub use adapters::openai_responses::debug_build_openai_request_body;
 pub use adapters::scripted::{
     ScriptedBlock, ScriptedFault, ScriptedProvider, ScriptedResponse, ScriptedTiming,
 };
+pub use core::concurrency_factory::install_coordination_store;
 pub use core::factory::{
     build_provider_from_config, build_provider_from_model, build_provider_from_selection,
     resolve_provider_selection, resolve_rewriter_provider,
