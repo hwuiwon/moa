@@ -1,8 +1,8 @@
 //! Skill lesson graph helpers.
 
 use chrono::Utc;
-use moa_core::RlsContext;
-use moa_core::{MoaError, Result, StoragePartitionId};
+use moa_core::types::memory::RlsContext;
+use moa_core::{error::MoaError, error::Result, types::identifiers::StoragePartitionId};
 use moa_db::ScopedConn;
 use moa_memory_graph::{NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
@@ -118,7 +118,7 @@ fn map_graph_error(error: moa_memory_graph::GraphError) -> MoaError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moa_core::TenantId;
+    use moa_core::types::identifiers::TenantId;
 
     /// Builds a lesson context whose pool is never connected.
     ///

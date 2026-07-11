@@ -1,6 +1,6 @@
 //! Integration coverage for external vector-backend sync outbox behavior.
 
-use moa_core::{MoaConfig, RlsContext, TenantId};
+use moa_core::{config::MoaConfig, types::identifiers::TenantId, types::memory::RlsContext};
 use moa_db::ScopedConn;
 use moa_memory_vector::{VECTOR_DIMENSION, VectorItem, VectorStoreFactory, VectorSyncReport};
 use moa_session::testing;

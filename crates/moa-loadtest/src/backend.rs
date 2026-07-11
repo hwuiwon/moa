@@ -88,7 +88,7 @@ impl SessionTarget for RemoteTarget {
                 id: self.identity.id,
             }),
             contact_promoted_from_id: None,
-            agent_context: Some(moa_core::AgentContext::system_default()),
+            agent_context: Some(moa_core::types::agent::AgentContext::system_default()),
             total_input_tokens: 0,
             total_input_tokens_uncached: 0,
             total_input_tokens_cache_write: 0,
@@ -197,9 +197,9 @@ impl SessionTarget for RemoteTarget {
         self.client
             .get_events(
                 session_id,
-                moa_core::EventRange {
+                moa_core::types::events_stream::EventRange {
                     from_seq: Some(after_seq + 1),
-                    ..moa_core::EventRange::default()
+                    ..moa_core::types::events_stream::EventRange::default()
                 },
             )
             .await
@@ -208,7 +208,10 @@ impl SessionTarget for RemoteTarget {
 
     async fn recent_events(&self, session_id: SessionId) -> Result<Vec<EventRecord>> {
         self.client
-            .get_events(session_id, moa_core::EventRange::recent(50))
+            .get_events(
+                session_id,
+                moa_core::types::events_stream::EventRange::recent(50),
+            )
             .await
             .map_err(client_error)
     }
@@ -366,7 +369,7 @@ impl RemoteHttpClient {
     async fn get_events(
         &self,
         session_id: SessionId,
-        range: moa_core::EventRange,
+        range: moa_core::types::events_stream::EventRange,
     ) -> std::result::Result<Vec<EventRecord>, RemoteHttpError> {
         self.post_call(
             "/SessionStore/get_events",

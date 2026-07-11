@@ -6,7 +6,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moa_core::config::MemoryExtractionConfig;
 use moa_core::{
-    CompletionRequest, CompletionResponse, ContextMessage, LLMProvider, MoaConfig, ModelId,
+    config::MoaConfig, traits::LLMProvider, types::completion::CompletionRequest,
+    types::completion::CompletionResponse, types::context::ContextMessage,
+    types::identifiers::ModelId,
 };
 use moa_providers::build_provider_from_model;
 use serde_json::json;
@@ -197,8 +199,9 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        CompletionResponse, CompletionStream, ModelCapabilities, StopReason, TokenPricing,
-        TokenUsage, ToolCallFormat,
+        types::completion::CompletionResponse, types::completion::CompletionStream,
+        types::completion::StopReason, types::completion::TokenUsage,
+        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
 
     use super::*;
@@ -237,7 +240,10 @@ mod tests {
             }
         }
 
-        async fn complete(&self, request: CompletionRequest) -> moa_core::Result<CompletionStream> {
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> moa_core::error::Result<CompletionStream> {
             *self.request.lock().expect("capture request") = Some(request);
             Ok(CompletionStream::from_response(CompletionResponse {
                 text: self.response.clone(),

@@ -1,0 +1,306 @@
+//! Linked-provider request, response, and webhook domain types.
+
+use chrono::{DateTime, Utc};
+use moa_core::types::identifiers::TenantId;
+use reqwest::header::HeaderMap;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use uuid::Uuid;
+
+use super::KnowledgeConnection;
+
+/// Linked-account provider identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkedProviderKind {
+    /// Nango linked-account provider.
+    Nango,
+    /// Merge linked-account provider.
+    Merge,
+}
+
+impl LinkedProviderKind {
+    /// Returns the stable provider identifier.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Nango => "nango",
+            Self::Merge => "merge",
+        }
+    }
+}
+
+/// Parser provider identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParserKind {
+    /// Local native parser backed by deterministic MOA parsing and liteparse.
+    Native,
+    /// LlamaParse cloud parser.
+    LlamaParse,
+    /// Unstructured partitioning parser.
+    Unstructured,
+    /// Reducto parser.
+    Reducto,
+}
+
+impl ParserKind {
+    /// Returns the stable parser identifier.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::LlamaParse => "llamaparse",
+            Self::Unstructured => "unstructured",
+            Self::Reducto => "reducto",
+        }
+    }
+}
+
+/// Stored provider webhook event used for idempotent delivery handling.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeProviderEventRecord {
+    /// Tenant-owned provider-event row identifier.
+    pub provider_event_uid: Uuid,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Optional linked connection associated with the event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_uid: Option<Uuid>,
+    /// Linked-account provider that emitted the event.
+    pub provider: String,
+    /// Provider event identifier used for idempotency.
+    pub provider_event_id: String,
+    /// Provider event type.
+    pub event_type: String,
+    /// Local event status.
+    pub status: String,
+    /// Redacted provider payload.
+    #[serde(default)]
+    pub payload: Value,
+    /// Whether this delivery duplicated an already recorded event.
+    pub duplicate: bool,
+}
+
+/// Request to create a provider link token.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateLinkTokenRequest {
+    /// Tenant that will own the connection.
+    pub tenant_id: TenantId,
+    /// Connector identifier.
+    pub connector: String,
+    /// Optional caller-facing account reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_account_id: Option<String>,
+    /// Optional end-user email address required by some link-token providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_user_email_address: Option<String>,
+    /// Optional redirect URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_url: Option<String>,
+    /// Provider-native selected source state requested before link creation.
+    #[serde(default)]
+    pub source_selection: Value,
+}
+
+/// Provider link token.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinkToken {
+    /// Provider identifier.
+    pub provider: String,
+    /// Short-lived token.
+    pub token: String,
+    /// Optional hosted link URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_url: Option<String>,
+    /// Token expiration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Request to exchange a provider public token.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExchangePublicTokenRequest {
+    /// Tenant that owns the link.
+    pub tenant_id: TenantId,
+    /// Token returned by provider-hosted UI.
+    pub public_token: String,
+    /// Provider-native selected source state collected by the frontend.
+    #[serde(default)]
+    pub source_selection: Value,
+}
+
+/// Request to apply provider-native selected source state to a linked account.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApplySourceSelectionRequest {
+    /// Connection whose provider-native selected sources should be applied.
+    pub connection: KnowledgeConnection,
+}
+
+/// Linked account returned by a provider after token exchange.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinkedAccount {
+    /// Provider identifier.
+    pub provider: String,
+    /// Provider connector.
+    pub connector: String,
+    /// Provider account identifier.
+    pub provider_account_id: String,
+    /// Credential vault reference or provider token reference.
+    pub credential_ref: String,
+    /// Raw credential material returned by the provider, kept in memory only until stored.
+    #[serde(skip)]
+    pub credential_material: Option<String>,
+    /// Safe account metadata.
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+/// Request to trigger a provider sync.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriggerSyncRequest {
+    /// Connection to sync.
+    pub connection: KnowledgeConnection,
+    /// Provider model or collection to sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Provider sync variant or partition name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+}
+
+/// Provider sync trigger acknowledgement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriggeredSync {
+    /// Provider identifier.
+    pub provider: String,
+    /// Provider sync identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_sync_id: Option<String>,
+    /// Provider status.
+    pub status: String,
+    /// Safe metadata.
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+/// Request to list changed provider records.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListChangedRecordsRequest {
+    /// Connection to inspect.
+    pub connection: KnowledgeConnection,
+    /// Provider cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Lower bound for provider-side modified timestamps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_after: Option<DateTime<Utc>>,
+    /// Maximum records to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Provider sync variant or partition name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+}
+
+/// Page of normalized provider records.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordPage {
+    /// Normalized records.
+    #[serde(default)]
+    pub records: Vec<ProviderRecord>,
+    /// Cursor for the next page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+/// Provider record before normalization into a knowledge object.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderRecord {
+    /// Provider source identifier.
+    pub source_id: String,
+    /// Source object type.
+    pub object_type: String,
+    /// Optional title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Optional URI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_uri: Option<String>,
+    /// Optional change token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_token: Option<String>,
+    /// Whether the provider reports this record as deleted.
+    #[serde(default)]
+    pub deleted: bool,
+    /// Source update timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_updated_at: Option<DateTime<Utc>>,
+    /// Safe metadata.
+    #[serde(default)]
+    pub metadata: Value,
+    /// Raw record payload kept in memory for normalization only.
+    #[serde(default)]
+    pub payload: Value,
+}
+
+/// Request to fetch the byte content of one provider record.
+///
+/// Mirrors the owned-request shape of [`ListChangedRecordsRequest`] and
+/// [`TriggerSyncRequest`]: the connection carries the provider account identity
+/// and connector needed to authorize the fetch, and the record identifies the
+/// specific source object whose content should be downloaded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FetchRecordContentRequest {
+    /// Connection whose provider account authorizes the fetch.
+    pub connection: KnowledgeConnection,
+    /// Normalized record whose byte content should be downloaded.
+    pub record: ProviderRecord,
+}
+
+/// Byte content downloaded for one provider record.
+///
+/// Kept in memory only for the duration of one ingestion pass; the bytes are
+/// handed straight to a document parser and never persisted or serialized into
+/// the durable sync journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedRecordContent {
+    /// Raw downloaded bytes, subject to the provider size cap.
+    pub bytes: Vec<u8>,
+    /// Reported content MIME type, when the provider supplies one.
+    pub mime_type: Option<String>,
+}
+
+/// One integration a linked-account provider can connect for a tenant.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderIntegration {
+    /// Stable integration identifier passed as `connector` in the link flow.
+    pub id: String,
+    /// Human-readable name for connect UIs.
+    pub display_name: String,
+    /// Optional logo URL supplied by the provider.
+    pub logo_url: Option<String>,
+}
+
+/// Verified provider webhook event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WebhookEvent {
+    /// Provider identifier.
+    pub provider: String,
+    /// Event identifier.
+    pub event_id: String,
+    /// Event type.
+    pub event_type: String,
+    /// Safe metadata.
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+/// Provider webhook verification input.
+#[derive(Debug, Clone)]
+pub struct WebhookVerification {
+    /// Webhook headers.
+    pub headers: HeaderMap,
+    /// Webhook body bytes.
+    pub body: bytes::Bytes,
+}

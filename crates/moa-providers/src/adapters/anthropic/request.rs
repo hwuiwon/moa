@@ -23,7 +23,7 @@ pub(super) fn build_request_body(
     // built message under the boundary gets a moving cache breakpoint.
     let stable_history_end = request
         .metadata
-        .get(moa_core::STABLE_HISTORY_END_METADATA_KEY)
+        .get(moa_core::types::completion::STABLE_HISTORY_END_METADATA_KEY)
         .and_then(Value::as_u64)
         .map(|value| value as usize);
     let mut frozen_history_position = None;

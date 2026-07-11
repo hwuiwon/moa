@@ -7,8 +7,8 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_core::RlsContext;
-use moa_core::{MoaError, TenantId, traits::EmbeddingProvider};
+use moa_core::types::memory::RlsContext;
+use moa_core::{error::MoaError, traits::EmbeddingProvider, types::identifiers::TenantId};
 use moa_knowledge::{
     chunking::ChunkingConfig,
     domain::{
@@ -97,7 +97,7 @@ impl EmbeddingProvider for TestEmbedder {
         4
     }
 
-    async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+    async fn embed(&self, inputs: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
         if matches!(self.mode, EmbedderMode::Fail) {
             return Err(MoaError::ProviderError(
                 "fixture embedding backend unavailable".to_string(),

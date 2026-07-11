@@ -1,6 +1,6 @@
 //! Character-limit test fixtures.
 
-use moa_core::{MessageContent, OutboundMessage};
+use moa_core::{types::channel::MessageContent, types::channel::OutboundMessage};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Builds a simple outbound text message with no reply target.

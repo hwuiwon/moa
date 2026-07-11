@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    BranchManager, CheckpointHandle, CheckpointInfo, MoaConfig, MoaError, Result, SessionId,
+    config::MoaConfig, error::MoaError, error::Result, traits::BranchManager,
+    types::identifiers::SessionId, types::session::CheckpointHandle,
+    types::session::CheckpointInfo,
 };
 use reqwest::{Client, Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};

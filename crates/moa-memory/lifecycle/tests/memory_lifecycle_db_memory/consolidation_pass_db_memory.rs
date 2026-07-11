@@ -2,7 +2,7 @@
 //! consolidation pass, and the incremental consolidation cursor.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use moa_core::{StoragePartitionId, TenantId};
+use moa_core::{types::identifiers::StoragePartitionId, types::identifiers::TenantId};
 use moa_memory_lifecycle::{
     ConsolidationOptions, TenantConsolidationCursor, advance_consolidation_watermark,
     consolidate_tenant, decay_confidence, decay_target_confidence, expire_idle_facts,

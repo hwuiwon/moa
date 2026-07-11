@@ -9,7 +9,7 @@
 
 use chrono::DateTime;
 use clickhouse::Client;
-use moa_core::ClickHouseConfig;
+use moa_core::config::ClickHouseConfig;
 use moa_core::wire::analytics::{AnalyticsCell, AnalyticsColumn, AnalyticsFieldKind};
 
 use crate::compiler::{AnalyticsBindValue, CompiledAnalyticsQuery};

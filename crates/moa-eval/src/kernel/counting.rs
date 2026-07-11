@@ -46,7 +46,7 @@ where
         self.inner.model_version()
     }
 
-    async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+    async fn embed(&self, inputs: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
         let embeddings = self.inner.embed(inputs).await?;
         let tokens = inputs
             .iter()
@@ -155,7 +155,7 @@ where
         query: &str,
         documents: &[String],
         top_n: usize,
-    ) -> moa_core::Result<Vec<RerankHit>> {
+    ) -> moa_core::error::Result<Vec<RerankHit>> {
         let hits = self.inner.rerank(model, query, documents, top_n).await?;
         self.ledger.lock().await.record_rerank(1);
         Ok(hits)
@@ -164,7 +164,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use moa_core::MoaError;
+    use moa_core::error::MoaError;
     use moa_memory_ingest::{ScriptedFactExtractor, TurnChunk};
     use moa_providers::NoopReranker;
 
@@ -248,7 +248,7 @@ mod tests {
             self.vector.len()
         }
 
-        async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+        async fn embed(&self, inputs: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
             if inputs.len() != 1
                 || inputs.first().map(String::as_str) != Some(self.expected_input.as_str())
             {

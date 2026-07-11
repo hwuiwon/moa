@@ -1,7 +1,10 @@
 //! Score card schema and analytics-score flattening helpers.
 
 use chrono::{DateTime, Utc};
-use moa_core::{SessionId, StoragePartitionId, UserId};
+use moa_core::{
+    types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+    types::identifiers::UserId,
+};
 use moa_eval_core::ConversationCost;
 use moa_lineage_core::{ScoreRecord, ScoreSource, ScoreTarget, ScoreValue as LineageScoreValue};
 use serde::{Deserialize, Serialize};

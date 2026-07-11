@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
-use moa_core::{CompletionRequest, ContextMessage, JsonResponseFormat, ModelId};
+use moa_core::{
+    types::completion::CompletionRequest, types::completion::JsonResponseFormat,
+    types::context::ContextMessage, types::identifiers::ModelId,
+};
 use moa_providers::debug_build_gemini_request_body;
 use serde_json::{Value, json};
 

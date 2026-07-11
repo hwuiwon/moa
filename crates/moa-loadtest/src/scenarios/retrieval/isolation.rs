@@ -233,13 +233,13 @@ pub(super) async fn first_dlq(pool: &PgPool, tenant_id: TenantId) -> Result<i64,
 pub(super) async fn app_scoped_conn<'a>(
     pool: &'a PgPool,
     tenant_id: TenantId,
-) -> moa_core::Result<ScopedConn<'a>> {
+) -> moa_core::error::Result<ScopedConn<'a>> {
     let scope = RlsContext::tenant(tenant_id);
     let mut conn = ScopedConn::begin(pool, &scope).await?;
     sqlx::query("SET LOCAL ROLE moa_app")
         .execute(conn.as_mut())
         .await
-        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     Ok(conn)
 }
 

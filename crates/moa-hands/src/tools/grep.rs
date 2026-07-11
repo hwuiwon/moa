@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ignore::WalkBuilder;
-use moa_core::{MoaError, Result, ToolContent, ToolOutput};
+use moa_core::{
+    error::MoaError, error::Result, types::tools::ToolContent, types::tools::ToolOutput,
+};
 use regex::Regex;
 use serde::Deserialize;
 

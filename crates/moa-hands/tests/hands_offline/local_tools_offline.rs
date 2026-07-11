@@ -401,7 +401,10 @@ async fn file_operations_reject_path_traversal() {
         .await
         .unwrap_err();
 
-    assert!(matches!(error, moa_core::MoaError::PermissionDenied(_)));
+    assert!(matches!(
+        error,
+        moa_core::error::MoaError::PermissionDenied(_)
+    ));
 }
 
 #[tokio::test]
@@ -679,7 +682,7 @@ async fn bash_respects_timeout() {
         .unwrap_err();
 
     assert!(
-        matches!(error, moa_core::MoaError::ToolError(message) if message.contains("timed out"))
+        matches!(error, moa_core::error::MoaError::ToolError(message) if message.contains("timed out"))
     );
 }
 
@@ -710,7 +713,7 @@ async fn local_bash_hard_cancel_kills_running_process() {
     cancel_token.cancel();
 
     let error = task.await.unwrap().unwrap_err();
-    assert!(matches!(error, moa_core::MoaError::Cancelled));
+    assert!(matches!(error, moa_core::error::MoaError::Cancelled));
     assert!(started.elapsed() < Duration::from_secs(3));
 }
 
@@ -733,7 +736,7 @@ async fn local_provider_installs_skill_package_files() {
         .await
         .unwrap();
     let sandbox_dir = match &handle {
-        moa_core::HandHandle::Local { sandbox_dir } => sandbox_dir.clone(),
+        moa_core::types::hands::HandHandle::Local { sandbox_dir } => sandbox_dir.clone(),
         other => panic!("expected local hand, got {other:?}"),
     };
 
@@ -815,7 +818,10 @@ async fn check_policy_denies_configured_tool_and_allows_others() {
         .await
         .unwrap();
     assert!(
-        matches!(denied.effect, moa_core::ActionPolicyEffect::Deny),
+        matches!(
+            denied.effect,
+            moa_core::types::action_policy::ActionPolicyEffect::Deny
+        ),
         "expected Deny for bash, got {:?}",
         denied.effect
     );
@@ -832,7 +838,10 @@ async fn check_policy_denies_configured_tool_and_allows_others() {
         .await
         .unwrap();
     assert!(
-        matches!(allowed.effect, moa_core::ActionPolicyEffect::Allow),
+        matches!(
+            allowed.effect,
+            moa_core::types::action_policy::ActionPolicyEffect::Allow
+        ),
         "expected Allow for file_read, got {:?}",
         allowed.effect
     );
@@ -858,7 +867,7 @@ async fn execute_authorized_rejects_unregistered_tool_name() {
         .await
         .unwrap_err();
     match error {
-        moa_core::MoaError::ToolError(message) => {
+        moa_core::error::MoaError::ToolError(message) => {
             assert!(
                 message.contains("unknown tool"),
                 "unexpected error message: {message}"

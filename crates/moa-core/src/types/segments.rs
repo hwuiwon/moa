@@ -3,7 +3,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{SegmentAssessment, SegmentId, SessionId};
+use super::{
+    identifiers::SegmentId, identifiers::SessionId, segment_assessment::SegmentAssessment,
+};
 
 /// Derives a stable segment identifier from a session identifier and segment index.
 #[must_use]

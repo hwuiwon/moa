@@ -5,9 +5,12 @@ use std::time::Duration;
 
 use moa_brain::segment_assessment::verification_signal::{self, VerificationKind};
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, Result, SessionId,
-    StopReason, ToolCallContent, ToolCallId, ToolInvocation, ToolOutput, TurnOutcome,
-    delegation_tool_schemas, procedure_tool_schemas,
+    error::Result, types::completion::CompletionContent, types::completion::CompletionRequest,
+    types::completion::CompletionResponse, types::completion::StopReason,
+    types::completion::ToolCallContent, types::completion::ToolInvocation,
+    types::context::ContextMessage, types::identifiers::SessionId, types::identifiers::ToolCallId,
+    types::procedure_tools::procedure_tool_schemas, types::session::TurnOutcome,
+    types::tools::ToolOutput, types::worker::tool_schema::delegation_tool_schemas,
 };
 use moa_security::{ToolInputCanaryScreening, screen_tool_input_for_canary};
 use uuid::Uuid;
@@ -332,8 +335,10 @@ mod tests {
     use std::collections::BTreeSet;
 
     use moa_core::{
-        CompletionContent, CompletionRequest, CompletionResponse, ModelId, SessionId, TokenUsage,
-        ToolInvocation, TurnOutcome,
+        types::completion::CompletionContent, types::completion::CompletionRequest,
+        types::completion::CompletionResponse, types::completion::TokenUsage,
+        types::completion::ToolInvocation, types::identifiers::ModelId,
+        types::identifiers::SessionId, types::session::TurnOutcome,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -347,7 +352,7 @@ mod tests {
     fn completion_response(
         text: &str,
         content: Vec<CompletionContent>,
-        stop_reason: moa_core::StopReason,
+        stop_reason: moa_core::types::completion::StopReason,
     ) -> CompletionResponse {
         CompletionResponse {
             text: text.to_string(),
@@ -364,15 +369,17 @@ mod tests {
     fn tool_use_response_continues_the_turn() {
         let response = completion_response(
             "working",
-            vec![CompletionContent::ToolCall(moa_core::ToolCallContent {
-                invocation: ToolInvocation {
-                    id: Some("provider-tool-id".to_string()),
-                    name: "file_read".to_string(),
-                    input: json!({"path":"/tmp/test.txt"}),
+            vec![CompletionContent::ToolCall(
+                moa_core::types::completion::ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some("provider-tool-id".to_string()),
+                        name: "file_read".to_string(),
+                        input: json!({"path":"/tmp/test.txt"}),
+                    },
+                    provider_metadata: None,
                 },
-                provider_metadata: None,
-            })],
-            moa_core::StopReason::ToolUse,
+            )],
+            moa_core::types::completion::StopReason::ToolUse,
         );
 
         assert_eq!(turn_outcome_for_response(&response), TurnOutcome::Continue);
@@ -388,7 +395,7 @@ mod tests {
                 name: "bash".to_string(),
                 input: json!({"cmd": "cargo test -p moa-orchestrator"}),
             },
-            &moa_core::ToolOutput::from_process(
+            &moa_core::types::tools::ToolOutput::from_process(
                 String::new(),
                 "test failed".to_string(),
                 1,
@@ -417,7 +424,7 @@ mod tests {
                 name: "bash".to_string(),
                 input: json!({"cmd": "cargo test -p moa-orchestrator"}),
             },
-            &moa_core::ToolOutput::from_process(
+            &moa_core::types::tools::ToolOutput::from_process(
                 String::new(),
                 "test failed".to_string(),
                 1,
@@ -429,7 +436,7 @@ mod tests {
             vec![CompletionContent::Text(
                 "I couldn't finish the fix.".to_string(),
             )],
-            moa_core::StopReason::EndTurn,
+            moa_core::types::completion::StopReason::EndTurn,
         );
 
         let (visible, annotated) = annotate_unresolved_verification(&response, &evidence);
@@ -439,7 +446,10 @@ mod tests {
             visible.text,
             "I couldn't finish the fix.\n\nVerification not green: cargo test -p moa-orchestrator exited 1 this turn and was not rerun successfully."
         );
-        assert_eq!(visible.stop_reason, moa_core::StopReason::EndTurn);
+        assert_eq!(
+            visible.stop_reason,
+            moa_core::types::completion::StopReason::EndTurn
+        );
         assert_eq!(visible.thought_signature, None);
     }
 
@@ -453,7 +463,7 @@ mod tests {
                 name: "bash".to_string(),
                 input: json!({"cmd": "cargo test"}),
             },
-            &moa_core::ToolOutput::from_process(
+            &moa_core::types::tools::ToolOutput::from_process(
                 String::new(),
                 String::new(),
                 1,
@@ -462,15 +472,17 @@ mod tests {
         );
         let response = completion_response(
             "I'll rerun it.",
-            vec![CompletionContent::ToolCall(moa_core::ToolCallContent {
-                invocation: ToolInvocation {
-                    id: Some("provider-tool-id".to_string()),
-                    name: "bash".to_string(),
-                    input: json!({"cmd":"cargo test"}),
+            vec![CompletionContent::ToolCall(
+                moa_core::types::completion::ToolCallContent {
+                    invocation: ToolInvocation {
+                        id: Some("provider-tool-id".to_string()),
+                        name: "bash".to_string(),
+                        input: json!({"cmd":"cargo test"}),
+                    },
+                    provider_metadata: None,
                 },
-                provider_metadata: None,
-            })],
-            moa_core::StopReason::ToolUse,
+            )],
+            moa_core::types::completion::StopReason::ToolUse,
         );
 
         let (visible, annotated) = annotate_unresolved_verification(&response, &evidence);
@@ -490,7 +502,7 @@ mod tests {
         };
         evidence.record_tool_result(
             &invocation,
-            &moa_core::ToolOutput::from_process(
+            &moa_core::types::tools::ToolOutput::from_process(
                 String::new(),
                 String::new(),
                 1,
@@ -499,7 +511,7 @@ mod tests {
         );
         evidence.record_tool_result(
             &invocation,
-            &moa_core::ToolOutput::from_process(
+            &moa_core::types::tools::ToolOutput::from_process(
                 "ok".to_string(),
                 String::new(),
                 0,
@@ -527,7 +539,7 @@ mod tests {
         let response = completion_response(
             "",
             vec![CompletionContent::Text(String::new())],
-            moa_core::StopReason::Cancelled,
+            moa_core::types::completion::StopReason::Cancelled,
         );
 
         assert_eq!(turn_outcome_for_response(&response), TurnOutcome::Cancelled);
@@ -546,7 +558,7 @@ mod tests {
             Uuid::parse_str("11111111-1111-4111-8111-111111111111")
                 .expect("fixture UUID should parse"),
         );
-        let call = moa_core::ToolCallContent {
+        let call = moa_core::types::completion::ToolCallContent {
             invocation: ToolInvocation {
                 id: Some("provider-tool-id".to_string()),
                 name: "bash".to_string(),
@@ -573,7 +585,7 @@ mod tests {
         let response = completion_response(
             &"a".repeat(300),
             vec![CompletionContent::Text("ok".to_string())],
-            moa_core::StopReason::EndTurn,
+            moa_core::types::completion::StopReason::EndTurn,
         );
 
         let summary = summarize_response_text(&response).expect("summary should exist");
@@ -617,11 +629,13 @@ mod tests {
 
         let names = allowed_tool_names(&request);
         assert_eq!(names.len(), 6);
-        assert!(moa_core::is_delegation_tool_name("spawn_worker"));
-        assert!(moa_core::is_delegation_tool_name("wait_worker"));
-        assert!(moa_core::is_delegation_tool_name("message_worker"));
-        assert!(moa_core::is_delegation_tool_name("list_workers"));
-        assert!(moa_core::is_delegation_tool_name("cancel_worker"));
-        assert!(moa_core::is_delegation_tool_name("provide_worker_input"));
+        assert!(moa_core::types::worker::tool_schema::is_delegation_tool_name("spawn_worker"));
+        assert!(moa_core::types::worker::tool_schema::is_delegation_tool_name("wait_worker"));
+        assert!(moa_core::types::worker::tool_schema::is_delegation_tool_name("message_worker"));
+        assert!(moa_core::types::worker::tool_schema::is_delegation_tool_name("list_workers"));
+        assert!(moa_core::types::worker::tool_schema::is_delegation_tool_name("cancel_worker"));
+        assert!(
+            moa_core::types::worker::tool_schema::is_delegation_tool_name("provide_worker_input")
+        );
     }
 }

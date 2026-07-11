@@ -2,7 +2,7 @@
 
 use chrono::{TimeZone, Utc};
 use moa_artifacts::registry::{ArtifactRun, ArtifactRunStatus};
-use moa_core::{ActionRuleScope, TenantId};
+use moa_core::{types::action_policy::ActionRuleScope, types::identifiers::TenantId};
 use moa_orchestrator::services::skills::{
     procedure_run_summary_from_run, skill_summary_from_skill,
 };
@@ -94,7 +94,7 @@ fn procedure_run_summary_from_run_preserves_dashboard_fields() {
         run_uid: run_id,
         artifact_uid: Some(artifact_uid),
         revision_uid: Some(revision_uid),
-        session_id: Some(moa_core::SessionId(session_id)),
+        session_id: Some(moa_core::types::identifiers::SessionId(session_id)),
         procedure_ref: "skill://support-flow".to_string(),
         status: ArtifactRunStatus::PendingReview,
         current_node_id: Some("review".to_string()),
@@ -109,7 +109,10 @@ fn procedure_run_summary_from_run_preserves_dashboard_fields() {
     assert_eq!(summary.run_id, run_id);
     assert_eq!(summary.artifact_uid, Some(artifact_uid));
     assert_eq!(summary.revision_uid, Some(revision_uid));
-    assert_eq!(summary.session_id, Some(moa_core::SessionId(session_id)));
+    assert_eq!(
+        summary.session_id,
+        Some(moa_core::types::identifiers::SessionId(session_id))
+    );
     assert_eq!(summary.procedure_ref, "skill://support-flow");
     assert_eq!(summary.status, "pending_review");
     assert_eq!(summary.current_node_id.as_deref(), Some("review"));

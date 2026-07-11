@@ -16,8 +16,9 @@ use anyhow::{Context, Result, bail};
 use moa_core::traits::Identity;
 use moa_core::wire::turn::{StartTurnRequest, StartTurnResponse};
 use moa_core::{
-    Event, EventRange, EventRecord, ModelId, SessionActorRef, SessionId, SessionStatus, ToolCallId,
-    ToolContent,
+    events::Event, types::contact::SessionActorRef, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::ToolCallId, types::session::SessionStatus, types::tools::ToolContent,
 };
 use tempfile::TempDir;
 use tokio::time::sleep;
@@ -602,7 +603,7 @@ fn describe_events(events: &[EventRecord]) -> String {
         .join("\n")
 }
 
-fn tool_output_text(output: &moa_core::ToolOutput) -> String {
+fn tool_output_text(output: &moa_core::types::tools::ToolOutput) -> String {
     output
         .content
         .iter()

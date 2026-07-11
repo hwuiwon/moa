@@ -1,15 +1,16 @@
 //! Restate service for local API key lifecycle operations.
 
 use moa_auth_providers::api_keys::{CreateApiKeyRequest, CreateApiKeyResponse, KeyListItem};
-use moa_authz::{AuthzCheckError, require_authz_with_delegation};
+use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::Identity;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::{
+    require_configured_fga_client, require_identity, translate_authz_error,
+};
 use crate::identity_admin::api_keys as key_admin;
 
 /// Restate service surface for local API key management.
@@ -32,8 +33,19 @@ pub trait ApiKeys {
 }
 
 /// Concrete API key management service implementation.
-#[derive(Clone, Default)]
-pub struct ApiKeysImpl;
+#[derive(Clone)]
+pub struct ApiKeysImpl {
+    pool: sqlx::PgPool,
+    fga_client: Option<FgaClient>,
+}
+
+impl ApiKeysImpl {
+    /// Creates the API-key service with its persistence and authorization dependencies.
+    #[must_use]
+    pub fn new(pool: sqlx::PgPool, fga_client: Option<FgaClient>) -> Self {
+        Self { pool, fga_client }
+    }
+}
 
 impl ApiKeys for ApiKeysImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -46,13 +58,18 @@ impl ApiKeys for ApiKeysImpl {
         let request = request.into_inner();
         validate_key_name(&request.name)?;
         let identity = require_identity(&ctx)?;
-        require_tenant_member(&identity).await?;
+        require_tenant_member(self.fga_client.clone(), &identity).await?;
         if let Some(agent_id) = request.for_agent_id {
-            require_agent_operator_or_tenant_admin(&identity, agent_id, identity.tenant_id.0)
-                .await?;
+            require_agent_operator_or_tenant_admin(
+                self.fga_client.clone(),
+                &identity,
+                agent_id,
+                identity.tenant_id.0,
+            )
+            .await?;
         }
 
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         Ok(ctx
             .run(|| async move {
                 create_key_for_identity(pool, identity, request)
@@ -68,7 +85,7 @@ impl ApiKeys for ApiKeysImpl {
     async fn list(&self, ctx: Context<'_>) -> Result<Json<Vec<KeyListItem>>, HandlerError> {
         annotate_restate_handler_span("ApiKeys", "list");
         let identity = require_identity(&ctx)?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         Ok(ctx
             .run(|| async move { list_keys_for_identity(pool, identity).await.map(Json::from) })
             .name("api_keys_list")
@@ -85,8 +102,8 @@ impl ApiKeys for ApiKeysImpl {
         annotate_restate_handler_span("ApiKeys", "rotate");
         let identity = require_identity(&ctx)?;
         let key_id = id.into_inner();
-        let pool = OrchestratorCtx::current_graph_pool();
-        let fga = OrchestratorCtx::current().fga_client();
+        let pool = self.pool.clone();
+        let fga = self.fga_client.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -104,8 +121,8 @@ impl ApiKeys for ApiKeysImpl {
         annotate_restate_handler_span("ApiKeys", "revoke");
         let identity = require_identity(&ctx)?;
         let key_id = id.into_inner();
-        let pool = OrchestratorCtx::current_graph_pool();
-        let fga = OrchestratorCtx::current().fga_client();
+        let pool = self.pool.clone();
+        let fga = self.fga_client.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -161,8 +178,11 @@ fn validate_key_name(name: &str) -> Result<(), HandlerError> {
     Ok(())
 }
 
-async fn require_tenant_member(identity: &Identity) -> Result<(), HandlerError> {
-    let fga = require_fga_client()?;
+async fn require_tenant_member(
+    fga_client: Option<FgaClient>,
+    identity: &Identity,
+) -> Result<(), HandlerError> {
+    let fga = require_configured_fga_client(fga_client)?;
     require_authz_with_delegation(
         &fga,
         identity,
@@ -175,11 +195,12 @@ async fn require_tenant_member(identity: &Identity) -> Result<(), HandlerError> 
 }
 
 async fn require_agent_operator_or_tenant_admin(
+    fga_client: Option<FgaClient>,
     identity: &Identity,
     agent_id: Uuid,
     tenant_id: Uuid,
 ) -> Result<(), HandlerError> {
-    let fga = require_fga_client()?;
+    let fga = require_configured_fga_client(fga_client)?;
     let operator = require_authz_with_delegation(
         &fga,
         identity,

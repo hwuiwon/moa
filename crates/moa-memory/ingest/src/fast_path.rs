@@ -6,10 +6,12 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_core::RlsContext;
+use moa_core::types::memory::RlsContext;
 use moa_core::{
-    ContactId, MemoryToolExecutor, MoaError, SessionActorRef, SessionMeta, StoragePartitionId,
-    TenantId, ToolOutput, traits::EmbeddingProvider,
+    error::MoaError, traits::EmbeddingProvider, traits::MemoryToolExecutor,
+    types::contact::ContactId, types::contact::SessionActorRef,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::session::SessionMeta, types::tools::ToolOutput,
 };
 use moa_db::ScopedConn;
 use moa_memory_graph::{
@@ -504,7 +506,7 @@ pub async fn execute_memory_tool(
     session: &SessionMeta,
     tool_name: &str,
     input: &Value,
-) -> moa_core::Result<ToolOutput> {
+) -> moa_core::error::Result<ToolOutput> {
     let started = Instant::now();
     let output = match tool_name {
         "memory_remember" => Ok(execute_remember_tool(session, input, started)
@@ -537,7 +539,7 @@ impl MemoryToolExecutor for FastMemoryToolExecutor {
         session: &SessionMeta,
         tool_name: &str,
         input: &Value,
-    ) -> moa_core::Result<ToolOutput> {
+    ) -> moa_core::error::Result<ToolOutput> {
         execute_memory_tool(session, tool_name, input).await
     }
 }
@@ -1071,8 +1073,9 @@ impl PiiClassifier for FailClosedClassifier {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        ContactId, ContactRef, ContactVerificationState, MoaConfig, SessionMeta, TenantId,
-        ToolContent,
+        config::MoaConfig, types::contact::ContactId, types::contact::ContactRef,
+        types::contact::ContactVerificationState, types::identifiers::TenantId,
+        types::session::SessionMeta, types::tools::ToolContent,
     };
     use serde_json::json;
     use sqlx::postgres::PgPoolOptions;

@@ -36,7 +36,7 @@ pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
     let created_by_actor_id = row.col::<Option<Uuid>>("created_by_actor_id")?;
 
     Ok(SessionMeta {
-        id: moa_core::SessionId(id),
+        id: moa_core::types::identifiers::SessionId(id),
         tenant_id: TenantId(tenant_id),
         title: row.col::<Option<String>>("title")?,
         status: from_db("session status", &status_text)?,
@@ -50,7 +50,7 @@ pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
         completed_at: row.col::<Option<DateTime<Utc>>>("completed_at")?,
         parent_session_id: row
             .col::<Option<Uuid>>("parent_session_id")?
-            .map(moa_core::SessionId),
+            .map(moa_core::types::identifiers::SessionId),
         contact: contact_from_columns(
             contact_id,
             contact_tenant_id,
@@ -137,7 +137,7 @@ pub(crate) fn session_summary_from_row(row: &PgRow) -> Result<SessionSummary> {
     let created_by_actor_id = row.col::<Option<Uuid>>("created_by_actor_id")?;
 
     Ok(SessionSummary {
-        session_id: moa_core::SessionId(row.col::<Uuid>("id")?),
+        session_id: moa_core::types::identifiers::SessionId(row.col::<Uuid>("id")?),
         tenant_id: TenantId(tenant_id),
         contact: contact_from_columns(
             contact_id,
@@ -178,14 +178,13 @@ fn action_rule_scope_from_columns(
             tenant_id: TenantId(tenant_id),
         }),
         ("contact", Some(user_id)) => {
-            let contact_id =
-                Uuid::parse_str(&user_id)
-                    .map(moa_core::ContactId)
-                    .map_err(|error| {
-                        MoaError::StorageError(format!(
-                            "invalid action policy contact scope user_id `{user_id}`: {error}"
-                        ))
-                    })?;
+            let contact_id = Uuid::parse_str(&user_id)
+                .map(moa_core::types::contact::ContactId)
+                .map_err(|error| {
+                    MoaError::StorageError(format!(
+                        "invalid action policy contact scope user_id `{user_id}`: {error}"
+                    ))
+                })?;
             Ok(ActionRuleScope::Contact {
                 tenant_id: TenantId(tenant_id),
                 contact_id,
@@ -381,7 +380,7 @@ pub(crate) fn action_policy_rule_from_row(row: &PgRow) -> Result<ActionPolicyRul
         pattern: row.col::<String>("pattern")?,
         effect: from_db("action policy effect", &row.col::<String>("effect")?)?,
         reason: row.col::<Option<String>>("reason")?,
-        created_by: moa_core::UserId(row.col::<String>("created_by")?),
+        created_by: moa_core::types::identifiers::UserId(row.col::<String>("created_by")?),
         created_at: row.col::<DateTime<Utc>>("created_at")?,
     })
 }

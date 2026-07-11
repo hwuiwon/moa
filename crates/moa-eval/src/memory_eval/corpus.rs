@@ -4,7 +4,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use moa_core::{SessionId, StoragePartitionId, UserId};
+use moa_core::{
+    types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+    types::identifiers::UserId,
+};
 use moa_memory_graph::PiiClass;
 use moa_memory_types::ScopeTier;
 use serde::{Deserialize, Serialize};
@@ -518,7 +521,10 @@ where
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use moa_core::{SessionId, StoragePartitionId, UserId};
+    use moa_core::{
+        types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+        types::identifiers::UserId,
+    };
     use moa_memory_graph::PiiClass;
     use moa_memory_types::ScopeTier;
     use uuid::Uuid;

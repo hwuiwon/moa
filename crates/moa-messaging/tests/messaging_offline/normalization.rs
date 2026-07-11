@@ -3,7 +3,10 @@
 #[path = "../support/normalization.rs"]
 mod support;
 
-use moa_core::{Channel, ChannelEvent, ChannelRef, ChannelSessionCommand};
+use moa_core::{
+    types::channel::Channel, types::channel::ChannelEvent, types::channel::ChannelRef,
+    types::channel::ChannelSessionCommand,
+};
 use moa_messaging::slack;
 use support::{assert_serde_json_error, assert_validation_error, fixture_text};
 

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use moa_core::Result;
+use moa_core::error::Result;
 
 mod cohere;
 mod factory;

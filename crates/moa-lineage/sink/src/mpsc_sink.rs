@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use moa_core::{LineageHandle, MoaError};
+use moa_core::{error::MoaError, traits::LineageHandle};
 use moa_lineage_core::{LineageEvent, LineageSink};
 use tokio::sync::mpsc;
 
@@ -37,8 +37,8 @@ impl Default for MpscSinkConfig {
     }
 }
 
-impl From<&moa_core::LineageConfig> for MpscSinkConfig {
-    fn from(config: &moa_core::LineageConfig) -> Self {
+impl From<&moa_core::config::LineageConfig> for MpscSinkConfig {
+    fn from(config: &moa_core::config::LineageConfig) -> Self {
         Self {
             channel_capacity: config.channel_capacity,
             batch_size: config.batch_size,
@@ -184,7 +184,10 @@ impl MpscSink {
         Ok(seq)
     }
 
-    async fn record_durable_json(&self, evt_json: serde_json::Value) -> moa_core::Result<()> {
+    async fn record_durable_json(
+        &self,
+        evt_json: serde_json::Value,
+    ) -> moa_core::error::Result<()> {
         let evt = serde_json::from_value::<LineageEvent>(evt_json)?;
         self.record_durable_event(evt)
             .await
@@ -264,7 +267,7 @@ impl LineageHandle for MpscSink {
     fn record_durable<'a>(
         &'a self,
         evt_json: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = moa_core::Result<()>> + Send + 'a>>
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = moa_core::error::Result<()>> + Send + 'a>>
     {
         Box::pin(async move { self.record_durable_json(evt_json).await })
     }
@@ -311,7 +314,7 @@ impl LineageHandle for OtelSink {
 /// Disabled-cost lineage sink exported from the production sink crate.
 ///
 /// Kept as a `pub` type for potential out-of-tree consumers. Production code
-/// standardizes on [`moa_core::NullLineageHandle`] for the disabled handle, so
+/// standardizes on [`moa_core::traits::NullLineageHandle`] for the disabled handle, so
 /// this is a plain unit struct with no inner wrapper.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NullSink;
@@ -364,7 +367,10 @@ impl From<&WriterHandle> for WriterStats {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{SessionId, StoragePartitionId, TenantId, UserId};
+    use moa_core::{
+        types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+        types::identifiers::TenantId, types::identifiers::UserId,
+    };
     use moa_lineage_core::{
         BackendIntrospection, LineageEvent, RetrievalLineage, RetrievalStage, StageTimings, TurnId,
     };

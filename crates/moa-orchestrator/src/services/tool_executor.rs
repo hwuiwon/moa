@@ -8,10 +8,13 @@ use moa_core::traits::SessionRepository;
 use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::wire::tools::{ToolDescriptor, tool_descriptor};
 use moa_core::{
-    ClaimCheck, Event, EventRecord, EventType, IdempotencyClass, MoaError, SandboxFile, SessionId,
-    SessionMeta, SessionStatus, TenantId, ToolCallId, ToolCallRequest, ToolDefinition,
-    ToolFailureClass, ToolInvocation, ToolOutput, TrustedSandboxFileEntry,
-    TrustedSandboxFileManifestPayload, TrustedSandboxFileManifestRef, classify_tool_error,
+    error::MoaError, error::ToolFailureClass, error::classify_tool_error, events::Event,
+    events::EventType, types::completion::ToolInvocation, types::events_stream::ClaimCheck,
+    types::events_stream::EventRecord, types::hands::SandboxFile, types::identifiers::SessionId,
+    types::identifiers::TenantId, types::identifiers::ToolCallId, types::session::SessionMeta,
+    types::session::SessionStatus, types::tools::IdempotencyClass, types::tools::ToolCallRequest,
+    types::tools::ToolDefinition, types::tools::ToolOutput, types::tools::TrustedSandboxFileEntry,
+    types::tools::TrustedSandboxFileManifestPayload, types::tools::TrustedSandboxFileManifestRef,
 };
 use moa_hands::ToolRouter;
 use moa_memory_ingest::{execute_memory_tool, is_fast_memory_tool};
@@ -22,7 +25,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::turn::util::{blocked_canary_message, blocked_canary_tool_output};
 use crate::workflows::errors::moa_error_to_handler_error;
@@ -80,7 +82,8 @@ pub struct ToolRunPlan {
 #[derive(Clone)]
 pub struct ToolExecutorImpl {
     router: Arc<ToolRouter>,
-    trusted_manifest_store: Arc<dyn TrustedSandboxFileManifestStore>,
+    session_store: Option<Arc<dyn SessionRepository>>,
+    trusted_manifest_store: Option<Arc<dyn TrustedSandboxFileManifestStore>>,
 }
 
 impl ToolExecutorImpl {
@@ -89,8 +92,16 @@ impl ToolExecutorImpl {
     pub fn new(router: Arc<ToolRouter>) -> Self {
         Self {
             router,
-            trusted_manifest_store: Arc::new(SessionStoreTrustedSandboxFileManifestStore),
+            session_store: None,
+            trusted_manifest_store: None,
         }
+    }
+
+    /// Supplies the session repository used by durable execution paths.
+    #[must_use]
+    pub fn with_session_store(mut self, session_store: Arc<dyn SessionRepository>) -> Self {
+        self.session_store = Some(session_store);
+        self
     }
 
     /// Overrides the trusted sandbox file manifest store.
@@ -99,15 +110,21 @@ impl ToolExecutorImpl {
         mut self,
         trusted_manifest_store: Arc<dyn TrustedSandboxFileManifestStore>,
     ) -> Self {
-        self.trusted_manifest_store = trusted_manifest_store;
+        self.trusted_manifest_store = Some(trusted_manifest_store);
         self
+    }
+
+    fn required_session_repository(&self) -> Result<Arc<dyn SessionRepository>, HandlerError> {
+        self.session_store.clone().ok_or_else(|| {
+            TerminalError::new("tool executor session repository is not configured").into()
+        })
     }
 
     async fn execute_buffered(
         &self,
         session: &SessionMeta,
         request: &ToolCallRequest,
-    ) -> moa_core::Result<ToolOutput> {
+    ) -> moa_core::error::Result<ToolOutput> {
         if is_fast_memory_tool(&request.tool_name) {
             return execute_memory_tool(session, &request.tool_name, &request.input).await;
         }
@@ -142,7 +159,7 @@ impl ToolExecutorImpl {
     async fn trusted_sandbox_files_for_request(
         &self,
         request: &ToolCallRequest,
-    ) -> moa_core::Result<Vec<SandboxFile>> {
+    ) -> moa_core::error::Result<Vec<SandboxFile>> {
         let Some(manifest) = request.trusted_sandbox_manifest.as_ref() else {
             return Ok(Vec::new());
         };
@@ -152,7 +169,15 @@ impl ToolExecutorImpl {
                 request.tool_name
             ))
         })?;
-        self.trusted_manifest_store.load(session_id, manifest).await
+        if let Some(store) = self.trusted_manifest_store.as_ref() {
+            return store.load(session_id, manifest).await;
+        }
+        let store = self.session_store.as_ref().ok_or_else(|| {
+            MoaError::ValidationError(
+                "tool executor session repository is not configured".to_string(),
+            )
+        })?;
+        load_trusted_sandbox_manifest_from_store(store.as_ref(), session_id, manifest).await
     }
 
     /// Returns the registered tool descriptors in stable name order.
@@ -191,22 +216,7 @@ pub trait TrustedSandboxFileManifestStore: Send + Sync {
         &self,
         session_id: SessionId,
         manifest: &TrustedSandboxFileManifestRef,
-    ) -> moa_core::Result<Vec<SandboxFile>>;
-}
-
-#[derive(Clone, Copy)]
-struct SessionStoreTrustedSandboxFileManifestStore;
-
-#[async_trait]
-impl TrustedSandboxFileManifestStore for SessionStoreTrustedSandboxFileManifestStore {
-    async fn load(
-        &self,
-        session_id: SessionId,
-        manifest: &TrustedSandboxFileManifestRef,
-    ) -> moa_core::Result<Vec<SandboxFile>> {
-        let store = OrchestratorCtx::current_session_store();
-        load_trusted_sandbox_manifest_from_store(store.as_ref(), session_id, manifest).await
-    }
+    ) -> moa_core::error::Result<Vec<SandboxFile>>;
 }
 
 impl ToolExecutor for ToolExecutorImpl {
@@ -219,7 +229,7 @@ impl ToolExecutor for ToolExecutorImpl {
     ) -> Result<Json<ToolOutput>, HandlerError> {
         annotate_restate_handler_span("ToolExecutor", "execute");
         let request = request.into_inner();
-        let session = resolve_session(&ctx, &request).await?;
+        let session = resolve_session(&ctx, &request, self.session_store.clone()).await?;
         annotate_tool_execution_span(&session, &request);
 
         let serialized_input = serde_json::to_string(&request.input)
@@ -228,14 +238,18 @@ impl ToolExecutor for ToolExecutorImpl {
             screen_tool_input_for_canary(request.active_canary.as_deref(), &serialized_input),
             ToolInputCanaryScreening::Blocked(_)
         ) {
-            if !prior_tool_call_event_exists(&ctx, &session, &request).await? {
+            if !prior_tool_call_event_exists(&ctx, &session, &request, self.session_store.clone())
+                .await?
+            {
                 append_tool_call_event(&ctx, &request).await?;
             }
             append_tool_canary_block_events(&ctx, &request).await?;
             return Ok(Json::from(blocked_canary_tool_output(&request.tool_name)));
         }
 
-        if !prior_tool_call_event_exists(&ctx, &session, &request).await? {
+        if !prior_tool_call_event_exists(&ctx, &session, &request, self.session_store.clone())
+            .await?
+        {
             append_tool_call_event(&ctx, &request).await?;
         }
 
@@ -263,7 +277,13 @@ impl ToolExecutor for ToolExecutorImpl {
         if matches!(
             definition.idempotency_class,
             IdempotencyClass::NonIdempotent
-        ) && prior_non_idempotent_result_exists(&ctx, &session, &request).await?
+        ) && prior_non_idempotent_result_exists(
+            &ctx,
+            &session,
+            &request,
+            self.required_session_repository()?,
+        )
+        .await?
         {
             return Err(TerminalError::new(format!(
                 "refusing to re-execute non-idempotent tool {} (tool_call_id={}) because a prior result already exists",
@@ -356,7 +376,7 @@ impl ToolExecutor for ToolExecutorImpl {
 pub fn tool_run_name(
     definition: &ToolDefinition,
     request: &ToolCallRequest,
-) -> moa_core::Result<String> {
+) -> moa_core::error::Result<String> {
     match definition.idempotency_class {
         IdempotencyClass::Idempotent => Ok(format!(
             "tool_execute:idempotent:{}:{}",
@@ -373,7 +393,7 @@ pub fn tool_run_name(
 pub fn build_tool_run_plan(
     definition: &ToolDefinition,
     request: &ToolCallRequest,
-) -> moa_core::Result<ToolRunPlan> {
+) -> moa_core::error::Result<ToolRunPlan> {
     Ok(ToolRunPlan {
         name: tool_run_name(definition, request)?,
         max_attempts: retry_max_attempts_for(definition.idempotency_class),
@@ -403,7 +423,7 @@ fn has_prior_tool_call_event(events: &[EventRecord], tool_call_id: ToolCallId) -
 fn validate_request(
     definition: &ToolDefinition,
     request: &ToolCallRequest,
-) -> moa_core::Result<()> {
+) -> moa_core::error::Result<()> {
     if matches!(
         definition.idempotency_class,
         IdempotencyClass::NonIdempotent
@@ -457,7 +477,7 @@ async fn load_trusted_sandbox_manifest_from_store(
     store: &(dyn SessionRepository + '_),
     session_id: SessionId,
     manifest: &TrustedSandboxFileManifestRef,
-) -> moa_core::Result<Vec<SandboxFile>> {
+) -> moa_core::error::Result<Vec<SandboxFile>> {
     let claim_check = ClaimCheck {
         blob_id: manifest.blob_id.clone(),
         size: manifest.size,
@@ -471,7 +491,7 @@ async fn load_trusted_sandbox_manifest_from_store(
 pub fn trusted_sandbox_files_from_manifest_payload(
     manifest: &TrustedSandboxFileManifestRef,
     payload: &str,
-) -> moa_core::Result<Vec<SandboxFile>> {
+) -> moa_core::error::Result<Vec<SandboxFile>> {
     let actual_manifest_hash = sha256_hex(payload.as_bytes());
     if actual_manifest_hash != manifest.manifest_sha256 {
         return Err(MoaError::StorageError(format!(
@@ -493,7 +513,7 @@ pub fn trusted_sandbox_files_from_manifest_payload(
 fn validate_trusted_sandbox_manifest_files(
     manifest: &TrustedSandboxFileManifestRef,
     files: &[SandboxFile],
-) -> moa_core::Result<()> {
+) -> moa_core::error::Result<()> {
     if manifest.files.len() != files.len() {
         return Err(MoaError::StorageError(format!(
             "trusted sandbox file manifest {} expected {} files but loaded {}",
@@ -526,12 +546,15 @@ fn sha256_hex(bytes: &[u8]) -> String {
 async fn resolve_session(
     ctx: &Context<'_>,
     request: &ToolCallRequest,
+    session_store: Option<Arc<dyn SessionRepository>>,
 ) -> Result<SessionMeta, HandlerError> {
     if let Some(session_id) = request.session_id {
-        let store = OrchestratorCtx::current_session_store();
+        let session_store = session_store.ok_or_else(|| {
+            TerminalError::new("tool executor session repository is not configured")
+        })?;
         return Ok(ctx
             .run(|| async move {
-                store
+                session_store
                     .get_session(session_id)
                     .await
                     .map(Json::from)
@@ -571,6 +594,7 @@ async fn prior_non_idempotent_result_exists(
     ctx: &Context<'_>,
     session: &SessionMeta,
     request: &ToolCallRequest,
+    session_store: Arc<dyn SessionRepository>,
 ) -> Result<bool, HandlerError> {
     let session_id = request.session_id.ok_or_else(|| {
         moa_error_to_handler_error(MoaError::ValidationError(format!(
@@ -578,13 +602,12 @@ async fn prior_non_idempotent_result_exists(
             request.tool_name
         )))
     })?;
-    let store = OrchestratorCtx::current_session_store();
     let storage_partition_id = storage_partition_id_for_session(session);
     let tool_call_id = request.tool_call_id;
     let scan_started = Instant::now();
     let exists = ctx
         .run(|| async move {
-            store
+            session_store
                 .tool_event_exists(
                     &storage_partition_id,
                     session_id,
@@ -606,18 +629,20 @@ async fn prior_tool_call_event_exists(
     ctx: &Context<'_>,
     session: &SessionMeta,
     request: &ToolCallRequest,
+    session_store: Option<Arc<dyn SessionRepository>>,
 ) -> Result<bool, HandlerError> {
     let Some(session_id) = request.session_id else {
         return Ok(false);
     };
+    let session_store = session_store
+        .ok_or_else(|| TerminalError::new("tool executor session repository is not configured"))?;
 
-    let store = OrchestratorCtx::current_session_store();
     let storage_partition_id = storage_partition_id_for_session(session);
     let tool_call_id = request.tool_call_id;
     let scan_started = Instant::now();
     let exists = ctx
         .run(|| async move {
-            store
+            session_store
                 .tool_event_exists(
                     &storage_partition_id,
                     session_id,
@@ -635,8 +660,10 @@ async fn prior_tool_call_event_exists(
     Ok(exists)
 }
 
-fn storage_partition_id_for_session(session: &SessionMeta) -> moa_core::StoragePartitionId {
-    moa_core::StoragePartitionId::for_tenant(session.tenant_id)
+fn storage_partition_id_for_session(
+    session: &SessionMeta,
+) -> moa_core::types::identifiers::StoragePartitionId {
+    moa_core::types::identifiers::StoragePartitionId::for_tenant(session.tenant_id)
 }
 
 async fn append_tool_call_event(
@@ -818,11 +845,17 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use moa_core::{
-        AgentContext, AgentPolicySnapshot, AgentToolPolicy, AgentToolPolicyMode, Event,
-        EventRecord, EventType, HandHandle, HandProvider, HandSpec, HandStatus, IdempotencyClass,
-        RiskLevel, SandboxFile, SandboxTier, SessionId, SessionMeta, TenantId, ToolCallId,
-        ToolCallRequest, ToolDiffStrategy, ToolInputShape, ToolOutput, ToolPolicySpec,
-        TrustedSandboxFileEntry, TrustedSandboxFileManifestRef, UserId,
+        events::Event, events::EventType, traits::HandProvider, types::action_policy::RiskLevel,
+        types::agent::AgentContext, types::agent::AgentPolicySnapshot,
+        types::agent::AgentToolPolicy, types::agent::AgentToolPolicyMode,
+        types::events_stream::EventRecord, types::hands::HandHandle, types::hands::HandSpec,
+        types::hands::HandStatus, types::hands::SandboxFile, types::hands::SandboxTier,
+        types::identifiers::SessionId, types::identifiers::TenantId,
+        types::identifiers::ToolCallId, types::identifiers::UserId, types::session::SessionMeta,
+        types::tools::IdempotencyClass, types::tools::ToolCallRequest,
+        types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolOutput,
+        types::tools::ToolPolicySpec, types::tools::TrustedSandboxFileEntry,
+        types::tools::TrustedSandboxFileManifestRef,
     };
     use moa_hands::{HandRoute, ToolRegistry, ToolRouter};
     use uuid::Uuid;
@@ -853,7 +886,7 @@ mod tests {
             "install-provider"
         }
 
-        async fn provision(&self, _spec: HandSpec) -> moa_core::Result<HandHandle> {
+        async fn provision(&self, _spec: HandSpec) -> moa_core::error::Result<HandHandle> {
             Ok(HandHandle::docker("install-provider-1"))
         }
 
@@ -862,7 +895,7 @@ mod tests {
             _handle: &HandHandle,
             _tool: &str,
             _input: &str,
-        ) -> moa_core::Result<ToolOutput> {
+        ) -> moa_core::error::Result<ToolOutput> {
             Ok(ToolOutput::text("ok", Duration::from_millis(1)))
         }
 
@@ -870,24 +903,24 @@ mod tests {
             &self,
             _handle: &HandHandle,
             files: &[SandboxFile],
-        ) -> moa_core::Result<()> {
+        ) -> moa_core::error::Result<()> {
             *self.installed_files.lock().expect("lock installed files") = files.to_vec();
             Ok(())
         }
 
-        async fn status(&self, _handle: &HandHandle) -> moa_core::Result<HandStatus> {
+        async fn status(&self, _handle: &HandHandle) -> moa_core::error::Result<HandStatus> {
             Ok(HandStatus::Running)
         }
 
-        async fn pause(&self, _handle: &HandHandle) -> moa_core::Result<()> {
+        async fn pause(&self, _handle: &HandHandle) -> moa_core::error::Result<()> {
             Ok(())
         }
 
-        async fn resume(&self, _handle: &HandHandle) -> moa_core::Result<()> {
+        async fn resume(&self, _handle: &HandHandle) -> moa_core::error::Result<()> {
             Ok(())
         }
 
-        async fn destroy(&self, _handle: &HandHandle) -> moa_core::Result<()> {
+        async fn destroy(&self, _handle: &HandHandle) -> moa_core::error::Result<()> {
             Ok(())
         }
     }
@@ -902,7 +935,7 @@ mod tests {
             &self,
             _session_id: SessionId,
             _manifest: &TrustedSandboxFileManifestRef,
-        ) -> moa_core::Result<Vec<SandboxFile>> {
+        ) -> moa_core::error::Result<Vec<SandboxFile>> {
             Ok(self.files.clone())
         }
     }
@@ -910,7 +943,7 @@ mod tests {
     fn tool_call_record(tool_call_id: ToolCallId) -> EventRecord {
         EventRecord {
             id: Uuid::now_v7(),
-            session_id: moa_core::SessionId::new(),
+            session_id: moa_core::types::identifiers::SessionId::new(),
             sequence_num: 0,
             event_type: EventType::ToolCall,
             event: Event::ToolCall {
@@ -1040,8 +1073,8 @@ mod tests {
             }),
             ToolPolicySpec {
                 risk_level: RiskLevel::High,
-                default_effect: moa_core::ActionPolicyEffect::Allow,
-                action_class: moa_core::ActionClass::CommandExecution,
+                default_effect: moa_core::types::action_policy::ActionPolicyEffect::Allow,
+                action_class: moa_core::types::action_policy::ActionClass::CommandExecution,
                 input_shape: ToolInputShape::Json,
                 diff_strategy: ToolDiffStrategy::None,
             },

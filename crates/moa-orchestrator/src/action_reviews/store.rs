@@ -2,8 +2,9 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ActionClass, ActionReviewStatus, SessionActorRef, StoragePartitionId, TenantId, ToolCallId,
-    ToolCallRequest,
+    types::action_policy::ActionClass, types::action_policy::ActionReviewStatus,
+    types::contact::SessionActorRef, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::identifiers::ToolCallId, types::tools::ToolCallRequest,
 };
 use restate_sdk::prelude::{HandlerError, TerminalError};
 use sqlx::{Postgres, Row, Transaction};
@@ -24,7 +25,7 @@ pub(crate) struct StoredReview {
 /// Durable row state needed to apply an action-review decision.
 pub(crate) struct ReviewDecisionRow {
     /// Owning session, when the action came from a session turn.
-    pub(crate) session_id: Option<moa_core::SessionId>,
+    pub(crate) session_id: Option<moa_core::types::identifiers::SessionId>,
     /// Action class used for decision metrics.
     pub(crate) action_class: ActionClass,
     /// Current review status.
@@ -172,7 +173,7 @@ pub(crate) async fn load_review_for_update(
         session_id: row
             .try_get::<Option<Uuid>, _>("session_id")
             .map_err(db_error)?
-            .map(moa_core::SessionId),
+            .map(moa_core::types::identifiers::SessionId),
         action_class: parse_db_enum(
             "action_class",
             row.try_get::<String, _>("action_class").map_err(db_error)?,
@@ -327,7 +328,7 @@ fn summary_from_row(row: &sqlx::postgres::PgRow) -> Result<ActionReviewSummary, 
         session_id: row
             .try_get::<Option<Uuid>, _>("session_id")
             .map_err(db_error)?
-            .map(moa_core::SessionId),
+            .map(moa_core::types::identifiers::SessionId),
         worker_id: row.try_get("worker_id").map_err(db_error)?,
         tool_call_id: ToolCallId(row.try_get("tool_call_id").map_err(db_error)?),
         tool_name: row.try_get("tool_name").map_err(db_error)?,

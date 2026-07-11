@@ -4,8 +4,10 @@ use async_trait::async_trait;
 use globset::{Glob, GlobMatcher};
 use moa_core::shell::{has_action_policy_unsafe_shell_syntax, split_shell_chain};
 use moa_core::{
-    ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, ContactId, MoaConfig, MoaError, Result,
-    SessionMeta, TenantId, ToolPolicyInput, UserId,
+    config::MoaConfig, error::MoaError, error::Result, types::action_policy::ActionPolicyEffect,
+    types::action_policy::ActionPolicyRule, types::action_policy::ActionRuleScope,
+    types::contact::ContactId, types::identifiers::TenantId, types::identifiers::UserId,
+    types::session::SessionMeta, types::tools::ToolPolicyInput,
 };
 
 /// Persistent action-policy rule storage used by policy-aware tool routing.
@@ -298,9 +300,12 @@ mod tests {
     use chrono::Utc;
     use moa_core::shell::split_shell_chain;
     use moa_core::{
-        ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, ContactId, ContactRef,
-        ContactVerificationState, MoaConfig, MoaError, ModelId, RiskLevel, SessionMeta, TenantId,
-        ToolPolicyInput, UserId,
+        config::MoaConfig, error::MoaError, types::action_policy::ActionPolicyEffect,
+        types::action_policy::ActionPolicyRule, types::action_policy::ActionRuleScope,
+        types::action_policy::RiskLevel, types::contact::ContactId, types::contact::ContactRef,
+        types::contact::ContactVerificationState, types::identifiers::ModelId,
+        types::identifiers::TenantId, types::identifiers::UserId, types::session::SessionMeta,
+        types::tools::ToolPolicyInput,
     };
     use uuid::Uuid;
 
@@ -365,7 +370,7 @@ mod tests {
                     input_summary: "Path: src/lib.rs".to_string(),
                     risk_level: RiskLevel::Low,
                     default_effect: ActionPolicyEffect::Allow,
-                    action_class: moa_core::ActionClass::Read,
+                    action_class: moa_core::types::action_policy::ActionClass::Read,
                 },
                 &ctx,
                 &[],
@@ -379,7 +384,7 @@ mod tests {
                     input_summary: "Command: npm test".to_string(),
                     risk_level: RiskLevel::High,
                     default_effect: ActionPolicyEffect::Allow,
-                    action_class: moa_core::ActionClass::CommandExecution,
+                    action_class: moa_core::types::action_policy::ActionClass::CommandExecution,
                 },
                 &ctx,
                 &[],
@@ -416,7 +421,7 @@ mod tests {
                     input_summary: "Path: src/lib.rs".to_string(),
                     risk_level: RiskLevel::Medium,
                     default_effect: ActionPolicyEffect::Allow,
-                    action_class: moa_core::ActionClass::LocalWrite,
+                    action_class: moa_core::types::action_policy::ActionClass::LocalWrite,
                 },
                 &ctx,
                 &rules,
@@ -470,7 +475,7 @@ mod tests {
                     input_summary: "Path: src/lib.rs".to_string(),
                     risk_level: RiskLevel::Medium,
                     default_effect: ActionPolicyEffect::Allow,
-                    action_class: moa_core::ActionClass::LocalWrite,
+                    action_class: moa_core::types::action_policy::ActionClass::LocalWrite,
                 },
                 &ctx,
                 &[rule],
@@ -513,7 +518,7 @@ mod tests {
                     input_summary: "Command: cargo test".to_string(),
                     risk_level: RiskLevel::High,
                     default_effect: ActionPolicyEffect::Allow,
-                    action_class: moa_core::ActionClass::CommandExecution,
+                    action_class: moa_core::types::action_policy::ActionClass::CommandExecution,
                 },
                 &ctx,
                 &[rule],
@@ -570,7 +575,7 @@ mod tests {
                     input_summary: "Path: src/lib.rs".to_string(),
                     risk_level: RiskLevel::Medium,
                     default_effect: ActionPolicyEffect::Allow,
-                    action_class: moa_core::ActionClass::LocalWrite,
+                    action_class: moa_core::types::action_policy::ActionClass::LocalWrite,
                 },
                 &ctx,
                 &[],
@@ -625,7 +630,7 @@ mod tests {
                     input_summary: "Command: git push".to_string(),
                     risk_level: RiskLevel::High,
                     default_effect: ActionPolicyEffect::Allow,
-                    action_class: moa_core::ActionClass::CommandExecution,
+                    action_class: moa_core::types::action_policy::ActionClass::CommandExecution,
                 },
                 &ctx,
                 &rules,
@@ -662,7 +667,7 @@ mod tests {
             input_summary: "Command: git push".to_string(),
             risk_level: RiskLevel::High,
             default_effect: ActionPolicyEffect::Allow,
-            action_class: moa_core::ActionClass::CommandExecution,
+            action_class: moa_core::types::action_policy::ActionClass::CommandExecution,
         };
 
         let other_session = SessionMeta {
@@ -719,7 +724,7 @@ mod tests {
             input_summary: "Command: git push".to_string(),
             risk_level: RiskLevel::High,
             default_effect: ActionPolicyEffect::Allow,
-            action_class: moa_core::ActionClass::CommandExecution,
+            action_class: moa_core::types::action_policy::ActionClass::CommandExecution,
         };
 
         let peer_check = policies
@@ -753,7 +758,7 @@ mod tests {
             input_summary: "deploy production".to_string(),
             risk_level: RiskLevel::High,
             default_effect: ActionPolicyEffect::Allow,
-            action_class: moa_core::ActionClass::Deployment,
+            action_class: moa_core::types::action_policy::ActionClass::Deployment,
         };
 
         let admin_review_policy = ActionPolicies {
@@ -816,7 +821,7 @@ mod tests {
                     input_summary: "Command: git status".to_string(),
                     risk_level: RiskLevel::Low,
                     default_effect: ActionPolicyEffect::Allow,
-                    action_class: moa_core::ActionClass::CommandExecution,
+                    action_class: moa_core::types::action_policy::ActionClass::CommandExecution,
                 },
                 &ctx,
                 &[allow_rule],

@@ -168,7 +168,7 @@ cargo test -p moa-eval --test long_conversation_smoke_eval --locked -- --ignored
 Run the budget gate:
 
 ```bash
-cargo run -p xtask -- check-eval-budgets --suite long_conversation --max-regression-pct 5
+cargo run -p xtask --features eval-tools -- check-eval-budgets --suite long_conversation --max-regression-pct 5
 ```
 
 Artifacts are written to:

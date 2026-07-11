@@ -7,10 +7,14 @@ use chrono::Utc;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use moa_core::{
-    AgentContext, AgentGuardrailPolicy, AgentGuardrailStagePolicy, AgentKnowledgePolicy,
-    AgentKnowledgeScopeMode, AgentPolicySnapshot, Channel, Event, EventRange, EventRecord,
-    GuardrailDirection, GuardrailMode, ModelId, ModelTier, SessionActorRef, SessionId, SessionMeta,
-    SessionStatus, TenantId,
+    events::Event, types::agent::AgentContext, types::agent::AgentKnowledgePolicy,
+    types::agent::AgentKnowledgeScopeMode, types::agent::AgentPolicySnapshot,
+    types::channel::Channel, types::contact::SessionActorRef, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::guardrails::AgentGuardrailPolicy,
+    types::guardrails::AgentGuardrailStagePolicy, types::guardrails::GuardrailDirection,
+    types::guardrails::GuardrailMode, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::TenantId, types::provider::ModelTier, types::session::SessionMeta,
+    types::session::SessionStatus,
 };
 use moa_test_support::{OrchestratorTestFixture, TestApiClient};
 use serde_json::json;

@@ -22,9 +22,7 @@ moa-memory-vector = { workspace = true }
 moa-providers = { workspace = true }
 moka.workspace = true
 metrics.workspace = true
-reqwest.workspace = true
 restate-sdk.workspace = true
-secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -36,11 +34,8 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
-moa-hands = { workspace = true }
 moa-session = { workspace = true }
 moa-test-support.workspace = true
-tempfile.workspace = true
-wiremock.workspace = true
 
 [[test]]
 name = "extract"

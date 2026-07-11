@@ -2,8 +2,9 @@
 
 use async_trait::async_trait;
 use moa_core::{
-    AgentToolPolicy, ContextProcessor, ExcludedItem, ProcessorOutput, Result, WorkingContext,
-    estimate_text_tokens,
+    error::Result, traits::ContextProcessor, types::agent::AgentToolPolicy,
+    types::context::ExcludedItem, types::context::ProcessorOutput, types::context::WorkingContext,
+    types::context::estimate_text_tokens,
 };
 use serde_json::Value;
 
@@ -163,8 +164,9 @@ fn sort_json_keys(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        Channel, ModelCapabilities, ModelId, SessionId, SessionMeta, TenantId, TokenPricing,
-        ToolCallFormat,
+        types::channel::Channel, types::identifiers::ModelId, types::identifiers::SessionId,
+        types::identifiers::TenantId, types::model::ModelCapabilities, types::model::TokenPricing,
+        types::model::ToolCallFormat, types::session::SessionMeta,
     };
     use serde_json::json;
 
@@ -271,18 +273,18 @@ mod tests {
         assert_eq!(output.items_excluded, vec!["bash".to_string()]);
     }
 
-    fn agent_context_allowing(tools: Vec<&str>) -> moa_core::AgentContext {
-        let snapshot = moa_core::AgentPolicySnapshot {
+    fn agent_context_allowing(tools: Vec<&str>) -> moa_core::types::agent::AgentContext {
+        let snapshot = moa_core::types::agent::AgentPolicySnapshot {
             instructions: Vec::new(),
-            tool_policy: moa_core::AgentToolPolicy {
-                mode: moa_core::AgentToolPolicyMode::Allowlist,
+            tool_policy: moa_core::types::agent::AgentToolPolicy {
+                mode: moa_core::types::agent::AgentToolPolicyMode::Allowlist,
                 tools: tools.into_iter().map(ToString::to_string).collect(),
                 denied_tools: Vec::new(),
             },
             revision_lock: None,
-            ..moa_core::AgentPolicySnapshot::default()
+            ..moa_core::types::agent::AgentPolicySnapshot::default()
         };
-        moa_core::AgentContext {
+        moa_core::types::agent::AgentContext {
             agent_id: None,
             installation_uid: Some(uuid::Uuid::now_v7()),
             deployment_uid: Some(uuid::Uuid::now_v7()),

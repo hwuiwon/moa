@@ -4,8 +4,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, LLMProvider, Result, RuntimeEvent,
-    SessionSignal,
+    error::Result, traits::LLMProvider, types::completion::CompletionContent,
+    types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::runtime_events::RuntimeEvent, types::session::SessionSignal,
 };
 use moa_observability::record_turn_llm_ttft;
 use tokio::sync::mpsc;
@@ -199,7 +200,10 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use moa_core::{CompletionResponse, StopReason, TokenUsage};
+    use moa_core::{
+        types::completion::CompletionResponse, types::completion::StopReason,
+        types::completion::TokenUsage,
+    };
 
     use super::*;
 
@@ -220,17 +224,17 @@ mod tests {
             "provider-tool-result"
         }
 
-        fn capabilities(&self) -> moa_core::ModelCapabilities {
-            moa_core::ModelCapabilities {
-                model_id: moa_core::ModelId::new("mock-model"),
+        fn capabilities(&self) -> moa_core::types::model::ModelCapabilities {
+            moa_core::types::model::ModelCapabilities {
+                model_id: moa_core::types::identifiers::ModelId::new("mock-model"),
                 context_window: 32_000,
                 max_output: 1_024,
                 supports_tools: true,
                 supports_vision: false,
                 supports_prefix_caching: false,
                 cache_ttl: None,
-                tool_call_format: moa_core::ToolCallFormat::Anthropic,
-                pricing: moa_core::TokenPricing {
+                tool_call_format: moa_core::types::model::ToolCallFormat::Anthropic,
+                pricing: moa_core::types::model::TokenPricing {
                     input_per_mtok: 0.0,
                     output_per_mtok: 0.0,
                     cached_input_per_mtok: None,
@@ -244,9 +248,9 @@ mod tests {
         async fn complete(
             &self,
             _request: CompletionRequest,
-        ) -> Result<moa_core::CompletionStream> {
-            Ok(moa_core::CompletionStream::from_response(
-                CompletionResponse {
+        ) -> Result<moa_core::types::completion::CompletionStream> {
+            Ok(
+                moa_core::types::completion::CompletionStream::from_response(CompletionResponse {
                     text: "Fresh answer".to_string(),
                     content: vec![
                         CompletionContent::ProviderToolResult {
@@ -256,12 +260,12 @@ mod tests {
                         CompletionContent::Text("Fresh answer".to_string()),
                     ],
                     stop_reason: StopReason::EndTurn,
-                    model: moa_core::ModelId::new("mock-model"),
+                    model: moa_core::types::identifiers::ModelId::new("mock-model"),
                     usage: token_usage(4, 2),
                     duration_ms: 1,
                     thought_signature: None,
-                },
-            ))
+                }),
+            )
         }
     }
 

@@ -1,6 +1,6 @@
 //! SQL compiler for validated analytics queries.
 
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use moa_core::wire::analytics::{
     AnalyticsAggregation, AnalyticsCatalogResponse, AnalyticsCell, AnalyticsColumn,
     AnalyticsFieldKind, AnalyticsFieldRole, AnalyticsFilterOperator, AnalyticsQueryRequest,

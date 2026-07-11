@@ -9,7 +9,10 @@ use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
 use moa_brain::retrieval::{LegSources, RetrievalHit, SourceTier};
-use moa_core::{SessionId, StoragePartitionId, UserId};
+use moa_core::{
+    types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+    types::identifiers::UserId,
+};
 use moa_eval::memory_eval::runner::QueryRewriteClassMetrics;
 use moa_eval::memory_eval::{
     BootstrapConfig, CORPUS_SCHEMA_VERSION, CorpusManifest, CorpusProfile, GoldResolutionReport,

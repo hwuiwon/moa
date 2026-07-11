@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use moa_core::{
-    TenantId,
     traits::{AuthError, AuthProvider, Credential, Identity, IdentityType},
+    types::identifiers::TenantId,
 };
 use uuid::Uuid;
 

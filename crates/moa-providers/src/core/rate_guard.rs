@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use moa_core::MoaError;
+use moa_core::error::MoaError;
 
 /// Fallback cooldown applied when a rate-limit response carries no `Retry-After`.
 const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(5);

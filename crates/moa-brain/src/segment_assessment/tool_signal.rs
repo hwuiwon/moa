@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use moa_core::{Event, EventRecord, ToolCallId};
+use moa_core::{events::Event, types::events_stream::EventRecord, types::identifiers::ToolCallId};
 
 /// Converts tool outcomes for one segment into a normalized signal.
 #[must_use]
@@ -89,7 +89,11 @@ mod tests {
     use std::time::Duration;
 
     use chrono::Utc;
-    use moa_core::{Event, EventRecord, EventType, ModelId, ModelTier, SessionId, ToolCallId};
+    use moa_core::{
+        events::Event, events::EventType, types::events_stream::EventRecord,
+        types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::ToolCallId,
+        types::provider::ModelTier,
+    };
     use serde_json::json;
     use uuid::Uuid;
 
@@ -129,7 +133,7 @@ mod tests {
             Event::ToolResult {
                 tool_id,
                 provider_tool_use_id: None,
-                output: moa_core::ToolOutput::from_process(
+                output: moa_core::types::tools::ToolOutput::from_process(
                     String::new(),
                     String::new(),
                     if success { 0 } else { 1 },

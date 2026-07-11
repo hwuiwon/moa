@@ -140,5 +140,5 @@ pub enum ProcedureError {
     },
     /// Artifact storage returned an error.
     #[error(transparent)]
-    Artifact(#[from] moa_core::MoaError),
+    Artifact(#[from] moa_core::error::MoaError),
 }

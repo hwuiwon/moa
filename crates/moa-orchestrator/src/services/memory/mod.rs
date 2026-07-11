@@ -18,8 +18,10 @@ use moa_core::wire::memory::{
     MemoryRetrieveDebugResponse, MemorySearchRequest, MemorySearchResponse, MemoryShowRequest,
     MemoryShowResponse,
 };
+use moa_core::{config::MoaConfig, traits::LineageHandle};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
+use std::sync::Arc;
 
 use crate::handlers::authz_shim::authorize_tenant;
 
@@ -52,8 +54,28 @@ pub trait Memory {
 }
 
 /// Concrete memory service implementation.
-#[derive(Clone, Default)]
-pub struct MemoryImpl;
+#[derive(Clone)]
+pub struct MemoryImpl {
+    pool: sqlx::PgPool,
+    config: Arc<MoaConfig>,
+    lineage: Arc<dyn LineageHandle>,
+}
+
+impl MemoryImpl {
+    /// Creates the memory adapter with its graph, retrieval, and lineage dependencies.
+    #[must_use]
+    pub fn new(
+        pool: sqlx::PgPool,
+        config: Arc<MoaConfig>,
+        lineage: Arc<dyn LineageHandle>,
+    ) -> Self {
+        Self {
+            pool,
+            config,
+            lineage,
+        }
+    }
+}
 
 impl Memory for MemoryImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -68,8 +90,14 @@ impl Memory for MemoryImpl {
         let scope = checked_memory_scope(request.tenant_id, request.contact_id, &identity)
             .map_err(user_scope_handler_error)?;
 
+        let pool = self.pool.clone();
+        let config = self.config.clone();
         Ok(ctx
-            .run(|| async move { search_inner(request, scope).await.map(Json::from) })
+            .run(|| async move {
+                search_inner(request, scope, &pool, config.as_ref())
+                    .await
+                    .map(Json::from)
+            })
             .name("memory_search")
             .await?)
     }
@@ -84,8 +112,9 @@ impl Memory for MemoryImpl {
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
 
+        let pool = self.pool.clone();
         Ok(ctx
-            .run(|| async move { show_inner(request).await.map(Json::from) })
+            .run(|| async move { show_inner(request, &pool).await.map(Json::from) })
             .name("memory_show")
             .await?)
     }
@@ -119,11 +148,21 @@ impl Memory for MemoryImpl {
         let scope = checked_memory_scope(request.tenant_id, request.contact_id, &identity)
             .map_err(user_scope_handler_error)?;
 
+        let pool = self.pool.clone();
+        let config = self.config.clone();
+        let lineage = self.lineage.clone();
         let response = ctx
             .run(|| async move {
-                retrieve_debug_inner(request, scope, &identity)
-                    .await
-                    .map(Json::from)
+                retrieve_debug_inner(
+                    request,
+                    scope,
+                    &identity,
+                    &pool,
+                    config.as_ref(),
+                    lineage.as_ref(),
+                )
+                .await
+                .map(Json::from)
             })
             .name("memory_retrieve_debug")
             .await?

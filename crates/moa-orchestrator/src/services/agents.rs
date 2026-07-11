@@ -1,7 +1,7 @@
 //! Restate service for agent principal lifecycle operations.
 
 use chrono::{DateTime, Utc};
-use moa_authz::{AuthzCheckError, require_authz_with_delegation};
+use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{Identity, IdentityType};
 use moa_observability::restate_observability::annotate_restate_handler_span;
@@ -9,8 +9,9 @@ use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::{
+    require_configured_fga_client, require_identity, translate_authz_error,
+};
 use crate::identity_admin::agents as agent_admin;
 
 /// Request body for registering an agent.
@@ -77,8 +78,19 @@ pub trait Agents {
 }
 
 /// Concrete agent service implementation.
-#[derive(Clone, Default)]
-pub struct AgentsImpl;
+#[derive(Clone)]
+pub struct AgentsImpl {
+    pool: sqlx::PgPool,
+    fga_client: Option<FgaClient>,
+}
+
+impl AgentsImpl {
+    /// Creates the agent service with its persistence and authorization dependencies.
+    #[must_use]
+    pub fn new(pool: sqlx::PgPool, fga_client: Option<FgaClient>) -> Self {
+        Self { pool, fga_client }
+    }
+}
 
 impl Agents for AgentsImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -91,8 +103,8 @@ impl Agents for AgentsImpl {
         let identity = require_identity(&ctx)?;
         let request = request.into_inner();
         validate_agent_name(&request.display_name)?;
-        require_tenant_admin(&identity).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        require_tenant_admin(self.fga_client.clone(), &identity).await?;
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -108,8 +120,8 @@ impl Agents for AgentsImpl {
     async fn list(&self, ctx: Context<'_>) -> Result<Json<Vec<AgentSummary>>, HandlerError> {
         annotate_restate_handler_span("Agents", "list");
         let identity = require_identity(&ctx)?;
-        require_tenant_member(&identity).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        require_tenant_member(self.fga_client.clone(), &identity).await?;
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -130,8 +142,9 @@ impl Agents for AgentsImpl {
         annotate_restate_handler_span("Agents", "get");
         let identity = require_identity(&ctx)?;
         let agent_id = id.into_inner();
-        require_agent_operator_or_tenant_admin(&identity, agent_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        require_agent_operator_or_tenant_admin(self.fga_client.clone(), &identity, agent_id)
+            .await?;
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -148,8 +161,9 @@ impl Agents for AgentsImpl {
         annotate_restate_handler_span("Agents", "deactivate");
         let identity = require_identity(&ctx)?;
         let agent_id = id.into_inner();
-        require_agent_operator_or_tenant_admin(&identity, agent_id).await?;
-        let fga = require_fga_client()?;
+        require_agent_operator_or_tenant_admin(self.fga_client.clone(), &identity, agent_id)
+            .await?;
+        let fga = require_configured_fga_client(self.fga_client.clone())?;
         let agent_wire = format!("agent:{agent_id}");
         let can_act_as = ctx
             .run(|| async move {
@@ -167,7 +181,7 @@ impl Agents for AgentsImpl {
             .name("agents_deactivate_read_can_act_as")
             .await?
             .into_inner();
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -186,8 +200,14 @@ impl Agents for AgentsImpl {
         annotate_restate_handler_span("Agents", "grant_can_act_as");
         let identity = require_identity(&ctx)?;
         let request = request.into_inner();
-        require_grant_authority(&identity, request.agent_id, request.user_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        require_grant_authority(
+            self.fga_client.clone(),
+            &identity,
+            request.agent_id,
+            request.user_id,
+        )
+        .await?;
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move { agent_admin::grant_can_act_as(pool, identity, request).await })
@@ -204,8 +224,13 @@ impl Agents for AgentsImpl {
         annotate_restate_handler_span("Agents", "revoke_can_act_as");
         let identity = require_identity(&ctx)?;
         let request = request.into_inner();
-        require_agent_operator_or_tenant_admin(&identity, request.agent_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        require_agent_operator_or_tenant_admin(
+            self.fga_client.clone(),
+            &identity,
+            request.agent_id,
+        )
+        .await?;
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move { agent_admin::revoke_can_act_as(pool, identity, request).await })
@@ -222,18 +247,22 @@ fn validate_agent_name(name: &str) -> Result<(), HandlerError> {
 }
 
 async fn require_grant_authority(
+    fga_client: Option<FgaClient>,
     identity: &Identity,
     agent_id: Uuid,
     user_id: Uuid,
 ) -> Result<(), HandlerError> {
     if actor_user_id(identity) == Some(user_id) {
-        return require_agent_operator_or_tenant_admin(identity, agent_id).await;
+        return require_agent_operator_or_tenant_admin(fga_client, identity, agent_id).await;
     }
-    require_tenant_admin(identity).await
+    require_tenant_admin(fga_client, identity).await
 }
 
-async fn require_tenant_member(identity: &Identity) -> Result<(), HandlerError> {
-    let fga = require_fga_client()?;
+async fn require_tenant_member(
+    fga_client: Option<FgaClient>,
+    identity: &Identity,
+) -> Result<(), HandlerError> {
+    let fga = require_configured_fga_client(fga_client)?;
     require_authz_with_delegation(
         &fga,
         identity,
@@ -245,8 +274,11 @@ async fn require_tenant_member(identity: &Identity) -> Result<(), HandlerError> 
     .map_err(translate_authz_error)
 }
 
-async fn require_tenant_admin(identity: &Identity) -> Result<(), HandlerError> {
-    let fga = require_fga_client()?;
+async fn require_tenant_admin(
+    fga_client: Option<FgaClient>,
+    identity: &Identity,
+) -> Result<(), HandlerError> {
+    let fga = require_configured_fga_client(fga_client)?;
     require_authz_with_delegation(
         &fga,
         identity,
@@ -259,10 +291,11 @@ async fn require_tenant_admin(identity: &Identity) -> Result<(), HandlerError> {
 }
 
 async fn require_agent_operator_or_tenant_admin(
+    fga_client: Option<FgaClient>,
     identity: &Identity,
     agent_id: Uuid,
 ) -> Result<(), HandlerError> {
-    let fga = require_fga_client()?;
+    let fga = require_configured_fga_client(fga_client.clone())?;
     match require_authz_with_delegation(
         &fga,
         identity,
@@ -273,7 +306,7 @@ async fn require_agent_operator_or_tenant_admin(
     .await
     {
         Ok(()) => Ok(()),
-        Err(AuthzCheckError::Forbidden { .. }) => require_tenant_admin(identity).await,
+        Err(AuthzCheckError::Forbidden { .. }) => require_tenant_admin(fga_client, identity).await,
         Err(error) => Err(translate_authz_error(error)),
     }
 }

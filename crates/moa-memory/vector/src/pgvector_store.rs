@@ -1,7 +1,7 @@
 //! pgvector-backed graph-memory vector store.
 
 use async_trait::async_trait;
-use moa_core::RlsContext;
+use moa_core::types::memory::RlsContext;
 use moa_db::ScopedConn;
 use pgvector::HalfVector;
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Row};

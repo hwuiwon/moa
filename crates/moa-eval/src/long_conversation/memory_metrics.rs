@@ -2,7 +2,10 @@
 
 use std::collections::HashSet;
 
-use moa_core::{Event, EventFilter, SessionId, SessionStore, ToolCallId};
+use moa_core::{
+    events::Event, traits::SessionStore, types::events_stream::EventFilter,
+    types::identifiers::SessionId, types::identifiers::ToolCallId,
+};
 
 /// Scenario expectations needed for memory-recall scoring.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -29,7 +32,7 @@ pub async fn compute_planted_fact_recall(
     scenario: &MemoryScenario,
     session_id: SessionId,
     session_store: &dyn SessionStore,
-) -> moa_core::Result<f64> {
+) -> moa_core::error::Result<f64> {
     if scenario.planted_facts.is_empty() {
         return Ok(0.0);
     }
@@ -175,8 +178,11 @@ pub(crate) mod test_session_store {
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use moa_core::{
-        Event, EventFilter, EventRange, EventRecord, Result, SequenceNum, SessionFilter, SessionId,
-        SessionMeta, SessionStatus, SessionStore, SessionSummary, TenantId,
+        error::Result, events::Event, traits::SessionStore, types::events_stream::EventFilter,
+        types::events_stream::EventRange, types::events_stream::EventRecord,
+        types::events_stream::SequenceNum, types::identifiers::SessionId,
+        types::identifiers::TenantId, types::session::SessionFilter, types::session::SessionMeta,
+        types::session::SessionStatus, types::session::SessionSummary,
     };
 
     /// Session store that returns a synthetic hit for configured planted facts and
@@ -292,7 +298,7 @@ pub(crate) mod test_session_store {
 mod tests {
     use std::time::Duration;
 
-    use moa_core::ToolOutput;
+    use moa_core::types::tools::ToolOutput;
     use serde_json::json;
 
     use super::test_session_store::RecordingSessionStore;

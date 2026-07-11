@@ -1,23 +1,38 @@
 //! Restate virtual object that owns one durable conversational worker.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use moa_core::config::SessionLimitsConfig;
+use moa_core::traits::SessionRepository;
 use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentTurnUsageRequest};
 use moa_core::{
-    AgentSignalId, AttachWorkerResultWaiterInput, AttachWorkerResultWaiterOutput, ChildSignalKind,
-    ClaimCheck, CompletionRequest, ContextMessage, Event, MarkWorkerChildTerminalInput,
-    MessageRole, MoaError, ModelCapabilities, ModelId, ParentResumePolicy,
-    RemoveWorkerResultWaiterInput, SessionId, SessionMeta, SessionStatus, SignalSeverity, TenantId,
-    TrustedSandboxFileManifestRef, TurnOutcome, UserId, UserMessage, WorkerChildRef, WorkerId,
-    WorkerMessage, WorkerPendingInput, WorkerProgressSummary, WorkerResult, WorkerSignal,
-    WorkerState, WorkerStatus, WorkerTerminalResult, WorkerToolRecord, WorkerTurnOutcomeRecord,
-    WorkerTurnPreparation, WorkerTurnResponseRecord, child_report_tool_schemas,
+    error::MoaError, events::Event, types::completion::CompletionRequest,
+    types::context::ContextMessage, types::context::MessageRole, types::events_stream::ClaimCheck,
+    types::identifiers::AgentSignalId, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::TenantId, types::identifiers::UserId, types::model::ModelCapabilities,
+    types::session::SessionMeta, types::session::SessionStatus, types::session::TurnOutcome,
+    types::session::UserMessage, types::tools::TrustedSandboxFileManifestRef,
+    types::worker::commands::AttachWorkerResultWaiterInput,
+    types::worker::commands::AttachWorkerResultWaiterOutput,
+    types::worker::commands::MarkWorkerChildTerminalInput,
+    types::worker::commands::RemoveWorkerResultWaiterInput,
+    types::worker::commands::WorkerToolRecord, types::worker::commands::WorkerTurnOutcomeRecord,
+    types::worker::commands::WorkerTurnPreparation,
+    types::worker::commands::WorkerTurnResponseRecord, types::worker::state::ChildSignalKind,
+    types::worker::state::ParentResumePolicy, types::worker::state::SignalSeverity,
+    types::worker::state::WorkerChildRef, types::worker::state::WorkerId,
+    types::worker::state::WorkerMessage, types::worker::state::WorkerPendingInput,
+    types::worker::state::WorkerProgressSummary, types::worker::state::WorkerResult,
+    types::worker::state::WorkerSignal, types::worker::state::WorkerState,
+    types::worker::state::WorkerStatus, types::worker::state::WorkerTerminalResult,
+    types::worker::tool_schema::child_report_tool_schemas,
 };
+use moa_providers::ProviderRegistry;
 use restate_sdk::prelude::*;
 use serde_json::json;
 
-use crate::OrchestratorCtx;
 use crate::objects::durable_utc_now;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::turn::util::{apply_response_to_history, summarize_response_text};
@@ -130,4 +145,27 @@ pub struct CleanupRequest {
 }
 
 /// Concrete `Worker` virtual object implementation.
-pub struct WorkerImpl;
+pub struct WorkerImpl {
+    session_store: Arc<dyn SessionRepository>,
+    session_limits: SessionLimitsConfig,
+    providers: Arc<ProviderRegistry>,
+    tool_schemas: Arc<Vec<serde_json::Value>>,
+}
+
+impl WorkerImpl {
+    /// Creates a worker object with its persistence, scheduling, and request dependencies.
+    #[must_use]
+    pub fn new(
+        session_store: Arc<dyn SessionRepository>,
+        session_limits: SessionLimitsConfig,
+        providers: Arc<ProviderRegistry>,
+        tool_schemas: Arc<Vec<serde_json::Value>>,
+    ) -> Self {
+        Self {
+            session_store,
+            session_limits,
+            providers,
+            tool_schemas,
+        }
+    }
+}

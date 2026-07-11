@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
-use moa_core::{Credential, CredentialVault, MessagingConfig, MoaError};
+use moa_core::{
+    config::MessagingConfig, error::MoaError, traits::CredentialVault, types::model::Credential,
+};
 use moa_messaging::{
     TWILIO_ACCOUNT_SID_SERVICE, TWILIO_API_KEY_SECRET_SERVICE, TWILIO_API_KEY_SID_SERVICE,
     TWILIO_MESSAGING_SERVICE_SID_SERVICE, TwilioSmsClient, TwilioSmsFailureClass, TwilioSmsMessage,
@@ -398,20 +400,25 @@ impl MockVault {
 
 #[async_trait]
 impl CredentialVault for MockVault {
-    async fn get(&self, service: &str, scope: &str) -> moa_core::Result<Credential> {
+    async fn get(&self, service: &str, scope: &str) -> moa_core::error::Result<Credential> {
         self.credentials
             .get(&(service.to_string(), scope.to_string()))
             .cloned()
             .ok_or_else(|| MoaError::MissingEnvironmentVariable(service.to_string()))
     }
 
-    async fn set(&self, _service: &str, _scope: &str, _cred: Credential) -> moa_core::Result<()> {
+    async fn set(
+        &self,
+        _service: &str,
+        _scope: &str,
+        _cred: Credential,
+    ) -> moa_core::error::Result<()> {
         Err(MoaError::StorageError(
             "mock vault is read-only".to_string(),
         ))
     }
 
-    async fn delete(&self, _service: &str, _scope: &str) -> moa_core::Result<bool> {
+    async fn delete(&self, _service: &str, _scope: &str) -> moa_core::error::Result<bool> {
         Err(MoaError::StorageError(
             "mock vault is read-only".to_string(),
         ))
@@ -420,7 +427,7 @@ impl CredentialVault for MockVault {
     async fn list(
         &self,
         _service_prefix: &str,
-    ) -> moa_core::Result<Vec<moa_core::StoredCredentialMetadata>> {
+    ) -> moa_core::error::Result<Vec<moa_core::traits::StoredCredentialMetadata>> {
         Err(MoaError::StorageError(
             "mock vault does not support listing".to_string(),
         ))

@@ -5,8 +5,11 @@ use moa_contacts::{
     domain::{hash_contact_point_from_env, normalize_contact_point},
     repository::resolve_verified_contact_ids,
 };
-use moa_core::RlsContext;
-use moa_core::{ContactId, ContactPointKind, StoragePartitionId, TenantId};
+use moa_core::types::memory::RlsContext;
+use moa_core::{
+    types::contact::ContactId, types::contact::ContactPointKind,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+};
 use moa_knowledge::{
     contact_groups::{
         contact_group_member_contact_points,

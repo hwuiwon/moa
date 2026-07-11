@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{MoaError, Result};
+use crate::{error::MoaError, error::Result};
 
 /// Per-query budgets applied by the analytics executors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

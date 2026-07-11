@@ -5,10 +5,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_brain::{TurnResult, run_brain_turn};
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, Event, EventRange,
-    LLMProvider, MoaConfig, ModelCapabilities, Result, SessionActorRef, SessionId, SessionMeta,
-    SessionStore, StopReason, TokenPricing, ToolCallContent, ToolCallFormat, ToolCallId,
-    ToolInvocation, ToolOutput, UserId,
+    types::completion::CompletionContent, types::completion::CompletionRequest, types::completion::CompletionResponse, types::completion::CompletionStream, events::Event, types::events_stream::EventRange,
+    traits::LLMProvider, config::MoaConfig, types::model::ModelCapabilities, error::Result, types::contact::SessionActorRef, types::identifiers::SessionId, types::session::SessionMeta,
+    traits::SessionStore, types::completion::StopReason, types::model::TokenPricing, types::completion::ToolCallContent, types::model::ToolCallFormat, types::identifiers::ToolCallId,
+    types::completion::ToolInvocation, types::tools::ToolOutput, types::identifiers::UserId,
 };
 use moa_hands::ToolRouter;
 use serde_json::json;
@@ -57,7 +57,7 @@ impl LLMProvider for SessionSearchArtifactLlmProvider {
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
-            model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
+            model_id: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
             context_window: 8_000,
             max_output: 8_192,
             supports_tools: true,
@@ -101,7 +101,7 @@ impl LLMProvider for SessionSearchArtifactLlmProvider {
                         provider_metadata: None,
                     })],
                     stop_reason: StopReason::ToolUse,
-                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                    model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                     usage: token_usage(19, 9),
                     duration_ms: 10,
                     thought_signature: None,
@@ -135,7 +135,7 @@ impl LLMProvider for SessionSearchArtifactLlmProvider {
                         provider_metadata: None,
                     })],
                     stop_reason: StopReason::ToolUse,
-                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                    model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                     usage: token_usage(22, 10),
                     duration_ms: 11,
                     thought_signature: None,
@@ -157,7 +157,7 @@ impl LLMProvider for SessionSearchArtifactLlmProvider {
                             .to_string(),
                     )],
                     stop_reason: StopReason::EndTurn,
-                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                    model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                     usage: token_usage(25, 9),
                     duration_ms: 12,
                     thought_signature: None,
@@ -182,7 +182,7 @@ impl LLMProvider for RepeatingToolLlmProvider {
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
-            model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
+            model_id: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -219,7 +219,7 @@ impl LLMProvider for RepeatingToolLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                 usage: token_usage(12, 5),
                 duration_ms: 10,
                 thought_signature: None,
@@ -237,7 +237,7 @@ impl LLMProvider for RepeatingToolLlmProvider {
                         "Tool said hello from tool ({request_index})"
                     ))],
                     stop_reason: StopReason::EndTurn,
-                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                    model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                     usage: token_usage(20, 7),
                     duration_ms: 12,
                     thought_signature: None,
@@ -247,7 +247,7 @@ impl LLMProvider for RepeatingToolLlmProvider {
                 text: "done".to_string(),
                 content: vec![CompletionContent::Text("done".to_string())],
                 stop_reason: StopReason::EndTurn,
-                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                 usage: token_usage(10, 2),
                 duration_ms: 5,
                 thought_signature: None,

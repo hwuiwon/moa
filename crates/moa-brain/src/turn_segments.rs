@@ -2,8 +2,10 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ActiveSegment, AssessmentPhase, Event, EventRecord, ResolutionConfig, SegmentAssessment,
-    SegmentBaseline, SegmentId, SessionMeta, TaskSegment,
+    config::ResolutionConfig, events::Event, types::events_stream::EventRecord,
+    types::identifiers::SegmentId, types::segment_assessment::AssessmentPhase,
+    types::segment_assessment::SegmentAssessment, types::segment_assessment::SegmentBaseline,
+    types::segments::ActiveSegment, types::segments::TaskSegment, types::session::SessionMeta,
 };
 
 use crate::pipeline::segments::SegmentCompleted;
@@ -248,7 +250,10 @@ fn last_brain_response(events: &[EventRecord]) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{Event, EventRecord, SegmentId, SessionId};
+    use moa_core::{
+        events::Event, types::events_stream::EventRecord, types::identifiers::SegmentId,
+        types::identifiers::SessionId,
+    };
     use uuid::Uuid;
 
     use super::{

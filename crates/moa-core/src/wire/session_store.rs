@@ -1,6 +1,18 @@
 //! Session-store service wire DTOs.
 
-use crate::*;
+use crate::events::Event;
+use crate::types::agent::{AgentContext, AgentSessionSelection};
+use crate::{
+    types::events_stream::EventRange,
+    types::experience::{
+        ExperienceAttribution, ExperienceRecord, LearningCandidate, LearningCandidateStatus,
+        LearningCandidateStatusUpdate, TaskStrategySuccessRate,
+    },
+    types::identifiers::{SegmentId, SessionId, TenantId},
+    types::segment_assessment::SegmentAssessment,
+    types::segments::{SegmentCompletion, TaskSegment},
+    types::session::{SessionFilter, SessionMeta},
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -53,7 +65,7 @@ pub struct UpdateStatusRequest {
     /// Session whose lifecycle state should be updated.
     pub session_id: SessionId,
     /// New session lifecycle state.
-    pub status: crate::SessionStatus,
+    pub status: crate::types::session::SessionStatus,
 }
 
 /// Request payload for `SessionStore/search_events`.
@@ -62,7 +74,7 @@ pub struct SearchEventsRequest {
     /// Full-text search query.
     pub query: String,
     /// Additional event-search scoping and limits.
-    pub filter: crate::EventFilter,
+    pub filter: crate::types::events_stream::EventFilter,
 }
 
 /// Request payload for `SessionStore/init_session_vo`.

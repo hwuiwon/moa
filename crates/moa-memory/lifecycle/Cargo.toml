@@ -8,7 +8,6 @@ license.workspace = true
 chrono.workspace = true
 moa-core = { workspace = true }
 moa-memory-graph = { workspace = true }
-moa-memory-ingest = { workspace = true }
 moa-memory-types = { workspace = true }
 moa-memory-vector = { workspace = true }
 serde.workspace = true
@@ -20,7 +19,6 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
-async-trait.workspace = true
 moa-brain = { workspace = true }
 moa-test-support = { workspace = true }
 tokio.workspace = true

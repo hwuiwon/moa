@@ -16,13 +16,13 @@ pub use export::write_export_readme;
 pub use manifest::{Ed25519ManifestSigner, finalize_archive_to_bytes, write_manifest};
 
 use moa_authz_schema::Relation;
+use moa_core::config::ComplianceConfig;
 use moa_core::wire::privacy::{
     PrivacyEraseRequest, PrivacyEraseResponse, PrivacyExportRequest, PrivacyExportResponse,
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 
-use crate::OrchestratorCtx;
 use crate::handlers::authz_shim::authorize_tenant;
 
 use self::export::execute_privacy_export;
@@ -43,8 +43,19 @@ pub trait Privacy {
 }
 
 /// Concrete privacy service implementation.
-#[derive(Clone, Default)]
-pub struct PrivacyImpl;
+#[derive(Clone)]
+pub struct PrivacyImpl {
+    pool: sqlx::PgPool,
+    compliance: ComplianceConfig,
+}
+
+impl PrivacyImpl {
+    /// Creates the privacy adapter with its repository pool and approval configuration.
+    #[must_use]
+    pub fn new(pool: sqlx::PgPool, compliance: ComplianceConfig) -> Self {
+        Self { pool, compliance }
+    }
+}
 
 impl Privacy for PrivacyImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -57,15 +68,14 @@ impl Privacy for PrivacyImpl {
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
         let subject_user_id = request.subject_user_id.to_string();
-        let config = OrchestratorCtx::current_config();
-        let claims = ApprovalTokenVerifier::from_config(&config.compliance)?.verify(
+        let claims = ApprovalTokenVerifier::from_config(&self.compliance)?.verify(
             &request.approval_token,
             "export",
             &subject_user_id,
             request.tenant_id,
         )?;
-        let pool = OrchestratorCtx::current_graph_pool();
-        let compliance_config = config.compliance.clone();
+        let pool = self.pool.clone();
+        let compliance_config = self.compliance.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -87,16 +97,14 @@ impl Privacy for PrivacyImpl {
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
         let subject_user_id = request.subject_user_id.to_string();
-        let config = OrchestratorCtx::current_config();
-        let claims = ApprovalTokenVerifier::from_config(&config.compliance)?.verify(
+        let claims = ApprovalTokenVerifier::from_config(&self.compliance)?.verify(
             &request.approval_token,
             "erase",
             &subject_user_id,
             request.tenant_id,
         )?;
-        let pool = OrchestratorCtx::current_graph_pool();
-        let erase_ctx =
-            PrivacyEraseContext::from_request(pool, request, claims, &config.compliance)?;
+        let pool = self.pool.clone();
+        let erase_ctx = PrivacyEraseContext::from_request(pool, request, claims, &self.compliance)?;
 
         Ok(ctx
             .run(|| async move { run_privacy_erase(erase_ctx).await.map(Json::from) })

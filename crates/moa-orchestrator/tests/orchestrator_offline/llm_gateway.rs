@@ -4,9 +4,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
-    DEFER_BRAIN_RESPONSE_METADATA_KEY, LLMProvider, MoaError, SessionId, StopReason, TokenPricing,
-    TokenUsage, ToolCallFormat,
+    error::MoaError, traits::LLMProvider, types::completion::CompletionContent,
+    types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::completion::CompletionStream, types::completion::DEFER_BRAIN_RESPONSE_METADATA_KEY,
+    types::completion::StopReason, types::completion::TokenUsage, types::identifiers::SessionId,
+    types::model::TokenPricing, types::model::ToolCallFormat,
 };
 use moa_orchestrator::services::llm_gateway::{
     LLMGatewayImpl, compute_cost_cents, should_defer_brain_response,
@@ -74,8 +76,8 @@ impl LLMProvider for MockProvider {
         self.name
     }
 
-    fn capabilities(&self) -> moa_core::ModelCapabilities {
-        moa_core::ModelCapabilities {
+    fn capabilities(&self) -> moa_core::types::model::ModelCapabilities {
+        moa_core::types::model::ModelCapabilities {
             model_id: self.model.into(),
             context_window: 200_000,
             max_output: 8_192,
@@ -89,7 +91,10 @@ impl LLMProvider for MockProvider {
         }
     }
 
-    async fn complete(&self, request: CompletionRequest) -> moa_core::Result<CompletionStream> {
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
         self.requests
             .lock()
             .expect("mock provider request log should not be poisoned")

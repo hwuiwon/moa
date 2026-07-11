@@ -15,7 +15,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, Utc};
-use moa_core::{ContactId, RlsContext, TenantId};
+use moa_core::{
+    types::contact::ContactId, types::identifiers::TenantId, types::memory::RlsContext,
+};
 use moa_memory_graph::{ExistingSupersessionIntent, GraphStore, PostgresGraphStore};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};

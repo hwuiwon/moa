@@ -6,8 +6,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{
-    AgentSessionSelection, Attachment, Channel, ChannelAccountRef, ChannelRef, EventRange,
-    SessionId, TenantId,
+    agent::AgentSessionSelection, channel::Attachment, channel::Channel,
+    channel::ChannelAccountRef, channel::ChannelRef, events_stream::EventRange,
+    identifiers::SessionId, identifiers::TenantId,
 };
 
 /// Maximum UTF-8 byte length for one contact-authored session message.
@@ -604,7 +605,10 @@ mod tests {
         ChannelRef, ContactSessionChannelRequest, ContactSessionMessageRequest,
         MAX_CONTACT_SESSION_ATTACHMENT_BYTES,
     };
-    use crate::types::{Attachment, SessionAttachmentId, SessionId, TenantId};
+    use crate::types::{
+        channel::Attachment, identifiers::SessionAttachmentId, identifiers::SessionId,
+        identifiers::TenantId,
+    };
 
     #[test]
     fn contact_session_channel_request_supports_chat_delivery_channel() {

@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    Channel, CompletionRequest, ContactId, MessageRole, ModelId, SessionActorRef, SessionId,
-    SessionMeta, TenantId, estimate_text_tokens, sum_message_tokens,
+    channel::Channel, completion::CompletionRequest, contact::ContactId, contact::SessionActorRef,
+    context::MessageRole, context::estimate_text_tokens, context::sum_message_tokens,
+    identifiers::ModelId, identifiers::SessionId, identifiers::TenantId, session::SessionMeta,
 };
 
 /// Durable summary of one provider request's cache plan and observed cache usage.
@@ -348,7 +349,8 @@ mod tests {
         TraceContext, full_request_fingerprint, stable_prefix_fingerprint, trace_name_from_message,
     };
     use crate::types::{
-        Channel, CompletionRequest, ContextMessage, SessionId, SessionMeta, TenantId,
+        channel::Channel, completion::CompletionRequest, context::ContextMessage,
+        identifiers::SessionId, identifiers::TenantId, session::SessionMeta,
     };
     use serde_json::json;
 

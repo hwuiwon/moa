@@ -109,9 +109,7 @@ impl Worker for WorkerImpl {
             .name("worker_progress_summary_now")
             .await?
             .into_inner();
-        let stale_threshold_ms = OrchestratorCtx::current_config()
-            .session_limits
-            .worker_heartbeat_stale_ms;
+        let stale_threshold_ms = self.session_limits.worker_heartbeat_stale_ms;
         Ok(Json::from(
             WorkerVoState::load_progress_summary(
                 &ctx,
@@ -183,7 +181,15 @@ impl Worker for WorkerImpl {
         mut ctx: ObjectContext<'_>,
     ) -> Result<Json<WorkerTurnPreparation>, HandlerError> {
         annotate_restate_handler_span("Worker", "prepare_turn");
-        Ok(Json::from(prepare_turn_inner(&mut ctx).await?))
+        Ok(Json::from(
+            prepare_turn_inner(
+                &mut ctx,
+                &self.providers,
+                &self.tool_schemas,
+                &self.session_store,
+            )
+            .await?,
+        ))
     }
 
     #[tracing::instrument(skip(self, ctx, response))]
@@ -215,7 +221,7 @@ impl Worker for WorkerImpl {
         state
             .history
             .extend(appended.into_iter().map(WorkerHistoryEntry::inline));
-        claim_check_worker_history(&ctx, &mut state).await?;
+        claim_check_worker_history(&ctx, &mut state, &self.session_store).await?;
         state.persist(&ctx);
 
         if let Some(parent_session) = parent_session
@@ -238,7 +244,13 @@ impl Worker for WorkerImpl {
         record: Json<WorkerToolRecord>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Worker", "record_tool_result");
-        record_tool_result_inner(&ctx, record.into_inner(), ToolRecordKind::Executed).await
+        record_tool_result_inner(
+            &ctx,
+            record.into_inner(),
+            ToolRecordKind::Executed,
+            &self.session_store,
+        )
+        .await
     }
 
     #[tracing::instrument(skip(self, ctx, record))]
@@ -248,7 +260,13 @@ impl Worker for WorkerImpl {
         record: Json<WorkerToolRecord>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Worker", "record_denied_tool");
-        record_tool_result_inner(&ctx, record.into_inner(), ToolRecordKind::Denied).await
+        record_tool_result_inner(
+            &ctx,
+            record.into_inner(),
+            ToolRecordKind::Denied,
+            &self.session_store,
+        )
+        .await
     }
 
     #[tracing::instrument(skip(self, ctx, outcome))]
@@ -393,7 +411,7 @@ impl Worker for WorkerImpl {
             start_worker_turn_execution(&ctx, turn_id, max_turns, trusted_sandbox_manifest);
             return Ok(());
         }
-        maybe_resolve_parent_awakeable(&ctx).await
+        maybe_resolve_parent_awakeable(&ctx, &self.session_limits).await
     }
 
     #[tracing::instrument(skip(self, ctx))]
@@ -439,9 +457,7 @@ impl Worker for WorkerImpl {
                 // Bottom-up teardown: this child still has non-terminal children, so
                 // reschedule (same generation) and let them self-clean first. A revive of
                 // this child bumps the generation and supersedes the rescheduled tick.
-                let grace_ms = OrchestratorCtx::current_config()
-                    .session_limits
-                    .worker_cleanup_grace_ms;
+                let grace_ms = self.session_limits.worker_cleanup_grace_ms;
                 if grace_ms > 0 {
                     let now = durable_utc_now(&ctx).await?;
                     schedule_cleanup_self_call(&ctx, state.cleanup_generation, now, grace_ms);
@@ -454,9 +470,7 @@ impl Worker for WorkerImpl {
             CleanupDecision::Proceed => {
                 if !release_and_clear_worker(&ctx, &state).await? {
                     let attempts = state.cleanup_release_attempts.saturating_add(1);
-                    let grace_ms = OrchestratorCtx::current_config()
-                        .session_limits
-                        .worker_cleanup_grace_ms;
+                    let grace_ms = self.session_limits.worker_cleanup_grace_ms;
                     if attempts >= MAX_CLEANUP_RELEASE_ATTEMPTS || grace_ms == 0 {
                         // Bound the retry loop: a persistently-failing release (e.g. a provider
                         // permanently absent from the router registry) must not reschedule
@@ -472,7 +486,12 @@ impl Worker for WorkerImpl {
                     } else {
                         state.cleanup_release_attempts = attempts;
                         state.persist(&ctx);
-                        reschedule_cleanup(&ctx, state.cleanup_generation).await?;
+                        reschedule_cleanup(
+                            &ctx,
+                            state.cleanup_generation,
+                            self.session_limits.worker_cleanup_grace_ms,
+                        )
+                        .await?;
                         tracing::warn!(
                             key = %ctx.key(),
                             cleanup_generation = state.cleanup_generation,
@@ -576,10 +595,11 @@ async fn release_and_clear_worker(
     Ok(true)
 }
 
-async fn reschedule_cleanup(ctx: &ObjectContext<'_>, generation: u64) -> Result<(), HandlerError> {
-    let grace_ms = OrchestratorCtx::current_config()
-        .session_limits
-        .worker_cleanup_grace_ms;
+async fn reschedule_cleanup(
+    ctx: &ObjectContext<'_>,
+    generation: u64,
+    grace_ms: u64,
+) -> Result<(), HandlerError> {
     if grace_ms > 0 {
         let now = durable_utc_now(ctx).await?;
         schedule_cleanup_self_call(ctx, generation, now, grace_ms);
@@ -638,6 +658,9 @@ fn generate_turn_id(ctx: &mut ObjectContext<'_>) -> String {
 
 async fn prepare_turn_inner(
     ctx: &mut ObjectContext<'_>,
+    providers: &ProviderRegistry,
+    tool_schemas: &[serde_json::Value],
+    session_store: &Arc<dyn SessionRepository>,
 ) -> Result<WorkerTurnPreparation, HandlerError> {
     let mut state = Tracked::<WorkerVoState>::load(ctx).await?;
     if state.cancel_reason.is_some() {
@@ -689,9 +712,15 @@ async fn prepare_turn_inner(
         .clone()
         .ok_or_else(|| TerminalError::new("worker model missing"))?;
 
-    let mut request = build_completion_request(&state)?;
-    extend_request_with_history(&*ctx, parent_session, &state.history, &mut request.messages)
-        .await?;
+    let mut request = build_completion_request(&state, providers, tool_schemas)?;
+    extend_request_with_history(
+        &*ctx,
+        parent_session,
+        &state.history,
+        &mut request.messages,
+        session_store,
+    )
+    .await?;
     let active_canary = if request.tools.is_empty() {
         None
     } else {
@@ -744,6 +773,7 @@ async fn record_tool_result_inner(
     ctx: &ObjectContext<'_>,
     record: WorkerToolRecord,
     kind: ToolRecordKind,
+    session_store: &Arc<dyn SessionRepository>,
 ) -> Result<(), HandlerError> {
     let mut state = Tracked::<WorkerVoState>::load(ctx).await?;
     if let Some(turn_id) = record.turn_id.as_deref()
@@ -771,7 +801,7 @@ async fn record_tool_result_inner(
     if kind.counts_invocation() {
         state.tools_invoked = state.tools_invoked.saturating_add(1);
     }
-    claim_check_worker_history(ctx, &mut state).await?;
+    claim_check_worker_history(ctx, &mut state, session_store).await?;
     state.persist(ctx);
     Ok(())
 }
@@ -788,12 +818,13 @@ async fn record_tool_result_inner(
 async fn claim_check_worker_history(
     ctx: &ObjectContext<'_>,
     state: &mut WorkerVoState,
+    session_store: &Arc<dyn SessionRepository>,
 ) -> Result<(), HandlerError> {
     let Some(session_id) = state.parent_session else {
         return Ok(());
     };
     for (idx, body) in state.history_entries_to_claim_check()? {
-        let store = OrchestratorCtx::current_session_store();
+        let store = session_store.clone();
         let claim = ctx
             .run(|| async move {
                 store
@@ -821,12 +852,16 @@ async fn extend_request_with_history(
     session_id: SessionId,
     history: &[WorkerHistoryEntry],
     out: &mut Vec<ContextMessage>,
+    session_store: &Arc<dyn SessionRepository>,
 ) -> Result<(), HandlerError> {
     for (idx, entry) in history.iter().enumerate() {
         match entry {
             WorkerHistoryEntry::Inline(message) => out.push(message.clone()),
             WorkerHistoryEntry::Claimed(claimed) => {
-                out.push(hydrate_claimed_history_entry(ctx, session_id, idx, claimed).await?);
+                out.push(
+                    hydrate_claimed_history_entry(ctx, session_id, idx, claimed, session_store)
+                        .await?,
+                );
             }
         }
     }
@@ -839,13 +874,14 @@ async fn hydrate_claimed_history_entry(
     session_id: SessionId,
     idx: usize,
     claimed: &ClaimedHistoryEntry,
+    session_store: &Arc<dyn SessionRepository>,
 ) -> Result<ContextMessage, HandlerError> {
     let claim_check = ClaimCheck {
         blob_id: claimed.blob_id.clone(),
         size: claimed.size,
         preview: claimed.preview.clone(),
     };
-    let store = OrchestratorCtx::current_session_store();
+    let store = session_store.clone();
     let body = ctx
         .run(|| async move {
             store
@@ -881,13 +917,18 @@ fn start_worker_turn_execution(
         .send();
 }
 
-async fn maybe_resolve_parent_awakeable(ctx: &ObjectContext<'_>) -> Result<(), HandlerError> {
+async fn maybe_resolve_parent_awakeable(
+    ctx: &ObjectContext<'_>,
+    session_limits: &SessionLimitsConfig,
+) -> Result<(), HandlerError> {
     let mut state = Tracked::<WorkerVoState>::load(ctx).await?;
     let Some(terminal) = state.terminal_result(ctx.key().to_string()) else {
         return Ok(());
     };
 
-    let delivered = deliver_terminal_notification_once(ctx, &mut state, terminal.clone()).await?;
+    let delivered =
+        deliver_terminal_notification_once(ctx, &mut state, terminal.clone(), session_limits)
+            .await?;
     let waiters = state.take_result_waiters();
     let waiter_payload = if waiters.is_empty() {
         None
@@ -914,6 +955,7 @@ async fn deliver_terminal_notification_once(
     ctx: &ObjectContext<'_>,
     state: &mut WorkerVoState,
     terminal: WorkerTerminalResult,
+    session_limits: &SessionLimitsConfig,
 ) -> Result<bool, HandlerError> {
     if state.notification_delivered {
         return Ok(false);
@@ -976,9 +1018,7 @@ async fn deliver_terminal_notification_once(
     // `cleanup_generation` (in `post_message`), making this pending tick stale so the
     // child is revived instead of cleaned. The caller persists `state` after this
     // returns `true`, so the bumped generation is durable before the tick fires.
-    let grace_ms = OrchestratorCtx::current_config()
-        .session_limits
-        .worker_cleanup_grace_ms;
+    let grace_ms = session_limits.worker_cleanup_grace_ms;
     if grace_ms > 0 {
         state.bump_cleanup_generation();
         let now = durable_utc_now(ctx).await?;
@@ -1058,7 +1098,7 @@ async fn cache_parent_terminal_result(
 #[cfg(test)]
 mod tests {
     use super::{CleanupDecision, decide_cleanup, release_worker_hands_request};
-    use moa_core::SessionId;
+    use moa_core::types::identifiers::SessionId;
 
     #[test]
     fn cleanup_release_request_targets_owning_session_and_child() {

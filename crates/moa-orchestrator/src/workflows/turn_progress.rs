@@ -1,12 +1,18 @@
 //! Transient progress projection helpers for turn workflows.
 
+use std::{collections::HashMap, sync::Arc};
+
 use chrono::{DateTime, Utc};
-use moa_core::SessionId;
 use moa_core::wire::turn::TurnPhase;
+use moa_core::{
+    config::SessionLimitsConfig, traits::ChannelAdapter, types::channel::Channel,
+    types::identifiers::SessionId,
+};
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::workflows::progress_delivery;
+use moa_session::PostgresSessionStore;
 
 const K_PROGRESS_STATE: &str = "progress_state";
 
@@ -125,11 +131,20 @@ pub(crate) async fn finish(ctx: &WorkflowContext<'_>) -> Result<(), HandlerError
 /// Records final elapsed time and updates any live root-turn status message.
 pub(crate) async fn finish_with_live_delivery(
     ctx: &WorkflowContext<'_>,
-    session_id: moa_core::SessionId,
+    session_id: moa_core::types::identifiers::SessionId,
     phase: TurnPhase,
+    session_store: Arc<PostgresSessionStore>,
+    channel_adapters: &HashMap<Channel, Arc<dyn ChannelAdapter>>,
 ) -> Result<(), HandlerError> {
     finish(ctx).await?;
-    progress_delivery::maybe_deliver_terminal(ctx, session_id, phase).await?;
+    progress_delivery::maybe_deliver_terminal(
+        ctx,
+        session_id,
+        phase,
+        session_store,
+        channel_adapters,
+    )
+    .await?;
     Ok(())
 }
 
@@ -138,10 +153,12 @@ pub(crate) async fn maybe_emit(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     summary: impl Into<String>,
+    limits: &SessionLimitsConfig,
+    session_store: Arc<PostgresSessionStore>,
+    channel_adapters: &HashMap<Channel, Arc<dyn ChannelAdapter>>,
 ) -> Result<(), HandlerError> {
     let mut state = load_workflow_state(ctx).await?;
     let now = workflow_utc_now(ctx).await?;
-    let limits = &crate::OrchestratorCtx::current_config().session_limits;
     let attempt = state.attempt(
         now,
         summary.into(),
@@ -149,7 +166,14 @@ pub(crate) async fn maybe_emit(
         limits.progress_interval_ms,
     );
     if let Some(summary) = attempt.emit {
-        progress_delivery::maybe_deliver(ctx, session_id, &summary).await?;
+        progress_delivery::maybe_deliver(
+            ctx,
+            session_id,
+            &summary,
+            session_store,
+            channel_adapters,
+        )
+        .await?;
     }
     store_state(ctx, &state);
     Ok(())

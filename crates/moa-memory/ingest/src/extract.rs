@@ -1,7 +1,9 @@
 //! Deterministic DTOs and extract/chunk helpers for graph-memory ingestion.
 
 use chrono::{DateTime, Utc};
-use moa_core::{ContactId, SessionId, TenantId};
+use moa_core::{
+    types::contact::ContactId, types::identifiers::SessionId, types::identifiers::TenantId,
+};
 use moa_memory_graph::PiiClass;
 use moa_memory_pii::PiiSpan;
 use serde::{Deserialize, Serialize};
@@ -376,7 +378,9 @@ fn object_words<'a>(words: &'a [&'a str]) -> &'a [&'a str] {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{ContactId, SessionId, TenantId};
+    use moa_core::{
+        types::contact::ContactId, types::identifiers::SessionId, types::identifiers::TenantId,
+    };
 
     use super::*;
 

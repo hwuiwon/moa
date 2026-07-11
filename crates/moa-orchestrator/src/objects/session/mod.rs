@@ -1,9 +1,12 @@
 //! Restate virtual object that owns one durable MOA session key.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
+use moa_core::config::SessionLimitsConfig;
+use moa_core::traits::SessionRepository;
 use moa_core::wire::session_store::{AppendEventRequest, UpdateStatusRequest};
 use moa_core::wire::turn::{
     CancelResponse, PendingMessage, QueueMessageRequest, QueueMessageResponse, RunTurnRequest,
@@ -12,17 +15,24 @@ use moa_core::wire::turn::{
     TurnTrigger,
 };
 use moa_core::{
-    ActiveSegment, CancelScope, ChildSignalKind, ClaimCheck, ConsumeWorkerChildResultInput,
-    ConsumeWorkerChildResultOutput, ContactRef, Event, EventRange, EventRecord, InputAudience,
-    MarkWorkerChildTerminalInput, MoaError, ParentResumePolicy, Result as MoaResult, SessionId,
-    SessionMeta, SessionStatus, SignalSeverity, UnreadChildSignal, UserMessage, WorkerChildRef,
-    WorkerId, WorkerMessage, WorkerProgressSummary, WorkerSignal, WorkerTerminalResult,
+    error::MoaError, error::Result as MoaResult, events::Event, types::contact::ContactRef,
+    types::events_stream::ClaimCheck, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::identifiers::SessionId,
+    types::segments::ActiveSegment, types::session::CancelScope, types::session::SessionMeta,
+    types::session::SessionStatus, types::session::UserMessage,
+    types::worker::commands::ConsumeWorkerChildResultInput,
+    types::worker::commands::ConsumeWorkerChildResultOutput,
+    types::worker::commands::MarkWorkerChildTerminalInput, types::worker::state::ChildSignalKind,
+    types::worker::state::InputAudience, types::worker::state::ParentResumePolicy,
+    types::worker::state::SignalSeverity, types::worker::state::UnreadChildSignal,
+    types::worker::state::WorkerChildRef, types::worker::state::WorkerId,
+    types::worker::state::WorkerMessage, types::worker::state::WorkerProgressSummary,
+    types::worker::state::WorkerSignal, types::worker::state::WorkerTerminalResult,
 };
 use moa_observability::record_turn_event_persist_duration;
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
-use crate::OrchestratorCtx;
 use crate::objects::durable_utc_now;
 use crate::objects::worker::WorkerClient;
 use crate::restate_identity::with_identity_headers;
@@ -255,7 +265,24 @@ pub trait Session {
 }
 
 /// Concrete `Session` virtual object implementation.
-pub struct SessionImpl;
+pub struct SessionImpl {
+    session_store: Arc<dyn SessionRepository>,
+    session_limits: SessionLimitsConfig,
+}
+
+impl SessionImpl {
+    /// Creates a session object with its persistence and scheduling dependencies.
+    #[must_use]
+    pub fn new(
+        session_store: Arc<dyn SessionRepository>,
+        session_limits: SessionLimitsConfig,
+    ) -> Self {
+        Self {
+            session_store,
+            session_limits,
+        }
+    }
+}
 
 async fn load_pending_state<R: VoReader>(reader: &R) -> Result<SessionPendingState, HandlerError> {
     Ok(reader.get_json(K_PENDING_STATE).await?.unwrap_or_default())

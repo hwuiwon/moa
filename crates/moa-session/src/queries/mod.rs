@@ -1,11 +1,17 @@
 //! Query helpers for mapping `PostgreSQL` rows into MOA core types.
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ActionPolicyRule, ActionRuleScope, ContactId, ContactRef, ContactVerificationState,
-    ExperienceAttribution, ExperienceRecord, LearningCandidate, LearningEntry, MoaError, ModelId,
-    Result, SegmentAssessment, SegmentId, SessionActorRef, SessionChannelBindingId, SessionId,
-    SessionMeta, SessionSummary, TaskFingerprint, TaskSegment, TaskStrategySuccessRate, TenantId,
-    UserId,
+    error::MoaError, error::Result, types::action_policy::ActionPolicyRule,
+    types::action_policy::ActionRuleScope, types::channel::SessionChannelBindingId,
+    types::contact::ContactId, types::contact::ContactRef,
+    types::contact::ContactVerificationState, types::contact::SessionActorRef,
+    types::experience::ExperienceAttribution, types::experience::ExperienceRecord,
+    types::experience::LearningCandidate, types::experience::TaskFingerprint,
+    types::experience::TaskStrategySuccessRate, types::identifiers::ModelId,
+    types::identifiers::SegmentId, types::identifiers::SessionId, types::identifiers::TenantId,
+    types::identifiers::UserId, types::learning::LearningEntry,
+    types::segment_assessment::SegmentAssessment, types::segments::TaskSegment,
+    types::session::SessionMeta, types::session::SessionSummary,
 };
 use sha2::{Digest, Sha256};
 use sqlx::{Row, postgres::PgRow};

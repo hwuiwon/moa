@@ -4,7 +4,10 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use moa_core::{CancelScope, Event, EventRange, ModelId, SessionId, SessionStatus};
+use moa_core::{
+    events::Event, types::events_stream::EventRange, types::identifiers::ModelId,
+    types::identifiers::SessionId, types::session::CancelScope, types::session::SessionStatus,
+};
 use reqwest::StatusCode;
 use sqlx::PgPool;
 use tempfile::TempDir;
@@ -267,7 +270,7 @@ async fn wait_for_brain_response(
     ingress: &str,
     identity: &moa_core::traits::Identity,
     session_id: SessionId,
-) -> Result<Vec<moa_core::EventRecord>> {
+) -> Result<Vec<moa_core::types::events_stream::EventRecord>> {
     for _attempt in 0..30 {
         let request = client.post(format!(
             "{}/restate/call/SessionStore/get_events",
@@ -279,7 +282,7 @@ async fn wait_for_brain_response(
             .await
             .context("fetch events via restate ingress")?;
         let events = response
-            .json::<Vec<moa_core::EventRecord>>()
+            .json::<Vec<moa_core::types::events_stream::EventRecord>>()
             .await
             .context("deserialize event response")?;
         if events

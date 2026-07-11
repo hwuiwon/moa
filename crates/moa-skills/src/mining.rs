@@ -12,8 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
-    LearningCandidateType, LearningRiskClass, TenantId,
+    types::experience::LearningCandidate, types::experience::LearningCandidateStatus,
+    types::experience::LearningCandidateStatusUpdate, types::experience::LearningCandidateType,
+    types::experience::LearningRiskClass, types::identifiers::TenantId,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -131,8 +132,10 @@ pub enum CandidateFiling {
 /// reviewed tool (correlated through the matching review-request event).
 /// Retryable tool errors and cleared reviews are not failures and are skipped.
 #[must_use]
-pub fn session_failures_from_events(events: &[moa_core::EventRecord]) -> Vec<SessionFailure> {
-    use moa_core::{ActionReviewDecision, Event};
+pub fn session_failures_from_events(
+    events: &[moa_core::types::events_stream::EventRecord],
+) -> Vec<SessionFailure> {
+    use moa_core::{events::Event, types::action_policy::ActionReviewDecision};
 
     let mut review_subjects: BTreeMap<Uuid, String> = BTreeMap::new();
     let mut failures = Vec::new();
@@ -182,9 +185,9 @@ pub fn session_failures_from_events(events: &[moa_core::EventRecord]) -> Vec<Ses
 pub async fn mine_and_file_session_failures(
     store: &moa_session::PostgresSessionStore,
     tenant_id: TenantId,
-    events: &[moa_core::EventRecord],
+    events: &[moa_core::types::events_stream::EventRecord],
     now: DateTime<Utc>,
-) -> moa_core::Result<usize> {
+) -> moa_core::error::Result<usize> {
     let session_failures = session_failures_from_events(events);
     if session_failures.is_empty() {
         return Ok(0);
@@ -616,8 +619,12 @@ mod tests {
 mod extraction_tests {
     use chrono::Utc;
     use moa_core::{
-        ActionClass, ActionEnvelope, ActionReviewDecision, ActionReviewField, ActionReviewPreview,
-        Event, EventRecord, RiskLevel, SessionActorRef, SessionId, TenantId, ToolCallId,
+        events::Event, types::action_policy::ActionClass, types::action_policy::ActionEnvelope,
+        types::action_policy::ActionReviewDecision, types::action_policy::ActionReviewField,
+        types::action_policy::ActionReviewPreview, types::action_policy::RiskLevel,
+        types::contact::SessionActorRef, types::events_stream::EventRecord,
+        types::identifiers::SessionId, types::identifiers::TenantId,
+        types::identifiers::ToolCallId,
     };
     use uuid::Uuid;
 

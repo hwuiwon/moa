@@ -186,7 +186,7 @@ pub struct WorkerVoState {
 
 impl WorkerVoState {
     /// Bootstraps state from the initial child-task payload.
-    pub fn initialize(&mut self, msg: &WorkerMessage) -> moa_core::Result<()> {
+    pub fn initialize(&mut self, msg: &WorkerMessage) -> moa_core::error::Result<()> {
         let WorkerMessage::InitialTask(initial) = msg else {
             return Err(MoaError::ValidationError(
                 "worker initialization requires an InitialTask message".to_string(),
@@ -234,7 +234,7 @@ impl WorkerVoState {
     }
 
     /// Ensures the child was initialized before handling follow-up messages or turns.
-    pub(super) fn ensure_initialized(&self) -> moa_core::Result<()> {
+    pub(super) fn ensure_initialized(&self) -> moa_core::error::Result<()> {
         if self.parent_session.is_some()
             && self.task.is_some()
             && self.tenant_id.is_some()
@@ -272,7 +272,7 @@ impl WorkerVoState {
     }
 
     /// Queues a follow-up message and transitions the child into `Running`.
-    pub(super) fn enqueue_follow_up(&mut self, text: String) -> moa_core::Result<()> {
+    pub(super) fn enqueue_follow_up(&mut self, text: String) -> moa_core::error::Result<()> {
         self.ensure_initialized()?;
         self.pending.push(UserMessage {
             text,
@@ -782,8 +782,10 @@ impl VoState for WorkerVoState {
 fn latest_assistant_text(history: &[WorkerHistoryEntry]) -> Option<String> {
     history.iter().rev().find_map(|entry| match entry {
         WorkerHistoryEntry::Inline(message)
-            if matches!(message.role, moa_core::MessageRole::Assistant)
-                && !message.content.trim().is_empty() =>
+            if matches!(
+                message.role,
+                moa_core::types::context::MessageRole::Assistant
+            ) && !message.content.trim().is_empty() =>
         {
             Some(message.content.clone())
         }
@@ -791,8 +793,10 @@ fn latest_assistant_text(history: &[WorkerHistoryEntry]) -> Option<String> {
         // terminal result output (reached solely when no `last_turn_summary` was recorded),
         // so the stored preview is sufficient and avoids a blob read on the terminal path.
         WorkerHistoryEntry::Claimed(claimed)
-            if matches!(claimed.role, moa_core::MessageRole::Assistant)
-                && !claimed.preview.trim().is_empty() =>
+            if matches!(
+                claimed.role,
+                moa_core::types::context::MessageRole::Assistant
+            ) && !claimed.preview.trim().is_empty() =>
         {
             Some(claimed.preview.clone())
         }
@@ -863,14 +867,19 @@ impl WorkerVoState {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        ModelId, SessionId, TenantId, TurnOutcome, UserId, WorkerInitialTask, WorkerMessage,
+        types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
+        types::identifiers::UserId, types::session::TurnOutcome,
+        types::worker::state::WorkerInitialTask, types::worker::state::WorkerMessage,
     };
 
     use super::{
         ClaimedHistoryEntry, HISTORY_CLAIM_CHECK_THRESHOLD_BYTES, HISTORY_INLINE_TAIL,
         WORKER_BUDGET_EXHAUSTED_MESSAGE, WorkerHistoryEntry, WorkerVoState, latest_assistant_text,
     };
-    use moa_core::{ClaimCheck, ContextMessage, MessageRole, WorkerState};
+    use moa_core::{
+        types::context::ContextMessage, types::context::MessageRole,
+        types::events_stream::ClaimCheck, types::worker::state::WorkerState,
+    };
 
     fn initial_task() -> WorkerMessage {
         WorkerMessage::InitialTask(Box::new(WorkerInitialTask {
@@ -1110,7 +1119,7 @@ mod tests {
 
         // A pending request_input round-trip surfaces awaiting_input so the watchdog can
         // exempt the child even with an aged (or absent) heartbeat.
-        state.register_input_request(moa_core::WorkerPendingInput {
+        state.register_input_request(moa_core::types::worker::state::WorkerPendingInput {
             input_request_id: "req-1".to_string(),
             awakeable_id: "awk-1".to_string(),
         });
@@ -1182,7 +1191,7 @@ mod tests {
         // Pins: register stores one awakeable per input_request_id (idempotent), take
         // returns the matching awakeable id and removes only that entry, and a missing or
         // already-taken id yields None so ProvideInput/timeout stay idempotent.
-        use moa_core::WorkerPendingInput;
+        use moa_core::types::worker::state::WorkerPendingInput;
 
         let mut state = WorkerVoState::default();
         assert!(state.register_input_request(WorkerPendingInput {

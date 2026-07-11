@@ -1,6 +1,6 @@
 //! Pure helpers for worker limits, budgets, and paths.
 
-use moa_core::WorkerChildRef;
+use moa_core::types::worker::state::WorkerChildRef;
 use restate_sdk::prelude::*;
 
 /// Maximum nested worker depth allowed for one tree.
@@ -103,7 +103,7 @@ pub(crate) fn child_agent_path(parent_key: &str, sub_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::WorkerChildRef;
+    use moa_core::types::worker::state::WorkerChildRef;
 
     use super::{
         MAX_WORKER_DEPTH, MAX_WORKER_FAN_OUT, task_hash, validate_dispatch_budget,
@@ -176,9 +176,9 @@ mod tests {
     #[test]
     fn validate_dispatch_limits_ignores_terminal_cached_children() {
         // Pins: consumed-later terminal children prove ownership but do not consume active fan-out.
-        let terminal = moa_core::WorkerTerminalResult {
-            state: moa_core::WorkerState::Completed,
-            result: moa_core::WorkerResult {
+        let terminal = moa_core::types::worker::state::WorkerTerminalResult {
+            state: moa_core::types::worker::state::WorkerState::Completed,
+            result: moa_core::types::worker::state::WorkerResult {
                 worker_id: "child-done".to_string(),
                 success: true,
                 output: "done".to_string(),

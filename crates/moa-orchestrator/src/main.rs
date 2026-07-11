@@ -137,8 +137,16 @@ async fn async_main() -> anyhow::Result<()> {
     let endpoint = build_endpoint(
         runtime_deps.session_store.clone(),
         runtime_deps.pool.clone(),
+        runtime_deps.fga_client.clone(),
         runtime_deps.providers.clone(),
         runtime_deps.tool_router.clone(),
+        runtime_deps.tool_schemas.clone(),
+        moa_config.session_limits.clone(),
+        moa_config.clone(),
+        runtime_deps.auth_providers.contact_tokens.clone(),
+        runtime_deps.lineage.handle.clone(),
+        runtime_deps.embedding_provider.clone(),
+        Arc::new(runtime_deps.channel_adapters.clone()),
     );
 
     let readiness = Arc::new(AtomicBool::new(false));

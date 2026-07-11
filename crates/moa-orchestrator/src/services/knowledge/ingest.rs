@@ -3,8 +3,8 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use moa_core::RlsContext;
-use moa_core::{MoaConfig, TenantId, traits::EmbeddingProvider};
+use moa_core::types::memory::RlsContext;
+use moa_core::{config::MoaConfig, traits::EmbeddingProvider, types::identifiers::TenantId};
 use moa_knowledge::{
     chunking::ChunkingConfig,
     domain::{KnowledgeSyncRun, ParseInput, ParsedDocument, RecordPage},
@@ -286,7 +286,7 @@ impl EmbeddingProvider for SharedEmbeddingProvider {
         self.inner.model_version()
     }
 
-    async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+    async fn embed(&self, inputs: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
         self.inner.embed(inputs).await
     }
 }
@@ -316,6 +316,6 @@ fn required_parser_api_key(
     })
 }
 
-fn embedder_config_error(error: moa_core::MoaError) -> KnowledgeServiceError {
-    KnowledgeServiceError::Moa(moa_core::MoaError::ConfigError(error.to_string()))
+fn embedder_config_error(error: moa_core::error::MoaError) -> KnowledgeServiceError {
+    KnowledgeServiceError::Moa(moa_core::error::MoaError::ConfigError(error.to_string()))
 }

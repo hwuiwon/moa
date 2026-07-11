@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{SegmentEvidence, SegmentId, SegmentOutcome, SessionId, TenantId, UserId};
+use super::{
+    identifiers::SegmentId, identifiers::SessionId, identifiers::TenantId, identifiers::UserId,
+    segment_assessment::SegmentEvidence, segment_assessment::SegmentOutcome,
+};
 
 /// Stable task grouping key used for task-conditioned learning.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

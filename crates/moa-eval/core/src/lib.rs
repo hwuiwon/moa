@@ -20,7 +20,7 @@ pub use evaluators::{
     TrajectoryMatchEvaluator, build_evaluators, evaluate_run, score_is_failure,
 };
 pub use loader::{load_agent_config, load_suite};
-pub use plan::{EvalPlan, build_eval_plan};
+pub use plan::{EvalPlan, build_eval_plan_with_estimator, estimate_run_cost_range};
 pub use replay::{ReplayConfig, token_f1};
 pub use results::{EvalMetrics, EvalResult, EvalScore, EvalScoreValue, EvalStatus, TrajectoryStep};
 pub use types::{

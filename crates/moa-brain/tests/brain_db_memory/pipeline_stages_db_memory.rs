@@ -19,13 +19,18 @@ use moa_brain::{
     GraphMemoryPipelineOptions,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
 };
-use moa_core::RlsContext;
+use moa_core::types::memory::RlsContext;
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContactId,
-    ContextMessage, ContextProcessor, LLMProvider, MessageRole, MoaConfig, ModelCapabilities,
-    ModelId, NullLineageHandle, QueryRewriteConfig, QueryRewriteResult, Result, RewriteReason,
-    RewriteSource, StopReason, StoragePartitionId, TenantId, TokenUsage, WorkingContext,
-    stable_prefix_fingerprint,
+    config::MoaConfig, config::QueryRewriteConfig, error::Result, traits::ContextProcessor,
+    traits::LLMProvider, traits::NullLineageHandle, types::completion::CompletionContent,
+    types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::completion::CompletionStream, types::completion::StopReason,
+    types::completion::TokenUsage, types::contact::ContactId, types::context::ContextMessage,
+    types::context::MessageRole, types::context::WorkingContext, types::identifiers::ModelId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::model::ModelCapabilities, types::observability::stable_prefix_fingerprint,
+    types::query_rewrite::QueryRewriteResult, types::query_rewrite::RewriteReason,
+    types::query_rewrite::RewriteSource,
 };
 use moa_db::ScopedConn;
 use moa_memory_graph::{NodeLabel, PiiClass};
@@ -560,11 +565,11 @@ async fn seed_memory_rows(
 ) -> Result<()> {
     let mut conn = ScopedConn::begin(pool, &RlsContext::contact(tenant_id, contact_id))
         .await
-        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     sqlx::query("SET LOCAL ROLE moa_app")
         .execute(conn.as_mut())
         .await
-        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     for (index, hit) in hits.iter().enumerate() {
         let valid_to = (!hit.valid).then_some(clock_at);
         let last_accessed_at = clock_at + Duration::seconds(index as i64);
@@ -588,11 +593,11 @@ async fn seed_memory_rows(
         .bind(last_accessed_at)
         .execute(conn.as_mut())
         .await
-        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     }
     conn.commit()
         .await
-        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     Ok(())
 }
 
@@ -614,7 +619,7 @@ async fn seed_other_tenant_vector_noise(
         .bind(uid)
         .execute(pool)
         .await
-        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     sqlx::query(
         r#"
         INSERT INTO moa.node_index
@@ -633,7 +638,7 @@ async fn seed_other_tenant_vector_noise(
     .bind(clock_at + Duration::seconds(10_000))
     .execute(pool)
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
 
     let vector = PgvectorStore::new(pool.clone(), RlsContext::tenant(other_tenant_id));
     vector
@@ -649,7 +654,7 @@ async fn seed_other_tenant_vector_noise(
             valid_to: None,
         }])
         .await
-        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
 
     Ok(uid)
 }
@@ -662,11 +667,11 @@ async fn seed_workspace_embedder_state(
 ) -> Result<()> {
     let mut conn = ScopedConn::begin(pool, &RlsContext::tenant(*tenant_id))
         .await
-        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     sqlx::query("SET LOCAL ROLE moa_app")
         .execute(conn.as_mut())
         .await
-        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     sqlx::query(
         r#"
         INSERT INTO moa.storage_partition_state
@@ -684,10 +689,10 @@ async fn seed_workspace_embedder_state(
     .bind(VECTOR_DIMENSION as i32)
     .execute(conn.as_mut())
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     conn.commit()
         .await
-        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     Ok(())
 }
 
@@ -699,7 +704,7 @@ async fn delete_memory_rows(
         .bind(storage_partition_id.as_str())
         .execute(pool)
         .await
-        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     Ok(())
 }
 
@@ -708,7 +713,7 @@ async fn delete_other_tenant_vector_noise(pool: &sqlx::PgPool, uid: Uuid) -> Res
         .bind(uid)
         .execute(pool)
         .await
-        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     Ok(())
 }
 
@@ -727,7 +732,9 @@ fn tool_name(schema: &serde_json::Value) -> Result<String> {
         .get("name")
         .and_then(serde_json::Value::as_str)
         .map(ToString::to_string)
-        .ok_or_else(|| moa_core::MoaError::ValidationError("tool schema missing name".to_string()))
+        .ok_or_else(|| {
+            moa_core::error::MoaError::ValidationError("tool schema missing name".to_string())
+        })
 }
 
 fn invalidated_uids_in_content(content: &str, hits: &[MemoryHit]) -> Vec<String> {

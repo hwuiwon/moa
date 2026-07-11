@@ -8,11 +8,14 @@ use chrono::Utc;
 use moa_brain::pipeline::memory::GraphMemoryRetriever;
 use moa_brain::planning::{PlannedQuery, Strategy};
 use moa_brain::retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalRequest};
-use moa_core::RlsContext;
+use moa_core::types::memory::RlsContext;
 use moa_core::{
-    Channel, ContactId, ContactRef, ContactVerificationState, ContextMessage, ContextProcessor,
-    LineageHandle, ModelCapabilities, ModelId, SessionId, SessionMeta, TenantId, TokenPricing,
-    ToolCallFormat, traits::EmbeddingProvider,
+    traits::ContextProcessor, traits::EmbeddingProvider, traits::LineageHandle,
+    types::channel::Channel, types::contact::ContactId, types::contact::ContactRef,
+    types::contact::ContactVerificationState, types::context::ContextMessage,
+    types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
+    types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
+    types::session::SessionMeta,
 };
 use moa_db::ScopedConn;
 use moa_lineage_core::{LineageEvent, RetrievalLineage};
@@ -97,7 +100,7 @@ async fn mock_tenant_and_contact_retrieval() {
         .expect("create other contact fact");
 
     let session = contact_session(tenant_id, contact_id);
-    let mut ctx = moa_core::WorkingContext::new(&session, capabilities());
+    let mut ctx = moa_core::types::context::WorkingContext::new(&session, capabilities());
     ctx.append_message(ContextMessage::user(
         "Find the pto runbook answer and contact deployment preference answer",
     ));
@@ -217,7 +220,8 @@ async fn mock_tenant_and_contact_retrieval() {
     assert!(contact_trace.timings.total_ms > 0);
 
     let tenant_session = tenant_only_session(tenant_id);
-    let mut tenant_ctx = moa_core::WorkingContext::new(&tenant_session, capabilities());
+    let mut tenant_ctx =
+        moa_core::types::context::WorkingContext::new(&tenant_session, capabilities());
     tenant_ctx.append_message(ContextMessage::user("Find the pto runbook answer"));
     let tenant_lineage = Arc::new(CapturedLineage::default());
     let tenant_retriever = GraphMemoryRetriever::new(pool.clone(), Some(Arc::new(TestEmbedder)))
@@ -697,7 +701,7 @@ impl EmbeddingProvider for TestEmbedder {
         VECTOR_DIMENSION
     }
 
-    async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+    async fn embed(&self, inputs: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
         Ok(inputs.iter().map(|input| test_embedding(input)).collect())
     }
 }

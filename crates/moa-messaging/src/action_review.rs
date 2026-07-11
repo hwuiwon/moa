@@ -1,6 +1,6 @@
 //! Unified action-review rendering across channel adapters.
 
-use moa_core::{MessageContent, OutboundMessage};
+use moa_core::{types::channel::MessageContent, types::channel::OutboundMessage};
 
 use crate::renderer::render_action_review_request;
 
@@ -19,8 +19,11 @@ pub fn prepare_outbound_message(mut message: OutboundMessage) -> OutboundMessage
 mod tests {
     use chrono::Utc;
     use moa_core::{
-        ActionClass, ActionEnvelope, ActionReviewField, ActionReviewPreview, MessageContent,
-        OutboundMessage, RiskLevel, SessionActorRef, TenantId, ToolCallId,
+        types::action_policy::ActionClass, types::action_policy::ActionEnvelope,
+        types::action_policy::ActionReviewField, types::action_policy::ActionReviewPreview,
+        types::action_policy::RiskLevel, types::channel::MessageContent,
+        types::channel::OutboundMessage, types::contact::SessionActorRef,
+        types::identifiers::TenantId, types::identifiers::ToolCallId,
     };
     use uuid::Uuid;
 

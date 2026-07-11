@@ -20,9 +20,12 @@ use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::session_store::{AppendEventRequest, GetEventsRequest, InitSessionVoRequest};
 use moa_core::wire::turn::{SessionSnapshot, StartTurnRequest, StartTurnResponse, TurnOutcome};
 use moa_core::{
-    AgentContext, AgentKnowledgePolicy, AgentKnowledgeScopeMode, AgentPolicySnapshot, Channel,
-    Event, EventRange, EventRecord, ModelId, SessionActorRef, SessionId, SessionMeta,
-    SessionStatus, StoragePartitionId, TenantId, UserId,
+    events::Event, types::agent::AgentContext, types::agent::AgentKnowledgePolicy,
+    types::agent::AgentKnowledgeScopeMode, types::agent::AgentPolicySnapshot,
+    types::channel::Channel, types::contact::SessionActorRef, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::identifiers::UserId, types::session::SessionMeta, types::session::SessionStatus,
 };
 use reqwest::StatusCode;
 use serde::Deserialize;

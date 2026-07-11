@@ -15,9 +15,11 @@ use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{AuthProvider, Credential, Identity};
 use moa_core::{
-    ContactSessionAuthorizationRequest, ContactSessionAuthorizationResponse,
-    ContactSessionMessageResponse, MoaConfig, MoaError, SessionAttachmentId,
-    SessionAttachmentStore, SessionId, TenantId,
+    config::MoaConfig, error::MoaError, traits::SessionAttachmentStore,
+    types::contact::ContactSessionAuthorizationRequest,
+    types::contact::ContactSessionAuthorizationResponse,
+    types::contact::ContactSessionMessageResponse, types::identifiers::SessionAttachmentId,
+    types::identifiers::SessionId, types::identifiers::TenantId,
 };
 use moa_session::PostgresSessionStore;
 #[cfg(feature = "auth0")]
@@ -36,7 +38,7 @@ mod analytics;
 mod artifacts;
 mod audit;
 mod auth;
-mod auth_accounts;
+pub(crate) mod auth_accounts;
 mod contact_messages;
 mod dashboard;
 mod knowledge;
@@ -131,6 +133,10 @@ pub fn router(state: AppState) -> Router {
             get(tenant_accounts::get_tenant)
                 .patch(tenant_accounts::patch_tenant)
                 .delete(tenant_accounts::delete_tenant),
+        )
+        .route(
+            "/v1/tenant/purge/{operation_id}",
+            get(tenant_accounts::tenant_purge_status),
         )
         .route(
             "/v1/tenant/users",
@@ -1468,7 +1474,7 @@ fn translate_json_object_with_fields<const N: usize>(
 pub(super) mod test_support {
     use axum::body::Bytes;
     use axum::http::{Method, Uri};
-    use moa_core::TenantId;
+    use moa_core::types::identifiers::TenantId;
     use uuid::Uuid;
 
     use super::{RouteTranslation, translate_public_route};
@@ -1496,8 +1502,8 @@ pub(super) mod test_support {
 mod tests {
     use async_trait::async_trait;
     use axum::http::header::{AUTHORIZATION, COOKIE};
-    use moa_core::TenantId;
     use moa_core::traits::{AuthError, Identity, IdentityType};
+    use moa_core::types::identifiers::TenantId;
 
     use super::*;
 

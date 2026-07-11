@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use moa_core::RlsContext;
+use moa_core::types::memory::RlsContext;
 use moa_db::ScopedConn;
 use moa_memory_graph::{
     EdgeLabel, GraphExpansionHit, GraphStore, GraphTraversalDirection, GraphWalkScoring,
@@ -1093,7 +1093,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::TimeZone;
-    use moa_core::TenantId;
+    use moa_core::types::identifiers::TenantId;
     use moa_memory_graph::{
         EdgeLabel, GraphExpansionHit, GraphTraversalDirection, NodeIndexRow, NodeLabel, PiiClass,
     };

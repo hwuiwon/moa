@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::{TimeZone, Utc};
 use moa_core::wire::privacy::{ParsedPrivacySubjectId, contact_privacy_subject_string};
-use moa_core::{ContactId, StoragePartitionId, UserId};
+use moa_core::{
+    types::contact::ContactId, types::identifiers::StoragePartitionId, types::identifiers::UserId,
+};
 use restate_sdk::prelude::{HandlerError, TerminalError};
 use serde_json::Value;
 use sqlx::{PgPool, Row};

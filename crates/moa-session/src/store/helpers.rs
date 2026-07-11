@@ -49,12 +49,14 @@ impl PostgresSessionStore {
         let event_type_text = row.col::<String>("event_type")?;
         Ok(EventRecord {
             id: row.col::<Uuid>("id")?,
-            session_id: moa_core::SessionId(row.col::<Uuid>("session_id")?),
+            session_id: moa_core::types::identifiers::SessionId(row.col::<Uuid>("session_id")?),
             sequence_num: row.col::<i64>("sequence_num")? as u64,
             event_type: from_db("event type", &event_type_text)?,
             event,
             timestamp: row.col::<chrono::DateTime<Utc>>("timestamp")?,
-            brain_id: row.col::<Option<Uuid>>("brain_id")?.map(moa_core::BrainId),
+            brain_id: row
+                .col::<Option<Uuid>>("brain_id")?
+                .map(moa_core::types::identifiers::BrainId),
             hand_id: row.col::<Option<String>>("hand_id")?,
             token_count: row
                 .col::<Option<i32>>("token_count")?
@@ -67,7 +69,7 @@ impl PostgresSessionStore {
         row: &sqlx::postgres::PgRow,
     ) -> Result<EventRecord> {
         let payload = row.col::<serde_json::Value>("payload")?;
-        let session_id = moa_core::SessionId(row.col::<Uuid>("session_id")?);
+        let session_id = moa_core::types::identifiers::SessionId(row.col::<Uuid>("session_id")?);
         let event =
             decode_event_from_storage(self.blob_store.as_ref(), &session_id, payload).await?;
         Self::event_record_from_row_parts(row, event)

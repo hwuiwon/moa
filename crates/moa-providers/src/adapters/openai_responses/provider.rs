@@ -4,8 +4,9 @@ use std::env;
 use std::time::{Duration, Instant};
 
 use moa_core::{
-    CompletionRequest, CompletionStream, LLMProvider, MoaConfig, MoaError, ModelCapabilities,
-    ModelId, ProviderNativeTool, Result,
+    config::MoaConfig, error::MoaError, error::Result, traits::LLMProvider,
+    types::completion::CompletionRequest, types::completion::CompletionStream,
+    types::identifiers::ModelId, types::model::ModelCapabilities, types::model::ProviderNativeTool,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -308,7 +309,7 @@ fn native_web_search_tools() -> Vec<ProviderNativeTool> {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::ToolCallFormat;
+    use moa_core::types::model::ToolCallFormat;
 
     use super::{MODEL_GPT_5_4, MODEL_GPT_5_4_MINI, canonical_model_id, capabilities_for_model};
 

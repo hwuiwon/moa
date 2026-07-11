@@ -2,8 +2,10 @@
 
 use chrono::{Duration, Utc};
 use moa_core::{
-    Event, EventFilter, EventRange, EventType, ModelId, SessionActorRef, SessionFilter,
-    SessionMeta, SessionStatus, SessionStore, TenantId,
+    events::Event, events::EventType, traits::SessionStore, types::contact::SessionActorRef,
+    types::events_stream::EventFilter, types::events_stream::EventRange,
+    types::identifiers::ModelId, types::identifiers::TenantId, types::session::SessionFilter,
+    types::session::SessionMeta, types::session::SessionStatus,
 };
 use uuid::Uuid;
 
@@ -56,7 +58,7 @@ where
                 text: "Hi there".into(),
                 thought_signature: None,
                 model: "test".into(),
-                model_tier: moa_core::ModelTier::Main,
+                model_tier: moa_core::types::provider::ModelTier::Main,
                 input_tokens_uncached: 10,
                 input_tokens_cache_write: 0,
                 input_tokens_cache_read: 0,
@@ -266,7 +268,7 @@ where
                 text: "first".into(),
                 thought_signature: None,
                 model: "test".into(),
-                model_tier: moa_core::ModelTier::Main,
+                model_tier: moa_core::types::provider::ModelTier::Main,
                 input_tokens_uncached: 10,
                 input_tokens_cache_write: 0,
                 input_tokens_cache_read: 0,
@@ -284,7 +286,7 @@ where
                 text: "second".into(),
                 thought_signature: None,
                 model: "test".into(),
-                model_tier: moa_core::ModelTier::Main,
+                model_tier: moa_core::types::provider::ModelTier::Main,
                 input_tokens_uncached: 8,
                 input_tokens_cache_write: 0,
                 input_tokens_cache_read: 0,
@@ -302,7 +304,7 @@ where
                 text: "other".into(),
                 thought_signature: None,
                 model: "test".into(),
-                model_tier: moa_core::ModelTier::Main,
+                model_tier: moa_core::types::provider::ModelTier::Main,
                 input_tokens_uncached: 8,
                 input_tokens_cache_write: 0,
                 input_tokens_cache_read: 0,

@@ -355,7 +355,7 @@ mod tests {
         Identity {
             identity_type,
             id,
-            tenant_id: moa_core::TenantId::from(
+            tenant_id: moa_core::types::identifiers::TenantId::from(
                 Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
                     .expect("tenant fixture UUID should parse"),
             ),

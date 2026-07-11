@@ -1,6 +1,6 @@
 //! Prompt-injection heuristics, canary helpers, and untrusted tool output wrapping.
 
-use moa_core::WorkingContext;
+use moa_core::types::context::WorkingContext;
 use uuid::Uuid;
 
 const CANARY_PREFIX: &str = "moa_canary_";
@@ -167,7 +167,10 @@ pub fn wrap_untrusted_tool_output(content: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::{ModelId, SessionMeta, TokenPricing, ToolCallFormat};
+    use moa_core::{
+        types::identifiers::ModelId, types::model::TokenPricing, types::model::ToolCallFormat,
+        types::session::SessionMeta,
+    };
 
     use super::{
         InputClassification, ToolInputCanaryLeak, ToolInputCanaryScreening, canary_system_message,
@@ -175,11 +178,11 @@ mod tests {
         wrap_untrusted_tool_output,
     };
 
-    fn working_context() -> moa_core::WorkingContext {
+    fn working_context() -> moa_core::types::context::WorkingContext {
         let session = SessionMeta::default();
-        moa_core::WorkingContext::new(
+        moa_core::types::context::WorkingContext::new(
             &session,
-            moa_core::ModelCapabilities {
+            moa_core::types::model::ModelCapabilities {
                 model_id: ModelId::new("claude-sonnet-4-6"),
                 context_window: 200_000,
                 max_output: 8_192,

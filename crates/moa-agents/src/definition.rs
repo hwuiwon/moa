@@ -1,6 +1,6 @@
 //! Database-facing configured-agent deployment pointers.
 
-use moa_core::AgentRevisionLock;
+use moa_core::types::agent::AgentRevisionLock;
 use uuid::Uuid;
 
 /// Installed-agent pointer selected for session creation or deployment resolution.

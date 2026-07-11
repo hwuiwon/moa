@@ -13,10 +13,15 @@ use moa_brain::pipeline::ContextPipeline;
 use moa_brain::pipeline::memory::OFFER_RETRIEVAL_TOOLS_METADATA_KEY;
 use moa_brain::{TurnResult, run_brain_turn};
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContextProcessor,
-    Event, EventRange, LLMProvider, MemoryRetrievalExecutor, MoaConfig, ModelCapabilities, ModelId,
-    ProcessorOutput, Result, SessionMeta, SessionStore, StopReason, TokenPricing, TokenUsage,
-    ToolCallContent, ToolCallFormat, ToolInvocation, ToolOutput, WorkingContext,
+    config::MoaConfig, error::Result, events::Event, traits::ContextProcessor, traits::LLMProvider,
+    traits::MemoryRetrievalExecutor, traits::SessionStore, types::completion::CompletionContent,
+    types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::completion::CompletionStream, types::completion::StopReason,
+    types::completion::TokenUsage, types::completion::ToolCallContent,
+    types::completion::ToolInvocation, types::context::ProcessorOutput,
+    types::context::WorkingContext, types::events_stream::EventRange, types::identifiers::ModelId,
+    types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
+    types::session::SessionMeta, types::tools::ToolOutput,
 };
 use moa_hands::ToolRouter;
 use serde_json::{Value, json};
@@ -194,7 +199,7 @@ impl LLMProvider for MemorySearchThenEndProvider {
             let tool_message = request
                 .messages
                 .iter()
-                .find(|message| message.role == moa_core::MessageRole::Tool)
+                .find(|message| message.role == moa_core::types::context::MessageRole::Tool)
                 .expect("memory_search tool result must be replayed into context");
             let graph_uid = GRAPH_UID.to_string();
             let chunk_uid = CHUNK_UID.to_string();

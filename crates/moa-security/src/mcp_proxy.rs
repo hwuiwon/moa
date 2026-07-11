@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_core::{
-    Credential, CredentialVault, McpCredentialConfig, McpServerConfig, MoaError, Result, SessionId,
-    StoredCredentialMetadata,
+    config::McpCredentialConfig, config::McpServerConfig, error::MoaError, error::Result,
+    traits::CredentialVault, traits::StoredCredentialMetadata, types::identifiers::SessionId,
+    types::model::Credential,
 };
 use tokio::sync::RwLock;
 
@@ -186,8 +187,8 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        Credential, CredentialVault, McpCredentialConfig, McpServerConfig, SessionId,
-        StoredCredentialMetadata,
+        config::McpCredentialConfig, config::McpServerConfig, traits::CredentialVault,
+        traits::StoredCredentialMetadata, types::identifiers::SessionId, types::model::Credential,
     };
     use uuid::Uuid;
 
@@ -199,11 +200,13 @@ mod tests {
 
     #[async_trait]
     impl CredentialVault for MockVault {
-        async fn get(&self, service: &str, scope: &str) -> moa_core::Result<Credential> {
+        async fn get(&self, service: &str, scope: &str) -> moa_core::error::Result<Credential> {
             self.values
                 .get(&(service.to_string(), scope.to_string()))
                 .cloned()
-                .ok_or_else(|| moa_core::MoaError::StorageError("missing credential".to_string()))
+                .ok_or_else(|| {
+                    moa_core::error::MoaError::StorageError("missing credential".to_string())
+                })
         }
 
         async fn set(
@@ -211,18 +214,18 @@ mod tests {
             _service: &str,
             _scope: &str,
             _cred: Credential,
-        ) -> moa_core::Result<()> {
+        ) -> moa_core::error::Result<()> {
             Ok(())
         }
 
-        async fn delete(&self, _service: &str, _scope: &str) -> moa_core::Result<bool> {
+        async fn delete(&self, _service: &str, _scope: &str) -> moa_core::error::Result<bool> {
             Ok(false)
         }
 
         async fn list(
             &self,
             _service_prefix: &str,
-        ) -> moa_core::Result<Vec<StoredCredentialMetadata>> {
+        ) -> moa_core::error::Result<Vec<StoredCredentialMetadata>> {
             Ok(Vec::new())
         }
     }
@@ -273,7 +276,7 @@ mod tests {
             .expect_err("a missing credential must fail closed, not return empty headers");
 
         assert!(
-            matches!(error, moa_core::MoaError::MissingEnvironmentVariable(message) if message.contains("credential not configured for service unknown-server"))
+            matches!(error, moa_core::error::MoaError::MissingEnvironmentVariable(message) if message.contains("credential not configured for service unknown-server"))
         );
     }
 
@@ -348,7 +351,7 @@ mod tests {
             panic!("a missing credential env var must fail vault construction");
         };
         assert!(
-            matches!(error, moa_core::MoaError::MissingEnvironmentVariable(var) if var == name)
+            matches!(error, moa_core::error::MoaError::MissingEnvironmentVariable(var) if var == name)
         );
     }
 
@@ -364,7 +367,7 @@ mod tests {
             .expect_err("an unconfigured service/scope lookup must fail closed");
 
         assert!(
-            matches!(error, moa_core::MoaError::MissingEnvironmentVariable(message) if message.contains("credential not configured for service unknown-service"))
+            matches!(error, moa_core::error::MoaError::MissingEnvironmentVariable(message) if message.contains("credential not configured for service unknown-service"))
         );
     }
 

@@ -18,7 +18,9 @@
 use std::collections::{HashMap, HashSet};
 
 use moa_core::{
-    Event, EventRecord, FileReadDedupState, SequenceNum, SnapshotFileReadState, ToolCallId,
+    events::Event, types::events_stream::EventRecord, types::events_stream::SequenceNum,
+    types::identifiers::ToolCallId, types::snapshot::FileReadDedupState,
+    types::snapshot::SnapshotFileReadState,
 };
 
 pub(super) fn build_full_file_read_path_map(
@@ -79,7 +81,9 @@ pub(super) fn build_tool_invocation_key_map(
         else {
             continue;
         };
-        if file_read_paths.contains_key(tool_id) || moa_core::is_child_report_tool_name(tool_name) {
+        if file_read_paths.contains_key(tool_id)
+            || moa_core::types::worker::tool_schema::is_child_report_tool_name(tool_name)
+        {
             continue;
         }
         let Ok(serialized_input) = serde_json::to_string(input) else {
@@ -406,7 +410,7 @@ mod tests {
                 events_summarized: 1,
                 token_count: 2,
                 model: ModelId::new("claude-sonnet-4-6"),
-                model_tier: moa_core::ModelTier::Main,
+                model_tier: moa_core::types::provider::ModelTier::Main,
                 input_tokens: 10,
                 output_tokens: 2,
                 cost_cents: 0,
@@ -541,7 +545,7 @@ mod tests {
                 events_summarized: 1,
                 token_count: 2,
                 model: ModelId::new("claude-sonnet-4-6"),
-                model_tier: moa_core::ModelTier::Main,
+                model_tier: moa_core::types::provider::ModelTier::Main,
                 input_tokens: 10,
                 output_tokens: 2,
                 cost_cents: 0,

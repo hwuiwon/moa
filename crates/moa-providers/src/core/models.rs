@@ -12,7 +12,8 @@
 use std::time::Duration;
 
 use moa_core::{
-    MoaError, ModelCapabilities, ModelId, ProviderNativeTool, Result, TokenPricing, ToolCallFormat,
+    error::MoaError, error::Result, types::identifiers::ModelId, types::model::ModelCapabilities,
+    types::model::ProviderNativeTool, types::model::TokenPricing, types::model::ToolCallFormat,
 };
 
 /// Identifier used in the catalog to denote the provider a model runs
@@ -25,7 +26,7 @@ pub const PROVIDER_GOOGLE: &str = "google";
 /// capability band (a request should not fail over from, say, a frontier model
 /// to a light one). Ranked 0 (most capable) through 4 (least).
 ///
-/// This is intentionally distinct from [`moa_core::ModelTier`], which is a coarse
+/// This is intentionally distinct from [`moa_core::types::provider::ModelTier`], which is a coarse
 /// pricing/analytics tier (`Main`/`Auxiliary`); this is a finer capability ladder
 /// used for routing/failover decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -2,8 +2,10 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    BrainId, Channel, ContactId, Event, EventRecord, EventType, ModelId, Result, SessionActorRef,
-    SessionId, SessionStatus, SessionSummary, TenantId,
+    error::Result, events::Event, events::EventType, types::channel::Channel,
+    types::contact::ContactId, types::contact::SessionActorRef, types::events_stream::EventRecord,
+    types::identifiers::BrainId, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::TenantId, types::session::SessionStatus, types::session::SessionSummary,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, QueryBuilder, postgres::PgRow};
@@ -341,7 +343,9 @@ fn page_limit(limit: Option<usize>) -> usize {
     limit.unwrap_or(DEFAULT_PAGE_LIMIT).clamp(1, MAX_PAGE_LIMIT)
 }
 
-fn dashboard_detail_from_meta(meta: moa_core::SessionMeta) -> DashboardSessionDetail {
+fn dashboard_detail_from_meta(
+    meta: moa_core::types::session::SessionMeta,
+) -> DashboardSessionDetail {
     let cache_hit_rate = meta.cache_hit_rate();
     DashboardSessionDetail {
         session_id: meta.id,

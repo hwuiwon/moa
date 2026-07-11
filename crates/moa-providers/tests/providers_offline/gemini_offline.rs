@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use moa_core::{
-    CompletionContent, LLMProvider, MoaError, StopReason, ToolCallContent, ToolInvocation,
+    error::MoaError, traits::LLMProvider, types::completion::CompletionContent,
+    types::completion::StopReason, types::completion::ToolCallContent,
+    types::completion::ToolInvocation,
 };
 use moa_providers::GeminiProvider;
 use serde_json::json;
@@ -86,9 +88,11 @@ async fn gemini_offline_tool_call_response_parses_into_provider_event() {
                 name: "emit_token".to_string(),
                 input: json!({ "token": "OFFLINE" }),
             },
-            provider_metadata: Some(moa_core::ProviderToolCallMetadata::Gemini {
-                thought_signature: "sig_stream_1".to_string(),
-            }),
+            provider_metadata: Some(
+                moa_core::types::completion::ProviderToolCallMetadata::Gemini {
+                    thought_signature: "sig_stream_1".to_string(),
+                }
+            ),
         })
     );
     assert_eq!(response.stop_reason, StopReason::ToolUse);

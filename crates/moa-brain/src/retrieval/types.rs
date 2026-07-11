@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use moa_core::SessionId;
+use moa_core::types::identifiers::SessionId;
 use moa_lineage_core::TurnId;
 use moa_memory_graph::{GraphError, NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_types::MemoryScope;
@@ -32,7 +32,7 @@ pub enum RetrievalError {
     Sqlx(#[from] sqlx::Error),
     /// Scoped Postgres connection setup failed.
     #[error("scope setup: {0}")]
-    Scope(#[from] moa_core::MoaError),
+    Scope(#[from] moa_core::error::MoaError),
 }
 
 /// Retrieval request supplied by the query planner.

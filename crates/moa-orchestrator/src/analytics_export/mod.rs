@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use clickhouse::{Client, Row};
-use moa_core::ClickHouseConfig;
+use moa_core::config::ClickHouseConfig;
 use serde::Serialize;
 use sqlx::PgPool;
 use sqlx::pool::PoolConnection;

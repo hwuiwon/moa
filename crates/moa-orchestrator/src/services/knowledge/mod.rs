@@ -17,9 +17,13 @@ use std::{
 
 use async_trait::async_trait;
 use moa_authz_schema::Relation;
-use moa_core::RlsContext;
+use moa_core::types::memory::RlsContext;
 use moa_core::{
-    Credential, CredentialVault, MoaConfig, MoaError, TenantId,
+    config::MoaConfig,
+    error::MoaError,
+    traits::CredentialVault,
+    types::identifiers::TenantId,
+    types::model::Credential,
     wire::knowledge::{
         KnowledgeConnectionListRequest, KnowledgeConnectionListResponse,
         KnowledgeCreateLinkTokenRequest, KnowledgeCreateLinkTokenResponse,
@@ -38,14 +42,16 @@ use moa_core::{
 use moa_knowledge::{
     domain::{KnowledgeConnection, LinkedAccount},
     providers::{LinkedIntegrationProvider, merge::MergeProvider, nango::NangoProvider},
-    repository::{KnowledgeRepository, PostgresKnowledgeRepository},
+    repository::{
+        KnowledgeDiscoveryStore, KnowledgeRepository, PostgresKnowledgeDiscoveryStore,
+        PostgresKnowledgeRepository,
+    },
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::{
-    OrchestratorCtx,
     ctx::RequestHeaders,
     workflows::knowledge_sync_ingestion::{
         KnowledgeSyncIngestionClient, KnowledgeSyncIngestionRequest,
@@ -125,8 +131,10 @@ pub trait Knowledge {
 }
 
 /// Concrete knowledge service implementation.
-#[derive(Clone, Default)]
-pub struct KnowledgeImpl;
+#[derive(Clone)]
+pub struct KnowledgeImpl {
+    service: KnowledgeService,
+}
 
 impl Knowledge for KnowledgeImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -138,7 +146,7 @@ impl Knowledge for KnowledgeImpl {
         annotate_restate_handler_span("Knowledge", "create_link_token");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
-        let service = production_service(request.tenant_id);
+        let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
                 service
@@ -160,7 +168,7 @@ impl Knowledge for KnowledgeImpl {
         annotate_restate_handler_span("Knowledge", "exchange_public_token");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
-        let service = production_service(request.tenant_id);
+        let service = self.service.clone();
         let response = ctx
             .run(|| async move {
                 service
@@ -192,7 +200,7 @@ impl Knowledge for KnowledgeImpl {
         annotate_restate_handler_span("Knowledge", "sync_connection");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
-        let service = production_service(request.tenant_id);
+        let service = self.service.clone();
         let response = ctx
             .run(|| async move {
                 service
@@ -219,7 +227,7 @@ impl Knowledge for KnowledgeImpl {
         annotate_restate_handler_span("Knowledge", "sync_status");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
-        let service = production_service(request.tenant_id);
+        let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
                 service
@@ -241,7 +249,7 @@ impl Knowledge for KnowledgeImpl {
         annotate_restate_handler_span("Knowledge", "sync_events");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
-        let service = production_service(request.tenant_id);
+        let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
                 service
@@ -263,7 +271,7 @@ impl Knowledge for KnowledgeImpl {
         annotate_restate_handler_span("Knowledge", "list_connections");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
-        let service = production_service(request.tenant_id);
+        let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
                 service
@@ -285,7 +293,7 @@ impl Knowledge for KnowledgeImpl {
         annotate_restate_handler_span("Knowledge", "list_integrations");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
-        let service = production_service(request.tenant_id);
+        let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
                 service
@@ -307,7 +315,7 @@ impl Knowledge for KnowledgeImpl {
         annotate_restate_handler_span("Knowledge", "update_connection_source_selection");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
-        let service = production_service(request.tenant_id);
+        let service = self.service.clone();
         let response = ctx
             .run(|| async move {
                 service
@@ -339,7 +347,7 @@ impl Knowledge for KnowledgeImpl {
         annotate_restate_handler_span("Knowledge", "disconnect_connection");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
-        let service = production_service(request.tenant_id);
+        let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
                 service
@@ -361,7 +369,7 @@ impl Knowledge for KnowledgeImpl {
         annotate_restate_handler_span("Knowledge", "list_objects");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
-        let service = production_service(request.tenant_id);
+        let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
                 service
@@ -383,7 +391,7 @@ impl Knowledge for KnowledgeImpl {
         annotate_restate_handler_span("Knowledge", "inspect_object");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
-        let service = production_service(request.tenant_id);
+        let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
                 service
@@ -405,7 +413,7 @@ impl Knowledge for KnowledgeImpl {
         annotate_restate_handler_span("Knowledge", "query_trace");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
-        let service = production_service(request.tenant_id);
+        let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
                 service
@@ -427,7 +435,7 @@ impl Knowledge for KnowledgeImpl {
     ) -> Result<Json<KnowledgeProviderWebhookResponse>, HandlerError> {
         annotate_restate_handler_span("Knowledge", "provider_webhook");
         let request = request.into_inner();
-        let service = production_service_for_webhook();
+        let service = self.service.clone();
         let response = ctx
             .run(|| async move {
                 service
@@ -449,6 +457,12 @@ impl Knowledge for KnowledgeImpl {
 }
 
 impl KnowledgeImpl {
+    /// Creates the Restate handler from the existing knowledge application service.
+    #[must_use]
+    pub fn new(service: KnowledgeService) -> Self {
+        Self { service }
+    }
+
     fn dispatch_knowledge_sync_ingestion(ctx: &Context<'_>, sync_run_uid: Uuid) {
         ctx.workflow_client::<KnowledgeSyncIngestionClient>(sync_run_uid.to_string())
             .run(Json::from(KnowledgeSyncIngestionRequest { sync_run_uid }))
@@ -460,6 +474,7 @@ impl KnowledgeImpl {
 #[derive(Clone)]
 pub struct KnowledgeService {
     repository: KnowledgeRepositorySource,
+    discovery: Arc<dyn KnowledgeDiscoveryStore>,
     providers: Arc<dyn KnowledgeProviderResolver>,
     credentials: Arc<dyn KnowledgeCredentialStore>,
     ingestion_runner: Arc<dyn KnowledgeIngestionRunner>,
@@ -472,6 +487,7 @@ impl KnowledgeService {
     #[must_use]
     pub fn new(
         repository: Arc<dyn KnowledgeRepository>,
+        discovery: Arc<dyn KnowledgeDiscoveryStore>,
         providers: Arc<dyn KnowledgeProviderResolver>,
         credentials: Arc<dyn KnowledgeCredentialStore>,
         ingestion_runner: Arc<dyn KnowledgeIngestionRunner>,
@@ -479,6 +495,7 @@ impl KnowledgeService {
     ) -> Self {
         Self {
             repository: KnowledgeRepositorySource::Fixed(repository),
+            discovery,
             providers,
             credentials,
             ingestion_runner,
@@ -496,14 +513,39 @@ impl KnowledgeService {
         ingestion_runner: Arc<dyn KnowledgeIngestionRunner>,
         max_preview_chars: usize,
     ) -> Self {
+        let discovery = Arc::new(PostgresKnowledgeDiscoveryStore::new(pool.clone()));
         Self {
             repository: KnowledgeRepositorySource::Postgres { pool },
+            discovery,
             providers,
             credentials,
             ingestion_runner,
             max_preview_chars,
             lineage_clickhouse: None,
         }
+    }
+
+    /// Creates the config-backed production knowledge application service.
+    #[must_use]
+    pub(crate) fn from_config(pool: sqlx::PgPool, config: &MoaConfig) -> Self {
+        Self::from_postgres_pool(
+            pool.clone(),
+            Arc::new(ConfigKnowledgeProviders::new(config.knowledge.clone())),
+            Arc::new(VaultKnowledgeCredentialStore::new(
+                knowledge_credential_vault(),
+            )),
+            Arc::new(ProductionKnowledgeIngestionRunner::new(
+                pool,
+                config.clone(),
+            )),
+            config.knowledge.observability.max_object_preview_chars,
+        )
+        .with_clickhouse_lineage(
+            config
+                .clickhouse
+                .as_ref()
+                .map(|clickhouse| Arc::new(moa_lineage_sink::ClickHouseStore::connect(clickhouse))),
+        )
     }
 
     /// Points retrieval-trace reads at ClickHouse when that lineage backend
@@ -541,8 +583,8 @@ impl KnowledgeService {
         self.repository.repository(tenant_id)
     }
 
-    fn webhook_lookup_repository(&self) -> Arc<dyn KnowledgeRepository> {
-        self.repository.webhook_lookup_repository()
+    fn discovery(&self) -> &dyn KnowledgeDiscoveryStore {
+        self.discovery.as_ref()
     }
 
     async fn connection_with_credential(
@@ -579,15 +621,6 @@ impl KnowledgeRepositorySource {
                 pool.clone(),
                 RlsContext::tenant(tenant_id),
             )),
-        }
-    }
-
-    fn webhook_lookup_repository(&self) -> Arc<dyn KnowledgeRepository> {
-        match self {
-            Self::Fixed(repository) => repository.clone(),
-            Self::Postgres { pool } => {
-                Arc::new(PostgresKnowledgeRepository::control_plane(pool.clone()))
-            }
         }
     }
 }
@@ -995,37 +1028,6 @@ pub enum KnowledgeServiceError {
     /// MOA runtime operation failed.
     #[error(transparent)]
     Moa(#[from] MoaError),
-}
-
-fn production_service(_tenant_id: TenantId) -> KnowledgeService {
-    let config = OrchestratorCtx::current_config();
-    service_from_config(OrchestratorCtx::current_graph_pool(), &config)
-}
-
-fn production_service_for_webhook() -> KnowledgeService {
-    let config = OrchestratorCtx::current_config();
-    service_from_config(OrchestratorCtx::current_graph_pool(), &config)
-}
-
-fn service_from_config(pool: sqlx::PgPool, config: &MoaConfig) -> KnowledgeService {
-    KnowledgeService::from_postgres_pool(
-        pool.clone(),
-        Arc::new(ConfigKnowledgeProviders::new(config.knowledge.clone())),
-        Arc::new(VaultKnowledgeCredentialStore::new(
-            knowledge_credential_vault(),
-        )),
-        Arc::new(ProductionKnowledgeIngestionRunner::new(
-            pool,
-            config.clone(),
-        )),
-        config.knowledge.observability.max_object_preview_chars,
-    )
-    .with_clickhouse_lineage(
-        config
-            .clickhouse
-            .as_ref()
-            .map(|clickhouse| Arc::new(moa_lineage_sink::ClickHouseStore::connect(clickhouse))),
-    )
 }
 
 fn knowledge_credential_vault() -> Arc<dyn CredentialVault> {

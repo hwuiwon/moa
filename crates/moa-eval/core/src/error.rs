@@ -34,16 +34,16 @@ pub enum EvalError {
     },
     /// A MOA runtime component returned an error.
     #[error(transparent)]
-    Moa(#[from] moa_core::MoaError),
+    Moa(#[from] moa_core::error::MoaError),
     /// A Tokio task failed to join.
     #[error("task join failed: {0}")]
     Join(#[from] tokio::task::JoinError),
     /// JSON serialization failed.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    /// SQL execution failed.
-    #[error(transparent)]
-    Sqlx(#[from] sqlx::Error),
+    /// An owning eval layer failed while reading or writing its storage.
+    #[error("eval storage operation failed: {0}")]
+    Storage(String),
     /// Regex compilation failed while evaluating output expectations.
     #[error(transparent)]
     Regex(#[from] regex::Error),

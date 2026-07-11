@@ -8,7 +8,8 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
-    Event, EventRange, LLMProvider, MoaConfig, Result, SessionMeta, SessionStore, TenantId,
+    config::MoaConfig, error::Result, events::Event, traits::LLMProvider, traits::SessionStore,
+    types::events_stream::EventRange, types::identifiers::TenantId, types::session::SessionMeta,
 };
 use moa_hands::ToolRouter;
 use moa_providers::build_provider_from_config;
@@ -46,7 +47,7 @@ async fn main() -> Result<()> {
             query_rewrite_llm_provider: Some(provider.clone()),
             identity_prompt_override: None,
             tool_schemas: tool_router.tool_schemas(),
-            lineage: Arc::new(moa_core::NullLineageHandle),
+            lineage: Arc::new(moa_core::traits::NullLineageHandle),
         },
     );
     let cli_prompt = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
@@ -104,7 +105,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_prompt(
-    session_id: moa_core::SessionId,
+    session_id: moa_core::types::identifiers::SessionId,
     store: Arc<PostgresSessionStore>,
     provider: Arc<dyn LLMProvider>,
     pipeline: &moa_brain::ContextPipeline,

@@ -5,8 +5,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use moa_core::{
-    CloudHandsConfig, HandProvider, LineageHandle, MoaConfig, MoaError, NullLineageHandle, Result,
-    SandboxTier, SessionStore, ToolBudgetConfig, ToolOutputConfig,
+    config::CloudHandsConfig, config::MoaConfig, config::ToolBudgetConfig,
+    config::ToolOutputConfig, error::MoaError, error::Result, traits::HandProvider,
+    traits::LineageHandle, traits::NullLineageHandle, traits::SessionStore,
+    types::hands::SandboxTier,
 };
 use moa_security::{
     ActionPolicies, ActionPolicyRuleStore, EnvironmentCredentialVault, MCPCredentialProxy,
@@ -172,14 +174,17 @@ impl ToolRouter {
     #[must_use]
     pub fn with_memory_tool_executor(
         mut self,
-        executor: Arc<dyn moa_core::MemoryToolExecutor>,
+        executor: Arc<dyn moa_core::traits::MemoryToolExecutor>,
     ) -> Self {
         self.memory_tool_executor = tokio::sync::RwLock::new(Some(executor));
         self
     }
 
     /// Installs or replaces the graph-memory executor used by built-in memory tools.
-    pub async fn set_memory_tool_executor(&self, executor: Arc<dyn moa_core::MemoryToolExecutor>) {
+    pub async fn set_memory_tool_executor(
+        &self,
+        executor: Arc<dyn moa_core::traits::MemoryToolExecutor>,
+    ) {
         *self.memory_tool_executor.write().await = Some(executor);
     }
 
@@ -187,7 +192,7 @@ impl ToolRouter {
     #[must_use]
     pub fn with_memory_retrieval_executor(
         mut self,
-        executor: Arc<dyn moa_core::MemoryRetrievalExecutor>,
+        executor: Arc<dyn moa_core::traits::MemoryRetrievalExecutor>,
     ) -> Self {
         self.memory_retrieval_executor = tokio::sync::RwLock::new(Some(executor));
         self
@@ -196,7 +201,7 @@ impl ToolRouter {
     /// Installs or replaces the read-only retrieval executor backing the agentic memory tools.
     pub async fn set_memory_retrieval_executor(
         &self,
-        executor: Arc<dyn moa_core::MemoryRetrievalExecutor>,
+        executor: Arc<dyn moa_core::traits::MemoryRetrievalExecutor>,
     ) {
         *self.memory_retrieval_executor.write().await = Some(executor);
     }
@@ -259,7 +264,7 @@ impl ToolRouter {
     }
 
     /// Returns one registered tool definition by name.
-    pub fn tool_definition(&self, name: &str) -> Option<moa_core::ToolDefinition> {
+    pub fn tool_definition(&self, name: &str) -> Option<moa_core::types::tools::ToolDefinition> {
         self.registry
             .tools
             .get(name)
@@ -267,7 +272,7 @@ impl ToolRouter {
     }
 
     /// Returns every registered tool definition in stable name order.
-    pub fn tool_definitions(&self) -> Vec<moa_core::ToolDefinition> {
+    pub fn tool_definitions(&self) -> Vec<moa_core::types::tools::ToolDefinition> {
         let mut definitions = self
             .registry
             .tools
@@ -435,7 +440,7 @@ fn cloud_provider_requested(hands: &CloudHandsConfig, provider: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::{CloudHandsConfig, MoaConfig, SandboxTier};
+    use moa_core::{config::CloudHandsConfig, config::MoaConfig, types::hands::SandboxTier};
 
     use super::{DEFAULT_PROVIDER_NAME, configured_hand_routes};
 

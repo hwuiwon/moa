@@ -5,8 +5,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use moa_core::RlsContext;
-use moa_core::{ContactId, UserId};
+use moa_core::types::memory::RlsContext;
+use moa_core::{types::contact::ContactId, types::identifiers::UserId};
 use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass, PostgresGraphStore};
 use moa_memory_ingest::{
     FactExtractor, IngestApplyReport, IngestCtx, SessionTurn, chunk_turn, fact_hash,
@@ -376,7 +376,7 @@ async fn fetch_source_candidates(ctx: &IngestCtx, fact: &LedgerFact) -> Result<V
     .bind(fact.source_turn_seq.to_string())
     .fetch_all(&ctx.pool)
     .await
-    .map_err(EvalError::from)
+    .map_err(crate::eval_sqlx_error)
 }
 
 async fn fetch_tenant_fact_candidates(
@@ -398,7 +398,7 @@ async fn fetch_tenant_fact_candidates(
     .bind(storage_partition_id)
     .fetch_all(&ctx.pool)
     .await
-    .map_err(EvalError::from)
+    .map_err(crate::eval_sqlx_error)
 }
 
 fn runtime_storage_partition_id(fact: &LedgerFact) -> String {
@@ -1014,7 +1014,10 @@ pub(crate) struct FactSource<'a> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use moa_core::{SessionId, StoragePartitionId, UserId};
+    use moa_core::{
+        types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+        types::identifiers::UserId,
+    };
     use moa_memory_ingest::ScriptedFactExtractor;
     use moa_memory_types::ScopeTier;
     use serde_json::json;

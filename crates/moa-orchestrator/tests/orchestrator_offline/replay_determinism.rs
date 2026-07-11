@@ -16,7 +16,7 @@ mod support;
 
 use async_trait::async_trait;
 use chrono::{Duration, TimeZone, Utc};
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use moa_memory_lifecycle::{
     BackfillStats, ConsolidationOutcome, DecayStats, DigestStats, ExpiryStats, MergeStats,
     SweepStats,

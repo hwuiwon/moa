@@ -5,7 +5,7 @@ use moa_artifacts::simulation::{
     SimulationDataBundleDefinition, SimulationPersonaDefinition, SimulationProfileDefinition,
     SimulationScenarioDefinition,
 };
-use moa_core::{AgentSessionSelection, ModelId};
+use moa_core::{types::agent::AgentSessionSelection, types::identifiers::ModelId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;

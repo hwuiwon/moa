@@ -1,8 +1,10 @@
 //! Resolved runtime policy returned by the configured-agent resolver.
 
 use moa_core::{
-    AgentActionPolicy, AgentContext, AgentGuardrailPolicy, AgentKnowledgePolicy, AgentModelPolicy,
-    AgentRevisionLock, AgentSkillPolicy, AgentToolPolicy,
+    types::agent::AgentActionPolicy, types::agent::AgentContext,
+    types::agent::AgentKnowledgePolicy, types::agent::AgentModelPolicy,
+    types::agent::AgentRevisionLock, types::agent::AgentSkillPolicy, types::agent::AgentToolPolicy,
+    types::guardrails::AgentGuardrailPolicy,
 };
 
 /// Compact deterministic runtime policy for a pinned configured-agent revision.

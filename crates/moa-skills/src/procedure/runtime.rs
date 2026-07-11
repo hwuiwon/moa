@@ -4,7 +4,7 @@ use moa_artifacts::document::{ArtifactDefinition, ArtifactKind};
 use moa_artifacts::procedure::ProcedureDefinition;
 use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::registry::{ArtifactRegistry, ArtifactRun, ArtifactRunStatus, NewArtifactRun};
-use moa_core::{ActionRuleScope, SessionId};
+use moa_core::{types::action_policy::ActionRuleScope, types::identifiers::SessionId};
 use serde_json::Value;
 use uuid::Uuid;
 

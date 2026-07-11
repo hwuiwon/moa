@@ -3,12 +3,11 @@
 //! If `MOA_NEON_API_KEY` is unset, the service is a no-op so local development
 //! and self-hosted deployments do not require Neon.
 
-use moa_core::BranchManager;
+use moa_core::{config::MoaConfig, traits::BranchManager};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
-
-use crate::OrchestratorCtx;
+use std::sync::Arc;
 
 /// Report returned by a Neon branch prune pass.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -32,7 +31,17 @@ pub trait NeonMaint {
 }
 
 /// Concrete Neon maintenance service implementation.
-pub struct NeonMaintImpl;
+pub struct NeonMaintImpl {
+    config: Arc<MoaConfig>,
+}
+
+impl NeonMaintImpl {
+    /// Creates the Neon maintenance adapter with its branch-manager configuration.
+    #[must_use]
+    pub fn new(config: Arc<MoaConfig>) -> Self {
+        Self { config }
+    }
+}
 
 impl NeonMaint for NeonMaintImpl {
     #[tracing::instrument(skip(self, ctx, _request))]
@@ -43,6 +52,7 @@ impl NeonMaint for NeonMaintImpl {
         _request: Json<serde_json::Value>,
     ) -> Result<Json<PruneReport>, HandlerError> {
         annotate_restate_handler_span("NeonMaint", "prune_branches");
+        let config = self.config.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -58,8 +68,6 @@ impl NeonMaint for NeonMaintImpl {
                     }));
                 }
 
-                let orchestrator_ctx = OrchestratorCtx::current();
-                let config = orchestrator_ctx.config();
                 let manager = moa_session::NeonBranchManager::from_config(config.as_ref())
                     .map_err(|error| TerminalError::new(format!("neon manager init: {error}")))?;
                 let deleted = manager

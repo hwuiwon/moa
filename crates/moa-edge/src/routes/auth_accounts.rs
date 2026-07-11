@@ -7,11 +7,11 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Duration, Utc};
 use moa_auth_providers::user_sessions;
-use moa_auth_providers::{NewUserSessionToken, hash_password, verify_password};
+use moa_auth_providers::{NewUserSessionToken, verify_password};
 use moa_authz::fga_subject;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::{StoragePartitionId, TenantId};
+use moa_core::{types::identifiers::StoragePartitionId, types::identifiers::TenantId};
 use moa_messaging::{DeliveryMessage, ProviderDeliverySink};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -98,7 +98,7 @@ pub struct PatchMeRequest {
 
 /// User JSON returned by account endpoints.
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct UserResponse {
+pub(crate) struct UserResponse {
     /// User UUID.
     pub id: Uuid,
     /// Tenant UUID.
@@ -149,7 +149,7 @@ struct AcceptedResponse {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct UserCredentialRow {
+pub(crate) struct UserCredentialRow {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub email: String,
@@ -498,39 +498,15 @@ pub async fn patch_me(State(state): State<AppState>, headers: HeaderMap, body: B
 }
 
 /// Set a tenant user's password inside the caller's transaction.
-pub(super) async fn set_user_password_in_tx(
+pub(crate) async fn set_user_password_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: Uuid,
     user_id: Uuid,
     password: &str,
 ) -> Result<(), Response> {
-    let password = password.to_string();
-    let hash = match tokio::task::spawn_blocking(move || hash_password(&password)).await {
-        Ok(Ok(hash)) => hash,
-        Ok(Err(error)) => return Err(internal_error(format!("password hash: {error}"))),
-        Err(error) => return Err(internal_error(format!("password hash task: {error}"))),
-    };
-    sqlx::query(
-        r#"
-        INSERT INTO local_user_credentials
-            (user_id, tenant_id, password_hash, password_set_at, password_reset_required)
-        VALUES ($1, $2, $3, NOW(), FALSE)
-        ON CONFLICT (user_id)
-        DO UPDATE SET
-            tenant_id = EXCLUDED.tenant_id,
-            password_hash = EXCLUDED.password_hash,
-            password_set_at = NOW(),
-            password_reset_required = FALSE,
-            updated_at = NOW()
-        "#,
-    )
-    .bind(user_id)
-    .bind(tenant_id)
-    .bind(hash)
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| internal_error(format!("set password: {error}")))?;
-    Ok(())
+    crate::tenant_accounts::repository::set_user_password(tx, tenant_id, user_id, password)
+        .await
+        .map_err(internal_error)
 }
 
 /// Load a JSON user response by tenant and ID.
@@ -583,12 +559,12 @@ pub(super) async fn load_user_response(
 
 /// Return a normalized email value.
 #[must_use]
-pub(super) fn normalize_email(email: &str) -> String {
+pub(crate) fn normalize_email(email: &str) -> String {
     email.trim().to_ascii_lowercase()
 }
 
 /// Validate a new password against MOA's local password policy.
-pub(super) fn validate_password_policy(password: &str) -> Result<(), Response> {
+pub(crate) fn validate_password_policy(password: &str) -> Result<(), Response> {
     let chars = password.chars().count();
     if !(PASSWORD_MIN_CHARS..=PASSWORD_MAX_CHARS).contains(&chars) {
         return Err((
@@ -601,7 +577,7 @@ pub(super) fn validate_password_policy(password: &str) -> Result<(), Response> {
 }
 
 /// Validate a user settings JSON object.
-pub(super) fn validate_settings(settings: Option<&Value>) -> Result<(), Response> {
+pub(crate) fn validate_settings(settings: Option<&Value>) -> Result<(), Response> {
     if settings.is_some_and(|value| !value.is_object()) {
         return Err((StatusCode::BAD_REQUEST, "settings must be a JSON object").into_response());
     }
@@ -657,7 +633,7 @@ pub(super) async fn issue_login_session(
     let identity = Identity {
         identity_type: IdentityType::Operator,
         id: row.id,
-        tenant_id: moa_core::TenantId::from(row.tenant_id),
+        tenant_id: moa_core::types::identifiers::TenantId::from(row.tenant_id),
         api_key_id: None,
         acting_on_behalf_of: None,
     };
@@ -790,7 +766,7 @@ async fn load_login_user(
     }
 }
 
-pub(super) async fn load_user_credential_by_id(
+pub(crate) async fn load_user_credential_by_id(
     pool: &sqlx::PgPool,
     tenant_id: Uuid,
     user_id: Uuid,

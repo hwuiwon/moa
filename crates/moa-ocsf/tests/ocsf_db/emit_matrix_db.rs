@@ -8,8 +8,8 @@
 //! (`emit_authn_failure`) paths.
 
 use moa_core::{
-    TenantId,
     traits::{Identity, IdentityType},
+    types::identifiers::TenantId,
 };
 use moa_ocsf::{
     ActorInput, emit_agent_deactivated_tx, emit_agent_registered_tx, emit_api_key_created_tx,

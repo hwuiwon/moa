@@ -1,8 +1,10 @@
 //! Shared tracing helpers for provider-level LLM completion spans.
 
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, TokenPricing, TokenUsage,
-    genai_operation_name, genai_provider_name,
+    types::completion::CompletionContent, types::completion::CompletionRequest,
+    types::completion::CompletionResponse, types::completion::TokenUsage,
+    types::model::TokenPricing, types::observability::genai_operation_name,
+    types::observability::genai_provider_name,
 };
 use moa_observability::{
     record_cache_hit_rate, record_genai_client_operation_duration,
@@ -353,7 +355,7 @@ fn metadata_string(request: &CompletionRequest, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::TokenPricing;
+    use moa_core::types::model::TokenPricing;
 
     use super::{calculate_cost, calculate_cost_with_cached, llm_span_name};
 

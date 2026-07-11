@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::ModelId;
+use super::identifiers::ModelId;
 
 /// Per-agent guardrail policy copied into a pinned runtime policy snapshot.
 #[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]

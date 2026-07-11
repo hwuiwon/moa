@@ -23,7 +23,7 @@ pub use ctx::{
 };
 pub use entity_resolution::{
     DeterministicEntityMergeVerifier, EntityMergeVerifier, EntityResolutionPlan,
-    EntityResolutionRequest, EntityResolver, ResolvedEntity, normalize_entity_name,
+    EntityResolutionRequest, EntityResolver, ResolvedEntity,
 };
 pub use error::{IngestError, Result};
 pub use extract::{

@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    ActionClass, ActionPolicyEffect, ClaimCheck, RiskLevel, SandboxFile, SessionId, TenantId,
-    ToolCallId, UserId,
+    action_policy::ActionClass, action_policy::ActionPolicyEffect, action_policy::RiskLevel,
+    events_stream::ClaimCheck, hands::SandboxFile, identifiers::SessionId, identifiers::TenantId,
+    identifiers::ToolCallId, identifiers::UserId,
 };
 
 fn default_tool_max_output_tokens() -> u32 {

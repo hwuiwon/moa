@@ -1,13 +1,14 @@
 //! Model-backed entity merge verification and recorded replay support.
 
 use async_trait::async_trait;
-use moa_core::MoaConfig;
+use moa_core::config::MoaConfig;
 use moa_memory_graph::NodeIndexRow;
+use moa_memory_types::normalize_entity_name;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::model_client::{ModelCallObserver, ModelTextClient, resolved_extraction_config};
-use crate::{EntityMergeVerifier, IngestError, Result, entity_resolution::normalize_entity_name};
+use crate::{EntityMergeVerifier, IngestError, Result};
 
 /// Merge-verifier prompt version used for recorded fixtures.
 pub const MERGE_PROMPT_VERSION: &str = "v1";
@@ -205,8 +206,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use moa_core::{
-        CompletionRequest, CompletionResponse, CompletionStream, LLMProvider, ModelCapabilities,
-        ModelId, StopReason, TokenPricing, TokenUsage, ToolCallFormat,
+        traits::LLMProvider, types::completion::CompletionRequest,
+        types::completion::CompletionResponse, types::completion::CompletionStream,
+        types::completion::StopReason, types::completion::TokenUsage, types::identifiers::ModelId,
+        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
 
     use super::*;
@@ -243,7 +246,10 @@ mod tests {
             }
         }
 
-        async fn complete(&self, request: CompletionRequest) -> moa_core::Result<CompletionStream> {
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> moa_core::error::Result<CompletionStream> {
             *self.request.lock().expect("capture request") = Some(request);
             Ok(CompletionStream::from_response(CompletionResponse {
                 text: self.response.clone(),
@@ -293,7 +299,7 @@ mod tests {
             MapStore {
                 records: BTreeMap::new(),
             },
-            "cargo run -p xtask -- record-memory-merges --corpus target/memory-eval/pr-natural",
+            "cargo run -p xtask --features eval-tools -- record-memory-merges --corpus target/memory-eval/pr-natural",
         );
         let candidate = test_candidate("checkout-service");
 

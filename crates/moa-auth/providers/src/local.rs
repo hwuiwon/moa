@@ -54,7 +54,7 @@ async fn authenticate_api_key(pool: &PgPool, key: &str) -> Result<Identity, Auth
             Ok(Identity {
                 identity_type,
                 id,
-                tenant_id: moa_core::TenantId::from(resolved.tenant_id),
+                tenant_id: moa_core::types::identifiers::TenantId::from(resolved.tenant_id),
                 api_key_id: Some(resolved.id),
                 acting_on_behalf_of: None,
             })
@@ -78,7 +78,7 @@ async fn authenticate_user_session(pool: &PgPool, token: &str) -> Result<Identit
         Ok(resolved) => Ok(Identity {
             identity_type: IdentityType::Operator,
             id: resolved.user_id,
-            tenant_id: moa_core::TenantId::from(resolved.tenant_id),
+            tenant_id: moa_core::types::identifiers::TenantId::from(resolved.tenant_id),
             api_key_id: None,
             acting_on_behalf_of: None,
         }),

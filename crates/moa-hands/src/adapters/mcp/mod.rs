@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use eventsource_stream::Eventsource;
 use futures_util::{StreamExt, pin_mut};
-use moa_core::{McpServerConfig, MoaError, Result, ToolContent, ToolOutput};
+use moa_core::{
+    config::McpServerConfig, error::MoaError, error::Result, types::tools::ToolContent,
+    types::tools::ToolOutput,
+};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 use serde_json::{Value, json};

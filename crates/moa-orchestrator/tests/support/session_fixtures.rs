@@ -2,9 +2,13 @@
 
 use moa_core::wire::session_store::{AppendEventRequest, GetEventsRequest, InitSessionVoRequest};
 use moa_core::{
-    AgentContext, AgentKnowledgePolicy, AgentKnowledgeScopeMode, AgentPolicySnapshot, ContactId,
-    ContactRef, ContactVerificationState, Event, EventRange, ModelId, SessionId, SessionMeta,
-    StoragePartitionId, TenantId, UserMessage,
+    events::Event, types::agent::AgentContext, types::agent::AgentKnowledgePolicy,
+    types::agent::AgentKnowledgeScopeMode, types::agent::AgentPolicySnapshot,
+    types::contact::ContactId, types::contact::ContactRef,
+    types::contact::ContactVerificationState, types::events_stream::EventRange,
+    types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::session::SessionMeta, types::session::UserMessage,
 };
 use moa_test_support::fixtures::contact_ref_fixture;
 

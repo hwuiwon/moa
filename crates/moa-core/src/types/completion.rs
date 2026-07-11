@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{MoaError, Result};
 
-use super::{ContextMessage, ModelId};
+use super::{context::ContextMessage, identifiers::ModelId};
 
 /// Request metadata key that asks `LLMGateway` to return without appending a `BrainResponse`.
 pub const DEFER_BRAIN_RESPONSE_METADATA_KEY: &str = "_moa.defer_brain_response";
@@ -338,8 +338,8 @@ mod tests {
         CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, StopReason,
         TokenUsage,
     };
-    use crate::ModelId;
     use crate::error::MoaError;
+    use crate::types::identifiers::ModelId;
 
     #[test]
     fn token_usage_cache_hit_rate_handles_zero_and_mixed_usage() {

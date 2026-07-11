@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use moa_core::{ToolOutput, compute_unified_diff};
+use moa_core::{diff::compute_unified_diff, types::tools::ToolOutput};
 
 const DIFF_CONTEXT_LINES: usize = 3;
 

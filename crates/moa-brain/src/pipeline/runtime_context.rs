@@ -7,8 +7,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ContextMessage, ContextProcessor, MessageRole, ProcessorOutput, Result, WorkingContext,
-    estimate_text_tokens,
+    error::Result, traits::ContextProcessor, types::context::ContextMessage,
+    types::context::MessageRole, types::context::ProcessorOutput, types::context::WorkingContext,
+    types::context::estimate_text_tokens,
 };
 use moka::future::Cache;
 use tokio::process::Command;
@@ -220,8 +221,9 @@ async fn detect_git_branch(workspace_root: &Path) -> Option<String> {
 mod tests {
     use chrono::TimeZone;
     use moa_core::{
-        Channel, ContextMessage, ModelCapabilities, ModelId, SessionId, SessionMeta, TokenPricing,
-        ToolCallFormat,
+        types::channel::Channel, types::context::ContextMessage, types::identifiers::ModelId,
+        types::identifiers::SessionId, types::model::ModelCapabilities, types::model::TokenPricing,
+        types::model::ToolCallFormat, types::session::SessionMeta,
     };
 
     use super::*;

@@ -511,7 +511,7 @@ fn push_relation(
 
 #[cfg(test)]
 mod tests {
-    use moa_core::TenantId;
+    use moa_core::types::identifiers::TenantId;
     use serde_json::json;
     use uuid::Uuid;
 

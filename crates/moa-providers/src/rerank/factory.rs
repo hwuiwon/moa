@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use moa_core::{MoaConfig, MoaError, Result};
+use moa_core::{config::MoaConfig, error::MoaError, error::Result};
 
 use super::cohere::COHERE_DEFAULT_RERANK_MODEL;
 #[cfg(test)]
@@ -194,7 +194,7 @@ fn ensure_no_zeroentropy_latency(config: &MoaConfig, provider: RerankerProviderK
 
 #[cfg(test)]
 mod tests {
-    use moa_core::MoaConfig;
+    use moa_core::config::MoaConfig;
 
     use super::{
         COHERE_DEFAULT_RERANK_MODEL, RerankerProviderKind, ZEROENTROPY_DEFAULT_RERANK_MODEL,

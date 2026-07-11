@@ -225,13 +225,13 @@ impl MoaConfig {
 impl MoaConfig {
     /// Returns the configured model identifier for one routing task.
     #[must_use]
-    pub fn model_for_task(&self, task: crate::ModelTask) -> &str {
+    pub fn model_for_task(&self, task: crate::types::provider::ModelTask) -> &str {
         match task {
-            crate::ModelTask::MainLoop => self.models.main.as_str(),
-            crate::ModelTask::Summarization
-            | crate::ModelTask::Consolidation
-            | crate::ModelTask::SkillDistillation
-            | crate::ModelTask::Worker => self
+            crate::types::provider::ModelTask::MainLoop => self.models.main.as_str(),
+            crate::types::provider::ModelTask::Summarization
+            | crate::types::provider::ModelTask::Consolidation
+            | crate::types::provider::ModelTask::SkillDistillation
+            | crate::types::provider::ModelTask::Worker => self
                 .models
                 .auxiliary
                 .as_deref()
@@ -522,10 +522,10 @@ mod tests {
         // Pins: auxiliary tasks route to models.auxiliary when set and otherwise
         // fall back to models.main; the main loop always uses models.main.
         let auxiliary_tasks = [
-            crate::ModelTask::Summarization,
-            crate::ModelTask::Consolidation,
-            crate::ModelTask::SkillDistillation,
-            crate::ModelTask::Worker,
+            crate::types::provider::ModelTask::Summarization,
+            crate::types::provider::ModelTask::Consolidation,
+            crate::types::provider::ModelTask::SkillDistillation,
+            crate::types::provider::ModelTask::Worker,
         ];
 
         let mut config = MoaConfig::default();
@@ -533,7 +533,7 @@ mod tests {
         config.models.auxiliary = None;
 
         assert_eq!(
-            config.model_for_task(crate::ModelTask::MainLoop),
+            config.model_for_task(crate::types::provider::ModelTask::MainLoop),
             "main-model"
         );
         for task in auxiliary_tasks {
@@ -547,7 +547,7 @@ mod tests {
         config.models.auxiliary = Some("aux-model".to_string());
 
         assert_eq!(
-            config.model_for_task(crate::ModelTask::MainLoop),
+            config.model_for_task(crate::types::provider::ModelTask::MainLoop),
             "main-model",
             "main loop must keep using models.main even when auxiliary is set"
         );

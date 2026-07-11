@@ -23,9 +23,13 @@ use async_openai::types::responses::{
 };
 use futures_util::StreamExt;
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, JsonResponseFormat,
-    MessageRole, MoaError, ModelId, ProviderNativeTool, Result, StopReason, TokenUsage,
-    ToolCallContent, ToolContent, ToolInvocation, stable_prefix_fingerprint,
+    error::MoaError, error::Result, types::completion::CompletionContent,
+    types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::completion::JsonResponseFormat, types::completion::StopReason,
+    types::completion::TokenUsage, types::completion::ToolCallContent,
+    types::completion::ToolInvocation, types::context::ContextMessage, types::context::MessageRole,
+    types::identifiers::ModelId, types::model::ProviderNativeTool,
+    types::observability::stable_prefix_fingerprint, types::tools::ToolContent,
 };
 use reqwest::StatusCode;
 use serde_json::Value;

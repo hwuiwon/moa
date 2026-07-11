@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
-use moa_core::{ActiveSegment, CompletionRequest, QueryRewriteResult};
+use moa_core::{
+    types::completion::CompletionRequest, types::query_rewrite::QueryRewriteResult,
+    types::segments::ActiveSegment,
+};
 
 /// Completion metadata key for the active segment identifier.
 pub(crate) const ACTIVE_SEGMENT_ID_METADATA_KEY: &str = "_moa.segment_id";
@@ -38,7 +41,10 @@ pub(crate) fn query_rewrite_from_metadata(
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{CompletionRequest, ModelId, QueryRewriteResult, SegmentId};
+    use moa_core::{
+        types::completion::CompletionRequest, types::identifiers::ModelId,
+        types::identifiers::SegmentId, types::query_rewrite::QueryRewriteResult,
+    };
 
     use super::{
         ACTIVE_SEGMENT_ID_METADATA_KEY, ACTIVE_SEGMENT_INDEX_METADATA_KEY,
@@ -48,7 +54,7 @@ mod tests {
     #[test]
     fn active_segment_metadata_uses_owned_keys() {
         // Pins: root and worker completion requests use one segment metadata key owner.
-        let segment = moa_core::ActiveSegment {
+        let segment = moa_core::types::segments::ActiveSegment {
             id: SegmentId(uuid::Uuid::now_v7()),
             segment_index: 3,
             task_summary: None,

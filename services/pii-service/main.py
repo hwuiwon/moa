@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Any
 
@@ -13,8 +15,6 @@ from transformers import pipeline
 
 MODEL = os.getenv("MODEL", "openai/privacy-filter")
 DEVICE = os.getenv("DEVICE", "cpu")
-
-app = FastAPI(title="MOA PII Service", version="0.1.0")
 
 
 class ClassifyRequest(BaseModel):
@@ -52,6 +52,17 @@ def classifier() -> Any:
         aggregation_strategy="simple",
         device=device,
     )
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Loads the classifier before the service reports ready."""
+
+    classifier()
+    yield
+
+
+app = FastAPI(title="MOA PII Service", version="0.1.0", lifespan=lifespan)
 
 
 @app.get("/healthz")

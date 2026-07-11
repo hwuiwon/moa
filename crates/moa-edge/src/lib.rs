@@ -4,3 +4,4 @@ pub mod headers;
 mod ingress;
 pub mod proxy;
 pub mod routes;
+mod tenant_accounts;

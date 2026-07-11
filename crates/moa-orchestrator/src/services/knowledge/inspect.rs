@@ -8,7 +8,7 @@ use moa_core::wire::knowledge::{
     KnowledgeObjectListRequest, KnowledgeObjectListResponse, KnowledgeQueryTraceHit,
     KnowledgeQueryTraceRequest, KnowledgeQueryTraceResponse, KnowledgeQueryTraceStage,
 };
-use moa_core::{MoaError, StoragePartitionId};
+use moa_core::{error::MoaError, types::identifiers::StoragePartitionId};
 use moa_knowledge::normalize::redact_provider_metadata;
 use moa_lineage_core::{LineageEvent, RecordKind, RetrievalLineage};
 use moa_observability::{record_knowledge_retrieval_duration, record_knowledge_retrieval_hits};

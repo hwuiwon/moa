@@ -1,7 +1,7 @@
 //! Integration coverage for the `moa.node_index` sidecar table.
 
-use moa_core::RlsContext;
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
+use moa_core::types::memory::RlsContext;
 use moa_db::ScopedConn;
 use moa_memory_graph::{NodeLabel, PiiClass, bump_last_accessed, lookup_seed_by_name};
 use moa_session::testing;

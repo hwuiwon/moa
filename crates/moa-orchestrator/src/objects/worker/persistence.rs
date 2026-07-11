@@ -19,5 +19,8 @@ pub(super) async fn persist_parent_session_event(
 }
 
 pub(super) fn render_user_message(message: &UserMessage) -> String {
-    moa_core::render_user_message_with_attachments(&message.text, &message.attachments)
+    moa_core::types::channel::render_user_message_with_attachments(
+        &message.text,
+        &message.attachments,
+    )
 }

@@ -1,6 +1,6 @@
 //! Wiremock offline counterpart for Cohere reranker live coverage.
 
-use moa_core::MoaError;
+use moa_core::error::MoaError;
 use moa_providers::{CohereReranker, Reranker};
 use serde_json::json;
 use wiremock::matchers::{body_partial_json, header, method};

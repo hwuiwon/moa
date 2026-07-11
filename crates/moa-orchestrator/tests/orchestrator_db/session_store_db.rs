@@ -2,9 +2,12 @@
 
 use anyhow::Result;
 use moa_core::{
-    ChannelRef, ContactId, ContactRef, ContactVerificationState, Event, EventFilter, EventRange,
-    ModelId, SessionActorRef, SessionFilter, SessionMeta, SessionStatus, SessionStore,
-    StoragePartitionId, TenantId,
+    events::Event, traits::SessionStore, types::channel::ChannelRef, types::contact::ContactId,
+    types::contact::ContactRef, types::contact::ContactVerificationState,
+    types::contact::SessionActorRef, types::events_stream::EventFilter,
+    types::events_stream::EventRange, types::identifiers::ModelId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::session::SessionFilter, types::session::SessionMeta, types::session::SessionStatus,
 };
 use moa_session::{PostgresSessionStore, store::SessionChannelBindingReplacement, testing};
 use moa_test_support::fixtures::contact_ref_fixture;
@@ -67,7 +70,7 @@ async fn create_contact_session(
     store: &PostgresSessionStore,
     tenant_id: TenantId,
     contact_id: ContactId,
-) -> Result<(StoragePartitionId, moa_core::SessionId)> {
+) -> Result<(StoragePartitionId, moa_core::types::identifiers::SessionId)> {
     let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     let session_id = store
         .create_session(SessionMeta {

@@ -8,7 +8,7 @@ pub fn test_user_identity() -> Identity {
     Identity {
         identity_type: IdentityType::Operator,
         id: Uuid::new_v4(),
-        tenant_id: moa_core::TenantId::new(),
+        tenant_id: moa_core::types::identifiers::TenantId::new(),
         api_key_id: None,
         acting_on_behalf_of: None,
     }

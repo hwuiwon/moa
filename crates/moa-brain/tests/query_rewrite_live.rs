@@ -10,9 +10,12 @@ use async_trait::async_trait;
 use moa_brain::pipeline::query_rewrite::QueryRewriter;
 use moa_core::config::MoaEnvOverlay;
 use moa_core::{
-    Channel, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
-    ContextProcessor, LLMProvider, MoaConfig, ModelCapabilities, QueryRewriteResult, RewriteReason,
-    RewriteSource, SessionMeta, TenantId,
+    config::MoaConfig, traits::ContextProcessor, traits::LLMProvider, types::channel::Channel,
+    types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::completion::CompletionStream, types::context::ContextMessage,
+    types::identifiers::TenantId, types::model::ModelCapabilities,
+    types::query_rewrite::QueryRewriteResult, types::query_rewrite::RewriteReason,
+    types::query_rewrite::RewriteSource, types::session::SessionMeta,
 };
 use moa_providers::resolve_rewriter_provider;
 use tokio::sync::Mutex;
@@ -45,7 +48,10 @@ impl LLMProvider for CapturingProvider {
         self.inner.capabilities()
     }
 
-    async fn complete(&self, request: CompletionRequest) -> moa_core::Result<CompletionStream> {
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let stream = match self.inner.complete(request).await {
             Ok(stream) => stream,
@@ -82,7 +88,7 @@ fn env_flag_enabled(name: &str) -> bool {
 
 #[tokio::test]
 #[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1, provider API key env, and performs live query rewrite calls"]
-async fn live_query_rewrite_gate_matrix() -> moa_core::Result<()> {
+async fn live_query_rewrite_gate_matrix() -> moa_core::error::Result<()> {
     if !env_flag_enabled("MOA_RUN_LIVE_PROVIDER_TESTS") {
         return Ok(());
     }
@@ -236,8 +242,8 @@ async fn process_case(
     messages: Vec<ContextMessage>,
     memory_retrieval_available: bool,
     vector_retrieval_available: bool,
-) -> moa_core::Result<QueryRewriteResult> {
-    let mut ctx = moa_core::WorkingContext::new(
+) -> moa_core::error::Result<QueryRewriteResult> {
+    let mut ctx = moa_core::types::context::WorkingContext::new(
         &SessionMeta {
             tenant_id: TenantId::new(),
             channel: Channel::Chat,

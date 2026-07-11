@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use moa_core::{Event, EventRange, EventRecord, ModelId, SessionId, WorkerChildRef};
+use moa_core::{events::Event, types::events_stream::EventRange, types::events_stream::EventRecord, types::identifiers::ModelId, types::identifiers::SessionId, types::worker::state::WorkerChildRef};
 
 use crate::support::restate_runtime::grant_session_participant;
 use crate::support::session_store_service::{
@@ -36,7 +36,7 @@ async fn create_session(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    meta: &moa_core::SessionMeta,
+    meta: &moa_core::types::session::SessionMeta,
 ) -> Result<SessionId> {
     let create_request = client.post(service_url(ingress, "SessionStore", "create_session"));
     let session_id = with_identity(create_request, identity)

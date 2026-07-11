@@ -1,6 +1,6 @@
 //! Integration tests for memory scope helpers and serialization.
 
-use moa_core::{ContactId, TenantId};
+use moa_core::{types::contact::ContactId, types::identifiers::TenantId};
 use moa_memory_types::MemoryScope;
 use uuid::Uuid;
 

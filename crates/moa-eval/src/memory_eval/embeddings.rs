@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, hash_map::Entry};
 use std::path::Path;
 
 use async_trait::async_trait;
-use moa_core::{MoaError, traits::EmbeddingProvider};
+use moa_core::{error::MoaError, traits::EmbeddingProvider};
 use moa_memory_vector::VECTOR_DIMENSION;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -136,7 +136,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
         VECTOR_DIMENSION
     }
 
-    async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+    async fn embed(&self, inputs: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
         let mut embeddings = Vec::with_capacity(inputs.len());
         for input in inputs {
             let text_hash = embedding_text_hash(input);

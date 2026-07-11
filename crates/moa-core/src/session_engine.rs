@@ -1,11 +1,14 @@
 //! Shared session-lifecycle rules used by multiple orchestrator adapters.
 
-use crate::{EventRecord, ProcessingEffect, SessionMeta, SessionStatus};
+use crate::{
+    events::ProcessingEffect, types::events_stream::EventRecord, types::session::SessionMeta,
+    types::session::SessionStatus,
+};
 
 /// Returns whether the persisted session log indicates more work is required.
 ///
 /// The tail is scanned newest-first and each event is classified by
-/// [`crate::Event::processing_effect`]. [`ProcessingEffect::Neutral`] events —
+/// [`crate::events::Event::processing_effect`]. [`ProcessingEffect::Neutral`] events —
 /// passive telemetry, liveness, enrichment, and lifecycle breadcrumbs, several
 /// of which are appended asynchronously off the turn path — are skipped so they
 /// cannot mask an older trigger. The first non-neutral event decides:
@@ -36,9 +39,14 @@ mod tests {
     use std::time::Duration;
 
     use crate::{
-        AgentSignalId, ChildSignalKind, Event, EventRecord, EventType, GuardrailDirection,
-        GuardrailMode, InputAudience, ModelId, ModelTier, NarrationSource, SessionId, SessionMeta,
-        SignalSeverity, ToolCallId, ToolOutput, WorkerState,
+        events::Event, events::EventType, types::events_stream::EventRecord,
+        types::guardrails::GuardrailDirection, types::guardrails::GuardrailMode,
+        types::identifiers::AgentSignalId, types::identifiers::ModelId,
+        types::identifiers::SessionId, types::identifiers::ToolCallId, types::provider::ModelTier,
+        types::session::SessionMeta, types::tools::ToolOutput,
+        types::worker::state::ChildSignalKind, types::worker::state::InputAudience,
+        types::worker::state::NarrationSource, types::worker::state::SignalSeverity,
+        types::worker::state::WorkerState,
     };
 
     use super::session_requires_processing;

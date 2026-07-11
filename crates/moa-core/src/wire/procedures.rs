@@ -1,6 +1,6 @@
 //! Procedure service wire DTOs.
 
-use crate::*;
+use crate::types::identifiers::{SessionId, TenantId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

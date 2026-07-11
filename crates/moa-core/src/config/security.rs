@@ -1,6 +1,6 @@
 //! Permission posture configuration.
 
-use crate::ActionPolicyEffect;
+use crate::types::action_policy::ActionPolicyEffect;
 use serde::{Deserialize, Serialize};
 
 /// Permission posture configuration.

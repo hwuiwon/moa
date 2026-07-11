@@ -1,11 +1,15 @@
 //! Production-path DB coverage for agentic memory-tool admission.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use chrono::Utc;
 use moa_core::{
-    Channel, ContactId, ContactRef, ContactVerificationState, MoaConfig, ModelId, RlsContext,
-    SessionId, SessionMeta, TenantId, ToolContent, ToolOutput,
+    config::MoaConfig, types::channel::Channel, types::contact::ContactId,
+    types::contact::ContactRef, types::contact::ContactVerificationState,
+    types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
+    types::memory::RlsContext, types::session::SessionMeta, types::tools::ToolContent,
+    types::tools::ToolOutput,
 };
 use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
@@ -91,10 +95,10 @@ async fn search_and_navigation_share_the_contact_memory_admission_boundary() {
         .await
         .expect("create admitted-to-hidden edge");
 
-    let executor = OrchestratorMemoryRetrievalExecutor;
     let session = contact_session(tenant_id, contact_id);
     let mut config = MoaConfig::default();
     config.memory.vector.embedder.name = "disabled".to_string();
+    let executor = OrchestratorMemoryRetrievalExecutor::new(pool.clone(), Arc::new(config.clone()));
     let search = executor
         .execute_retrieval_tool_with_runtime(
             &session,

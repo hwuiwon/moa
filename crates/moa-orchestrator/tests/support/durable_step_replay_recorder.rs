@@ -2,7 +2,7 @@
 
 use std::fmt::Debug;
 
-use moa_core::compute_unified_diff;
+use moa_core::diff::compute_unified_diff;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_canonical_json::CanonicalFormatter;
 use serde_json::Serializer;

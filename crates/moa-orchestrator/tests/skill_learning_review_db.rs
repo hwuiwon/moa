@@ -11,9 +11,11 @@ use moa_core::wire::session_store::{
     GetLearningCandidateRequest, LearningCandidateReviewAction, LearningCandidateReviewRequest,
 };
 use moa_core::{
-    ActionRuleScope, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
-    LearningCandidateType, LearningEntry, LearningRiskClass, MoaConfig, MoaError,
-    StoragePartitionId, TenantId,
+    config::MoaConfig, error::MoaError, types::action_policy::ActionRuleScope,
+    types::experience::LearningCandidate, types::experience::LearningCandidateStatus,
+    types::experience::LearningCandidateStatusUpdate, types::experience::LearningCandidateType,
+    types::experience::LearningRiskClass, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::learning::LearningEntry,
 };
 use moa_orchestrator::services::learning_review::{
     accept_skill_candidate_after_authz, get_learning_candidate_after_authz,

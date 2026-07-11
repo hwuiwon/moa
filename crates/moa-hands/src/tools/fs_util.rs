@@ -3,7 +3,7 @@
 use std::io::ErrorKind;
 use std::path::Path;
 
-use moa_core::Result;
+use moa_core::error::Result;
 use tokio::fs;
 
 /// Reads a file's raw bytes, returning `Ok(None)` when the file does not exist.

@@ -12,7 +12,7 @@ use moa_core::wire::artifacts::{
 use moa_core::wire::procedures::{
     ProcedureRunRequest, ProcedureRunResponse, ProcedureRunStatus, ProcedureStatusRequest,
 };
-use moa_core::{ActionRuleScope, TenantId};
+use moa_core::{types::action_policy::ActionRuleScope, types::identifiers::TenantId};
 use moa_test_support::postgres::test_database_url;
 use serde_json::{Value, json};
 use tempfile::TempDir;

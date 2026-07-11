@@ -6,8 +6,10 @@ use moa_artifacts::registry::{ArtifactFile, ArtifactRegistry, StoredArtifactRevi
 use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
 use moa_core::{
-    ActionRuleScope, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
-    LearningCandidateType, LearningEntry, MoaError, StoragePartitionId, TenantId,
+    error::MoaError, types::action_policy::ActionRuleScope, types::experience::LearningCandidate,
+    types::experience::LearningCandidateStatus, types::experience::LearningCandidateStatusUpdate,
+    types::experience::LearningCandidateType, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::learning::LearningEntry,
 };
 use moa_db::ScopedConn;
 use serde_json::{Value, json};
@@ -683,7 +685,7 @@ fn bad_request(message: impl Into<String>) -> SkillReviewError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moa_core::LearningRiskClass;
+    use moa_core::types::experience::LearningRiskClass;
     use std::sync::Mutex;
 
     /// In-memory [`LearningReviewStore`] that records the status updates it receives.

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::types::{SessionAttachmentId, SessionId, ToolOutput};
+use crate::types::{identifiers::SessionAttachmentId, identifiers::SessionId, tools::ToolOutput};
 
 /// Convenience result type for MOA libraries.
 pub type Result<T> = std::result::Result<T, MoaError>;
@@ -349,7 +349,7 @@ impl From<ToolFailureClass> for ToolOutput {
         };
 
         ToolOutput {
-            content: vec![crate::types::ToolContent::Text { text: message }],
+            content: vec![crate::types::tools::ToolContent::Text { text: message }],
             is_error: true,
             structured: Some(structured),
             duration: Duration::ZERO,

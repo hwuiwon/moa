@@ -5,7 +5,9 @@ _Crates, services, build targets, and deployment dependencies._
 ## Rust Workspace
 
 The root workspace currently contains these packages from
-`cargo metadata --no-deps`:
+`cargo metadata --no-deps`. The final structural-program inventory is 44
+packages, 41 default members, 152 integration-test targets, and 203 total
+targets:
 
 - Core/runtime: `moa-core`, `moa-brain`, `moa-db`, `moa-session`,
   `moa-runtime-store`, `moa-edge`, `moa-orchestrator`, `moa-migrations`.
@@ -23,6 +25,16 @@ The root workspace currently contains these packages from
 - Providers/tools/eval/dev: `moa-hands`, `moa-providers`,
   `moa-eval-core`, `moa-eval`, `moa-loadtest`, `moa-test-support`,
   `workspace-hack`, `xtask`.
+
+Build-graph boundaries keep optional tooling out of ordinary builds:
+
+- `xtask` gates evaluation dependencies behind `eval-tools`;
+- `moa-test-support` gates orchestrator fixtures behind `orchestrator-fixture`;
+- `moa-brain` gates evaluation-only harness code behind `eval-harness`;
+- `moa-eval-core` has no direct `moa-providers` or `sqlx` dependency;
+  provider-aware construction lives in `moa-eval`;
+- scoring and experiment persistence stay in their owning crates; and
+- `moa-memory-lifecycle` has no dependency on `moa-memory-ingest`.
 
 ## Core Dependencies
 
@@ -42,6 +54,10 @@ The root workspace currently contains these packages from
 | Security | `secrecy`, `shell-words` |
 | Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP transports |
 | Lineage and audit | OTel/OpenInference bridge, Parquet/Arrow cold export, Object Lock audit storage |
+
+`moa-migrations` owns the central table-ownership manifest. The current 98
+table declarations resolve to 90 owned logical families, enforced by
+`cargo run -p xtask --locked -- check-migrations`.
 
 ## External Services
 
@@ -129,6 +145,9 @@ Implemented architectural pillars:
 
 - Restate cloud orchestration with session, worker, tenant, service, and workflow handlers.
 - One `moa-orchestrator` production binary for local development and cloud execution, with domain logic kept behind in-process application and repository boundaries.
+- Constructor-based runtime composition: `RuntimeDeps::build` constructs the
+  concrete graph and `build_endpoint` binds it, including the durable
+  `TenantPurge` workflow.
 - Postgres session store with tenant-isolated event log, analytics, task segments, and learning log.
 - Postgres hand leases and Postgres-backed claim-check blobs for cross-pod sandbox and replay correctness.
 - Redis-backed runtime cache for the production orchestrator; the in-memory implementation is limited to isolated non-orchestrator tests and embeddings.

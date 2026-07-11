@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::Result;
+use crate::error::Result;
 
 /// Ephemeral byte-value cache used for runtime coordination.
 #[async_trait]

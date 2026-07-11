@@ -19,19 +19,27 @@ use crate::analytics::{
     ToolCallSummary,
 };
 use crate::error::{MoaError, Result, ToolFailureClass, classify_tool_error};
-use crate::events::Event;
+use crate::events::{Event, EventType};
 use crate::types::{
-    Attachment, Channel, ChannelAccountId, ChannelCapabilities, ChannelEvent, ChannelRef,
-    CheckpointHandle, CheckpointInfo, ClaimCheck, CompletionRequest, CompletionStream, ContactId,
-    ContactPointId, ContextSnapshot, Credential as StoredCredential, EventFilter, EventRange,
-    EventRecord, EventType, ExperienceAttribution, ExperienceRecord, HandHandle, HandSpec,
-    HandStatus, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
-    LearningEntry, MessageId, ModelCapabilities, OutboundMessage, ProcessorOutput, SandboxFile,
-    SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId, SequenceNum,
-    SessionAttachmentId, SessionChannelBinding, SessionChannelBindingId,
-    SessionChannelBindingResolution, SessionFilter, SessionId, SessionMeta, SessionStatus,
-    SessionSummary, SkillResolutionRate, StoragePartitionId, TaskSegment, TaskStrategySuccessRate,
-    TenantId, ToolCallId, ToolOutput, WorkingContext,
+    channel::Attachment, channel::Channel, channel::ChannelAccountId, channel::ChannelCapabilities,
+    channel::ChannelEvent, channel::ChannelRef, channel::MessageId, channel::OutboundMessage,
+    channel::SessionChannelBinding, channel::SessionChannelBindingId,
+    channel::SessionChannelBindingResolution, completion::CompletionRequest,
+    completion::CompletionStream, contact::ContactId, contact::ContactPointId,
+    context::ProcessorOutput, context::WorkingContext, events_stream::ClaimCheck,
+    events_stream::EventFilter, events_stream::EventRange, events_stream::EventRecord,
+    events_stream::SequenceNum, experience::ExperienceAttribution, experience::ExperienceRecord,
+    experience::LearningCandidate, experience::LearningCandidateStatus,
+    experience::LearningCandidateStatusUpdate, experience::TaskStrategySuccessRate,
+    hands::HandHandle, hands::HandSpec, hands::HandStatus, hands::SandboxFile,
+    identifiers::SegmentId, identifiers::SessionAttachmentId, identifiers::SessionId,
+    identifiers::StoragePartitionId, identifiers::TenantId, identifiers::ToolCallId,
+    learning::LearningEntry, model::Credential as StoredCredential, model::ModelCapabilities,
+    segment_assessment::SegmentAssessment, segment_assessment::SegmentBaseline,
+    segment_assessment::SkillResolutionRate, segments::SegmentCompletion, segments::TaskSegment,
+    session::CheckpointHandle, session::CheckpointInfo, session::SessionFilter,
+    session::SessionMeta, session::SessionStatus, session::SessionSummary,
+    snapshot::ContextSnapshot, tools::ToolOutput,
 };
 use crate::wire::analytics::LearningCandidateSummary;
 
@@ -116,8 +124,8 @@ pub trait SessionStore: Send + Sync {
     async fn update_session_contact(
         &self,
         _session_id: SessionId,
-        _contact: crate::ContactRef,
-        _promoted_from: Option<crate::ContactId>,
+        _contact: crate::types::contact::ContactRef,
+        _promoted_from: Option<crate::types::contact::ContactId>,
     ) -> Result<()> {
         Err(MoaError::Unsupported(
             "session contact promotion is not supported by this session store".to_string(),
@@ -427,7 +435,7 @@ pub trait LearningCandidateStore: Send + Sync {
     async fn list_learning_candidates(
         &self,
         tenant_id: &str,
-        status: Option<crate::types::LearningCandidateStatus>,
+        status: Option<crate::types::experience::LearningCandidateStatus>,
         limit: usize,
     ) -> Result<Vec<LearningCandidate>>;
 
@@ -759,10 +767,10 @@ pub trait BuiltInTool: Send + Sync {
     fn input_schema(&self) -> Value;
 
     /// Returns the policy and approval metadata for the tool.
-    fn policy_spec(&self) -> crate::types::ToolPolicySpec;
+    fn policy_spec(&self) -> crate::types::tools::ToolPolicySpec;
 
     /// Returns the declared replay/idempotency contract for the tool.
-    fn idempotency_class(&self) -> crate::types::IdempotencyClass;
+    fn idempotency_class(&self) -> crate::types::tools::IdempotencyClass;
 
     /// Returns the approximate maximum successful output size persisted for one call.
     fn max_output_tokens(&self) -> u32 {
@@ -770,8 +778,8 @@ pub trait BuiltInTool: Send + Sync {
     }
 
     /// Returns the canonical shared tool definition for this built-in tool.
-    fn definition(&self) -> crate::types::ToolDefinition {
-        crate::types::ToolDefinition {
+    fn definition(&self) -> crate::types::tools::ToolDefinition {
+        crate::types::tools::ToolDefinition {
             name: self.name().to_string(),
             description: self.description().to_string(),
             schema: self.input_schema(),

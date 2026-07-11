@@ -3,7 +3,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use moa_core::{CompletionRequest, ContextMessage, JsonResponseFormat, LLMProvider};
+use moa_core::{
+    traits::LLMProvider, types::completion::CompletionRequest,
+    types::completion::JsonResponseFormat, types::context::ContextMessage,
+};
 use moa_eval_core::Result;
 use serde_json::{Value, json};
 

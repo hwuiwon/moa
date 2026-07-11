@@ -2,7 +2,10 @@
 
 #![allow(non_snake_case)]
 
-use moa_core::{CompletionRequest, ContextMessage, ModelId};
+use moa_core::{
+    types::completion::CompletionRequest, types::context::ContextMessage,
+    types::identifiers::ModelId,
+};
 use moa_providers::{
     debug_build_anthropic_request_body, debug_build_gemini_request_body,
     debug_build_openai_request_body,

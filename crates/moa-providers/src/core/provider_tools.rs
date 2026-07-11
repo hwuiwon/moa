@@ -1,6 +1,9 @@
 //! Shared helpers for provider-native tool exposure and status blocks.
 
-use moa_core::{CompletionContent, ModelCapabilities, ProviderNativeTool};
+use moa_core::{
+    types::completion::CompletionContent, types::model::ModelCapabilities,
+    types::model::ProviderNativeTool,
+};
 
 const WEB_SEARCH_TOOL_NAME: &str = "web_search";
 

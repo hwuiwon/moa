@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::{MoaError, Result};
+use crate::{error::MoaError, error::Result};
 use serde::{Deserialize, Serialize};
 
 const LOCAL_DEVELOPMENT_JOURNAL_PATH: &str = "~/.moa/lineage-journal";

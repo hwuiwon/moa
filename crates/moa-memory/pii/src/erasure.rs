@@ -1,7 +1,9 @@
 //! Memory-owned privacy erasure helpers.
 
-use moa_core::RlsContext;
-use moa_core::{ContactId, StoragePartitionId, TenantId};
+use moa_core::types::memory::RlsContext;
+use moa_core::{
+    types::contact::ContactId, types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
     ChangelogRecord, PostgresGraphStore, write::hard_purge_with_audit, write_and_bump,
@@ -23,7 +25,7 @@ pub enum ErasureError {
     Graph(#[from] moa_memory_graph::GraphError),
     /// Scoped transaction setup failed.
     #[error("scoped erasure transaction: {0}")]
-    Scope(#[from] moa_core::MoaError),
+    Scope(#[from] moa_core::error::MoaError),
     /// SQL operation failed.
     #[error("erasure sql: {0}")]
     Sqlx(#[from] sqlx::Error),
@@ -225,7 +227,7 @@ fn contact_id_from_subject(subject_user_id: &str) -> Result<ContactId> {
     moa_core::wire::privacy::ParsedPrivacySubjectId::parse_str(subject_user_id)
         .map(moa_core::wire::privacy::ParsedPrivacySubjectId::contact_id)
         .map_err(|error| {
-            ErasureError::Scope(moa_core::MoaError::ValidationError(format!(
+            ErasureError::Scope(moa_core::error::MoaError::ValidationError(format!(
                 "privacy erasure subject_user_id must be a contact UUID or contact:<UUID> for contact-scoped memory: {error}"
             )))
         })

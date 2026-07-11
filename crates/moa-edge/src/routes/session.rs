@@ -4,21 +4,21 @@ use std::sync::OnceLock;
 
 use axum::body::Bytes;
 use axum::http::{Method, Uri};
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use uuid::Uuid;
 
 use super::{RouteTranslation, translate_create_agent_session_route};
 
 /// Default cancel-scope body forwarded when a client omits an explicit scope.
 ///
-/// Derived once from [`moa_core::CancelScope::default`]'s snake_case serialization (today
+/// Derived once from [`moa_core::types::session::CancelScope::default`]'s snake_case serialization (today
 /// `"task_tree"`) so a bare "stop" cancels the coordinator turn and the whole child task tree, and
 /// the forwarded bytes can never drift from the type. The value is pinned by
 /// [`tests::default_cancel_scope_body_matches_task_tree_serialization`].
 fn default_cancel_scope_body() -> &'static [u8] {
     static BODY: OnceLock<Vec<u8>> = OnceLock::new();
     BODY.get_or_init(|| {
-        serde_json::to_vec(&moa_core::CancelScope::default())
+        serde_json::to_vec(&moa_core::types::session::CancelScope::default())
             .expect("CancelScope serializes to JSON")
     })
     .as_slice()

@@ -7,22 +7,77 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 
+#[cfg(feature = "eval-tools")]
 mod calibrate_external_memory_judge;
 mod check_architecture_boundaries;
+#[cfg(feature = "eval-tools")]
 mod check_eval_budgets;
+#[cfg(feature = "eval-tools")]
 mod compare_eval_reports;
+#[cfg(feature = "eval-tools")]
 mod compute_memory_quality_scores;
+#[cfg(feature = "eval-tools")]
 mod fetch_memory_benchmark;
+#[cfg(feature = "eval-tools")]
 mod generate_memory_eval_corpus;
+#[cfg(feature = "eval-tools")]
 mod record_memory_extractions;
+#[cfg(feature = "eval-tools")]
 mod record_memory_merges;
+#[cfg(feature = "eval-tools")]
 mod run_external_memory_eval;
+#[cfg(feature = "eval-tools")]
 mod run_memory_retrieval_eval;
+#[cfg(feature = "eval-tools")]
 mod wixqa_rag_eval;
+
+const EVAL_TOOL_COMMANDS: &[&str] = &[
+    "check-eval-budgets",
+    "calibrate-external-memory-judge",
+    "compare-eval-reports",
+    "compute-memory-quality-scores",
+    "fetch-memory-benchmark",
+    "generate-memory-eval-corpus",
+    "record-memory-extractions",
+    "record-memory-merges",
+    "run-external-memory-eval",
+    "run-memory-retrieval-eval",
+    "wixqa-rag-eval",
+];
 
 const CENTRAL_MIGRATIONS_DIR: &str = "crates/moa-migrations/migrations/postgres";
 const CENTRAL_MIGRATIONS_ROOT: &str = "crates/moa-migrations/migrations";
+const MIGRATION_OWNERSHIP_MANIFEST: &str = "crates/moa-migrations/migration-ownership.toml";
+
+#[derive(Debug, Deserialize)]
+struct MigrationOwnershipManifest {
+    table: Vec<MigrationOwnership>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MigrationOwnership {
+    name: String,
+    schema: String,
+    owner: String,
+    #[serde(default)]
+    readers: Vec<String>,
+    #[serde(default)]
+    notes: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct TableIdentity {
+    schema: String,
+    name: String,
+}
+
+impl TableIdentity {
+    fn display(&self) -> String {
+        format!("{}.{}", self.schema, self.name)
+    }
+}
 
 fn main() -> Result<()> {
     let mut args = env::args().skip(1);
@@ -30,17 +85,31 @@ fn main() -> Result<()> {
         Some("audit-paths") => cmd_audit_paths(),
         Some("check-architecture-boundaries") => check_architecture_boundaries::run(),
         Some("check-migrations") => cmd_check_migrations(),
+        #[cfg(feature = "eval-tools")]
         Some("check-eval-budgets") => check_eval_budgets::run(args),
+        #[cfg(feature = "eval-tools")]
         Some("calibrate-external-memory-judge") => calibrate_external_memory_judge::run(args),
+        #[cfg(feature = "eval-tools")]
         Some("compare-eval-reports") => compare_eval_reports::run(args),
+        #[cfg(feature = "eval-tools")]
         Some("compute-memory-quality-scores") => compute_memory_quality_scores::run(args),
+        #[cfg(feature = "eval-tools")]
         Some("fetch-memory-benchmark") => fetch_memory_benchmark::run(args),
+        #[cfg(feature = "eval-tools")]
         Some("generate-memory-eval-corpus") => generate_memory_eval_corpus::run(args),
+        #[cfg(feature = "eval-tools")]
         Some("record-memory-extractions") => record_memory_extractions::run(args),
+        #[cfg(feature = "eval-tools")]
         Some("record-memory-merges") => record_memory_merges::run(args),
+        #[cfg(feature = "eval-tools")]
         Some("run-external-memory-eval") => run_external_memory_eval::run(args),
+        #[cfg(feature = "eval-tools")]
         Some("run-memory-retrieval-eval") => run_memory_retrieval_eval::run(args),
+        #[cfg(feature = "eval-tools")]
         Some("wixqa-rag-eval") => wixqa_rag_eval::run(args),
+        Some(command) if EVAL_TOOL_COMMANDS.contains(&command) => bail!(
+            "xtask command `{command}` requires `cargo run -p xtask --features eval-tools -- {command}`"
+        ),
         Some(command) => bail!("unknown xtask command: {command}"),
         None => bail!("missing xtask command; try `cargo xtask audit-paths`"),
     }
@@ -49,7 +118,10 @@ fn main() -> Result<()> {
 fn cmd_check_migrations() -> Result<()> {
     check_central_migration_files()?;
     check_no_noncentral_migration_dirs()?;
-    check_duplicate_table_ownership()?;
+    let (statements, families) = check_migration_ownership()?;
+    println!(
+        "migration ownership clean: {statements} CREATE TABLE statements, {families} owned logical families"
+    );
     println!("migration checks clean");
     Ok(())
 }
@@ -116,51 +188,154 @@ fn check_no_noncentral_migration_dirs() -> Result<()> {
     Ok(())
 }
 
-fn check_duplicate_table_ownership() -> Result<()> {
+fn check_migration_ownership() -> Result<(usize, usize)> {
     let mut migration_files = Vec::new();
     collect_migration_sql_files(Path::new(CENTRAL_MIGRATIONS_DIR), &mut migration_files)?;
 
-    let mut owners = BTreeMap::<String, Vec<PathBuf>>::new();
+    let mut statements = 0;
+    let mut declared = BTreeSet::new();
     for path in migration_files {
         let sql = fs::read_to_string(&path)
             .with_context(|| format!("read migration {}", path.display()))?;
-        for table in extract_create_table_if_not_exists(&sql) {
-            owners.entry(table).or_default().push(path.clone());
-        }
+        let tables = extract_create_tables(&sql);
+        statements += tables.len();
+        declared.extend(tables);
     }
 
-    let mut violations = Vec::new();
-    for (table, paths) in owners {
-        if paths.len() <= 1 {
-            continue;
+    let body = fs::read_to_string(MIGRATION_OWNERSHIP_MANIFEST)
+        .with_context(|| format!("read {MIGRATION_OWNERSHIP_MANIFEST}"))?;
+    let manifest: MigrationOwnershipManifest =
+        toml::from_str(&body).with_context(|| format!("parse {MIGRATION_OWNERSHIP_MANIFEST}"))?;
+    validate_migration_ownership(&manifest, &declared)?;
+    Ok((statements, declared.len()))
+}
+
+fn validate_migration_ownership(
+    manifest: &MigrationOwnershipManifest,
+    declared: &BTreeSet<TableIdentity>,
+) -> Result<()> {
+    let mut owned = BTreeMap::<TableIdentity, &MigrationOwnership>::new();
+    for entry in &manifest.table {
+        let table = manifest_table_identity(entry)?;
+        if owned.insert(table.clone(), entry).is_some() {
+            bail!("duplicate migration ownership row: {}", table.display());
         }
-        let owner_keys = paths
-            .iter()
-            .map(|path| migration_owner_key(path))
-            .collect::<BTreeSet<_>>();
-        if owner_keys.len() == 1 {
-            continue;
+        validate_owner_identifier(&entry.owner)
+            .with_context(|| format!("invalid owner for {}", table.display()))?;
+        for reader in &entry.readers {
+            validate_owner_identifier(reader)
+                .with_context(|| format!("invalid reader for {}", table.display()))?;
         }
-        let path_list = paths
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        violations.push(format!("{table}: {path_list}"));
+        let _ = &entry.notes;
     }
 
-    if !violations.is_empty() {
+    let owned_tables = owned.keys().cloned().collect::<BTreeSet<_>>();
+    let missing = declared
+        .difference(&owned_tables)
+        .map(TableIdentity::display)
+        .collect::<Vec<_>>();
+    let stale = owned_tables
+        .difference(declared)
+        .map(TableIdentity::display)
+        .collect::<Vec<_>>();
+    if !missing.is_empty() || !stale.is_empty() {
+        let mut details = Vec::new();
+        if !missing.is_empty() {
+            details.push(format!("missing ownership rows:\n{}", missing.join("\n")));
+        }
+        if !stale.is_empty() {
+            details.push(format!("stale ownership rows:\n{}", stale.join("\n")));
+        }
         bail!(
-            "duplicate CREATE TABLE IF NOT EXISTS ownership detected:\n{}",
-            violations.join("\n")
+            "migration ownership manifest does not match DDL:\n{}",
+            details.join("\n")
         );
     }
-
     Ok(())
 }
 
-fn migration_owner_key(path: &Path) -> String {
-    file_name(path).unwrap_or("<unknown>").to_string()
+fn manifest_table_identity(entry: &MigrationOwnership) -> Result<TableIdentity> {
+    let schema = canonical_identifier(&entry.schema);
+    let name = canonical_identifier(&entry.name);
+    if schema.is_empty() || name.is_empty() {
+        bail!("migration ownership schema and name must not be empty");
+    }
+    if name.contains('.') {
+        bail!(
+            "migration ownership name must be unqualified: {}",
+            entry.name
+        );
+    }
+    Ok(normalize_table_family(TableIdentity { schema, name }))
+}
+
+fn validate_owner_identifier(identifier: &str) -> Result<()> {
+    let root = workspace_root();
+    if let Some(group) = identifier.strip_suffix("/*") {
+        let path = root.join("crates").join(group);
+        if !path.is_dir() {
+            bail!("crate group does not exist: {identifier}");
+        }
+        let mut manifests = Vec::new();
+        collect_named_files(&path, "Cargo.toml", &mut manifests)?;
+        if manifests.is_empty() {
+            bail!("crate group contains no crates: {identifier}");
+        }
+        return Ok(());
+    }
+    let crate_dir = root.join("crates").join(identifier);
+    let service_dir = root.join(identifier);
+    if crate_dir.join("Cargo.toml").is_file()
+        || (identifier.starts_with("services/") && service_dir.is_dir())
+        || workspace_contains_package(identifier)?
+    {
+        return Ok(());
+    }
+    bail!("crate or service does not exist: {identifier}")
+}
+
+fn workspace_contains_package(package_name: &str) -> Result<bool> {
+    let mut manifests = Vec::new();
+    collect_named_files(
+        &workspace_root().join("crates"),
+        "Cargo.toml",
+        &mut manifests,
+    )?;
+    for manifest in manifests {
+        let body = fs::read_to_string(&manifest)
+            .with_context(|| format!("read {}", manifest.display()))?;
+        let parsed: toml::Value =
+            toml::from_str(&body).with_context(|| format!("parse {}", manifest.display()))?;
+        if parsed
+            .get("package")
+            .and_then(|package| package.get("name"))
+            .and_then(toml::Value::as_str)
+            == Some(package_name)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("xtask must live beneath the workspace root")
+        .to_path_buf()
+}
+
+fn collect_named_files(root: &Path, name: &str, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_named_files(&path, name, out)?;
+        } else if path.file_name().and_then(|value| value.to_str()) == Some(name) {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn collect_migration_dirs(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -203,50 +378,131 @@ fn collect_migration_sql_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<()
     Ok(())
 }
 
-fn extract_create_table_if_not_exists(sql: &str) -> Vec<String> {
+fn extract_create_tables(sql: &str) -> Vec<TableIdentity> {
+    let tokens = sql_tokens_without_comments(sql);
     let mut tables = Vec::new();
-    let sql_without_line_comments = sql
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("--"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let lower = sql_without_line_comments.to_ascii_lowercase();
-    let marker = "create table if not exists ";
-    let mut offset = 0;
-    while let Some(relative_index) = lower[offset..].find(marker) {
-        let name_start = offset + relative_index + marker.len();
-        let remainder = sql_without_line_comments[name_start..].trim_start();
-        let Some(token) = remainder.split_whitespace().next() else {
-            break;
-        };
-        if let Some(table) = normalize_table_name(token) {
-            tables.push(table);
+    let mut index = 0;
+    while index + 2 < tokens.len() {
+        if !tokens[index].eq_ignore_ascii_case("create")
+            || !tokens[index + 1].eq_ignore_ascii_case("table")
+        {
+            index += 1;
+            continue;
         }
-        offset = name_start + token.len();
+        let mut name_index = index + 2;
+        if tokens
+            .get(name_index)
+            .is_some_and(|token| token.eq_ignore_ascii_case("if"))
+            && tokens
+                .get(name_index + 1)
+                .is_some_and(|token| token.eq_ignore_ascii_case("not"))
+            && tokens
+                .get(name_index + 2)
+                .is_some_and(|token| token.eq_ignore_ascii_case("exists"))
+        {
+            name_index += 3;
+        }
+        if let Some(table) = tokens
+            .get(name_index)
+            .and_then(|token| parse_table_identity(token))
+        {
+            tables.push(normalize_table_family(table));
+        }
+        index = name_index + 1;
     }
     tables
 }
 
-fn normalize_table_name(token: &str) -> Option<String> {
-    let trimmed = token
-        .trim_end_matches('(')
-        .trim_end_matches(';')
-        .trim_matches('"')
-        .to_ascii_lowercase();
-    if trimmed.is_empty() {
-        return None;
+fn sql_tokens_without_comments(sql: &str) -> Vec<String> {
+    let bytes = sql.as_bytes();
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut index = 0;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    while index < bytes.len() {
+        if in_line_comment {
+            if bytes[index] == b'\n' {
+                in_line_comment = false;
+            }
+            index += 1;
+            continue;
+        }
+        if in_block_comment {
+            if bytes[index..].starts_with(b"*/") {
+                in_block_comment = false;
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index..].starts_with(b"--") {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+            in_line_comment = true;
+            index += 2;
+            continue;
+        }
+        if bytes[index..].starts_with(b"/*") {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+            in_block_comment = true;
+            index += 2;
+            continue;
+        }
+        let character = bytes[index] as char;
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '%' | '"') {
+            current.push(character);
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+        index += 1;
     }
-    if trimmed.contains('.') {
-        Some(
-            trimmed
-                .split('.')
-                .map(|part| part.trim_matches('"'))
-                .collect::<Vec<_>>()
-                .join("."),
-        )
-    } else {
-        Some(format!("public.{trimmed}"))
+    if !current.is_empty() {
+        tokens.push(current);
     }
+    tokens
+}
+
+fn parse_table_identity(token: &str) -> Option<TableIdentity> {
+    let parts = token
+        .split('.')
+        .map(canonical_identifier)
+        .collect::<Vec<_>>();
+    match parts.as_slice() {
+        [name] if !name.is_empty() => Some(TableIdentity {
+            schema: "public".to_string(),
+            name: name.clone(),
+        }),
+        [schema, name] if !schema.is_empty() && !name.is_empty() => Some(TableIdentity {
+            schema: schema.clone(),
+            name: name.clone(),
+        }),
+        _ => None,
+    }
+}
+
+fn canonical_identifier(identifier: &str) -> String {
+    identifier.trim_matches('"').to_ascii_lowercase()
+}
+
+fn normalize_table_family(mut table: TableIdentity) -> TableIdentity {
+    let parent = match (table.schema.as_str(), table.name.as_str()) {
+        ("public", name) if name.starts_with("events_p%s") => Some("events"),
+        ("public", name) if name.starts_with("session_event_dedupe_p%s") => {
+            Some("session_event_dedupe")
+        }
+        ("moa", name) if name.starts_with("embeddings_p%s") => Some("embeddings"),
+        ("moa", name) if name.starts_with("graph_changelog_%s") => Some("graph_changelog"),
+        _ => None,
+    };
+    if let Some(parent) = parent {
+        table.name = parent.to_string();
+    }
+    table
 }
 
 fn file_name(path: &Path) -> Result<&str> {
@@ -393,6 +649,133 @@ fn rg_forbid(label: &str, pattern: &str, paths: &[&str], options: &[&str]) -> Re
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod check_migrations_tests {
+    use super::*;
+
+    fn ownership(schema: &str, name: &str, owner: &str) -> MigrationOwnership {
+        MigrationOwnership {
+            name: name.to_string(),
+            schema: schema.to_string(),
+            owner: owner.to_string(),
+            readers: Vec::new(),
+            notes: None,
+        }
+    }
+
+    fn identities(values: &[(&str, &str)]) -> BTreeSet<TableIdentity> {
+        values
+            .iter()
+            .map(|(schema, name)| TableIdentity {
+                schema: (*schema).to_string(),
+                name: (*name).to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn check_migrations_extracts_supported_table_forms_and_ignores_comments() {
+        // Pins: migration inventory recognizes real and generated DDL without treating comments as declarations.
+        let sql = r#"
+            CREATE TABLE alpha (id bigint);
+            CREATE TABLE IF NOT EXISTS "moa"."Beta" (id bigint);
+            -- CREATE TABLE ignored_line (id bigint);
+            /* CREATE TABLE IF NOT EXISTS ignored_block (id bigint); */
+            'CREATE TABLE IF NOT EXISTS events_p%s (id bigint)';
+            'CREATE TABLE IF NOT EXISTS session_event_dedupe_p%s (id bigint)';
+            'CREATE TABLE IF NOT EXISTS moa.embeddings_p%s (id bigint)';
+            'CREATE TABLE IF NOT EXISTS moa.graph_changelog_%s (id bigint)';
+            'CREATE TABLE IF NOT EXISTS %I.session_blobs (id bigint)';
+        "#;
+
+        let tables = extract_create_tables(sql)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            tables,
+            identities(&[
+                ("%i", "session_blobs"),
+                ("moa", "beta"),
+                ("moa", "embeddings"),
+                ("moa", "graph_changelog"),
+                ("public", "alpha"),
+                ("public", "events"),
+                ("public", "session_event_dedupe"),
+            ])
+        );
+    }
+
+    #[test]
+    fn check_migrations_rejects_duplicate_manifest_rows() {
+        // Pins: one logical table family has exactly one ownership row.
+        let manifest = MigrationOwnershipManifest {
+            table: vec![
+                ownership("public", "sessions", "moa-session"),
+                ownership("public", "sessions", "moa-session"),
+            ],
+        };
+        let error = validate_migration_ownership(&manifest, &identities(&[("public", "sessions")]))
+            .expect_err("duplicate ownership must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate migration ownership row: public.sessions"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn check_migrations_reports_missing_and_stale_manifest_rows() {
+        // Pins: ownership validation is an exact inventory comparison in both directions.
+        let manifest = MigrationOwnershipManifest {
+            table: vec![
+                ownership("public", "sessions", "moa-session"),
+                ownership("public", "stale", "moa-session"),
+            ],
+        };
+        let error = validate_migration_ownership(
+            &manifest,
+            &identities(&[("public", "sessions"), ("public", "missing")]),
+        )
+        .expect_err("inventory mismatch must fail");
+        let message = error.to_string();
+        assert!(
+            message.contains("missing ownership rows:\npublic.missing"),
+            "{error:#}"
+        );
+        assert!(
+            message.contains("stale ownership rows:\npublic.stale"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn check_migrations_rejects_invalid_owner_identifiers() {
+        // Pins: manifest ownership cannot silently name a crate or service that does not exist.
+        let manifest = MigrationOwnershipManifest {
+            table: vec![ownership("public", "sessions", "does-not-exist")],
+        };
+        let error = validate_migration_ownership(&manifest, &identities(&[("public", "sessions")]))
+            .expect_err("invalid owner must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid owner for public.sessions")
+        );
+
+        let mut entry = ownership("public", "sessions", "moa-session");
+        entry.readers.push("missing-reader".to_string());
+        let manifest = MigrationOwnershipManifest { table: vec![entry] };
+        let error = validate_migration_ownership(&manifest, &identities(&[("public", "sessions")]))
+            .expect_err("invalid reader must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid reader for public.sessions")
+        );
+    }
 }
 
 #[cfg(test)]

@@ -3,9 +3,12 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, Event, LLMProvider,
-    MessageRole, MoaConfig, ModelCapabilities, ModelId, StopReason, TokenPricing, TokenUsage,
-    ToolCallContent, ToolCallFormat, ToolInvocation,
+    config::MoaConfig, events::Event, traits::LLMProvider, types::completion::CompletionContent,
+    types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::completion::CompletionStream, types::completion::StopReason,
+    types::completion::TokenUsage, types::completion::ToolCallContent,
+    types::completion::ToolInvocation, types::context::MessageRole, types::identifiers::ModelId,
+    types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
 };
 use moa_eval::long_conversation::{ScriptedUserScript, run_scenario_with_provider};
 use moa_eval_core::{
@@ -478,13 +481,16 @@ impl LLMProvider for ToolThenFinalProvider {
         }
     }
 
-    async fn complete(&self, request: CompletionRequest) -> moa_core::Result<CompletionStream> {
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
         let latest_user = latest_user_message(&request).unwrap_or_default();
         let request_index = {
             let mut seen = self
                 .seen_user_messages
                 .lock()
-                .map_err(|error| moa_core::MoaError::ProviderError(error.to_string()))?;
+                .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?;
             seen.push(latest_user);
             seen.len()
         };
@@ -570,11 +576,14 @@ impl LLMProvider for ClarifyingDisputeProvider {
         }
     }
 
-    async fn complete(&self, request: CompletionRequest) -> moa_core::Result<CompletionStream> {
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
         let latest_user = latest_user_message(&request).unwrap_or_default();
         self.seen_user_messages
             .lock()
-            .map_err(|error| moa_core::MoaError::ProviderError(error.to_string()))?
+            .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?
             .push(latest_user);
 
         let text = "Please confirm the merchant's legal name, date, amount, and whether your card was present before I draft a dispute.";
@@ -631,16 +640,19 @@ impl LLMProvider for ResponsivenessClarificationProvider {
         }
     }
 
-    async fn complete(&self, request: CompletionRequest) -> moa_core::Result<CompletionStream> {
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
         let latest_user = latest_user_message(&request).unwrap_or_default();
         if latest_user != "fix this" {
-            return Err(moa_core::MoaError::ProviderError(format!(
+            return Err(moa_core::error::MoaError::ProviderError(format!(
                 "unexpected responsiveness fixture user message: {latest_user}"
             )));
         }
         self.seen_user_messages
             .lock()
-            .map_err(|error| moa_core::MoaError::ProviderError(error.to_string()))?
+            .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?
             .push(latest_user);
 
         Ok(CompletionStream::from_response(CompletionResponse {

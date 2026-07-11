@@ -1,6 +1,6 @@
 //! Agent Skill markdown parsing and rendering utilities.
 
-use moa_core::{MoaError, Result, SkillMetadata};
+use moa_core::{error::MoaError, error::Result, types::memory::SkillMetadata};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use tracing::warn;

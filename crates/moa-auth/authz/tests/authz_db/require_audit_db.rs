@@ -7,8 +7,8 @@ use httpmock::prelude::*;
 use moa_authz::{AuthzCheckError, FgaClient, FgaConfig, configure_security_audit, require_authz};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::{
-    TenantId,
     traits::{Identity, IdentityType},
+    types::identifiers::TenantId,
 };
 use serde_json::json;
 use sqlx::{PgPool, postgres::PgPoolOptions};

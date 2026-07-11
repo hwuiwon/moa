@@ -5,7 +5,7 @@
 //! input order, and rejects vectors whose width does not match the model's fixed
 //! dimensionality.
 
-use moa_core::{MoaError, traits::EmbeddingProvider};
+use moa_core::{error::MoaError, traits::EmbeddingProvider};
 use moa_providers::OpenAIEmbedding;
 use serde_json::{Value, json};
 use wiremock::matchers::{body_partial_json, header, method};

@@ -801,7 +801,7 @@ async fn authorize_event_search(
 
 async fn authorize_tenant_read(
     ctx: &impl RequestHeaders,
-    tenant_id: moa_core::TenantId,
+    tenant_id: moa_core::types::identifiers::TenantId,
 ) -> Result<(), HandlerError> {
     authorize_tenant(ctx, tenant_id, Relation::Operator).await?;
     Ok(())
@@ -809,7 +809,7 @@ async fn authorize_tenant_read(
 
 fn tenant_id_for_session_listing(
     request: &ListSessionsRequest,
-) -> Result<moa_core::TenantId, HandlerError> {
+) -> Result<moa_core::types::identifiers::TenantId, HandlerError> {
     request
         .filter
         .tenant_id
@@ -818,7 +818,7 @@ fn tenant_id_for_session_listing(
 
 async fn authorize_tenant_admin(
     ctx: &impl RequestHeaders,
-    tenant_id: moa_core::TenantId,
+    tenant_id: moa_core::types::identifiers::TenantId,
 ) -> Result<(), HandlerError> {
     authorize_tenant(ctx, tenant_id, Relation::Admin).await?;
     Ok(())
@@ -877,7 +877,7 @@ async fn ensure_session_authz_visible(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moa_core::{SessionFilter, TenantId};
+    use moa_core::{types::identifiers::TenantId, types::session::SessionFilter};
 
     #[test]
     fn list_sessions_requires_explicit_tenant_id() {

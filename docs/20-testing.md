@@ -124,6 +124,13 @@ and Restate service/provider E2E coverage should use surface-specific
 integration-test binary cannot be split immediately, give the resource-backed
 test function the same lane suffix so nextest can keep it out of `fast-pr`.
 
+The consolidation is concrete: the seven former `moa-session` DB roots now
+run through the single `session_db` harness. Knowledge and eval behavior files
+use the same pattern under their lane directories. Behavior modules belong
+under a lane root and are declared by that lane's harness; adding another root
+binary for the same runtime requirement is a regression unless a pinned script
+or profile requires the standalone target.
+
 If a crate-private inline unit test needs a slow resource and cannot move to an
 integration test without exposing internals, put the lane marker in the test
 function name, for example `*_db_*`. Keep these exceptions rare; file suffixes
@@ -157,8 +164,8 @@ Run the boundary scanner after touching Restate handlers, workflows, runtime
 dependency wiring, domain repository seams, workspace crate dependencies,
 `moa-core` top-level re-exports, or central hotspot files such as
 `crates/moa-edge/src/routes.rs`,
-`crates/moa-core/src/config/env_overlay.rs`, and
-`crates/moa-orchestrator/src/workflows/turn_execution.rs`:
+`crates/moa-core/src/config/env_overlay/mod.rs`, and
+`crates/moa-orchestrator/src/workflows/turn_execution/mod.rs`:
 
 ```bash
 cargo run -p xtask -- check-architecture-boundaries
@@ -168,16 +175,22 @@ The check fails on new direct SQL in
 `crates/moa-orchestrator/src/services/**` or
 `crates/moa-orchestrator/src/workflows/**`, and on new raw
 `OrchestratorCtx` dependency access such as `current_graph_pool()` or
-`current_session_store()`. If a handler truly needs a temporary exception,
-record it in the scanner allowlist with a concrete reason and exact expected
-count. Prefer moving SQL to a repository or domain crate and passing concrete
-dependencies from the composition root instead of expanding the allowlist.
+`current_session_store()` under orchestrator objects, services, and workflows;
+the current count in those scanner roots is zero. This does not claim that the
+context type is absent everywhere. If a handler truly needs a temporary
+exception, record it in the scanner allowlist with a concrete reason and exact
+expected count. Prefer moving SQL to a repository or domain crate and passing
+concrete dependencies from the composition root instead of expanding the
+allowlist.
 
 The same command also reports and enforces architecture budgets from Cargo
 metadata and current source files: workspace package/default-member counts,
 `moa-core` direct and transitive reverse dependencies, configured LOC budgets,
 forbidden dependency directions from `docs/15-architecture-policy.md`, and the
-`moa-core` top-level re-export budget. If one of these numbers grows
+exact semantic `moa-core` root allowlist (`MoaError`, `Result`, and
+`WORKSPACE_ID`) with wildcard rejection. Dependency rules distinguish normal,
+build, and dev edges so a test-only allowance cannot silently become a
+production dependency. If one of these numbers grows
 intentionally, update the scanner budget in the same change with the measured
 count and the reason for accepting the growth.
 

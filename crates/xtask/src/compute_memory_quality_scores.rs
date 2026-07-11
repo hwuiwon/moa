@@ -3,7 +3,7 @@
 use std::env;
 
 use anyhow::{Context, Result, bail};
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use moa_memory_lifecycle::compute_quality_scores;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -81,5 +81,5 @@ impl Options {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- compute-memory-quality-scores --tenant-id <id> [--database-url <url>] [--lookback-days N]"
+    "usage: cargo run -p xtask --features eval-tools -- compute-memory-quality-scores --tenant-id <id> [--database-url <url>] [--lookback-days N]"
 }

@@ -2,8 +2,10 @@
 
 use chrono::Utc;
 use moa_core::{
-    Channel, ModelId, SessionActorRef, SessionId, SessionMeta, SessionStore as _,
-    StoragePartitionId, TenantId, UserId,
+    traits::SessionStore as _, types::channel::Channel, types::contact::SessionActorRef,
+    types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::identifiers::UserId, types::session::SessionMeta,
 };
 use moa_memory_lifecycle::compute_quality_scores;
 use moa_test_support::fixtures::quote_identifier;

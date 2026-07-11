@@ -14,7 +14,7 @@
 //! and every forwarded call routes through one place that can add a flow-control
 //! scope.
 
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 
 /// Flow-control scope applied to a Restate ingress call.
 ///
@@ -59,10 +59,15 @@ pub(crate) fn call_path(scope: &IngressScope, service_path: &str) -> String {
     }
 }
 
+/// Build the Restate fire-and-forget ingress path for a keyed workflow handler.
+pub(crate) fn send_path(service_path: &str) -> String {
+    format!("/restate/send{service_path}")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{IngressScope, call_path};
-    use moa_core::TenantId;
+    use super::{IngressScope, call_path, send_path};
+    use moa_core::types::identifiers::TenantId;
     use uuid::Uuid;
 
     fn tenant() -> TenantId {
@@ -103,5 +108,14 @@ mod tests {
             .expect("scoped path has a scope key before /call/");
         assert_eq!(scope_key, "tenant-11111111-2222-3333-4444-555555555555");
         assert!(!scope_key.contains('/'), "scope key must be one segment");
+    }
+
+    #[test]
+    fn workflow_send_uses_restate_fire_and_forget_prefix() {
+        // Pins: destructive tenant purge admission returns without waiting for workflow completion.
+        assert_eq!(
+            send_path("/TenantPurge/tenant-key/run"),
+            "/restate/send/TenantPurge/tenant-key/run"
+        );
     }
 }

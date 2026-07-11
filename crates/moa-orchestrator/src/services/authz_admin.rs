@@ -2,14 +2,13 @@
 
 use moa_authz::{enqueue, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation, TupleKey, TupleOp, UserType};
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 
 /// Tenant role relation that public API-key authz administration can write.
@@ -104,8 +103,18 @@ pub trait Authz {
 }
 
 /// Concrete authorization administration implementation.
-#[derive(Clone, Default)]
-pub struct AuthzImpl;
+#[derive(Clone)]
+pub struct AuthzImpl {
+    pool: PgPool,
+}
+
+impl AuthzImpl {
+    /// Creates the authorization administration adapter with its backing pool.
+    #[must_use]
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
 
 impl Authz for AuthzImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -133,7 +142,7 @@ impl Authz for AuthzImpl {
         .await
         .map_err(translate_authz_error)?;
 
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         Ok(ctx
             .run(|| async move { enqueue_typed_tuple_write(pool, request).await })
             .name("authz_write_typed_tuple")

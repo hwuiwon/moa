@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use moa_core::transcript::{ProviderEvent, Transcript, Turn, UserUtterance};
 use moa_core::{
-    CompletionRequest, MoaConfig, SessionId, StopReason, StoragePartitionId, TokenUsage, UserId,
+    config::MoaConfig, types::completion::CompletionRequest, types::completion::StopReason,
+    types::completion::TokenUsage, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::identifiers::UserId,
 };
 use moa_eval::EvalEngine;
 use moa_eval::long_conversation::{

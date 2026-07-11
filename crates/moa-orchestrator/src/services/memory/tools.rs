@@ -8,18 +8,20 @@
 //! are never trusted.
 
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
 use moa_brain::retrieval::{MemoryAdmissionPolicy, RetrievalHit};
-use moa_core::{MemoryRetrievalExecutor, MoaConfig, MoaError, Result, SessionMeta, ToolOutput};
+use moa_core::{
+    config::MoaConfig, error::MoaError, error::Result, traits::MemoryRetrievalExecutor,
+    types::session::SessionMeta, types::tools::ToolOutput,
+};
 use moa_memory_graph::EdgeLabel;
 use restate_sdk::prelude::HandlerError;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
-
-use crate::OrchestratorCtx;
 
 use super::retrieval::{neighbors_for_tool, search_hits_for_tool};
 
@@ -35,10 +37,19 @@ const MEMORY_SEARCH_LIMIT: u32 = 8;
 const MAX_NAVIGATE_HOPS: u8 = 3;
 
 /// Cloud runtime implementation of the read-only memory retrieval tools.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct OrchestratorMemoryRetrievalExecutor;
+#[derive(Debug, Clone)]
+pub struct OrchestratorMemoryRetrievalExecutor {
+    pool: sqlx::PgPool,
+    config: Arc<MoaConfig>,
+}
 
 impl OrchestratorMemoryRetrievalExecutor {
+    /// Creates the production memory-tool executor with its graph and retrieval configuration.
+    #[must_use]
+    pub fn new(pool: sqlx::PgPool, config: Arc<MoaConfig>) -> Self {
+        Self { pool, config }
+    }
+
     /// Executes one agentic memory tool with explicit runtime dependencies.
     ///
     /// Embedded hosts and DB integration tests use this entry point so the
@@ -72,11 +83,14 @@ impl MemoryRetrievalExecutor for OrchestratorMemoryRetrievalExecutor {
         tool_name: &str,
         input: &Value,
     ) -> Result<ToolOutput> {
-        let runtime = OrchestratorCtx::current();
-        let pool = runtime.graph_pool();
-        let config = runtime.config();
-        self.execute_retrieval_tool_with_runtime(session, tool_name, input, &pool, config.as_ref())
-            .await
+        self.execute_retrieval_tool_with_runtime(
+            session,
+            tool_name,
+            input,
+            &self.pool,
+            self.config.as_ref(),
+        )
+        .await
     }
 }
 
@@ -136,7 +150,7 @@ async fn memory_search_tool(
 
 /// Maps one retrieval hit to the tool's provenance-bearing JSON shape.
 ///
-/// The provenance fields mirror [`moa_core::ContextSourceRef::with_evidence`]
+/// The provenance fields mirror [`moa_core::types::context::ContextSourceRef::with_evidence`]
 /// (graph uid, chunk uid, document version, source uri) so tool-derived answers
 /// carry the same chunk-level citation identity as injected retrieval.
 fn search_hit_json(hit: &RetrievalHit) -> Value {

@@ -11,7 +11,11 @@
 use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
-use moa_core::{ClickHouseConfig, SessionId, StoragePartitionId, TenantId, UserId};
+use moa_core::{
+    config::ClickHouseConfig, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::identifiers::UserId,
+};
 use moa_lineage_core::{
     BackendIntrospection, LineageEvent, RetrievalLineage, RetrievalStage, StageTimings,
 };

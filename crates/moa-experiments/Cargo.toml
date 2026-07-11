@@ -10,7 +10,6 @@ chrono.workspace = true
 moa-artifacts.workspace = true
 moa-core.workspace = true
 moa-db.workspace = true
-moa-memory-types.workspace = true
 moa-observability.workspace = true
 moa-scoring.workspace = true
 serde.workspace = true

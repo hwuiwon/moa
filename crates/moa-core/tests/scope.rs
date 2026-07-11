@@ -1,6 +1,8 @@
 //! Integration tests for core scope helpers and serialization.
 
-use moa_core::{ActionRuleScope, ContactId, TenantId};
+use moa_core::{
+    types::action_policy::ActionRuleScope, types::contact::ContactId, types::identifiers::TenantId,
+};
 use uuid::Uuid;
 
 #[test]

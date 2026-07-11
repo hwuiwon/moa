@@ -24,8 +24,9 @@ use moa_core::wire::session_store::{
     LearningCandidateReviewAction, LearningCandidateReviewRequest,
 };
 use moa_core::{
-    ActionRuleScope, LearningCandidate, LearningCandidateStatus, LearningCandidateType,
-    LearningRiskClass, MoaConfig, StoragePartitionId,
+    config::MoaConfig, types::action_policy::ActionRuleScope, types::experience::LearningCandidate,
+    types::experience::LearningCandidateStatus, types::experience::LearningCandidateType,
+    types::experience::LearningRiskClass, types::identifiers::StoragePartitionId,
 };
 use moa_orchestrator::services::learning_review::accept_skill_candidate_after_authz;
 use moa_skills::artifact::skill_artifact_document_from_package;

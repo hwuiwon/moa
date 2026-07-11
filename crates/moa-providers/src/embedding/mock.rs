@@ -4,7 +4,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use async_trait::async_trait;
-use moa_core::Result;
+use moa_core::error::Result;
 use moa_core::traits::EmbeddingProvider;
 
 /// Deterministic embedding provider used by tests.

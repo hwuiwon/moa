@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 
 use moa_core::{
-    AttributionSubjectType, Event, EventRange, Result, SkillResolutionRate,
-    TaskStrategySuccessRate, WorkingContext,
+    error::Result, events::Event, types::context::WorkingContext, types::events_stream::EventRange,
+    types::experience::AttributionSubjectType, types::experience::TaskStrategySuccessRate,
+    types::segment_assessment::SkillResolutionRate,
 };
 
 use crate::learning::experience::task_fingerprint_for_context;
@@ -88,7 +89,9 @@ fn task_strategy_success_rate_map(
         .collect()
 }
 
-fn extract_query_keywords_from_events(events: &[moa_core::EventRecord]) -> Vec<String> {
+fn extract_query_keywords_from_events(
+    events: &[moa_core::types::events_stream::EventRecord],
+) -> Vec<String> {
     events
         .iter()
         .rev()

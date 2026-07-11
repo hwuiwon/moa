@@ -5,10 +5,15 @@ use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFil
 use moa_artifacts::validation::validate_for_status;
 use moa_brain::pipeline::skills::{SELECTED_SKILL_NAMES_METADATA_KEY, SkillInjector};
 use moa_core::{
-    ActionRuleScope, AgentContext, AgentPolicySnapshot, AgentRevisionLock, AgentSkillPolicy,
-    AgentSkillPolicyMode, ContactId, ContactRef, ContactVerificationState, ContextMessage,
-    ContextProcessor, LockedToolRef, ModelCapabilities, ResolvedArtifactRevisionRef, Result,
-    SessionActorRef, SessionMeta, StoragePartitionId, TenantId, UserId, WorkingContext,
+    error::Result, traits::ContextProcessor, types::action_policy::ActionRuleScope,
+    types::agent::AgentContext, types::agent::AgentPolicySnapshot, types::agent::AgentRevisionLock,
+    types::agent::AgentSkillPolicy, types::agent::AgentSkillPolicyMode,
+    types::agent::LockedToolRef, types::agent::ResolvedArtifactRevisionRef,
+    types::contact::ContactId, types::contact::ContactRef,
+    types::contact::ContactVerificationState, types::contact::SessionActorRef,
+    types::context::ContextMessage, types::context::WorkingContext,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::identifiers::UserId, types::model::ModelCapabilities, types::session::SessionMeta,
 };
 use serde_json::json;
 use uuid::Uuid;

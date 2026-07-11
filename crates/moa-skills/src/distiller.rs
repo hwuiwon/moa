@@ -4,9 +4,13 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use moa_core::{
-    AttributionEffect, AttributionSubjectType, CompletionRequest, Event, EventRecord,
-    ExperienceAttribution, ExperienceRecord, MoaConfig, ModelTask, Result, SegmentEvidenceKind,
-    SegmentEvidencePolarity, SegmentOutcome, SessionMeta, SkillMetadata,
+    config::MoaConfig, error::Result, events::Event, types::completion::CompletionRequest,
+    types::events_stream::EventRecord, types::experience::AttributionEffect,
+    types::experience::AttributionSubjectType, types::experience::ExperienceAttribution,
+    types::experience::ExperienceRecord, types::memory::SkillMetadata, types::provider::ModelTask,
+    types::segment_assessment::SegmentEvidenceKind,
+    types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
+    types::session::SessionMeta,
 };
 use moa_providers::ModelRouter;
 use moa_session::PostgresSessionStore;
@@ -466,9 +470,12 @@ fn tokenize(text: &str) -> HashSet<String> {
 mod tests {
     use chrono::{TimeZone, Utc};
     use moa_core::{
-        ExperienceRecord, MessageRole, SegmentEvidence, SegmentEvidenceKind,
-        SegmentEvidencePolarity, SegmentId, SessionId, TaskFacetSet, TaskFingerprint, TenantId,
-        UserId,
+        types::context::MessageRole, types::experience::ExperienceRecord,
+        types::experience::TaskFacetSet, types::experience::TaskFingerprint,
+        types::identifiers::SegmentId, types::identifiers::SessionId, types::identifiers::TenantId,
+        types::identifiers::UserId, types::segment_assessment::SegmentEvidence,
+        types::segment_assessment::SegmentEvidenceKind,
+        types::segment_assessment::SegmentEvidencePolarity,
     };
     use uuid::Uuid;
 

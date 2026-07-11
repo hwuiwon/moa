@@ -14,8 +14,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{
-    ContextProcessor, LLMProvider, ProcessorOutput, QueryRewriteConfig, QueryRewriteResult, Result,
-    SessionStore, WorkingContext,
+    config::QueryRewriteConfig, error::Result, traits::ContextProcessor, traits::LLMProvider,
+    traits::SessionStore, types::context::ProcessorOutput, types::context::WorkingContext,
+    types::query_rewrite::QueryRewriteResult,
 };
 use serde_json::json;
 
@@ -257,11 +258,17 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use moa_core::{
-        Channel, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
-        ContextProcessor, Event, EventRecord, LLMProvider, ModelCapabilities, ModelId, ModelTier,
-        ProcessorOutput, QueryRewriteConfig, QueryRewriteResult, Result, RewriteReason,
-        RewriteSource, SessionId, SessionMeta, StopReason, TenantId, TokenPricing, TokenUsage,
-        ToolCallFormat, WorkingContext,
+        config::QueryRewriteConfig, error::Result, events::Event, traits::ContextProcessor,
+        traits::LLMProvider, types::channel::Channel, types::completion::CompletionRequest,
+        types::completion::CompletionResponse, types::completion::CompletionStream,
+        types::completion::StopReason, types::completion::TokenUsage,
+        types::context::ContextMessage, types::context::ProcessorOutput,
+        types::context::WorkingContext, types::events_stream::EventRecord,
+        types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
+        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
+        types::provider::ModelTier, types::query_rewrite::QueryRewriteResult,
+        types::query_rewrite::RewriteReason, types::query_rewrite::RewriteSource,
+        types::session::SessionMeta,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -297,7 +304,7 @@ mod tests {
                 .clone();
             Ok(CompletionStream::from_response(CompletionResponse {
                 text: text.clone(),
-                content: vec![moa_core::CompletionContent::Text(text)],
+                content: vec![moa_core::types::completion::CompletionContent::Text(text)],
                 stop_reason: StopReason::EndTurn,
                 model: ModelId::new("mock"),
                 usage: TokenUsage::default(),

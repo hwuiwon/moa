@@ -1,7 +1,7 @@
 //! Durable Restate façade over the PostgreSQL-backed MOA session store.
 //!
 //! This module intentionally exposes the Restate service as `SessionStore` while
-//! keeping the implementation separate from `moa_core::SessionStore`. The S05
+//! keeping the implementation separate from `moa_core::traits::SessionStore`. The S05
 //! audit classified this as a workflow RPC facade, not a duplicate core trait.
 
 use std::sync::Arc;
@@ -18,9 +18,12 @@ use moa_core::wire::session_store::{
     UpdateLearningCandidateStatusRequest, UpdateSegmentAssessmentRequest, UpdateStatusRequest,
 };
 use moa_core::{
-    Event, EventRecord, ExperienceAttribution, ExperienceRecord, LearningCandidate,
-    SegmentBaseline, SessionId, SessionMeta, SessionStore as CoreSessionStore, SessionSummary,
-    SkillResolutionRate, TaskSegment, TaskStrategySuccessRate,
+    events::Event, traits::SessionStore as CoreSessionStore, types::events_stream::EventRecord,
+    types::experience::ExperienceAttribution, types::experience::ExperienceRecord,
+    types::experience::LearningCandidate, types::experience::TaskStrategySuccessRate,
+    types::identifiers::SessionId, types::segment_assessment::SegmentBaseline,
+    types::segment_assessment::SkillResolutionRate, types::segments::TaskSegment,
+    types::session::SessionMeta, types::session::SessionSummary,
 };
 use moa_observability::record_session_error;
 use moa_session::PostgresSessionStore;

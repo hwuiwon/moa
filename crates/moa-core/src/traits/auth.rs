@@ -11,7 +11,7 @@ use std::time::Duration;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::TenantId;
+use crate::types::identifiers::TenantId;
 
 /// Principal category resolved from an inbound credential.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

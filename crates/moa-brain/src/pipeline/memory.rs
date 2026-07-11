@@ -5,11 +5,13 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures_util::future::try_join_all;
-use moa_core::RlsContext;
+use moa_core::types::memory::RlsContext;
 use moa_core::{
-    ContextMessage, ContextProcessor, ContextSourceRef, ExcludedItem, LineageHandle, MoaError,
-    NullLineageHandle, ProcessorOutput, QueryRewriteResult, Result, SessionId, StageApply,
-    WorkingContext, traits::EmbeddingProvider,
+    error::MoaError, error::Result, traits::ContextProcessor, traits::EmbeddingProvider,
+    traits::LineageHandle, traits::NullLineageHandle, traits::StageApply,
+    types::context::ContextMessage, types::context::ContextSourceRef, types::context::ExcludedItem,
+    types::context::ProcessorOutput, types::context::WorkingContext, types::identifiers::SessionId,
+    types::query_rewrite::QueryRewriteResult,
 };
 use moa_memory_graph::{GraphStore, PiiClass, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
@@ -159,7 +161,7 @@ struct ScopeProbe<'a> {
 pub struct GraphMemoryRetriever {
     pool: PgPool,
     embedder: Option<Arc<dyn EmbeddingProvider>>,
-    config: moa_core::MoaConfig,
+    config: moa_core::config::MoaConfig,
     assume_app_role: bool,
     lineage: Arc<dyn LineageHandle>,
     result_limit: usize,
@@ -226,7 +228,7 @@ pub trait ScopedRetrievalRuntimeFactory: Send + Sync {
     async fn build_runtime(
         &self,
         scope: &MemoryScope,
-        config: &moa_core::MoaConfig,
+        config: &moa_core::config::MoaConfig,
         pool: &PgPool,
         assume_app_role: bool,
     ) -> Result<ScopedRetrievalRuntime>;
@@ -243,7 +245,7 @@ impl ScopedRetrievalRuntimeFactory for PostgresScopedRetrievalRuntimeFactory {
     async fn build_runtime(
         &self,
         scope: &MemoryScope,
-        config: &moa_core::MoaConfig,
+        config: &moa_core::config::MoaConfig,
         pool: &PgPool,
         assume_app_role: bool,
     ) -> Result<ScopedRetrievalRuntime> {
@@ -289,13 +291,13 @@ impl GraphMemoryRetriever {
     /// Creates a graph-memory retriever backed by the shared Postgres pool.
     #[must_use]
     pub fn new(pool: PgPool, embedder: Option<Arc<dyn EmbeddingProvider>>) -> Self {
-        Self::new_with_config(moa_core::MoaConfig::default(), pool, embedder)
+        Self::new_with_config(moa_core::config::MoaConfig::default(), pool, embedder)
     }
 
     /// Creates a graph-memory retriever backed by the shared Postgres pool and runtime config.
     #[must_use]
     pub fn new_with_config(
-        config: moa_core::MoaConfig,
+        config: moa_core::config::MoaConfig,
         pool: PgPool,
         embedder: Option<Arc<dyn EmbeddingProvider>>,
     ) -> Self {
@@ -905,7 +907,9 @@ use super::trailing_user_insertion_index;
 /// memory section, reserved from the memory budget so the whole injected message
 /// stays within budget.
 fn memory_reminder_wrapper_tokens() -> usize {
-    moa_core::estimate_text_tokens(&format!("{MEMORY_REMINDER_PREFIX}\n\n</memory-reminder>"))
+    moa_core::types::context::estimate_text_tokens(&format!(
+        "{MEMORY_REMINDER_PREFIX}\n\n</memory-reminder>"
+    ))
 }
 
 /// Builds the processor-output metadata that records the router's chosen
@@ -964,7 +968,7 @@ fn extract_search_query_from_messages(messages: &[ContextMessage]) -> Option<Str
         .iter()
         .rev()
         .find_map(|message| match message.role {
-            moa_core::MessageRole::User => Some(message.content.as_str()),
+            moa_core::types::context::MessageRole::User => Some(message.content.as_str()),
             _ => None,
         })?;
     let query = text.trim();
@@ -1011,10 +1015,14 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use moa_core::{
-        AgentContext, AgentKnowledgePolicy, AgentKnowledgeScopeMode, AgentPolicySnapshot, Channel,
-        ContactId, ContactRef, ContactVerificationState, ContextMessage, ContextProcessor,
-        ModelCapabilities, ModelId, QueryRewriteResult, SessionId, SessionMeta, TenantId,
-        TokenPricing, ToolCallFormat, WorkingContext,
+        traits::ContextProcessor, types::agent::AgentContext, types::agent::AgentKnowledgePolicy,
+        types::agent::AgentKnowledgeScopeMode, types::agent::AgentPolicySnapshot,
+        types::channel::Channel, types::contact::ContactId, types::contact::ContactRef,
+        types::contact::ContactVerificationState, types::context::ContextMessage,
+        types::context::WorkingContext, types::identifiers::ModelId, types::identifiers::SessionId,
+        types::identifiers::TenantId, types::model::ModelCapabilities, types::model::TokenPricing,
+        types::model::ToolCallFormat, types::query_rewrite::QueryRewriteResult,
+        types::session::SessionMeta,
     };
     use moa_lineage_core::TurnId;
     use moa_memory_graph::{
@@ -1133,10 +1141,10 @@ mod tests {
         async fn build_runtime(
             &self,
             _scope: &MemoryScope,
-            _config: &moa_core::MoaConfig,
+            _config: &moa_core::config::MoaConfig,
             _pool: &sqlx::PgPool,
             _assume_app_role: bool,
-        ) -> moa_core::Result<ScopedRetrievalRuntime> {
+        ) -> moa_core::error::Result<ScopedRetrievalRuntime> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(ScopedRetrievalRuntime::new(
                 Arc::new(NoopGraphStore),
@@ -1191,10 +1199,10 @@ mod tests {
         async fn build_runtime(
             &self,
             _scope: &MemoryScope,
-            _config: &moa_core::MoaConfig,
+            _config: &moa_core::config::MoaConfig,
             _pool: &sqlx::PgPool,
             _assume_app_role: bool,
-        ) -> moa_core::Result<ScopedRetrievalRuntime> {
+        ) -> moa_core::error::Result<ScopedRetrievalRuntime> {
             let retriever: Arc<dyn crate::retrieval::PlannedRetriever> = self.retriever.clone();
             Ok(ScopedRetrievalRuntime::new(
                 Arc::new(NoopGraphStore),
@@ -1244,10 +1252,10 @@ mod tests {
         async fn build_runtime(
             &self,
             _scope: &MemoryScope,
-            _config: &moa_core::MoaConfig,
+            _config: &moa_core::config::MoaConfig,
             _pool: &sqlx::PgPool,
             _assume_app_role: bool,
-        ) -> moa_core::Result<ScopedRetrievalRuntime> {
+        ) -> moa_core::error::Result<ScopedRetrievalRuntime> {
             let retriever: Arc<dyn crate::retrieval::PlannedRetriever> = self.retriever.clone();
             Ok(ScopedRetrievalRuntime::new(
                 Arc::new(NoopGraphStore),
@@ -1292,10 +1300,10 @@ mod tests {
         async fn build_runtime(
             &self,
             _scope: &MemoryScope,
-            _config: &moa_core::MoaConfig,
+            _config: &moa_core::config::MoaConfig,
             _pool: &sqlx::PgPool,
             _assume_app_role: bool,
-        ) -> moa_core::Result<ScopedRetrievalRuntime> {
+        ) -> moa_core::error::Result<ScopedRetrievalRuntime> {
             let retriever: Arc<dyn crate::retrieval::PlannedRetriever> = self.retriever.clone();
             Ok(ScopedRetrievalRuntime::new(
                 Arc::new(NoopGraphStore),
@@ -1319,7 +1327,7 @@ mod tests {
             4
         }
 
-        async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+        async fn embed(&self, inputs: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(inputs.iter().map(|_| vec![0.0; 4]).collect())
         }
@@ -1354,7 +1362,9 @@ mod tests {
             ..SessionMeta::default()
         };
         let mut ctx = WorkingContext::new(&session, capabilities());
-        ctx.append_message(moa_core::ContextMessage::user("what is the cached answer"));
+        ctx.append_message(moa_core::types::context::ContextMessage::user(
+            "what is the cached answer",
+        ));
 
         retriever
             .process(&mut ctx)
@@ -1558,7 +1568,7 @@ mod tests {
             },
             capabilities(),
         );
-        ctx.append_message(moa_core::ContextMessage::user(
+        ctx.append_message(moa_core::types::context::ContextMessage::user(
             "Please explain the OAuth refresh token race condition bug",
         ));
 
@@ -1603,7 +1613,9 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let retriever = scripted_graph_memory_retriever(calls.clone(), HashMap::new());
         let mut ctx = WorkingContext::new(&session, capabilities());
-        ctx.append_message(moa_core::ContextMessage::user("Find relevant knowledge"));
+        ctx.append_message(moa_core::types::context::ContextMessage::user(
+            "Find relevant knowledge",
+        ));
 
         let output = retriever
             .process(&mut ctx)
@@ -1821,7 +1833,7 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let retriever = scripted_graph_memory_retriever(calls.clone(), hits_by_scope);
         let mut ctx = WorkingContext::new(&session, capabilities());
-        ctx.append_message(moa_core::ContextMessage::user(
+        ctx.append_message(moa_core::types::context::ContextMessage::user(
             "Tell me the tenant and user memory answer",
         ));
 
@@ -1907,7 +1919,7 @@ mod tests {
             ..SessionMeta::default()
         };
         let mut ctx = WorkingContext::new(&session, capabilities());
-        ctx.append_message(moa_core::ContextMessage::user("thanks!"));
+        ctx.append_message(moa_core::types::context::ContextMessage::user("thanks!"));
 
         let output = retriever
             .process(&mut ctx)
@@ -1927,7 +1939,7 @@ mod tests {
         assert_eq!(output.items_excluded, vec!["graph_memory".to_string()]);
         assert_eq!(
             output.excluded_items,
-            vec![moa_core::ExcludedItem {
+            vec![moa_core::types::context::ExcludedItem {
                 item: "graph_memory".to_string(),
                 reason: "router: skip (no retrieval intent)".to_string(),
             }]
@@ -1982,7 +1994,7 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let retriever = scripted_graph_memory_retriever(calls, hits_by_scope);
         let mut ctx = WorkingContext::new(&session, capabilities());
-        ctx.append_message(moa_core::ContextMessage::user(
+        ctx.append_message(moa_core::types::context::ContextMessage::user(
             "What is my API key rotation policy?",
         ));
 
@@ -2011,7 +2023,7 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let retriever = scripted_graph_memory_retriever(calls, HashMap::new());
         let mut ctx = WorkingContext::new(&session, capabilities());
-        ctx.append_message(moa_core::ContextMessage::user(
+        ctx.append_message(moa_core::types::context::ContextMessage::user(
             "What is my API key rotation policy?",
         ));
 
@@ -2058,7 +2070,7 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let retriever = scripted_graph_memory_retriever(calls, hits_by_scope);
         let mut ctx = WorkingContext::new(&session, capabilities());
-        ctx.append_message(moa_core::ContextMessage::user(
+        ctx.append_message(moa_core::types::context::ContextMessage::user(
             "Investigate what we know about the auth outage",
         ));
 
@@ -2138,7 +2150,7 @@ mod tests {
             ..SessionMeta::default()
         };
         let mut ctx = WorkingContext::new(&session, capabilities());
-        ctx.append_message(moa_core::ContextMessage::user(
+        ctx.append_message(moa_core::types::context::ContextMessage::user(
             "Which team owns the library that svc depends on?",
         ));
 
@@ -2202,7 +2214,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                moa_core::MoaError::ValidationError(ref message)
+                moa_core::error::MoaError::ValidationError(ref message)
                     if message == "memory evidence token budget must be positive"
             ),
             "zero budget should return the dedicated validation error: {error}"
@@ -2358,7 +2370,7 @@ mod tests {
         }
         assert_eq!(
             response.consumed_evidence_tokens,
-            moa_core::estimate_text_tokens(&response.rendered_evidence)
+            moa_core::types::context::estimate_text_tokens(&response.rendered_evidence)
         );
         assert!(response.consumed_evidence_tokens <= 512);
         assert_eq!(
@@ -2422,7 +2434,7 @@ mod tests {
         assert_eq!(response.source_refs.len(), 1);
         assert_eq!(
             response.consumed_evidence_tokens,
-            moa_core::estimate_text_tokens(&response.rendered_evidence)
+            moa_core::types::context::estimate_text_tokens(&response.rendered_evidence)
         );
         assert!(
             response.consumed_evidence_tokens <= token_budget,
@@ -2529,7 +2541,7 @@ mod tests {
                 .expect_err("out-of-range ranked occurrence depth must fail");
             assert!(matches!(
                 error,
-                moa_core::MoaError::ValidationError(ref message)
+                moa_core::error::MoaError::ValidationError(ref message)
                     if message == "memory evidence ranked occurrence depth must be in 1..=50"
             ));
         }

@@ -4,8 +4,10 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use moa_core::{
-    BuiltInTool, Event, EventRange, IdempotencyClass, MoaError, Result, ToolArtifactStream,
-    ToolCallId, ToolContext, ToolInputShape, ToolOutput, ToolPolicySpec, read_tool_policy,
+    error::MoaError, error::Result, events::Event, traits::BuiltInTool, traits::ToolContext,
+    types::events_stream::EventRange, types::identifiers::ToolCallId,
+    types::tools::IdempotencyClass, types::tools::ToolArtifactStream, types::tools::ToolInputShape,
+    types::tools::ToolOutput, types::tools::ToolPolicySpec, types::tools::read_tool_policy,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -327,8 +329,8 @@ struct SearchContextLine {
 }
 
 async fn load_tool_result_text(
-    session_store: &dyn moa_core::SessionStore,
-    session_id: moa_core::SessionId,
+    session_store: &dyn moa_core::traits::SessionStore,
+    session_id: moa_core::types::identifiers::SessionId,
     tool_id: ToolCallId,
     stream: ToolArtifactStream,
 ) -> Result<String> {
@@ -508,20 +510,21 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use moa_core::{
-        ClaimCheck, EventFilter, SessionFilter, SessionId, SessionMeta, SessionStatus,
-        SessionSummary, TenantId,
+        types::events_stream::ClaimCheck, types::events_stream::EventFilter,
+        types::identifiers::SessionId, types::identifiers::TenantId, types::session::SessionFilter,
+        types::session::SessionMeta, types::session::SessionStatus, types::session::SessionSummary,
     };
 
     use super::*;
 
     #[derive(Clone, Default)]
     struct MockSessionStore {
-        events: Vec<moa_core::EventRecord>,
+        events: Vec<moa_core::types::events_stream::EventRecord>,
         artifacts: std::collections::HashMap<String, String>,
     }
 
     #[async_trait]
-    impl moa_core::SessionStore for MockSessionStore {
+    impl moa_core::traits::SessionStore for MockSessionStore {
         async fn create_session(&self, _meta: SessionMeta) -> Result<SessionId> {
             Ok(SessionId::new())
         }
@@ -553,7 +556,7 @@ mod tests {
             &self,
             _session_id: SessionId,
             _range: EventRange,
-        ) -> Result<Vec<moa_core::EventRecord>> {
+        ) -> Result<Vec<moa_core::types::events_stream::EventRecord>> {
             Ok(self.events.clone())
         }
 
@@ -577,7 +580,7 @@ mod tests {
             &self,
             _query: &str,
             _filter: EventFilter,
-        ) -> Result<Vec<moa_core::EventRecord>> {
+        ) -> Result<Vec<moa_core::types::events_stream::EventRecord>> {
             Ok(Vec::new())
         }
 
@@ -598,9 +601,12 @@ mod tests {
         }
     }
 
-    fn event_record(session_id: SessionId, event: Event) -> moa_core::EventRecord {
+    fn event_record(
+        session_id: SessionId,
+        event: Event,
+    ) -> moa_core::types::events_stream::EventRecord {
         let event_type = event.event_type();
-        moa_core::EventRecord {
+        moa_core::types::events_stream::EventRecord {
             id: Uuid::now_v7(),
             session_id,
             sequence_num: 0,
@@ -624,7 +630,7 @@ mod tests {
                     tool_id,
                     provider_tool_use_id: None,
                     output: ToolOutput::text("stored separately", Duration::from_millis(1))
-                        .with_artifact(Some(moa_core::ToolOutputArtifact {
+                        .with_artifact(Some(moa_core::types::tools::ToolOutputArtifact {
                             combined: ClaimCheck {
                                 blob_id: "blob-1".to_string(),
                                 size: 24,
@@ -647,7 +653,7 @@ mod tests {
         };
         let ctx = ToolContext {
             session: &session,
-            lineage: &moa_core::NULL_LINEAGE_HANDLE,
+            lineage: &moa_core::traits::NULL_LINEAGE_HANDLE,
             session_store: Some(&store),
             cancel_token: None,
             memory_tool_executor: None,
@@ -693,7 +699,7 @@ mod tests {
         };
         let ctx = ToolContext {
             session: &session,
-            lineage: &moa_core::NULL_LINEAGE_HANDLE,
+            lineage: &moa_core::traits::NULL_LINEAGE_HANDLE,
             session_store: Some(&store),
             cancel_token: None,
             memory_tool_executor: None,

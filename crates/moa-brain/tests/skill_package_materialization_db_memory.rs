@@ -10,11 +10,16 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
-    ActionRuleScope, AgentContext, AgentPolicySnapshot, AgentRevisionLock, AgentSkillPolicy,
-    AgentSkillPolicyMode, AgentToolPolicy, AgentToolPolicyMode, ContactId, ContactRef,
-    ContactVerificationState, Event, EventRange, LockedToolRef, ModelCapabilities, ModelId,
-    ResolvedArtifactRevisionRef, Result, SessionActorRef, SessionMeta, SessionStore,
-    StoragePartitionId, TenantId, TokenPricing, ToolCallFormat, ToolOutput, UserId,
+    error::Result, events::Event, traits::SessionStore, types::action_policy::ActionRuleScope,
+    types::agent::AgentContext, types::agent::AgentPolicySnapshot, types::agent::AgentRevisionLock,
+    types::agent::AgentSkillPolicy, types::agent::AgentSkillPolicyMode,
+    types::agent::AgentToolPolicy, types::agent::AgentToolPolicyMode, types::agent::LockedToolRef,
+    types::agent::ResolvedArtifactRevisionRef, types::contact::ContactId,
+    types::contact::ContactRef, types::contact::ContactVerificationState,
+    types::contact::SessionActorRef, types::events_stream::EventRange, types::identifiers::ModelId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::identifiers::UserId, types::model::ModelCapabilities, types::model::TokenPricing,
+    types::model::ToolCallFormat, types::session::SessionMeta, types::tools::ToolOutput,
 };
 use moa_hands::ToolRouter;
 use moa_providers::{ScriptedBlock, ScriptedProvider, ScriptedResponse};
@@ -31,7 +36,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
     let workspace = root.path().join("workspace");
     tokio::fs::create_dir_all(&workspace).await?;
 
-    let mut config = moa_core::MoaConfig::default();
+    let mut config = moa_core::config::MoaConfig::default();
     config.models.main = "claude-sonnet-4-6".to_string();
     config.skill_budget.max_manifest_chars = Some(512);
 
@@ -102,7 +107,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
             query_rewrite_llm_provider: None,
             identity_prompt_override: None,
             tool_schemas: router.tool_schemas(),
-            lineage: Arc::new(moa_core::NullLineageHandle),
+            lineage: Arc::new(moa_core::traits::NullLineageHandle),
         },
     );
     session_store
@@ -176,7 +181,7 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
     let workspace = root.path().join("workspace");
     tokio::fs::create_dir_all(&workspace).await?;
 
-    let mut config = moa_core::MoaConfig::default();
+    let mut config = moa_core::config::MoaConfig::default();
     config.models.main = "claude-sonnet-4-6".to_string();
     config.skill_budget.max_manifest_chars = Some(512);
 
@@ -289,7 +294,7 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
             query_rewrite_llm_provider: None,
             identity_prompt_override: None,
             tool_schemas: router.tool_schemas(),
-            lineage: Arc::new(moa_core::NullLineageHandle),
+            lineage: Arc::new(moa_core::traits::NullLineageHandle),
         },
     );
     session_store
@@ -330,12 +335,12 @@ async fn allow_skill_package_bash(
     tenant_id: TenantId,
 ) -> Result<()> {
     store
-        .upsert_action_policy_rule(moa_core::ActionPolicyRule {
+        .upsert_action_policy_rule(moa_core::types::action_policy::ActionPolicyRule {
             id: Uuid::now_v7(),
             scope: ActionRuleScope::Tenant { tenant_id },
             tool: "bash".to_string(),
             pattern: "*run.sh".to_string(),
-            effect: moa_core::ActionPolicyEffect::Allow,
+            effect: moa_core::types::action_policy::ActionPolicyEffect::Allow,
             reason: Some("skill package materialization test bash opt-in".to_string()),
             created_by: UserId::new("skill-package-test"),
             created_at: chrono::Utc::now(),
@@ -550,7 +555,7 @@ fn slugify_skill_name(value: &str) -> String {
 
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
-        model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model_id: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         context_window: 200_000,
         max_output: 8_192,
         supports_tools: true,
@@ -623,7 +628,7 @@ fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
 }
 
 fn tool_results_by_provider_id(
-    events: &[moa_core::EventRecord],
+    events: &[moa_core::types::events_stream::EventRecord],
 ) -> Vec<(Option<String>, ToolOutput)> {
     events
         .iter()

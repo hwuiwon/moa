@@ -1,6 +1,9 @@
 //! Error-preservation rules for compacted history replay.
 
-use moa_core::{ContextMessage, ContextSourceRef, Event, EventRecord};
+use moa_core::{
+    events::Event, types::context::ContextMessage, types::context::ContextSourceRef,
+    types::events_stream::EventRecord,
+};
 
 pub(crate) fn preserved_error_messages(events: &[&EventRecord]) -> Vec<ContextMessage> {
     let mut messages = Vec::new();

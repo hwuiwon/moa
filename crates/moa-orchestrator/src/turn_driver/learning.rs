@@ -1,8 +1,11 @@
 //! Learning-log helper types for turn workflows.
 
 use chrono::{DateTime, Utc};
-use moa_core::{Event, EventRecord};
-use moa_core::{LearningEntry, MoaError, SegmentAssessment, SegmentId, TenantId};
+use moa_core::{
+    error::MoaError, types::identifiers::SegmentId, types::identifiers::TenantId,
+    types::learning::LearningEntry, types::segment_assessment::SegmentAssessment,
+};
+use moa_core::{events::Event, types::events_stream::EventRecord};
 use uuid::Uuid;
 
 /// Request for building a learning-log entry from a segment assessment.
@@ -53,8 +56,8 @@ pub(crate) fn segment_assessment_learning_entry(
 pub(crate) fn skill_learning_dispatch_is_eligible(
     segment_events: &[EventRecord],
     min_tool_calls: usize,
-    experience: &moa_core::ExperienceRecord,
-    attributions: &[moa_core::ExperienceAttribution],
+    experience: &moa_core::types::experience::ExperienceRecord,
+    attributions: &[moa_core::types::experience::ExperienceAttribution],
 ) -> bool {
     moa_skills::distiller::experience_is_learnable(experience, attributions)
         && segment_events
@@ -68,7 +71,9 @@ pub(crate) fn skill_learning_dispatch_is_eligible(
 mod tests {
     use chrono::Utc;
     use moa_core::{
-        AssessmentPhase, SegmentAssessment, SegmentEvidence, SegmentId, SegmentOutcome, TenantId,
+        types::identifiers::SegmentId, types::identifiers::TenantId,
+        types::segment_assessment::AssessmentPhase, types::segment_assessment::SegmentAssessment,
+        types::segment_assessment::SegmentEvidence, types::segment_assessment::SegmentOutcome,
     };
 
     use super::{SegmentAssessmentLearningRequest, segment_assessment_learning_entry};

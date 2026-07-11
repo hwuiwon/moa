@@ -1,7 +1,7 @@
 //! ZeroEntropy rerank provider client.
 
 use async_trait::async_trait;
-use moa_core::{MoaError, Result};
+use moa_core::{error::MoaError, error::Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 

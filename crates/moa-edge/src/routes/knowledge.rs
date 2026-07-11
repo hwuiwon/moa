@@ -3,7 +3,7 @@
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method, Uri};
 use base64::{Engine as _, engine::general_purpose};
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use moa_core::wire::knowledge::{
     KnowledgeConnectionListRequest, KnowledgeCreateLinkTokenRequest,
     KnowledgeDisconnectConnectionRequest, KnowledgeExchangeTokenRequest,

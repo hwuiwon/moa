@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use moa_core::{LLMProvider, MoaConfig, MoaError};
+use moa_core::{config::MoaConfig, error::MoaError, traits::LLMProvider};
 
 use crate::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 
@@ -53,7 +53,8 @@ impl ProviderId {
 }
 
 /// Factory used to construct a provider from runtime config and a model id.
-pub type ConfigProviderFactory = fn(&MoaConfig, &str) -> moa_core::Result<Arc<dyn LLMProvider>>;
+pub type ConfigProviderFactory =
+    fn(&MoaConfig, &str) -> moa_core::error::Result<Arc<dyn LLMProvider>>;
 
 /// Accessor for a provider's API-key setting.
 pub type ApiKeyAccessor = for<'a> fn(&'a MoaConfig) -> &'a str;
@@ -174,7 +175,7 @@ fn google_api_key(config: &MoaConfig) -> &str {
 fn build_anthropic_provider_from_config(
     config: &MoaConfig,
     model: &str,
-) -> moa_core::Result<Arc<dyn LLMProvider>> {
+) -> moa_core::error::Result<Arc<dyn LLMProvider>> {
     Ok(Arc::new(AnthropicProvider::from_config_with_model(
         config, model,
     )?))
@@ -183,7 +184,7 @@ fn build_anthropic_provider_from_config(
 fn build_openai_provider_from_config(
     config: &MoaConfig,
     model: &str,
-) -> moa_core::Result<Arc<dyn LLMProvider>> {
+) -> moa_core::error::Result<Arc<dyn LLMProvider>> {
     Ok(Arc::new(OpenAIProvider::from_config_with_model(
         config, model,
     )?))
@@ -192,7 +193,7 @@ fn build_openai_provider_from_config(
 fn build_google_provider_from_config(
     config: &MoaConfig,
     model: &str,
-) -> moa_core::Result<Arc<dyn LLMProvider>> {
+) -> moa_core::error::Result<Arc<dyn LLMProvider>> {
     Ok(Arc::new(GeminiProvider::from_config_with_model(
         config, model,
     )?))

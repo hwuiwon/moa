@@ -1,6 +1,6 @@
 //! Outcome-weighted memory quality-score computation.
 
-use moa_core::{StoragePartitionId, TenantId};
+use moa_core::{types::identifiers::StoragePartitionId, types::identifiers::TenantId};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 

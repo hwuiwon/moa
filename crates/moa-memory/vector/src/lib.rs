@@ -165,7 +165,7 @@ pub enum Error {
     },
     /// A core storage helper failed.
     #[error("core storage helper failed: {0}")]
-    Core(#[from] moa_core::MoaError),
+    Core(#[from] moa_core::error::MoaError),
     /// A Postgres query failed.
     #[error("vector store query failed: {0}")]
     Sqlx(#[from] sqlx::Error),
@@ -250,7 +250,7 @@ fn is_permanent_http_status(status: u16) -> bool {
     (400..500).contains(&status) && status != 408 && status != 429
 }
 
-impl From<Error> for moa_core::MoaError {
+impl From<Error> for moa_core::error::MoaError {
     fn from(error: Error) -> Self {
         match error {
             Error::Core(error) => error,

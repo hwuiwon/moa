@@ -1,7 +1,10 @@
 //! Stage 1: injects the static MOA identity prompt.
 
 use async_trait::async_trait;
-use moa_core::{ContextProcessor, ProcessorOutput, Result, WorkingContext, estimate_text_tokens};
+use moa_core::{
+    error::Result, traits::ContextProcessor, types::context::ProcessorOutput,
+    types::context::WorkingContext, types::context::estimate_text_tokens,
+};
 
 // WARNING: This file contributes to the provider-cacheable stable system prefix.
 // Do not add dynamic content here (datetime, workspace path, git branch, user identity, etc.).
@@ -151,8 +154,9 @@ impl ContextProcessor for IdentityProcessor {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        Channel, ModelCapabilities, ModelId, SessionId, SessionMeta, TenantId, TokenPricing,
-        ToolCallFormat,
+        types::channel::Channel, types::identifiers::ModelId, types::identifiers::SessionId,
+        types::identifiers::TenantId, types::model::ModelCapabilities, types::model::TokenPricing,
+        types::model::ToolCallFormat, types::session::SessionMeta,
     };
 
     use super::*;
@@ -192,7 +196,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(ctx.messages.len(), 1);
-        assert_eq!(ctx.messages[0].role, moa_core::MessageRole::System);
+        assert_eq!(
+            ctx.messages[0].role,
+            moa_core::types::context::MessageRole::System
+        );
         assert!(output.tokens_added > 0);
     }
 

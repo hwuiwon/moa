@@ -10,19 +10,19 @@ include!("brain_turn_support/artifacts.rs");
 #[cfg(feature = "eval-harness")]
 async fn allow_artifact_capture_bash(
     store: &moa_session::PostgresSessionStore,
-    tenant_id: moa_core::TenantId,
+    tenant_id: moa_core::types::identifiers::TenantId,
 ) {
     // These tests exercise artifact capture after local bash execution, so they
     // intentionally override the hardened AdminReview default for python fixtures.
     store
-        .upsert_action_policy_rule(moa_core::ActionPolicyRule {
+        .upsert_action_policy_rule(moa_core::types::action_policy::ActionPolicyRule {
             id: uuid::Uuid::now_v7(),
-            scope: moa_core::ActionRuleScope::Tenant { tenant_id },
+            scope: moa_core::types::action_policy::ActionRuleScope::Tenant { tenant_id },
             tool: "bash".to_string(),
             pattern: "python3 -c *".to_string(),
-            effect: moa_core::ActionPolicyEffect::Allow,
+            effect: moa_core::types::action_policy::ActionPolicyEffect::Allow,
             reason: Some("artifact capture test bash opt-in".to_string()),
-            created_by: moa_core::UserId::new("artifact-capture-test"),
+            created_by: moa_core::types::identifiers::UserId::new("artifact-capture-test"),
             created_at: chrono::Utc::now(),
         })
         .await
@@ -32,7 +32,10 @@ async fn allow_artifact_capture_bash(
 #[tokio::test]
 async fn brain_turn_text_artifact_store_round_trips_db() {
     // Pins: the brain turn artifact DB lane exercises the real session-store blob path.
-    use moa_core::{ModelId, SessionActorRef, SessionMeta, SessionStore as _, TenantId};
+    use moa_core::{
+        traits::SessionStore as _, types::contact::SessionActorRef, types::identifiers::ModelId,
+        types::identifiers::TenantId, types::session::SessionMeta,
+    };
 
     let (store, database_url, schema_name) = moa_session::testing::create_isolated_test_store()
         .await
@@ -78,7 +81,7 @@ async fn run_brain_turn_uses_tool_result_search_for_artifact_backed_output() {
         created_by: Some(SessionActorRef::Contact {
             id: test_contact_id(),
         }),
-        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     store.create_session(session.clone()).await.unwrap();
@@ -183,7 +186,7 @@ async fn run_brain_turn_reads_stderr_stream_from_artifact_backed_output() {
         created_by: Some(SessionActorRef::Contact {
             id: test_contact_id(),
         }),
-        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     store.create_session(session.clone()).await.unwrap();

@@ -4,8 +4,8 @@
 use std::time::Duration;
 
 use moa_core::{
-    TenantId,
     traits::{Identity, IdentityType},
+    types::identifiers::TenantId,
 };
 use moa_ocsf::{dropped_audit_count, init_background_audit, signing, spawn_authn_success};
 use uuid::Uuid;

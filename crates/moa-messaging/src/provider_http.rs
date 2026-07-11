@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use moa_core::{MoaError, Result};
+use moa_core::{error::MoaError, error::Result};
 use reqwest::{
     Client, StatusCode,
     header::{HeaderMap, RETRY_AFTER},

@@ -3,8 +3,8 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
-use moa_core::RlsContext;
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
+use moa_core::types::memory::RlsContext;
 use moa_db::ScopedConn;
 use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
 use moa_test_support::fixtures::stable_uuid_from_label;

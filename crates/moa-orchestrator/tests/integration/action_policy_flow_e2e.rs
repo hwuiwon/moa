@@ -6,8 +6,12 @@ use anyhow::{Context, Result};
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use moa_core::{
-    ActionPolicyEffect, ActionReviewDecision, ActionReviewStatus, Event, EventRange, EventRecord,
-    SessionId, SessionStatus, TenantId, ToolCallId, ToolCallRequest, ToolInvocation, UserId,
+    events::Event, types::action_policy::ActionPolicyEffect,
+    types::action_policy::ActionReviewDecision, types::action_policy::ActionReviewStatus,
+    types::completion::ToolInvocation, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::identifiers::SessionId, types::identifiers::TenantId,
+    types::identifiers::ToolCallId, types::identifiers::UserId, types::session::SessionStatus,
+    types::tools::ToolCallRequest,
 };
 use moa_orchestrator::objects::tenant::TenantConfig;
 use moa_orchestrator::services::action_policy::{PrepareActionReviewRequest, PreparedActionReview};
@@ -441,11 +445,15 @@ async fn run_scripted_turn(
 }
 
 /// Mirrors the orchestrator's fallback tool `user_id` derivation for a session.
-fn fallback_tool_user_id(meta: &moa_core::SessionMeta) -> UserId {
+fn fallback_tool_user_id(meta: &moa_core::types::session::SessionMeta) -> UserId {
     match &meta.created_by {
-        Some(moa_core::SessionActorRef::Identity { id }) => UserId::new(id.to_string()),
-        Some(moa_core::SessionActorRef::Contact { id }) => UserId::new(format!("contact:{id}")),
-        Some(moa_core::SessionActorRef::Anonymous) | None => {
+        Some(moa_core::types::contact::SessionActorRef::Identity { id }) => {
+            UserId::new(id.to_string())
+        }
+        Some(moa_core::types::contact::SessionActorRef::Contact { id }) => {
+            UserId::new(format!("contact:{id}"))
+        }
+        Some(moa_core::types::contact::SessionActorRef::Anonymous) | None => {
             UserId::new(format!("tenant:{}", meta.tenant_id))
         }
     }

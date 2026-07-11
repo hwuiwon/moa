@@ -2,8 +2,9 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ActionClass, ActionReviewDecision, ActionReviewStatus, Event, StoragePartitionId, ToolCallId,
-    ToolCallRequest,
+    events::Event, types::action_policy::ActionClass, types::action_policy::ActionReviewDecision,
+    types::action_policy::ActionReviewStatus, types::identifiers::StoragePartitionId,
+    types::identifiers::ToolCallId, types::tools::ToolCallRequest,
 };
 use moa_security::{ToolInputCanaryScreening, screen_tool_input_for_canary};
 use restate_sdk::prelude::{HandlerError, TerminalError};
@@ -34,7 +35,7 @@ pub(crate) struct DecidedReview {
     /// Storage partition that owns the review.
     pub(crate) storage_partition_id: StoragePartitionId,
     /// Owning session, when present.
-    pub(crate) session_id: Option<moa_core::SessionId>,
+    pub(crate) session_id: Option<moa_core::types::identifiers::SessionId>,
     /// Admin decision.
     pub(crate) decision: ActionReviewDecision,
     /// Terminal review status.
@@ -147,7 +148,7 @@ pub(crate) async fn decide_review(
     })
 }
 
-fn storage_partition_id(tenant_id: moa_core::TenantId) -> StoragePartitionId {
+fn storage_partition_id(tenant_id: moa_core::types::identifiers::TenantId) -> StoragePartitionId {
     StoragePartitionId::for_tenant(tenant_id)
 }
 
@@ -269,8 +270,9 @@ fn screen_review_tool_input(request: &ToolCallRequest) -> Result<(), TerminalErr
 mod tests {
     use chrono::Utc;
     use moa_core::{
-        ActionClass, ActionReviewDecision, ActionReviewStatus, TenantId, ToolCallId,
-        ToolCallRequest, UserId,
+        types::action_policy::ActionClass, types::action_policy::ActionReviewDecision,
+        types::action_policy::ActionReviewStatus, types::identifiers::TenantId,
+        types::identifiers::ToolCallId, types::identifiers::UserId, types::tools::ToolCallRequest,
     };
     use serde_json::json;
     use uuid::Uuid;

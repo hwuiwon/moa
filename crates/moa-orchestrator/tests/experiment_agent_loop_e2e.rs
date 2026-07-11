@@ -23,7 +23,11 @@ use moa_core::wire::experiments::{
 use moa_core::wire::skills::{
     SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
 };
-use moa_core::{ActionRuleScope, Event, EventRange, EventRecord, StoragePartitionId, TenantId};
+use moa_core::{
+    events::Event, types::action_policy::ActionRuleScope, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId,
+};
 use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::test_database_url;
 use serde_json::{Value, json};
@@ -314,7 +318,7 @@ async fn wait_for_brain_response_text(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    session_id: moa_core::SessionId,
+    session_id: moa_core::types::identifiers::SessionId,
     expected_text: &str,
 ) -> Result<Vec<EventRecord>> {
     let mut last_events = Vec::new();
@@ -339,7 +343,7 @@ async fn fetch_events(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    session_id: moa_core::SessionId,
+    session_id: moa_core::types::identifiers::SessionId,
 ) -> Result<Vec<EventRecord>> {
     post_json_with_identity(
         client,

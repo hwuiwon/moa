@@ -1,7 +1,7 @@
 //! DB-backed coverage for hosted eval run status RLS behavior.
 
 use anyhow::Result;
-use moa_core::{RlsContext, TenantId};
+use moa_core::{types::identifiers::TenantId, types::memory::RlsContext};
 use moa_db::ScopedConn;
 use moa_session::PostgresSessionStore;
 use moa_session::testing;

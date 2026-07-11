@@ -4,7 +4,7 @@ use std::{future::Future, sync::Arc, time::Duration};
 
 use anyhow::{Context as AnyhowContext, Result, bail};
 use moa_authz::{AwakeableResolver, FgaClient};
-use moa_core::{MoaConfig, config::AsyncAuthzKind};
+use moa_core::{config::AsyncAuthzKind, config::MoaConfig};
 use reqwest::Client;
 use sqlx::PgPool;
 use tokio::task::JoinHandle;

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
-use moa_core::{MoaError, traits::EmbeddingProvider};
+use moa_core::{error::MoaError, traits::EmbeddingProvider};
 use moa_memory_graph::{GraphError, GraphStore, NodeLabel, PiiClass};
 use moa_memory_types::MemoryScope;
 use uuid::Uuid;
@@ -539,7 +539,7 @@ mod tests {
         NodeLabel, PlannedQuery, Strategy, classify_strategy, infer_label_hint, parse_temporal,
         should_skip_graph_expansion_for_direct_lookup,
     };
-    use moa_core::TenantId;
+    use moa_core::types::identifiers::TenantId;
     use moa_memory_types::MemoryScope;
 
     fn utc(value: &str) -> DateTime<Utc> {

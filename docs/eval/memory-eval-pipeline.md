@@ -156,9 +156,9 @@ usually from the MOA compose stack:
 
 ```bash
 export MOA_DATABASE_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa
-cargo run -p xtask -- generate-memory-eval-corpus --profile pr --seed 1 --seed 2 --seed 3 --output target/memory-eval/pr
-cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr --output target/memory-eval/report.json
-cargo run -p xtask -- check-eval-budgets --suite memory_retrieval --max-regression-pct 5 --memory-eval-report target/memory-eval/report.json
+cargo run -p xtask --features eval-tools -- generate-memory-eval-corpus --profile pr --seed 1 --seed 2 --seed 3 --output target/memory-eval/pr
+cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval --corpus target/memory-eval/pr --output target/memory-eval/report.json
+cargo run -p xtask --features eval-tools -- check-eval-budgets --suite memory_retrieval --max-regression-pct 5 --memory-eval-report target/memory-eval/report.json
 ```
 
 The budget gate treats `cross_user_leak_count != 0` and
@@ -177,21 +177,21 @@ the exact `memory-eval-pr-marked-101-102-103` corpus identity and remains
 provider-hermetic:
 
 ```bash
-cargo run -p xtask -- generate-memory-eval-corpus \
+cargo run -p xtask --features eval-tools -- generate-memory-eval-corpus \
   --profile pr --held-out \
   --output target/memory-eval/pr-held-out
 env -u COHERE_API_KEY -u MOA_COHERE_API_KEY \
   MOA_DATABASE_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa \
-  cargo run -p xtask -- run-memory-retrieval-eval \
+  cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval \
   --corpus target/memory-eval/pr-held-out \
   --lane pr \
   --output target/memory-eval/held-out.json
 MOA_EVAL_PREVIOUS_MEMORY_REPORT=docs/eval/baselines/memory-retrieval-pr-held-out-baseline.json \
-  cargo run -p xtask -- check-eval-budgets \
+  cargo run -p xtask --features eval-tools -- check-eval-budgets \
   --suite memory_retrieval \
   --memory-eval-report target/memory-eval/held-out.json \
   --max-regression-pct 5
-cargo run -p xtask -- compare-eval-reports \
+cargo run -p xtask --features eval-tools -- compare-eval-reports \
   --baseline docs/eval/baselines/memory-retrieval-pr-held-out-baseline.json \
   --candidate target/memory-eval/held-out.json \
   --output target/memory-eval/held-out-compare.json
@@ -256,7 +256,7 @@ Record fixtures after changing the natural corpus, the extraction prompt, or
 the extractor model:
 
 ```bash
-cargo run -p xtask -- record-memory-extractions --corpus target/memory-eval/pr-natural
+cargo run -p xtask --features eval-tools -- record-memory-extractions --corpus target/memory-eval/pr-natural
 ```
 
 The default fixture path is:
@@ -268,7 +268,7 @@ crates/moa-eval/fixtures/memory/extractions-<corpus_id>-v2.jsonl
 Replay with no credentials required:
 
 ```bash
-env -u MOA_COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+env -u MOA_COHERE_API_KEY cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval \
   --corpus target/memory-eval/pr-natural \
   --extractor recorded \
   --output target/memory-eval/natural-recorded.json
@@ -278,7 +278,7 @@ To exercise lifecycle consolidation in the same hermetic lane, add
 `--consolidate` after gold resolution and before probes:
 
 ```bash
-env -u MOA_COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+env -u MOA_COHERE_API_KEY cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval \
   --corpus target/memory-eval/pr-natural \
   --extractor recorded \
   --consolidate \
@@ -299,7 +299,7 @@ consolidation digest step. Without `--consolidate`, the eval calls
 `moa_memory_lifecycle::rebuild_digests` directly after gold resolution:
 
 ```bash
-env -u MOA_COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+env -u MOA_COHERE_API_KEY cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval \
   --corpus target/memory-eval/pr-natural \
   --extractor recorded \
   --consolidate \
@@ -314,16 +314,16 @@ corpus seeds expected facts with high synthetic priors and same-subject lexical
 colliders with low synthetic priors:
 
 ```bash
-env -u MOA_COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+env -u MOA_COHERE_API_KEY cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval \
   --corpus target/memory-eval/pr-natural \
   --extractor recorded \
   --quality-weight 0.0 \
   --output target/memory-eval/q0.json
-env -u MOA_COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+env -u MOA_COHERE_API_KEY cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval \
   --corpus target/memory-eval/pr-natural \
   --extractor recorded \
   --output target/memory-eval/q.json
-cargo run -p xtask -- compare-eval-reports \
+cargo run -p xtask --features eval-tools -- compare-eval-reports \
   --baseline target/memory-eval/q0.json \
   --candidate target/memory-eval/q.json
 ```
@@ -333,12 +333,12 @@ confidence interval excluding zero, proving the quality term has enough weight
 to matter rather than acting as a no-op:
 
 ```bash
-env -u MOA_COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+env -u MOA_COHERE_API_KEY cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval \
   --corpus target/memory-eval/pr-natural \
   --extractor recorded \
   --invert-quality-priors \
   --output target/memory-eval/qinv.json
-cargo run -p xtask -- compare-eval-reports \
+cargo run -p xtask --features eval-tools -- compare-eval-reports \
   --baseline target/memory-eval/q.json \
   --candidate target/memory-eval/qinv.json
 ```
@@ -359,7 +359,7 @@ sequence, UID, rank, and timestamp; write errors trace and never fail
 retrieval. The dark scoring job is manual:
 
 ```bash
-cargo run -p xtask -- compute-memory-quality-scores --tenant-id <tenant-uuid>
+cargo run -p xtask --features eval-tools -- compute-memory-quality-scores --tenant-id <tenant-uuid>
 ```
 
 It applies Beta(1,1) smoothing, `(1 + successes) / (2 + uses)`, over lineage
@@ -379,9 +379,9 @@ command to regenerate the fixture set.
 The natural CI lane runs:
 
 ```bash
-cargo run -p xtask -- generate-memory-eval-corpus --profile pr --transcript-style natural --seed 1 --seed 2 --seed 3 --output target/memory-eval/pr-natural
-env -u MOA_COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr-natural --extractor recorded --output target/memory-eval/natural-recorded.json
-cargo run -p xtask -- check-eval-budgets --suite memory_retrieval \
+cargo run -p xtask --features eval-tools -- generate-memory-eval-corpus --profile pr --transcript-style natural --seed 1 --seed 2 --seed 3 --output target/memory-eval/pr-natural
+env -u MOA_COHERE_API_KEY cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval --corpus target/memory-eval/pr-natural --extractor recorded --output target/memory-eval/natural-recorded.json
+cargo run -p xtask --features eval-tools -- check-eval-budgets --suite memory_retrieval \
   --memory-eval-report target/memory-eval/natural-recorded.json \
   --min-metric ingestion_coverage=0.85 \
   --min-metric scope_match_rate=0.90 \
@@ -412,7 +412,7 @@ Record merge fixtures after changing entity blocking, the merge prompt, the
 natural corpus, or recorded extraction fixtures:
 
 ```bash
-cargo run -p xtask -- record-memory-merges --corpus target/memory-eval/pr-natural
+cargo run -p xtask --features eval-tools -- record-memory-merges --corpus target/memory-eval/pr-natural
 ```
 
 Replay uses `--extractor recorded`; the runner resolves both extraction and
@@ -439,7 +439,7 @@ Cohere reranking.
 Run the PR preset with no live providers:
 
 ```bash
-env -u MOA_COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+env -u MOA_COHERE_API_KEY cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval \
   --corpus target/memory-eval/pr-natural \
   --lane pr \
   --extractor recorded \
@@ -449,14 +449,14 @@ env -u MOA_COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
 Run the live PR-natural pair with bounded spend:
 
 ```bash
-cargo run -p xtask -- run-memory-retrieval-eval \
+cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval \
   --corpus target/memory-eval/pr-natural \
   --lane live \
   --reranker off \
   --budget-usd 5 \
   --output target/memory-eval/live.json
 
-cargo run -p xtask -- run-memory-retrieval-eval \
+cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval \
   --corpus target/memory-eval/pr-natural \
   --lane live \
   --reranker on \
@@ -490,11 +490,11 @@ provider behavior can drift outside a code change. The nightly workflow pairs
 the same PR-natural corpus three ways:
 
 ```bash
-cargo run -p xtask -- compare-eval-reports \
+cargo run -p xtask --features eval-tools -- compare-eval-reports \
   --baseline target/memory-eval/hermetic.json \
   --candidate target/memory-eval/live.json
 
-cargo run -p xtask -- compare-eval-reports \
+cargo run -p xtask --features eval-tools -- compare-eval-reports \
   --baseline target/memory-eval/live.json \
   --candidate target/memory-eval/live-rerank.json
 ```
@@ -526,9 +526,9 @@ not contain p-values.
 Run baseline and candidate reports on the same corpus, then compare them:
 
 ```bash
-cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr --output target/memory-eval/baseline.json
-cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr --ranking-subject-match 0.6 --output target/memory-eval/candidate.json
-cargo run -p xtask -- compare-eval-reports --baseline target/memory-eval/baseline.json --candidate target/memory-eval/candidate.json
+cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval --corpus target/memory-eval/pr --output target/memory-eval/baseline.json
+cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval --corpus target/memory-eval/pr --ranking-subject-match 0.6 --output target/memory-eval/candidate.json
+cargo run -p xtask --features eval-tools -- compare-eval-reports --baseline target/memory-eval/baseline.json --candidate target/memory-eval/candidate.json
 ```
 
 Query rewrite policy A/B uses the same corpus and retrieval metrics. PR runs are
@@ -538,10 +538,10 @@ includes exact-identifier negative controls and treats temporal-as-of probes as
 explicit temporal retrieval, because the temporal parser owns the as-of instant.
 
 ```bash
-cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr --output target/memory-eval/rewrite-off.json --rewrite-policy off
-cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr --output target/memory-eval/rewrite-always.json --rewrite-policy always
-cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr --output target/memory-eval/rewrite-gated.json --rewrite-policy gated
-MOA_EVAL_PREVIOUS_MEMORY_REPORT=target/memory-eval/rewrite-always.json cargo run -p xtask -- check-eval-budgets --suite memory_retrieval --max-regression-pct 5 --memory-eval-report target/memory-eval/rewrite-gated.json
+cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval --corpus target/memory-eval/pr --output target/memory-eval/rewrite-off.json --rewrite-policy off
+cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval --corpus target/memory-eval/pr --output target/memory-eval/rewrite-always.json --rewrite-policy always
+cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval --corpus target/memory-eval/pr --output target/memory-eval/rewrite-gated.json --rewrite-policy gated
+MOA_EVAL_PREVIOUS_MEMORY_REPORT=target/memory-eval/rewrite-always.json cargo run -p xtask --features eval-tools -- check-eval-budgets --suite memory_retrieval --max-regression-pct 5 --memory-eval-report target/memory-eval/rewrite-gated.json
 ```
 
 The rewrite budget gate compares `gated` against `always` for recall@4,
@@ -576,9 +576,9 @@ retrieval and budget commands, but keep the artifacts separate from PR output:
 
 ```bash
 export MOA_DATABASE_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa
-cargo run -p xtask -- generate-memory-eval-corpus --profile full --seed 1 --seed 2 --seed 3 --output target/memory-eval/full
-cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/full --output target/memory-eval/full-report.json
-cargo run -p xtask -- check-eval-budgets --suite memory_retrieval --max-regression-pct 5 --memory-eval-report target/memory-eval/full-report.json
+cargo run -p xtask --features eval-tools -- generate-memory-eval-corpus --profile full --seed 1 --seed 2 --seed 3 --output target/memory-eval/full
+cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval --corpus target/memory-eval/full --output target/memory-eval/full-report.json
+cargo run -p xtask --features eval-tools -- check-eval-budgets --suite memory_retrieval --max-regression-pct 5 --memory-eval-report target/memory-eval/full-report.json
 ```
 
 To compare against a previous report, set:
@@ -642,9 +642,9 @@ Use it when evaluating an implementation candidate:
 ```bash
 export MOA_DATABASE_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa
 export MOA_EVAL_PREVIOUS_MEMORY_REPORT=docs/eval/baselines/memory-retrieval-pr-baseline.json
-cargo run -p xtask -- generate-memory-eval-corpus --profile pr --seed 1 --seed 2 --seed 3 --output target/memory-eval/pr-candidate
-cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr-candidate --output target/memory-eval/candidate-report.json
-cargo run -p xtask -- check-eval-budgets --suite memory_retrieval --max-regression-pct 5 --memory-eval-report target/memory-eval/candidate-report.json
+cargo run -p xtask --features eval-tools -- generate-memory-eval-corpus --profile pr --seed 1 --seed 2 --seed 3 --output target/memory-eval/pr-candidate
+cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval --corpus target/memory-eval/pr-candidate --output target/memory-eval/candidate-report.json
+cargo run -p xtask --features eval-tools -- check-eval-budgets --suite memory_retrieval --max-regression-pct 5 --memory-eval-report target/memory-eval/candidate-report.json
 ```
 
 ## Architecture Gate

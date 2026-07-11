@@ -9,31 +9,43 @@ use moa_contacts::domain::{
     verified_scopes,
 };
 use moa_contacts::repository::{
-    ContactVerificationStartCommand, complete_contact_verification, create_contact_token_grant,
-    ensure_contact_token_grant_active, issue_contact, load_contact_ref, promoted_from_contact,
-    resolve_contact_session_channel, start_contact_verification,
+    complete_contact_verification, create_contact_token_grant, ensure_contact_token_grant_active,
+    issue_contact, load_contact_ref, promoted_from_contact, resolve_contact_session_channel,
+};
+use moa_contacts::verification_service::{
+    ContactVerificationService, ContactVerificationStartCommand, contact_delivery_error,
 };
 use moa_core::traits::{Identity, IdentityType, SessionChannelBindingUpdate};
 use moa_core::wire::turn::{QueueMessageRequest, SessionProgress, SessionProgressRequest};
+use moa_core::{config::MoaConfig, error::MoaError, traits::SessionStore};
 use moa_core::{
-    ChannelAccountRef, ChannelRef, ContactId, ContactPointId, ContactRef,
-    ContactSessionAuthorizationRequest, ContactSessionAuthorizationResponse,
-    ContactSessionChannelChangeRequest, ContactSessionChannelChangeResponse,
-    ContactSessionInitRequest, ContactSessionInitResponse, ContactSessionMessageRequest,
-    ContactSessionMessageResponse, ContactSessionProgressRequest, ContactSessionPromotionRequest,
-    ContactSessionPromotionResponse, ContactTokenClaims, ContactTokenIssueRequest,
-    ContactTokenIssueResponse, ContactVerificationCompleteRequest,
-    ContactVerificationCompleteResponse, ContactVerificationStartRequest,
-    ContactVerificationStartResponse, Event, ModelId, SessionActorRef, SessionChannelBindingId,
-    SessionId, SessionMeta, SessionStatus, StoragePartitionId, TenantId,
+    events::Event, types::channel::ChannelAccountRef, types::channel::ChannelRef,
+    types::channel::SessionChannelBindingId, types::contact::ContactId,
+    types::contact::ContactPointId, types::contact::ContactRef,
+    types::contact::ContactSessionAuthorizationRequest,
+    types::contact::ContactSessionAuthorizationResponse,
+    types::contact::ContactSessionChannelChangeRequest,
+    types::contact::ContactSessionChannelChangeResponse, types::contact::ContactSessionInitRequest,
+    types::contact::ContactSessionInitResponse, types::contact::ContactSessionMessageRequest,
+    types::contact::ContactSessionMessageResponse, types::contact::ContactSessionProgressRequest,
+    types::contact::ContactSessionPromotionRequest,
+    types::contact::ContactSessionPromotionResponse, types::contact::ContactTokenClaims,
+    types::contact::ContactTokenIssueRequest, types::contact::ContactTokenIssueResponse,
+    types::contact::ContactVerificationCompleteRequest,
+    types::contact::ContactVerificationCompleteResponse,
+    types::contact::ContactVerificationStartRequest,
+    types::contact::ContactVerificationStartResponse, types::contact::SessionActorRef,
+    types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::session::SessionMeta, types::session::SessionStatus,
 };
-use moa_core::{MoaError, SessionStore};
+use moa_messaging::ProviderDeliverySink;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::OrchestratorCtx;
 use crate::handlers::authz_shim::authorize_tenant;
 use crate::objects::session::SessionClient;
 use crate::restate_identity::with_identity_headers;
@@ -93,8 +105,55 @@ pub trait Contacts {
 }
 
 /// Concrete contact service implementation.
-#[derive(Clone, Default)]
-pub struct ContactsImpl;
+#[derive(Clone)]
+pub struct ContactsImpl {
+    pool: sqlx::PgPool,
+    session_store: Arc<moa_session::PostgresSessionStore>,
+    config: Arc<MoaConfig>,
+    contact_token_issuer: Option<Arc<moa_auth_providers::ContactTokenIssuer>>,
+}
+
+impl ContactsImpl {
+    /// Creates the contact adapter while preserving the provider-delivery boundary.
+    #[must_use]
+    pub fn new(
+        pool: sqlx::PgPool,
+        session_store: Arc<moa_session::PostgresSessionStore>,
+        config: Arc<MoaConfig>,
+        contact_token_issuer: Option<Arc<moa_auth_providers::ContactTokenIssuer>>,
+    ) -> Self {
+        Self {
+            pool,
+            session_store,
+            config,
+            contact_token_issuer,
+        }
+    }
+
+    fn contact_token_issuer(
+        &self,
+    ) -> Result<Arc<moa_auth_providers::ContactTokenIssuer>, HandlerError> {
+        self.contact_token_issuer.clone().ok_or_else(|| {
+            TerminalError::new_with_code(503, "contact token signing keys are not configured")
+                .into()
+        })
+    }
+
+    fn verify_contact_token(
+        &self,
+        token: &str,
+        tenant_id: TenantId,
+    ) -> Result<ContactTokenClaims, HandlerError> {
+        let claims = self
+            .contact_token_issuer()?
+            .verify(token)
+            .map_err(contact_token_handler_error)?;
+        if claims.tenant_id != tenant_id {
+            return Err(TerminalError::new_with_code(403, "contact token tenant mismatch").into());
+        }
+        Ok(claims)
+    }
+}
 
 impl Contacts for ContactsImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -107,9 +166,10 @@ impl Contacts for ContactsImpl {
         let request = request.into_inner();
         let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let tenant_id = request.tenant_id;
-        let token_issuer = contact_token_issuer()?;
-        let pool = OrchestratorCtx::current_graph_pool();
-        let contact_point_hash_key_hex = OrchestratorCtx::current_config()
+        let token_issuer = self.contact_token_issuer()?;
+        let pool = self.pool.clone();
+        let contact_point_hash_key_hex = self
+            .config
             .auth
             .contact_tokens
             .contact_point_hash_key_hex
@@ -138,7 +198,7 @@ impl Contacts for ContactsImpl {
         let grant_contact_id = contact.contact_id;
         let grant_expires_at = issued.expires_at;
         let issued_by_actor_id = identity.id;
-        let grant_pool = OrchestratorCtx::current_graph_pool();
+        let grant_pool = self.pool.clone();
         ctx.run(|| async move {
             create_contact_token_grant(
                 grant_pool,
@@ -175,7 +235,7 @@ impl Contacts for ContactsImpl {
     ) -> Result<Json<ContactVerificationStartResponse>, HandlerError> {
         annotate_restate_handler_span("Contacts", "start_verification");
         let request = request.into_inner();
-        let claims = verify_contact_token(&request.contact_token, request.tenant_id)?;
+        let claims = self.verify_contact_token(&request.contact_token, request.tenant_id)?;
         require_contact_scope(&claims, "contact:verify:start")
             .map_err(contact_error_handler_error)?;
         require_contact_session_permission(&claims, request.session_id)
@@ -183,9 +243,9 @@ impl Contacts for ContactsImpl {
         let contact_id = contact_id_from_claims(&claims).map_err(contact_error_handler_error)?;
         annotate_claim_contact_span(&claims, request.session_id);
         let tenant_id = claims.tenant_id;
-        let pool = OrchestratorCtx::current_graph_pool();
-        let store = OrchestratorCtx::current_session_store();
-        let config = OrchestratorCtx::current_config();
+        let pool = self.pool.clone();
+        let store = self.session_store.clone();
+        let config = self.config.clone();
         let ttl_seconds = config.auth.contact_tokens.verification_ttl_seconds;
         let contact_point_hash_key_hex = config
             .auth
@@ -211,21 +271,24 @@ impl Contacts for ContactsImpl {
                     )
                     .await?;
                 }
-                start_contact_verification(
-                    pool,
-                    ContactVerificationStartCommand {
+                let delivery = ProviderDeliverySink::from_env(
+                    StoragePartitionId::for_tenant(tenant_id).as_str(),
+                    &messaging_config,
+                )
+                .await
+                .map_err(|error| contact_error_handler_error(contact_delivery_error(error)))?;
+                ContactVerificationService::new(pool, delivery)
+                    .start_verification(ContactVerificationStartCommand {
                         tenant_id,
                         contact_id,
                         contact_point,
                         requested_channel: delivery_channel,
                         ttl_seconds,
                         contact_point_hash_key_hex,
-                        messaging_config,
-                    },
-                )
-                .await
-                .map_err(contact_error_handler_error)
-                .map(Json::from)
+                    })
+                    .await
+                    .map_err(contact_error_handler_error)
+                    .map(Json::from)
             })
             .name("contacts_start_verification")
             .await?)
@@ -240,7 +303,7 @@ impl Contacts for ContactsImpl {
     ) -> Result<Json<ContactVerificationCompleteResponse>, HandlerError> {
         annotate_restate_handler_span("Contacts", "complete_verification");
         let request = request.into_inner();
-        let claims = verify_contact_token(&request.contact_token, request.tenant_id)?;
+        let claims = self.verify_contact_token(&request.contact_token, request.tenant_id)?;
         require_contact_scope(&claims, "contact:verify:complete")
             .map_err(contact_error_handler_error)?;
         require_contact_session_permission(&claims, request.session_id)
@@ -248,9 +311,9 @@ impl Contacts for ContactsImpl {
         let contact_id = contact_id_from_claims(&claims).map_err(contact_error_handler_error)?;
         annotate_claim_contact_span(&claims, request.session_id);
         let tenant_id = claims.tenant_id;
-        let token_issuer = contact_token_issuer()?;
-        let pool = OrchestratorCtx::current_graph_pool();
-        let store = OrchestratorCtx::current_session_store();
+        let token_issuer = self.contact_token_issuer()?;
+        let pool = self.pool.clone();
+        let store = self.session_store.clone();
         let session_id = request.session_id;
 
         let contact = ctx
@@ -288,7 +351,7 @@ impl Contacts for ContactsImpl {
         let grant_claims = issued.claims.clone();
         let grant_contact_id = contact.contact_id;
         let grant_expires_at = issued.expires_at;
-        let grant_pool = OrchestratorCtx::current_graph_pool();
+        let grant_pool = self.pool.clone();
         ctx.run(|| async move {
             create_contact_token_grant(
                 grant_pool,
@@ -320,7 +383,7 @@ impl Contacts for ContactsImpl {
     ) -> Result<Json<ContactSessionInitResponse>, HandlerError> {
         annotate_restate_handler_span("Contacts", "init_session");
         let request = request.into_inner();
-        let claims = verify_contact_token(&request.contact_token, request.tenant_id)?;
+        let claims = self.verify_contact_token(&request.contact_token, request.tenant_id)?;
         require_contact_scope(&claims, "agent:session:create")
             .map_err(contact_error_handler_error)?;
         require_contact_agent_permission(&claims, &request.agent)
@@ -328,9 +391,9 @@ impl Contacts for ContactsImpl {
         let contact_id = contact_id_from_claims(&claims).map_err(contact_error_handler_error)?;
         annotate_claim_contact_span(&claims, None);
         let tenant_id = claims.tenant_id;
-        let pool = OrchestratorCtx::current_graph_pool();
-        let store = OrchestratorCtx::current_session_store();
-        let store_backend = OrchestratorCtx::current().session_store_backend();
+        let pool = self.pool.clone();
+        let store = self.session_store.clone();
+        let store_backend = self.session_store.clone();
         let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
         let model = ModelId::new(request.model);
         let channel_request = request.channel;
@@ -480,7 +543,7 @@ impl Contacts for ContactsImpl {
     ) -> Result<Json<ContactSessionChannelChangeResponse>, HandlerError> {
         annotate_restate_handler_span("Contacts", "change_session_channel");
         let request = request.into_inner();
-        let claims = verify_contact_token(&request.contact_token, request.tenant_id)?;
+        let claims = self.verify_contact_token(&request.contact_token, request.tenant_id)?;
         require_contact_scope(&claims, "contact:session:channel:update")
             .map_err(contact_error_handler_error)?;
         require_contact_session_permission(&claims, Some(request.session_id))
@@ -489,10 +552,10 @@ impl Contacts for ContactsImpl {
         annotate_claim_contact_span(&claims, Some(request.session_id));
         let session_id = request.session_id;
         let tenant_id = claims.tenant_id;
-        let pool = OrchestratorCtx::current_graph_pool();
-        let store = OrchestratorCtx::current_session_store();
+        let pool = self.pool.clone();
+        let store = self.session_store.clone();
         let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
-        let store_backend = OrchestratorCtx::current().session_store_backend();
+        let store_backend = self.session_store.clone();
         let change_pool = pool.clone();
         // Journal a replay-stable binding id so the channel-change transaction is
         // idempotent: a replay reuses this id, the binding insert conflicts, and
@@ -601,7 +664,7 @@ impl Contacts for ContactsImpl {
         if let Err(message) = request.validate_admitted_payload() {
             return Err(TerminalError::new_with_code(400, message).into());
         }
-        let claims = verify_contact_token(&request.contact_token, request.tenant_id)?;
+        let claims = self.verify_contact_token(&request.contact_token, request.tenant_id)?;
         require_contact_scope(&claims, "contact:session:message:send")
             .map_err(contact_error_handler_error)?;
         require_contact_session_permission(&claims, Some(request.session_id))
@@ -610,8 +673,8 @@ impl Contacts for ContactsImpl {
         annotate_claim_contact_span(&claims, Some(request.session_id));
         let session_id = request.session_id;
         let tenant_id = claims.tenant_id;
-        let pool = OrchestratorCtx::current_graph_pool();
-        let store = OrchestratorCtx::current_session_store();
+        let pool = self.pool.clone();
+        let store = self.session_store.clone();
 
         let contact = ctx
             .run(|| async move {
@@ -666,7 +729,7 @@ impl Contacts for ContactsImpl {
     ) -> Result<Json<ContactSessionAuthorizationResponse>, HandlerError> {
         annotate_restate_handler_span("Contacts", "authorize_session");
         let request = request.into_inner();
-        let claims = verify_contact_token(&request.contact_token, request.tenant_id)?;
+        let claims = self.verify_contact_token(&request.contact_token, request.tenant_id)?;
         require_contact_scope(&claims, "contact:session:message:send")
             .map_err(contact_error_handler_error)?;
         require_contact_session_permission(&claims, Some(request.session_id))
@@ -675,8 +738,8 @@ impl Contacts for ContactsImpl {
         annotate_claim_contact_span(&claims, Some(request.session_id));
         let session_id = request.session_id;
         let tenant_id = claims.tenant_id;
-        let pool = OrchestratorCtx::current_graph_pool();
-        let store = OrchestratorCtx::current_session_store();
+        let pool = self.pool.clone();
+        let store = self.session_store.clone();
 
         let contact = ctx
             .run(|| async move {
@@ -715,7 +778,7 @@ impl Contacts for ContactsImpl {
     ) -> Result<Json<SessionProgress>, HandlerError> {
         annotate_restate_handler_span("Contacts", "progress");
         let request = request.into_inner();
-        let claims = verify_contact_token(&request.contact_token, request.tenant_id)?;
+        let claims = self.verify_contact_token(&request.contact_token, request.tenant_id)?;
         require_contact_scope(&claims, "contact:session:message:send")
             .map_err(contact_error_handler_error)?;
         require_contact_session_permission(&claims, Some(request.session_id))
@@ -724,8 +787,8 @@ impl Contacts for ContactsImpl {
         annotate_claim_contact_span(&claims, Some(request.session_id));
         let session_id = request.session_id;
         let tenant_id = claims.tenant_id;
-        let pool = OrchestratorCtx::current_graph_pool();
-        let store = OrchestratorCtx::current_session_store();
+        let pool = self.pool.clone();
+        let store = self.session_store.clone();
 
         let contact = ctx
             .run(|| async move {
@@ -771,7 +834,7 @@ impl Contacts for ContactsImpl {
     ) -> Result<Json<ContactSessionPromotionResponse>, HandlerError> {
         annotate_restate_handler_span("Contacts", "promote_session");
         let request = request.into_inner();
-        let claims = verify_contact_token(&request.contact_token, request.tenant_id)?;
+        let claims = self.verify_contact_token(&request.contact_token, request.tenant_id)?;
         require_contact_scope(&claims, "contact:session:promote")
             .map_err(contact_error_handler_error)?;
         require_contact_session_permission(&claims, Some(request.session_id))
@@ -784,8 +847,8 @@ impl Contacts for ContactsImpl {
         let contact_id = contact_id_from_claims(&claims).map_err(contact_error_handler_error)?;
         annotate_claim_contact_span(&claims, Some(request.session_id));
         let tenant_id = claims.tenant_id;
-        let pool = OrchestratorCtx::current_graph_pool();
-        let store = OrchestratorCtx::current_session_store();
+        let pool = self.pool.clone();
+        let store = self.session_store.clone();
 
         let SessionPromotionResult {
             contact,
@@ -881,7 +944,7 @@ impl ContactScopesExt for ContactRef {
 
 async fn validate_contact_session(
     store: &dyn SessionStore,
-    session_id: moa_core::SessionId,
+    session_id: moa_core::types::identifiers::SessionId,
     tenant_id: TenantId,
     contact_id: ContactId,
 ) -> Result<SessionMeta, HandlerError> {
@@ -907,18 +970,10 @@ async fn validate_contact_session(
     Ok(meta)
 }
 
-fn contact_token_issuer()
--> Result<std::sync::Arc<moa_auth_providers::ContactTokenIssuer>, HandlerError> {
-    OrchestratorCtx::current()
-        .auth_providers()
-        .contact_tokens
-        .ok_or_else(|| {
-            TerminalError::new_with_code(503, "contact token signing keys are not configured")
-                .into()
-        })
-}
-
-fn annotate_contact_operation_span(contact: &ContactRef, session_id: Option<moa_core::SessionId>) {
+fn annotate_contact_operation_span(
+    contact: &ContactRef,
+    session_id: Option<moa_core::types::identifiers::SessionId>,
+) {
     let span = tracing::Span::current();
     span.set_attribute("moa.tenant.id", contact.tenant_id.to_string());
     span.set_attribute("moa.contact.id", contact.contact_id.to_string());
@@ -930,7 +985,7 @@ fn annotate_contact_operation_span(contact: &ContactRef, session_id: Option<moa_
 
 fn annotate_claim_contact_span(
     claims: &ContactTokenClaims,
-    session_id: Option<moa_core::SessionId>,
+    session_id: Option<moa_core::types::identifiers::SessionId>,
 ) {
     let span = tracing::Span::current();
     span.set_attribute("moa.tenant.id", claims.tenant_id.to_string());
@@ -945,7 +1000,7 @@ fn annotate_claim_contact_span(
 pub async fn replace_contact_session_authz_tuples(
     pool: &sqlx::PgPool,
     tenant_id: TenantId,
-    session_id: moa_core::SessionId,
+    session_id: moa_core::types::identifiers::SessionId,
     promoted_from: Option<ContactId>,
     promoted_to: ContactId,
 ) -> Result<(), HandlerError> {
@@ -1001,7 +1056,7 @@ async fn enqueue_contact_session_owner_tuple(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     op: TupleOp,
     tenant_id: TenantId,
-    session_id: moa_core::SessionId,
+    session_id: moa_core::types::identifiers::SessionId,
     contact_id: ContactId,
 ) -> Result<(), HandlerError> {
     let owner_tuple = TupleKey::new(
@@ -1020,7 +1075,7 @@ async fn enqueue_contact_session_participant_tuple(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     op: TupleOp,
     tenant_id: TenantId,
-    session_id: moa_core::SessionId,
+    session_id: moa_core::types::identifiers::SessionId,
     contact_id: ContactId,
 ) -> Result<(), HandlerError> {
     enqueue_raw(
@@ -1043,19 +1098,6 @@ fn contact_identity(contact_id: ContactId, tenant_id: TenantId) -> Identity {
         api_key_id: None,
         acting_on_behalf_of: None,
     }
-}
-
-fn verify_contact_token(
-    token: &str,
-    tenant_id: TenantId,
-) -> Result<ContactTokenClaims, HandlerError> {
-    let claims = contact_token_issuer()?
-        .verify(token)
-        .map_err(contact_token_handler_error)?;
-    if claims.tenant_id != tenant_id {
-        return Err(TerminalError::new_with_code(403, "contact token tenant mismatch").into());
-    }
-    Ok(claims)
 }
 
 fn contact_error_handler_error(error: ContactError) -> HandlerError {

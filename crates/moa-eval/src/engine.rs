@@ -7,9 +7,12 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream};
 use moa_brain::{StreamedTurnResult, run_streamed_turn_with_lineage};
-use moa_core::{Event, EventRange, LLMProvider, MoaConfig, RuntimeEvent};
+use moa_core::{
+    config::MoaConfig, events::Event, traits::LLMProvider, types::events_stream::EventRange,
+    types::runtime_events::RuntimeEvent,
+};
 use moa_eval_core::engine::{EngineOptions, EvalRun, RunSummary};
-use moa_eval_core::plan::{EvalPlan, build_eval_plan};
+use moa_eval_core::plan::EvalPlan;
 use moa_eval_core::{
     AgentConfig, EvalError, EvalMetrics, EvalResult, EvalStatus, Result, TestCase, TestCaseKind,
     TestSuite,
@@ -22,6 +25,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::collector::{CollectedExecution, TrajectoryCollector};
 use crate::long_conversation::run_scenario_with_provider;
+use crate::plan::build_eval_plan;
 use crate::setup::{build_agent_environment, build_agent_environment_with_provider};
 
 const DEFAULT_SINGLE_TIMEOUT_SECONDS: u64 = 300;
@@ -382,7 +386,7 @@ async fn run_environment(
                 continue;
             }
             StreamedTurnResult::Cancelled => {
-                return Err(EvalError::Moa(moa_core::MoaError::Cancelled));
+                return Err(EvalError::Moa(moa_core::error::MoaError::Cancelled));
             }
         }
     }
@@ -459,8 +463,10 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        CompletionRequest, CompletionResponse, CompletionStream, LLMProvider, MoaConfig,
-        ModelCapabilities, StopReason, TokenPricing, TokenUsage, ToolCallFormat,
+        config::MoaConfig, traits::LLMProvider, types::completion::CompletionRequest,
+        types::completion::CompletionResponse, types::completion::CompletionStream,
+        types::completion::StopReason, types::completion::TokenUsage,
+        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
     use tempfile::tempdir;
 
@@ -494,7 +500,7 @@ mod tests {
 
         fn capabilities(&self) -> ModelCapabilities {
             ModelCapabilities {
-                model_id: moa_core::ModelId::new("mock-model"),
+                model_id: moa_core::types::identifiers::ModelId::new("mock-model"),
                 context_window: 32_000,
                 max_output: 1_024,
                 supports_tools: true,
@@ -516,14 +522,14 @@ mod tests {
         async fn complete(
             &self,
             _request: CompletionRequest,
-        ) -> moa_core::Result<CompletionStream> {
+        ) -> moa_core::error::Result<CompletionStream> {
             Ok(CompletionStream::from_response(CompletionResponse {
                 text: "hello from eval".to_string(),
-                content: vec![moa_core::CompletionContent::Text(
+                content: vec![moa_core::types::completion::CompletionContent::Text(
                     "hello from eval".to_string(),
                 )],
                 stop_reason: StopReason::EndTurn,
-                model: moa_core::ModelId::new("mock-model"),
+                model: moa_core::types::identifiers::ModelId::new("mock-model"),
                 usage: token_usage(42, 7),
                 duration_ms: 3,
                 thought_signature: None,

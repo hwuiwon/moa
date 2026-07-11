@@ -21,7 +21,10 @@ use moa_core::wire::procedures::{
     ProcedureReviewDecisionKind, ProcedureReviewDecisionRequest, ProcedureReviewDecisionResponse,
     ProcedureRunStatus, ProcedureStatusRequest,
 };
-use moa_core::{ActionRuleScope, StoragePartitionId, TenantId};
+use moa_core::{
+    types::action_policy::ActionRuleScope, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId,
+};
 use moa_experiments::model::{ExperimentRunStatus, ExperimentScorecard, NewExperimentRun};
 use moa_experiments::store::ExperimentStore;
 use moa_orchestrator::workflows::experiment_run::ExperimentRunWorkflowRequest;

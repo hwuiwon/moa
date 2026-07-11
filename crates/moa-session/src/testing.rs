@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use moa_core::{MoaError, Result};
+use moa_core::{error::MoaError, error::Result};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Connection, PgConnection, PgPool};
 use tokio::sync::OnceCell;
@@ -506,7 +506,7 @@ mod tests {
         DEFAULT_DATABASE_URL, ORPHAN_CLONE_MIN_AGE, clone_name_is_sweepable,
         maintenance_connection_error, split_database_url, with_database,
     };
-    use moa_core::MoaError;
+    use moa_core::error::MoaError;
     use uuid::{NoContext, Timestamp, Uuid};
 
     #[test]

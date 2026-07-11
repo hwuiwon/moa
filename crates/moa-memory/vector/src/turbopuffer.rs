@@ -5,7 +5,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
 use moa_core::config::TurbopufferVectorType;
-use moa_core::{MoaConfig, StoragePartitionId, TenantId};
+use moa_core::{
+    config::MoaConfig, types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+};
 use reqwest::{Client, Method};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;

@@ -2,7 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use moa_core::{ContactId, ContactPointInput, ContactPointKind};
+use moa_core::{
+    types::contact::ContactId, types::contact::ContactPointInput, types::contact::ContactPointKind,
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
 

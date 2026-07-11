@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{ActionEnvelope, ActionReviewPreview};
+use super::{action_policy::ActionEnvelope, action_policy::ActionReviewPreview};
 
 /// Inline tool card lifecycle state used by the local UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

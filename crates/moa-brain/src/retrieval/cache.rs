@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::RlsContext;
+use moa_core::types::memory::RlsContext;
 use moa_db::ScopedConn;
 use moa_memory_types::{MemoryScope, ScopeTier};
 use moka::future::Cache;
@@ -429,7 +429,7 @@ mod tests {
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
     use chrono::Utc;
-    use moa_core::{ContactId, TenantId};
+    use moa_core::{types::contact::ContactId, types::identifiers::TenantId};
     use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
     use moa_memory_types::MemoryScope;
     use uuid::Uuid;

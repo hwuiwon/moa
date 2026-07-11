@@ -14,5 +14,6 @@ pub mod privacy;
 pub mod procedures;
 pub mod session_store;
 pub mod skills;
+pub mod tenants;
 pub mod tools;
 pub mod turn;

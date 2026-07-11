@@ -1,6 +1,6 @@
 //! Reference resolution for artifact publish validation.
 
-use moa_core::{ActionRuleScope, Result};
+use moa_core::{error::Result, types::action_policy::ActionRuleScope};
 
 use crate::connector::ConnectorDefinition;
 use crate::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind};

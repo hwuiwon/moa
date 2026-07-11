@@ -1,15 +1,18 @@
 //! Adapters for executing effectful procedure nodes through existing services.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use moa_artifacts::reference::ArtifactRef;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::memory::{MemoryIngestDocument, MemoryIngestRequest, MemorySearchRequest};
 use moa_core::wire::turn::{QueueMessageRequest, TurnOutcome, TurnOutcomeKind};
 use moa_core::{
-    ActionPolicyEffect, ContactId, DelegationTool, SessionActorRef, SessionId, SessionMeta,
-    SessionStatus, SpawnWorkerInput, TenantId, ToolCallId, ToolCallRequest, ToolInvocation,
-    ToolOutput, WaitWorkerInput,
+    traits::SessionStore as _, types::action_policy::ActionPolicyEffect,
+    types::completion::ToolInvocation, types::contact::ContactId, types::contact::SessionActorRef,
+    types::identifiers::SessionId, types::identifiers::TenantId, types::identifiers::ToolCallId,
+    types::session::SessionMeta, types::session::SessionStatus, types::tools::ToolCallRequest,
+    types::tools::ToolOutput, types::worker::commands::SpawnWorkerInput,
+    types::worker::commands::WaitWorkerInput, types::worker::tool_schema::DelegationTool,
 };
 use moa_skills::procedure::interpreter::ProcedureNodeRequest;
 use restate_sdk::prelude::*;
@@ -17,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
 use crate::delegation::{DelegationParent, execute_delegation_tool, storage_user_id};
 use crate::objects::session::{
     AttachSessionTurnWaiterInput, RemoveSessionTurnWaiterInput, SessionClient,
@@ -27,6 +29,7 @@ use crate::services::action_policy::{ActionPolicyClient, PrepareActionReviewRequ
 use crate::services::memory::MemoryClient;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::services::tool_executor::ToolExecutorClient;
+use moa_session::PostgresSessionStore;
 
 const AGENT_NODE_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
 const WORKER_WAIT_TIMEOUT_MS: u64 = 30_000;
@@ -92,6 +95,7 @@ async fn procedure_cancel_requested(
 /// Executes a procedure action/tool node through the same policy and tool services as agent turns.
 pub async fn execute_procedure_node_action(
     ctx: &WorkflowContext<'_>,
+    session_store: Arc<PostgresSessionStore>,
     action_context: ProcedureNodeActionContext,
     request: ProcedureNodeRequest,
 ) -> Result<ProcedureNodeActionOutcome, HandlerError> {
@@ -128,7 +132,7 @@ pub async fn execute_procedure_node_action(
         "procedure:{}:{}",
         action_context.run_uid, action_context.node_id
     ));
-    let session = procedure_session_meta(ctx, &action_context).await?;
+    let session = procedure_session_meta(ctx, session_store, &action_context).await?;
     let prepared_action = ctx
         .service_client::<ActionPolicyClient>()
         .prepare_action_review(Json(PrepareActionReviewRequest {
@@ -398,7 +402,9 @@ async fn execute_worker_node(
             });
         }
     };
-    let Some(spawn) = structured_output::<moa_core::SpawnWorkerOutput>(&spawn_output) else {
+    let Some(spawn) =
+        structured_output::<moa_core::types::worker::commands::SpawnWorkerOutput>(&spawn_output)
+    else {
         return Ok(ProcedureNodeActionOutcome::Failed {
             error: "procedure worker node spawn returned no structured output".to_string(),
         });
@@ -428,7 +434,9 @@ async fn execute_worker_node(
             });
         }
     };
-    let Some(wait) = structured_output::<moa_core::WaitWorkerOutput>(&wait_output) else {
+    let Some(wait) =
+        structured_output::<moa_core::types::worker::commands::WaitWorkerOutput>(&wait_output)
+    else {
         return Ok(ProcedureNodeActionOutcome::Failed {
             error: "procedure worker node wait returned no structured output".to_string(),
         });
@@ -759,7 +767,7 @@ fn spawn_input_from_node(input: &Value) -> Result<SpawnWorkerInput, String> {
     let budget_tokens = input
         .get("budget_tokens")
         .and_then(Value::as_u64)
-        .unwrap_or_else(moa_core::default_worker_budget_tokens);
+        .unwrap_or_else(moa_core::types::worker::state::default_worker_budget_tokens);
     Ok(SpawnWorkerInput {
         task,
         tool_subset,
@@ -834,12 +842,12 @@ fn tool_input(input: &Value) -> Value {
 /// authorizing identity.
 async fn procedure_session_meta(
     ctx: &WorkflowContext<'_>,
+    store: Arc<PostgresSessionStore>,
     context: &ProcedureNodeActionContext,
 ) -> Result<SessionMeta, HandlerError> {
     let Some(session_id) = context.session_id else {
         return Ok(synthetic_procedure_session_meta(context));
     };
-    let store = OrchestratorCtx::current_session_store();
     Ok(ctx
         .run(|| async move {
             store
@@ -1207,7 +1215,7 @@ mod tests {
         );
         assert_eq!(
             storage_user_id(&meta),
-            moa_core::UserId::new(format!("identity:{identity_id}"))
+            moa_core::types::identifiers::UserId::new(format!("identity:{identity_id}"))
         );
     }
 

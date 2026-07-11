@@ -5,7 +5,7 @@
 #[path = "support/common.rs"]
 mod support;
 
-use moa_core::{MoaConfig, SegmentOutcome};
+use moa_core::{config::MoaConfig, types::segment_assessment::SegmentOutcome};
 use moa_skills::distiller::{
     DistillationOutcome, DistillationSkipReason, distill_skill_from_experience_with_learning,
 };

@@ -1,7 +1,10 @@
 //! Messaging adapters and rendering helpers.
 
 #[cfg(feature = "slack")]
-use moa_core::{ChannelRef, InboundMessage, trace_name_from_message};
+use moa_core::{
+    types::channel::ChannelRef, types::channel::InboundMessage,
+    types::observability::trace_name_from_message,
+};
 
 pub mod action_review;
 pub mod delivery;

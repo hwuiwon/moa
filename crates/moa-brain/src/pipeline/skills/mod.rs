@@ -11,9 +11,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_core::{
-    AgentSkillPolicy, AgentSkillPolicyMode, ContextMessage, ContextProcessor, ExcludedItem,
-    ProcessorOutput, Result, SegmentStore, SessionStore, SkillBudgetConfig, SkillMetadata,
-    StageApply, WorkingContext,
+    config::SkillBudgetConfig, error::Result, traits::ContextProcessor, traits::SegmentStore,
+    traits::SessionStore, traits::StageApply, types::agent::AgentSkillPolicy,
+    types::agent::AgentSkillPolicyMode, types::context::ContextMessage,
+    types::context::ExcludedItem, types::context::ProcessorOutput, types::context::WorkingContext,
+    types::memory::SkillMetadata,
 };
 use serde_json::json;
 use sqlx::PgPool;
@@ -403,9 +405,11 @@ fn pinned_skill_names(policy: &AgentSkillPolicy) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        AgentContext, AgentPolicySnapshot, AgentSkillPolicy, AgentSkillPolicyMode, ContextMessage,
-        ContextProcessor, SYSTEM_DEFAULT_AGENT_POLICY_HASH, SYSTEM_DEFAULT_AGENT_REF,
-        SYSTEM_DEFAULT_AGENT_REVISION_UID, SkillBudgetConfig,
+        config::SkillBudgetConfig, traits::ContextProcessor, types::agent::AgentContext,
+        types::agent::AgentPolicySnapshot, types::agent::AgentSkillPolicy,
+        types::agent::AgentSkillPolicyMode, types::agent::SYSTEM_DEFAULT_AGENT_POLICY_HASH,
+        types::agent::SYSTEM_DEFAULT_AGENT_REF, types::agent::SYSTEM_DEFAULT_AGENT_REVISION_UID,
+        types::context::ContextMessage,
     };
     use serde_json::json;
 
@@ -418,7 +422,8 @@ mod tests {
     #[tokio::test]
     async fn skill_injector_formats_dynamic_metadata() {
         // Pins: selected skill manifests are dynamic context and do not require cache markers.
-        let mut ctx = moa_core::WorkingContext::new(&session(), capabilities(200_000));
+        let mut ctx =
+            moa_core::types::context::WorkingContext::new(&session(), capabilities(200_000));
         let skills = skills(vec![(
             "debug-oauth",
             "OAuth refresh-token debugging workflow",
@@ -429,7 +434,10 @@ mod tests {
             .await
             .expect("skill injection should succeed");
 
-        assert_eq!(ctx.messages[0].role, moa_core::MessageRole::User);
+        assert_eq!(
+            ctx.messages[0].role,
+            moa_core::types::context::MessageRole::User
+        );
         assert!(ctx.messages[0].content.contains("<available_skills>"));
         assert!(ctx.messages[0].content.contains("debug-oauth"));
         assert!(
@@ -447,7 +455,8 @@ mod tests {
         // Pins: a selected skill carrying a procedure is tagged [procedure] in the
         // manifest and listed in the procedure-skill metadata that gates the
         // run_procedure tool, while an agent-mediated skill is neither.
-        let mut ctx = moa_core::WorkingContext::new(&session(), capabilities(200_000));
+        let mut ctx =
+            moa_core::types::context::WorkingContext::new(&session(), capabilities(200_000));
         let selection = vec![
             test_skill_with_procedure("damaged-food-order", "Handle a damaged food order"),
             test_skill("free-form-helper", "General assistance"),
@@ -479,7 +488,8 @@ mod tests {
     #[tokio::test]
     async fn skill_injector_injects_nothing_without_skills() {
         // Pins: an empty skill registry leaves the compiled prompt unchanged.
-        let mut ctx = moa_core::WorkingContext::new(&session(), capabilities(200_000));
+        let mut ctx =
+            moa_core::types::context::WorkingContext::new(&session(), capabilities(200_000));
 
         let output = SkillInjector::from_skills(Vec::new())
             .process(&mut ctx)
@@ -493,7 +503,8 @@ mod tests {
 
     #[tokio::test]
     async fn emits_all_skills_alphabetically_when_budget_allows() {
-        let mut ctx = moa_core::WorkingContext::new(&session(), capabilities(200_000));
+        let mut ctx =
+            moa_core::types::context::WorkingContext::new(&session(), capabilities(200_000));
         let skills = skills(vec![
             ("zeta", "Zeta workflow"),
             ("alpha", "Alpha workflow"),
@@ -528,14 +539,16 @@ mod tests {
             ("db", "Handle database incidents"),
         ]);
 
-        let mut first = moa_core::WorkingContext::new(&session(), capabilities(200_000));
+        let mut first =
+            moa_core::types::context::WorkingContext::new(&session(), capabilities(200_000));
         first.append_message(ContextMessage::user("Investigate auth failures"));
         SkillInjector::from_skills(static_skills.clone())
             .process(&mut first)
             .await
             .expect("first manifest should render");
 
-        let mut second = moa_core::WorkingContext::new(&session(), capabilities(200_000));
+        let mut second =
+            moa_core::types::context::WorkingContext::new(&session(), capabilities(200_000));
         second.append_message(ContextMessage::user("Investigate auth failures"));
         SkillInjector::from_skills(static_skills)
             .process(&mut second)
@@ -554,14 +567,16 @@ mod tests {
             ("deploy", "Handle deploy incidents"),
         ]);
 
-        let mut first = moa_core::WorkingContext::new(&session(), capabilities(200_000));
+        let mut first =
+            moa_core::types::context::WorkingContext::new(&session(), capabilities(200_000));
         first.append_message(ContextMessage::user("Investigate auth failures"));
         SkillInjector::from_skills(static_skills.clone())
             .process(&mut first)
             .await
             .expect("first manifest should render");
 
-        let mut second = moa_core::WorkingContext::new(&session(), capabilities(200_000));
+        let mut second =
+            moa_core::types::context::WorkingContext::new(&session(), capabilities(200_000));
         second.append_message(ContextMessage::user("Review database latency"));
         SkillInjector::from_skills(static_skills)
             .process(&mut second)
@@ -579,7 +594,8 @@ mod tests {
             ("beta", "Beta workflow"),
             ("gamma", "Gamma workflow"),
         ]);
-        let mut ctx = moa_core::WorkingContext::new(&session(), capabilities(200_000));
+        let mut ctx =
+            moa_core::types::context::WorkingContext::new(&session(), capabilities(200_000));
 
         let output = SkillInjector::from_skills(static_skills)
             .with_budget_config(SkillBudgetConfig {
@@ -617,7 +633,8 @@ mod tests {
             refs: vec!["skill://pinned".to_string()],
             max_visible: Some(1),
         }));
-        let mut ctx = moa_core::WorkingContext::new(&session, capabilities(200_000));
+        let mut ctx =
+            moa_core::types::context::WorkingContext::new(&session, capabilities(200_000));
 
         let output = SkillInjector::from_skills(static_skills)
             .process(&mut ctx)

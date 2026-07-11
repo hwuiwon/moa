@@ -7,8 +7,10 @@
 
 use chrono::Utc;
 use moa_core::{
-    ActionClass, ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, MoaConfig, ModelId,
-    RiskLevel, SessionMeta, TenantId, ToolPolicyInput, UserId,
+    config::MoaConfig, types::action_policy::ActionClass, types::action_policy::ActionPolicyEffect,
+    types::action_policy::ActionPolicyRule, types::action_policy::ActionRuleScope,
+    types::action_policy::RiskLevel, types::identifiers::ModelId, types::identifiers::TenantId,
+    types::identifiers::UserId, types::session::SessionMeta, types::tools::ToolPolicyInput,
 };
 use moa_security::{ActionPolicies, ActionPolicyContext};
 use uuid::Uuid;

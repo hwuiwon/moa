@@ -8,9 +8,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, LLMProvider,
-    MessageRole, MoaError, ModelCapabilities, Result, StopReason, TokenUsage, ToolCallContent,
-    ToolInvocation,
+    error::MoaError, error::Result, traits::LLMProvider, types::completion::CompletionContent,
+    types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::completion::CompletionStream, types::completion::StopReason,
+    types::completion::TokenUsage, types::completion::ToolCallContent,
+    types::completion::ToolInvocation, types::context::MessageRole,
+    types::model::ModelCapabilities,
 };
 use serde_json::Value;
 const DEFAULT_INPUT_TOKENS: usize = 64;
@@ -395,7 +398,7 @@ impl LLMProvider for ScriptedProvider {
         self.recorded_requests
             .lock()
             .map_err(|error| {
-                moa_core::MoaError::ProviderError(format!(
+                moa_core::error::MoaError::ProviderError(format!(
                     "scripted provider request log poisoned: {error}"
                 ))
             })?
@@ -407,7 +410,7 @@ impl LLMProvider for ScriptedProvider {
                     .responses
                     .lock()
                     .map_err(|error| {
-                        moa_core::MoaError::ProviderError(format!(
+                        moa_core::error::MoaError::ProviderError(format!(
                             "scripted provider response queue poisoned: {error}"
                         ))
                     })?
@@ -418,13 +421,13 @@ impl LLMProvider for ScriptedProvider {
                         .fallback_response
                         .lock()
                         .map_err(|error| {
-                            moa_core::MoaError::ProviderError(format!(
+                            moa_core::error::MoaError::ProviderError(format!(
                                 "scripted provider fallback response poisoned: {error}"
                             ))
                         })?
                         .clone()
                         .ok_or_else(|| {
-                            moa_core::MoaError::ProviderError(
+                            moa_core::error::MoaError::ProviderError(
                                 "scripted provider ran out of queued responses".to_string(),
                             )
                         })?,
@@ -538,7 +541,7 @@ impl LLMProvider for ScriptedProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moa_core::ContextMessage;
+    use moa_core::types::context::ContextMessage;
 
     /// Builds a request whose concatenated system + user text contains `text`.
     fn user_request(text: &str) -> CompletionRequest {

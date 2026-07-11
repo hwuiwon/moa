@@ -7,9 +7,13 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
-    AgentContext, CompletionRequest, ContactId, ContactRef, ContactVerificationState, Event,
-    MessageRole, ModelCapabilities, ModelId, Result, SessionActorRef, SessionMeta, SessionStore,
-    StoragePartitionId, TenantId, TokenPricing, ToolCallFormat, UserId,
+    error::Result, events::Event, traits::SessionStore, types::agent::AgentContext,
+    types::completion::CompletionRequest, types::contact::ContactId, types::contact::ContactRef,
+    types::contact::ContactVerificationState, types::contact::SessionActorRef,
+    types::context::MessageRole, types::identifiers::ModelId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::identifiers::UserId, types::model::ModelCapabilities, types::model::TokenPricing,
+    types::model::ToolCallFormat, types::session::SessionMeta,
 };
 use moa_hands::ToolRouter;
 use moa_providers::ScriptedProvider;
@@ -24,7 +28,7 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
     let workspace = root.path().join("workspace");
     tokio::fs::create_dir_all(&workspace).await?;
 
-    let mut config = moa_core::MoaConfig::default();
+    let mut config = moa_core::config::MoaConfig::default();
     config.models.main = "claude-sonnet-4-6".to_string();
 
     let (session_store, _database_url, _schema_name) =
@@ -53,7 +57,7 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
             query_rewrite_llm_provider: None,
             identity_prompt_override: None,
             tool_schemas: extend_tool_schemas(router.tool_schemas()),
-            lineage: Arc::new(moa_core::NullLineageHandle),
+            lineage: Arc::new(moa_core::traits::NullLineageHandle),
         },
     );
 
@@ -142,7 +146,7 @@ fn scripted_provider() -> ScriptedProvider {
 
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
-        model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model_id: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         context_window: 200_000,
         max_output: 8_192,
         supports_tools: true,

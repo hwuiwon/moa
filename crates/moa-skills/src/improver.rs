@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use moa_core::{
-    ActionRuleScope, CompletionRequest, Event, EventRecord, ModelTask, Result, SessionMeta,
-    SkillMetadata,
+    error::Result, events::Event, types::action_policy::ActionRuleScope,
+    types::completion::CompletionRequest, types::events_stream::EventRecord,
+    types::memory::SkillMetadata, types::provider::ModelTask, types::session::SessionMeta,
 };
 use moa_providers::ModelRouter;
 use moa_session::PostgresSessionStore;
@@ -350,7 +351,7 @@ fn truncate_for_learning(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::MessageRole;
+    use moa_core::types::context::MessageRole;
 
     use super::*;
 

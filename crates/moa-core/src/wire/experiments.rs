@@ -1,7 +1,8 @@
 //! Experiment and agent-revision simulation wire DTOs.
 
+use crate::types::action_policy::ActionRuleScope;
+use crate::types::identifiers::{SessionId, TenantId};
 use crate::wire::artifacts::ArtifactSummary;
-use crate::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;

@@ -1,6 +1,8 @@
 //! Prompt construction for the query rewriter model call.
 
-use moa_core::{ContextMessage, MessageRole, WorkingContext};
+use moa_core::{
+    types::context::ContextMessage, types::context::MessageRole, types::context::WorkingContext,
+};
 use serde_json::Value;
 
 use super::input::RewriteInput;
@@ -99,7 +101,10 @@ fn truncate_for_prompt(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::{ContextMessage, ModelCapabilities, SessionMeta, WorkingContext};
+    use moa_core::{
+        types::context::ContextMessage, types::context::WorkingContext,
+        types::model::ModelCapabilities, types::session::SessionMeta,
+    };
     use serde_json::json;
 
     use super::*;

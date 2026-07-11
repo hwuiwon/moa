@@ -2,8 +2,11 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    AttributionEffect, AttributionSubjectType, Event, EventRecord, ExperienceAttribution,
-    ExperienceRecord, SegmentEvidenceKind, SegmentEvidencePolarity, SegmentOutcome, UserId,
+    events::Event, types::events_stream::EventRecord, types::experience::AttributionEffect,
+    types::experience::AttributionSubjectType, types::experience::ExperienceAttribution,
+    types::experience::ExperienceRecord, types::identifiers::UserId,
+    types::segment_assessment::SegmentEvidenceKind,
+    types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
 };
 use uuid::Uuid;
 
@@ -162,8 +165,10 @@ fn verification_evidence(experience: &ExperienceRecord) -> Option<String> {
 mod tests {
     use chrono::TimeZone;
     use moa_core::{
-        SegmentEvidence, SegmentEvidenceKind, SegmentEvidencePolarity, SegmentId, SessionId,
-        TaskFacetSet, TaskFingerprint, TenantId,
+        types::experience::TaskFacetSet, types::experience::TaskFingerprint,
+        types::identifiers::SegmentId, types::identifiers::SessionId, types::identifiers::TenantId,
+        types::segment_assessment::SegmentEvidence, types::segment_assessment::SegmentEvidenceKind,
+        types::segment_assessment::SegmentEvidencePolarity,
     };
 
     use super::*;
@@ -211,7 +216,7 @@ mod tests {
             id: Uuid::now_v7(),
             session_id: experience.session_id,
             sequence_num: 0,
-            event_type: moa_core::EventType::MemoryRead,
+            event_type: moa_core::events::EventType::MemoryRead,
             event: Event::MemoryRead {
                 path: "docs/architecture".to_string(),
                 scope: "tenant".to_string(),

@@ -1,6 +1,6 @@
 //! Restate workflow that executes one skill-backed procedure run.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 use chrono::Utc;
 use moa_artifacts::document::ArtifactDefinition;
@@ -13,7 +13,7 @@ use moa_core::wire::procedures::{
     ProcedureReviewDecisionKind, ProcedureReviewDecisionRequest, ProcedureReviewDecisionResponse,
     ProcedureSignalRequest, ProcedureSignalResponse,
 };
-use moa_core::{ActionRuleScope, TenantId};
+use moa_core::{types::action_policy::ActionRuleScope, types::identifiers::TenantId};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_skills::procedure::error::ProcedureError;
 use moa_skills::procedure::interpreter::{
@@ -24,11 +24,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
 use crate::workflows::errors::procedure_handler_error;
 use crate::workflows::procedure_node_actions::{
     ProcedureNodeActionContext, ProcedureNodeActionOutcome, execute_procedure_node_action,
 };
+use moa_session::PostgresSessionStore;
 
 const K_STATUS: &str = "status";
 const K_RUN_UID: &str = "run_uid";
@@ -47,7 +47,7 @@ pub struct RunProcedureRequest {
     pub identity: Identity,
     /// Optional session associated with this procedure run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<moa_core::SessionId>,
+    pub session_id: Option<moa_core::types::identifiers::SessionId>,
 }
 
 /// Terminal or current outcome for one procedure execution.
@@ -266,7 +266,22 @@ pub trait ProcedureExecution {
 }
 
 /// Concrete procedure execution implementation.
-pub struct ProcedureExecutionImpl;
+#[derive(Clone)]
+pub struct ProcedureExecutionImpl {
+    registry: ArtifactRegistry,
+    session_store: Arc<PostgresSessionStore>,
+}
+
+impl ProcedureExecutionImpl {
+    /// Creates a procedure workflow with its artifact and session stores.
+    #[must_use]
+    pub fn new(registry: ArtifactRegistry, session_store: Arc<PostgresSessionStore>) -> Self {
+        Self {
+            registry,
+            session_store,
+        }
+    }
+}
 
 impl ProcedureExecution for ProcedureExecutionImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -287,8 +302,13 @@ impl ProcedureExecution for ProcedureExecutionImpl {
             Json(ArtifactRunStatus::Running.as_str().to_string()),
         );
         let initial_request = request.clone();
+        let registry = self.registry.clone();
         let mut step = ctx
-            .run(|| async move { advance_procedure(initial_request).await.map(Json::from) })
+            .run(|| async move {
+                advance_procedure(registry, initial_request)
+                    .await
+                    .map(Json::from)
+            })
             .name("procedure_execute")
             .await?
             .into_inner();
@@ -305,6 +325,7 @@ impl ProcedureExecution for ProcedureExecutionImpl {
                 } => {
                     if let Some(cancel_step) = cancel_step_if_requested(
                         &ctx,
+                        self.registry.clone(),
                         &request,
                         format!("procedure_cancel_before_node_{step_index}"),
                     )
@@ -315,6 +336,7 @@ impl ProcedureExecution for ProcedureExecutionImpl {
                     }
                     let action_outcomes = execute_node_actions(
                         &ctx,
+                        self.session_store.clone(),
                         &request,
                         vec![ProcedureNodeExecution {
                             node_run_uid,
@@ -323,9 +345,11 @@ impl ProcedureExecution for ProcedureExecutionImpl {
                     )
                     .await?;
                     let persist_request = request.clone();
+                    let registry = self.registry.clone();
                     step = ctx
                         .run(|| async move {
                             persist_procedure_node_action_outcomes(
+                                registry,
                                 persist_request,
                                 action_outcomes,
                                 ActionResultMode::Single,
@@ -340,6 +364,7 @@ impl ProcedureExecution for ProcedureExecutionImpl {
                 ProcedureStep::ExecuteNodes { executions, .. } => {
                     if let Some(cancel_step) = cancel_step_if_requested(
                         &ctx,
+                        self.registry.clone(),
                         &request,
                         format!("procedure_cancel_before_parallel_nodes_{step_index}"),
                     )
@@ -348,11 +373,19 @@ impl ProcedureExecution for ProcedureExecutionImpl {
                         step = cancel_step;
                         continue;
                     }
-                    let action_outcomes = execute_node_actions(&ctx, &request, executions).await?;
+                    let action_outcomes = execute_node_actions(
+                        &ctx,
+                        self.session_store.clone(),
+                        &request,
+                        executions,
+                    )
+                    .await?;
                     let persist_request = request.clone();
+                    let registry = self.registry.clone();
                     step = ctx
                         .run(|| async move {
                             persist_procedure_node_action_outcomes(
+                                registry,
                                 persist_request,
                                 action_outcomes,
                                 ActionResultMode::Parallel,
@@ -372,6 +405,7 @@ impl ProcedureExecution for ProcedureExecutionImpl {
                     ctx.set(K_STATUS, Json(outcome.status));
                     step = await_blocked_node_resolution(
                         &ctx,
+                        self.registry.clone(),
                         request.clone(),
                         node_run_uid,
                         node_request,
@@ -472,26 +506,28 @@ impl ProcedureExecution for ProcedureExecutionImpl {
 
 async fn cancel_step_if_requested(
     ctx: &WorkflowContext<'_>,
+    registry: ArtifactRegistry,
     request: &RunProcedureRequest,
     run_step_name: String,
 ) -> Result<Option<ProcedureStep>, HandlerError> {
     let Some(reason) = cancel_requested(ctx).await? else {
         return Ok(None);
     };
-    persist_cancel_step(ctx, request.clone(), reason, run_step_name)
+    persist_cancel_step(ctx, registry, request.clone(), reason, run_step_name)
         .await
         .map(Some)
 }
 
 async fn persist_cancel_step(
     ctx: &WorkflowContext<'_>,
+    registry: ArtifactRegistry,
     request: RunProcedureRequest,
     reason: String,
     run_step_name: String,
 ) -> Result<ProcedureStep, HandlerError> {
     Ok(ctx
         .run(|| async move {
-            persist_procedure_cancel(request, reason)
+            persist_procedure_cancel(registry, request, reason)
                 .await
                 .map(Json::from)
         })
@@ -507,6 +543,7 @@ async fn persist_cancel_step(
 /// order rather than concurrently.
 async fn execute_node_actions(
     ctx: &WorkflowContext<'_>,
+    session_store: Arc<PostgresSessionStore>,
     request: &RunProcedureRequest,
     executions: Vec<ProcedureNodeExecution>,
 ) -> Result<Vec<ProcedureNodeActionResult>, HandlerError> {
@@ -514,6 +551,7 @@ async fn execute_node_actions(
     for execution in executions {
         let action_outcome = execute_procedure_node_action(
             ctx,
+            session_store.clone(),
             ProcedureNodeActionContext {
                 tenant_id: request.tenant_id,
                 run_uid: request.run_uid,
@@ -536,6 +574,7 @@ async fn execute_node_actions(
 
 async fn await_blocked_node_resolution(
     ctx: &WorkflowContext<'_>,
+    registry: ArtifactRegistry,
     request: RunProcedureRequest,
     node_run_uid: Uuid,
     node_request: ProcedureNodeRequest,
@@ -556,11 +595,12 @@ async fn await_blocked_node_resolution(
             let review_key = kind.promise_key(&node_id);
             let step = restate_sdk::select! {
                 reason = ctx.promise::<String>(K_CANCEL_REASON_PROMISE) => {
-                    persist_cancel_step(ctx, request.clone(), reason?, cancel_step_name).await?
+                    persist_cancel_step(ctx, registry.clone(), request.clone(), reason?, cancel_step_name).await?
                 },
                 resolution = ctx.promise::<Json<ProcedureReviewResolution>>(review_key.as_str()) => {
                     persist_blocked_node_resolution_step(
                         ctx,
+                        registry.clone(),
                         request.clone(),
                         node_run_uid,
                         ProcedureBlockedNodeResolution::Review(resolution?.into_inner()),
@@ -575,11 +615,12 @@ async fn await_blocked_node_resolution(
             let signal_key = kind.promise_key(&node_id);
             let step = restate_sdk::select! {
                 reason = ctx.promise::<String>(K_CANCEL_REASON_PROMISE) => {
-                    persist_cancel_step(ctx, request.clone(), reason?, cancel_step_name).await?
+                    persist_cancel_step(ctx, registry.clone(), request.clone(), reason?, cancel_step_name).await?
                 },
                 resolution = ctx.promise::<Json<ProcedureSignalResolution>>(signal_key.as_str()) => {
                     persist_blocked_node_resolution_step(
                         ctx,
+                        registry.clone(),
                         request.clone(),
                         node_run_uid,
                         ProcedureBlockedNodeResolution::Signal(resolution?.into_inner()),
@@ -595,6 +636,7 @@ async fn await_blocked_node_resolution(
 
 async fn persist_blocked_node_resolution_step(
     ctx: &WorkflowContext<'_>,
+    registry: ArtifactRegistry,
     request: RunProcedureRequest,
     node_run_uid: Uuid,
     resolution: ProcedureBlockedNodeResolution,
@@ -604,10 +646,12 @@ async fn persist_blocked_node_resolution_step(
         .run(|| async move {
             match resolution {
                 ProcedureBlockedNodeResolution::Review(resolution) => {
-                    persist_procedure_review_resolution(request, node_run_uid, resolution).await
+                    persist_procedure_review_resolution(registry, request, node_run_uid, resolution)
+                        .await
                 }
                 ProcedureBlockedNodeResolution::Signal(resolution) => {
-                    persist_procedure_signal_resolution(request, node_run_uid, resolution).await
+                    persist_procedure_signal_resolution(registry, request, node_run_uid, resolution)
+                        .await
                 }
             }
             .map(Json::from)
@@ -624,13 +668,13 @@ async fn cancel_requested(ctx: &WorkflowContext<'_>) -> Result<Option<String>, H
 }
 
 async fn persist_procedure_cancel(
+    registry: ArtifactRegistry,
     request: RunProcedureRequest,
     reason: String,
 ) -> Result<ProcedureStep, HandlerError> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
-    let registry = ArtifactRegistry::new(OrchestratorCtx::current_graph_pool());
     let run = registry
         .load_run(&scope, request.run_uid)
         .await
@@ -679,11 +723,13 @@ async fn persist_procedure_cancel(
     })
 }
 
-async fn advance_procedure(request: RunProcedureRequest) -> Result<ProcedureStep, HandlerError> {
+async fn advance_procedure(
+    registry: ArtifactRegistry,
+    request: RunProcedureRequest,
+) -> Result<ProcedureStep, HandlerError> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
-    let registry = ArtifactRegistry::new(OrchestratorCtx::current_graph_pool());
     let run = registry
         .load_run(&scope, request.run_uid)
         .await
@@ -725,6 +771,7 @@ async fn advance_procedure(request: RunProcedureRequest) -> Result<ProcedureStep
 }
 
 async fn persist_procedure_node_action_outcomes(
+    registry: ArtifactRegistry,
     request: RunProcedureRequest,
     action_results: Vec<ProcedureNodeActionResult>,
     mode: ActionResultMode,
@@ -732,7 +779,6 @@ async fn persist_procedure_node_action_outcomes(
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
-    let registry = ArtifactRegistry::new(OrchestratorCtx::current_graph_pool());
     let run = registry
         .load_run(&scope, request.run_uid)
         .await
@@ -780,7 +826,7 @@ async fn persist_procedure_node_action_outcomes(
                     reason.clone(),
                 )
                 .await?;
-                return persist_procedure_cancel(request, reason).await;
+                return persist_procedure_cancel(registry, request, reason).await;
             }
         }
     }
@@ -885,12 +931,12 @@ async fn fail_procedure_run(
 
 /// Validates an explicit procedure review-node decision before resolving the workflow promise.
 pub(crate) async fn validate_procedure_review_decision(
+    registry: ArtifactRegistry,
     request: ProcedureReviewDecisionRequest,
 ) -> Result<ValidatedProcedureReviewDecision, HandlerError> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
-    let registry = ArtifactRegistry::new(OrchestratorCtx::current_graph_pool());
     let run = registry
         .load_run(&scope, request.run_id)
         .await
@@ -947,12 +993,12 @@ pub(crate) async fn validate_procedure_review_decision(
 
 /// Validates an external procedure signal before resolving the workflow promise.
 pub(crate) async fn validate_procedure_signal(
+    registry: ArtifactRegistry,
     request: ProcedureSignalRequest,
 ) -> Result<ValidatedProcedureSignal, HandlerError> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
-    let registry = ArtifactRegistry::new(OrchestratorCtx::current_graph_pool());
     let run = registry
         .load_run(&scope, request.run_id)
         .await
@@ -1010,6 +1056,7 @@ pub(crate) async fn validate_procedure_signal(
 }
 
 async fn persist_procedure_review_resolution(
+    registry: ArtifactRegistry,
     request: RunProcedureRequest,
     node_run_uid: Uuid,
     resolution: ProcedureReviewResolution,
@@ -1017,7 +1064,6 @@ async fn persist_procedure_review_resolution(
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
-    let registry = ArtifactRegistry::new(OrchestratorCtx::current_graph_pool());
     let run = registry
         .load_run(&scope, request.run_uid)
         .await
@@ -1072,6 +1118,7 @@ async fn persist_procedure_review_resolution(
 }
 
 async fn persist_procedure_signal_resolution(
+    registry: ArtifactRegistry,
     request: RunProcedureRequest,
     node_run_uid: Uuid,
     resolution: ProcedureSignalResolution,
@@ -1079,7 +1126,6 @@ async fn persist_procedure_signal_resolution(
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
-    let registry = ArtifactRegistry::new(OrchestratorCtx::current_graph_pool());
     let run = registry
         .load_run(&scope, request.run_uid)
         .await
@@ -1542,6 +1588,6 @@ fn outcome_from_run(run: &ArtifactRun) -> ProcedureOutcome {
     }
 }
 
-fn artifact_handler_error(error: moa_core::MoaError) -> HandlerError {
+fn artifact_handler_error(error: moa_core::error::MoaError) -> HandlerError {
     procedure_handler_error(ProcedureError::Artifact(error))
 }

@@ -11,11 +11,9 @@ default = []
 async-trait.workspace = true
 chrono.workspace = true
 moa-core = { workspace = true }
-moa-providers = { workspace = true }
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sqlx = { workspace = true, features = ["tls-rustls", "chrono", "uuid", "json"] }
 thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true

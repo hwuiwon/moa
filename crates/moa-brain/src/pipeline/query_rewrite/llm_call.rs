@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 
 use moa_core::{
-    CompletionRequest, ContextMessage, JsonResponseFormat, ModelId, QueryRewriteResult, Result,
-    RewriteReason, WorkingContext,
+    error::Result, types::completion::CompletionRequest, types::completion::JsonResponseFormat,
+    types::context::ContextMessage, types::context::WorkingContext, types::identifiers::ModelId,
+    types::query_rewrite::QueryRewriteResult, types::query_rewrite::RewriteReason,
 };
 use serde_json::json;
 

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use moa_core::ActionPolicyEffect;
+use moa_core::types::action_policy::ActionPolicyEffect;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

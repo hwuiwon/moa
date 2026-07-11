@@ -13,9 +13,9 @@ use std::time::Instant;
 
 use moa_core::wire::turn::{StartTurnRequest, StartTurnResponse};
 use moa_core::{
-    ActionPolicyEffect, AgentContext, AgentKnowledgePolicy, AgentKnowledgeScopeMode,
-    AgentPolicySnapshot, AgentSkillPolicy, AgentSkillPolicyMode, Event, EventRange, EventRecord,
-    ModelId, SessionActorRef, SessionId, SessionMeta, SessionStatus, ToolContent, ToolOutput,
+    types::action_policy::ActionPolicyEffect, types::agent::AgentContext, types::agent::AgentKnowledgePolicy, types::agent::AgentKnowledgeScopeMode,
+    types::agent::AgentPolicySnapshot, types::agent::AgentSkillPolicy, types::agent::AgentSkillPolicyMode, events::Event, types::events_stream::EventRange, types::events_stream::EventRecord,
+    types::identifiers::ModelId, types::contact::SessionActorRef, types::identifiers::SessionId, types::session::SessionMeta, types::session::SessionStatus, types::tools::ToolContent, types::tools::ToolOutput,
 };
 
 use crate::support::restate_runtime::grant_session_participant;

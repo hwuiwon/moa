@@ -4,8 +4,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AgentContext, Attachment, Channel, ContactId, ContactRef, ModelId, SequenceNum,
-    SessionActorRef, SessionChannelBindingId, SessionId, TenantId,
+    agent::AgentContext, channel::Attachment, channel::Channel, channel::SessionChannelBindingId,
+    contact::ContactId, contact::ContactRef, contact::SessionActorRef, events_stream::SequenceNum,
+    identifiers::ModelId, identifiers::SessionId, identifiers::TenantId,
 };
 
 /// Session lifecycle status.

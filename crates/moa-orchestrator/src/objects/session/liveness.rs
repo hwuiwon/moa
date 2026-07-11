@@ -18,7 +18,10 @@
 
 use std::time::Duration;
 
-use moa_core::{AgentSignalId, ChildSignalKind, ParentResumePolicy, SignalSeverity};
+use moa_core::{
+    types::identifiers::AgentSignalId, types::worker::state::ChildSignalKind,
+    types::worker::state::ParentResumePolicy, types::worker::state::SignalSeverity,
+};
 
 use super::*;
 use crate::vo::schedule_generation_guarded_self_call;
@@ -38,10 +41,9 @@ pub(super) async fn ensure_child_liveness_scheduled(
     ctx: &ObjectContext<'_>,
     state: &mut SessionVoState,
     worker_id: &str,
+    limits: &SessionLimitsConfig,
 ) -> Result<(), HandlerError> {
-    let stale_ms = OrchestratorCtx::current_config()
-        .session_limits
-        .worker_heartbeat_stale_ms;
+    let stale_ms = limits.worker_heartbeat_stale_ms;
     if stale_ms == 0 {
         return Ok(());
     }
@@ -62,6 +64,7 @@ pub(super) async fn ensure_child_liveness_scheduled(
 pub(super) async fn run_child_liveness_check(
     ctx: &ObjectContext<'_>,
     req: CheckChildLivenessRequest,
+    limits: &SessionLimitsConfig,
 ) -> Result<(), HandlerError> {
     let mut state = Tracked::<SessionVoState>::load(ctx).await?;
 
@@ -86,9 +89,7 @@ pub(super) async fn run_child_liveness_check(
         }
     };
 
-    let stale_ms = OrchestratorCtx::current_config()
-        .session_limits
-        .worker_heartbeat_stale_ms;
+    let stale_ms = limits.worker_heartbeat_stale_ms;
     let summary = fetch_child_summary(ctx, &req.worker_id).await;
     let now = durable_utc_now(ctx).await?;
 

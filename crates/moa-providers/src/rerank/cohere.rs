@@ -1,7 +1,7 @@
 //! Cohere rerank provider client.
 
 use async_trait::async_trait;
-use moa_core::Result;
+use moa_core::error::Result;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 

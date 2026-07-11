@@ -1,8 +1,8 @@
 //! Integration tests for OCSF authentication event emission.
 
 use moa_core::{
-    TenantId,
     traits::{Identity, IdentityType},
+    types::identifiers::TenantId,
 };
 use moa_ocsf::{emit_authn_success, signing};
 use uuid::Uuid;

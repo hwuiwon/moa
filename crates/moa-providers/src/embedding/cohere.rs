@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use futures_util::future::try_join_all;
 use moa_core::traits::EmbeddingProvider;
-use moa_core::{MoaError, Result};
+use moa_core::{error::MoaError, error::Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 

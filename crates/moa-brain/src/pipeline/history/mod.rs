@@ -5,10 +5,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_core::{
-    CONTEXT_SNAPSHOT_FORMAT_VERSION, CompactionConfig, ContextMessage, ContextProcessor,
-    ContextSnapshot, ContextSnapshotConfig, Event, EventRange, EventRecord, FileReadDedupState,
-    LLMProvider, ProcessorOutput, Result, SequenceNum, SessionStore, ToolOutputConfig,
-    WorkingContext,
+    config::CompactionConfig, config::ContextSnapshotConfig, config::ToolOutputConfig,
+    error::Result, events::Event, traits::ContextProcessor, traits::LLMProvider,
+    traits::SessionStore, types::context::ContextMessage, types::context::ProcessorOutput,
+    types::context::WorkingContext, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::events_stream::SequenceNum,
+    types::snapshot::CONTEXT_SNAPSHOT_FORMAT_VERSION, types::snapshot::ContextSnapshot,
+    types::snapshot::FileReadDedupState,
 };
 use serde_json::json;
 
@@ -16,7 +19,7 @@ use crate::compaction::{
     latest_checkpoint_state, non_checkpoint_events, recent_turn_boundary, unsummarized_events,
 };
 
-use moa_core::{estimate_text_tokens, sum_message_tokens};
+use moa_core::{types::context::estimate_text_tokens, types::context::sum_message_tokens};
 
 mod budgeting;
 mod checkpoint;
@@ -384,7 +387,7 @@ impl ContextProcessor for HistoryCompiler {
         // Later stages insert per-turn sections at (not before) this index,
         // so the boundary stays valid in the final request message order.
         ctx.insert_metadata(
-            moa_core::STABLE_HISTORY_END_METADATA_KEY,
+            moa_core::types::completion::STABLE_HISTORY_END_METADATA_KEY,
             json!(crate::pipeline::trailing_user_insertion_index(
                 &ctx.messages
             )),
@@ -552,7 +555,7 @@ mod tests {
                     text: "answer one".to_string(),
                     thought_signature: None,
                     model: ModelId::new("claude-sonnet-4-6"),
-                    model_tier: moa_core::ModelTier::Main,
+                    model_tier: moa_core::types::provider::ModelTier::Main,
                     input_tokens_uncached: 1,
                     input_tokens_cache_write: 0,
                     input_tokens_cache_read: 0,
@@ -576,7 +579,7 @@ mod tests {
                     text: "answer two".to_string(),
                     thought_signature: None,
                     model: ModelId::new("claude-sonnet-4-6"),
-                    model_tier: moa_core::ModelTier::Main,
+                    model_tier: moa_core::types::provider::ModelTier::Main,
                     input_tokens_uncached: 1,
                     input_tokens_cache_write: 0,
                     input_tokens_cache_read: 0,
@@ -683,7 +686,7 @@ mod tests {
                     session_id: session.id,
                     last_sequence_num: 0,
                     created_at: Utc::now(),
-                    token_count: moa_core::sum_message_tokens(&snapshot_messages),
+                    token_count: moa_core::types::context::sum_message_tokens(&snapshot_messages),
                     messages: snapshot_messages,
                     file_read_dedup_state: FileReadDedupState::default(),
                     stage_inputs_hash: snapshot_stage_inputs_hash(&ctx),

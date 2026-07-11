@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use moa_core::{
-    CompletionContent, LLMProvider, MoaError, StopReason, ToolCallContent, ToolInvocation,
+    error::MoaError, traits::LLMProvider, types::completion::CompletionContent,
+    types::completion::StopReason, types::completion::ToolCallContent,
+    types::completion::ToolInvocation,
 };
 use moa_providers::OpenAIProvider;
 use serde_json::{Value, json};

@@ -1,6 +1,6 @@
 //! Tenant-configurable agent artifact definitions.
 
-use moa_core::GuardrailMode;
+use moa_core::types::guardrails::GuardrailMode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

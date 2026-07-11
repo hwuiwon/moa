@@ -7,9 +7,12 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use futures_util::stream;
 use moa_core::wire::turn::{SessionProgress, TurnPhase, TurnProgress};
 use moa_core::{
-    ContactSessionMessageRequest, ContactSessionMessageResponse, ContactSessionProgressRequest,
-    Event, EventRange, EventRecord, SequenceNum, SessionId, TenantId, WorkerId,
-    WorkerProgressSummary, WorkerState,
+    events::Event, types::contact::ContactSessionMessageRequest,
+    types::contact::ContactSessionMessageResponse, types::contact::ContactSessionProgressRequest,
+    types::events_stream::EventRange, types::events_stream::EventRecord,
+    types::events_stream::SequenceNum, types::identifiers::SessionId, types::identifiers::TenantId,
+    types::worker::state::WorkerId, types::worker::state::WorkerProgressSummary,
+    types::worker::state::WorkerState,
 };
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -466,8 +469,8 @@ fn sse_event_name(event: &Event) -> &'static str {
         Event::ProgressUpdate { .. } => "progress",
         Event::ProgressNarrated { .. } => "progress_narration",
         Event::WorkerSignalReceived {
-            kind: moa_core::ChildSignalKind::NeedsInput,
-            input_audience: Some(moa_core::InputAudience::User),
+            kind: moa_core::types::worker::state::ChildSignalKind::NeedsInput,
+            input_audience: Some(moa_core::types::worker::state::InputAudience::User),
             ..
         } => "worker_input_request",
         Event::WorkerSignalReceived { .. } => "worker_signal",
@@ -508,7 +511,7 @@ mod tests {
     use moa_core::wire::turn::{
         SessionSnapshot, TurnComplexityClass, TurnOutcome, TurnOutcomeKind,
     };
-    use moa_core::{EventRecord, EventType};
+    use moa_core::{events::EventType, types::events_stream::EventRecord};
     use uuid::Uuid;
 
     use super::*;
@@ -643,7 +646,7 @@ mod tests {
         // Pins: child progress/signal/liveness events stream as distinct, named SSE frames.
         assert_eq!(
             sse_event_name(&Event::ProgressNarrated {
-                source: moa_core::NarrationSource::Coordinator,
+                source: moa_core::types::worker::state::NarrationSource::Coordinator,
                 text: "Searching the pricing docs".to_string(),
                 segments: Vec::new(),
                 model: "none".to_string(),
@@ -653,10 +656,10 @@ mod tests {
         );
         assert_eq!(
             sse_event_name(&Event::WorkerSignalReceived {
-                signal_id: moa_core::AgentSignalId::new(),
+                signal_id: moa_core::types::identifiers::AgentSignalId::new(),
                 worker_id: "child-1".to_string(),
-                kind: moa_core::ChildSignalKind::Blocked,
-                severity: moa_core::SignalSeverity::Warning,
+                kind: moa_core::types::worker::state::ChildSignalKind::Blocked,
+                severity: moa_core::types::worker::state::SignalSeverity::Warning,
                 summary: "blocked on input".to_string(),
                 input_request_id: None,
                 input_audience: None,
@@ -665,19 +668,19 @@ mod tests {
         );
         assert_eq!(
             sse_event_name(&Event::WorkerSignalReceived {
-                signal_id: moa_core::AgentSignalId::new(),
+                signal_id: moa_core::types::identifiers::AgentSignalId::new(),
                 worker_id: "child-1".to_string(),
-                kind: moa_core::ChildSignalKind::NeedsInput,
-                severity: moa_core::SignalSeverity::Warning,
+                kind: moa_core::types::worker::state::ChildSignalKind::NeedsInput,
+                severity: moa_core::types::worker::state::SignalSeverity::Warning,
                 summary: "needs user input".to_string(),
                 input_request_id: Some("req-1".to_string()),
-                input_audience: Some(moa_core::InputAudience::User),
+                input_audience: Some(moa_core::types::worker::state::InputAudience::User),
             }),
             "worker_input_request"
         );
         assert_eq!(
             sse_event_name(&Event::WorkerParentResumeRequested {
-                signal_id: moa_core::AgentSignalId::new(),
+                signal_id: moa_core::types::identifiers::AgentSignalId::new(),
                 worker_id: "child-1".to_string(),
                 turn_id: "turn-1".to_string(),
                 reason: "child blocked".to_string(),
@@ -798,7 +801,7 @@ mod tests {
         );
         assert_eq!(
             follow_on_terminal_turn(&Event::WorkerParentResumeRequested {
-                signal_id: moa_core::AgentSignalId::new(),
+                signal_id: moa_core::types::identifiers::AgentSignalId::new(),
                 worker_id: "child-1".to_string(),
                 turn_id: "resume-turn".to_string(),
                 reason: "child needs attention".to_string(),

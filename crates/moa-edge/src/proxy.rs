@@ -201,7 +201,7 @@ fn is_hop_by_hop_header(name: &str) -> bool {
 mod tests {
     use super::*;
     use axum::http::HeaderMap;
-    use moa_core::TenantId;
+    use moa_core::types::identifiers::TenantId;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;

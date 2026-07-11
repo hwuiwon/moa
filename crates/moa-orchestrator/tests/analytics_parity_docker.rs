@@ -23,8 +23,8 @@
 
 use chrono::{DateTime, Duration, Utc};
 use moa_analytics::{AnalyticsClickHouseClient, AnalyticsService};
-use moa_core::ClickHouseConfig;
-use moa_core::TenantId;
+use moa_core::config::ClickHouseConfig;
+use moa_core::types::identifiers::TenantId;
 use moa_core::wire::analytics::{
     AnalyticsAggregation, AnalyticsCell, AnalyticsDataset, AnalyticsDimension, AnalyticsFieldKind,
     AnalyticsFieldRole, AnalyticsFilter, AnalyticsFilterOperator, AnalyticsMeasure,

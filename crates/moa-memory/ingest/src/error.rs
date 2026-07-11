@@ -51,7 +51,7 @@ pub enum IngestError {
     RuntimeNotInstalled,
     /// A scoped Postgres helper failed.
     #[error("scope transaction: {0}")]
-    Scope(#[from] moa_core::MoaError),
+    Scope(#[from] moa_core::error::MoaError),
     /// A Postgres query failed.
     #[error("postgres: {0}")]
     Sqlx(#[from] sqlx::Error),

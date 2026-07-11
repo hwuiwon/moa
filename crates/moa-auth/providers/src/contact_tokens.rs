@@ -5,7 +5,10 @@ use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header,
 };
 use moa_core::config::ContactTokenConfig;
-use moa_core::{ContactRef, ContactTokenClaims, ContactVerificationState, MoaError};
+use moa_core::{
+    error::MoaError, types::contact::ContactRef, types::contact::ContactTokenClaims,
+    types::contact::ContactVerificationState,
+};
 use thiserror::Error;
 use uuid::Uuid;
 

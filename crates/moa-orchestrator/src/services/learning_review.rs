@@ -9,9 +9,12 @@ use moa_core::wire::session_store::{
     LearningCandidateReviewResponse,
 };
 use moa_core::{
-    LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate, TenantId,
+    config::MoaConfig, types::experience::LearningCandidate,
+    types::experience::LearningCandidateStatus, types::experience::LearningCandidateStatusUpdate,
+    types::identifiers::TenantId,
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_providers::ProviderRegistry;
 use moa_session::PostgresSessionStore;
 use moa_skills::registry::SkillRegistry;
 use moa_skills::review::{
@@ -23,7 +26,6 @@ use moa_skills::review::{
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::authorize_tenant;
 use crate::services::skill_regression::{
@@ -52,8 +54,31 @@ pub trait LearningReview {
 }
 
 /// Concrete learning-review service implementation.
-#[derive(Clone, Default)]
-pub struct LearningReviewImpl;
+#[derive(Clone)]
+pub struct LearningReviewImpl {
+    store: Arc<PostgresSessionStore>,
+    pool: sqlx::PgPool,
+    config: Arc<MoaConfig>,
+    providers: Arc<ProviderRegistry>,
+}
+
+impl LearningReviewImpl {
+    /// Creates learning review with its transactional store and regression dependencies.
+    #[must_use]
+    pub fn new(
+        store: Arc<PostgresSessionStore>,
+        pool: sqlx::PgPool,
+        config: Arc<MoaConfig>,
+        providers: Arc<ProviderRegistry>,
+    ) -> Self {
+        Self {
+            store,
+            pool,
+            config,
+            providers,
+        }
+    }
+}
 
 impl LearningReview for LearningReviewImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -65,7 +90,7 @@ impl LearningReview for LearningReviewImpl {
         annotate_restate_handler_span("LearningReview", "get");
         let request = request.into_inner();
         authorize_tenant_operator(&ctx, request.tenant_id).await?;
-        let store = OrchestratorCtx::current().session_store_backend();
+        let store = self.store.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -87,11 +112,10 @@ impl LearningReview for LearningReviewImpl {
         let mut request = request.into_inner();
         let identity = authorize_tenant_operator(&ctx, request.tenant_id).await?;
         request.reviewer_subject = fga_subject(&identity);
-        let runtime = OrchestratorCtx::current();
-        let store = runtime.session_store_backend();
-        let pool = runtime.graph_pool();
-        let config = runtime.config();
-        let providers = runtime.provider_registry();
+        let store = self.store.clone();
+        let pool = self.pool.clone();
+        let config = self.config.clone();
+        let providers = self.providers.clone();
 
         let response = ctx
             .run(move || async move {
@@ -115,7 +139,7 @@ impl LearningReview for LearningReviewImpl {
         let mut request = request.into_inner();
         let identity = authorize_tenant_operator(&ctx, request.tenant_id).await?;
         request.reviewer_subject = fga_subject(&identity);
-        let store = OrchestratorCtx::current().session_store_backend();
+        let store = self.store.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -144,7 +168,7 @@ impl LearningReviewStore for SessionLearningReviewStore {
         &self,
         tenant_id: &TenantId,
         candidate_id: Uuid,
-    ) -> std::result::Result<Option<LearningCandidate>, moa_core::MoaError> {
+    ) -> std::result::Result<Option<LearningCandidate>, moa_core::error::MoaError> {
         self.store
             .get_learning_candidate(tenant_id, candidate_id)
             .await
@@ -154,7 +178,7 @@ impl LearningReviewStore for SessionLearningReviewStore {
         &self,
         update: &LearningCandidateStatusUpdate,
         expected_status: LearningCandidateStatus,
-    ) -> std::result::Result<bool, moa_core::MoaError> {
+    ) -> std::result::Result<bool, moa_core::error::MoaError> {
         self.store
             .update_learning_candidate_status_from(update, expected_status)
             .await
@@ -165,7 +189,7 @@ impl LearningReviewStore for SessionLearningReviewStore {
         conn: &mut sqlx::PgConnection,
         update: &LearningCandidateStatusUpdate,
         expected_status: LearningCandidateStatus,
-    ) -> std::result::Result<bool, moa_core::MoaError> {
+    ) -> std::result::Result<bool, moa_core::error::MoaError> {
         self.store
             .update_learning_candidate_status_from_in_tx(conn, update, expected_status)
             .await
@@ -174,8 +198,8 @@ impl LearningReviewStore for SessionLearningReviewStore {
     async fn append_learning_in_tx(
         &self,
         conn: &mut sqlx::PgConnection,
-        entry: &moa_core::LearningEntry,
-    ) -> std::result::Result<(), moa_core::MoaError> {
+        entry: &moa_core::types::learning::LearningEntry,
+    ) -> std::result::Result<(), moa_core::error::MoaError> {
         self.store.append_learning_in_tx(conn, entry).await
     }
 }
@@ -195,7 +219,7 @@ pub async fn get_learning_candidate_after_authz(
 pub async fn accept_skill_candidate_after_authz(
     store: Arc<PostgresSessionStore>,
     pool: sqlx::PgPool,
-    config: Arc<moa_core::MoaConfig>,
+    config: Arc<moa_core::config::MoaConfig>,
     providers: Arc<moa_providers::ProviderRegistry>,
     request: LearningCandidateReviewRequest,
 ) -> Result<LearningCandidateReviewResponse, HandlerError> {

@@ -6,8 +6,9 @@ use moa_contacts::domain::{
     low_assurance_scopes, require_contact_agent_allowlist, require_contact_agent_permission,
 };
 use moa_core::{
-    AgentSessionSelection, ContactId, ContactTokenClaims, ContactVerificationState, SessionId,
-    TenantId,
+    types::agent::AgentSessionSelection, types::contact::ContactId,
+    types::contact::ContactTokenClaims, types::contact::ContactVerificationState,
+    types::identifiers::SessionId, types::identifiers::TenantId,
 };
 use moa_orchestrator::services::contacts::replace_contact_session_authz_tuples;
 use uuid::Uuid;

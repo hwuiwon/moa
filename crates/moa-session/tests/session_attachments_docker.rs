@@ -1,5 +1,6 @@
 use moa_core::{
-    MoaConfig, SessionAttachmentStorageConfig, SessionAttachmentStore, SessionStore, TenantId,
+    config::MoaConfig, config::SessionAttachmentStorageConfig, traits::SessionAttachmentStore,
+    traits::SessionStore, types::identifiers::TenantId,
 };
 use moa_session::{PostgresSessionStore, testing};
 use moa_test_support::fixtures::session_meta_fixture;

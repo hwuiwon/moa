@@ -4,8 +4,11 @@ use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, StoredArtifact
 use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::validate_for_status;
 use moa_core::{
-    ActionRuleScope, AgentGuardrailPolicy, AgentRevisionLock, ModelId, Result, SessionActorRef,
-    SessionMeta, SessionStore, StoragePartitionId, TenantId,
+    error::Result, traits::SessionStore, types::action_policy::ActionRuleScope,
+    types::agent::AgentRevisionLock, types::contact::SessionActorRef,
+    types::guardrails::AgentGuardrailPolicy, types::identifiers::ModelId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::session::SessionMeta,
 };
 use serde_json::json;
 use sqlx::types::Json;
@@ -391,7 +394,7 @@ async fn insert_installation(
     .bind(deployment_uid)
     .execute(pool)
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     Ok(())
 }
 
@@ -420,6 +423,6 @@ async fn insert_deployment(
     .bind(&revision_lock.canonical_policy_hash)
     .execute(pool)
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     Ok(())
 }

@@ -6,8 +6,9 @@ pub(super) async fn insert_or_load_trial(
     ctx: &WorkflowContext<'_>,
     tenant_id: TenantId,
     trial: NewExperimentTrial,
+    pool: &sqlx::PgPool,
 ) -> Result<ExperimentTrialRecord, HandlerError> {
-    let pool = OrchestratorCtx::current_graph_pool();
+    let pool = pool.clone();
     let scope = tenant_scope(tenant_id);
     Ok(ctx
         .run(|| async move {
@@ -29,8 +30,9 @@ pub(super) async fn persist_trial_status(
     status: ExperimentTrialStatus,
     stop_reason: Option<ExperimentTrialStopReason>,
     error: Option<String>,
+    pool: &sqlx::PgPool,
 ) -> Result<ExperimentTrialRecord, HandlerError> {
-    let pool = OrchestratorCtx::current_graph_pool();
+    let pool = pool.clone();
     let scope = tenant_scope(tenant_id);
     Ok(ctx
         .run(|| async move {
@@ -43,6 +45,10 @@ pub(super) async fn persist_trial_status(
         .into_inner())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the journaled status write keeps its durable fields and pool explicit"
+)]
 pub(super) async fn persist_trial_status_by_key(
     ctx: &WorkflowContext<'_>,
     tenant_id: TenantId,
@@ -51,8 +57,9 @@ pub(super) async fn persist_trial_status_by_key(
     status: ExperimentTrialStatus,
     stop_reason: Option<ExperimentTrialStopReason>,
     error: Option<String>,
+    pool: &sqlx::PgPool,
 ) -> Result<(), HandlerError> {
-    let pool = OrchestratorCtx::current_graph_pool();
+    let pool = pool.clone();
     let scope = tenant_scope(tenant_id);
     ctx.run(|| async move {
         let store = ExperimentStore::new(pool.clone());
@@ -77,9 +84,18 @@ pub(super) async fn stop_trial(
     status: ExperimentTrialStatus,
     stop_reason: ExperimentTrialStopReason,
     error: Option<String>,
+    pool: &sqlx::PgPool,
 ) -> Result<ExperimentTrialRunStatusResponse, HandlerError> {
-    let trial =
-        persist_trial_status(ctx, tenant_id, trial_uid, status, Some(stop_reason), error).await?;
+    let trial = persist_trial_status(
+        ctx,
+        tenant_id,
+        trial_uid,
+        status,
+        Some(stop_reason),
+        error,
+        pool,
+    )
+    .await?;
     ctx.set(K_STATUS, Json(trial.status));
     status_response_from_record(tenant_id, trial)
 }
@@ -88,8 +104,9 @@ pub(super) async fn increment_trial_turn(
     ctx: &WorkflowContext<'_>,
     tenant_id: TenantId,
     trial_uid: Uuid,
+    pool: &sqlx::PgPool,
 ) -> Result<(), HandlerError> {
-    let pool = OrchestratorCtx::current_graph_pool();
+    let pool = pool.clone();
     let scope = tenant_scope(tenant_id);
     ctx.run(|| async move {
         ExperimentStore::new(pool)
@@ -110,8 +127,9 @@ pub(super) async fn attach_trial_session(
     scope: ActionRuleScope,
     trial_uid: Uuid,
     session_id: SessionId,
+    pool: &sqlx::PgPool,
 ) -> Result<(), HandlerError> {
-    let pool = OrchestratorCtx::current_graph_pool();
+    let pool = pool.clone();
     ctx.run(|| async move {
         ExperimentStore::new(pool)
             .attach_trial_session(&scope, trial_uid, session_id)
@@ -129,12 +147,13 @@ pub(super) async fn attach_current_trial_trace(
     ctx: &WorkflowContext<'_>,
     tenant_id: TenantId,
     trial_uid: Uuid,
+    pool: &sqlx::PgPool,
 ) -> Result<(), HandlerError> {
     let Some(trace_id) = current_trace_id() else {
         return Ok(());
     };
     tracing::Span::current().set_attribute("moa.experiment.trace_id", trace_id.clone());
-    let pool = OrchestratorCtx::current_graph_pool();
+    let pool = pool.clone();
     let scope = tenant_scope(tenant_id);
     ctx.run(|| async move {
         ExperimentStore::new(pool)

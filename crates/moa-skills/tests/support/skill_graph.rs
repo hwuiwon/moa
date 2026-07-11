@@ -7,8 +7,8 @@
 
 #![allow(dead_code)]
 
-use moa_core::RlsContext;
-use moa_core::{ActionRuleScope, MoaError, Result};
+use moa_core::types::memory::RlsContext;
+use moa_core::{error::MoaError, error::Result, types::action_policy::ActionRuleScope};
 use moa_memory_graph::PostgresGraphStore;
 use moa_memory_types::MemoryScope;
 use moa_test_support::fixtures::tenant_id_from_storage_partition;

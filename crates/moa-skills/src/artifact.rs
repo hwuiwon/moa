@@ -6,7 +6,7 @@ use moa_artifacts::document::{
 };
 use moa_artifacts::registry::{ArtifactFile, NewArtifactFile, StoredArtifactRevision};
 use moa_artifacts::skill::{SkillDefinition, SkillInstructionSource};
-use moa_core::{MoaError, Result};
+use moa_core::{error::MoaError, error::Result};
 
 use crate::format::SkillDocument;
 use crate::package::{

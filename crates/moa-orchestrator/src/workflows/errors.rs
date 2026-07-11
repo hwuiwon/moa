@@ -1,6 +1,6 @@
 //! Shared workflow error conversion for Restate handlers.
 
-use moa_core::MoaError;
+use moa_core::error::MoaError;
 use moa_skills::procedure::error::ProcedureError;
 use restate_sdk::prelude::*;
 

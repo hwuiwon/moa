@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use moa_core::MoaConfig;
-use moa_core::RlsContext;
+use moa_core::config::MoaConfig;
+use moa_core::types::memory::RlsContext;
 use moa_db::ScopedConn;
 use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_vector::{Error as VectorError, VECTOR_DIMENSION, VectorQuery, VectorStore};
@@ -792,8 +792,10 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use moa_core::{
-        CompletionRequest, CompletionResponse, CompletionStream, LLMProvider, ModelCapabilities,
-        ModelId, StopReason, TokenPricing, TokenUsage, ToolCallFormat,
+        traits::LLMProvider, types::completion::CompletionRequest,
+        types::completion::CompletionResponse, types::completion::CompletionStream,
+        types::completion::StopReason, types::completion::TokenUsage, types::identifiers::ModelId,
+        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
     use moa_memory_graph::PiiClass;
     use moa_providers::NoopReranker;
@@ -833,7 +835,10 @@ mod tests {
             }
         }
 
-        async fn complete(&self, request: CompletionRequest) -> moa_core::Result<CompletionStream> {
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> moa_core::error::Result<CompletionStream> {
             *self.request.lock().expect("capture request") = Some(request);
             Ok(CompletionStream::from_response(CompletionResponse {
                 text: self.response.clone(),

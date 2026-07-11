@@ -105,8 +105,8 @@ baseline on branch `remove-apache-age` with local compose Postgres at
 `postgres://moa_owner:dev@127.0.0.1:10040/moa`.
 
 ```bash
-cargo run -p xtask -- generate-memory-eval-corpus --profile pr --seed 1 --seed 2 --seed 3 --output target/memory-eval/final-rag-pr
-cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/final-rag-pr --output target/memory-eval/final-rag-baseline.json
+cargo run -p xtask --features eval-tools -- generate-memory-eval-corpus --profile pr --seed 1 --seed 2 --seed 3 --output target/memory-eval/final-rag-pr
+cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval --corpus target/memory-eval/final-rag-pr --output target/memory-eval/final-rag-baseline.json
 jq '.metrics | {recall_at_4, mrr, ndcg_at_4, zero_recall_rate, p95_retrieval_latency_ms, cross_user_leak_count, pii_unredacted_count, per_leg_recall}' target/memory-eval/final-rag-baseline.json
 ```
 

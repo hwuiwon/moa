@@ -3,7 +3,7 @@
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
 use moa_artifacts::validation::validate_for_status;
-use moa_core::{MoaError, Result, TenantId};
+use moa_core::{error::MoaError, error::Result, types::identifiers::TenantId};
 use moa_skills::artifact::skill_artifact_document_from_package;
 use moa_skills::package::{SkillPackage, SkillPackageFile, ValidatedSkillPackage};
 use moa_skills::registry::{NewSkill, SkillRegistry};

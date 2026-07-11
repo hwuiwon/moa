@@ -38,8 +38,9 @@ async fn memory_retrieval_eval_runner_writes_report_from_cached_embeddings() -> 
     );
 
     let _guard = GOLD_RESOLUTION_TEST_LOCK.lock().await;
-    let corpus = generate_memory_eval_corpus(CorpusProfile::Pr, vec![1, 2, 3])
-        .expect("generate PR memory eval corpus");
+    let corpus =
+        generate_memory_eval_corpus(CorpusProfile::Pr, vec![1, 2, 3], TranscriptStyle::Marked)
+            .expect("generate PR memory eval corpus");
     let temp = tempfile::tempdir()?;
     let corpus_dir = temp.path().join("pr-corpus");
     write_memory_eval_corpus(&corpus_dir, &corpus).await?;

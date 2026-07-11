@@ -1,8 +1,11 @@
 use moa_artifacts::simulation::ExperimentTargetKind;
-use moa_core::RlsContext;
+use moa_core::types::memory::RlsContext;
 use moa_core::wire::experiments::ExperimentCancelRequest;
 use moa_core::{
-    ActionRuleScope, ContactId, ModelId, Result, SessionId, StoragePartitionId, TenantId, UserId,
+    error::Result, types::action_policy::ActionRuleScope, types::contact::ContactId,
+    types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::identifiers::UserId,
 };
 use moa_db::ScopedConn;
 use moa_experiments::{
@@ -11,8 +14,14 @@ use moa_experiments::{
         ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant,
         NewExperimentRun as NewExperiment, NewExperimentTrial,
     },
+    scores::{
+        ExperimentRunCompareRef, ExperimentRunScoreRef, ScenarioScoreDeltaRow, TrialScoreSummary,
+        VariantScoreDeltaRow, compare_experiment_score_breakdown_for_tenant,
+        experiment_score_breakdown_for_tenant,
+    },
     store::ExperimentStore,
 };
+use moa_scoring::ScoreSummaryRow;
 use serde_json::json;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -484,6 +493,211 @@ async fn trial_key_deduplicates_within_run_db() -> Result<()> {
     assert_eq!(duplicate.trial_uid, first.trial_uid);
     assert_eq!(duplicate.score_run_id, first.score_run_id);
     assert_score_run_absent(test_db.store().pool(), duplicate_score_run_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn experiment_score_queries_preserve_breakdowns_comparisons_and_tenant_scope_db() -> Result<()>
+{
+    // Pins: experiment-owned trial joins preserve exact grouping, comparison order, and tenant isolation.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool();
+    let store = ExperimentStore::new(pool.clone());
+    let scope = tenant_scope("experiment-score-query");
+    let other_scope = tenant_scope("experiment-score-query-other");
+    let tenant_id = scope_tenant_id(&scope);
+    let other_tenant_id = scope_tenant_id(&other_scope);
+    let plan_revision_uid = insert_artifact_revision(pool, &scope).await?;
+    let base_run = store
+        .insert_run(&scope, new_experiment("score-base", None, Vec::new()))
+        .await?;
+    let new_run = store
+        .insert_run(&scope, new_experiment("score-new", None, Vec::new()))
+        .await?;
+
+    insert_scored_trial(
+        &store,
+        pool,
+        &scope,
+        base_run.run_uid,
+        plan_revision_uid,
+        "base-baseline",
+        "baseline",
+        "scenario-a",
+        0.25,
+        None,
+    )
+    .await?;
+    insert_scored_trial(
+        &store,
+        pool,
+        &scope,
+        base_run.run_uid,
+        plan_revision_uid,
+        "base-candidate",
+        "candidate",
+        "scenario-b",
+        0.5,
+        None,
+    )
+    .await?;
+    let new_baseline = insert_scored_trial(
+        &store,
+        pool,
+        &scope,
+        new_run.run_uid,
+        plan_revision_uid,
+        "new-baseline",
+        "baseline",
+        "scenario-a",
+        0.5,
+        Some(true),
+    )
+    .await?;
+    let new_candidate = insert_scored_trial(
+        &store,
+        pool,
+        &scope,
+        new_run.run_uid,
+        plan_revision_uid,
+        "new-candidate",
+        "candidate",
+        "scenario-b",
+        1.0,
+        Some(false),
+    )
+    .await?;
+
+    // A score sharing the tenant-A trial score-run ID but owned by tenant B
+    // must not become visible through the experiment join.
+    insert_score(
+        pool,
+        &other_scope,
+        new_baseline.score_run_id,
+        "quality",
+        "numeric",
+        Some(10.0),
+        None,
+    )
+    .await?;
+
+    let breakdown = experiment_score_breakdown_for_tenant(
+        pool,
+        ExperimentRunScoreRef {
+            tenant_id,
+            run_uid: new_run.run_uid,
+        },
+    )
+    .await
+    .expect("read tenant experiment score breakdown");
+    assert_eq!(
+        breakdown.trial_rollup_rows,
+        vec![
+            score_summary("quality", "numeric", 2, 0.75),
+            score_summary("success", "boolean", 2, 0.5),
+        ]
+    );
+    assert_eq!(
+        breakdown.trials,
+        vec![
+            TrialScoreSummary {
+                trial_uid: new_baseline.trial_uid,
+                trial_key: "new-baseline".to_string(),
+                score_run_id: new_baseline.score_run_id,
+                variant_key: "baseline".to_string(),
+                scenario_id: Some("scenario-a".to_string()),
+                rows: vec![
+                    score_summary("quality", "numeric", 1, 0.5),
+                    score_summary("success", "boolean", 1, 1.0),
+                ],
+            },
+            TrialScoreSummary {
+                trial_uid: new_candidate.trial_uid,
+                trial_key: "new-candidate".to_string(),
+                score_run_id: new_candidate.score_run_id,
+                variant_key: "candidate".to_string(),
+                scenario_id: Some("scenario-b".to_string()),
+                rows: vec![
+                    score_summary("quality", "numeric", 1, 1.0),
+                    score_summary("success", "boolean", 1, 0.0),
+                ],
+            },
+        ]
+    );
+    assert_eq!(breakdown.scenarios.len(), 2);
+    assert_eq!(
+        breakdown.scenarios[0].scenario_id.as_deref(),
+        Some("scenario-a")
+    );
+    assert_eq!(
+        breakdown.scenarios[1].scenario_id.as_deref(),
+        Some("scenario-b")
+    );
+
+    let comparison = compare_experiment_score_breakdown_for_tenant(
+        pool,
+        ExperimentRunCompareRef {
+            tenant_id,
+            base_run_uid: base_run.run_uid,
+            new_run_uid: new_run.run_uid,
+        },
+    )
+    .await
+    .expect("compare tenant experiment scores");
+    assert_eq!(
+        comparison.scenario_deltas,
+        vec![
+            ScenarioScoreDeltaRow {
+                scenario_id: Some("scenario-a".to_string()),
+                name: "quality".to_string(),
+                base_mean: Some(0.25),
+                new_mean: Some(0.5),
+                delta: Some(0.25),
+            },
+            ScenarioScoreDeltaRow {
+                scenario_id: Some("scenario-b".to_string()),
+                name: "quality".to_string(),
+                base_mean: Some(0.5),
+                new_mean: Some(1.0),
+                delta: Some(0.5),
+            },
+        ]
+    );
+    assert_eq!(
+        comparison.variant_deltas,
+        vec![
+            VariantScoreDeltaRow {
+                variant_key: "baseline".to_string(),
+                name: "quality".to_string(),
+                base_mean: Some(0.25),
+                new_mean: Some(0.5),
+                delta: Some(0.25),
+            },
+            VariantScoreDeltaRow {
+                variant_key: "candidate".to_string(),
+                name: "quality".to_string(),
+                base_mean: Some(0.5),
+                new_mean: Some(1.0),
+                delta: Some(0.5),
+            },
+        ]
+    );
+
+    let invisible = experiment_score_breakdown_for_tenant(
+        pool,
+        ExperimentRunScoreRef {
+            tenant_id: other_tenant_id,
+            run_uid: new_run.run_uid,
+        },
+    )
+    .await
+    .expect("read other tenant experiment score breakdown");
+    assert!(invisible.trial_rollup_rows.is_empty());
+    assert!(invisible.trials.is_empty());
+    assert!(invisible.scenarios.is_empty());
+
     Ok(())
 }
 
@@ -1108,6 +1322,92 @@ fn new_trial(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn insert_scored_trial(
+    store: &ExperimentStore,
+    pool: &sqlx::PgPool,
+    scope: &ActionRuleScope,
+    run_uid: Uuid,
+    plan_revision_uid: Uuid,
+    trial_key: &str,
+    variant_key: &str,
+    scenario_id: &str,
+    quality: f64,
+    success: Option<bool>,
+) -> Result<moa_experiments::model::ExperimentTrialRecord> {
+    let mut trial = new_trial(run_uid, trial_key, plan_revision_uid, Vec::new());
+    trial.variant_key = variant_key.to_string();
+    trial.scenario_id = Some(scenario_id.to_string());
+    let trial = store.insert_trial(scope, trial).await?;
+    insert_score(
+        pool,
+        scope,
+        trial.score_run_id,
+        "quality",
+        "numeric",
+        Some(quality),
+        None,
+    )
+    .await?;
+    if let Some(success) = success {
+        insert_score(
+            pool,
+            scope,
+            trial.score_run_id,
+            "success",
+            "boolean",
+            None,
+            Some(success),
+        )
+        .await?;
+    }
+    Ok(trial)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_score(
+    pool: &sqlx::PgPool,
+    scope: &ActionRuleScope,
+    run_id: Uuid,
+    name: &str,
+    value_type: &str,
+    value_numeric: Option<f64>,
+    value_boolean: Option<bool>,
+) -> Result<()> {
+    let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO analytics.scores (
+            score_id, ts, storage_partition_id, user_id, target_kind, run_id,
+            name, value_type, value_numeric, value_boolean, source, model_or_evaluator
+        )
+        VALUES ($1, now(), $2, $3, 'agent_loop', $4, $5, $6, $7, $8, 'test', 'offline')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(scope_storage_partition_id(scope))
+    .bind(scope_user_id(scope))
+    .bind(run_id)
+    .bind(name)
+    .bind(value_type)
+    .bind(value_numeric)
+    .bind(value_boolean)
+    .execute(conn.as_mut())
+    .await
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
+    conn.commit().await?;
+    Ok(())
+}
+
+fn score_summary(name: &str, value_type: &str, n: u64, mean_or_rate: f64) -> ScoreSummaryRow {
+    ScoreSummaryRow {
+        name: name.to_string(),
+        value_type: value_type.to_string(),
+        n,
+        mean_or_rate: Some(mean_or_rate),
+    }
+}
+
 async fn create_run_and_trial(pool: sqlx::PgPool, label: &'static str) -> Result<(Uuid, Uuid)> {
     let store = ExperimentStore::new(pool.clone());
     let scope = tenant_scope(label);
@@ -1164,12 +1464,13 @@ async fn insert_procedure_run(
     .bind(json!({}))
     .execute(conn.as_mut())
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     conn.commit().await?;
     Ok(run_uid)
 }
 
 async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) -> Result<Uuid> {
+    let tenant_id = scope_tenant_id(scope);
     let storage_partition_id = scope_storage_partition_id(scope);
     let user_id = scope_user_id(scope);
     let artifact_uid = Uuid::now_v7();
@@ -1178,29 +1479,32 @@ async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) 
     sqlx::query(
         r#"
         INSERT INTO moa.artifact (
-            artifact_uid, storage_partition_id, user_id, kind, name, description
+            artifact_uid, tenant_id, storage_partition_id, user_id, kind, name, description
         )
-        VALUES ($1, $2, $3, 'skill', $4, 'experiment fixture')
+        VALUES ($1, $2, $3, $4, 'skill', $5, 'experiment fixture')
         "#,
     )
     .bind(artifact_uid)
+    .bind(tenant_id.0)
     .bind(&storage_partition_id)
     .bind(user_id.as_deref())
     .bind(format!("experiment-fixture-{artifact_uid}"))
     .execute(conn.as_mut())
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     sqlx::query(
         r#"
         INSERT INTO moa.artifact_revision (
-            revision_uid, artifact_uid, storage_partition_id, user_id, definition, canonical_hash,
-            source_format, source_text, status, validation_report, version, published_at
+            revision_uid, artifact_uid, tenant_id, storage_partition_id, user_id, definition,
+            canonical_hash, source_format, source_text, status, validation_report, version,
+            published_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, 'json', $7, 'published', $8, 1, now())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'json', $8, 'published', $9, 1, now())
         "#,
     )
     .bind(revision_uid)
     .bind(artifact_uid)
+    .bind(tenant_id.0)
     .bind(&storage_partition_id)
     .bind(user_id.as_deref())
     .bind(json!({ "kind": "skill", "name": "experiment fixture" }))
@@ -1209,7 +1513,7 @@ async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) 
     .bind(json!({}))
     .execute(conn.as_mut())
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     conn.commit().await?;
     Ok(revision_uid)
 }
@@ -1250,7 +1554,7 @@ async fn assert_score_run_exists_with_source(
     .bind(source)
     .fetch_one(conn.as_mut())
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     conn.commit().await?;
     assert!(exists, "score-run parent row should exist");
     Ok(())
@@ -1269,7 +1573,7 @@ async fn assert_score_run_absent(pool: &sqlx::PgPool, score_run_id: Uuid) -> Res
     .bind(score_run_id)
     .fetch_one(pool)
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     assert!(!exists, "score-run parent row should not exist");
     Ok(())
 }
@@ -1298,7 +1602,7 @@ async fn assert_scoped_experiment_count_for_score_run(
     .bind(parts.2.as_deref())
     .fetch_one(conn.as_mut())
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     conn.commit().await?;
     assert_eq!(count, expected);
     Ok(())
@@ -1328,7 +1632,7 @@ async fn assert_scoped_trial_count_for_score_run(
     .bind(parts.2.as_deref())
     .fetch_one(conn.as_mut())
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     conn.commit().await?;
     assert_eq!(count, expected);
     Ok(())
@@ -1342,7 +1646,7 @@ async fn assert_no_experiment_trial_event_table(pool: &sqlx::PgPool) -> Result<(
     )
     .fetch_one(pool)
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     assert_eq!(table, None);
     Ok(())
 }
@@ -1377,7 +1681,7 @@ async fn insert_score_run_with_source(
     .bind(source)
     .execute(conn.as_mut())
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     conn.commit().await?;
     Ok(())
 }
@@ -1400,7 +1704,7 @@ async fn assert_artifact_revision_links(
     .bind(run_uid)
     .fetch_all(conn.as_mut())
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     conn.commit().await?;
     let mut expected = expected_revision_uids.to_vec();
     revision_uids.sort_unstable();
@@ -1424,7 +1728,7 @@ async fn insert_session_for_experiment_fk(
     )
     .fetch_optional(pool)
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     let session_id = SessionId::new();
     let target_table = target_table.unwrap_or_else(|| "sessions".to_string());
     sqlx::query(&format!(
@@ -1441,7 +1745,7 @@ async fn insert_session_for_experiment_fk(
     .bind("gpt-5.1")
     .execute(pool)
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     Ok(session_id)
 }
 
@@ -1463,6 +1767,14 @@ fn scope_storage_partition_id(scope: &ActionRuleScope) -> String {
     match scope {
         ActionRuleScope::Tenant { tenant_id } => tenant_id.to_string(),
         ActionRuleScope::Contact { tenant_id, .. } => tenant_id.to_string(),
+    }
+}
+
+fn scope_tenant_id(scope: &ActionRuleScope) -> TenantId {
+    match scope {
+        ActionRuleScope::Tenant { tenant_id } | ActionRuleScope::Contact { tenant_id, .. } => {
+            *tenant_id
+        }
     }
 }
 

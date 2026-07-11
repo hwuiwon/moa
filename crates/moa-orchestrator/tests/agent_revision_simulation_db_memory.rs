@@ -6,13 +6,16 @@ use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, StoredArtifactRevision};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_artifacts::validation::validate_for_status;
-use moa_core::RlsContext;
 use moa_core::traits::{Identity, IdentityType};
+use moa_core::types::memory::RlsContext;
 use moa_core::wire::experiments::{
     AgentRevisionSimulationCompareRequest, AgentRevisionSimulationRunRequest,
     AgentRevisionSimulationVariant, ExperimentPlanListRequest,
 };
-use moa_core::{ActionRuleScope, ModelId, StoragePartitionId, TenantId};
+use moa_core::{
+    types::action_policy::ActionRuleScope, types::identifiers::ModelId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+};
 use moa_db::ScopedConn;
 use moa_experiments::model::{
     ExperimentScorecard, ExperimentSimulatorConfig, ExperimentTarget, ExperimentTrialStatus,

@@ -1,18 +1,24 @@
 //! Restate workflow that runs one tenant-visible memory-consolidation pass.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
-use moa_core::{LearningEntry, TenantId};
+use moa_core::{
+    config::MoaConfig, traits::EmbeddingProvider, types::identifiers::TenantId,
+    types::learning::LearningEntry,
+};
 use moa_memory_lifecycle::{
     BackfillStats, ConsolidationOptions, ConsolidationOutcome, DecayStats, DigestStats,
     ExpiryStats, MergeStats, SweepStats, TenantConsolidationCursor,
 };
 use restate_sdk::prelude::*;
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::ctx::OrchestratorCtx;
 use crate::objects::tenant::TenantObjectClient;
 use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_session::PostgresSessionStore;
 
 /// Returns the durable workflow ID for a tenant/date consolidation pass.
 #[must_use]
@@ -207,7 +213,31 @@ pub trait Consolidate {
 }
 
 /// Concrete workflow implementation.
-pub struct ConsolidateImpl;
+#[derive(Clone)]
+pub struct ConsolidateImpl {
+    pool: PgPool,
+    config: Arc<MoaConfig>,
+    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    session_store: Arc<PostgresSessionStore>,
+}
+
+impl ConsolidateImpl {
+    /// Creates a consolidation workflow with its storage and memory dependencies.
+    #[must_use]
+    pub fn new(
+        pool: PgPool,
+        config: Arc<MoaConfig>,
+        embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+        session_store: Arc<PostgresSessionStore>,
+    ) -> Self {
+        Self {
+            pool,
+            config,
+            embedding_provider,
+            session_store,
+        }
+    }
+}
 
 impl Consolidate for ConsolidateImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -218,7 +248,13 @@ impl Consolidate for ConsolidateImpl {
     ) -> Result<Json<ConsolidateReport>, HandlerError> {
         annotate_restate_handler_span("Consolidate", "run");
         let request = request.into_inner();
-        let mut steps = RestateConsolidateSteps { ctx: &ctx };
+        let mut steps = RestateConsolidateSteps {
+            ctx: &ctx,
+            pool: self.pool.clone(),
+            config: self.config.clone(),
+            embedding_provider: self.embedding_provider.clone(),
+            session_store: self.session_store.clone(),
+        };
         let report = run_consolidate_workflow(&mut steps, request).await?;
 
         Ok(Json::from(report))
@@ -356,6 +392,10 @@ pub async fn run_consolidate_workflow(
 
 struct RestateConsolidateSteps<'ctx, 'workflow> {
     ctx: &'ctx WorkflowContext<'workflow>,
+    pool: PgPool,
+    config: Arc<MoaConfig>,
+    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    session_store: Arc<PostgresSessionStore>,
 }
 
 #[async_trait]
@@ -385,7 +425,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         &mut self,
         request: &ConsolidateRequest,
     ) -> Result<i64, HandlerError> {
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         let tenant_id = request.tenant_id;
         self.ctx
             .run(|| async move {
@@ -405,7 +445,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         request: &ConsolidateRequest,
         now: DateTime<Utc>,
     ) -> Result<MergeStats, HandlerError> {
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         let tenant_id = request.tenant_id;
         self.ctx
             .run(|| async move {
@@ -425,7 +465,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         request: &ConsolidateRequest,
         now: DateTime<Utc>,
     ) -> Result<DecayStats, HandlerError> {
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         let tenant_id = request.tenant_id;
         self.ctx
             .run(|| async move {
@@ -450,7 +490,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         request: &ConsolidateRequest,
         now: DateTime<Utc>,
     ) -> Result<SweepStats, HandlerError> {
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         let tenant_id = request.tenant_id;
         self.ctx
             .run(|| async move {
@@ -470,7 +510,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         request: &ConsolidateRequest,
         now: DateTime<Utc>,
     ) -> Result<ExpiryStats, HandlerError> {
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         let tenant_id = request.tenant_id;
         self.ctx
             .run(|| async move {
@@ -494,10 +534,9 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         &mut self,
         request: &ConsolidateRequest,
     ) -> Result<BackfillStats, HandlerError> {
-        let runtime = OrchestratorCtx::current();
-        let pool = runtime.graph_pool();
+        let pool = self.pool.clone();
         let tenant_id = request.tenant_id;
-        let embedder = runtime.embedding_provider();
+        let embedder = self.embedding_provider.clone();
         self.ctx
             .run(|| async move {
                 moa_memory_lifecycle::backfill_entities(&pool, &tenant_id, embedder)
@@ -516,10 +555,9 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         request: &ConsolidateRequest,
         now: DateTime<Utc>,
     ) -> Result<DigestStats, HandlerError> {
-        let runtime = OrchestratorCtx::current();
-        let pool = runtime.graph_pool();
+        let pool = self.pool.clone();
         let tenant_id = request.tenant_id;
-        let digest_config = runtime.config().memory.digest.clone();
+        let digest_config = self.config.memory.digest.clone();
         self.ctx
             .run(|| async move {
                 moa_memory_lifecycle::rebuild_digests(&pool, &tenant_id, now, &digest_config)
@@ -560,7 +598,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         &mut self,
         report: &ConsolidateReport,
     ) -> Result<(), HandlerError> {
-        record_memory_learning(self.ctx, report).await
+        record_memory_learning(self.ctx, self.session_store.clone(), report).await
     }
 
     async fn consolidation_completed(
@@ -580,7 +618,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         request: &ConsolidateRequest,
         changelog_version: i64,
     ) -> Result<(), HandlerError> {
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         let cursor = TenantConsolidationCursor {
             tenant_id: request.tenant_id,
             changelog_version,
@@ -601,6 +639,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
 
 async fn record_memory_learning(
     ctx: &WorkflowContext<'_>,
+    store: Arc<PostgresSessionStore>,
     report: &ConsolidateReport,
 ) -> Result<(), HandlerError> {
     if !report.errors.is_empty() {
@@ -618,7 +657,6 @@ async fn record_memory_learning(
     {
         return Ok(());
     }
-    let store = OrchestratorCtx::current_session_store();
     let report = report.clone();
     ctx.run(|| async move {
         store

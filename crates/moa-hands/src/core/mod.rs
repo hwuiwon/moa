@@ -17,8 +17,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use moa_core::{
-    HandHandle, HandProvider, McpServerConfig, MemoryRetrievalExecutor, MemoryToolExecutor,
-    SandboxFile, SessionStore, TenantId, ToolBudgetConfig, ToolOutputConfig,
+    config::McpServerConfig, config::ToolBudgetConfig, config::ToolOutputConfig,
+    traits::HandProvider, traits::MemoryRetrievalExecutor, traits::MemoryToolExecutor,
+    traits::SessionStore, types::hands::HandHandle, types::hands::SandboxFile,
+    types::identifiers::TenantId,
 };
 use moa_security::{ActionPolicies, ActionPolicyRuleStore, MCPCredentialProxy};
 use tokio::sync::RwLock;
@@ -55,7 +57,7 @@ pub struct ToolRouter {
     session_store: Option<Arc<dyn SessionStore>>,
     memory_tool_executor: RwLock<Option<Arc<dyn MemoryToolExecutor>>>,
     memory_retrieval_executor: RwLock<Option<Arc<dyn MemoryRetrievalExecutor>>>,
-    lineage: Arc<dyn moa_core::LineageHandle>,
+    lineage: Arc<dyn moa_core::traits::LineageHandle>,
     sandbox_root: Option<PathBuf>,
     tool_output: ToolOutputConfig,
     tool_budgets: ToolBudgetConfig,

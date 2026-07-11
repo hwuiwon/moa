@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::TaskFacetSet;
+use super::experience::TaskFacetSet;
 
 /// Result produced by the query-rewrite context processor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

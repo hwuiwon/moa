@@ -18,7 +18,6 @@ metrics.workspace = true
 moa-core = { workspace = true }
 moa-db = { workspace = true }
 moa-memory-graph = { workspace = true }
-moa-memory-vector = { workspace = true }
 moa-memory-types = { workspace = true }
 reqwest.workspace = true
 serde.workspace = true

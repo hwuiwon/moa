@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use moa_artifacts::registry::ArtifactRunStatus;
 use moa_core::traits::Identity;
-use moa_core::{SessionId, TenantId};
+use moa_core::{types::identifiers::SessionId, types::identifiers::TenantId};
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 

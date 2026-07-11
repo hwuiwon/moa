@@ -29,12 +29,9 @@ workspace-hack = { workspace = true }
 
 [dev-dependencies]
 base64.workspace = true
-insta.workspace = true
 moa-runtime-store.workspace = true
-moa-test-support.workspace = true
 reqwest.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
-tokio-test = "0.4"
 wiremock.workspace = true

@@ -2,10 +2,11 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::RlsContext;
+use moa_core::types::memory::RlsContext;
 use moa_core::{
-    ContextMessage, ContextProcessor, MemoryDigestConfig, MoaError, ProcessorOutput, Result,
-    StageApply, WorkingContext,
+    config::MemoryDigestConfig, error::MoaError, error::Result, traits::ContextProcessor,
+    traits::StageApply, types::context::ContextMessage, types::context::ProcessorOutput,
+    types::context::WorkingContext,
 };
 use moa_db::ScopedConn;
 use serde_json::json;
@@ -176,8 +177,10 @@ struct DigestRow {
 mod tests {
     use chrono::TimeZone;
     use moa_core::{
-        Channel, ContextProcessor, MemoryDigestConfig, ModelCapabilities, ModelId, SessionId,
-        SessionMeta, TokenPricing, ToolCallFormat, WorkingContext,
+        config::MemoryDigestConfig, traits::ContextProcessor, types::channel::Channel,
+        types::context::WorkingContext, types::identifiers::ModelId, types::identifiers::SessionId,
+        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
+        types::session::SessionMeta,
     };
     use sqlx::postgres::PgPoolOptions;
 

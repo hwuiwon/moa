@@ -10,7 +10,7 @@
 use clickhouse::Client;
 use clickhouse::test::{Mock, handlers};
 use moa_analytics::{AnalyticsClickHouseClient, AnalyticsService};
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use moa_core::wire::analytics::{
     AnalyticsAggregation, AnalyticsCell, AnalyticsDimension, AnalyticsFilter,
     AnalyticsFilterOperator, AnalyticsMeasure, AnalyticsQueryRequest,

@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use moa_core::traits::RuntimeCacheStore;
-use moa_core::{MoaError, Result};
+use moa_core::{error::MoaError, error::Result};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 use tokio::sync::Semaphore;

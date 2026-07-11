@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_core::{Credential, CredentialVault, MessagingConfig, MoaError};
+use moa_core::{
+    config::MessagingConfig, error::MoaError, traits::CredentialVault, types::model::Credential,
+};
 use moa_messaging::{
     POSTMARK_SERVER_API_TOKEN_ENV, POSTMARK_SERVER_TOKEN_SERVICE, POSTMARK_TEST_TOKEN,
     PostmarkEmailClient, PostmarkEmailMessage,
@@ -122,7 +124,7 @@ impl SingleCredentialVault {
 
 #[async_trait]
 impl CredentialVault for SingleCredentialVault {
-    async fn get(&self, service: &str, scope: &str) -> moa_core::Result<Credential> {
+    async fn get(&self, service: &str, scope: &str) -> moa_core::error::Result<Credential> {
         if service == POSTMARK_SERVER_TOKEN_SERVICE && scope == TEST_SCOPE {
             return Ok(self.credential.clone());
         }
@@ -131,13 +133,18 @@ impl CredentialVault for SingleCredentialVault {
         )))
     }
 
-    async fn set(&self, _service: &str, _scope: &str, _cred: Credential) -> moa_core::Result<()> {
+    async fn set(
+        &self,
+        _service: &str,
+        _scope: &str,
+        _cred: Credential,
+    ) -> moa_core::error::Result<()> {
         Err(MoaError::StorageError(
             "Postmark e2e vault is read-only".to_string(),
         ))
     }
 
-    async fn delete(&self, _service: &str, _scope: &str) -> moa_core::Result<bool> {
+    async fn delete(&self, _service: &str, _scope: &str) -> moa_core::error::Result<bool> {
         Err(MoaError::StorageError(
             "Postmark e2e vault is read-only".to_string(),
         ))
@@ -146,7 +153,7 @@ impl CredentialVault for SingleCredentialVault {
     async fn list(
         &self,
         _service_prefix: &str,
-    ) -> moa_core::Result<Vec<moa_core::StoredCredentialMetadata>> {
+    ) -> moa_core::error::Result<Vec<moa_core::traits::StoredCredentialMetadata>> {
         Err(MoaError::StorageError(
             "Postmark e2e vault does not support listing".to_string(),
         ))

@@ -14,12 +14,20 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
-    ActionRuleScope, Attachment, Channel, CompletionContent, CompletionRequest, CompletionResponse,
-    CompletionStream, Event, EventRecord, ExperienceRecord, LLMProvider, MoaConfig, MoaError,
-    ModelCapabilities, ModelId, ModelTier, SegmentEvidence, SegmentEvidenceKind,
-    SegmentEvidencePolarity, SegmentId, SegmentOutcome, SessionId, SessionMeta, SessionStatus,
-    StopReason, StoragePartitionId, TaskFacetSet, TaskFingerprint, TokenPricing, TokenUsage,
-    ToolCallFormat, ToolCallId, ToolOutput, UserId,
+    config::MoaConfig, error::MoaError, events::Event, traits::LLMProvider,
+    types::action_policy::ActionRuleScope, types::channel::Attachment, types::channel::Channel,
+    types::completion::CompletionContent, types::completion::CompletionRequest,
+    types::completion::CompletionResponse, types::completion::CompletionStream,
+    types::completion::StopReason, types::completion::TokenUsage,
+    types::events_stream::EventRecord, types::experience::ExperienceRecord,
+    types::experience::TaskFacetSet, types::experience::TaskFingerprint,
+    types::identifiers::ModelId, types::identifiers::SegmentId, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::identifiers::ToolCallId,
+    types::identifiers::UserId, types::model::ModelCapabilities, types::model::TokenPricing,
+    types::model::ToolCallFormat, types::provider::ModelTier,
+    types::segment_assessment::SegmentEvidence, types::segment_assessment::SegmentEvidenceKind,
+    types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
+    types::session::SessionMeta, types::session::SessionStatus, types::tools::ToolOutput,
 };
 use moa_providers::ModelRouter;
 use moa_session::PostgresSessionStore;
@@ -279,7 +287,7 @@ pub async fn seed_skill(
     test_db: &TestDb,
     scope: ActionRuleScope,
     markdown: &str,
-) -> moa_core::SkillMetadata {
+) -> moa_core::types::memory::SkillMetadata {
     let document = parse_skill_markdown(markdown).expect("parse seed skill");
     let rendered = render_skill_markdown(&document).expect("render seed skill");
     let registry = SkillRegistry::new(test_db.store().pool().clone());
@@ -422,7 +430,10 @@ impl LLMProvider for TestProvider {
         }
     }
 
-    async fn complete(&self, _request: CompletionRequest) -> moa_core::Result<CompletionStream> {
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
         let text = self
             .responses
             .lock()

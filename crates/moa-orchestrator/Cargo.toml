@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-integration = []
+integration = ["moa-test-support/orchestrator-fixture"]
 auth0 = ["moa-auth-providers/auth0"]
 provider-overrides = ["moa-providers/scripted-provider"]
 slack = ["moa-messaging/slack"]
@@ -64,6 +64,7 @@ moa-authz.workspace = true
 moa-authz-schema.workspace = true
 moa-auth-providers.workspace = true
 moa-agents.workspace = true
+moa-analytics.workspace = true
 moa-artifacts.workspace = true
 moa-brain = { workspace = true, features = ["eval-harness"] }
 moa-contacts = { workspace = true }
@@ -95,10 +96,8 @@ moa-providers = { workspace = true }
 moa-runtime-store = { workspace = true, features = ["redis"] }
 moa-session = { workspace = true }
 moa-skills = { workspace = true }
-rand.workspace = true
 restate-sdk.workspace = true
 reqwest.workspace = true
-regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 secrecy.workspace = true
@@ -117,9 +116,8 @@ workspace-hack = { workspace = true }
 
 [dev-dependencies]
 clickhouse = { workspace = true, features = ["test-util"] }
-moa-analytics.workspace = true
 moa-eval-core.workspace = true
-moa-test-support.workspace = true
+moa-test-support = { workspace = true, features = ["orchestrator-fixture"] }
 serde_canonical_json.workspace = true
 tempfile.workspace = true
 

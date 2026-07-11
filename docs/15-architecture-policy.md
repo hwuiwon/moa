@@ -13,6 +13,15 @@ type instead of defining a lookalike.
 shared errors, config, and trait surfaces. It does not depend on the memory
 subsystem.
 
+Consumers import category-owned paths such as
+`moa_core::types::identifiers::TenantId`,
+`moa_core::types::session::SessionMeta`, `moa_core::events::Event`,
+`moa_core::config::MoaConfig`, and `moa_core::traits::SessionStore`. The crate
+root allowlist is exactly `MoaError`, `Result`, and `WORKSPACE_ID`; wildcard,
+prelude, and compatibility re-exports are forbidden. Domain-specific ports
+such as knowledge discovery and contact OTP delivery stay in their owning
+domain crates rather than moving into `moa-core`.
+
 - IDs: `TenantId`, `StoragePartitionId` for storage partition internals, `UserId`, `SessionId`
 - Platform RLS context: `RlsContext`
 - Config and errors: `MoaConfig`, `MoaError`, `Result`
@@ -27,7 +36,7 @@ subsystem.
 
 | Crate | Owns |
 |---|---|
-| `moa-memory/types` | Memory-specific runtime scopes such as `MemoryScope` and `ScopeTier`, plus conversion into `moa-core::RlsContext` at memory boundaries |
+| `moa-memory/types` | Memory-specific runtime scopes such as `MemoryScope` and `ScopeTier`, plus conversion into `moa_core::types::memory::RlsContext` at memory boundaries |
 | `moa-memory/graph` | Relational graph-primary storage, `GraphStore`, `PostgresGraphStore`, node/edge labels, write intents, `PiiClass`, changelog rows, lexical index types |
 | `moa-memory/vector` | Embedding and vector-index abstractions, `VectorStore`, `PgvectorStore`, `TurbopufferStore`, vector query/result DTOs |
 | `moa-memory/pii` | Privacy classification and redaction clients, `PiiClassifier`, `PiiResult`, `PiiSpan`, `PiiCategory` |
@@ -98,7 +107,7 @@ Allowed responsibilities:
 | Application services | Use-case orchestration, business decisions, state transitions, idempotency, domain events, and calls to repositories or existing typed domain APIs |
 | Repositories | SQL, row mapping, transactional persistence helpers, storage errors, and Postgres-specific query optimization |
 | Domain crates | Stable domain models, traits, validation, policy types, reusable algorithms, and tests that should outlive the current Restate adapter |
-| Composition code | Constructing concrete dependencies, feature-gated bindings, background jobs, provider selection, and wiring in-process implementations into `OrchestratorCtx` |
+| Composition code | Constructing concrete dependencies in `RuntimeDeps`, feature-gated bindings, background jobs, provider selection, and binding in-process implementations through `build_endpoint` |
 
 Handlers may validate transport shape and reject unauthenticated or unauthorized
 requests, but policy decisions after that point belong in an application or
@@ -109,6 +118,17 @@ context, or own product policy. Domain crates should not depend on
 Do not add internal network services, RPC clients, or remote-service seams for
 this effort. A future deployed split must be replaceable from composition code
 without changing turn workflows, handler contracts, or domain tests.
+
+The architecture checker enforces dependency kinds as well as source layout:
+forbidden production directions cannot be hidden as ordinary build edges, and
+explicit dev-only exceptions remain counted. It also enforces zero raw
+`OrchestratorCtx::current_*` dependency reads in orchestrator objects, services,
+and workflows. That scoped rule does not assert repository-wide elimination of
+the context type.
+
+Postgres DDL has one declared owner per logical top-level table family in the
+`moa-migrations` manifest. New or removed tables must update that manifest in
+the same change; `xtask check-migrations` rejects missing and stale owners.
 
 ## Decision Records
 

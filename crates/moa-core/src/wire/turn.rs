@@ -1,7 +1,15 @@
 //! Turn workflow and session progress wire DTOs.
 
 use crate::traits::Identity;
-use crate::*;
+use crate::{
+    types::channel::Attachment,
+    types::contact::ContactRef,
+    types::events_stream::{EventRange, EventRecord},
+    types::identifiers::AgentSignalId,
+};
+use crate::{
+    types::tools::TrustedSandboxFileManifestRef, types::worker::state::WorkerProgressSummary,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 

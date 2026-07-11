@@ -1,6 +1,6 @@
 //! Wiremock offline counterpart for ZeroEntropy reranker live coverage.
 
-use moa_core::MoaError;
+use moa_core::error::MoaError;
 use moa_providers::{
     Reranker, ZEROENTROPY_DEFAULT_RERANK_MODEL, ZeroEntropyRerankLatency, ZeroEntropyReranker,
 };

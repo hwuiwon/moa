@@ -1,7 +1,10 @@
 //! DB integration coverage for contact-scoped privacy erasure.
 
 use chrono::Utc;
-use moa_core::{ContactId, RlsContext, StoragePartitionId, TenantId};
+use moa_core::{
+    types::contact::ContactId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::memory::RlsContext,
+};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,

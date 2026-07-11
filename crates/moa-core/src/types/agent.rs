@@ -309,16 +309,16 @@ impl AgentContext {
     }
 
     /// Parses the typed policy snapshot copied onto this session.
-    pub fn parsed_policy_snapshot(&self) -> crate::Result<AgentPolicySnapshot> {
+    pub fn parsed_policy_snapshot(&self) -> crate::error::Result<AgentPolicySnapshot> {
         if self.policy_snapshot.is_null() {
             return Ok(AgentPolicySnapshot::default());
         }
         serde_json::from_value(self.policy_snapshot.clone())
-            .map_err(|error| crate::MoaError::SerializationError(error.to_string()))
+            .map_err(|error| crate::error::MoaError::SerializationError(error.to_string()))
     }
 
     /// Returns whether this pinned context allows a tool call by name.
-    pub fn allows_tool(&self, tool_name: &str) -> crate::Result<bool> {
+    pub fn allows_tool(&self, tool_name: &str) -> crate::error::Result<bool> {
         Ok(self.parsed_policy_snapshot()?.tool_policy.allows(tool_name))
     }
 }

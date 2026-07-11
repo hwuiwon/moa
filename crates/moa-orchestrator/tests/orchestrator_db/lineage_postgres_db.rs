@@ -2,7 +2,10 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use moa_core::{MoaConfig, SessionId, StoragePartitionId, TenantId, UserId};
+use moa_core::{
+    config::MoaConfig, types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::identifiers::UserId,
+};
 use moa_lineage_core::{
     BackendIntrospection, LineageEvent, RetrievalLineage, RetrievalStage, StageTimings, TurnId,
 };

@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{MoaError, Result};
+use crate::{error::MoaError, error::Result};
 
 /// Connection and retention settings for the optional ClickHouse store.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

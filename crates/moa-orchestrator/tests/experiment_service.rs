@@ -17,7 +17,11 @@ use moa_core::wire::experiments::{
     ExperimentTrialStatusResponse, ExperimentTrialSummary, ExperimentTrialsRequest,
     ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
 };
-use moa_core::{ActionRuleScope, ModelId, SessionId, StoragePartitionId, TenantId};
+use moa_core::{
+    types::action_policy::ActionRuleScope, types::identifiers::ModelId,
+    types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId,
+};
 use moa_experiments::app::{
     ExperimentLearningProposalEvidence, build_experiment_learning_candidate,
 };
@@ -25,6 +29,7 @@ use moa_experiments::model::{
     ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentSimulatorConfig,
     ExperimentTarget, ExperimentTrialRecord, ExperimentTrialStatus, ExperimentVariant,
 };
+use moa_experiments::scores::{ScenarioScoreSummary, TrialScoreSummary};
 use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -425,7 +430,7 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
             mean_or_rate: Some(0.92),
         }],
     };
-    let trial_score_summary = moa_scoring::TrialScoreSummary {
+    let trial_score_summary = TrialScoreSummary {
         trial_uid: trials[0].trial_uid,
         trial_key: trials[0].trial_key.clone(),
         score_run_id: trials[0].score_run_id,
@@ -433,7 +438,7 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
         scenario_id: trials[0].scenario_id.clone(),
         rows: score_summary.rows.clone(),
     };
-    let scenario_score_summary = moa_scoring::ScenarioScoreSummary {
+    let scenario_score_summary = ScenarioScoreSummary {
         scenario_id: trials[0].scenario_id.clone(),
         rows: score_summary.rows.clone(),
     };

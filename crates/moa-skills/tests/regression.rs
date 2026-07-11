@@ -5,7 +5,7 @@
 #[path = "support/common.rs"]
 mod support;
 
-use moa_core::Event;
+use moa_core::events::Event;
 use moa_eval_core::{
     EvalResult, EvalStatus, Evaluator, OutputMatchEvaluator, TestSuite, TrajectoryMatchEvaluator,
     TrajectoryStep, score_is_failure,
@@ -132,7 +132,10 @@ async fn generated_regression_suite_runs_green_against_the_skill_canonical_traje
 /// Builds the skill's canonical eval result from its recorded session events:
 /// the final response text and the ordered successful tool trajectory the
 /// generated suite's expectations were derived from.
-fn canonical_result(test_case: String, events: &[moa_core::EventRecord]) -> EvalResult {
+fn canonical_result(
+    test_case: String,
+    events: &[moa_core::types::events_stream::EventRecord],
+) -> EvalResult {
     let response = events.iter().rev().find_map(|record| match &record.event {
         Event::BrainResponse { text, .. } => Some(text.clone()),
         _ => None,

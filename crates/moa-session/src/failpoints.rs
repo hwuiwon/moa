@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
-use moa_core::MoaError;
+use moa_core::error::MoaError;
 
 struct FailpointState {
     budget: u64,

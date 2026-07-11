@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use moa_core::{MoaConfig, RlsContext};
+use moa_core::{config::MoaConfig, types::memory::RlsContext};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
@@ -550,9 +550,9 @@ fn resolve_external_backend_choice(
 mod tests {
     use std::sync::Arc;
 
-    use moa_core::MoaConfig;
-    use moa_core::RlsContext;
-    use moa_core::TenantId;
+    use moa_core::config::MoaConfig;
+    use moa_core::types::identifiers::TenantId;
+    use moa_core::types::memory::RlsContext;
     use secrecy::SecretString;
     use sqlx::PgPool;
 

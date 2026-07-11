@@ -17,7 +17,10 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::Utc;
-use moa_core::{SessionId, StoragePartitionId, TenantId, UserId};
+use moa_core::{
+    types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::identifiers::UserId,
+};
 use moa_lineage_core::{
     BackendIntrospection, LineageEvent, RetrievalLineage, RetrievalStage, StageTimings,
 };
@@ -354,9 +357,9 @@ async fn lineage_writer_clickhouse_backend_splits_rows_from_scores_db() -> TestR
     let create_table = mock.add(clickhouse::test::handlers::record_ddl());
     let insert = mock.add(clickhouse::test::handlers::record::<RecordedClickHouseRow>());
 
-    let clickhouse_config = moa_core::ClickHouseConfig {
+    let clickhouse_config = moa_core::config::ClickHouseConfig {
         url: mock.url().to_string(),
-        ..moa_core::ClickHouseConfig::default()
+        ..moa_core::config::ClickHouseConfig::default()
     };
     let store = LineageStore::from_config(Some(&clickhouse_config), pool.clone());
 

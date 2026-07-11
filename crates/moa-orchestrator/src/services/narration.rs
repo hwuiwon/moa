@@ -15,17 +15,19 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use moa_core::config::SessionLimitsConfig;
 use moa_core::traits::Identity;
 use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::wire::turn::{SessionProgress, SessionProgressRequest, TurnPhase, TurnProgress};
 use moa_core::{
-    CompletionRequest, ContextMessage, Event, ModelId, NarrationSegment, NarrationSource,
-    SessionId, WorkerProgressSummary, WorkerState,
+    events::Event, types::completion::CompletionRequest, types::context::ContextMessage,
+    types::identifiers::ModelId, types::identifiers::SessionId,
+    types::worker::state::NarrationSegment, types::worker::state::NarrationSource,
+    types::worker::state::WorkerProgressSummary, types::worker::state::WorkerState,
 };
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::ctx::OrchestratorCtx;
 use crate::objects::session::SessionClient;
 use crate::restate_identity::with_identity_headers;
 use crate::services::llm_gateway::LLMGatewayImpl;
@@ -118,10 +120,16 @@ struct NarrationCompletion {
 pub(crate) async fn run_narration_job(
     ctx: &Context<'_>,
     gateway: &LLMGatewayImpl,
+    limits: Option<&SessionLimitsConfig>,
     request: NarrateSessionRequest,
 ) -> Result<(), HandlerError> {
-    let config = OrchestratorCtx::current_config();
-    let limits = &config.session_limits;
+    let Some(limits) = limits else {
+        tracing::warn!(
+            session_id = %request.session_id,
+            "progress narration limits are not configured; skipping job"
+        );
+        return Ok(());
+    };
     if !limits.progress_narration_enabled {
         tracing::debug!(
             session_id = %request.session_id,

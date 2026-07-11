@@ -1,6 +1,6 @@
 //! Structural anomaly signal for task-segment assessment.
 
-use moa_core::SegmentBaseline;
+use moa_core::types::segment_assessment::SegmentBaseline;
 
 /// Segment metrics compared against tenant and intent baselines.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,7 +53,7 @@ fn is_high_outlier(value: f64, mean: f64, stddev: Option<f64>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::SegmentBaseline;
+    use moa_core::types::segment_assessment::SegmentBaseline;
 
     use super::{SegmentMetrics, score};
 

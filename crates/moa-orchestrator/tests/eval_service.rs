@@ -1,6 +1,6 @@
 //! Eval service helper coverage.
 
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use moa_core::wire::eval::{
     EvalRunResponse, EvalRunStatus, EvalRunStatusResponse, EvalSuiteListDocument,
 };

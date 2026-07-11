@@ -6,10 +6,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    Channel, ContactId, ContactRef, ContactVerificationState, ContextMessage, Event, EventFilter,
-    EventRange, EventRecord, ModelCapabilities, ModelId, Result, SequenceNum, SessionActorRef,
-    SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary, TenantId,
-    TokenPricing, ToolCallFormat, WorkingContext,
+    error::Result, events::Event, traits::SessionStore, types::channel::Channel,
+    types::contact::ContactId, types::contact::ContactRef,
+    types::contact::ContactVerificationState, types::contact::SessionActorRef,
+    types::context::ContextMessage, types::context::WorkingContext,
+    types::events_stream::EventFilter, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::events_stream::SequenceNum,
+    types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
+    types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
+    types::session::SessionFilter, types::session::SessionMeta, types::session::SessionStatus,
+    types::session::SessionSummary,
 };
 use moa_test_support::fixtures::contact_ref_fixture;
 use serde_json::{Value, json};
@@ -124,7 +130,7 @@ impl WorkingContextFixture {
             contact: Some(contact_ref(tenant_id, contact_id)),
             created_by: Some(SessionActorRef::Contact { id: contact_id }),
             contact_promoted_from_id: None,
-            agent_context: Some(moa_core::AgentContext::system_default()),
+            agent_context: Some(moa_core::types::agent::AgentContext::system_default()),
             total_input_tokens: 0,
             total_input_tokens_uncached: 0,
             total_input_tokens_cache_write: 0,

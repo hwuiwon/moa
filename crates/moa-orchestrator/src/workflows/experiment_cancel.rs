@@ -11,8 +11,8 @@
 //! handlers. Cancelling the child makes the workflow's own durable wait resolve as
 //! `Cancelled`, so it stops promptly instead of waiting out the target timeout.
 
-use moa_core::SessionId;
 use moa_core::traits::{Identity, IdentityType};
+use moa_core::types::identifiers::SessionId;
 use restate_sdk::context::Request;
 use restate_sdk::prelude::*;
 use uuid::Uuid;

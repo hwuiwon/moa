@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::error::{MoaError, Result};
 
-use super::ToolInvocation;
+use super::completion::ToolInvocation;
 
 /// Stable kind for one built-in procedure tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,7 +225,7 @@ mod tests {
         ProcedureTool, ProcedureToolKind, RunProcedureToolInput, is_procedure_tool_name,
         procedure_tool_schemas,
     };
-    use crate::ToolInvocation;
+    use crate::types::completion::ToolInvocation;
 
     fn invocation(name: &str, input: serde_json::Value) -> ToolInvocation {
         ToolInvocation {

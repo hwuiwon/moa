@@ -2,14 +2,16 @@
 
 use moa_core::wire::turn::TurnPhase;
 use moa_core::{
-    Channel, MessageContent, MessageId, OutboundMessage, SessionChannelBinding,
-    SessionChannelBindingId, SessionId, SessionStatus, traits::ChannelAdapter,
+    traits::ChannelAdapter, types::channel::Channel, types::channel::MessageContent,
+    types::channel::MessageId, types::channel::OutboundMessage,
+    types::channel::SessionChannelBinding, types::channel::SessionChannelBindingId,
+    types::identifiers::SessionId, types::session::SessionStatus,
 };
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use crate::ctx::OrchestratorCtx;
+use moa_session::PostgresSessionStore;
 
 const K_PROGRESS_LIVE_DELIVERY_ENABLED: &str = "progress_live_delivery_enabled";
 const K_PROGRESS_STATUS_MESSAGE: &str = "progress_status_message";
@@ -42,8 +44,19 @@ pub(crate) async fn maybe_deliver(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     summary: &str,
+    session_store: Arc<PostgresSessionStore>,
+    channel_adapters: &HashMap<Channel, Arc<dyn ChannelAdapter>>,
 ) -> Result<(), HandlerError> {
-    if let Err(error) = try_deliver_status(ctx, session_id, SessionStatus::Running, summary).await {
+    if let Err(error) = try_deliver_status(
+        ctx,
+        session_id,
+        SessionStatus::Running,
+        summary,
+        session_store,
+        channel_adapters,
+    )
+    .await
+    {
         tracing::warn!(
             session_id = %session_id,
             error = ?error,
@@ -58,9 +71,20 @@ pub(crate) async fn maybe_deliver_terminal(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     phase: TurnPhase,
+    session_store: Arc<PostgresSessionStore>,
+    channel_adapters: &HashMap<Channel, Arc<dyn ChannelAdapter>>,
 ) -> Result<(), HandlerError> {
     let (status, summary) = terminal_status_and_summary(phase);
-    if let Err(error) = try_deliver_status(ctx, session_id, status, summary).await {
+    if let Err(error) = try_deliver_status(
+        ctx,
+        session_id,
+        status,
+        summary,
+        session_store,
+        channel_adapters,
+    )
+    .await
+    {
         tracing::warn!(
             session_id = %session_id,
             error = ?error,
@@ -75,19 +99,23 @@ async fn try_deliver_status(
     session_id: SessionId,
     status: SessionStatus,
     summary: &str,
+    session_store: Arc<PostgresSessionStore>,
+    channel_adapters: &HashMap<Channel, Arc<dyn ChannelAdapter>>,
 ) -> Result<(), HandlerError> {
     if !live_delivery_enabled(ctx).await? {
         return Ok(());
     }
 
-    let Some(binding) = load_active_channel_binding(ctx, session_id).await? else {
+    let Some(binding) = load_active_channel_binding(ctx, session_store, session_id).await? else {
         return Ok(());
     };
     if progress_delivery_mode(binding.channel_ref.channel()) != ProgressDeliveryMode::LiveStatus {
         return Ok(());
     }
 
-    let Some(adapter) = OrchestratorCtx::current_channel_adapter(binding.channel_ref.channel())
+    let Some(adapter) = channel_adapters
+        .get(&binding.channel_ref.channel())
+        .cloned()
     else {
         return Ok(());
     };
@@ -178,9 +206,9 @@ async fn live_delivery_enabled(ctx: &WorkflowContext<'_>) -> Result<bool, Handle
 
 async fn load_active_channel_binding(
     ctx: &WorkflowContext<'_>,
+    store: Arc<PostgresSessionStore>,
     session_id: SessionId,
 ) -> Result<Option<SessionChannelBinding>, HandlerError> {
-    let store = OrchestratorCtx::current_session_store();
     Ok(ctx
         .run(move || {
             let store = store.clone();
@@ -257,8 +285,9 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        ChannelCapabilities, ChannelEvent, ChannelRef, MoaError, Result as MoaResult,
-        SessionChannelBindingId,
+        error::MoaError, error::Result as MoaResult, types::channel::ChannelCapabilities,
+        types::channel::ChannelEvent, types::channel::ChannelRef,
+        types::channel::SessionChannelBindingId,
     };
     use tokio::sync::mpsc;
 

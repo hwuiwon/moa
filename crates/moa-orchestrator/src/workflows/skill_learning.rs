@@ -4,11 +4,13 @@ use std::sync::Arc;
 
 use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::{
-    Event, EventRange, EventRecord, EventType, MoaConfig, MoaError, Result as MoaResult, SegmentId,
-    SessionId, SessionStore as _,
+    config::MoaConfig, error::MoaError, error::Result as MoaResult, events::Event,
+    events::EventType, traits::SessionStore as _, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::identifiers::SegmentId,
+    types::identifiers::SessionId,
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
-use moa_providers::ModelRouter;
+use moa_providers::{ModelRouter, ProviderRegistry};
 use moa_session::PostgresSessionStore;
 use moa_skills::distiller::{
     ExperienceDistillationInput, SkillProposalGeneration,
@@ -18,7 +20,6 @@ use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
 use crate::services::session_store::RestateSessionStoreClient;
 
 const FALLBACK_EVENT_TAIL_LIMIT: usize = 200;
@@ -59,7 +60,28 @@ pub trait SkillLearning {
 }
 
 /// Concrete `SkillLearning` workflow implementation.
-pub struct SkillLearningImpl;
+#[derive(Clone)]
+pub struct SkillLearningImpl {
+    session_store: Arc<PostgresSessionStore>,
+    config: Arc<MoaConfig>,
+    providers: Arc<ProviderRegistry>,
+}
+
+impl SkillLearningImpl {
+    /// Creates a skill-learning workflow with its storage, config, and provider dependencies.
+    #[must_use]
+    pub fn new(
+        session_store: Arc<PostgresSessionStore>,
+        config: Arc<MoaConfig>,
+        providers: Arc<ProviderRegistry>,
+    ) -> Self {
+        Self {
+            session_store,
+            config,
+            providers,
+        }
+    }
+}
 
 impl SkillLearning for SkillLearningImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -70,11 +92,10 @@ impl SkillLearning for SkillLearningImpl {
     ) -> Result<Json<SkillLearningReport>, HandlerError> {
         annotate_restate_handler_span("SkillLearning", "run");
         let request = request.into_inner();
-        let runtime = OrchestratorCtx::current();
-        let store = runtime.session_store_backend();
-        let config = runtime.config().as_ref().clone();
-        let router = match runtime
-            .provider_registry()
+        let store = self.session_store.clone();
+        let config = self.config.as_ref().clone();
+        let router = match self
+            .providers
             .model_router_for_config(&config)
             .map(Arc::new)
         {
@@ -239,7 +260,7 @@ async fn load_experience_record(
     store: &PostgresSessionStore,
     session_id: SessionId,
     experience_id: Uuid,
-) -> MoaResult<moa_core::ExperienceRecord> {
+) -> MoaResult<moa_core::types::experience::ExperienceRecord> {
     store
         .get_experience_record(session_id, experience_id)
         .await?

@@ -4,10 +4,22 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use moa_core::{
-    ChannelRef, ContactId, ContactVerificationState, Event, EventFilter, EventRange, ModelId,
-    SessionActorRef, SessionChannelBindingId, SessionId, SessionMeta, SessionStatus, SessionStore,
-    StoragePartitionId, TenantId,
+    events::Event,
+    traits::SessionStore,
     traits::{Identity, IdentityType, SessionChannelBindingUpdate},
+    types::channel::ChannelRef,
+    types::channel::SessionChannelBindingId,
+    types::contact::ContactId,
+    types::contact::ContactVerificationState,
+    types::contact::SessionActorRef,
+    types::events_stream::EventFilter,
+    types::events_stream::EventRange,
+    types::identifiers::ModelId,
+    types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId,
+    types::session::SessionMeta,
+    types::session::SessionStatus,
 };
 use moa_session::testing;
 use moa_test_support::fixtures::{contact_ref_fixture, session_meta_fixture};

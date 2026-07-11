@@ -3,7 +3,7 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use chrono::Utc;
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use moa_knowledge::{
     domain::{
         ConnectionStatus, CreateLinkTokenRequest, FetchRecordContentRequest, KnowledgeConnection,

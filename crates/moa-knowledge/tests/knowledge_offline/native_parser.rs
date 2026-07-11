@@ -1,7 +1,7 @@
 //! Native parser coverage for deterministic local structures and liteparse layout mapping.
 
 use chrono::Utc;
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use moa_knowledge::{
     chunking::elements_to_blocks,
     domain::{ConnectionStatus, KnowledgeConnection, KnowledgeObject, ObjectStatus, ParseInput},

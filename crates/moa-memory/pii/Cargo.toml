@@ -9,7 +9,6 @@ async-trait.workspace = true
 moa-core = { workspace = true }
 moa-db = { workspace = true }
 moa-memory-graph = { workspace = true }
-moa-memory-types = { workspace = true }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -10,7 +10,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::Utc;
-use moa_core::{SessionId, StoragePartitionId, TenantId, UserId};
+use moa_core::{
+    types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::identifiers::UserId,
+};
 use moa_lineage_core::{
     BackendIntrospection, ContextChunk, ContextLineage, GenerationLineage, GenerationTokenUsage,
     GraphIntrospection, PgvectorIntrospection, RetrievalLineage, RetrievalStage, StageTimings,

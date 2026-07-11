@@ -14,12 +14,12 @@
 
 use chrono::{DateTime, Duration, Utc};
 use moa_analytics::{AnalyticsClickHouseClient, AnalyticsService};
-use moa_core::ClickHouseConfig;
+use moa_core::config::ClickHouseConfig;
 use moa_core::wire::analytics::{
     AnalyticsAggregation, AnalyticsCell, AnalyticsDimension, AnalyticsMeasure,
     AnalyticsQueryRequest,
 };
-use moa_core::{TenantId, wire::analytics::AnalyticsQueryResponse};
+use moa_core::{types::identifiers::TenantId, wire::analytics::AnalyticsQueryResponse};
 use moa_orchestrator::analytics_export::AnalyticsExporter;
 use serde_json::json;
 use sqlx::PgPool;

@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use moa_core::{MoaError, Result, ToolOutput};
+use moa_core::{error::MoaError, error::Result, types::tools::ToolOutput};
 use serde::Deserialize;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
@@ -202,7 +202,7 @@ impl BashToolInput {
 mod tests {
     use std::time::Duration;
 
-    use moa_core::ToolOutput;
+    use moa_core::types::tools::ToolOutput;
 
     use super::{MAX_CAPTURED_STREAM_BYTES, process_output};
 

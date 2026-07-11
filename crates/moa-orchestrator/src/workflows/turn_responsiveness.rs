@@ -2,7 +2,10 @@
 
 use moa_core::config::SessionLimitsConfig;
 use moa_core::wire::turn::TurnComplexityClass;
-use moa_core::{Event, EventRecord, ToolContent, ToolInvocation, ToolOutput};
+use moa_core::{
+    events::Event, types::completion::ToolInvocation, types::events_stream::EventRecord,
+    types::tools::ToolContent, types::tools::ToolOutput,
+};
 
 /// Cheap, deterministic inputs used to classify one turn request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -693,7 +696,11 @@ mod tests {
     use chrono::Utc;
     use moa_core::config::SessionLimitsConfig;
     use moa_core::wire::turn::TurnComplexityClass;
-    use moa_core::{Attachment, Event, EventRecord, SessionId, ToolCallId, ToolInvocation};
+    use moa_core::{
+        events::Event, types::channel::Attachment, types::completion::ToolInvocation,
+        types::events_stream::EventRecord, types::identifiers::SessionId,
+        types::identifiers::ToolCallId,
+    };
     use uuid::Uuid;
 
     use super::{

@@ -11,11 +11,15 @@ use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
 use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::registry::{ArtifactRegistry, ArtifactScopeParts, StoredArtifactRevision};
 use moa_core::{
-    ActionRuleScope, AgentActionPolicy, AgentContext, AgentGuardrailPolicy,
-    AgentGuardrailStagePolicy, AgentKnowledgePolicy, AgentKnowledgeScopeMode, AgentModelPolicy,
-    AgentPolicySnapshot, AgentRevisionLock, AgentSkillPolicy, AgentSkillPolicyMode,
-    AgentToolPolicy, AgentToolPolicyMode, LockedToolRef, MoaError, ModelId,
-    ResolvedArtifactRevisionRef, Result,
+    error::MoaError, error::Result, types::action_policy::ActionRuleScope,
+    types::agent::AgentActionPolicy, types::agent::AgentContext,
+    types::agent::AgentKnowledgePolicy, types::agent::AgentKnowledgeScopeMode,
+    types::agent::AgentModelPolicy, types::agent::AgentPolicySnapshot,
+    types::agent::AgentRevisionLock, types::agent::AgentSkillPolicy,
+    types::agent::AgentSkillPolicyMode, types::agent::AgentToolPolicy,
+    types::agent::AgentToolPolicyMode, types::agent::LockedToolRef,
+    types::agent::ResolvedArtifactRevisionRef, types::guardrails::AgentGuardrailPolicy,
+    types::guardrails::AgentGuardrailStagePolicy, types::identifiers::ModelId,
 };
 use moa_db::ScopedConn;
 use serde::Serialize;
@@ -641,7 +645,7 @@ fn map_sqlx_error(error: sqlx::Error) -> MoaError {
 #[cfg(test)]
 mod tests {
     use moa_artifacts::agent::{AgentPurpose, ToolPolicy};
-    use moa_core::GuardrailMode;
+    use moa_core::types::guardrails::GuardrailMode;
 
     use super::*;
 

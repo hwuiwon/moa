@@ -16,8 +16,9 @@ async fn brain_turn_session_search_finds_user_message_db() {
     let _guard = BRAIN_TURN_SESSION_SEARCH_DB_LOCK.lock().await;
 
     use moa_core::{
-        Event, EventFilter, EventType, ModelId, SessionActorRef, SessionMeta, SessionStore as _,
-        TenantId,
+        events::Event, events::EventType, traits::SessionStore as _,
+        types::contact::SessionActorRef, types::events_stream::EventFilter,
+        types::identifiers::ModelId, types::identifiers::TenantId, types::session::SessionMeta,
     };
 
     let (store, database_url, schema_name) = moa_session::testing::create_isolated_test_store()
@@ -84,7 +85,7 @@ async fn run_brain_turn_recovers_old_artifact_via_session_search() {
         created_by: Some(SessionActorRef::Contact {
             id: test_contact_id(),
         }),
-        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     store.create_session(session.clone()).await.unwrap();
@@ -141,7 +142,7 @@ async fn run_brain_turn_recovers_old_artifact_via_session_search() {
                 )
                 .with_truncated(true)
                 .with_original_output_tokens(Some(8_000))
-                .with_artifact(Some(moa_core::ToolOutputArtifact {
+                .with_artifact(Some(moa_core::types::tools::ToolOutputArtifact {
                     combined,
                     estimated_tokens: 8_000,
                     line_count: count_lines(&old_output_text),
@@ -161,8 +162,8 @@ async fn run_brain_turn_recovers_old_artifact_via_session_search() {
             Event::BrainResponse {
                 text: "The noisy command ran successfully.".to_string(),
                 thought_signature: None,
-                model: moa_core::ModelId::new("claude-sonnet-4-6"),
-                model_tier: moa_core::ModelTier::Main,
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
+                model_tier: moa_core::types::provider::ModelTier::Main,
                 input_tokens_uncached: 20,
                 input_tokens_cache_write: 0,
                 input_tokens_cache_read: 0,
@@ -191,8 +192,8 @@ async fn run_brain_turn_recovers_old_artifact_via_session_search() {
                 Event::BrainResponse {
                     text: filler_text(&format!("Follow-up assistant turn {index}"), 1_200),
                     thought_signature: None,
-                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
-                    model_tier: moa_core::ModelTier::Main,
+                    model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
+                    model_tier: moa_core::types::provider::ModelTier::Main,
                     input_tokens_uncached: 24,
                     input_tokens_cache_write: 0,
                     input_tokens_cache_read: 0,
@@ -307,7 +308,7 @@ async fn auto_mode_repeated_tool_runs_without_persisted_action_policy_rules() {
             created_by: Some(SessionActorRef::Contact {
                 id: test_contact_id(),
             }),
-            model: moa_core::ModelId::new("claude-sonnet-4-6"),
+            model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         })
         .await

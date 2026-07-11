@@ -6,8 +6,8 @@
 use anyhow::{Context, Result};
 use moa_authz::{FgaClient, FgaConfig};
 use moa_authz_schema::TupleOp;
-use moa_core::SessionId;
 use moa_core::traits::Identity;
+use moa_core::types::identifiers::SessionId;
 use serde_json::json;
 
 /// Grant the test identity tenant-admin access directly in live OpenFGA.

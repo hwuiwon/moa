@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use moa_core::{
-    MoaConfig, MoaError, Result, SessionAttachmentBackend, SessionAttachmentId, SessionId, TenantId,
+    config::MoaConfig, config::SessionAttachmentBackend, error::MoaError, error::Result,
+    types::identifiers::SessionAttachmentId, types::identifiers::SessionId,
+    types::identifiers::TenantId,
 };
 use object_store::{
     ObjectStore, PutPayload, aws::AmazonS3Builder, gcp::GoogleCloudStorageBuilder, path::Path,

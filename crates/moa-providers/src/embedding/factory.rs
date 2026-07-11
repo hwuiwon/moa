@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use moa_core::traits::EmbeddingProvider;
-use moa_core::{MoaConfig, MoaError, Result};
+use moa_core::{config::MoaConfig, error::MoaError, error::Result};
 
 use super::cohere::{COHERE_DEFAULT_MODEL, cohere_input_type_for_role};
 use super::gemini::GEMINI_V2_MODEL;
@@ -312,7 +312,7 @@ fn resolve_embedding_model(
 
 #[cfg(test)]
 mod tests {
-    use moa_core::MoaConfig;
+    use moa_core::config::MoaConfig;
 
     use super::{
         COHERE_DEFAULT_MODEL, EmbeddingProviderKind, GEMINI_V2_MODEL, ZEROENTROPY_DEFAULT_MODEL,

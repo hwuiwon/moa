@@ -5,9 +5,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ContactId, ContactRef, ContactVerificationState, Event, EventFilter, EventRange, EventRecord,
-    ModelId, Result, SequenceNum, SessionActorRef, SessionFilter, SessionId, SessionMeta,
-    SessionStatus, SessionStore, SessionSummary, TenantId,
+    error::Result, events::Event, traits::SessionStore, types::contact::ContactId,
+    types::contact::ContactRef, types::contact::ContactVerificationState,
+    types::contact::SessionActorRef, types::events_stream::EventFilter,
+    types::events_stream::EventRange, types::events_stream::EventRecord,
+    types::events_stream::SequenceNum, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::TenantId, types::session::SessionFilter, types::session::SessionMeta,
+    types::session::SessionStatus, types::session::SessionSummary,
 };
 use moa_test_support::fixtures::contact_ref_fixture;
 use tokio::sync::Mutex;

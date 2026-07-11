@@ -1,14 +1,15 @@
 //! Restate service for tenant security-audit administration.
 
-use moa_authz::require_authz_with_delegation;
+use moa_authz::{FgaClient, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::handlers::authz_shim::{
+    require_configured_fga_client, require_identity, translate_authz_error,
+};
 use crate::identity_admin::tenants as tenant_admin;
 
 /// Request for configuring a tenant audit destination.
@@ -47,8 +48,19 @@ pub trait Tenants {
 }
 
 /// Concrete tenant administration implementation.
-#[derive(Clone, Default)]
-pub struct TenantsImpl;
+#[derive(Clone)]
+pub struct TenantsImpl {
+    pool: sqlx::PgPool,
+    fga_client: Option<FgaClient>,
+}
+
+impl TenantsImpl {
+    /// Creates the tenant service with its persistence and authorization dependencies.
+    #[must_use]
+    pub fn new(pool: sqlx::PgPool, fga_client: Option<FgaClient>) -> Self {
+        Self { pool, fga_client }
+    }
+}
 
 impl Tenants for TenantsImpl {
     #[tracing::instrument(skip(self, ctx, tenant_id))]
@@ -60,8 +72,8 @@ impl Tenants for TenantsImpl {
         annotate_restate_handler_span("Tenants", "ensure_signing_key");
         let identity = require_identity(&ctx)?;
         let tenant_id = tenant_id.into_inner();
-        require_tenant_admin(&identity, tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        require_tenant_admin(self.fga_client.clone(), &identity, tenant_id).await?;
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -82,8 +94,8 @@ impl Tenants for TenantsImpl {
         annotate_restate_handler_span("Tenants", "rotate_signing_key");
         let identity = require_identity(&ctx)?;
         let tenant_id = tenant_id.into_inner();
-        require_tenant_admin(&identity, tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        require_tenant_admin(self.fga_client.clone(), &identity, tenant_id).await?;
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -105,8 +117,8 @@ impl Tenants for TenantsImpl {
         let identity = require_identity(&ctx)?;
         let request = request.into_inner();
         validate_destination(&request)?;
-        require_tenant_admin(&identity, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        require_tenant_admin(self.fga_client.clone(), &identity, request.tenant_id).await?;
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move { tenant_admin::set_audit_destination(pool, request).await })
@@ -116,10 +128,11 @@ impl Tenants for TenantsImpl {
 }
 
 async fn require_tenant_admin(
+    fga_client: Option<FgaClient>,
     identity: &moa_core::traits::Identity,
     tenant_id: Uuid,
 ) -> Result<(), HandlerError> {
-    let fga = require_fga_client()?;
+    let fga = require_configured_fga_client(fga_client)?;
     require_authz_with_delegation(
         &fga,
         identity,

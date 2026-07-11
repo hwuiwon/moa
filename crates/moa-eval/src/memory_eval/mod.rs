@@ -40,8 +40,7 @@ pub use embeddings::{
 };
 pub use generator::{
     EmbeddingInput, EmbeddingInputKind, GeneratedMemoryEvalCorpus, generate_memory_eval_corpus,
-    generate_memory_eval_corpus_with_style, read_embedding_inputs_jsonl,
-    write_embedding_inputs_jsonl, write_memory_eval_corpus,
+    read_embedding_inputs_jsonl, write_embedding_inputs_jsonl, write_memory_eval_corpus,
 };
 pub use gold::{
     GoldIngestTurnReport, GoldNodeRecord, GoldNodeSnapshot, GoldPiiStatus, GoldResolutionReport,

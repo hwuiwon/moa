@@ -4,9 +4,17 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use moa_core::{
-    Channel, ChannelEvent, ChannelSessionCommand, InboundMessage, MessageContent, MoaError,
-    OutboundMessage, Result, SessionChannelBindingResolution, SessionId,
+    error::MoaError,
+    error::Result,
     traits::{ChannelAdapter, Identity, IdentityType, SessionChannelStore},
+    types::channel::Channel,
+    types::channel::ChannelEvent,
+    types::channel::ChannelSessionCommand,
+    types::channel::InboundMessage,
+    types::channel::MessageContent,
+    types::channel::OutboundMessage,
+    types::channel::SessionChannelBindingResolution,
+    types::identifiers::SessionId,
     wire::turn::{CancelResponse, SessionProgress, SessionProgressRequest},
 };
 use reqwest::Client;
@@ -175,7 +183,7 @@ fn identity_for_resolution(resolution: &SessionChannelBindingResolution) -> Iden
 async fn send_reply(
     adapter: &dyn ChannelAdapter,
     inbound: &InboundMessage,
-    channel_ref: &moa_core::ChannelRef,
+    channel_ref: &moa_core::types::channel::ChannelRef,
     text: String,
 ) -> Result<()> {
     adapter
@@ -323,8 +331,14 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        ChannelActor, ChannelCapabilities, ChannelRef, ContactId, MessageId, SessionChannelBinding,
-        SessionChannelBindingId, TenantId,
+        types::channel::ChannelActor,
+        types::channel::ChannelCapabilities,
+        types::channel::ChannelRef,
+        types::channel::MessageId,
+        types::channel::SessionChannelBinding,
+        types::channel::SessionChannelBindingId,
+        types::contact::ContactId,
+        types::identifiers::TenantId,
         wire::turn::{SessionSnapshot, TurnComplexityClass, TurnPhase, TurnProgress},
     };
     use uuid::Uuid;

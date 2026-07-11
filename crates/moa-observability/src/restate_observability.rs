@@ -4,7 +4,10 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
-use moa_core::{CoordinationSnapshot, SessionId, SessionMeta, TraceContext, TurnReplaySnapshot};
+use moa_core::{
+    coordination_counters::CoordinationSnapshot, session_replay::TurnReplaySnapshot,
+    types::identifiers::SessionId, types::observability::TraceContext, types::session::SessionMeta,
+};
 use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -386,7 +389,10 @@ fn synthetic_session_span_context(session_id: SessionId) -> SpanContext {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::{Channel, ModelId, SessionId, SessionMeta, TenantId};
+    use moa_core::{
+        types::channel::Channel, types::identifiers::ModelId, types::identifiers::SessionId,
+        types::identifiers::TenantId, types::session::SessionMeta,
+    };
     use opentelemetry::Value;
     use opentelemetry::trace::SpanKind;
 

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_core::StoragePartitionId;
+use moa_core::types::identifiers::StoragePartitionId;
 use moa_lineage_core::{
     Citation, LineageEvent, LineageSink, ScoreRecord, ScoreSource, ScoreTarget, ScoreValue, TurnId,
     VerifierResult,

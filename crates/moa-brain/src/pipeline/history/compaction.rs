@@ -1,6 +1,9 @@
 //! History-stage checkpoint generation trigger.
 
-use moa_core::{Event, EventRange, EventRecord, ModelTask, Result, WorkingContext};
+use moa_core::{
+    error::Result, events::Event, types::context::WorkingContext, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::provider::ModelTask,
+};
 
 use crate::compaction::{latest_checkpoint_state, maybe_compact_events, watermark_may_compact};
 
@@ -216,7 +219,7 @@ mod tests {
                 events_summarized: 8,
                 token_count: 12,
                 model: ModelId::new("claude-sonnet-4-6"),
-                model_tier: moa_core::ModelTier::Auxiliary,
+                model_tier: moa_core::types::provider::ModelTier::Auxiliary,
                 input_tokens: 60,
                 output_tokens: 20,
                 cost_cents: 1,

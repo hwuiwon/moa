@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use moa_core::{Event, SessionStore, ToolInvocation};
+use moa_core::{events::Event, traits::SessionStore, types::completion::ToolInvocation};
 use moa_hands::ToolRouter;
 use moa_session::{PostgresSessionStore, testing};
 use serde_json::json;

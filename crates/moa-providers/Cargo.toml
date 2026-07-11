@@ -21,10 +21,8 @@ futures-util.workspace = true
 metrics.workspace = true
 opentelemetry.workspace = true
 reqwest.workspace = true
-secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
@@ -34,6 +32,5 @@ workspace-hack = { workspace = true }
 [dev-dependencies]
 insta.workspace = true
 moa-runtime-store = { workspace = true, features = ["redis"] }
-moa-test-support = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 wiremock.workspace = true

@@ -24,8 +24,9 @@ use moa_core::wire::skills::{
     SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
 };
 use moa_core::{
-    ActionRuleScope, Event, EventRange, EventRecord, ModelId, SessionId, SessionStatus,
-    StoragePartitionId,
+    events::Event, types::action_policy::ActionRuleScope, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::session::SessionStatus,
 };
 use moa_skills::package::{SkillPackage, SkillPackageFile};
 use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
@@ -591,7 +592,7 @@ async fn create_session(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    meta: &moa_core::SessionMeta,
+    meta: &moa_core::types::session::SessionMeta,
 ) -> Result<SessionId> {
     let create_request = client.post(service_url(ingress, "SessionStore", "create_session"));
     let session_id = with_identity(create_request, identity)

@@ -1,11 +1,17 @@
 //! Policy evaluation and action-review rendering for tool invocations.
 
 use moa_core::{
-    ActionClass, ActionEnvelope, ActionPolicyEffect, ActionPolicyRule, ActionReviewField,
-    ActionReviewFileDiff, ActionReviewPreview, ActionRuleScope, IdempotencyClass, MoaError,
-    ProcedureToolKind, Result, RiskLevel, SessionActorRef, SessionMeta, ToolCallId, ToolDefinition,
-    ToolDiffStrategy, ToolInputShape, ToolInvocation, ToolPolicyInput, ToolPolicySpec, UserId,
-    WorkerId, is_procedure_tool_name,
+    error::MoaError, error::Result, types::action_policy::ActionClass,
+    types::action_policy::ActionEnvelope, types::action_policy::ActionPolicyEffect,
+    types::action_policy::ActionPolicyRule, types::action_policy::ActionReviewField,
+    types::action_policy::ActionReviewFileDiff, types::action_policy::ActionReviewPreview,
+    types::action_policy::ActionRuleScope, types::action_policy::RiskLevel,
+    types::completion::ToolInvocation, types::contact::SessionActorRef,
+    types::identifiers::ToolCallId, types::identifiers::UserId,
+    types::procedure_tools::ProcedureToolKind, types::procedure_tools::is_procedure_tool_name,
+    types::session::SessionMeta, types::tools::IdempotencyClass, types::tools::ToolDefinition,
+    types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolPolicyInput,
+    types::tools::ToolPolicySpec, types::worker::state::WorkerId,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -243,7 +249,7 @@ impl ToolRouter {
 
     fn describe_invocation(
         &self,
-        definition: &moa_core::ToolDefinition,
+        definition: &moa_core::types::tools::ToolDefinition,
         invocation: &ToolInvocation,
     ) -> Result<ToolPolicyInput> {
         let normalized_input = normalized_input_for(
@@ -330,8 +336,10 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, Result, SessionMeta, TenantId,
-        ToolInvocation, UserId,
+        error::Result, types::action_policy::ActionPolicyEffect,
+        types::action_policy::ActionPolicyRule, types::action_policy::ActionRuleScope,
+        types::completion::ToolInvocation, types::identifiers::TenantId,
+        types::identifiers::UserId, types::session::SessionMeta,
     };
     use moa_security::ActionPolicyRuleStore;
     use serde_json::json;

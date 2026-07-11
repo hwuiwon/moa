@@ -1,8 +1,10 @@
 //! Pure contact identity helpers.
 
 use moa_core::{
-    AgentSessionSelection, Channel, ContactId, ContactPointKind, ContactTokenClaims,
-    ContactVerificationChallengeId, ContactVerificationState, TenantId,
+    types::agent::AgentSessionSelection, types::channel::Channel, types::contact::ContactId,
+    types::contact::ContactPointKind, types::contact::ContactTokenClaims,
+    types::contact::ContactVerificationChallengeId, types::contact::ContactVerificationState,
+    types::identifiers::TenantId,
 };
 use rand::Rng;
 use uuid::Uuid;
@@ -124,7 +126,7 @@ pub fn require_contact_scope(claims: &ContactTokenClaims, required_scope: &str) 
 /// Requires a contact token to allow the requested session id.
 pub fn require_contact_session_permission(
     claims: &ContactTokenClaims,
-    session_id: Option<moa_core::SessionId>,
+    session_id: Option<moa_core::types::identifiers::SessionId>,
 ) -> Result<()> {
     let Some(session_id) = session_id else {
         return Ok(());
@@ -300,8 +302,9 @@ pub fn parse_contact_point_kind(value: &str) -> Result<ContactPointKind> {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        AgentSessionSelection, Channel, ContactId, ContactPointKind, ContactTokenClaims,
-        ContactVerificationState, TenantId,
+        types::agent::AgentSessionSelection, types::channel::Channel, types::contact::ContactId,
+        types::contact::ContactPointKind, types::contact::ContactTokenClaims,
+        types::contact::ContactVerificationState, types::identifiers::TenantId,
     };
 
     use super::{

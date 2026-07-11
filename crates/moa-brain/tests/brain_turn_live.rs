@@ -9,8 +9,9 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
-    Event, EventRange, LLMProvider, MoaConfig, Result, SessionActorRef, SessionMeta, SessionStore,
-    TenantId,
+    config::MoaConfig, error::Result, events::Event, traits::LLMProvider, traits::SessionStore,
+    types::contact::SessionActorRef, types::events_stream::EventRange,
+    types::identifiers::TenantId, types::session::SessionMeta,
 };
 use moa_providers::{build_provider_from_config, resolve_provider_selection};
 use moa_session::testing;
@@ -66,7 +67,7 @@ async fn live_brain_turn_completes() -> Result<()> {
             query_rewrite_llm_provider: None,
             identity_prompt_override: None,
             tool_schemas: Vec::new(),
-            lineage: Arc::new(moa_core::NullLineageHandle),
+            lineage: Arc::new(moa_core::traits::NullLineageHandle),
         },
     );
 

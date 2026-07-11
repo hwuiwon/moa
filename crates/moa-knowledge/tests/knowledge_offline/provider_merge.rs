@@ -4,7 +4,7 @@ use base64::{Engine as _, engine::general_purpose};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use moa_knowledge::{
     Error,
     domain::{

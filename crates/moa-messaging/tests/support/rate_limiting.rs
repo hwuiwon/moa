@@ -54,13 +54,13 @@ pub async fn mock_always_200() -> Arc<MockServer> {
 }
 
 /// Posts one synthetic channel send request to a mock server.
-pub async fn post_send(server: Arc<MockServer>) -> moa_core::Result<MessagingSendResponse> {
+pub async fn post_send(server: Arc<MockServer>) -> moa_core::error::Result<MessagingSendResponse> {
     let response = reqwest::Client::new()
         .post(format!("{}/send", server.uri()))
         .body("{}")
         .send()
         .await
-        .map_err(|error| moa_core::MoaError::ProviderError(error.to_string()))?;
+        .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?;
     let status = response.status().as_u16();
     let retry_after = response
         .headers()
@@ -71,7 +71,7 @@ pub async fn post_send(server: Arc<MockServer>) -> moa_core::Result<MessagingSen
     let body = response
         .text()
         .await
-        .map_err(|error| moa_core::MoaError::ProviderError(error.to_string()))?;
+        .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?;
     let mut normalized = MessagingSendResponse::new(status, body);
     if let Some(retry_after) = retry_after {
         normalized = normalized

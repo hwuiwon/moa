@@ -5,9 +5,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use moa_core::{
-    CacheReport, CompletionRequest, CompletionResponse, ContextSnapshot, Event, EventRecord,
-    LLMProvider, Result, SessionActorRef, SessionId, SessionMeta, SessionStore, TokenPricing,
-    TraceContext, WorkingContext, record_pipeline_compile_duration, stable_prefix_fingerprint,
+    error::Result, events::Event, session_replay::record_pipeline_compile_duration,
+    traits::LLMProvider, traits::SessionStore, types::completion::CompletionRequest,
+    types::completion::CompletionResponse, types::contact::SessionActorRef,
+    types::context::WorkingContext, types::events_stream::EventRecord,
+    types::identifiers::SessionId, types::model::TokenPricing, types::observability::CacheReport,
+    types::observability::TraceContext, types::observability::stable_prefix_fingerprint,
+    types::session::SessionMeta, types::snapshot::ContextSnapshot,
 };
 use moa_lineage_core::TurnId;
 use moa_observability::{
@@ -247,7 +251,7 @@ pub(super) fn record_turn_span_metrics(
 }
 
 pub(super) fn calculate_response_cost_cents(
-    response: &moa_core::CompletionResponse,
+    response: &moa_core::types::completion::CompletionResponse,
     pricing: &TokenPricing,
 ) -> u32 {
     let usage = response.token_usage();
@@ -286,7 +290,7 @@ pub(super) fn build_cache_report(
         request
             .model
             .clone()
-            .unwrap_or_else(|| moa_core::ModelId::new("")),
+            .unwrap_or_else(|| moa_core::types::identifiers::ModelId::new("")),
         stable_prefix_reused,
         0,
         0,
@@ -312,7 +316,7 @@ pub(super) fn complete_cache_report(
 }
 
 pub(super) async fn append_event(
-    session_store: &Arc<dyn moa_core::SessionStore>,
+    session_store: &Arc<dyn moa_core::traits::SessionStore>,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
     session_id: SessionId,
     event: Event,
@@ -341,7 +345,10 @@ pub(super) async fn append_event(
 
 #[cfg(test)]
 mod tests {
-    use moa_core::{CompletionResponse, StopReason, TokenPricing};
+    use moa_core::{
+        types::completion::CompletionResponse, types::completion::StopReason,
+        types::model::TokenPricing,
+    };
 
     use super::calculate_response_cost_cents;
 
@@ -351,8 +358,8 @@ mod tests {
             text: "done".to_string(),
             content: Vec::new(),
             stop_reason: StopReason::EndTurn,
-            model: moa_core::ModelId::new("gpt-5.4"),
-            usage: moa_core::TokenUsage {
+            model: moa_core::types::identifiers::ModelId::new("gpt-5.4"),
+            usage: moa_core::types::completion::TokenUsage {
                 input_tokens_uncached: 50_000,
                 input_tokens_cache_write: 0,
                 input_tokens_cache_read: 50_000,

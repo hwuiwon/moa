@@ -215,7 +215,7 @@ mod tests {
             MapStore {
                 records: BTreeMap::from([(key, record)]),
             },
-            "cargo run -p xtask -- record-memory-extractions --corpus target/memory-eval/pr-natural",
+            "cargo run -p xtask --features eval-tools -- record-memory-extractions --corpus target/memory-eval/pr-natural",
         );
 
         let facts = extractor.extract(&[chunk]).await.expect("replay facts");
@@ -255,7 +255,7 @@ mod tests {
             MapStore {
                 records: BTreeMap::from([(key, record)]),
             },
-            "cargo run -p xtask -- record-memory-extractions --corpus target/memory-eval/pr-natural",
+            "cargo run -p xtask --features eval-tools -- record-memory-extractions --corpus target/memory-eval/pr-natural",
         );
 
         let error = extractor
@@ -299,7 +299,7 @@ mod tests {
             MapStore {
                 records: BTreeMap::from([(key, record)]),
             },
-            "cargo run -p xtask -- record-memory-extractions --corpus target/memory-eval/pr-natural",
+            "cargo run -p xtask --features eval-tools -- record-memory-extractions --corpus target/memory-eval/pr-natural",
         );
 
         let facts = extractor
@@ -338,7 +338,7 @@ mod tests {
             MapStore {
                 records: BTreeMap::from([(key, record)]),
             },
-            "cargo run -p xtask -- record-memory-extractions --corpus target/memory-eval/pr-natural",
+            "cargo run -p xtask --features eval-tools -- record-memory-extractions --corpus target/memory-eval/pr-natural",
         );
 
         let facts = extractor.extract(&[chunk]).await.expect("replay facts");
@@ -373,7 +373,7 @@ mod tests {
             MapStore {
                 records: BTreeMap::from([(key, record)]),
             },
-            "cargo run -p xtask -- record-memory-extractions --corpus target/memory-eval/pr-natural",
+            "cargo run -p xtask --features eval-tools -- record-memory-extractions --corpus target/memory-eval/pr-natural",
         );
 
         let facts = extractor.extract(&[chunk]).await.expect("replay facts");

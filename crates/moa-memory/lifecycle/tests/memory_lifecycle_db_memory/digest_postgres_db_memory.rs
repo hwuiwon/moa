@@ -3,9 +3,13 @@
 use chrono::{TimeZone, Utc};
 use moa_brain::pipeline::digest::DigestProcessor;
 use moa_core::{
-    Channel, ContactId, ContactRef, ContactVerificationState, ContextMessage, ContextProcessor,
-    MemoryDigestConfig, ModelCapabilities, ModelId, SessionId, SessionMeta, StoragePartitionId,
-    TenantId, TokenPricing, ToolCallFormat, WorkingContext,
+    config::MemoryDigestConfig, traits::ContextProcessor, types::channel::Channel,
+    types::contact::ContactId, types::contact::ContactRef,
+    types::contact::ContactVerificationState, types::context::ContextMessage,
+    types::context::WorkingContext, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
+    types::session::SessionMeta,
 };
 use moa_memory_lifecycle::rebuild_digests;
 use moa_test_support::fixtures::{stable_uuid_from_label, tenant_id_from_storage_partition};

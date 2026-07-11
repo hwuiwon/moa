@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::{future::Future, pin::Pin, result::Result as StdResult};
 
 use chrono::Utc;
-use moa_core::ActionRuleScope;
-use moa_core::RlsContext;
+use moa_core::types::action_policy::ActionRuleScope;
+use moa_core::types::memory::RlsContext;
 use moa_core::wire::eval::{
     EvalCompareRequest, EvalCompareResponse, EvalCompareRow, EvalDatasetListRequest,
     EvalDatasetListResponse, EvalDatasetRegisterRequest, EvalDatasetRegisterResponse,
@@ -16,10 +16,12 @@ use moa_core::wire::eval::{
     EvalScoreSummaryRow, EvalScoresRequest, EvalScoresResponse, EvalSuiteListRequest,
     EvalSuiteListResponse, EvalSuiteSummary,
 };
-use moa_core::{MoaConfig, StoragePartitionId, TenantId};
+use moa_core::{
+    config::MoaConfig, types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+};
 use moa_db::ScopedConn;
-use moa_eval::EvalEngine;
-use moa_eval_core::{AgentConfig, EvalRun as CoreEvalRun, TestSuite, build_eval_plan};
+use moa_eval::{EvalEngine, build_eval_plan};
+use moa_eval_core::{AgentConfig, EvalRun as CoreEvalRun, TestSuite};
 use moa_eval_core::{EngineOptions, EvaluatorOptions, build_evaluators, evaluate_run};
 use moa_eval_core::{EvalResult, ReplayConfig, token_f1};
 use moa_eval_core::{EvalStatus, ExpectedOutput, TestCase};
@@ -43,7 +45,6 @@ use sqlx::{PgPool, Row};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
 use crate::handlers::authz_shim::authorize_tenant_operator_or_admin;
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
@@ -124,8 +125,19 @@ pub trait Eval {
 }
 
 /// Concrete hosted eval service implementation.
-#[derive(Clone, Default)]
-pub struct EvalImpl;
+#[derive(Clone)]
+pub struct EvalImpl {
+    pool: PgPool,
+    config: Arc<MoaConfig>,
+}
+
+impl EvalImpl {
+    /// Creates the hosted eval service with its storage and runtime configuration.
+    #[must_use]
+    pub fn new(pool: PgPool, config: Arc<MoaConfig>) -> Self {
+        Self { pool, config }
+    }
+}
 
 impl Eval for EvalImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -137,7 +149,7 @@ impl Eval for EvalImpl {
         annotate_restate_handler_span("Eval", "plan");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let config = OrchestratorCtx::current_config().as_ref().clone();
+        let config = self.config.as_ref().clone();
 
         Ok(ctx
             .run(|| async move {
@@ -179,7 +191,7 @@ impl Eval for EvalImpl {
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
 
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         let acceptance_request = request.clone();
         let accepted = ctx
             .run(|| async move {
@@ -229,7 +241,7 @@ impl Eval for EvalImpl {
         let request = request.into_inner();
         let run_id = request.run_id;
         let tenant_id = request.request.tenant_id;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         let existing = ctx
             .run(move || async move {
                 load_eval_run_execution_state(&pool, tenant_id, run_id)
@@ -266,7 +278,7 @@ impl Eval for EvalImpl {
             )));
         }
 
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         ctx.run(move || async move {
             mark_eval_run_running(&pool, tenant_id, run_id)
                 .await
@@ -275,13 +287,14 @@ impl Eval for EvalImpl {
         .name("eval_run_mark_running")
         .await?;
 
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
+        let config = self.config.as_ref().clone();
         Ok(ctx
             .run(move || async move {
                 let response = normalize_eval_run_response(
                     tenant_id,
                     run_id,
-                    execute_eval_run_request_isolated(run_id, request.request).await,
+                    execute_eval_run_request_isolated(config, run_id, request.request).await,
                 );
                 persist_terminal_eval_run_response(&pool, &response)
                     .await
@@ -301,7 +314,7 @@ impl Eval for EvalImpl {
         annotate_restate_handler_span("Eval", "run_status");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         Ok(ctx
             .run(move || async move {
                 load_eval_run_status_response(&pool, request.tenant_id, request.run_id)
@@ -322,7 +335,7 @@ impl Eval for EvalImpl {
         annotate_restate_handler_span("Eval", "datasets_register");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -344,7 +357,7 @@ impl Eval for EvalImpl {
         annotate_restate_handler_span("Eval", "datasets_list");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -367,9 +380,8 @@ impl Eval for EvalImpl {
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
 
-        let runtime = OrchestratorCtx::current();
-        let config = runtime.config().as_ref().clone();
-        let pool = runtime.graph_pool();
+        let config = self.config.as_ref().clone();
+        let pool = self.pool.clone();
 
         run_replay_request_isolated(config, pool, request)
             .await
@@ -386,7 +398,7 @@ impl Eval for EvalImpl {
         annotate_restate_handler_span("Eval", "scores");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -416,7 +428,7 @@ impl Eval for EvalImpl {
         annotate_restate_handler_span("Eval", "compare");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -832,7 +844,7 @@ async fn load_eval_run_status_response(
     Ok(response)
 }
 
-fn scoped_conn_error(error: moa_core::MoaError) -> EvalServiceError {
+fn scoped_conn_error(error: moa_core::error::MoaError) -> EvalServiceError {
     EvalServiceError::Runtime {
         message: error.to_string(),
     }
@@ -881,9 +893,13 @@ fn eval_run_status_is_terminal(status: EvalRunStatus) -> bool {
 }
 
 /// Runs an already-authorized eval request inside the hosted eval worker.
-pub async fn execute_eval_run_request(run_id: Uuid, request: EvalRunRequest) -> EvalRunResponse {
+pub async fn execute_eval_run_request(
+    config: MoaConfig,
+    run_id: Uuid,
+    request: EvalRunRequest,
+) -> EvalRunResponse {
     let tenant_id = request.tenant_id;
-    match Box::pin(execute_eval_run_request_inner(run_id, request)).await {
+    match Box::pin(execute_eval_run_request_inner(config, run_id, request)).await {
         Ok(response) => response,
         Err(error) => failed_eval_run_response(tenant_id, run_id, error.to_string()),
     }
@@ -891,12 +907,13 @@ pub async fn execute_eval_run_request(run_id: Uuid, request: EvalRunRequest) -> 
 
 /// Runs an already-authorized eval request on an isolated current-thread runtime.
 pub async fn execute_eval_run_request_isolated(
+    config: MoaConfig,
     run_id: Uuid,
     request: EvalRunRequest,
 ) -> EvalRunResponse {
     let tenant_id = request.tenant_id;
     let join = tokio::task::spawn_blocking(move || {
-        block_on_current_thread(Box::pin(execute_eval_run_request(run_id, request)))
+        block_on_current_thread(Box::pin(execute_eval_run_request(config, run_id, request)))
     })
     .await;
     match join {
@@ -964,6 +981,7 @@ fn suite_list_response(
 }
 
 async fn execute_eval_run_request_inner(
+    config: MoaConfig,
     run_id: Uuid,
     request: EvalRunRequest,
 ) -> Result<EvalRunResponse, EvalServiceError> {
@@ -983,7 +1001,7 @@ async fn execute_eval_run_request_inner(
         },
     )?;
     let engine = EvalEngine::new(
-        OrchestratorCtx::current_config().as_ref().clone(),
+        config,
         EngineOptions {
             parallel: usize::try_from(request.parallel)
                 .map_err(|_| EvalServiceError::IntegerTooLarge { field: "parallel" })?,

@@ -167,7 +167,7 @@ jobs:
         env:
           MOA_RUN_NETWORK_MEMORY_BENCHMARKS: "1"
         run: >-
-          cargo run -p xtask --locked --release -- fetch-memory-benchmark
+          cargo run -p xtask --locked --release --features eval-tools -- fetch-memory-benchmark
           --dataset personamem-32k
           --revision 73dfd752d477d0c466cd441f1669397f5726d7ab
           --output target/memory-benchmarks/personamem-32k
@@ -178,7 +178,7 @@ jobs:
         env:
           MOA_RUN_NETWORK_MEMORY_BENCHMARKS: "1"
         run: >-
-          cargo run -p xtask --locked --release -- fetch-memory-benchmark
+          cargo run -p xtask --locked --release --features eval-tools -- fetch-memory-benchmark
           --dataset longmemeval-s-cleaned
           --revision 98d7416c24c778c2fee6e6f3006e7a073259d48f
           --output target/memory-benchmarks/longmemeval-s-cleaned
@@ -202,7 +202,7 @@ jobs:
           BUDGET_USD: ${{ inputs.budget_usd }}
         run: |
           set -euo pipefail
-          cargo run -p xtask --locked --release -- run-external-memory-eval \
+          cargo run -p xtask --locked --release --features eval-tools -- run-external-memory-eval \
             --dataset personamem-32k \
             --data target/memory-benchmarks/personamem-32k \
             --package-manifest target/memory-benchmarks/personamem-32k/package.json \
@@ -240,7 +240,7 @@ jobs:
           BUDGET_USD: ${{ inputs.budget_usd }}
         run: |
           set -euo pipefail
-          cargo run -p xtask --locked --release -- run-external-memory-eval \
+          cargo run -p xtask --locked --release --features eval-tools -- run-external-memory-eval \
             --dataset longmemeval-s-cleaned \
             --data target/memory-benchmarks/longmemeval-s-cleaned \
             --package-manifest target/memory-benchmarks/longmemeval-s-cleaned/package.json \

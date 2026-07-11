@@ -8,7 +8,7 @@ use std::sync::{
 use base64::{Engine as _, engine::general_purpose};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use moa_knowledge::{
     Error,
     chunking::{ChunkingConfig, blocks_to_chunks, elements_to_blocks},

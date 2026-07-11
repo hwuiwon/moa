@@ -2,8 +2,8 @@
 
 use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::TenantId;
 use moa_core::traits::Identity;
+use moa_core::types::identifiers::TenantId;
 use restate_sdk::prelude::{HandlerError, TerminalError};
 
 use crate::ctx::{self, IdentityHeaderError, OrchestratorCtx, RequestHeaders};
@@ -22,8 +22,14 @@ pub fn require_identity(ctx: &impl RequestHeaders) -> Result<Identity, HandlerEr
 
 /// Return the process-wide FGA client or fail closed.
 pub fn require_fga_client() -> Result<FgaClient, HandlerError> {
-    OrchestratorCtx::current()
-        .fga_client()
+    require_configured_fga_client(OrchestratorCtx::current().fga_client())
+}
+
+/// Return an explicitly configured FGA client or fail closed.
+pub fn require_configured_fga_client(
+    fga_client: Option<FgaClient>,
+) -> Result<FgaClient, HandlerError> {
+    fga_client
         .ok_or_else(|| TerminalError::new_with_code(503, "authorization engine unavailable").into())
 }
 

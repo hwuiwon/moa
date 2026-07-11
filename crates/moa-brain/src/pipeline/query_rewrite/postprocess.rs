@@ -3,8 +3,9 @@
 use std::collections::HashSet;
 
 use moa_core::{
-    MoaError, QueryRewriteResult, Result, RewriteReason, RewriteSource, TaskFacetSet,
-    WorkingContext,
+    error::MoaError, error::Result, types::context::WorkingContext,
+    types::experience::TaskFacetSet, types::query_rewrite::QueryRewriteResult,
+    types::query_rewrite::RewriteReason, types::query_rewrite::RewriteSource,
 };
 use serde::Deserialize;
 

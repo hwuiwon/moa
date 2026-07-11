@@ -13,8 +13,8 @@
 
 use std::time::Duration;
 
-use moa_core::SessionActorRef;
 use moa_core::traits::{Identity, IdentityType};
+use moa_core::types::contact::SessionActorRef;
 
 use super::*;
 use crate::services::llm_gateway::LLMGatewayClient;
@@ -40,12 +40,11 @@ const COORDINATOR_SOURCE_ID: &str = "coordinator";
 pub(super) async fn ensure_narration_tick_scheduled(
     ctx: &ObjectContext<'_>,
     state: &mut SessionVoState,
+    limits: &SessionLimitsConfig,
 ) -> Result<(), HandlerError> {
     if state.narration_tick_outstanding {
         return Ok(());
     }
-    let config = OrchestratorCtx::current_config();
-    let limits = &config.session_limits;
     if !limits.progress_narration_enabled || limits.progress_narration_interval_ms == 0 {
         return Ok(());
     }
@@ -71,6 +70,7 @@ pub(super) async fn ensure_narration_tick_scheduled(
 pub(super) async fn run_narration_tick(
     ctx: &ObjectContext<'_>,
     generation: u64,
+    limits: &SessionLimitsConfig,
 ) -> Result<(), HandlerError> {
     let mut state = Tracked::<SessionVoState>::load(ctx).await?;
 
@@ -79,8 +79,6 @@ pub(super) async fn run_narration_tick(
         return Ok(());
     }
 
-    let config = OrchestratorCtx::current_config();
-    let limits = &config.session_limits;
     if !limits.progress_narration_enabled {
         state.narration_tick_outstanding = false;
         state.persist(ctx);
@@ -444,7 +442,9 @@ mod tests {
     use chrono::{DateTime, Utc};
     use moa_core::traits::IdentityType;
     use moa_core::{
-        ContactId, ContactRef, ContactVerificationState, SessionActorRef, SessionMeta, TenantId,
+        types::contact::ContactId, types::contact::ContactRef,
+        types::contact::ContactVerificationState, types::contact::SessionActorRef,
+        types::identifiers::TenantId, types::session::SessionMeta,
     };
     use uuid::Uuid;
 

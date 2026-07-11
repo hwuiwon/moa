@@ -1,6 +1,9 @@
 //! Administrative maintenance wire DTOs.
 
-use crate::*;
+use crate::{
+    types::identifiers::{SessionId, TenantId},
+    types::session::{CheckpointHandle, CheckpointInfo},
+};
 use serde::{Deserialize, Serialize};
 
 /// Request payload for promoting a tenant vector backend.

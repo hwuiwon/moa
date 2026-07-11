@@ -1,7 +1,7 @@
 //! Model-backed fact extraction through the existing ingestion extractor seam.
 
 use async_trait::async_trait;
-use moa_core::MoaConfig;
+use moa_core::config::MoaConfig;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -351,8 +351,10 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        CompletionRequest, CompletionResponse, CompletionStream, LLMProvider, ModelCapabilities,
-        ModelId, StopReason, TokenPricing, TokenUsage, ToolCallFormat,
+        traits::LLMProvider, types::completion::CompletionRequest,
+        types::completion::CompletionResponse, types::completion::CompletionStream,
+        types::completion::StopReason, types::completion::TokenUsage, types::identifiers::ModelId,
+        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
 
     use super::*;
@@ -391,7 +393,7 @@ mod tests {
         async fn complete(
             &self,
             _request: CompletionRequest,
-        ) -> moa_core::Result<CompletionStream> {
+        ) -> moa_core::error::Result<CompletionStream> {
             Ok(CompletionStream::from_response(CompletionResponse {
                 text: self.response.clone(),
                 content: Vec::new(),

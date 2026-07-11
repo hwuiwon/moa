@@ -7,9 +7,11 @@ use uuid::Uuid;
 
 use moa_core::wire::analytics::LearningCandidateSummary;
 use moa_core::{
-    CacheDailyMetric, ContactId, LearningCandidateStatus, LearningCandidateType, LearningRiskClass,
-    MoaError, Result, SessionAnalyticsSummary, SessionId, SessionTurnMetric,
-    TenantAnalyticsSummary, TenantId, ToolCallSummary,
+    analytics::CacheDailyMetric, analytics::SessionAnalyticsSummary, analytics::SessionTurnMetric,
+    analytics::TenantAnalyticsSummary, analytics::ToolCallSummary, error::MoaError, error::Result,
+    types::contact::ContactId, types::experience::LearningCandidateStatus,
+    types::experience::LearningCandidateType, types::experience::LearningRiskClass,
+    types::identifiers::SessionId, types::identifiers::TenantId,
 };
 use moa_db::ScopedConn;
 

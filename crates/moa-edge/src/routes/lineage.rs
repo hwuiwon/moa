@@ -14,7 +14,10 @@ use moa_core::wire::lineage::{
     LineageExplainRequest, LineageExplainResponse, LineageQueryOrder, LineageQueryRequest,
     LineageQueryResponse, LineageRecordView, LineageVerifyRequest, LineageVerifyResponse,
 };
-use moa_core::{RlsContext, SessionId, StoragePartitionId, TenantId, UserId};
+use moa_core::{
+    types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::identifiers::UserId, types::memory::RlsContext,
+};
 use moa_lineage_audit::admin as lineage_audit_admin;
 use moa_lineage_audit::{AuditRootSigner, LocalAuditRootSigner, SigningKey};
 use moa_lineage_sink::admin as lineage_sink_admin;

@@ -5,12 +5,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::{RlsContext, SessionId, StoragePartitionId, UserId, traits::EmbeddingProvider};
+use moa_core::{types::memory::RlsContext, types::identifiers::SessionId, types::identifiers::StoragePartitionId, types::identifiers::UserId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_eval::memory_eval::{
     BootstrapConfig, CorpusProfile, GoldPiiStatus, GoldResolutionStatus, LedgerFact,
     MemoryRetrievalEvalOptions, RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K,
-    SyntheticSession, SyntheticTurn, build_cached_embedding_fixtures, generate_memory_eval_corpus,
+    SyntheticSession, SyntheticTurn, TranscriptStyle, build_cached_embedding_fixtures,
+    generate_memory_eval_corpus,
     read_gold_nodes_jsonl, resolve_gold_nodes, run_memory_retrieval_eval,
     tenant_id_from_storage_partition_id, write_embeddings_jsonl, write_gold_nodes_jsonl,
     write_memory_eval_corpus,
@@ -49,7 +50,7 @@ impl EmbeddingProvider for GoldResolutionEmbedder {
         VECTOR_DIMENSION
     }
 
-    async fn embed(&self, texts: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+    async fn embed(&self, texts: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
         Ok(texts
             .iter()
             .map(|text| gold_resolution_vector(text))

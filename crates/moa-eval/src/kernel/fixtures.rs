@@ -215,7 +215,9 @@ mod tests {
         .expect("write fixture");
         let store = FixtureStore::<TestRecord>::read_jsonl(&path, "v1")
             .expect("read fixture")
-            .with_remediation_command("cargo run -p xtask -- record-memory-extractions");
+            .with_remediation_command(
+                "cargo run -p xtask --features eval-tools -- record-memory-extractions",
+            );
 
         let error = store.get("def").expect_err("missing key should fail");
 
@@ -223,7 +225,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("cargo run -p xtask -- record-memory-extractions")
+                .contains("cargo run -p xtask --features eval-tools -- record-memory-extractions")
         );
     }
 

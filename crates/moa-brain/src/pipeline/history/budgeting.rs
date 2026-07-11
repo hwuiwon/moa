@@ -1,6 +1,9 @@
 //! Token-budget allocation for history replay.
 
-use moa_core::{ContextMessage, MessageRole, estimate_text_tokens};
+use moa_core::{
+    types::context::ContextMessage, types::context::MessageRole,
+    types::context::estimate_text_tokens,
+};
 
 pub(super) fn keep_budgeted_older_messages(
     stable_prefix_tokens: usize,
@@ -51,7 +54,7 @@ pub(super) fn keep_budgeted_older_messages(
 
 #[cfg(test)]
 mod tests {
-    use moa_core::ContextMessage;
+    use moa_core::types::context::ContextMessage;
 
     use super::keep_budgeted_older_messages;
 
@@ -77,7 +80,7 @@ mod tests {
             "current turn",
         ]
         .iter()
-        .map(|text| moa_core::estimate_text_tokens(text))
+        .map(|text| moa_core::types::context::estimate_text_tokens(text))
         .sum::<usize>();
 
         let (kept, _) = keep_budgeted_older_messages(0, &older, &recent, 3, budget);

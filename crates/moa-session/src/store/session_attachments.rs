@@ -1,7 +1,10 @@
 //! Session attachment storage for user-visible message uploads.
 
 use async_trait::async_trait;
-use moa_core::{Attachment, SessionAttachmentId, SessionAttachmentStore};
+use moa_core::{
+    traits::SessionAttachmentStore, types::channel::Attachment,
+    types::identifiers::SessionAttachmentId,
+};
 use sha2::{Digest, Sha256};
 
 use super::*;

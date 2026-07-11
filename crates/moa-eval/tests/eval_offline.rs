@@ -1,5 +1,8 @@
 //! Consolidated offline integration tests for the eval crate.
 
+#[path = "memory_eval_support/common.rs"]
+mod common;
+
 #[path = "eval_offline/evaluators.rs"]
 mod evaluators;
 #[path = "eval_offline/external_memory.rs"]
@@ -16,5 +19,9 @@ mod external_memory_longmemeval;
 mod external_memory_personamem;
 #[path = "eval_offline/loader.rs"]
 mod loader;
+#[path = "eval_offline/memory_eval_corpus.rs"]
+mod memory_eval_corpus;
 #[path = "eval_offline/memory_eval_judge.rs"]
 mod memory_eval_judge;
+#[path = "eval_offline/memory_eval_metrics.rs"]
+mod memory_eval_metrics;

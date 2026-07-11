@@ -1,6 +1,9 @@
 use chrono::Utc;
 use moa_artifacts::simulation::ExperimentTargetKind;
-use moa_core::{ActionRuleScope, Attachment, ModelId, SessionId, TenantId};
+use moa_core::{
+    types::action_policy::ActionRuleScope, types::channel::Attachment, types::identifiers::ModelId,
+    types::identifiers::SessionId, types::identifiers::TenantId,
+};
 use moa_experiments::model::{
     ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentSimulatorConfig,
     ExperimentTarget, ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason,

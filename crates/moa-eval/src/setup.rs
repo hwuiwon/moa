@@ -10,9 +10,12 @@ use moa_brain::{
     pipeline::identity::DEFAULT_IDENTITY_PROMPT,
 };
 use moa_core::{
-    ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, ExperienceStore, LLMProvider,
-    LearningCandidateStore, LineageHandle, MoaConfig, SegmentStore, SessionActorRef, SessionMeta,
-    SessionStore, StoragePartitionId, TenantId, UserId,
+    config::MoaConfig, traits::ExperienceStore, traits::LLMProvider,
+    traits::LearningCandidateStore, traits::LineageHandle, traits::SegmentStore,
+    traits::SessionStore, types::action_policy::ActionPolicyEffect,
+    types::action_policy::ActionPolicyRule, types::action_policy::ActionRuleScope,
+    types::contact::SessionActorRef, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::identifiers::UserId, types::session::SessionMeta,
 };
 use moa_eval_core::{
     ActionPolicyOverride, ActionPolicyRuleOverride, AgentConfig, EvalError, InstructionOverride,
@@ -49,7 +52,7 @@ pub struct AgentEnvironment {
     /// Temporary workspace directory used as the sandbox root.
     pub workspace_dir: PathBuf,
     /// Persisted session identifier for the run.
-    pub session_id: moa_core::SessionId,
+    pub session_id: moa_core::types::identifiers::SessionId,
     /// Storage partition identifier used inside the run.
     pub storage_partition_id: StoragePartitionId,
     /// User identifier used inside the run.
@@ -484,7 +487,7 @@ fn expand_local_path(path: impl AsRef<Path>) -> Result<PathBuf> {
     let raw = path.to_string_lossy();
     if let Some(relative) = raw.strip_prefix("~/") {
         let home = std::env::var("HOME")
-            .map_err(|_| EvalError::Moa(moa_core::MoaError::HomeDirectoryNotFound))?;
+            .map_err(|_| EvalError::Moa(moa_core::error::MoaError::HomeDirectoryNotFound))?;
         return Ok(PathBuf::from(home).join(relative));
     }
 
@@ -497,8 +500,10 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        CompletionRequest, CompletionResponse, CompletionStream, LLMProvider, MoaConfig,
-        ModelCapabilities, StopReason, TokenPricing, TokenUsage, ToolCallFormat,
+        config::MoaConfig, traits::LLMProvider, types::completion::CompletionRequest,
+        types::completion::CompletionResponse, types::completion::CompletionStream,
+        types::completion::StopReason, types::completion::TokenUsage,
+        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
     use tempfile::tempdir;
 
@@ -528,7 +533,7 @@ mod tests {
 
         fn capabilities(&self) -> ModelCapabilities {
             ModelCapabilities {
-                model_id: moa_core::ModelId::new("mock-model"),
+                model_id: moa_core::types::identifiers::ModelId::new("mock-model"),
                 context_window: 32_000,
                 max_output: 1_024,
                 supports_tools: true,
@@ -550,12 +555,14 @@ mod tests {
         async fn complete(
             &self,
             _request: CompletionRequest,
-        ) -> moa_core::Result<CompletionStream> {
+        ) -> moa_core::error::Result<CompletionStream> {
             Ok(CompletionStream::from_response(CompletionResponse {
                 text: "ok".to_string(),
-                content: vec![moa_core::CompletionContent::Text("ok".to_string())],
+                content: vec![moa_core::types::completion::CompletionContent::Text(
+                    "ok".to_string(),
+                )],
                 stop_reason: StopReason::EndTurn,
-                model: moa_core::ModelId::new("mock-model"),
+                model: moa_core::types::identifiers::ModelId::new("mock-model"),
                 usage: token_usage(1, 1),
                 duration_ms: 1,
                 thought_signature: None,

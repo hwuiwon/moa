@@ -1,6 +1,6 @@
 //! Trace-context span attribute helpers.
 
-use moa_core::{SessionActorRef, TraceContext};
+use moa_core::{types::contact::SessionActorRef, types::observability::TraceContext};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Sets MOA trace-context attributes on the provided tracing span.
@@ -44,7 +44,9 @@ pub fn apply_trace_context_to_span(context: &TraceContext, span: &tracing::Span)
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        Channel, ContactId, ModelId, SessionActorRef, SessionId, TenantId, TraceContext,
+        types::channel::Channel, types::contact::ContactId, types::contact::SessionActorRef,
+        types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
+        types::observability::TraceContext,
     };
 
     use super::apply_trace_context_to_span;

@@ -6,8 +6,9 @@
 
 use chrono::Utc;
 use moa_core::{
-    Event, EventRecord, LearningCandidateStatus, LearningCandidateStatusUpdate,
-    LearningCandidateType, SessionId, TenantId, ToolCallId,
+    events::Event, types::events_stream::EventRecord, types::experience::LearningCandidateStatus,
+    types::experience::LearningCandidateStatusUpdate, types::experience::LearningCandidateType,
+    types::identifiers::SessionId, types::identifiers::TenantId, types::identifiers::ToolCallId,
 };
 use moa_skills::mining::mine_and_file_session_failures;
 use moa_test_support::postgres::bootstrap_test_db;
@@ -175,7 +176,7 @@ fn durable_errors(session_id: SessionId, tool_name: &str, count: usize) -> Vec<E
 async fn open_candidates(
     test_db: &moa_test_support::postgres::TestDb,
     tenant_id: TenantId,
-) -> Vec<moa_core::LearningCandidate> {
+) -> Vec<moa_core::types::experience::LearningCandidate> {
     test_db
         .store()
         .list_learning_candidates(

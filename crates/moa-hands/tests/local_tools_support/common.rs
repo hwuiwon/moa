@@ -1,6 +1,6 @@
 // Shared local-tools test session fixtures.
 
-use moa_core::{ModelId, SessionActorRef, SessionMeta, TenantId};
+use moa_core::{types::identifiers::ModelId, types::contact::SessionActorRef, types::session::SessionMeta, types::identifiers::TenantId};
 
 fn session() -> SessionMeta {
     SessionMeta {

@@ -5,9 +5,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_brain::{TurnResult, run_brain_turn};
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, Event, EventRange,
-    LLMProvider, MoaConfig, ModelCapabilities, Result, SessionActorRef, SessionId, SessionMeta,
-    SessionStore, StopReason, TokenPricing, ToolCallContent, ToolCallFormat, ToolInvocation,
+    types::completion::CompletionContent, types::completion::CompletionRequest, types::completion::CompletionResponse, types::completion::CompletionStream, events::Event, types::events_stream::EventRange,
+    traits::LLMProvider, config::MoaConfig, types::model::ModelCapabilities, error::Result, types::contact::SessionActorRef, types::identifiers::SessionId, types::session::SessionMeta,
+    traits::SessionStore, types::completion::StopReason, types::model::TokenPricing, types::completion::ToolCallContent, types::model::ToolCallFormat, types::completion::ToolInvocation,
 };
 use moa_hands::ToolRouter;
 use moa_security::ActionPolicies;
@@ -32,7 +32,7 @@ impl LLMProvider for ArtifactRetrievalLlmProvider {
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
-            model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
+            model_id: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -67,7 +67,7 @@ impl LLMProvider for ArtifactRetrievalLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                 usage: token_usage(18, 8),
                 duration_ms: 10,
                 thought_signature: None,
@@ -109,7 +109,7 @@ impl LLMProvider for ArtifactRetrievalLlmProvider {
                         provider_metadata: None,
                     })],
                     stop_reason: StopReason::ToolUse,
-                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                    model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                     usage: token_usage(22, 10),
                     duration_ms: 11,
                     thought_signature: None,
@@ -129,7 +129,7 @@ impl LLMProvider for ArtifactRetrievalLlmProvider {
                         "Recovered bash-line-140 via tool_result_search".to_string(),
                     )],
                     stop_reason: StopReason::EndTurn,
-                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                    model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                     usage: token_usage(26, 9),
                     duration_ms: 12,
                     thought_signature: None,
@@ -162,7 +162,7 @@ impl LLMProvider for ArtifactStderrLlmProvider {
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
-            model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
+            model_id: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -197,7 +197,7 @@ impl LLMProvider for ArtifactStderrLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                 usage: token_usage(18, 9),
                 duration_ms: 10,
                 thought_signature: None,
@@ -226,7 +226,7 @@ impl LLMProvider for ArtifactStderrLlmProvider {
                         provider_metadata: None,
                     })],
                     stop_reason: StopReason::ToolUse,
-                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                    model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                     usage: token_usage(20, 8),
                     duration_ms: 11,
                     thought_signature: None,
@@ -246,7 +246,7 @@ impl LLMProvider for ArtifactStderrLlmProvider {
                         "stderr warning recovered via tool_result_read".to_string(),
                     )],
                     stop_reason: StopReason::EndTurn,
-                    model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                    model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                     usage: token_usage(24, 8),
                     duration_ms: 12,
                     thought_signature: None,

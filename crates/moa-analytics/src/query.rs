@@ -1,7 +1,7 @@
 //! Query validation for the generic analytics request model.
 
 use chrono::{DateTime, Utc};
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use moa_core::wire::analytics::{
     AnalyticsAggregation, AnalyticsCatalogResponse, AnalyticsCell, AnalyticsDataset,
     AnalyticsField, AnalyticsFieldKind, AnalyticsFieldRole, AnalyticsFilter,

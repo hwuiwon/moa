@@ -12,7 +12,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use moa_core::RlsContext;
+use moa_core::types::memory::RlsContext;
 use moa_core::wire::artifacts::{
     ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest, ArtifactPublishResponse,
 };
@@ -29,8 +29,10 @@ use moa_core::wire::skills::{
     SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
 };
 use moa_core::{
-    ActionRuleScope, Event, EventRange, EventRecord, SessionId, StoragePartitionId, TenantId,
-    traits::Identity,
+    events::Event, traits::Identity, types::action_policy::ActionRuleScope,
+    types::events_stream::EventRange, types::events_stream::EventRecord,
+    types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId,
 };
 use moa_db::ScopedConn;
 use moa_test_support::fixtures::tenant_id_from_storage_partition_id;

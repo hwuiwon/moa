@@ -4,8 +4,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use moa_core::RlsContext;
-use moa_core::{ContactId, TenantId};
+use moa_core::types::memory::RlsContext;
+use moa_core::{types::contact::ContactId, types::identifiers::TenantId};
 use moa_db::ScopedConn;
 use moa_memory_vector::{
     PROMOTION_OVERLAP_THRESHOLD, PgvectorStore, VectorItem, VectorMatch, VectorPartitionPromotion,

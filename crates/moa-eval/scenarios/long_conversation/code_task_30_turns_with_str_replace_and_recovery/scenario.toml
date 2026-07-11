@@ -11,3 +11,6 @@ goal_card = "scenarios/long_conversation/code_task_30_turns_with_str_replace_and
 transcript = "scenarios/long_conversation/code_task_30_turns_with_str_replace_and_recovery/transcript.jsonl"
 expectations = "scenarios/long_conversation/code_task_30_turns_with_str_replace_and_recovery/expectations.toml"
 mode = "recorded"
+
+[cases.metadata]
+errors_preserved = 2

@@ -9,7 +9,7 @@ use moa_core::wire::agents::{
     AgentDefinitionListRequest, AgentDeployRequest, AgentDeploymentListRequest,
     AgentInstallRequest, AgentInstallationListRequest,
 };
-use moa_core::{ActionRuleScope, TenantId};
+use moa_core::{types::action_policy::ActionRuleScope, types::identifiers::TenantId};
 use moa_orchestrator::services::agent_definitions::{
     deploy_inner, install_inner, list_definitions_inner, list_deployments_inner,
     list_installations_inner,

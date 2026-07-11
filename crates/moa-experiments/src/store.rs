@@ -2,15 +2,14 @@
 
 use chrono::{DateTime, Utc};
 use moa_artifacts::simulation::ExperimentTargetKind;
-use moa_core::RlsContext;
+use moa_core::types::memory::RlsContext;
 use moa_core::{
-    ActionRuleScope, ContactId, MoaError, ModelId, Result as MoaResult, SessionId,
-    StoragePartitionId, TenantId,
+    error::MoaError, error::Result as MoaResult, types::action_policy::ActionRuleScope,
+    types::contact::ContactId, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
 };
 use moa_db::ScopedConn;
-use moa_scoring::{
-    SCORE_RUN_SOURCE_EXPERIMENT_RUN, SCORE_RUN_SOURCE_EXPERIMENT_TRIAL, ensure_score_run_parent,
-};
+use moa_scoring::ensure_score_run_parent;
 use serde_json::Value;
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
@@ -20,6 +19,7 @@ use crate::model::{
     ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant,
     NewExperimentRun, NewExperimentTrial,
 };
+use crate::scores::{SCORE_RUN_SOURCE_EXPERIMENT_RUN, SCORE_RUN_SOURCE_EXPERIMENT_TRIAL};
 
 /// Postgres-backed repository for experiment run metadata.
 pub struct ExperimentStore {

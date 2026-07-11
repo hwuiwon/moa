@@ -17,8 +17,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionStream, LLMProvider, MoaError,
-    ModelCapabilities, ModelId, Result,
+    error::MoaError, error::Result, traits::LLMProvider, types::completion::CompletionContent,
+    types::completion::CompletionRequest, types::completion::CompletionStream,
+    types::identifiers::ModelId, types::model::ModelCapabilities,
 };
 use tokio::sync::mpsc;
 
@@ -237,9 +238,11 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, LLMProvider,
-        MoaError, ModelCapabilities, ModelId, Result, StopReason, TokenPricing, TokenUsage,
-        ToolCallFormat,
+        error::MoaError, error::Result, traits::LLMProvider, types::completion::CompletionContent,
+        types::completion::CompletionRequest, types::completion::CompletionResponse,
+        types::completion::CompletionStream, types::completion::StopReason,
+        types::completion::TokenUsage, types::identifiers::ModelId,
+        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
     use tokio::sync::mpsc;
     use tokio::time::sleep;

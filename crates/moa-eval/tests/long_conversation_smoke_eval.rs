@@ -9,9 +9,12 @@ use async_trait::async_trait;
 use moa_core::shell::{has_action_policy_unsafe_shell_syntax, split_shell_chain};
 use moa_core::transcript::{ProviderEvent, Transcript, Turn, UserUtterance};
 use moa_core::{
-    ActionRuleScope, CompletionRequest, CompletionResponse, CompletionStream, Event, LLMProvider,
-    MoaError, ModelCapabilities, StopReason, TokenUsage, ToolCallContent, ToolCallId,
-    ToolInvocation,
+    error::MoaError, events::Event, traits::LLMProvider, types::action_policy::ActionRuleScope,
+    types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::completion::CompletionStream, types::completion::StopReason,
+    types::completion::TokenUsage, types::completion::ToolCallContent,
+    types::completion::ToolInvocation, types::identifiers::ToolCallId,
+    types::model::ModelCapabilities,
 };
 use moa_eval::long_conversation::{Budgets, RecordedScriptedProvider, run_scenario_with_provider};
 use moa_eval::memory_eval::tenant_id_from_storage_partition;
@@ -138,7 +141,7 @@ async fn assert_scenario_meets_expectations(scenario_name: &str) -> TestResult {
         };
     let temp_dir = tempdir()?;
 
-    let mut base_config = moa_core::MoaConfig::default();
+    let mut base_config = moa_core::config::MoaConfig::default();
     base_config.database.url = moa_test_support::postgres::test_database_url();
     base_config.query_rewrite.enabled = false;
     let mut agent_config = agent_config_for(scenario_name);
@@ -482,7 +485,7 @@ async fn run_learning_matrix_case(
         primary_transcript,
     ));
 
-    let mut base_config = moa_core::MoaConfig::default();
+    let mut base_config = moa_core::config::MoaConfig::default();
     base_config.database.url = moa_test_support::postgres::test_database_url();
     base_config.query_rewrite.enabled = false;
     base_config.skill_budget.max_manifest_chars = Some(MATRIX_MAX_MANIFEST_CHARS);
@@ -1314,12 +1317,15 @@ impl LLMProvider for CompactionAwareRecordedProvider {
         self.recorded.capabilities()
     }
 
-    async fn complete(&self, request: CompletionRequest) -> moa_core::Result<CompletionStream> {
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
         if is_compaction_request(&request) {
             return Ok(CompletionStream::from_response(CompletionResponse {
                 text: "Compaction checkpoint preserved the file-not-found and zero-match errors."
                     .to_string(),
-                content: vec![moa_core::CompletionContent::Text(
+                content: vec![moa_core::types::completion::CompletionContent::Text(
                     "Compaction checkpoint preserved the file-not-found and zero-match errors."
                         .to_string(),
                 )],

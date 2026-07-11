@@ -9,9 +9,12 @@
 use chrono::{DateTime, Utc};
 use clickhouse::sql::Identifier;
 use clickhouse::{Client, Row};
-use moa_core::ClickHouseConfig;
+use moa_core::config::ClickHouseConfig;
 use moa_core::wire::lineage::LineageRecordView;
-use moa_core::{SessionId, StoragePartitionId, TenantId, UserId};
+use moa_core::{
+    types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::identifiers::UserId,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

@@ -7,8 +7,9 @@ use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use moa_core::{
-    HandHandle, HandResources, HandSpec, HandStatus, MoaError, Result, SandboxFile, SandboxTier,
-    SessionMeta, TenantId,
+    error::MoaError, error::Result, types::hands::HandHandle, types::hands::HandResources,
+    types::hands::HandSpec, types::hands::HandStatus, types::hands::SandboxFile,
+    types::hands::SandboxTier, types::identifiers::TenantId, types::session::SessionMeta,
 };
 use moa_observability::record_sandbox_provision_duration;
 
@@ -138,7 +139,7 @@ impl ToolRouter {
     /// the result and lets the lease TTL reclaim any straggler.
     pub async fn reclaim_hands(
         &self,
-        session_id: &moa_core::SessionId,
+        session_id: &moa_core::types::identifiers::SessionId,
         scope: Option<&str>,
     ) -> bool {
         let mut complete = true;
@@ -885,8 +886,11 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        ActionClass, ActionPolicyEffect, HandProvider, IdempotencyClass, RiskLevel,
-        ToolDiffStrategy, ToolInputShape, ToolInvocation, ToolOutput, ToolPolicySpec,
+        traits::HandProvider, types::action_policy::ActionClass,
+        types::action_policy::ActionPolicyEffect, types::action_policy::RiskLevel,
+        types::completion::ToolInvocation, types::tools::IdempotencyClass,
+        types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolOutput,
+        types::tools::ToolPolicySpec,
     };
     use serde_json::json;
 
@@ -898,7 +902,10 @@ mod tests {
     struct CountingProvider {
         name: String,
         provision_delay: Duration,
-        stale_generation_on_provision: Option<(Arc<MemoryHandLeaseStore>, moa_core::SessionId)>,
+        stale_generation_on_provision: Option<(
+            Arc<MemoryHandLeaseStore>,
+            moa_core::types::identifiers::SessionId,
+        )>,
         destroy_fails: bool,
         provision_calls: AtomicUsize,
         execute_calls: AtomicUsize,
@@ -926,7 +933,7 @@ mod tests {
         fn with_stale_generation_on_provision(
             mut self,
             lease_store: Arc<MemoryHandLeaseStore>,
-            session_id: moa_core::SessionId,
+            session_id: moa_core::types::identifiers::SessionId,
         ) -> Self {
             self.stale_generation_on_provision = Some((lease_store, session_id));
             self
@@ -1037,7 +1044,7 @@ mod tests {
 
     fn session() -> SessionMeta {
         SessionMeta {
-            id: moa_core::SessionId::new(),
+            id: moa_core::types::identifiers::SessionId::new(),
             tenant_id: TenantId::new(),
             ..SessionMeta::default()
         }

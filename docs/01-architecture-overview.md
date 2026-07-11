@@ -149,7 +149,11 @@ tenant-local and never globally promoted. Skills and policies are tenant-owned.
 
 Most trait definitions live under `crates/moa-core/src/traits/` and
 `crates/moa-core/src/traits/mod.rs`; shared DTOs live under
-`crates/moa-core/src/types/`. A few traits are owned by the crate that
+`crates/moa-core/src/types/`. Imports name the owning category, such as
+`moa_core::traits::SessionStore`, `moa_core::types::session::SessionMeta`, and
+`moa_core::events::Event`; `moa-core` does not provide a flattened type facade.
+Its crate root exports only `MoaError`, `Result`, and `WORKSPACE_ID`. A few
+traits are owned by the crate that
 implements them: `Reranker` in `moa-providers`, and `LinkedIntegrationProvider`
 and `DocumentParser` in `moa-knowledge`. Session orchestration is not a trait —
 it is realized as Restate services and virtual objects in `moa-orchestrator`
@@ -195,8 +199,8 @@ Core production bindings:
   `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`,
   `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy`
 - Workflows: `ProcedureExecution`, `KnowledgeSyncIngestion`,
-  `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`, `TurnExecution`,
-  `WorkerTurnExecution`
+  `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`, `TenantPurge`,
+  `TurnExecution`, `WorkerTurnExecution`
 
 Feature-gated bindings:
 
@@ -208,6 +212,14 @@ review promotion, experiments, privacy, provider routing, and graph memory
 retrieval. Read-only analytics, identity diagnostics, audit verification, and
 lineage read routes are served directly from `moa-edge` against Postgres/domain
 stores instead of going through Restate.
+
+The binary composition root constructs `RuntimeDeps` and passes concrete
+dependencies through implementation constructors before `build_endpoint`
+binds the Restate services, virtual objects, and workflows. The architecture
+scanner enforces zero raw `OrchestratorCtx::current_*` dependency reads under
+`objects/`, `services/`, and `workflows/`. This is a scoped runtime-boundary
+invariant, not a claim that every `OrchestratorCtx` use has been removed from
+the entire repository.
 
 `Session` is the durable actor for one session key. It queues messages, admits `TurnExecution` workflows, tracks the active task segment, records tool/skill usage, and writes learning entries. Segment assessment happens at turn, segment, idle, cancellation, and timeout boundaries as an auditable learning artifact, not as a live-loop control signal. `Worker` owns conversational delegated state with depth and budget limits, while `WorkerTurnExecution` runs one admitted child turn and reports turn-scoped mutations back to the VO.
 
@@ -295,6 +307,11 @@ policy.
 | Runtime cache | Redis or memory | optional TTL cache/coordination for pacing and transient references; memory is per-process and non-authoritative |
 | Optional checkpoints | Neon | branch manager for database checkpoints |
 | Security events | Postgres and S3 | OCSF v1.3 events in `security_events`, shipped to tenant audit buckets |
+
+The central migration inventory currently contains 98 `CREATE TABLE`
+statements covering 90 logical top-level table families. Every family has one
+owner in the `moa-migrations` ownership manifest, and
+`xtask check-migrations` rejects missing or stale ownership entries.
 
 ## Auth Layer
 

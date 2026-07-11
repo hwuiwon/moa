@@ -1,7 +1,7 @@
 //! Integration coverage for the `moa.graph_changelog` outbox.
 
-use moa_core::RlsContext;
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
+use moa_core::types::memory::RlsContext;
 use moa_db::ScopedConn;
 use moa_memory_graph::{ChangelogRecord, write_and_bump};
 use moa_session::testing;

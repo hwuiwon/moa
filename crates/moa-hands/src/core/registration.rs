@@ -6,8 +6,10 @@ use std::sync::Arc;
 use crate::adapters::mcp::McpDiscoveredTool;
 use crate::tools::{memory, session_search, tool_result};
 use moa_core::{
-    ActionClass, ActionPolicyEffect, BuiltInTool, IdempotencyClass, Result, SandboxTier,
-    ToolBudgetConfig, ToolDefinition, ToolDiffStrategy, ToolInputShape, ToolPolicySpec,
+    config::ToolBudgetConfig, error::Result, traits::BuiltInTool,
+    types::action_policy::ActionClass, types::action_policy::ActionPolicyEffect,
+    types::hands::SandboxTier, types::tools::IdempotencyClass, types::tools::ToolDefinition,
+    types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolPolicySpec,
 };
 use serde_json::Value;
 
@@ -97,7 +99,7 @@ impl RegisteredTool {
                 description: tool.description,
                 schema: tool.input_schema,
                 policy: ToolPolicySpec {
-                    risk_level: moa_core::RiskLevel::High,
+                    risk_level: moa_core::types::action_policy::RiskLevel::High,
                     // MCP/third-party tools have no considered per-tool descriptor
                     // gate (unlike builtins), so they default to admin review rather
                     // than a bare allow: unvetted external code should not execute
@@ -201,7 +203,7 @@ impl ToolRegistry {
     pub fn register_mcp_tool(&mut self, server_name: &str, tool: McpDiscoveredTool) -> Result<()> {
         let name = tool.name.clone();
         if self.tools.contains_key(&name) {
-            return Err(moa_core::MoaError::ConfigError(format!(
+            return Err(moa_core::error::MoaError::ConfigError(format!(
                 "MCP server {server_name} discovered tool {name}, which conflicts with an existing local tool name"
             )));
         }

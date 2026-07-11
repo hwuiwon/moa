@@ -6,7 +6,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -105,7 +105,7 @@ async fn verify_event(
 #[cfg(test)]
 mod tests {
     use axum::body::Bytes;
-    use moa_core::TenantId;
+    use moa_core::types::identifiers::TenantId;
     use uuid::Uuid;
 
     use super::AuditVerifyRequest;

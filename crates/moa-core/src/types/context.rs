@@ -8,9 +8,10 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{
-    AgentContext, AgentPolicySnapshot, CompletionRequest, ContactRef, EventRecord,
-    ModelCapabilities, SandboxFile, SessionActorRef, SessionId, SessionMeta, TenantId, ToolCallId,
-    ToolContent, ToolInvocation,
+    agent::AgentContext, agent::AgentPolicySnapshot, completion::CompletionRequest,
+    completion::ToolInvocation, contact::ContactRef, contact::SessionActorRef,
+    events_stream::EventRecord, hands::SandboxFile, identifiers::SessionId, identifiers::TenantId,
+    identifiers::ToolCallId, model::ModelCapabilities, session::SessionMeta, tools::ToolContent,
 };
 
 /// Role of a context message passed to the LLM.
@@ -427,7 +428,7 @@ impl WorkingContext {
     }
 
     /// Parses the configured-agent policy snapshot pinned to this context, when one exists.
-    pub fn agent_policy_snapshot(&self) -> crate::Result<Option<AgentPolicySnapshot>> {
+    pub fn agent_policy_snapshot(&self) -> crate::error::Result<Option<AgentPolicySnapshot>> {
         self.agent_context
             .as_ref()
             .map(AgentContext::parsed_policy_snapshot)
@@ -584,7 +585,7 @@ pub fn sum_message_tokens(messages: &[ContextMessage]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{ContextMessage, ContextSourceKind, ContextSourceRef, MessageRole};
-    use crate::types::{ToolContent, ToolInvocation};
+    use crate::types::{completion::ToolInvocation, tools::ToolContent};
     use uuid::Uuid;
 
     #[test]

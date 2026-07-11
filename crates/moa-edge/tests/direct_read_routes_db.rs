@@ -11,9 +11,12 @@ use moa_authz::{FgaClient, FgaConfig};
 use moa_core::traits::{AuthError, AuthProvider, Credential, Identity, IdentityType};
 use moa_core::wire::analytics::{AnalyticsCatalogResponse, AnalyticsCell, AnalyticsQueryResponse};
 use moa_core::wire::lineage::LineageQueryResponse;
+use moa_core::wire::tenants::{TenantPurgeStatus, TenantPurgeStatusResponse};
 use moa_core::{
-    AgentContext, Event, MoaConfig, ModelId, SessionActorRef, SessionId, SessionMeta, SessionStore,
-    TenantId, ToolCallId, ToolOutput,
+    config::MoaConfig, events::Event, traits::SessionStore, types::agent::AgentContext,
+    types::contact::SessionActorRef, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::TenantId, types::identifiers::ToolCallId, types::session::SessionMeta,
+    types::tools::ToolOutput,
 };
 use moa_edge::proxy::OrchestratorProxy;
 use moa_edge::routes::{self, AppState, KnowledgeWebhookEdgeConfig};
@@ -49,6 +52,7 @@ impl AuthProvider for FixedAuth {
 #[derive(Clone)]
 struct FgaMockState {
     allowed: bool,
+    allowed_objects: Arc<Vec<String>>,
     checks: Arc<Mutex<Vec<Value>>>,
 }
 
@@ -63,6 +67,12 @@ struct EdgeServer {
     server: JoinHandle<()>,
 }
 
+struct PurgeUpstream {
+    base_url: String,
+    requests: Arc<Mutex<Vec<String>>>,
+    server: JoinHandle<()>,
+}
+
 // The edge router configures moa-authz's process-global security audit sink.
 // Dashboard denial tests hold this narrow lock so one isolated pool is not
 // closed while another test's denied authz audit is still using it.
@@ -72,14 +82,21 @@ async fn fga_check(
     State(state): State<FgaMockState>,
     axum::Json(body): axum::Json<Value>,
 ) -> axum::Json<Value> {
+    let object = body["tuple_key"]["object"].as_str().unwrap_or_default();
+    let allowed = state.allowed || state.allowed_objects.iter().any(|value| value == object);
     state.checks.lock().await.push(body);
-    axum::Json(json!({ "allowed": state.allowed }))
+    axum::Json(json!({ "allowed": allowed }))
 }
 
 async fn start_fga_mock(allowed: bool) -> FgaMock {
+    start_fga_mock_with_objects(allowed, Vec::new()).await
+}
+
+async fn start_fga_mock_with_objects(allowed: bool, allowed_objects: Vec<String>) -> FgaMock {
     let checks = Arc::new(Mutex::new(Vec::new()));
     let state = FgaMockState {
         allowed,
+        allowed_objects: Arc::new(allowed_objects),
         checks: checks.clone(),
     };
     let app = Router::new()
@@ -114,6 +131,25 @@ async fn start_edge(
     identity: Identity,
     fga: Option<FgaClient>,
 ) -> EdgeServer {
+    start_edge_with_upstream(
+        store,
+        database_url,
+        schema_name,
+        identity,
+        fga,
+        "http://127.0.0.1:1",
+    )
+    .await
+}
+
+async fn start_edge_with_upstream(
+    store: &PostgresSessionStore,
+    database_url: &str,
+    schema_name: &str,
+    identity: Identity,
+    fga: Option<FgaClient>,
+    upstream: &str,
+) -> EdgeServer {
     let mut config = MoaConfig::default();
     config.database.url = database_url.to_string();
     config.database.schema = Some(schema_name.to_string());
@@ -126,8 +162,7 @@ async fn start_edge(
         pool: Arc::new(store.pool().clone()),
         session_store: Arc::new(store.clone()),
         proxy: Arc::new(
-            OrchestratorProxy::new("http://127.0.0.1:1")
-                .expect("proxy URL should be syntactically valid"),
+            OrchestratorProxy::new(upstream).expect("proxy URL should be syntactically valid"),
         ),
         clickhouse_lineage: None,
         clickhouse_analytics: None,
@@ -144,6 +179,32 @@ async fn start_edge(
     });
     EdgeServer {
         base_url: format!("http://{addr}"),
+        server,
+    }
+}
+
+async fn start_purge_upstream() -> PurgeUpstream {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = requests.clone();
+    let app = Router::new().fallback(move |request: axum::extract::Request| {
+        let seen = seen.clone();
+        async move {
+            seen.lock().await.push(request.uri().path().to_string());
+            StatusCode::ACCEPTED
+        }
+    });
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind purge upstream");
+    let addr = listener.local_addr().expect("read purge upstream addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve purge upstream");
+    });
+    PurgeUpstream {
+        base_url: format!("http://{addr}"),
+        requests,
         server,
     }
 }
@@ -201,6 +262,143 @@ async fn stop_server(server: JoinHandle<()>) {
 async fn stop_fga_mock(mock_server: JoinHandle<()>) {
     mock_server.abort();
     let _ = mock_server.await;
+}
+
+#[tokio::test]
+async fn tenant_purge_denial_never_dispatches_workflow_db() {
+    // Pins: destructive purge authorization is completed at the edge before any Restate dispatch.
+    let _guard = DASHBOARD_SESSIONS_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = create_test_store().await;
+    let tenant_id = TenantId::new();
+    let fga = start_fga_mock(false).await;
+    let edge = start_edge(
+        &store,
+        &database_url,
+        &schema_name,
+        identity(IdentityType::Operator, tenant_id),
+        Some(fga.client.clone()),
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .delete(format!("{}/v1/tenant", edge.base_url))
+        .send()
+        .await
+        .expect("send denied tenant purge");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let checks = fga.checks.lock().await.clone();
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0]["tuple_key"]["relation"], json!("admin"));
+    assert_eq!(
+        checks[0]["tuple_key"]["object"],
+        json!(format!("tenant:{tenant_id}"))
+    );
+
+    stop_server(edge.server).await;
+    stop_fga_mock(fga.server).await;
+    cleanup_test_store(store, database_url, schema_name).await;
+}
+
+#[tokio::test]
+async fn repeated_tenant_purge_requests_dispatch_one_stable_workflow_key_db() {
+    // Pins: duplicate DELETE requests return the same operation id and target the same tenant-keyed workflow.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let tenant_id = TenantId::new();
+    sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, 'purge dispatch')")
+        .bind(tenant_id.0)
+        .bind(format!("purge-{tenant_id}"))
+        .execute(store.pool())
+        .await
+        .expect("insert purge dispatch tenant");
+    let fga = start_fga_mock(true).await;
+    let upstream = start_purge_upstream().await;
+    let edge = start_edge_with_upstream(
+        &store,
+        &database_url,
+        &schema_name,
+        identity(IdentityType::Operator, tenant_id),
+        Some(fga.client.clone()),
+        &upstream.base_url,
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let first = client
+        .delete(format!("{}/v1/tenant", edge.base_url))
+        .send()
+        .await
+        .expect("send first tenant purge");
+    let second = client
+        .delete(format!("{}/v1/tenant", edge.base_url))
+        .send()
+        .await
+        .expect("send duplicate tenant purge");
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    assert_eq!(second.status(), StatusCode::ACCEPTED);
+    let first: TenantPurgeStatusResponse = first.json().await.expect("decode first purge response");
+    let second: TenantPurgeStatusResponse = second
+        .json()
+        .await
+        .expect("decode duplicate purge response");
+    assert_eq!(first, second);
+    assert_eq!(first.status, TenantPurgeStatus::Pending);
+
+    let requests = upstream.requests.lock().await.clone();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|path| path == &format!("/restate/send/TenantPurge/{tenant_id}/run"))
+    );
+
+    stop_server(edge.server).await;
+    stop_server(upstream.server).await;
+    stop_fga_mock(fga.server).await;
+    cleanup_test_store(store, database_url, schema_name).await;
+}
+
+#[tokio::test]
+async fn tenant_purge_status_uses_workspace_admin_after_tenant_tuple_is_gone_db() {
+    // Pins: post-delete status falls back to canonical workspace admin because tenant-local credentials and tuples are purged.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let tenant_id = TenantId::new();
+    let caller_tenant_id = TenantId::new();
+    let workspace_object = format!("workspace:{}", moa_core::WORKSPACE_ID);
+    let fga = start_fga_mock_with_objects(false, vec![workspace_object.clone()]).await;
+    let upstream = start_purge_upstream().await;
+    let edge = start_edge_with_upstream(
+        &store,
+        &database_url,
+        &schema_name,
+        identity(IdentityType::Operator, caller_tenant_id),
+        Some(fga.client.clone()),
+        &upstream.base_url,
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/tenant/purge/tenant-purge-{tenant_id}",
+            edge.base_url
+        ))
+        .send()
+        .await
+        .expect("send workspace-admin purge status request");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let checks = fga.checks.lock().await.clone();
+    assert_eq!(checks.len(), 2);
+    assert_eq!(
+        checks[0]["tuple_key"]["object"],
+        json!(format!("tenant:{tenant_id}"))
+    );
+    assert_eq!(checks[1]["tuple_key"]["object"], json!(workspace_object));
+    assert_eq!(checks[1]["tuple_key"]["relation"], json!("admin"));
+
+    stop_server(edge.server).await;
+    stop_server(upstream.server).await;
+    stop_fga_mock(fga.server).await;
+    cleanup_test_store(store, database_url, schema_name).await;
 }
 
 async fn seed_tool_call(store: &PostgresSessionStore, tenant_id: TenantId, tool_name: &str) {

@@ -1,7 +1,7 @@
 //! Shared server-sent event parsing helpers for provider implementations.
 
 use eventsource_stream::Event as SseEvent;
-use moa_core::{CompletionResponse, MoaError, Result};
+use moa_core::{error::MoaError, error::Result, types::completion::CompletionResponse};
 use reqwest::{RequestBuilder, Response};
 use serde::de::DeserializeOwned;
 

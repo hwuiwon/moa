@@ -22,7 +22,7 @@ async fn docker_file_tools_roundtrip_inside_container_workspace() {
         .await
         .unwrap();
 
-    if !matches!(handle, moa_core::HandHandle::Docker { .. }) {
+    if !matches!(handle, moa_core::types::hands::HandHandle::Docker { .. }) {
         return;
     }
 
@@ -132,7 +132,7 @@ async fn docker_bash_hard_cancel_stops_container_exec() {
         .await
         .unwrap();
 
-    if !matches!(handle, moa_core::HandHandle::Docker { .. }) {
+    if !matches!(handle, moa_core::types::hands::HandHandle::Docker { .. }) {
         return;
     }
 
@@ -158,7 +158,7 @@ async fn docker_bash_hard_cancel_stops_container_exec() {
     cancel_token.cancel();
 
     let error = task.await.unwrap().unwrap_err();
-    assert!(matches!(error, moa_core::MoaError::Cancelled));
+    assert!(matches!(error, moa_core::error::MoaError::Cancelled));
     assert!(started.elapsed() < Duration::from_secs(3));
 
     let _ = provider.destroy(&handle).await;

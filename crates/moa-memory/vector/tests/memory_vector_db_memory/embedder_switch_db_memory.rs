@@ -1,7 +1,7 @@
 //! Integration coverage for workspace embedder switching guards.
 
-use moa_core::RlsContext;
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
+use moa_core::types::memory::RlsContext;
 use moa_db::ScopedConn;
 use moa_memory_vector::{
     Error, PgvectorStore, VECTOR_DIMENSION, VectorItem, VectorQuery, VectorStore,

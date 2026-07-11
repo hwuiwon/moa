@@ -6,8 +6,9 @@ use std::sync::{
 use std::time::Duration;
 
 use moa_core::{
-    CompletionContent, CompletionRequest, ContextMessage, JsonResponseFormat, LLMProvider,
-    StopReason, ToolContent,
+    traits::LLMProvider, types::completion::CompletionContent,
+    types::completion::CompletionRequest, types::completion::JsonResponseFormat,
+    types::completion::StopReason, types::context::ContextMessage, types::tools::ToolContent,
 };
 use moa_providers::OpenAIProvider;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -61,8 +62,8 @@ async fn openai_provider_translates_requests_to_responses_api() {
     let request = CompletionRequest {
         model: None,
         messages: vec![
-            moa_core::ContextMessage::system("Follow the rules."),
-            moa_core::ContextMessage::user("hello"),
+            moa_core::types::context::ContextMessage::system("Follow the rules."),
+            moa_core::types::context::ContextMessage::user("hello"),
         ],
         tools: vec![serde_json::json!({
             "name": "file_read",
@@ -374,7 +375,7 @@ async fn openai_provider_serializes_assistant_tool_calls_as_function_call_items(
     let request = CompletionRequest {
         model: None,
         messages: vec![ContextMessage::assistant_tool_call(
-            moa_core::ToolInvocation {
+            moa_core::types::completion::ToolInvocation {
                 id: Some("fc_history_1".to_string()),
                 name: "file_write".to_string(),
                 input: serde_json::json!({ "path": "live/openai.txt" }),
@@ -502,7 +503,9 @@ async fn openai_provider_streams_tool_calls_from_responses_events() {
         .with_max_retries(0);
     let request = CompletionRequest {
         model: None,
-        messages: vec![moa_core::ContextMessage::user("show me cwd")],
+        messages: vec![moa_core::types::context::ContextMessage::user(
+            "show me cwd",
+        )],
         tools: vec![serde_json::json!({
             "name": "bash",
             "description": "Run a command",
@@ -529,8 +532,8 @@ async fn openai_provider_streams_tool_calls_from_responses_events() {
 
     assert_eq!(
         first_block,
-        CompletionContent::ToolCall(moa_core::ToolCallContent {
-            invocation: moa_core::ToolInvocation {
+        CompletionContent::ToolCall(moa_core::types::completion::ToolCallContent {
+            invocation: moa_core::types::completion::ToolInvocation {
                 id: Some("fc_1".to_string()),
                 name: "bash".to_string(),
                 input: serde_json::json!({ "cmd": "pwd" }),
@@ -763,8 +766,8 @@ async fn openai_provider_streams_parallel_tool_calls_in_order() {
 
     assert_eq!(
         first,
-        CompletionContent::ToolCall(moa_core::ToolCallContent {
-            invocation: moa_core::ToolInvocation {
+        CompletionContent::ToolCall(moa_core::types::completion::ToolCallContent {
+            invocation: moa_core::types::completion::ToolInvocation {
                 id: Some("fc_1".to_string()),
                 name: "bash".to_string(),
                 input: serde_json::json!({ "cmd": "pwd" }),
@@ -774,8 +777,8 @@ async fn openai_provider_streams_parallel_tool_calls_in_order() {
     );
     assert_eq!(
         second,
-        CompletionContent::ToolCall(moa_core::ToolCallContent {
-            invocation: moa_core::ToolInvocation {
+        CompletionContent::ToolCall(moa_core::types::completion::ToolCallContent {
+            invocation: moa_core::types::completion::ToolInvocation {
                 id: Some("fc_2".to_string()),
                 name: "file_read".to_string(),
                 input: serde_json::json!({ "path": "Cargo.toml" }),

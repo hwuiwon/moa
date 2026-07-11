@@ -27,7 +27,9 @@ use moa_core::wire::skills::{
     SkillSummary,
 };
 use moa_core::{
-    ActionRuleScope, RlsContext, TenantId, delegation_tool_schemas, procedure_tool_schemas,
+    types::action_policy::ActionRuleScope, types::identifiers::TenantId, types::memory::RlsContext,
+    types::procedure_tools::procedure_tool_schemas,
+    types::worker::tool_schema::delegation_tool_schemas,
 };
 use moa_hands::ToolRegistry;
 use moa_knowledge::repository::{KnowledgeRepository, PostgresKnowledgeRepository};
@@ -39,7 +41,6 @@ use moa_skills::registry::{NewSkill, Skill, SkillRegistry, StoredSkillPackage};
 use restate_sdk::prelude::*;
 use serde_json::Value;
 
-use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::authorize_tenant;
 use crate::workflows::errors::{moa_error_to_status_handler_error, procedure_handler_error};
@@ -109,8 +110,18 @@ pub trait Skills {
 }
 
 /// Concrete skill service implementation.
-#[derive(Clone, Default)]
-pub struct SkillsImpl;
+#[derive(Clone)]
+pub struct SkillsImpl {
+    pool: sqlx::PgPool,
+}
+
+impl SkillsImpl {
+    /// Creates the skills adapter with its artifact, skill, and knowledge pool.
+    #[must_use]
+    pub fn new(pool: sqlx::PgPool) -> Self {
+        Self { pool }
+    }
+}
 
 impl Skills for SkillsImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -123,8 +134,9 @@ impl Skills for SkillsImpl {
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
 
+        let pool = self.pool.clone();
         Ok(ctx
-            .run(|| async move { export_inner(request).await.map(Json::from) })
+            .run(|| async move { export_inner(pool, request).await.map(Json::from) })
             .name("skills_export")
             .await?)
     }
@@ -140,8 +152,9 @@ impl Skills for SkillsImpl {
         let scope = authorized_import_scope(&ctx, request.scope).await?;
         let packages = request.packages;
 
+        let pool = self.pool.clone();
         Ok(ctx
-            .run(|| async move { import_inner(scope, packages).await.map(Json::from) })
+            .run(|| async move { import_inner(pool, scope, packages).await.map(Json::from) })
             .name("skills_import")
             .await?)
     }
@@ -156,8 +169,9 @@ impl Skills for SkillsImpl {
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
 
+        let pool = self.pool.clone();
         Ok(ctx
-            .run(|| async move { list_inner(request).await.map(Json::from) })
+            .run(|| async move { list_inner(pool, request).await.map(Json::from) })
             .name("skills_list")
             .await?)
     }
@@ -172,8 +186,9 @@ impl Skills for SkillsImpl {
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
 
+        let pool = self.pool.clone();
         Ok(ctx
-            .run(|| async move { list_capabilities_inner(request).await.map(Json::from) })
+            .run(|| async move { list_capabilities_inner(pool, request).await.map(Json::from) })
             .name("skills_list_capabilities")
             .await?)
     }
@@ -190,8 +205,9 @@ impl Skills for SkillsImpl {
         let execution_request_tenant_id = request.tenant_id;
         let execution_request_session_id = request.session_id;
 
+        let pool = self.pool.clone();
         let response = ctx
-            .run(|| async move { run_inner(request).await.map(Json::from) })
+            .run(|| async move { run_inner(pool, request).await.map(Json::from) })
             .name("skills_run")
             .await?
             .into_inner();
@@ -216,8 +232,9 @@ impl Skills for SkillsImpl {
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
 
+        let pool = self.pool.clone();
         Ok(ctx
-            .run(|| async move { status_inner(request).await.map(Json::from) })
+            .run(|| async move { status_inner(pool, request).await.map(Json::from) })
             .name("skills_status")
             .await?)
     }
@@ -232,8 +249,9 @@ impl Skills for SkillsImpl {
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
 
+        let pool = self.pool.clone();
         Ok(ctx
-            .run(|| async move { list_runs_inner(request).await.map(Json::from) })
+            .run(|| async move { list_runs_inner(pool, request).await.map(Json::from) })
             .name("skills_list_runs")
             .await?)
     }
@@ -253,8 +271,9 @@ impl Skills for SkillsImpl {
             .clone()
             .unwrap_or_else(|| "procedure cancellation requested".to_string());
 
+        let pool = self.pool.clone();
         let response = ctx
-            .run(|| async move { cancel_inner(request).await.map(Json::from) })
+            .run(|| async move { cancel_inner(pool, request).await.map(Json::from) })
             .name("skills_cancel")
             .await?
             .into_inner();
@@ -276,10 +295,11 @@ impl Skills for SkillsImpl {
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
         let run_uid = request.run_id;
+        let registry = ArtifactRegistry::new(self.pool.clone());
 
         let validated = ctx
             .run(|| async move {
-                validate_procedure_review_decision(request)
+                validate_procedure_review_decision(registry, request)
                     .await
                     .map(Json::from)
             })
@@ -307,9 +327,14 @@ impl Skills for SkillsImpl {
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let run_uid = request.run_id;
+        let registry = ArtifactRegistry::new(self.pool.clone());
 
         let validated = ctx
-            .run(|| async move { validate_procedure_signal(request).await.map(Json::from) })
+            .run(|| async move {
+                validate_procedure_signal(registry, request)
+                    .await
+                    .map(Json::from)
+            })
             .name("skills_signal")
             .await?
             .into_inner();
@@ -325,11 +350,14 @@ impl Skills for SkillsImpl {
     }
 }
 
-async fn run_inner(request: ProcedureRunRequest) -> Result<ProcedureRunResponse, HandlerError> {
+async fn run_inner(
+    pool: sqlx::PgPool,
+    request: ProcedureRunRequest,
+) -> Result<ProcedureRunResponse, HandlerError> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
-    let run = procedure_runtime()
+    let run = procedure_runtime(pool)
         .start(
             &scope,
             StartProcedureRun {
@@ -348,16 +376,19 @@ async fn run_inner(request: ProcedureRunRequest) -> Result<ProcedureRunResponse,
     })
 }
 
-async fn status_inner(request: ProcedureStatusRequest) -> Result<ProcedureRunStatus, HandlerError> {
+async fn status_inner(
+    pool: sqlx::PgPool,
+    request: ProcedureStatusRequest,
+) -> Result<ProcedureRunStatus, HandlerError> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
-    let run = procedure_runtime()
+    let run = procedure_runtime(pool.clone())
         .status(&scope, request.run_id)
         .await
         .map_err(procedure_handler_error)?
         .ok_or_else(|| TerminalError::new_with_code(404, "procedure run not found"))?;
-    let node_runs = ArtifactRegistry::new(OrchestratorCtx::current_graph_pool())
+    let node_runs = ArtifactRegistry::new(pool)
         .list_node_runs(&scope, request.run_id)
         .await
         .map_err(|error| procedure_handler_error(ProcedureError::Artifact(error)))?
@@ -381,6 +412,7 @@ async fn status_inner(request: ProcedureStatusRequest) -> Result<ProcedureRunSta
 }
 
 async fn list_runs_inner(
+    pool: sqlx::PgPool,
     request: ProcedureRunListRequest,
 ) -> Result<ProcedureRunListResponse, HandlerError> {
     let scope = ActionRuleScope::Tenant {
@@ -391,10 +423,10 @@ async fn list_runs_inner(
         .as_deref()
         .map(str::parse)
         .transpose()
-        .map_err(|error: moa_core::MoaError| {
+        .map_err(|error: moa_core::error::MoaError| {
             TerminalError::new_with_code(400, error.to_string())
         })?;
-    let page = ArtifactRegistry::new(OrchestratorCtx::current_graph_pool())
+    let page = ArtifactRegistry::new(pool)
         .list_runs(
             &scope,
             ArtifactRunListRequest {
@@ -442,12 +474,13 @@ pub fn procedure_run_summary_from_run(
 }
 
 async fn cancel_inner(
+    pool: sqlx::PgPool,
     request: ProcedureCancelRequest,
 ) -> Result<ProcedureCancelResponse, HandlerError> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
-    let run = procedure_runtime()
+    let run = procedure_runtime(pool)
         .cancel(&scope, request.run_id, request.reason)
         .await
         .map_err(procedure_handler_error)?;
@@ -459,8 +492,8 @@ async fn cancel_inner(
     })
 }
 
-fn procedure_runtime() -> ProcedureRuntime {
-    ProcedureRuntime::new(ArtifactRegistry::new(OrchestratorCtx::current_graph_pool()))
+fn procedure_runtime(pool: sqlx::PgPool) -> ProcedureRuntime {
+    ProcedureRuntime::new(ArtifactRegistry::new(pool))
 }
 
 /// Converts a registry skill row into a public API summary.
@@ -481,10 +514,13 @@ pub fn skill_summary_from_skill(skill: Skill) -> Result<SkillSummary, HandlerErr
     })
 }
 
-async fn export_inner(request: SkillExportRequest) -> Result<SkillExportResponse, HandlerError> {
+async fn export_inner(
+    pool: sqlx::PgPool,
+    request: SkillExportRequest,
+) -> Result<SkillExportResponse, HandlerError> {
     let tenant_id = request.tenant_id;
     let scope = ActionRuleScope::Tenant { tenant_id };
-    let registry = skill_registry();
+    let registry = skill_registry(pool);
     let packages = registry
         .load_packages_for_scope(&scope)
         .await
@@ -500,10 +536,11 @@ async fn export_inner(request: SkillExportRequest) -> Result<SkillExportResponse
 }
 
 async fn import_inner(
+    pool: sqlx::PgPool,
     scope: ActionRuleScope,
     packages: Vec<SkillPackageDocument>,
 ) -> Result<SkillImportResponse, HandlerError> {
-    let registry = skill_registry();
+    let registry = skill_registry(pool);
     let mut imported = 0_u64;
     for package in packages {
         let files = decode_skill_package_files(package.files)?;
@@ -517,11 +554,14 @@ async fn import_inner(
     Ok(SkillImportResponse { scope, imported })
 }
 
-async fn list_inner(request: SkillListRequest) -> Result<SkillListResponse, HandlerError> {
+async fn list_inner(
+    pool: sqlx::PgPool,
+    request: SkillListRequest,
+) -> Result<SkillListResponse, HandlerError> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
     };
-    let registry = skill_registry();
+    let registry = skill_registry(pool);
     let skills = registry
         .load_for_scope(&scope)
         .await
@@ -547,17 +587,18 @@ async fn list_inner(request: SkillListRequest) -> Result<SkillListResponse, Hand
 /// child-only report tools exposed only inside a worker subset — cannot be
 /// enumerated from a tenant-scoped read and are intentionally omitted.
 async fn list_capabilities_inner(
+    pool: sqlx::PgPool,
     request: CapabilitiesListRequest,
 ) -> Result<CapabilitiesListResponse, HandlerError> {
     let tenant_id = request.tenant_id;
     let scope = ActionRuleScope::Tenant { tenant_id };
-    let registry = ArtifactRegistry::new(OrchestratorCtx::current_graph_pool());
+    let registry = ArtifactRegistry::new(pool.clone());
 
     let tool_sources = builtin_tool_sources();
     let action_artifacts = load_action_artifacts(&registry, &scope).await?;
     let connector_artifacts = load_connector_artifacts(&registry, &scope).await?;
     let skill_actions = load_skill_actions(&registry, &scope).await?;
-    let datasources = load_datasource_summaries(tenant_id).await?;
+    let datasources = load_datasource_summaries(pool, tenant_id).await?;
 
     let capabilities = build_capabilities(
         &tool_sources,
@@ -689,12 +730,10 @@ async fn load_published_revisions(
 /// Reuses the same tenant-scoped repository read the `Knowledge` service uses for
 /// `list_connections`, without touching that service's internals.
 async fn load_datasource_summaries(
+    pool: sqlx::PgPool,
     tenant_id: TenantId,
 ) -> Result<Vec<KnowledgeConnectionSummary>, HandlerError> {
-    let repository = PostgresKnowledgeRepository::scoped(
-        OrchestratorCtx::current_graph_pool(),
-        RlsContext::tenant(tenant_id),
-    );
+    let repository = PostgresKnowledgeRepository::scoped(pool, RlsContext::tenant(tenant_id));
     let projections = repository
         .list_connections(tenant_id, None)
         .await
@@ -837,8 +876,8 @@ fn memory_capability_entries() -> [CapabilityEntry; 2] {
     ]
 }
 
-fn skill_registry() -> SkillRegistry {
-    SkillRegistry::new(OrchestratorCtx::current_graph_pool())
+fn skill_registry(pool: sqlx::PgPool) -> SkillRegistry {
+    SkillRegistry::new(pool)
 }
 
 async fn authorized_import_scope(

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use moa_core::{MoaError, Result};
+use moa_core::{error::MoaError, error::Result};
 use reqwest::{Client, Response};
 use serde::Serialize;
 use serde::de::DeserializeOwned;

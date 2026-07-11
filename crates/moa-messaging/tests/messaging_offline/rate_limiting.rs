@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use moa_core::{Channel, MoaError};
+use moa_core::{error::MoaError, types::channel::Channel};
 use moa_messaging::{MessagingFailureClass, MessagingRateLimiter};
 use support::{mock_429_then_200, mock_always_200, mock_always_429, post_send};
 use tokio::time::advance;

@@ -6,7 +6,10 @@ use async_openai::error::OpenAIError;
 use async_openai::types::responses::{
     PromptCacheRetention, ResponseUsage, TextResponseFormatConfiguration,
 };
-use moa_core::{CompletionRequest, ContextMessage, JsonResponseFormat, ProviderNativeTool};
+use moa_core::{
+    types::completion::CompletionRequest, types::completion::JsonResponseFormat,
+    types::context::ContextMessage, types::model::ProviderNativeTool,
+};
 use serde_json::json;
 
 use super::{

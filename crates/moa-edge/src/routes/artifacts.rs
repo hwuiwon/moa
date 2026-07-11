@@ -2,7 +2,7 @@
 
 use axum::body::Bytes;
 use axum::http::{Method, Uri};
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 
 use super::{
     RouteTranslation, tenant_id_field, translate_json_object_with_fields,

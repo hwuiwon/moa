@@ -2,7 +2,8 @@
 
 #[cfg(feature = "slack")]
 use moa_core::{
-    Channel, MessageContent, OutboundMessage, SessionStatus, ToolStatus, types::DiffHunk,
+    types::channel::Channel, types::channel::DiffHunk, types::channel::MessageContent,
+    types::channel::OutboundMessage, types::channel::ToolStatus, types::session::SessionStatus,
 };
 #[cfg(feature = "slack")]
 use unicode_segmentation::UnicodeSegmentation;
@@ -73,8 +74,8 @@ impl SlackRenderer {
     }
 
     /// Returns Slack's channel capabilities.
-    pub fn capabilities(&self) -> moa_core::ChannelCapabilities {
-        moa_core::ChannelCapabilities {
+    pub fn capabilities(&self) -> moa_core::types::channel::ChannelCapabilities {
+        moa_core::types::channel::ChannelCapabilities {
             max_message_length: SLACK_MAX_MESSAGE_LENGTH,
             supports_ephemeral: true,
             supports_threads: true,
@@ -128,8 +129,8 @@ fn render_tool_card(
 }
 
 pub(crate) fn render_action_review_request(
-    envelope: &moa_core::ActionEnvelope,
-    preview: &moa_core::ActionReviewPreview,
+    envelope: &moa_core::types::action_policy::ActionEnvelope,
+    preview: &moa_core::types::action_policy::ActionReviewPreview,
 ) -> String {
     let mut rendered = format!(
         "{} Action review requested: {}\n{}\nReview: {}",
@@ -147,11 +148,11 @@ pub(crate) fn render_action_review_request(
     rendered
 }
 
-fn risk_icon(risk_level: &moa_core::RiskLevel) -> &'static str {
+fn risk_icon(risk_level: &moa_core::types::action_policy::RiskLevel) -> &'static str {
     match risk_level {
-        moa_core::RiskLevel::Low => "🟢",
-        moa_core::RiskLevel::Medium => "🟡",
-        moa_core::RiskLevel::High => "🔴",
+        moa_core::types::action_policy::RiskLevel::Low => "🟢",
+        moa_core::types::action_policy::RiskLevel::Medium => "🟡",
+        moa_core::types::action_policy::RiskLevel::High => "🔴",
     }
 }
 
@@ -247,8 +248,11 @@ mod tests {
     use super::*;
     #[cfg(feature = "slack")]
     use moa_core::{
-        ActionClass, ActionEnvelope, ActionReviewField, ActionReviewPreview, RiskLevel,
-        SessionActorRef, SessionId, SessionStatus, TenantId, ToolCallId,
+        types::action_policy::ActionClass, types::action_policy::ActionEnvelope,
+        types::action_policy::ActionReviewField, types::action_policy::ActionReviewPreview,
+        types::action_policy::RiskLevel, types::contact::SessionActorRef,
+        types::identifiers::SessionId, types::identifiers::TenantId,
+        types::identifiers::ToolCallId, types::session::SessionStatus,
     };
 
     #[cfg(feature = "slack")]

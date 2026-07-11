@@ -4,7 +4,10 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use moa_core::{Event, EventRange, ToolCallId, ToolCallRequest, ToolOutput};
+use moa_core::{
+    events::Event, types::events_stream::EventRange, types::identifiers::ToolCallId,
+    types::tools::ToolCallRequest, types::tools::ToolOutput,
+};
 use moa_test_support::postgres::test_database_url;
 use serde_json::json;
 use tempfile::TempDir;
@@ -48,8 +51,8 @@ fn tool_request(
     tool_call_id: ToolCallId,
     tool_name: &str,
     input: serde_json::Value,
-    session_id: moa_core::SessionId,
-    meta: &moa_core::SessionMeta,
+    session_id: moa_core::types::identifiers::SessionId,
+    meta: &moa_core::types::session::SessionMeta,
 ) -> ToolCallRequest {
     ToolCallRequest {
         tool_call_id,
@@ -70,8 +73,8 @@ fn tool_request_with_provider_id(
     provider_tool_use_id: Option<&str>,
     tool_name: &str,
     input: serde_json::Value,
-    session_id: moa_core::SessionId,
-    meta: &moa_core::SessionMeta,
+    session_id: moa_core::types::identifiers::SessionId,
+    meta: &moa_core::types::session::SessionMeta,
 ) -> ToolCallRequest {
     ToolCallRequest {
         tool_call_id,
@@ -87,14 +90,18 @@ fn tool_request_with_provider_id(
     }
 }
 
-fn fallback_tool_user_id(meta: &moa_core::SessionMeta) -> moa_core::UserId {
+fn fallback_tool_user_id(
+    meta: &moa_core::types::session::SessionMeta,
+) -> moa_core::types::identifiers::UserId {
     match &meta.created_by {
-        Some(moa_core::SessionActorRef::Identity { id }) => moa_core::UserId::new(id.to_string()),
-        Some(moa_core::SessionActorRef::Contact { id }) => {
-            moa_core::UserId::new(format!("contact:{id}"))
+        Some(moa_core::types::contact::SessionActorRef::Identity { id }) => {
+            moa_core::types::identifiers::UserId::new(id.to_string())
         }
-        Some(moa_core::SessionActorRef::Anonymous) | None => {
-            moa_core::UserId::new(format!("tenant:{}", meta.tenant_id))
+        Some(moa_core::types::contact::SessionActorRef::Contact { id }) => {
+            moa_core::types::identifiers::UserId::new(format!("contact:{id}"))
+        }
+        Some(moa_core::types::contact::SessionActorRef::Anonymous) | None => {
+            moa_core::types::identifiers::UserId::new(format!("tenant:{}", meta.tenant_id))
         }
     }
 }
@@ -131,7 +138,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             .await
             .context("create session via restate ingress")?;
         let session_id = create_response
-            .json::<moa_core::SessionId>()
+            .json::<moa_core::types::identifiers::SessionId>()
             .await
             .context("deserialize create_session response")?;
         grant_session_participant(&identity, session_id).await?;
@@ -342,7 +349,7 @@ async fn tool_executor_blocks_canary_input_before_backend_execution() -> Result<
             .await
             .context("create session via restate ingress")?;
         let session_id = create_response
-            .json::<moa_core::SessionId>()
+            .json::<moa_core::types::identifiers::SessionId>()
             .await
             .context("deserialize create_session response")?;
         grant_session_participant(&identity, session_id).await?;
@@ -394,7 +401,7 @@ async fn tool_executor_blocks_canary_input_before_backend_execution() -> Result<
             .send()
             .await
             .context("fetch canary block events via restate ingress")?
-            .json::<Vec<moa_core::EventRecord>>()
+            .json::<Vec<moa_core::types::events_stream::EventRecord>>()
             .await
             .context("deserialize canary block event response")?;
 
@@ -483,7 +490,7 @@ async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Resul
             .await
             .context("create session via restate ingress")?;
         let session_id = create_response
-            .json::<moa_core::SessionId>()
+            .json::<moa_core::types::identifiers::SessionId>()
             .await
             .context("deserialize create_session response")?;
         grant_session_participant(&identity, session_id).await?;
@@ -584,9 +591,9 @@ async fn wait_for_tool_result_events(
     client: &reqwest::Client,
     ingress: &str,
     identity: &moa_core::traits::Identity,
-    session_id: moa_core::SessionId,
+    session_id: moa_core::types::identifiers::SessionId,
     expected_results: usize,
-) -> Result<Vec<moa_core::EventRecord>> {
+) -> Result<Vec<moa_core::types::events_stream::EventRecord>> {
     for _attempt in 0..30 {
         let request = client.post(format!(
             "{}/restate/call/SessionStore/get_events",
@@ -598,7 +605,7 @@ async fn wait_for_tool_result_events(
             .await
             .context("fetch events via restate ingress")?;
         let events = response
-            .json::<Vec<moa_core::EventRecord>>()
+            .json::<Vec<moa_core::types::events_stream::EventRecord>>()
             .await
             .context("deserialize event response")?;
         if events

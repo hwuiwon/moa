@@ -5,7 +5,7 @@ use std::sync::Arc;
 #[cfg(feature = "auth0")]
 use async_trait::async_trait;
 use moa_authz::AwakeableResolver;
-use moa_core::MoaConfig;
+use moa_core::config::MoaConfig;
 use moa_core::config::{AsyncAuthzKind, AuthProviderKind, TokenVaultKind};
 use moa_core::traits::{AsyncAuthzProvider, AuthProvider, TokenVaultProvider};
 #[cfg(feature = "auth0")]
@@ -300,7 +300,7 @@ mod tests {
         assert_eq!(identity.id, uuid::Uuid::nil());
         assert_eq!(
             identity.tenant_id,
-            moa_core::TenantId::from(uuid::Uuid::nil())
+            moa_core::types::identifiers::TenantId::from(uuid::Uuid::nil())
         );
         assert_eq!(identity.api_key_id, None);
     }

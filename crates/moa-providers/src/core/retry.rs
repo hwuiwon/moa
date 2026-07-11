@@ -3,7 +3,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
-use moa_core::{MoaError, Result};
+use moa_core::{error::MoaError, error::Result};
 use reqwest::{
     RequestBuilder, Response, StatusCode,
     header::{HeaderMap, RETRY_AFTER},
@@ -318,7 +318,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use moa_core::MoaError;
+    use moa_core::error::MoaError;
 
     use super::{RateGuard, RetryPolicy, retry_after_delay_from_message};
 

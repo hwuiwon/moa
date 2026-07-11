@@ -1,6 +1,9 @@
 //! Event-log collection helpers for eval trajectories, responses, and aggregate metrics.
 
-use moa_core::{Event, EventRecord, TokenPricing, ToolCallId};
+use moa_core::{
+    events::Event, types::events_stream::EventRecord, types::identifiers::ToolCallId,
+    types::model::TokenPricing,
+};
 use moa_eval_core::{EvalMetrics, TrajectoryStep};
 use std::collections::HashMap;
 
@@ -200,7 +203,10 @@ fn truncate(text: &str, max_bytes: usize) -> String {
 mod tests {
     use std::time::Duration;
 
-    use moa_core::{Event, TokenPricing, ToolCallId, ToolOutput};
+    use moa_core::{
+        events::Event, types::identifiers::ToolCallId, types::model::TokenPricing,
+        types::tools::ToolOutput,
+    };
     use serde_json::json;
 
     use super::TrajectoryCollector;
@@ -239,8 +245,8 @@ mod tests {
         collector.process_event(&Event::BrainResponse {
             text: "done".to_string(),
             thought_signature: None,
-            model: moa_core::ModelId::new("mock"),
-            model_tier: moa_core::ModelTier::Main,
+            model: moa_core::types::identifiers::ModelId::new("mock"),
+            model_tier: moa_core::types::provider::ModelTier::Main,
             input_tokens_uncached: 100,
             input_tokens_cache_write: 0,
             input_tokens_cache_read: 0,

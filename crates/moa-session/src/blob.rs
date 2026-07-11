@@ -8,7 +8,10 @@ use std::{
 
 use async_trait::async_trait;
 use moa_core::config::SessionBlobBackend;
-use moa_core::{BlobStore, ClaimCheck, Event, MoaConfig, MoaError, Result, SessionId};
+use moa_core::{
+    config::MoaConfig, error::MoaError, error::Result, events::Event, traits::BlobStore,
+    types::events_stream::ClaimCheck, types::identifiers::SessionId,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
@@ -570,32 +573,32 @@ mod tests {
         let after = "new line\n".repeat(32);
         let event = Event::ActionReviewRequested {
             review_id,
-            envelope: moa_core::ActionEnvelope {
+            envelope: moa_core::types::action_policy::ActionEnvelope {
                 review_id,
-                tenant_id: moa_core::TenantId::from(uuid::Uuid::from_u128(1)),
-                requested_by: moa_core::SessionActorRef::Identity {
+                tenant_id: moa_core::types::identifiers::TenantId::from(uuid::Uuid::from_u128(1)),
+                requested_by: moa_core::types::contact::SessionActorRef::Identity {
                     id: uuid::Uuid::from_u128(2),
                 },
                 session_id: Some(session_id),
                 worker_id: None,
-                tool_call_id: moa_core::ToolCallId(review_id),
+                tool_call_id: moa_core::types::identifiers::ToolCallId(review_id),
                 tool_name: "file_write".to_string(),
                 normalized_input: "src/lib.rs".to_string(),
                 input_summary: "write src/lib.rs".to_string(),
-                risk_level: moa_core::RiskLevel::High,
-                action_class: moa_core::ActionClass::LocalWrite,
+                risk_level: moa_core::types::action_policy::RiskLevel::High,
+                action_class: moa_core::types::action_policy::ActionClass::LocalWrite,
                 origin_kind: None,
                 origin_id: None,
                 origin_step_id: None,
                 idempotency_key: None,
                 created_at: chrono::Utc::now(),
             },
-            preview: moa_core::ActionReviewPreview {
-                fields: vec![moa_core::ActionReviewField {
+            preview: moa_core::types::action_policy::ActionReviewPreview {
+                fields: vec![moa_core::types::action_policy::ActionReviewField {
                     label: "path".to_string(),
                     value: "src/lib.rs".to_string(),
                 }],
-                file_diffs: vec![moa_core::ActionReviewFileDiff {
+                file_diffs: vec![moa_core::types::action_policy::ActionReviewFileDiff {
                     path: "src/lib.rs".to_string(),
                     before,
                     after,

@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use moa_core::{HandProvider, HandResources, HandSpec, SandboxTier};
+use moa_core::{
+    traits::HandProvider, types::hands::HandResources, types::hands::HandSpec,
+    types::hands::SandboxTier,
+};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;

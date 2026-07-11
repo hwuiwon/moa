@@ -18,16 +18,16 @@ use moa_core::wire::experiments::{
     ExperimentTrialsRequest, ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
 };
 use moa_core::{
-    ActionRuleScope, CompletionRequest, ContextMessage, JsonResponseFormat, LearningCandidate,
-    LearningCandidateStatus, LearningCandidateType, LearningRiskClass, MoaError, ModelId, TenantId,
+    error::MoaError, types::action_policy::ActionRuleScope, types::completion::CompletionRequest,
+    types::completion::JsonResponseFormat, types::context::ContextMessage,
+    types::experience::LearningCandidate, types::experience::LearningCandidateStatus,
+    types::experience::LearningCandidateType, types::experience::LearningRiskClass,
+    types::identifiers::ModelId, types::identifiers::TenantId,
 };
 use moa_observability::{record_experiment_run, record_experiment_score_rows};
 use moa_scoring::{
-    ExperimentRunCompareRef, ExperimentRunScoreRef, ScenarioScoreDeltaRow, ScenarioScoreSummary,
     ScoreCompareRef, ScoreCompareRow, ScoreRunRef, ScoreSummary, ScoreSummaryRow, ScoringError,
-    TrialScoreSummary, VariantScoreDeltaRow, compare_experiment_score_breakdown_for_tenant,
-    compare_score_runs_for_tenant, experiment_score_breakdown_for_tenant,
-    score_summaries_for_tenant,
+    compare_score_runs_for_tenant, score_summaries_for_tenant,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,11 @@ use crate::model::{
     ExperimentTrialRecord, ExperimentTrialStatus, ExperimentVariant, NewExperimentRun,
 };
 use crate::plan::project_plan_run;
+use crate::scores::{
+    ExperimentRunCompareRef, ExperimentRunScoreRef, ScenarioScoreDeltaRow, ScenarioScoreSummary,
+    TrialScoreSummary, VariantScoreDeltaRow, compare_experiment_score_breakdown_for_tenant,
+    experiment_score_breakdown_for_tenant,
+};
 use crate::store::ExperimentStore;
 
 const DEFAULT_LIST_LIMIT: i64 = 50;
@@ -1045,7 +1050,9 @@ fn parse_trial_status(status: &str) -> Result<ExperimentTrialStatus> {
         .ok_or_else(|| bad_request(format!("invalid experiment trial status `{status}`")))
 }
 
-fn session_id_from_target(target: &ExperimentTarget) -> Option<moa_core::SessionId> {
+fn session_id_from_target(
+    target: &ExperimentTarget,
+) -> Option<moa_core::types::identifiers::SessionId> {
     match target {
         ExperimentTarget::AgentLoop { session_id, .. }
         | ExperimentTarget::Procedure { session_id, .. } => *session_id,
@@ -1207,7 +1214,10 @@ fn bad_request_from(error: impl std::fmt::Display) -> ExperimentAppError {
 mod tests {
     use chrono::{TimeZone, Utc};
     use moa_artifacts::simulation::ExperimentTargetKind;
-    use moa_core::{ActionRuleScope, MessageRole, ModelId, SessionId};
+    use moa_core::{
+        types::action_policy::ActionRuleScope, types::context::MessageRole,
+        types::identifiers::ModelId, types::identifiers::SessionId,
+    };
     use serde_json::json;
 
     use super::*;

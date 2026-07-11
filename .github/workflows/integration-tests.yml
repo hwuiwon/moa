@@ -37,7 +37,7 @@ jobs:
       # the workspace test build; a separate target dir stops them from
       # invalidating each other's fingerprints.
       - name: Check architecture boundaries
-        run: CARGO_TARGET_DIR=target/tools cargo run -p xtask -- check-architecture-boundaries
+        run: CARGO_TARGET_DIR=target/tools cargo run -p xtask --locked -- check-architecture-boundaries
 
       - name: Start Postgres and OpenFGA
         run: docker compose up -d --build postgres openfga

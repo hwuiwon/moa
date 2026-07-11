@@ -1,7 +1,7 @@
 //! Tests for trusted identity-header extraction.
 
-use moa_core::TenantId;
 use moa_core::traits::IdentityType;
+use moa_core::types::identifiers::TenantId;
 use moa_orchestrator::ctx::{IdentityHeaderError, extract_identity};
 use restate_sdk::prelude::HeaderMap;
 use uuid::Uuid;

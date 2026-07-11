@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use crate::memory_eval::corpus::{LedgerFact, TranscriptStyle};
 use moa_memory_types::ScopeTier;
 
-use super::{FactCategory, mix_u64};
+use super::model::{FactCategory, mix_u64};
 
 pub(super) fn render_fact_transcript(
     transcript_style: TranscriptStyle,

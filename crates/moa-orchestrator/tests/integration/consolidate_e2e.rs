@@ -4,7 +4,7 @@ use std::process::{Child, Command, Stdio};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use moa_orchestrator::objects::tenant::{TenantConfig, TenantStatus};
 use moa_orchestrator::workflows::consolidate::{ConsolidateReport, ConsolidateRequest};
 use moa_test_support::postgres::test_database_url;

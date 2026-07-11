@@ -1,6 +1,8 @@
 //! Deterministic gate for deciding whether query rewriting should call an LLM.
 
-use moa_core::{ContextMessage, QueryRewriteConfig, RewriteReason};
+use moa_core::{
+    config::QueryRewriteConfig, types::context::ContextMessage, types::query_rewrite::RewriteReason,
+};
 
 use crate::planning::{Strategy, classify_strategy};
 
@@ -235,7 +237,10 @@ fn approximate_query_tokens(query: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::{ContextMessage, QueryRewriteConfig, RewriteReason};
+    use moa_core::{
+        config::QueryRewriteConfig, types::context::ContextMessage,
+        types::query_rewrite::RewriteReason,
+    };
 
     use super::{RewriteDecision, RewriteGateInput, SkipReason, decide};
 
@@ -265,7 +270,7 @@ mod tests {
             history: &history,
             user_message_count: history
                 .iter()
-                .filter(|message| message.role == moa_core::MessageRole::User)
+                .filter(|message| message.role == moa_core::types::context::MessageRole::User)
                 .count()
                 + 1,
             config: &QueryRewriteConfig::default(),

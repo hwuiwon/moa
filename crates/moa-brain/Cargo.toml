@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-eval-harness = []
+eval-harness = ["dep:moa-hands", "dep:moa-memory-ingest"]
 
 [dependencies]
 async-trait.workspace = true
@@ -17,19 +17,17 @@ metrics.workspace = true
 moa-artifacts = { workspace = true }
 moa-core = { workspace = true }
 moa-db = { workspace = true }
-moa-hands = { workspace = true }
+moa-hands = { workspace = true, optional = true }
 moa-lineage-citation = { workspace = true }
 moa-lineage-core = { workspace = true }
 moa-memory-graph = { workspace = true }
-moa-memory-ingest = { workspace = true }
+moa-memory-ingest = { workspace = true, optional = true }
 moa-memory-types = { workspace = true }
 moa-memory-vector = { workspace = true }
 moa-observability = { workspace = true }
 moa-providers = { workspace = true }
-moa-session = { workspace = true }
 moa-security = { workspace = true }
 moka.workspace = true
-reqwest.workspace = true
 rust-stemmers.workspace = true
 secrecy.workspace = true
 serde.workspace = true

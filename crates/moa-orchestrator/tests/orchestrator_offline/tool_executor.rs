@@ -7,11 +7,15 @@ use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::wire::tools::ToolDescriptor;
 use moa_core::{
-    ActionClass, BuiltInTool, Event, EventRecord, EventType, IdempotencyClass, RiskLevel,
-    SandboxFile, TenantId, ToolCallId, ToolCallRequest, ToolContext, ToolDefinition,
-    ToolDiffStrategy, ToolInputShape, ToolOutput, ToolPolicySpec, TrustedSandboxFileEntry,
-    TrustedSandboxFileManifestPayload, TrustedSandboxFileManifestRef, UserId, read_tool_policy,
-    write_tool_policy,
+    events::Event, events::EventType, traits::BuiltInTool, traits::ToolContext,
+    types::action_policy::ActionClass, types::action_policy::RiskLevel,
+    types::events_stream::EventRecord, types::hands::SandboxFile, types::identifiers::TenantId,
+    types::identifiers::ToolCallId, types::identifiers::UserId, types::tools::IdempotencyClass,
+    types::tools::ToolCallRequest, types::tools::ToolDefinition, types::tools::ToolDiffStrategy,
+    types::tools::ToolInputShape, types::tools::ToolOutput, types::tools::ToolPolicySpec,
+    types::tools::TrustedSandboxFileEntry, types::tools::TrustedSandboxFileManifestPayload,
+    types::tools::TrustedSandboxFileManifestRef, types::tools::read_tool_policy,
+    types::tools::write_tool_policy,
 };
 use moa_hands::{ToolRegistry, ToolRouter};
 use moa_orchestrator::services::tool_executor::{
@@ -71,7 +75,7 @@ impl BuiltInTool for CountingTool {
         &self,
         _input: &Value,
         _ctx: &ToolContext<'_>,
-    ) -> moa_core::Result<ToolOutput> {
+    ) -> moa_core::error::Result<ToolOutput> {
         Ok(ToolOutput::text(
             self.name,
             std::time::Duration::from_millis(1),
@@ -120,7 +124,7 @@ fn tool_definition(
 fn tool_result_record(tool_call_id: ToolCallId) -> EventRecord {
     EventRecord {
         id: Uuid::now_v7(),
-        session_id: moa_core::SessionId::new(),
+        session_id: moa_core::types::identifiers::SessionId::new(),
         sequence_num: 0,
         event_type: EventType::ToolResult,
         event: Event::ToolResult {

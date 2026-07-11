@@ -3,7 +3,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{ContactId, SessionId, SessionStatus, TenantId};
+use crate::{
+    types::contact::ContactId, types::identifiers::SessionId, types::identifiers::TenantId,
+    types::session::SessionStatus,
+};
 
 /// One session-level analytics row sourced from the `session_summary` view.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

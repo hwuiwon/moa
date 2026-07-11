@@ -3,13 +3,19 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
-#[cfg(feature = "scripted-provider")]
-use moa_core::{CompletionContent, StopReason, ToolCallContent, ToolInvocation};
 use moa_core::{
-    LLMProvider, MoaConfig, MoaError, ModelCapabilities, ModelId, ModelTask, QueryRewriteConfig,
+    config::MoaConfig, config::QueryRewriteConfig, error::MoaError, traits::LLMProvider,
+    types::identifiers::ModelId, types::model::ModelCapabilities, types::provider::ModelTask,
 };
 #[cfg(feature = "scripted-provider")]
-use moa_core::{TokenPricing, ToolCallFormat as ScriptedToolCallFormat};
+use moa_core::{
+    types::completion::CompletionContent, types::completion::StopReason,
+    types::completion::ToolCallContent, types::completion::ToolInvocation,
+};
+#[cfg(feature = "scripted-provider")]
+use moa_core::{
+    types::model::TokenPricing, types::model::ToolCallFormat as ScriptedToolCallFormat,
+};
 #[cfg(feature = "scripted-provider")]
 use serde::Deserialize;
 #[cfg(feature = "scripted-provider")]
@@ -30,7 +36,8 @@ enum ProviderSource {
     Factory(ProviderFactory),
 }
 
-type ProviderFactory = Arc<dyn Fn(&str) -> moa_core::Result<Arc<dyn LLMProvider>> + Send + Sync>;
+type ProviderFactory =
+    Arc<dyn Fn(&str) -> moa_core::error::Result<Arc<dyn LLMProvider>> + Send + Sync>;
 type ProviderCache = Arc<RwLock<HashMap<ProviderCacheKey, ResolvedProvider>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -73,7 +80,7 @@ impl RegisteredProvider {
         }
     }
 
-    fn build(&self, model: &str) -> moa_core::Result<Arc<dyn LLMProvider>> {
+    fn build(&self, model: &str) -> moa_core::error::Result<Arc<dyn LLMProvider>> {
         match &self.source {
             ProviderSource::Static(provider) => Ok(provider.clone()),
             ProviderSource::Factory(factory) => factory(model),
@@ -136,7 +143,7 @@ impl ProviderRegistry {
     }
 
     /// Builds a deterministic scripted registry from a JSON fixture file.
-    pub fn scripted(path: impl AsRef<std::path::Path>) -> moa_core::Result<Self> {
+    pub fn scripted(path: impl AsRef<std::path::Path>) -> moa_core::error::Result<Self> {
         #[cfg(not(feature = "scripted-provider"))]
         {
             let _ = path;
@@ -166,7 +173,7 @@ impl ProviderRegistry {
     }
 
     /// Builds a deterministic mock registry with an unbounded fallback response.
-    pub fn mock(seed: u64) -> moa_core::Result<Self> {
+    pub fn mock(seed: u64) -> moa_core::error::Result<Self> {
         #[cfg(not(feature = "scripted-provider"))]
         {
             let _ = seed;
@@ -191,7 +198,7 @@ impl ProviderRegistry {
     pub fn resolve_selection_from_config(
         config: &MoaConfig,
         model_override: Option<&str>,
-    ) -> moa_core::Result<(ProviderId, ModelId)> {
+    ) -> moa_core::error::Result<(ProviderId, ModelId)> {
         let requested = model_override
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -228,7 +235,7 @@ impl ProviderRegistry {
     pub fn resolve_provider_id(
         &self,
         requested_model: Option<&str>,
-    ) -> moa_core::Result<(ProviderId, ModelId)> {
+    ) -> moa_core::error::Result<(ProviderId, ModelId)> {
         match requested_model {
             Some(requested_model) => self.resolve_requested_model(requested_model),
             None => self.resolve_default_model(),
@@ -239,7 +246,7 @@ impl ProviderRegistry {
     pub fn capabilities_for_model(
         &self,
         requested_model: Option<&str>,
-    ) -> moa_core::Result<ModelCapabilities> {
+    ) -> moa_core::error::Result<ModelCapabilities> {
         let (provider_id, model) = self.resolve_provider_id(requested_model)?;
         Ok(self
             .provider_for_id(provider_id, &model)?
@@ -251,7 +258,7 @@ impl ProviderRegistry {
     pub fn resolve_rewriter_provider(
         &self,
         config: &QueryRewriteConfig,
-    ) -> moa_core::Result<Option<Arc<dyn LLMProvider>>> {
+    ) -> moa_core::error::Result<Option<Arc<dyn LLMProvider>>> {
         if !config.enabled {
             return Ok(None);
         }
@@ -278,7 +285,10 @@ impl ProviderRegistry {
     /// The main-loop provider is wrapped with the configured LLM failover chain
     /// (`models.fallback_models`) so a rate-limited primary transparently fails
     /// over; the auxiliary provider is left unwrapped.
-    pub fn model_router_for_config(&self, config: &MoaConfig) -> moa_core::Result<ModelRouter> {
+    pub fn model_router_for_config(
+        &self,
+        config: &MoaConfig,
+    ) -> moa_core::error::Result<ModelRouter> {
         let main_model = config.model_for_task(ModelTask::MainLoop);
         let main = self.provider_for_model(Some(main_model))?;
         let main = self.apply_main_failover(config, main_model, main)?;
@@ -306,7 +316,7 @@ impl ProviderRegistry {
         config: &MoaConfig,
         primary_model: &str,
         main: Arc<dyn LLMProvider>,
-    ) -> moa_core::Result<Arc<dyn LLMProvider>> {
+    ) -> moa_core::error::Result<Arc<dyn LLMProvider>> {
         if config.models.fallback_models.is_empty() {
             return Ok(main);
         }
@@ -358,7 +368,7 @@ impl ProviderRegistry {
     pub fn provider_for_model(
         &self,
         requested_model: Option<&str>,
-    ) -> moa_core::Result<Arc<dyn LLMProvider>> {
+    ) -> moa_core::error::Result<Arc<dyn LLMProvider>> {
         let (id, model) = self.resolve_provider_id(requested_model)?;
         Ok(self.provider_for_id(id, &model)?.provider)
     }
@@ -368,7 +378,7 @@ impl ProviderRegistry {
         &self,
         id: ProviderId,
         model: &ModelId,
-    ) -> moa_core::Result<ResolvedProvider> {
+    ) -> moa_core::error::Result<ResolvedProvider> {
         let cache_key = ProviderCacheKey {
             id,
             model: model.clone(),
@@ -395,7 +405,7 @@ impl ProviderRegistry {
     fn resolve_requested_model(
         &self,
         requested_model: &str,
-    ) -> moa_core::Result<(ProviderId, ModelId)> {
+    ) -> moa_core::error::Result<(ProviderId, ModelId)> {
         let trimmed = requested_model.trim();
         if trimmed.is_empty() {
             return self.resolve_default_model();
@@ -437,7 +447,7 @@ impl ProviderRegistry {
             .map(|(id, _)| *id)
     }
 
-    fn resolve_default_model(&self) -> moa_core::Result<(ProviderId, ModelId)> {
+    fn resolve_default_model(&self) -> moa_core::error::Result<(ProviderId, ModelId)> {
         if let Some((id, provider)) = self
             .providers
             .iter()
@@ -498,7 +508,7 @@ fn strip_provider_prefix(model: &str) -> &str {
     model.split_once(':').map_or(model, |(_, model)| model)
 }
 
-fn default_provider_id(provider_name: &str) -> moa_core::Result<ProviderId> {
+fn default_provider_id(provider_name: &str) -> moa_core::error::Result<ProviderId> {
     provider_descriptor_by_name(provider_name)
         .map(|descriptor| descriptor.id)
         .ok_or_else(|| MoaError::ConfigError(format!("unsupported provider '{provider_name}'")))
@@ -603,7 +613,9 @@ struct ScriptedToolCall {
 }
 
 #[cfg(feature = "scripted-provider")]
-fn scripted_registry_from_file(file: ScriptedProviderFile) -> moa_core::Result<ProviderRegistry> {
+fn scripted_registry_from_file(
+    file: ScriptedProviderFile,
+) -> moa_core::error::Result<ProviderRegistry> {
     let mut provider = ScriptedProvider::new(scripted_capabilities("scripted-loadtest"));
     if let Some(default) = file.default {
         provider = provider.with_fallback_response(scripted_response(default)?);
@@ -621,7 +633,7 @@ fn scripted_registry_from_file(file: ScriptedProviderFile) -> moa_core::Result<P
 }
 
 #[cfg(feature = "scripted-provider")]
-fn scripted_response(entry: ScriptedEntry) -> moa_core::Result<ScriptedResponse> {
+fn scripted_response(entry: ScriptedEntry) -> moa_core::error::Result<ScriptedResponse> {
     let completion = entry.into_completion();
     let mut blocks = Vec::new();
     if !completion.content.is_empty() {
@@ -684,7 +696,7 @@ fn scripted_response(entry: ScriptedEntry) -> moa_core::Result<ScriptedResponse>
 }
 
 #[cfg(feature = "scripted-provider")]
-fn parse_scripted_stop_reason(raw: &str) -> moa_core::Result<StopReason> {
+fn parse_scripted_stop_reason(raw: &str) -> moa_core::error::Result<StopReason> {
     match raw {
         "end_turn" => Ok(StopReason::EndTurn),
         "max_tokens" => Ok(StopReason::MaxTokens),
@@ -726,8 +738,10 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        CompletionRequest, CompletionResponse, CompletionStream, LLMProvider, ModelCapabilities,
-        ModelId, QueryRewriteConfig, StopReason, TokenPricing, TokenUsage, ToolCallFormat,
+        config::QueryRewriteConfig, traits::LLMProvider, types::completion::CompletionRequest,
+        types::completion::CompletionResponse, types::completion::CompletionStream,
+        types::completion::StopReason, types::completion::TokenUsage, types::identifiers::ModelId,
+        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
 
     use super::{ProviderFactory, ProviderId, ProviderRegistry};
@@ -766,7 +780,7 @@ mod tests {
         async fn complete(
             &self,
             _request: CompletionRequest,
-        ) -> moa_core::Result<CompletionStream> {
+        ) -> moa_core::error::Result<CompletionStream> {
             Ok(CompletionStream::from_response(CompletionResponse {
                 text: "ok".to_string(),
                 content: Vec::new(),
@@ -797,7 +811,7 @@ mod tests {
     #[test]
     fn from_config_uses_configured_api_key() {
         // Pins: provider registry availability follows direct MoaConfig provider API keys.
-        let mut config = moa_core::MoaConfig::default();
+        let mut config = moa_core::config::MoaConfig::default();
         config.providers.openai.api_key = "test-key".to_string();
 
         let registry = ProviderRegistry::from_config(&config);
@@ -941,7 +955,7 @@ mod tests {
     fn failover_accepts_adjacent_tier_fallback() {
         // Pins: a within-one-tier fallback (fable-5 Frontier → opus-4-8 Flagship)
         // is accepted and wraps the primary provider.
-        let mut config = moa_core::MoaConfig::default();
+        let mut config = moa_core::config::MoaConfig::default();
         config.models.main = "claude-fable-5".to_string();
         config.models.fallback_models = vec!["claude-opus-4-8".to_string()];
         let registry = ProviderRegistry::with_static_providers(
@@ -965,7 +979,7 @@ mod tests {
     fn failover_rejects_two_tier_gap_naming_both_tiers() {
         // Pins: a fallback more than one tier from the primary (gpt-5.4 Flagship →
         // claude-haiku-4-5 Fast) is a hard config error at build time.
-        let mut config = moa_core::MoaConfig::default();
+        let mut config = moa_core::config::MoaConfig::default();
         config.models.main = "gpt-5.4".to_string();
         config.models.fallback_models = vec!["claude-haiku-4-5".to_string()];
         let registry = ProviderRegistry::with_static_providers(
@@ -997,7 +1011,7 @@ mod tests {
     #[test]
     fn failover_rejects_fallback_absent_from_catalog() {
         // Pins: a fallback model that is not catalogued is a hard config error.
-        let mut config = moa_core::MoaConfig::default();
+        let mut config = moa_core::config::MoaConfig::default();
         config.models.main = "gpt-5.4".to_string();
         config.models.fallback_models = vec!["claude-imaginary-9".to_string()];
         let registry =

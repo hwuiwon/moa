@@ -57,6 +57,21 @@ struct Allowance {
     reason: &'static str,
 }
 
+impl Allowance {
+    fn removal_task(self) -> Option<&'static str> {
+        match self.path {
+            "crates/moa-orchestrator/src/services/agents.rs"
+            | "crates/moa-orchestrator/src/services/tenants.rs" => Some("Task 2"),
+            "crates/moa-orchestrator/src/services/api_keys.rs"
+            | "crates/moa-orchestrator/src/services/experiments.rs" => Some("Task 3"),
+            path if path.starts_with("crates/moa-orchestrator/src/objects/") => Some("Task 14"),
+            path if path.starts_with("crates/moa-orchestrator/src/services/") => Some("Task 15"),
+            path if path.starts_with("crates/moa-orchestrator/src/workflows/") => Some("Task 16"),
+            _ => None,
+        }
+    }
+}
+
 macro_rules! allow {
     ($rule:ident, $path:literal, $needle:literal, $expected_count:literal, $reason:literal) => {
         Allowance {
@@ -73,130 +88,11 @@ macro_rules! allow {
 // access under an allowed file still fails until a reviewer records a reason.
 const ALLOWANCES: &[Allowance] = &[
     allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/objects/worker/request.rs",
-        "OrchestratorCtx::current_tool_schemas",
-        1,
-        "Worker request prep still reads configured tool schemas from the runtime singleton"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/objects/worker/request.rs",
-        "OrchestratorCtx::current_provider_registry",
-        1,
-        "Worker model capability checks still use the shared provider registry"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/objects/worker/handlers.rs",
-        "OrchestratorCtx::current_config",
-        5,
-        "Worker handlers still read stale-threshold and grace-period config from runtime config"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/objects/session/handlers.rs",
-        "OrchestratorCtx::current_session_store",
-        1,
-        "Session handlers still use the session-store seam for direct status and progress reads"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/objects/session/handlers.rs",
-        "OrchestratorCtx::current_config",
-        2,
-        "Session handlers still read liveness and narration config from runtime config"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/objects/session/liveness.rs",
-        "OrchestratorCtx::current_config",
-        2,
-        "Session liveness still reads stale-threshold config from runtime config"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/objects/session/narration.rs",
-        "OrchestratorCtx::current_config",
-        2,
-        "Session narration still reads narration config from runtime config"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/objects/tenant.rs",
-        "OrchestratorCtx::current()",
-        1,
-        "Tenant VO still owns a narrow memory-summary read and action-policy persistence pending repository seams"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/objects/tenant.rs",
-        ".graph_pool()",
-        1,
-        "Tenant VO memory-summary read currently obtains the graph pool from grouped deps"
-    ),
-    allow!(
         DirectSql,
         "crates/moa-orchestrator/src/objects/tenant.rs",
         "sqlx::query_scalar",
         1,
         "Tenant VO memory summary has one direct graph-node count pending repository extraction"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/action_reviews.rs",
-        "OrchestratorCtx::current_graph_pool",
-        6,
-        "Restate adapter obtains the pool for the extracted action-review app/store seam"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/action_reviews.rs",
-        "OrchestratorCtx::current_session_store",
-        2,
-        "Action-review terminal event append still uses the Restate session-store client seam"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/admin_maintenance.rs",
-        "OrchestratorCtx::current()",
-        1,
-        "Maintenance handler needs grouped runtime deps until the maintenance app seam exists"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/admin_maintenance.rs",
-        ".graph_pool()",
-        1,
-        "Maintenance handler reads the graph pool from grouped runtime deps"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/admin_maintenance.rs",
-        "OrchestratorCtx::current_graph_pool",
-        2,
-        "Remaining maintenance actions still call repository constructors directly"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/admin_maintenance.rs",
-        "OrchestratorCtx::current_config",
-        4,
-        "Maintenance jobs still read database config from runtime config accessors"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/agents.rs",
-        "OrchestratorCtx::current_graph_pool",
-        6,
-        "Agent service is a thin authz/DTO adapter over identity_admin repositories"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/agent_definitions.rs",
-        "OrchestratorCtx::current_graph_pool",
-        5,
-        "Agent-definition service currently owns artifact-backed install/deploy repository operations"
     ),
     allow!(
         DirectSql,
@@ -213,109 +109,11 @@ const ALLOWANCES: &[Allowance] = &[
         "Agent installation guard SQL remains local pending an agent-definition repository seam"
     ),
     allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/api_keys.rs",
-        "OrchestratorCtx::current()",
-        2,
-        "API-key service needs FGA plus repository deps for operator-scope checks"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/api_keys.rs",
-        "OrchestratorCtx::current_graph_pool",
-        4,
-        "API-key persistence moved under identity_admin while the handler still constructs repos"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/artifacts.rs",
-        "OrchestratorCtx::current_graph_pool",
-        1,
-        "Artifact registry is the current domain API and requires the Postgres pool"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/authz_admin.rs",
-        "OrchestratorCtx::current_graph_pool",
-        1,
-        "Authz admin handler still constructs authz repository state directly"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/authz_challenges.rs",
-        "OrchestratorCtx::current_graph_pool",
-        2,
-        "Authz challenge adapter obtains the pool for the extracted app/store seam"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/contacts.rs",
-        "OrchestratorCtx::current_graph_pool",
-        11,
-        "Contact service constructs the initial in-process contact repository operations"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/contacts.rs",
-        "OrchestratorCtx::current_session_store",
-        8,
-        "Contact service validates and updates session contact bindings through the session-store seam"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/contacts.rs",
-        "OrchestratorCtx::current_config",
-        2,
-        "Contact verification TTL and contact-point hash key env name are read from runtime config"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/contacts.rs",
-        "OrchestratorCtx::current()",
-        1,
-        "Contact token issuer is read from the process provider bundle"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/contacts.rs",
-        ".auth_providers()",
-        1,
-        "Contact token issuer is stored on the auth provider bundle"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/eval/mod.rs",
-        "OrchestratorCtx::current()",
-        1,
-        "Eval service still combines provider registry and analytics persistence"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/eval/mod.rs",
-        ".graph_pool()",
-        1,
-        "Eval service reads the pool from grouped runtime deps"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/eval/mod.rs",
-        "OrchestratorCtx::current_config",
-        2,
-        "Internal eval runner still reads model and database config from runtime config accessors"
-    ),
-    allow!(
         DirectSql,
-        "crates/moa-orchestrator/src/services/eval/repository.rs",
-        "QueryBuilder::<",
+        "crates/moa-orchestrator/src/services/authz_admin.rs",
+        "sqlx::query_scalar",
         1,
-        "Eval repository owns dataset multi-row insert persistence"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/eval/mod.rs",
-        "OrchestratorCtx::current_graph_pool",
-        9,
-        "Eval handler obtains pools before delegating to repositories and scoring read models"
+        "Authz admin still resolves one API-key ownership record inline"
     ),
     allow!(
         DirectSql,
@@ -326,455 +124,22 @@ const ALLOWANCES: &[Allowance] = &[
     ),
     allow!(
         DirectSql,
-        "crates/moa-orchestrator/src/services/eval/repository.rs",
-        "sqlx::query(",
-        3,
-        "Eval repository owns dataset SQL row mapping"
-    ),
-    allow!(
-        DirectSql,
-        "crates/moa-orchestrator/src/services/eval/repository.rs",
-        "sqlx::query_scalar",
-        1,
-        "Eval repository owns dataset upsert SQL"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/experiments.rs",
-        "OrchestratorCtx::current()",
-        2,
-        "Experiment service needs grouped deps for behavior-lab app and workflow dispatch"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/experiments.rs",
-        ".graph_pool()",
-        2,
-        "Experiment service reads the pool from grouped runtime deps"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/experiments.rs",
-        ".provider_registry()",
-        1,
-        "Experiment proposal generation still creates the local LLM gateway facade"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/experiments.rs",
-        "OrchestratorCtx::current_graph_pool",
-        10,
-        "Experiment service still constructs extracted experiment app/store helpers per handler"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/graph_memory_maint.rs",
-        "OrchestratorCtx::current_graph_pool",
-        2,
-        "Graph-memory maintenance is a storage-maintenance exception; sync_vectors drains the vector projection outbox against the graph pool"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/graph_memory_maint.rs",
-        "OrchestratorCtx::current_config",
-        1,
-        "sync_vectors builds the vector store from runtime config to drain the projection outbox"
-    ),
-    allow!(
-        DirectSql,
-        "crates/moa-orchestrator/src/services/graph_memory_maint.rs",
-        "sqlx::query_scalar",
-        1,
-        "Graph-memory maintenance scans storage partitions until a maintenance repository owns it"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/learning_review.rs",
-        "OrchestratorCtx::current()",
-        3,
-        "Learning review handler needs grouped deps and a concrete backend for transaction-aware skill promotion"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/learning_review.rs",
-        ".provider_registry()",
-        1,
-        "Learning review regression gate still consumes the configured provider registry"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/learning_review.rs",
-        ".graph_pool()",
-        1,
-        "Learning review acceptance passes the runtime pool into the extracted skill promotion flow"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/knowledge/mod.rs",
-        "OrchestratorCtx::current_config",
-        2,
-        "Knowledge production service constructors still read parser/provider config from runtime"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/knowledge/mod.rs",
-        "OrchestratorCtx::current_graph_pool",
-        2,
-        "Knowledge production service constructors still obtain the Postgres pool from runtime"
-    ),
-    allow!(
-        DirectSql,
         "crates/moa-orchestrator/src/services/knowledge/inspect.rs",
         "sqlx::query(",
         1,
         "Knowledge query-trace inspection reads lineage diagnostics until an analytics repository owns it"
     ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/memory/retrieval.rs",
-        "OrchestratorCtx::current()",
-        1,
-        "Memory handler needs grouped pool access until the memory app seam is extracted"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/memory/retrieval.rs",
-        ".graph_pool()",
-        1,
-        "Memory handler reads the graph pool from grouped runtime deps"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/memory/retrieval.rs",
-        "OrchestratorCtx::current_graph_pool",
-        1,
-        "Memory handler still constructs graph stores directly for the old memory endpoint"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/memory/retrieval.rs",
-        "OrchestratorCtx::current_config",
-        2,
-        "Memory debug retrieval still reads lineage and embedder config from the runtime singleton"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/memory/retrieval.rs",
-        "OrchestratorCtx::current_lineage",
-        1,
-        "Memory debug lineage endpoint directly records one lineage diagnostic event"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/neon_maint.rs",
-        "OrchestratorCtx::current()",
-        1,
-        "Neon maintenance endpoint still needs grouped runtime deps"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/narration.rs",
-        "OrchestratorCtx::current_config",
-        1,
-        "Narration service still reads narration config from runtime config"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/privacy/mod.rs",
-        "OrchestratorCtx::current_graph_pool",
-        2,
-        "Privacy adapter keeps token/vault/export orchestration while erasure moved to owning crates"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/privacy/mod.rs",
-        "OrchestratorCtx::current_config",
-        2,
-        "Privacy export and erase handlers still read compliance approval-token config"
-    ),
-    allow!(
-        DirectSql,
-        "crates/moa-orchestrator/src/services/privacy/repository.rs",
-        "sqlx::query(",
-        2,
-        "Privacy repository sets auditor role and resolves contact subjects before controlled export reads"
-    ),
-    allow!(
-        DirectSql,
-        "crates/moa-orchestrator/src/services/privacy/repository.rs",
-        "sqlx::query_scalar",
-        7,
-        "Privacy repository owns DSAR export read-model and linked-contact SQL"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/skills.rs",
-        "OrchestratorCtx::current_graph_pool",
-        5,
-        "Skills service constructs the skill registry, the artifact registry for procedure state, and the knowledge repository for the capabilities catalog"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/tenants.rs",
-        "OrchestratorCtx::current_graph_pool",
-        3,
-        "Tenant service is a thin authz/DTO adapter over identity_admin repositories"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/services/tool_executor.rs",
-        "OrchestratorCtx::current_session_store",
-        4,
-        "Tool executor still appends action events through the Restate session-store seam"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/consolidate.rs",
-        "OrchestratorCtx::current()",
-        2,
-        "Consolidation workflow needs grouped pool/embedder deps until memory app seam expands"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/consolidate.rs",
-        ".graph_pool()",
-        2,
-        "Consolidation workflow reads the pool from grouped runtime deps"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/consolidate.rs",
-        "OrchestratorCtx::current_graph_pool",
-        3,
-        "Consolidation workflow still constructs graph-memory helpers directly"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/consolidate.rs",
-        "OrchestratorCtx::current_session_store",
-        1,
-        "Consolidation workflow still reads recent events through the session-store seam"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/consolidate.rs",
-        ".embedding_provider()",
-        1,
-        "Consolidation backfill still reads the configured embedder from grouped runtime deps"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/procedure_execution.rs",
-        "OrchestratorCtx::current_graph_pool",
-        7,
-        "Procedure execution constructs the artifact registry for procedure run state in workflow helper steps"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/procedure_node_actions.rs",
-        "OrchestratorCtx::current_session_store",
-        1,
-        "Procedure node actions load the real session meta through the session-store seam for governed tool attribution"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/experiment_run.rs",
-        "OrchestratorCtx::current_graph_pool",
-        3,
-        "Experiment workflow uses experiment app/store helpers from the global context"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/experiment_run/plan_expansion.rs",
-        "OrchestratorCtx::current_graph_pool",
-        5,
-        "Experiment plan expansion still uses the experiment store from workflow steps"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/experiment_run/status.rs",
-        "OrchestratorCtx::current_graph_pool",
-        1,
-        "Experiment status projection still reads through experiment store helpers"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/experiment_run/status.rs",
-        "OrchestratorCtx::current_session_store",
-        1,
-        "Experiment status projection still resolves source sessions"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
-        "OrchestratorCtx::current_graph_pool",
-        2,
-        "Experiment target execution reads workflow/runtime stores and passes the pool into session creation helpers"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
-        "OrchestratorCtx::current()",
-        1,
-        "Experiment target execution reads the session-store backend from the global context"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/experiment_trial_run.rs",
-        "OrchestratorCtx::current_graph_pool",
-        1,
-        "Experiment trial workflow still reads experiment trial state through store helpers"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/experiment_trial_run/status.rs",
-        "OrchestratorCtx::current_graph_pool",
-        6,
-        "Experiment trial status projection still uses experiment store helpers"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/experiment_trial_run/target_execution.rs",
-        "OrchestratorCtx::current_graph_pool",
-        2,
-        "Experiment trial target execution reads workflow/runtime stores and passes the pool into session creation helpers"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/experiment_trial_run/target_execution.rs",
-        "OrchestratorCtx::current_session_store",
-        2,
-        "Experiment trial target execution still appends session events"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/experiment_trial_run/target_execution.rs",
-        "OrchestratorCtx::current()",
-        1,
-        "Experiment trial target execution reads the session-store backend from the global context"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/experiment_trial_run/trial_simulator.rs",
-        "OrchestratorCtx::current_graph_pool",
-        1,
-        "Trial simulator still reads experiment state through store helpers"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/experiment_trial_run/trial_simulator.rs",
-        "OrchestratorCtx::current_provider_registry",
-        1,
-        "Trial simulator still creates the local LLM gateway facade"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/skill_learning.rs",
-        "OrchestratorCtx::current()",
-        1,
-        "Skill-learning workflow needs grouped store/provider deps for proposal generation"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/skill_learning.rs",
-        ".provider_registry()",
-        1,
-        "Skill-learning workflow still uses configured providers for distillation"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/knowledge_sync_ingestion.rs",
-        "OrchestratorCtx::current_graph_pool",
-        5,
-        "Knowledge sync ingestion workflow constructs repositories and ingestion runners inside durable steps"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/knowledge_sync_ingestion.rs",
-        "OrchestratorCtx::current_config",
-        4,
-        "Knowledge sync ingestion workflow reads provider/parser config inside durable steps"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/progress_delivery.rs",
-        "OrchestratorCtx::current_channel_adapter",
-        1,
-        "Progress delivery resolves the target channel adapter through the runtime registry"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/progress_delivery.rs",
-        "OrchestratorCtx::current_session_store",
-        1,
-        "Progress delivery reads active channel bindings through the session-store seam"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/worker_turn_execution.rs",
-        "OrchestratorCtx::current_config",
-        2,
-        "Worker turn execution still reads generation config from runtime config"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/turn_execution.rs",
-        "OrchestratorCtx::current()",
-        3,
-        "TurnExecution is the central workflow adapter and still needs grouped runtime deps"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/turn_execution.rs",
-        ".session_store()",
-        1,
-        "TurnExecution reads the session store from grouped runtime deps"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/turn_execution.rs",
-        "OrchestratorCtx::current_session_store",
-        5,
-        "TurnExecution still appends workflow events through the current session-store seam"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/turn_execution.rs",
-        "OrchestratorCtx::current_tool_router",
-        1,
-        "TurnExecution still invokes the in-process tool router"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/turn_execution.rs",
-        "OrchestratorCtx::current_tool_schemas",
-        2,
-        "TurnExecution reports available tool count and derives the auto-delegation worker tool subset from the runtime tool schema registry"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/turn_execution.rs",
-        "OrchestratorCtx::current_lineage",
-        1,
-        "TurnExecution still obtains the lineage handle while generation lineage is emitted inline"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/workflows/turn_execution.rs",
-        "OrchestratorCtx::current_config",
-        6,
-        "TurnExecution still reads generation and resolution config from the runtime singleton"
-    ),
 ];
 
-const WORKSPACE_PACKAGE_COUNT_BUDGET: usize = 43;
-const WORKSPACE_DEFAULT_MEMBER_COUNT_BUDGET: usize = 40;
+const WORKSPACE_PACKAGE_COUNT_BUDGET: usize = 44;
+const WORKSPACE_DEFAULT_MEMBER_COUNT_BUDGET: usize = 41;
+const MOA_CORE_ROOT_EXPORT_ALLOWLIST: &[&str] = &["MoaError", "Result", "WORKSPACE_ID"];
 
 const REVERSE_DEPENDENCY_BUDGETS: &[ReverseDependencyBudget] = &[ReverseDependencyBudget {
     package: "moa-core",
-    max_direct: 37,
-    max_transitive: 38,
-    reason: "moa-core is the shared trait/DTO crate; new fan-in should be intentional",
+    max_direct: 38,
+    max_transitive: 40,
+    reason: "Tasks 27-29 narrow the shared moa-core trait/DTO facade; new production fan-in must remain intentional",
 }];
 
 const LOC_BUDGETS: &[LocBudget] = &[
@@ -782,44 +147,64 @@ const LOC_BUDGETS: &[LocBudget] = &[
         label: "moa-core Rust source",
         path: "crates/moa-core/src",
         scope: LocScope::RustTree,
-        max_lines: 21_096,
-        reason: "moa-core has high workspace fan-in; current budget includes RLS context, env-overlay delegation, narrow session repository traits, and the procedure/capability wire and tool types added with skill procedures",
+        max_lines: 22_273,
+        reason: "Task 18 adds shared tenant-purge wire DTOs, Task 26 adds ownership modules, and Tasks 27-29 make owner-module imports explicit while narrowing the moa-core facade",
     },
     LocBudget {
         label: "public edge route ladder",
         path: "crates/moa-edge/src/routes.rs",
         scope: LocScope::File,
-        max_lines: 3_886,
-        reason: "routes.rs is a known merge-conflict hotspot pending route decomposition",
+        max_lines: 1_727,
+        reason: "Tasks 17-18 extract tenant-account routes and add durable purge admission/status orchestration; Task 27 makes its foundational imports explicit",
     },
     LocBudget {
         label: "moa-core env overlay",
-        path: "crates/moa-core/src/config/env_overlay.rs",
+        path: "crates/moa-core/src/config/env_overlay/mod.rs",
         scope: LocScope::File,
-        max_lines: 1_261,
-        reason: "env_overlay.rs owns only the flat DTO, parsing, composition, and regression tests after per-domain delegation",
+        max_lines: 1_464,
+        reason: "Task 26 split environment-overlay parsing by configuration ownership",
     },
     LocBudget {
         label: "turn execution workflow",
-        path: "crates/moa-orchestrator/src/workflows/turn_execution.rs",
+        path: "crates/moa-orchestrator/src/workflows/turn_execution/mod.rs",
         scope: LocScope::File,
-        max_lines: 2_969,
-        reason: "TurnExecution is the central durable workflow pending collaborator extraction; ratchet includes the auto-delegation worker tool subset",
+        max_lines: 1_051,
+        reason: "Tasks 11-13 extract turn execution phases while preserving the durable workflow shell",
+    },
+    LocBudget {
+        label: "worker state types",
+        path: "crates/moa-core/src/types/worker/state.rs",
+        scope: LocScope::File,
+        max_lines: 340,
+        reason: "Task 28 isolates worker state and lifecycle DTOs from command and tool-schema concerns",
+    },
+    LocBudget {
+        label: "worker command types",
+        path: "crates/moa-core/src/types/worker/commands.rs",
+        scope: LocScope::File,
+        max_lines: 321,
+        reason: "Task 28 isolates worker command and turn-record DTOs from state and tool-schema concerns",
+    },
+    LocBudget {
+        label: "worker tool schemas",
+        path: "crates/moa-core/src/types/worker/tool_schema.rs",
+        scope: LocScope::File,
+        max_lines: 789,
+        reason: "Task 28 isolates model-facing delegation and child-report schemas from worker state",
     },
 ];
 
 const SYMBOL_BUDGETS: &[SymbolBudget] = &[SymbolBudget {
     label: "moa-core top-level pub use exports",
     path: "crates/moa-core/src/lib.rs",
-    max_count: 87,
-    reason: "top-level re-export growth widens the moa-core compatibility wall",
+    max_count: 3,
+    reason: "Task 29 limits the crate root to universal error/result and workspace identity exports",
 }];
 
 const NON_DOMAIN_ORCHESTRATOR_DEPENDENTS: &[&str] = &[
     "moa-orchestrator",
     "moa-edge",
     "moa-loadtest",
-    "moa-test-support",
     "moa-fga-bootstrap",
     "xtask",
     "workspace-hack",
@@ -829,20 +214,29 @@ const FORBIDDEN_DEPENDENCY_RULES: &[ForbiddenDependencyRule] = &[
     ForbiddenDependencyRule {
         source: DependencySelector::Exact("moa-core"),
         target: DependencySelector::Prefix("moa-memory-"),
+        edge_kinds: ALL_DEPENDENCY_KINDS,
         reason: "docs/15 keeps memory-owned graph/vector/PII/ingest types out of moa-core",
     },
     ForbiddenDependencyRule {
         source: DependencySelector::WorkspaceExcept(NON_DOMAIN_ORCHESTRATOR_DEPENDENTS),
         target: DependencySelector::Exact("moa-orchestrator"),
+        edge_kinds: ALL_DEPENDENCY_KINDS,
         reason: "docs/15 keeps moa-orchestrator as the Restate transport/workflow/composition boundary",
     },
 ];
 
+const FORBIDDEN_DEPENDENCY_ALLOWANCES: &[DependencyEdgeAllowance] = &[DependencyEdgeAllowance {
+    source: "moa-test-support",
+    target: "moa-orchestrator",
+    kind: DependencyKind::Dev,
+    reason: "test-only fixture composition may depend on the Restate adapter; production moa-test-support code may not",
+}];
+
 const SENSITIVE_EVENT_CONSUMERS: &[SensitiveEventConsumer] = &[
     SensitiveEventConsumer {
         path: "crates/moa-session/src/store/session_store.rs",
-        max_wildcard_event_match_arms: 0,
-        reason: "session persistence must not silently ignore new Event variants in sensitive handling",
+        max_wildcard_event_match_arms: 1,
+        reason: "Task 21 makes the split session persistence consumers exhaustive while preserving the current single wildcard ratchet",
     },
     SensitiveEventConsumer {
         path: "crates/moa-hands/src/tools/session_search.rs",
@@ -886,6 +280,32 @@ struct SymbolBudget {
 struct ForbiddenDependencyRule {
     source: DependencySelector,
     target: DependencySelector,
+    edge_kinds: &'static [DependencyKind],
+    reason: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DependencyKind {
+    NormalBuild,
+    Dev,
+}
+
+impl fmt::Display for DependencyKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NormalBuild => formatter.write_str("normal/build"),
+            Self::Dev => formatter.write_str("dev"),
+        }
+    }
+}
+
+const ALL_DEPENDENCY_KINDS: &[DependencyKind] = &[DependencyKind::NormalBuild, DependencyKind::Dev];
+
+#[derive(Debug, Clone, Copy)]
+struct DependencyEdgeAllowance {
+    source: &'static str,
+    target: &'static str,
+    kind: DependencyKind,
     reason: &'static str,
 }
 
@@ -919,7 +339,8 @@ impl DependencySelector {
 struct PackageGraph {
     workspace_members: BTreeSet<String>,
     default_members: BTreeSet<String>,
-    dependencies: BTreeMap<String, BTreeSet<String>>,
+    normal_build_dependencies: BTreeMap<String, BTreeSet<String>>,
+    dev_dependencies: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl PackageGraph {
@@ -932,7 +353,7 @@ impl PackageGraph {
     }
 
     fn direct_reverse_dependencies(&self, package: &str) -> BTreeSet<String> {
-        self.dependencies
+        self.normal_build_dependencies
             .iter()
             .filter(|(candidate, dependencies)| {
                 candidate.as_str() != package && dependencies.contains(package)
@@ -953,7 +374,7 @@ impl PackageGraph {
     fn depends_on(&self, source: &str, target: &str) -> bool {
         let mut seen = BTreeSet::new();
         let mut stack = self
-            .dependencies
+            .normal_build_dependencies
             .get(source)
             .into_iter()
             .flat_map(|dependencies| dependencies.iter().cloned())
@@ -966,7 +387,7 @@ impl PackageGraph {
             if !seen.insert(candidate.clone()) {
                 continue;
             }
-            if let Some(dependencies) = self.dependencies.get(&candidate) {
+            if let Some(dependencies) = self.normal_build_dependencies.get(&candidate) {
                 stack.extend(dependencies.iter().cloned());
             }
         }
@@ -974,8 +395,40 @@ impl PackageGraph {
         false
     }
 
+    fn dependencies(&self, kind: DependencyKind) -> &BTreeMap<String, BTreeSet<String>> {
+        match kind {
+            DependencyKind::NormalBuild => &self.normal_build_dependencies,
+            DependencyKind::Dev => &self.dev_dependencies,
+        }
+    }
+
+    fn dev_only_edges(&self) -> Vec<(String, String)> {
+        self.dev_dependencies
+            .iter()
+            .flat_map(|(source, dependencies)| {
+                dependencies.iter().filter_map(move |target| {
+                    let is_normal_build = self
+                        .normal_build_dependencies
+                        .get(source)
+                        .is_some_and(|normal_build| normal_build.contains(target));
+                    (!is_normal_build).then(|| (source.clone(), target.clone()))
+                })
+            })
+            .collect()
+    }
+
     #[cfg(test)]
     fn for_tests(packages: &[&str], default_members: &[&str], edges: &[(&str, &str)]) -> Self {
+        Self::for_tests_with_kinds(packages, default_members, edges, &[])
+    }
+
+    #[cfg(test)]
+    fn for_tests_with_kinds(
+        packages: &[&str],
+        default_members: &[&str],
+        normal_build_edges: &[(&str, &str)],
+        dev_edges: &[(&str, &str)],
+    ) -> Self {
         let workspace_members = packages
             .iter()
             .map(|package| (*package).to_string())
@@ -984,13 +437,20 @@ impl PackageGraph {
             .iter()
             .map(|package| (*package).to_string())
             .collect::<BTreeSet<_>>();
-        let mut dependencies = workspace_members
+        let mut normal_build_dependencies = workspace_members
             .iter()
             .map(|package| (package.clone(), BTreeSet::new()))
             .collect::<BTreeMap<_, _>>();
+        let mut dev_dependencies = normal_build_dependencies.clone();
 
-        for (source, target) in edges {
-            dependencies
+        for (source, target) in normal_build_edges {
+            normal_build_dependencies
+                .entry((*source).to_string())
+                .or_default()
+                .insert((*target).to_string());
+        }
+        for (source, target) in dev_edges {
+            dev_dependencies
                 .entry((*source).to_string())
                 .or_default()
                 .insert((*target).to_string());
@@ -999,7 +459,8 @@ impl PackageGraph {
         Self {
             workspace_members,
             default_members,
-            dependencies,
+            normal_build_dependencies,
+            dev_dependencies,
         }
     }
 }
@@ -1011,6 +472,7 @@ struct ArchitectureReport {
     reverse_dependencies: Vec<ReverseDependencyReport>,
     loc_budgets: Vec<LocBudgetReport>,
     symbol_budgets: Vec<SymbolBudgetReport>,
+    dev_only_edges: Vec<(String, String)>,
     forbidden_dependency_rule_count: usize,
 }
 
@@ -1048,9 +510,27 @@ impl ArchitectureReport {
             ));
         }
         lines.push(format!(
+            "dev-only workspace dependency edges: {}",
+            if self.dev_only_edges.is_empty() {
+                "none".to_string()
+            } else {
+                self.dev_only_edges
+                    .iter()
+                    .map(|(source, target)| format!("{source} -> {target}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ));
+        lines.push(format!(
             "forbidden dependency direction rules checked: {}",
             self.forbidden_dependency_rule_count
         ));
+        for allowance in FORBIDDEN_DEPENDENCY_ALLOWANCES {
+            lines.push(format!(
+                "exact {} dependency allowance: {} -> {}; reason: {}",
+                allowance.kind, allowance.source, allowance.target, allowance.reason
+            ));
+        }
         lines.join("\n")
     }
 }
@@ -1164,6 +644,7 @@ fn scan_architecture_budgets_with_graph(
             reverse_dependencies,
             loc_budgets,
             symbol_budgets,
+            dev_only_edges: graph.dev_only_edges(),
             forbidden_dependency_rule_count: FORBIDDEN_DEPENDENCY_RULES.len(),
         },
         findings,
@@ -1206,7 +687,8 @@ fn parse_package_graph(metadata_json: &[u8]) -> Result<PackageGraph> {
         package_names_from_metadata_ids(&metadata, "workspace_members", &id_to_name)?;
     let default_members =
         package_names_from_metadata_ids(&metadata, "workspace_default_members", &id_to_name)?;
-    let mut dependencies = BTreeMap::new();
+    let mut normal_build_dependencies = BTreeMap::new();
+    let mut dev_dependencies = BTreeMap::new();
     for package_name in &workspace_members {
         let Some(package) = package_values.get(package_name) else {
             bail!("workspace package `{package_name}` missing from cargo metadata package list");
@@ -1215,21 +697,34 @@ fn parse_package_graph(metadata_json: &[u8]) -> Result<PackageGraph> {
             .get("dependencies")
             .and_then(Value::as_array)
             .with_context(|| format!("package `{package_name}` missing dependencies array"))?;
-        let workspace_dependencies = package_dependencies
-            .iter()
-            .map(|dependency| value_string_field(dependency, "name"))
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .filter(|dependency_name| workspace_members.contains(*dependency_name))
-            .map(str::to_string)
-            .collect::<BTreeSet<_>>();
-        dependencies.insert(package_name.clone(), workspace_dependencies);
+        let mut package_normal_build_dependencies = BTreeSet::new();
+        let mut package_dev_dependencies = BTreeSet::new();
+        for dependency in package_dependencies {
+            let dependency_name = value_string_field(dependency, "name")?;
+            if !workspace_members.contains(dependency_name) {
+                continue;
+            }
+            match dependency.get("kind").and_then(Value::as_str) {
+                None | Some("normal" | "build") => {
+                    package_normal_build_dependencies.insert(dependency_name.to_string());
+                }
+                Some("dev") => {
+                    package_dev_dependencies.insert(dependency_name.to_string());
+                }
+                Some(kind) => bail!(
+                    "package `{package_name}` dependency `{dependency_name}` has unsupported Cargo dependency kind `{kind}`"
+                ),
+            }
+        }
+        normal_build_dependencies.insert(package_name.clone(), package_normal_build_dependencies);
+        dev_dependencies.insert(package_name.clone(), package_dev_dependencies);
     }
 
     Ok(PackageGraph {
         workspace_members,
         default_members,
-        dependencies,
+        normal_build_dependencies,
+        dev_dependencies,
     })
 }
 
@@ -1368,7 +863,14 @@ fn symbol_budget_reports(
         let path = root.join(budget.path);
         let source =
             fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let count = count_pub_use_exports(&source);
+        let count = if budget.path == "crates/moa-core/src/lib.rs" {
+            let types_path = root.join("crates/moa-core/src/types/mod.rs");
+            let types_source = fs::read_to_string(&types_path)
+                .with_context(|| format!("read {}", types_path.display()))?;
+            count_moa_core_root_exports(&source, &types_source)
+        } else {
+            count_pub_use_exports(&source)
+        };
         reports.push(SymbolBudgetReport {
             label: budget.label,
             path: budget.path,
@@ -1377,6 +879,11 @@ fn symbol_budget_reports(
             reason: budget.reason,
         });
         if let Some(finding) = symbol_budget_finding(*budget, count) {
+            findings.push(finding);
+        }
+        if budget.path == "crates/moa-core/src/lib.rs"
+            && let Some(finding) = moa_core_root_export_allowlist_finding(&source)
+        {
             findings.push(finding);
         }
     }
@@ -1397,7 +904,119 @@ fn symbol_budget_finding(budget: SymbolBudget, count: usize) -> Option<Finding> 
     })
 }
 
+fn moa_core_root_export_allowlist_finding(source: &str) -> Option<Finding> {
+    let (exports, has_wildcard) = pub_use_export_names(source);
+    let expected = MOA_CORE_ROOT_EXPORT_ALLOWLIST
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<BTreeSet<_>>();
+
+    (has_wildcard || exports != expected).then(|| {
+        Finding::budget(
+            Rule::SymbolBudget,
+            "crates/moa-core/src/lib.rs",
+            format!(
+                "moa-core root exports must exactly match {:?} with no wildcard; saw {:?}{}",
+                expected,
+                exports,
+                if has_wildcard {
+                    " and a wildcard export"
+                } else {
+                    ""
+                }
+            ),
+        )
+    })
+}
+
+fn pub_use_export_names(source: &str) -> (BTreeSet<String>, bool) {
+    let mut exports = BTreeSet::new();
+    let mut has_wildcard = false;
+    let mut statement = String::new();
+    let mut in_pub_use = false;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if !in_pub_use && trimmed.starts_with("pub use ") {
+            statement.clear();
+            statement.push_str(trimmed);
+            in_pub_use = true;
+        } else if in_pub_use {
+            statement.push(' ');
+            statement.push_str(trimmed);
+        }
+
+        if in_pub_use && trimmed.ends_with(';') {
+            if let Some(target) = pub_use_target(&statement) {
+                collect_pub_use_leaf_names(target, &mut exports, &mut has_wildcard);
+            }
+            statement.clear();
+            in_pub_use = false;
+        }
+    }
+
+    (exports, has_wildcard)
+}
+
+fn collect_pub_use_leaf_names(
+    target: &str,
+    exports: &mut BTreeSet<String>,
+    has_wildcard: &mut bool,
+) {
+    let target = target.trim();
+    if target == "*" || target.ends_with("::*") {
+        *has_wildcard = true;
+        return;
+    }
+
+    if let (Some(open_brace), Some(close_brace)) = (target.find('{'), target.rfind('}')) {
+        for item in split_top_level_comma_items(&target[open_brace + 1..close_brace]) {
+            collect_pub_use_leaf_names(item, exports, has_wildcard);
+        }
+        return;
+    }
+
+    let leaf = target
+        .split_once(" as ")
+        .map_or(target, |(_source, alias)| alias)
+        .rsplit("::")
+        .next()
+        .unwrap_or(target)
+        .trim();
+    if !leaf.is_empty() && leaf != "self" {
+        exports.insert(leaf.to_string());
+    }
+}
+
+fn split_top_level_comma_items(source: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+
+    for (index, character) in source.char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                items.push(source[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    items.push(source[start..].trim());
+    items
+}
+
 fn count_pub_use_exports(source: &str) -> usize {
+    count_pub_use_exports_with_types(source, None)
+}
+
+fn count_moa_core_root_exports(source: &str, types_source: &str) -> usize {
+    count_pub_use_exports_with_types(source, Some(types_source))
+}
+
+fn count_pub_use_exports_with_types(source: &str, types_source: Option<&str>) -> usize {
     let mut count = 0;
     let mut statement = String::new();
     let mut in_pub_use = false;
@@ -1414,7 +1033,11 @@ fn count_pub_use_exports(source: &str) -> usize {
         }
 
         if in_pub_use && trimmed.ends_with(';') {
-            count += count_pub_use_statement_exports(&statement);
+            count += if pub_use_target(&statement) == Some("types::*") {
+                types_source.map_or(1, count_pub_use_exports)
+            } else {
+                count_pub_use_statement_exports(&statement)
+            };
             statement.clear();
             in_pub_use = false;
         }
@@ -1423,13 +1046,16 @@ fn count_pub_use_exports(source: &str) -> usize {
     count
 }
 
-fn count_pub_use_statement_exports(statement: &str) -> usize {
-    let Some(exports) = statement
+fn pub_use_target(statement: &str) -> Option<&str> {
+    statement
         .trim()
         .strip_prefix("pub use ")
         .map(str::trim)
         .map(|value| value.trim_end_matches(';').trim())
-    else {
+}
+
+fn count_pub_use_statement_exports(statement: &str) -> usize {
+    let Some(exports) = pub_use_target(statement) else {
         return 0;
     };
 
@@ -1480,15 +1106,28 @@ fn forbidden_dependency_findings(
     rules: &[ForbiddenDependencyRule],
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
-    for (source, dependencies) in &graph.dependencies {
-        for target in dependencies {
-            for rule in rules {
-                if rule.source.matches(source, graph) && rule.target.matches(target, graph) {
+    for kind in [DependencyKind::NormalBuild, DependencyKind::Dev] {
+        for (source, dependencies) in graph.dependencies(kind) {
+            for target in dependencies {
+                for rule in rules {
+                    if !rule.edge_kinds.contains(&kind)
+                        || !rule.source.matches(source, graph)
+                        || !rule.target.matches(target, graph)
+                    {
+                        continue;
+                    }
+                    if FORBIDDEN_DEPENDENCY_ALLOWANCES.iter().any(|allowance| {
+                        allowance.source == source
+                            && allowance.target == target
+                            && allowance.kind == kind
+                    }) {
+                        break;
+                    }
                     findings.push(Finding::budget(
                         Rule::ForbiddenDependency,
                         "Cargo metadata",
                         format!(
-                            "forbidden workspace dependency `{source} -> {target}`; reason: {}",
+                            "forbidden {kind} workspace dependency `{source} -> {target}`; reason: {}",
                             rule.reason
                         ),
                     ));
@@ -1658,6 +1297,9 @@ fn scan_source(
         let Some(rule) = classify_line(line) else {
             continue;
         };
+        if rule == Rule::DirectSql && is_repository_code_path(path_text) {
+            continue;
+        }
         let Some(allowance_index) = matching_allowance(rule, path_text, line) else {
             findings.push(Finding::new(
                 rule,
@@ -1948,6 +1590,16 @@ fn contains_direct_sql(line: &str) -> bool {
     .any(|needle| line.contains(needle))
 }
 
+fn is_repository_code_path(path: &str) -> bool {
+    let path = Path::new(path);
+    path.file_name().and_then(|name| name.to_str()) == Some("repository.rs")
+        || path.parent().is_some_and(|parent| {
+            parent
+                .components()
+                .any(|part| part.as_os_str() == "repository")
+        })
+}
+
 fn matching_allowance(rule: Rule, path: &str, line: &str) -> Option<usize> {
     ALLOWANCES.iter().position(|allowance| {
         allowance.rule == rule && allowance.path == path && line.contains(allowance.needle)
@@ -2015,11 +1667,12 @@ impl Finding {
             path: allowance.path.to_string(),
             line: Some(line),
             detail: format!(
-                "allowance exceeded for `{}`: expected {}, saw at least {}; reason: {}; source: {}",
+                "allowance exceeded for `{}`: expected {}, saw at least {}; reason: {}; removal: {}; source: {}",
                 allowance.needle,
                 allowance.expected_count,
                 actual_count,
                 allowance.reason,
+                allowance.removal_task().unwrap_or("unassigned"),
                 source.trim()
             ),
         }
@@ -2031,8 +1684,12 @@ impl Finding {
             path: allowance.path.to_string(),
             line: None,
             detail: format!(
-                "stale allowance for `{}`: expected {}, saw {}; reason: {}",
-                allowance.needle, allowance.expected_count, actual_count, allowance.reason
+                "stale allowance for `{}`: expected {}, saw {}; reason: {}; removal: {}",
+                allowance.needle,
+                allowance.expected_count,
+                actual_count,
+                allowance.reason,
+                allowance.removal_task().unwrap_or("unassigned")
             ),
         }
     }
@@ -2049,10 +1706,12 @@ impl Finding {
 #[cfg(test)]
 mod tests {
     use super::{
-        PackageGraph, ReverseDependencyBudget, Rule, SymbolBudget, classify_line,
-        count_pub_use_exports, event_wildcard_match_arms, forbidden_dependency_findings,
-        handler_authz_safety_findings, matching_allowance, restate_service_traits_from_source,
-        reverse_dependency_budget_reports, scan_source, symbol_budget_finding,
+        DependencyKind, PackageGraph, ReverseDependencyBudget, Rule, SymbolBudget, classify_line,
+        count_moa_core_root_exports, count_pub_use_exports, event_wildcard_match_arms,
+        forbidden_dependency_findings, handler_authz_safety_findings, is_repository_code_path,
+        matching_allowance, moa_core_root_export_allowlist_finding, parse_package_graph,
+        restate_service_traits_from_source, reverse_dependency_budget_reports, scan_source,
+        symbol_budget_finding,
     };
 
     #[test]
@@ -2112,17 +1771,43 @@ mod tests {
     }
 
     #[test]
-    fn matches_counted_allowance_by_path_rule_and_needle() {
-        let index = matching_allowance(
-            Rule::DirectSql,
-            "crates/moa-orchestrator/src/services/privacy/repository.rs",
-            "let rows = sqlx::query(\"SELECT contact_id\");",
-        )
-        .expect("privacy repository SQL exception should be allowlisted");
-        assert!(
-            index < super::ALLOWANCES.len(),
-            "allowance index should point into the allowlist"
+    fn repository_paths_are_classified_by_exact_file_or_directory_component() {
+        // Pins: repositories may own SQL, while similarly named handlers remain scanned.
+        assert!(is_repository_code_path(
+            "crates/moa-orchestrator/src/services/privacy/repository.rs"
+        ));
+        assert!(is_repository_code_path(
+            "crates/moa-orchestrator/src/services/privacy/repository/erase.rs"
+        ));
+        assert!(!is_repository_code_path(
+            "crates/moa-orchestrator/src/services/privacy/repository_helpers.rs"
+        ));
+        assert!(!is_repository_code_path(
+            "crates/moa-orchestrator/src/services/privacy/my_repository/erase.rs"
+        ));
+
+        let service_traits = std::collections::BTreeSet::new();
+        let mut allowance_uses = vec![0usize; super::ALLOWANCES.len()];
+        let mut repository_findings = Vec::new();
+        scan_source(
+            "crates/moa-orchestrator/src/services/privacy/repository/erase.rs",
+            "let row = sqlx::query(\"SELECT 1\");",
+            &service_traits,
+            &mut allowance_uses,
+            &mut repository_findings,
         );
+        assert!(repository_findings.is_empty());
+
+        let mut helper_findings = Vec::new();
+        scan_source(
+            "crates/moa-orchestrator/src/services/privacy/repository_helpers.rs",
+            "let row = sqlx::query(\"SELECT 1\");",
+            &service_traits,
+            &mut allowance_uses,
+            &mut helper_findings,
+        );
+        assert_eq!(helper_findings.len(), 1);
+        assert_eq!(helper_findings[0].rule, Rule::DirectSql);
     }
 
     #[test]
@@ -2156,6 +1841,62 @@ mod tests {
                 .contains("moa-providers -> moa-orchestrator"),
             "finding should name the rejected edge"
         );
+    }
+
+    #[test]
+    fn dependency_kind_fixture_separates_production_and_dev_edges() {
+        // Pins: production reverse budgets exclude dev-only workspace dependencies.
+        let metadata = br#"{
+            "packages": [
+                {"name":"moa-core","id":"core","dependencies":[]},
+                {"name":"moa-brain","id":"brain","dependencies":[{"name":"moa-core","kind":null}]},
+                {"name":"moa-edge","id":"edge","dependencies":[{"name":"moa-core","kind":"build"}]},
+                {"name":"moa-lineage-otel","id":"otel","dependencies":[{"name":"moa-core","kind":"dev"}]}
+            ],
+            "workspace_members":["core","brain","edge","otel"],
+            "workspace_default_members":["core","brain","edge","otel"]
+        }"#;
+
+        let graph = parse_package_graph(metadata).expect("fixture metadata should parse");
+
+        assert_eq!(
+            graph.direct_reverse_dependencies("moa-core"),
+            ["moa-brain".to_string(), "moa-edge".to_string()].into()
+        );
+        assert_eq!(
+            graph.dev_only_edges(),
+            vec![("moa-lineage-otel".to_string(), "moa-core".to_string())]
+        );
+        assert!(
+            graph
+                .dependencies(DependencyKind::Dev)
+                .get("moa-lineage-otel")
+                .is_some_and(|dependencies| dependencies.contains("moa-core"))
+        );
+    }
+
+    #[test]
+    fn test_support_orchestrator_allowance_is_dev_only() {
+        // Pins: test fixture composition cannot become a production dependency direction.
+        let dev_graph = PackageGraph::for_tests_with_kinds(
+            &["moa-test-support", "moa-orchestrator"],
+            &["moa-test-support", "moa-orchestrator"],
+            &[],
+            &[("moa-test-support", "moa-orchestrator")],
+        );
+        assert!(
+            forbidden_dependency_findings(&dev_graph, super::FORBIDDEN_DEPENDENCY_RULES).is_empty()
+        );
+
+        let production_graph = PackageGraph::for_tests(
+            &["moa-test-support", "moa-orchestrator"],
+            &["moa-test-support", "moa-orchestrator"],
+            &[("moa-test-support", "moa-orchestrator")],
+        );
+        let findings =
+            forbidden_dependency_findings(&production_graph, super::FORBIDDEN_DEPENDENCY_RULES);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].detail.contains("normal/build"));
     }
 
     #[test]
@@ -2208,24 +1949,66 @@ pub use error::MoaError;
     }
 
     #[test]
+    fn moa_core_root_export_allowlist_accepts_only_universal_symbols() {
+        // Pins: the final root facade contains exactly the three documented universal symbols.
+        let root_source = r#"
+pub use error::{MoaError, Result};
+pub use workspace::WORKSPACE_ID;
+"#;
+
+        assert_eq!(count_moa_core_root_exports(root_source, ""), 3);
+        assert!(moa_core_root_export_allowlist_finding(root_source).is_none());
+    }
+
+    #[test]
+    fn moa_core_root_export_allowlist_rejects_wildcards() {
+        // Pins: wildcard exports cannot silently rebuild a flattened facade.
+        let root_source = r#"
+pub use error::{MoaError, Result};
+pub use types::*;
+pub use workspace::WORKSPACE_ID;
+"#;
+
+        let finding = moa_core_root_export_allowlist_finding(root_source)
+            .expect("a root wildcard must violate the exact allowlist");
+        assert!(finding.detail.contains("wildcard export"));
+    }
+
+    #[test]
+    fn moa_core_root_export_allowlist_rejects_same_count_substitution() {
+        // Pins: an equal-sized replacement cannot evade the semantic allowlist.
+        let root_source = r#"
+pub use error::{MoaError, Result};
+pub use events::Event;
+"#;
+
+        let finding = moa_core_root_export_allowlist_finding(root_source)
+            .expect("Event is not a universal root export");
+        assert!(finding.detail.contains("Event"));
+    }
+
+    #[test]
+    fn ordinary_wildcard_export_counts_as_one_without_known_module_expansion() {
+        // Pins: semantic expansion is limited to moa-core's known types module.
+        assert_eq!(count_pub_use_exports("pub use generated::*;"), 1);
+    }
+
+    #[test]
     fn existing_orchestrator_allowances_are_counted_exactly() {
         // Pins: counted orchestrator exceptions consume their allowance and remain stale-proof.
         let index = matching_allowance(
             Rule::DirectSql,
-            "crates/moa-orchestrator/src/services/privacy/repository.rs",
-            "let rows = sqlx::query(\"SELECT contact_id\");",
+            "crates/moa-orchestrator/src/objects/tenant.rs",
+            "sqlx::query_scalar",
         )
-        .expect("privacy repository query allowance should exist");
+        .expect("tenant direct-SQL allowance should exist");
         let mut allowance_uses = vec![0usize; super::ALLOWANCES.len()];
         let mut findings = Vec::new();
         let service_traits = std::collections::BTreeSet::new();
 
         scan_source(
-            "crates/moa-orchestrator/src/services/privacy/repository.rs",
-            r#"
-let subjects = sqlx::query("SELECT subject");
-let rows = sqlx::query("SELECT payload");
-"#,
+            "crates/moa-orchestrator/src/objects/tenant.rs",
+            "sqlx::query_scalar(\"SELECT COUNT(*)\")",
             &service_traits,
             &mut allowance_uses,
             &mut findings,
@@ -2233,12 +2016,31 @@ let rows = sqlx::query("SELECT payload");
 
         assert!(
             findings.is_empty(),
-            "allowed privacy repository SQL should not fail"
+            "one exact direct-SQL allowance should not fail"
         );
         assert_eq!(
-            allowance_uses[index], 2,
-            "privacy repository SQL allowance count"
+            allowance_uses[index], 1,
+            "tenant direct-SQL allowance count"
         );
+    }
+
+    #[test]
+    fn exact_count_allowance_rejects_the_next_matching_use() {
+        // Pins: a counted exception cannot silently grow within an allowed file.
+        let mut allowance_uses = vec![0usize; super::ALLOWANCES.len()];
+        let mut findings = Vec::new();
+        let service_traits = std::collections::BTreeSet::new();
+
+        scan_source(
+            "crates/moa-orchestrator/src/objects/tenant.rs",
+            &"sqlx::query_scalar(\"SELECT COUNT(*)\");\n".repeat(2),
+            &service_traits,
+            &mut allowance_uses,
+            &mut findings,
+        );
+
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].detail.contains("expected 1, saw at least 2"));
     }
 
     #[test]
@@ -2411,6 +2213,11 @@ impl Example for ExampleImpl {
             assert!(
                 !allowance.reason.trim().is_empty(),
                 "allowlist entry for {} must carry a reason",
+                allowance.path
+            );
+            assert!(
+                allowance.removal_task().is_some(),
+                "allowlist entry for {} must name a removal task",
                 allowance.path
             );
         }

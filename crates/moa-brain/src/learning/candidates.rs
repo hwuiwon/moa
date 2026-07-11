@@ -2,9 +2,11 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    AttributionEffect, AttributionSubjectType, ExperienceAttribution, ExperienceRecord,
-    LearningCandidate, LearningCandidateStatus, LearningCandidateType, LearningRiskClass,
-    SegmentOutcome,
+    types::experience::AttributionEffect, types::experience::AttributionSubjectType,
+    types::experience::ExperienceAttribution, types::experience::ExperienceRecord,
+    types::experience::LearningCandidate, types::experience::LearningCandidateStatus,
+    types::experience::LearningCandidateType, types::experience::LearningRiskClass,
+    types::segment_assessment::SegmentOutcome,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -147,7 +149,11 @@ fn should_propose_policy(
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use moa_core::{SegmentId, SessionId, TaskFacetSet, TaskFingerprint, TenantId, UserId};
+    use moa_core::{
+        types::experience::TaskFacetSet, types::experience::TaskFingerprint,
+        types::identifiers::SegmentId, types::identifiers::SessionId, types::identifiers::TenantId,
+        types::identifiers::UserId,
+    };
 
     use super::*;
 

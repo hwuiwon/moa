@@ -1,6 +1,6 @@
 //! Session storage configuration.
 
-use crate::{MoaError, Result};
+use crate::{error::MoaError, error::Result};
 use serde::{Deserialize, Serialize};
 
 /// Supported claim-check blob storage backends.

@@ -2,7 +2,7 @@
 
 mod contracts;
 
-use moa_core::{MoaError, Result};
+use moa_core::{error::MoaError, error::Result};
 use moa_session::{PostgresSessionStore, testing};
 
 pub use contracts::{

@@ -270,7 +270,7 @@ impl Options {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--consolidate] [--digests] [--invert-quality-priors] [--graph-expansion-policy current|skip-exact-direct|legacy-broad-expansion] [--rewrite-policy off|always|gated] [--reranker off|on] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--quality-weight N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
+    "usage: cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--consolidate] [--digests] [--invert-quality-priors] [--graph-expansion-policy current|skip-exact-direct|legacy-broad-expansion] [--rewrite-policy off|always|gated] [--reranker off|on] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--quality-weight N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
 }
 
 fn parse_reranker(value: &str) -> Result<bool> {

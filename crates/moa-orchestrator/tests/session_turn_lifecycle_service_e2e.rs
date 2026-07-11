@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use moa_core::traits::Identity;
-use moa_core::{ModelId, SessionActorRef, SessionId, SessionMeta, TenantId};
+use moa_core::{
+    types::contact::SessionActorRef, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::TenantId, types::session::SessionMeta,
+};
 use serde::Deserialize;
 
 use crate::support::restate_runtime::{grant_tenant_operator, test_user_identity, with_identity};

@@ -3,8 +3,10 @@
 use std::time::Duration;
 
 use moa_core::{
-    HandHandle, IdempotencyClass, MoaError, Result, SandboxTier, SessionMeta, ToolDefinition,
-    ToolFailureClass, ToolInvocation, ToolOutput, classify_tool_error,
+    error::MoaError, error::Result, error::ToolFailureClass, error::classify_tool_error,
+    types::completion::ToolInvocation, types::hands::HandHandle, types::hands::SandboxTier,
+    types::session::SessionMeta, types::tools::IdempotencyClass, types::tools::ToolDefinition,
+    types::tools::ToolOutput,
 };
 use moa_observability::{record_tool_failure, record_tool_reprovision, record_tool_retry};
 use tracing::Instrument;

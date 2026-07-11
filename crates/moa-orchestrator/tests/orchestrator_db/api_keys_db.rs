@@ -4,8 +4,8 @@ use anyhow::{Context, Result, anyhow};
 use axum::{Json, Router, extract::State, routing::post};
 use moa_authz::{FgaClient, FgaConfig};
 use moa_core::{
-    TenantId,
     traits::{Identity, IdentityType},
+    types::identifiers::TenantId,
 };
 use moa_orchestrator::services::api_keys::{
     list_keys_for_identity, revoke_key_for_identity, rotate_key_for_identity,

@@ -5,6 +5,7 @@ use super::*;
 
 pub(super) async fn status_response(
     pool: sqlx::PgPool,
+    session_store: Arc<PostgresSessionStore>,
     request: ExperimentRunStatusRequest,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
     let tenant_id = request.tenant_id;
@@ -29,7 +30,8 @@ pub(super) async fn status_response(
         return linked_workflow_status_response(pool, scope, tenant_id, run).await;
     }
 
-    if let Some(status) = derived_session_status(run.status, run.session_id).await?
+    if let Some(status) =
+        derived_session_status(run.status, run.session_id, session_store.as_ref()).await?
         && status != run.status
     {
         run.status = status;
@@ -77,10 +79,17 @@ async fn linked_workflow_status_response(
 pub(super) async fn procedure_status_response(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunStatusRequest,
+    pool: &sqlx::PgPool,
+    session_store: &Arc<PostgresSessionStore>,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
-    let pool = OrchestratorCtx::current_graph_pool();
+    let pool = pool.clone();
+    let session_store = session_store.clone();
     Ok(ctx
-        .run(|| async move { status_response(pool, request).await.map(Json::from) })
+        .run(|| async move {
+            status_response(pool, session_store, request)
+                .await
+                .map(Json::from)
+        })
         .name("experiment_run_response")
         .await?
         .into_inner())
@@ -89,6 +98,7 @@ pub(super) async fn procedure_status_response(
 async fn derived_session_status(
     row_status: ExperimentRunStatus,
     session_id: Option<SessionId>,
+    session_store: &PostgresSessionStore,
 ) -> Result<Option<ExperimentRunStatus>, HandlerError> {
     if matches!(
         row_status,
@@ -102,7 +112,7 @@ async fn derived_session_status(
     let Some(session_id) = session_id else {
         return Ok(Some(row_status));
     };
-    let session = OrchestratorCtx::current_session_store()
+    let session = session_store
         .get_session(session_id)
         .await
         .map_err(moa_error_to_handler_error)?;

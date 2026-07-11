@@ -7,7 +7,11 @@ use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::turn::{
     StartTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
 };
-use moa_core::{Event, EventRange, EventRecord, EventType, ModelTier, SessionId, TenantId};
+use moa_core::{
+    events::Event, events::EventType, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::identifiers::SessionId, types::identifiers::TenantId,
+    types::provider::ModelTier,
+};
 use moa_test_support::{OrchestratorTestFixture, TestApiClient};
 use serde_json::json;
 use uuid::Uuid;

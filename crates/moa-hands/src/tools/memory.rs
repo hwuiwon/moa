@@ -2,8 +2,10 @@
 
 use async_trait::async_trait;
 use moa_core::{
-    ActionClass, ActionPolicyEffect, BuiltInTool, IdempotencyClass, Result, RiskLevel, ToolContext,
-    ToolDiffStrategy, ToolInputShape, ToolOutput, ToolPolicySpec,
+    error::Result, traits::BuiltInTool, traits::ToolContext, types::action_policy::ActionClass,
+    types::action_policy::ActionPolicyEffect, types::action_policy::RiskLevel,
+    types::tools::IdempotencyClass, types::tools::ToolDiffStrategy, types::tools::ToolInputShape,
+    types::tools::ToolOutput, types::tools::ToolPolicySpec,
 };
 
 /// Names of the read-only agentic memory retrieval tools.
@@ -171,7 +173,7 @@ async fn execute_memory_tool(
     input: &serde_json::Value,
 ) -> Result<ToolOutput> {
     let executor = ctx.memory_tool_executor.ok_or_else(|| {
-        moa_core::MoaError::Unsupported(
+        moa_core::error::MoaError::Unsupported(
             "graph-memory tools require a runtime memory executor".to_string(),
         )
     })?;
@@ -284,7 +286,7 @@ async fn execute_memory_retrieval_tool(
     input: &serde_json::Value,
 ) -> Result<ToolOutput> {
     let executor = ctx.memory_retrieval_executor.ok_or_else(|| {
-        moa_core::MoaError::Unsupported(
+        moa_core::error::MoaError::Unsupported(
             "graph-memory retrieval tools require a runtime retrieval executor".to_string(),
         )
     })?;

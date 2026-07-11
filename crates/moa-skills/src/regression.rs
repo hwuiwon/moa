@@ -2,7 +2,10 @@
 
 use std::path::PathBuf;
 
-use moa_core::{Event, EventRecord, MoaError, Result, TenantId};
+use moa_core::{
+    error::MoaError, error::Result, events::Event, types::events_stream::EventRecord,
+    types::identifiers::TenantId,
+};
 use moa_eval_core::{ExpectedOutput, TestCase, TestSuite};
 
 use crate::format::{SkillDocument, slugify_skill_name};

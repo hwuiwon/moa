@@ -3,7 +3,7 @@
 use base64::{Engine as _, engine::general_purpose};
 use chrono::Utc;
 use moa_core::{
-    TenantId,
+    types::identifiers::TenantId,
     wire::knowledge::{KnowledgeProviderWebhookRequest, KnowledgeProviderWebhookResponse},
 };
 use moa_knowledge::domain::{
@@ -215,7 +215,7 @@ impl KnowledgeService {
         };
 
         let lookup = self
-            .webhook_lookup_repository()
+            .discovery()
             .lookup_connection_by_provider_account(
                 provider,
                 candidate.connector.as_deref(),

@@ -1,8 +1,9 @@
 //! Shared fixtures for skill-injection unit tests.
 
 use moa_core::{
-    Channel, ModelCapabilities, ModelId, SessionId, SessionMeta, SkillMetadata, TenantId,
-    TokenPricing, ToolCallFormat,
+    types::channel::Channel, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::TenantId, types::memory::SkillMetadata, types::model::ModelCapabilities,
+    types::model::TokenPricing, types::model::ToolCallFormat, types::session::SessionMeta,
 };
 
 use super::tier1_metadata::ResolvedSkillBudget;

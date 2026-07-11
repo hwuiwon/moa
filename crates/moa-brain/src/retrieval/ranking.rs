@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
-use moa_core::{MemoryRankingConfig, MemoryRankingWeights};
+use moa_core::{config::MemoryRankingConfig, config::MemoryRankingWeights};
 use moa_memory_graph::NodeIndexRow;
 use moa_memory_types::MemoryScope;
 use serde::{Deserialize, Serialize};
@@ -716,8 +716,8 @@ mod tests {
             .expect("test timestamp should be valid");
         let config = RankingConfig::default();
         let request_scope = MemoryScope::Contact {
-            tenant_id: moa_core::TenantId::from(Uuid::from_u128(0x100)),
-            contact_id: moa_core::ContactId(Uuid::from_u128(0x101)),
+            tenant_id: moa_core::types::identifiers::TenantId::from(Uuid::from_u128(0x100)),
+            contact_id: moa_core::types::contact::ContactId(Uuid::from_u128(0x101)),
         };
         let ranker = FeatureRanker::new(&config, reference_time).with_request_scope(&request_scope);
         let query_tokens = normalize_tokens("checkout service");

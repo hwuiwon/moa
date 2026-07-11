@@ -314,7 +314,7 @@ impl EnrichmentWorker {
 mod tests {
     use std::sync::Mutex;
 
-    use moa_core::SessionId;
+    use moa_core::types::identifiers::SessionId;
 
     use super::*;
 
@@ -357,7 +357,7 @@ mod tests {
 
     fn scope() -> MemoryScope {
         MemoryScope::Tenant {
-            tenant_id: moa_core::TenantId::new(),
+            tenant_id: moa_core::types::identifiers::TenantId::new(),
         }
     }
 

@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_brain::planning::{PlanningCtx, QueryPlanner, Strategy};
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, GraphError, GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent,
     PiiClass,

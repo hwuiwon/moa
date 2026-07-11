@@ -1,8 +1,11 @@
 //! Gemini adapter unit tests.
 
 use moa_core::{
-    CompletionContent, CompletionRequest, ContextMessage, JsonResponseFormat, LLMProvider, ModelId,
-    ProviderToolCallMetadata, ToolCallContent, ToolContent, ToolInvocation,
+    traits::LLMProvider, types::completion::CompletionContent,
+    types::completion::CompletionRequest, types::completion::JsonResponseFormat,
+    types::completion::ProviderToolCallMetadata, types::completion::ToolCallContent,
+    types::completion::ToolInvocation, types::context::ContextMessage, types::identifiers::ModelId,
+    types::tools::ToolContent,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

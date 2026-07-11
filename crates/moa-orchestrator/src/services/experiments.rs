@@ -20,24 +20,26 @@ use moa_core::wire::experiments::{
     ExperimentTrialStatusRequest, ExperimentTrialStatusResponse, ExperimentTrialsRequest,
     ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
 };
-use moa_core::{ActionRuleScope, TenantId};
+use moa_core::{types::action_policy::ActionRuleScope, types::identifiers::TenantId};
 use moa_experiments::app::{
     ExperimentAppError, admit_run, cancel_run, compare_runs, list_runs, list_trials,
     plan_generation_request, propose_improvement_candidate, scores, store_generated_plan,
     trial_status,
 };
 use moa_experiments::model::{ExperimentRunStatus, ExperimentTrialStatus, ExperimentVariant};
+use moa_experiments::scores::{
+    ExperimentRunScoreRef, TrialScoreSummary, experiment_score_breakdown_for_tenant,
+};
 use moa_experiments::store::ExperimentStore;
 use moa_observability::record_experiment_learning_candidates;
 use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_providers::ProviderRegistry;
 use moa_scoring::ScoringError;
-use moa_scoring::{ExperimentRunScoreRef, experiment_score_breakdown_for_tenant};
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::OrchestratorCtx;
 use crate::handlers::authz_shim::authorize_tenant_operator_or_admin;
 use crate::services::llm_gateway::LLMGatewayImpl;
 use crate::workflows::errors::moa_error_to_handler_error;
@@ -119,8 +121,28 @@ pub trait Experiments {
 }
 
 /// Concrete live behavior experiment service implementation.
-#[derive(Clone, Default)]
-pub struct ExperimentsImpl;
+#[derive(Clone)]
+pub struct ExperimentsImpl {
+    pool: sqlx::PgPool,
+    providers: Arc<ProviderRegistry>,
+    learning_candidate_store: Arc<dyn LearningCandidateStore>,
+}
+
+impl ExperimentsImpl {
+    /// Creates the experiment service with its persistence and provider dependencies.
+    #[must_use]
+    pub fn new(
+        pool: sqlx::PgPool,
+        providers: Arc<ProviderRegistry>,
+        learning_candidate_store: Arc<dyn LearningCandidateStore>,
+    ) -> Self {
+        Self {
+            pool,
+            providers,
+            learning_candidate_store,
+        }
+    }
+}
 
 impl Experiments for ExperimentsImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -132,9 +154,8 @@ impl Experiments for ExperimentsImpl {
         annotate_restate_handler_span("Experiments", "generate_plan");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let runtime = OrchestratorCtx::current();
-        let pool = runtime.graph_pool();
-        let gateway = LLMGatewayImpl::new(runtime.provider_registry());
+        let pool = self.pool.clone();
+        let gateway = LLMGatewayImpl::new(self.providers.clone());
 
         Ok(ctx
             .run(|| async move {
@@ -155,7 +176,7 @@ impl Experiments for ExperimentsImpl {
         annotate_restate_handler_span("Experiments", "run");
         let request = request.into_inner();
         let identity = authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         let accepted = ctx
             .run(|| async move { run_inner(pool, request, identity).await.map(Json::from) })
@@ -204,7 +225,7 @@ impl Experiments for ExperimentsImpl {
         annotate_restate_handler_span("Experiments", "list");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move { list_inner(pool, request).await.map(Json::from) })
@@ -221,7 +242,7 @@ impl Experiments for ExperimentsImpl {
         annotate_restate_handler_span("Experiments", "list_plans");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move { list_plans_inner(pool, request).await.map(Json::from) })
@@ -238,7 +259,7 @@ impl Experiments for ExperimentsImpl {
         annotate_restate_handler_span("Experiments", "trials");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move { trials_inner(pool, request).await.map(Json::from) })
@@ -255,7 +276,7 @@ impl Experiments for ExperimentsImpl {
         annotate_restate_handler_span("Experiments", "trial_status");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move { trial_status_inner(pool, request).await.map(Json::from) })
@@ -272,7 +293,7 @@ impl Experiments for ExperimentsImpl {
         annotate_restate_handler_span("Experiments", "cancel");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         let run_uid = request.run_uid;
 
         let response = ctx
@@ -303,9 +324,8 @@ impl Experiments for ExperimentsImpl {
         annotate_restate_handler_span("Experiments", "propose_improvements");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let runtime = OrchestratorCtx::current();
-        let pool = runtime.graph_pool();
-        let session_store = runtime.learning_candidate_store();
+        let pool = self.pool.clone();
+        let session_store = self.learning_candidate_store.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -326,7 +346,7 @@ impl Experiments for ExperimentsImpl {
         annotate_restate_handler_span("Experiments", "scores");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move { scores_inner(pool, request).await.map(Json::from) })
@@ -343,7 +363,7 @@ impl Experiments for ExperimentsImpl {
         annotate_restate_handler_span("Experiments", "compare");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move { compare_inner(pool, request).await.map(Json::from) })
@@ -360,7 +380,7 @@ impl Experiments for ExperimentsImpl {
         annotate_restate_handler_span("Experiments", "run_agent_revision_simulation");
         let request = request.into_inner();
         let identity = authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         let accepted = ctx
             .run(|| async move {
@@ -386,7 +406,7 @@ impl Experiments for ExperimentsImpl {
         annotate_restate_handler_span("Experiments", "compare_agent_revision_simulation");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -407,7 +427,7 @@ impl Experiments for ExperimentsImpl {
         annotate_restate_handler_span("Experiments", "compare_agent_revisions");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -782,7 +802,7 @@ struct MutableSimulationVariantResult {
     failed_count: u64,
     cancelled_count: u64,
     score_run_ids: BTreeSet<uuid::Uuid>,
-    session_ids: Vec<moa_core::SessionId>,
+    session_ids: Vec<moa_core::types::identifiers::SessionId>,
     stop_reason_counts: BTreeMap<String, u64>,
     errors: BTreeSet<String>,
 }
@@ -875,7 +895,7 @@ impl ScoreAccumulator {
 }
 
 fn simulation_variant_deltas(
-    trials: &[moa_scoring::TrialScoreSummary],
+    trials: &[TrialScoreSummary],
     base_variant_key: &str,
     candidate_variant_keys: &[String],
 ) -> Vec<ExperimentVariantScoreDeltaRow> {
@@ -975,8 +995,8 @@ fn tenant_scope(tenant_id: TenantId) -> ActionRuleScope {
 }
 
 fn compare_artifact_dependencies(
-    base: &moa_core::AgentRevisionLock,
-    new: &moa_core::AgentRevisionLock,
+    base: &moa_core::types::agent::AgentRevisionLock,
+    new: &moa_core::types::agent::AgentRevisionLock,
 ) -> Vec<AgentArtifactDependencyDelta> {
     let mut references = BTreeMap::new();
     for dependency in &base.artifact_dependencies {
@@ -1007,8 +1027,8 @@ fn compare_artifact_dependencies(
 }
 
 fn compare_tool_dependencies(
-    base: &moa_core::AgentRevisionLock,
-    new: &moa_core::AgentRevisionLock,
+    base: &moa_core::types::agent::AgentRevisionLock,
+    new: &moa_core::types::agent::AgentRevisionLock,
 ) -> Vec<AgentToolDependencyDelta> {
     let mut tools = BTreeMap::new();
     for dependency in &base.tool_dependencies {
@@ -1073,7 +1093,10 @@ fn score_error_to_handler_error(error: ScoringError) -> HandlerError {
 #[cfg(test)]
 mod tests {
     use moa_core::wire::experiments::AgentDependencyChange;
-    use moa_core::{AgentRevisionLock, LockedToolRef, ResolvedArtifactRevisionRef};
+    use moa_core::{
+        types::agent::AgentRevisionLock, types::agent::LockedToolRef,
+        types::agent::ResolvedArtifactRevisionRef,
+    };
     use uuid::Uuid;
 
     use super::{compare_artifact_dependencies, compare_tool_dependencies};

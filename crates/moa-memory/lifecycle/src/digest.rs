@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, Utc};
-use moa_core::{MemoryDigestConfig, StoragePartitionId};
+use moa_core::{config::MemoryDigestConfig, types::identifiers::StoragePartitionId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};

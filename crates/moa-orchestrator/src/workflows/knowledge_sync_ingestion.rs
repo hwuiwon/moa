@@ -3,8 +3,8 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use moa_core::RlsContext;
-use moa_core::{CredentialVault, TenantId};
+use moa_core::types::memory::RlsContext;
+use moa_core::{config::MoaConfig, traits::CredentialVault, types::identifiers::TenantId};
 use moa_knowledge::{
     domain::{
         KnowledgeConnection, KnowledgeSyncRun, ListChangedRecordsRequest, RecordPage, SyncRunStatus,
@@ -12,21 +12,22 @@ use moa_knowledge::{
     ingestion::PageIngestionReport,
     observability::classify_failure,
     providers::{LinkedProviderContentFetcher, RecordContentFetcher},
-    repository::{KnowledgeRepository as _, PostgresKnowledgeRepository},
+    repository::{
+        KnowledgeDiscoveryStore as _, KnowledgeRepository as _, PostgresKnowledgeDiscoveryStore,
+        PostgresKnowledgeRepository,
+    },
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::workflows::errors::handler_error_message;
-use crate::{
-    OrchestratorCtx,
-    services::knowledge::{
-        ConfigKnowledgeProviders, KnowledgeCredentialStore as _, KnowledgeIngestionRunner as _,
-        KnowledgeProviderResolver as _, KnowledgeServiceError, ProductionKnowledgeIngestionRunner,
-        VaultKnowledgeCredentialStore,
-    },
+use crate::services::knowledge::{
+    ConfigKnowledgeProviders, KnowledgeCredentialStore as _, KnowledgeIngestionRunner as _,
+    KnowledgeProviderResolver as _, KnowledgeServiceError, ProductionKnowledgeIngestionRunner,
+    VaultKnowledgeCredentialStore,
 };
+use crate::workflows::errors::handler_error_message;
 
 /// Workflow input for one knowledge sync ingestion run.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -109,7 +110,19 @@ pub trait KnowledgeSyncIngestion {
 }
 
 /// Concrete knowledge sync ingestion workflow implementation.
-pub struct KnowledgeSyncIngestionImpl;
+#[derive(Clone)]
+pub struct KnowledgeSyncIngestionImpl {
+    pool: PgPool,
+    config: Arc<MoaConfig>,
+}
+
+impl KnowledgeSyncIngestionImpl {
+    /// Creates a knowledge-sync workflow with its storage and provider configuration.
+    #[must_use]
+    pub fn new(pool: PgPool, config: Arc<MoaConfig>) -> Self {
+        Self { pool, config }
+    }
+}
 
 impl KnowledgeSyncIngestion for KnowledgeSyncIngestionImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -121,7 +134,11 @@ impl KnowledgeSyncIngestion for KnowledgeSyncIngestionImpl {
     ) -> Result<Json<KnowledgeSyncIngestionReport>, HandlerError> {
         annotate_restate_handler_span("KnowledgeSyncIngestion", "run");
         let request = request.into_inner();
-        let mut steps = RestateKnowledgeSyncIngestionSteps { ctx: &ctx };
+        let mut steps = RestateKnowledgeSyncIngestionSteps {
+            ctx: &ctx,
+            pool: self.pool.clone(),
+            config: self.config.clone(),
+        };
         let report = run_knowledge_sync_ingestion_workflow(&mut steps, request).await?;
 
         Ok(Json::from(report))
@@ -268,6 +285,8 @@ pub async fn run_knowledge_sync_ingestion_workflow(
 
 struct RestateKnowledgeSyncIngestionSteps<'ctx, 'workflow> {
     ctx: &'ctx WorkflowContext<'workflow>,
+    pool: PgPool,
+    config: Arc<MoaConfig>,
 }
 
 #[async_trait]
@@ -276,21 +295,21 @@ impl KnowledgeSyncIngestionDurableSteps for RestateKnowledgeSyncIngestionSteps<'
         &mut self,
         request: &KnowledgeSyncIngestionRequest,
     ) -> Result<KnowledgeSyncPreparedRun, HandlerError> {
-        let pool = OrchestratorCtx::current_graph_pool();
-        let config = OrchestratorCtx::current_config();
+        let pool = self.pool.clone();
+        let config = self.config.clone();
         let sync_run_uid = request.sync_run_uid;
         self.ctx
             .run(|| async move {
-                let control_repository = PostgresKnowledgeRepository::control_plane(pool.clone());
-                let run = control_repository
-                    .get_sync_run(sync_run_uid)
+                let discovery = PostgresKnowledgeDiscoveryStore::new(pool.clone());
+                let tenant_id = discovery
+                    .resolve_sync_run_tenant(sync_run_uid)
                     .await
                     .map_err(knowledge_ingestion_error)?
                     .ok_or_else(|| {
                         TerminalError::new_with_code(404, "knowledge sync run not found")
                     })?;
                 let repository =
-                    PostgresKnowledgeRepository::scoped(pool, RlsContext::tenant(run.tenant_id));
+                    PostgresKnowledgeRepository::scoped(pool, RlsContext::tenant(tenant_id));
                 let mut run = repository
                     .get_sync_run(sync_run_uid)
                     .await
@@ -361,7 +380,7 @@ impl KnowledgeSyncIngestionDurableSteps for RestateKnowledgeSyncIngestionSteps<'
         limit: u32,
         page_index: u32,
     ) -> Result<KnowledgeSyncProviderPage, HandlerError> {
-        let config = OrchestratorCtx::current_config();
+        let config = self.config.clone();
         let tenant_id = prepared.run.tenant_id;
         let provider_label = prepared.provider.clone();
         let connection = prepared.connection.clone();
@@ -401,8 +420,8 @@ impl KnowledgeSyncIngestionDurableSteps for RestateKnowledgeSyncIngestionSteps<'
         page: KnowledgeSyncProviderPage,
         page_index: u32,
     ) -> Result<KnowledgeSyncPageApplication, HandlerError> {
-        let pool = OrchestratorCtx::current_graph_pool();
-        let config = OrchestratorCtx::current_config();
+        let pool = self.pool.clone();
+        let config = self.config.clone();
         let run = prepared.run.clone();
         let provider_label = prepared.provider.clone();
         let connection = prepared.connection.clone();
@@ -431,8 +450,8 @@ impl KnowledgeSyncIngestionDurableSteps for RestateKnowledgeSyncIngestionSteps<'
         prepared: &KnowledgeSyncPreparedRun,
         seen_source_ids: HashSet<String>,
     ) -> Result<KnowledgeSyncPageApplication, HandlerError> {
-        let pool = OrchestratorCtx::current_graph_pool();
-        let config = OrchestratorCtx::current_config();
+        let pool = self.pool.clone();
+        let config = self.config.clone();
         let run = prepared.run.clone();
         let provider = prepared.provider.clone();
         self.ctx
@@ -454,7 +473,7 @@ impl KnowledgeSyncIngestionDurableSteps for RestateKnowledgeSyncIngestionSteps<'
         &mut self,
         prepared: &KnowledgeSyncPreparedRun,
     ) -> Result<(), HandlerError> {
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         let tenant_id = prepared.run.tenant_id;
         let sync_run_uid = prepared.run.sync_run_uid;
         let connection_uid = prepared.run.connection_uid;
@@ -518,7 +537,7 @@ impl KnowledgeSyncIngestionDurableSteps for RestateKnowledgeSyncIngestionSteps<'
         stage: &'static str,
         error_message: String,
     ) -> Result<(), HandlerError> {
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         let tenant_id = prepared.run.tenant_id;
         let sync_run_uid = prepared.run.sync_run_uid;
         let provider = prepared.provider.clone();
@@ -588,7 +607,7 @@ impl From<PageIngestionReport> for KnowledgeSyncPageApplication {
 /// proxy content path only needs the connection's provider account and
 /// connector, so no vault credential resolution is required.
 fn build_record_content_fetcher(
-    config: &std::sync::Arc<moa_core::MoaConfig>,
+    config: &std::sync::Arc<moa_core::config::MoaConfig>,
     provider_label: &str,
     connection: KnowledgeConnection,
 ) -> Option<Arc<dyn RecordContentFetcher>> {
@@ -674,6 +693,6 @@ fn knowledge_service_handler_error(error: KnowledgeServiceError) -> HandlerError
     TerminalError::new(error.to_string()).into()
 }
 
-fn core_handler_error(error: moa_core::MoaError) -> HandlerError {
+fn core_handler_error(error: moa_core::error::MoaError) -> HandlerError {
     TerminalError::new(error.to_string()).into()
 }

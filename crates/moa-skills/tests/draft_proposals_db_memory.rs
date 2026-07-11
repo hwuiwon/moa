@@ -7,7 +7,9 @@ mod support;
 
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::ArtifactRegistry;
-use moa_core::{LearningCandidateStatus, LearningCandidateType};
+use moa_core::{
+    types::experience::LearningCandidateStatus, types::experience::LearningCandidateType,
+};
 use moa_skills::distiller::{DistillationOutcome, distill_skill_from_experience_with_learning};
 use moa_skills::improver::{ImprovementResult, improve_skill_from_experience_with_learning};
 use support::{
@@ -248,7 +250,7 @@ async fn open_proposal_for_same_skill_name_dedupes_across_sessions_db() {
     let test_db = setup_test_db().await;
     let loaded_a = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
     let mut loaded_b = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
-    loaded_b.session.id = moa_core::SessionId::new();
+    loaded_b.session.id = moa_core::types::identifiers::SessionId::new();
     loaded_b.session.tenant_id = loaded_a.session.tenant_id;
     let (config, _temp_dir) = test_config(&test_db);
     let proposed = skill_markdown(
@@ -308,7 +310,7 @@ async fn open_proposal_for_same_task_fingerprint_dedupes_across_skill_names_db()
     let test_db = setup_test_db().await;
     let loaded_a = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
     let mut loaded_b = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
-    loaded_b.session.id = moa_core::SessionId::new();
+    loaded_b.session.id = moa_core::types::identifiers::SessionId::new();
     loaded_b.session.tenant_id = loaded_a.session.tenant_id;
     let (config, _temp_dir) = test_config(&test_db);
     let first_name = skill_markdown(

@@ -5,7 +5,7 @@
 //! can return quickly and child execution has a durable progress/cancellation
 //! surface like top-level session turns.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,14 +13,25 @@ use chrono::{DateTime, Utc};
 use moa_core::wire::turn::{
     RunWorkerTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
 };
+use moa_core::{config::SessionLimitsConfig, traits::ChannelAdapter};
 use moa_core::{
-    AgentSignalId, ChildReportKind, ChildReportTool, ChildSignalKind, CompletionContent,
-    CompletionRequest, CompletionResponse, CoordinationCounters, Event, InputAudience, ModelTier,
-    ParentResumePolicy, ReportToParentInput, RequestInputInput, SessionId, SessionMeta,
-    SignalSeverity, StopReason, TokenUsage, ToolCallContent, ToolCallId, ToolInvocation,
-    ToolOutput, TrustedSandboxFileManifestRef, TurnOutcome as CoreTurnOutcome, WorkerPendingInput,
-    WorkerSignal, WorkerToolRecord, WorkerTurnOutcomeRecord, WorkerTurnPreparation,
-    WorkerTurnResponseRecord, scope_coordination_counters,
+    coordination_counters::CoordinationCounters,
+    coordination_counters::scope_coordination_counters, events::Event, types::channel::Channel,
+    types::completion::CompletionContent, types::completion::CompletionRequest,
+    types::completion::CompletionResponse, types::completion::StopReason,
+    types::completion::TokenUsage, types::completion::ToolCallContent,
+    types::completion::ToolInvocation, types::identifiers::AgentSignalId,
+    types::identifiers::SessionId, types::identifiers::ToolCallId, types::provider::ModelTier,
+    types::session::SessionMeta, types::session::TurnOutcome as CoreTurnOutcome,
+    types::tools::ToolOutput, types::tools::TrustedSandboxFileManifestRef,
+    types::worker::commands::ChildReportKind, types::worker::commands::ReportToParentInput,
+    types::worker::commands::RequestInputInput, types::worker::commands::WorkerToolRecord,
+    types::worker::commands::WorkerTurnOutcomeRecord,
+    types::worker::commands::WorkerTurnPreparation,
+    types::worker::commands::WorkerTurnResponseRecord, types::worker::state::ChildSignalKind,
+    types::worker::state::InputAudience, types::worker::state::ParentResumePolicy,
+    types::worker::state::SignalSeverity, types::worker::state::WorkerPendingInput,
+    types::worker::state::WorkerSignal, types::worker::tool_schema::ChildReportTool,
 };
 use moa_observability::restate_observability::{
     annotate_restate_handler_span, emit_turn_coordination_summary, llm_call_span,
@@ -33,7 +44,6 @@ use moa_observability::{
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
-use crate::OrchestratorCtx;
 use crate::objects::session::SessionClient;
 use crate::objects::worker::{MAX_WORKER_TURNS_PER_WORKFLOW, WorkerClient};
 use crate::services::{llm_gateway::LLMGatewayClient, session_store::RestateSessionStoreClient};
@@ -59,6 +69,7 @@ use crate::workflows::turn_progress::{self, SUMMARY_CALLING_MODEL};
 use crate::workflows::turn_responsiveness::{
     ToolBudgetDecision, ToolBudgetExhausted, ToolBudgetState,
 };
+use moa_session::PostgresSessionStore;
 
 #[derive(Clone, Debug)]
 enum WorkerIterationOutcome {
@@ -93,7 +104,28 @@ pub trait WorkerTurnExecution {
 }
 
 /// Concrete `WorkerTurnExecution` workflow implementation.
-pub struct WorkerTurnExecutionImpl;
+#[derive(Clone)]
+pub struct WorkerTurnExecutionImpl {
+    session_limits: SessionLimitsConfig,
+    session_store: Arc<PostgresSessionStore>,
+    channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
+}
+
+impl WorkerTurnExecutionImpl {
+    /// Creates a worker-turn workflow with its limits and progress-delivery dependencies.
+    #[must_use]
+    pub fn new(
+        session_limits: SessionLimitsConfig,
+        session_store: Arc<PostgresSessionStore>,
+        channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
+    ) -> Self {
+        Self {
+            session_limits,
+            session_store,
+            channel_adapters,
+        }
+    }
+}
 
 impl WorkerTurnExecution for WorkerTurnExecutionImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -111,14 +143,15 @@ impl WorkerTurnExecution for WorkerTurnExecutionImpl {
         // emit below). It stays `None` if the workflow errors before the first turn is
         // prepared; the terminal idle-wake still covers waking an idle parent.
         let mut parent_session: Option<SessionId> = None;
-        let outcome = match run_worker_inside_workflow(&ctx, &request, &mut parent_session).await {
-            Ok(outcome) => outcome,
-            Err(error) => TurnOutcome {
-                turn_id: request.turn_id.clone(),
-                kind: TurnOutcomeKind::Failed,
-                message: format!("{error:?}"),
-            },
-        };
+        let outcome =
+            match run_worker_inside_workflow(self, &ctx, &request, &mut parent_session).await {
+                Ok(outcome) => outcome,
+                Err(error) => TurnOutcome {
+                    turn_id: request.turn_id.clone(),
+                    kind: TurnOutcomeKind::Failed,
+                    message: format!("{error:?}"),
+                },
+            };
         record_turn_workflow_outcome(
             "worker",
             turn_outcome_kind_label(&outcome.kind),
@@ -161,11 +194,12 @@ impl WorkerTurnExecution for WorkerTurnExecutionImpl {
 }
 
 async fn run_worker_inside_workflow(
+    workflow: &WorkerTurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
     request: &RunWorkerTurnRequest,
     parent_session_out: &mut Option<SessionId>,
 ) -> Result<TurnOutcome, HandlerError> {
-    let session_limits = &OrchestratorCtx::current_config().session_limits;
+    let session_limits = &workflow.session_limits;
     let loop_plan = driver_model_loop::worker_loop_plan(
         driver_model_loop::WorkerLoopPlanRequest {
             request_max_turns: request.max_turns,
@@ -188,7 +222,7 @@ async fn run_worker_inside_workflow(
     for turn_number in 1..=max_turns {
         driver_progress::set_iteration(ctx, turn_number);
         if let Some(reason) = driver_progress::cancel_requested(ctx).await? {
-            moa_core::record_vo_send();
+            moa_core::coordination_counters::record_vo_send();
             ctx.object_client::<WorkerClient>(request.worker_id.clone())
                 .cancel(reason.clone())
                 .send();
@@ -200,7 +234,7 @@ async fn run_worker_inside_workflow(
         }
 
         driver_progress::set_phase(ctx, TurnPhase::Compiling);
-        moa_core::record_worker_vo_call();
+        moa_core::coordination_counters::record_worker_vo_call();
         let preparation = ctx
             .object_client::<WorkerClient>(request.worker_id.clone())
             .prepare_turn()
@@ -236,6 +270,7 @@ async fn run_worker_inside_workflow(
         let outcome = scope_coordination_counters(
             turn_coordination_counters.clone(),
             run_worker_iteration(
+                workflow,
                 ctx,
                 WorkerIterationInput {
                     request,
@@ -303,6 +338,7 @@ async fn run_worker_inside_workflow(
 }
 
 async fn run_worker_iteration(
+    workflow: &WorkerTurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
     mut input: WorkerIterationInput<'_>,
 ) -> Result<WorkerIterationOutcome, HandlerError> {
@@ -315,7 +351,15 @@ async fn run_worker_iteration(
         selected_procedure_skill_refs(&input.completion_request.metadata);
 
     driver_progress::set_phase(ctx, TurnPhase::Streaming);
-    turn_progress::maybe_emit(ctx, input.parent_session, SUMMARY_CALLING_MODEL).await?;
+    turn_progress::maybe_emit(
+        ctx,
+        input.parent_session,
+        SUMMARY_CALLING_MODEL,
+        &workflow.session_limits,
+        workflow.session_store.clone(),
+        workflow.channel_adapters.as_ref(),
+    )
+    .await?;
     record_worker_heartbeat(ctx, &input.request.worker_id).await?;
     let span = llm_call_span(&input.meta);
     let llm_started = Instant::now();
@@ -324,7 +368,7 @@ async fn run_worker_iteration(
         restate_sdk::select! {
             reason = ctx.promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE) => {
                 let reason = reason?;
-                moa_core::record_vo_send();
+                moa_core::coordination_counters::record_vo_send();
                 ctx.object_client::<WorkerClient>(input.request.worker_id.clone())
                     .cancel(reason.clone())
                     .send();
@@ -342,7 +386,7 @@ async fn run_worker_iteration(
     let (response, verification_annotated) =
         annotate_unresolved_verification(&response, &*input.turn_evidence);
 
-    moa_core::record_worker_vo_call();
+    moa_core::coordination_counters::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(input.request.worker_id.clone())
         .record_response(Json::from(WorkerTurnResponseRecord {
             turn_id: input.request.turn_id.clone(),
@@ -353,7 +397,7 @@ async fn run_worker_iteration(
 
     if verification_annotated {
         let outcome = CoreTurnOutcome::Idle;
-        moa_core::record_worker_vo_call();
+        moa_core::coordination_counters::record_worker_vo_call();
         ctx.object_client::<WorkerClient>(input.request.worker_id.clone())
             .apply_turn_outcome(Json::from(WorkerTurnOutcomeRecord {
                 turn_id: input.request.turn_id.clone(),
@@ -366,7 +410,7 @@ async fn run_worker_iteration(
 
     for (index, tool_call) in response_tool_calls(&response).into_iter().enumerate() {
         if let Some(reason) = driver_progress::cancel_requested(ctx).await? {
-            moa_core::record_vo_send();
+            moa_core::coordination_counters::record_vo_send();
             ctx.object_client::<WorkerClient>(input.request.worker_id.clone())
                 .cancel(reason.clone())
                 .send();
@@ -402,6 +446,7 @@ async fn run_worker_iteration(
             selected_procedure_skills: &selected_procedure_skills,
         };
         handle_tool_call(
+            workflow,
             ctx,
             tool_context,
             &allowed_tools,
@@ -413,7 +458,7 @@ async fn run_worker_iteration(
     }
 
     let outcome = turn_outcome_for_response(&response);
-    moa_core::record_worker_vo_call();
+    moa_core::coordination_counters::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(input.request.worker_id.clone())
         .apply_turn_outcome(Json::from(WorkerTurnOutcomeRecord {
             turn_id: input.request.turn_id.clone(),
@@ -434,7 +479,7 @@ async fn record_worker_heartbeat(
     worker_id: &str,
 ) -> Result<(), HandlerError> {
     let now = durable_utc_now(ctx, "worker_heartbeat").await?;
-    moa_core::record_vo_send();
+    moa_core::coordination_counters::record_vo_send();
     ctx.object_client::<WorkerClient>(worker_id.to_string())
         .record_heartbeat(Json::from(now))
         .send();
@@ -471,6 +516,7 @@ struct WorkerToolContext<'a> {
 }
 
 async fn handle_tool_call(
+    workflow: &WorkerTurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
     tool_context: WorkerToolContext<'_>,
     allowed_tools: &BTreeSet<String>,
@@ -492,6 +538,7 @@ async fn handle_tool_call(
         .map_err(|error| TerminalError::new(error.to_string()))?
     {
         return handle_child_report_tool(
+            workflow,
             ctx,
             ChildReportToolRequest {
                 turn_id: tool_context.turn_id,
@@ -522,6 +569,9 @@ async fn handle_tool_call(
                 turn_id: tool_context.turn_id,
             },
         },
+        &workflow.session_limits,
+        workflow.session_store.clone(),
+        workflow.channel_adapters.as_ref(),
     )
     .await?;
 
@@ -555,6 +605,7 @@ async fn handle_tool_call(
         }
         GovernedInvocationOutcome::Delegation { tool_id, .. } => {
             handle_delegation_tool(
+                workflow,
                 ctx,
                 WorkerDelegationToolRequest {
                     turn_id: tool_context.turn_id,
@@ -580,6 +631,7 @@ struct WorkerDelegationToolRequest<'a> {
 }
 
 async fn handle_delegation_tool(
+    workflow: &WorkerTurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
     request: WorkerDelegationToolRequest<'_>,
     turn_evidence: &mut TurnEvidence,
@@ -603,6 +655,9 @@ async fn handle_delegation_tool(
         ctx,
         session_id,
         turn_progress::running_tool_summary(&invocation.name),
+        &workflow.session_limits,
+        workflow.session_store.clone(),
+        workflow.channel_adapters.as_ref(),
     )
     .await?;
     record_worker_heartbeat(ctx, worker_id).await?;
@@ -645,6 +700,7 @@ struct ChildReportToolRequest<'a> {
 /// Restate awakeable until the coordinator answers (`ProvideInput`) or the long timeout
 /// elapses.
 async fn handle_child_report_tool(
+    workflow: &WorkerTurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
     request: ChildReportToolRequest<'_>,
     turn_evidence: &mut TurnEvidence,
@@ -665,7 +721,7 @@ async fn handle_child_report_tool(
             report_to_parent(ctx, worker_id, parent_session, &input).await?
         }
         ChildReportTool::RequestInput(input) => {
-            request_input_from_parent(ctx, worker_id, parent_session, &input).await?
+            request_input_from_parent(workflow, ctx, worker_id, parent_session, &input).await?
         }
     };
     append_tool_result_event(ctx, parent_session, tool_id, &invocation, &output).await?;
@@ -694,7 +750,7 @@ async fn report_to_parent(
         .into_inner();
     let created_at = durable_utc_now(ctx, "child_report_signal_at").await?;
     let signal = build_child_report_signal(worker_id, parent_session, signal_id, created_at, input);
-    moa_core::record_vo_send();
+    moa_core::coordination_counters::record_vo_send();
     ctx.object_client::<SessionClient>(parent_session.to_string())
         .record_child_signal(Json::from(signal))
         .send();
@@ -722,6 +778,7 @@ async fn report_to_parent(
 /// answer. On timeout the mapping is cleared so a late `ProvideInput` is an idempotent
 /// no-op, and the child receives a "no input" result so it can proceed or report blocked.
 async fn request_input_from_parent(
+    workflow: &WorkerTurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
     worker_id: &str,
     parent_session: SessionId,
@@ -743,7 +800,7 @@ async fn request_input_from_parent(
     // Persist the awakeable mapping on the child VO BEFORE emitting the signal so any
     // `ProvideInput` the coordinator sends in response always finds it (this `.call()`
     // awaits durable storage). Mirrors `attach_result_waiter` in the wait path.
-    moa_core::record_worker_vo_call();
+    moa_core::coordination_counters::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(worker_id.to_string())
         .register_input_request(Json::from(WorkerPendingInput {
             input_request_id: input_request_id.clone(),
@@ -771,21 +828,19 @@ async fn request_input_from_parent(
         input.audience,
         &input.question,
     );
-    moa_core::record_vo_send();
+    moa_core::coordination_counters::record_vo_send();
     ctx.object_client::<SessionClient>(parent_session.to_string())
         .record_child_signal(Json::from(signal))
         .send();
 
-    let timeout_ms = OrchestratorCtx::current_config()
-        .session_limits
-        .worker_input_timeout_ms;
+    let timeout_ms = workflow.session_limits.worker_input_timeout_ms;
     let output = restate_sdk::select! {
         answer = answer_future => {
             ToolOutput::text(format!("Input received: {}", answer?), Duration::ZERO)
         },
         _ = ctx.sleep(Duration::from_millis(timeout_ms)) => {
             // Clear the now-dead mapping so a late ProvideInput is an idempotent no-op.
-            moa_core::record_worker_vo_call();
+            moa_core::coordination_counters::record_worker_vo_call();
             ctx.object_client::<WorkerClient>(worker_id.to_string())
                 .clear_input_request(Json::from(input_request_id.clone()))
                 .call()
@@ -888,7 +943,7 @@ async fn record_worker_budget_stop(
         duration_ms: 0,
         thought_signature: None,
     };
-    moa_core::record_worker_vo_call();
+    moa_core::coordination_counters::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(request.worker_id.clone())
         .record_response(Json::from(WorkerTurnResponseRecord {
             turn_id: request.turn_id.clone(),
@@ -896,7 +951,7 @@ async fn record_worker_budget_stop(
         }))
         .call()
         .await?;
-    moa_core::record_worker_vo_call();
+    moa_core::coordination_counters::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(request.worker_id.clone())
         .apply_turn_outcome(Json::from(WorkerTurnOutcomeRecord {
             turn_id: request.turn_id.clone(),
@@ -937,7 +992,7 @@ async fn record_worker_turn_cap_stop(
         duration_ms: 0,
         thought_signature: None,
     };
-    moa_core::record_worker_vo_call();
+    moa_core::coordination_counters::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(request.worker_id.clone())
         .record_response(Json::from(WorkerTurnResponseRecord {
             turn_id: request.turn_id.clone(),
@@ -945,7 +1000,7 @@ async fn record_worker_turn_cap_stop(
         }))
         .call()
         .await?;
-    moa_core::record_worker_vo_call();
+    moa_core::coordination_counters::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(request.worker_id.clone())
         .apply_turn_outcome(Json::from(WorkerTurnOutcomeRecord {
             turn_id: request.turn_id.clone(),
@@ -964,7 +1019,7 @@ async fn record_tool_result(
     invocation: &ToolInvocation,
     output: &ToolOutput,
 ) -> Result<(), HandlerError> {
-    moa_core::record_worker_vo_call();
+    moa_core::coordination_counters::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(worker_id.to_string())
         .record_tool_result(Json::from(WorkerToolRecord {
             turn_id: Some(turn_id.to_string()),
@@ -985,7 +1040,7 @@ async fn record_denied_tool(
     invocation: &ToolInvocation,
     output: &ToolOutput,
 ) -> Result<(), HandlerError> {
-    moa_core::record_worker_vo_call();
+    moa_core::coordination_counters::record_worker_vo_call();
     ctx.object_client::<WorkerClient>(worker_id.to_string())
         .record_denied_tool(Json::from(WorkerToolRecord {
             turn_id: Some(turn_id.to_string()),
@@ -999,7 +1054,7 @@ async fn record_denied_tool(
 }
 
 fn notify_worker_of_outcome(ctx: &WorkflowContext<'_>, worker_id: &str, outcome: &TurnOutcome) {
-    moa_core::record_vo_send();
+    moa_core::coordination_counters::record_vo_send();
     ctx.object_client::<WorkerClient>(worker_id.to_string())
         .record_turn_outcome(Json::from(outcome.clone()))
         .send();
@@ -1049,7 +1104,7 @@ async fn emit_failed_child_signal_if_needed(
         &outcome.message,
     );
     // DETACHED: never block the workflow on the coordinator VO's single-writer queue.
-    moa_core::record_vo_send();
+    moa_core::coordination_counters::record_vo_send();
     ctx.object_client::<SessionClient>(parent_session.to_string())
         .record_child_signal(Json::from(signal))
         .send();
@@ -1146,8 +1201,10 @@ mod tests {
     use chrono::Utc;
     use moa_core::wire::turn::{TurnOutcome, TurnOutcomeKind};
     use moa_core::{
-        AgentSignalId, ChildReportKind, ChildSignalKind, InputAudience, ParentResumePolicy,
-        ReportToParentInput, SessionId, SignalSeverity,
+        types::identifiers::AgentSignalId, types::identifiers::SessionId,
+        types::worker::commands::ChildReportKind, types::worker::commands::ReportToParentInput,
+        types::worker::state::ChildSignalKind, types::worker::state::InputAudience,
+        types::worker::state::ParentResumePolicy, types::worker::state::SignalSeverity,
     };
 
     use super::{

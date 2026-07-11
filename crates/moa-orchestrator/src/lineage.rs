@@ -2,7 +2,10 @@
 
 use std::sync::Arc;
 
-use moa_core::{LineageHandle, MoaConfig, MoaError, NullLineageHandle, Result};
+use moa_core::{
+    config::MoaConfig, error::MoaError, error::Result, traits::LineageHandle,
+    traits::NullLineageHandle,
+};
 
 /// Runtime lineage sink and optional background writer handle.
 pub struct LineageSinkRuntime {

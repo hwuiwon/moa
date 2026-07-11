@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use moa_core::{HandProvider, HandResources, HandSpec, SandboxTier};
+use moa_core::{
+    traits::HandProvider, types::hands::HandResources, types::hands::HandSpec,
+    types::hands::SandboxTier,
+};
 use moa_hands::LocalHandProvider;
 use tempfile::tempdir;
 
@@ -26,7 +29,7 @@ async fn docker_container_runs_with_hardening() {
         .await
         .unwrap();
 
-    if !matches!(handle, moa_core::HandHandle::Docker { .. }) {
+    if !matches!(handle, moa_core::types::hands::HandHandle::Docker { .. }) {
         return;
     }
 

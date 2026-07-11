@@ -6,11 +6,15 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::types::{
-    ActionEnvelope, ActionReviewDecision, ActionReviewPreview, AgentSignalId, Attachment,
-    CacheReport, Channel, ChildSignalKind, ContactId, GuardrailDirection, GuardrailMode,
-    InputAudience, ModelId, ModelTier, NarrationSegment, NarrationSource, SegmentId,
-    SessionActorRef, SessionChannelBindingId, SessionStatus, SignalSeverity, TenantId, ToolCallId,
-    ToolOutput, WorkerId, WorkerState, WorkerTerminalResult,
+    action_policy::ActionEnvelope, action_policy::ActionReviewDecision,
+    action_policy::ActionReviewPreview, channel::Attachment, channel::Channel,
+    channel::SessionChannelBindingId, contact::ContactId, contact::SessionActorRef,
+    guardrails::GuardrailDirection, guardrails::GuardrailMode, identifiers::AgentSignalId,
+    identifiers::ModelId, identifiers::SegmentId, identifiers::TenantId, identifiers::ToolCallId,
+    observability::CacheReport, provider::ModelTier, session::SessionStatus, tools::ToolOutput,
+    worker::state::ChildSignalKind, worker::state::InputAudience, worker::state::NarrationSegment,
+    worker::state::NarrationSource, worker::state::SignalSeverity, worker::state::WorkerId,
+    worker::state::WorkerState, worker::state::WorkerTerminalResult,
 };
 
 /// Append-only session event payload.
@@ -762,7 +766,7 @@ mod tests {
         review_id: Uuid,
         tool_name: &str,
         input_summary: &str,
-        risk_level: crate::types::RiskLevel,
+        risk_level: crate::types::action_policy::RiskLevel,
     ) -> ActionEnvelope {
         ActionEnvelope {
             review_id,
@@ -770,14 +774,14 @@ mod tests {
             requested_by: SessionActorRef::Identity {
                 id: Uuid::from_u128(2),
             },
-            session_id: Some(crate::types::SessionId::new()),
+            session_id: Some(crate::types::identifiers::SessionId::new()),
             worker_id: None,
             tool_call_id: ToolCallId::from(review_id),
             tool_name: tool_name.to_string(),
             normalized_input: input_summary.to_string(),
             input_summary: input_summary.to_string(),
             risk_level,
-            action_class: crate::types::ActionClass::LocalWrite,
+            action_class: crate::types::action_policy::ActionClass::LocalWrite,
             origin_kind: None,
             origin_id: None,
             origin_step_id: None,
@@ -788,11 +792,11 @@ mod tests {
 
     fn sample_action_review_preview(input_summary: &str) -> ActionReviewPreview {
         ActionReviewPreview {
-            fields: vec![crate::types::ActionReviewField {
+            fields: vec![crate::types::action_policy::ActionReviewField {
                 label: "Path".to_string(),
                 value: input_summary.to_string(),
             }],
-            file_diffs: vec![crate::types::ActionReviewFileDiff {
+            file_diffs: vec![crate::types::action_policy::ActionReviewFileDiff {
                 path: input_summary.to_string(),
                 before: String::new(),
                 after: "hello\n".to_string(),
@@ -812,7 +816,7 @@ mod tests {
                 review_id,
                 "file_write",
                 "notes/today.md",
-                crate::types::RiskLevel::Medium,
+                crate::types::action_policy::RiskLevel::Medium,
             ),
             preview: sample_action_review_preview("notes/today.md"),
         };
@@ -985,9 +989,9 @@ mod tests {
             (
                 Event::WorkerResultBundle {
                     user_sequence_num: 42,
-                    results: vec![crate::WorkerTerminalResult {
+                    results: vec![crate::types::worker::state::WorkerTerminalResult {
                         state: WorkerState::Completed,
-                        result: crate::WorkerResult {
+                        result: crate::types::worker::state::WorkerResult {
                             worker_id: "child-1".to_string(),
                             success: true,
                             output: "done".to_string(),
@@ -1140,7 +1144,7 @@ mod tests {
         // terminals conclude or suspend the loop; the asynchronously appended passive
         // vectors (ProgressNarrated, WorkerHeartbeatStale, TurnMetrics, CacheReport,
         // MemoryRead/Ingest, BrainThinking) are Neutral so they cannot mask a trigger.
-        use crate::ProcessingEffect;
+        use crate::events::ProcessingEffect;
 
         let triggers = [
             Event::UserMessage {
@@ -1150,7 +1154,10 @@ mod tests {
             Event::ToolResult {
                 tool_id: ToolCallId::new(),
                 provider_tool_use_id: None,
-                output: crate::ToolOutput::text("ok", std::time::Duration::from_millis(1)),
+                output: crate::types::tools::ToolOutput::text(
+                    "ok",
+                    std::time::Duration::from_millis(1),
+                ),
                 original_output_tokens: None,
                 success: true,
                 duration_ms: 1,

@@ -1,7 +1,7 @@
 //! Privacy erasure orchestration across graph memory and PII vault state.
 
 use moa_core::wire::privacy::{ContactErasureScope, PrivacyEraseResponse, PrivacyEraseStatus};
-use moa_core::{StoragePartitionId, UserId};
+use moa_core::{types::identifiers::StoragePartitionId, types::identifiers::UserId};
 use moa_lineage_audit::PiiVault;
 use moa_memory_pii::erasure::{
     EraseCandidate, GraphErasureAudit, delete_subject_digests, delete_subject_retrieval_lineage,

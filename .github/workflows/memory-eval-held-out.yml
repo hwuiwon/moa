@@ -60,7 +60,7 @@ jobs:
 
       - name: Generate reserved marked corpus
         run: >-
-          cargo run -p xtask --release -- generate-memory-eval-corpus
+          cargo run -p xtask --release --features eval-tools -- generate-memory-eval-corpus
           --profile pr
           --held-out
           --output target/memory-eval/pr-held-out
@@ -68,7 +68,7 @@ jobs:
       - name: Run hermetic held-out retrieval eval
         run: >-
           env -u COHERE_API_KEY -u MOA_COHERE_API_KEY
-          cargo run -p xtask --release -- run-memory-retrieval-eval
+          cargo run -p xtask --release --features eval-tools -- run-memory-retrieval-eval
           --corpus target/memory-eval/pr-held-out
           --lane pr
           --extractor heuristic
@@ -77,7 +77,7 @@ jobs:
 
       - name: Write paired held-out comparison
         run: >-
-          cargo run -p xtask --release -- compare-eval-reports
+          cargo run -p xtask --release --features eval-tools -- compare-eval-reports
           --baseline docs/eval/baselines/memory-retrieval-pr-held-out-baseline.json
           --candidate target/memory-eval/held-out.json
           --output target/memory-eval/held-out-compare.json
@@ -86,7 +86,7 @@ jobs:
         env:
           MOA_EVAL_PREVIOUS_MEMORY_REPORT: docs/eval/baselines/memory-retrieval-pr-held-out-baseline.json
         run: >-
-          cargo run -p xtask --release -- check-eval-budgets
+          cargo run -p xtask --release --features eval-tools -- check-eval-budgets
           --suite memory_retrieval
           --memory-eval-report target/memory-eval/held-out.json
           --max-regression-pct 5

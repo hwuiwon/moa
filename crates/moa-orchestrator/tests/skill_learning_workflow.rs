@@ -11,12 +11,21 @@ use moa_artifacts::registry::ArtifactRegistry;
 use moa_brain::learning::attribution::attributions_for_experience;
 use moa_brain::learning::experience::experience_from_assessment;
 use moa_core::{
-    ActionRuleScope, AssessmentPhase, Attachment, Channel, CompletionContent, CompletionRequest,
-    CompletionResponse, CompletionStream, Event, LLMProvider, MoaConfig, MoaError,
-    ModelCapabilities, ModelId, ModelTier, SegmentAssessment, SegmentEvidence, SegmentEvidenceKind,
-    SegmentEvidencePolarity, SegmentId, SegmentOutcome, SessionActorRef, SessionId, SessionMeta,
-    SessionStatus, SessionStore as _, StopReason, StoragePartitionId, TaskSegment, TenantId,
-    TokenPricing, TokenUsage, ToolCallFormat, ToolCallId, ToolOutput,
+    config::MoaConfig, error::MoaError, events::Event, traits::LLMProvider,
+    traits::SessionStore as _, types::action_policy::ActionRuleScope, types::channel::Attachment,
+    types::channel::Channel, types::completion::CompletionContent,
+    types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::completion::CompletionStream, types::completion::StopReason,
+    types::completion::TokenUsage, types::contact::SessionActorRef, types::identifiers::ModelId,
+    types::identifiers::SegmentId, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::identifiers::ToolCallId, types::model::ModelCapabilities, types::model::TokenPricing,
+    types::model::ToolCallFormat, types::provider::ModelTier,
+    types::segment_assessment::AssessmentPhase, types::segment_assessment::SegmentAssessment,
+    types::segment_assessment::SegmentEvidence, types::segment_assessment::SegmentEvidenceKind,
+    types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
+    types::segments::TaskSegment, types::session::SessionMeta, types::session::SessionStatus,
+    types::tools::ToolOutput,
 };
 use moa_orchestrator::workflows::skill_learning::{
     RunSkillLearningRequest, record_skill_learning_failure, run_skill_learning_for_experience,
@@ -135,6 +144,9 @@ async fn seed_experience_fixture(
     test_db: &moa_test_support::postgres::TestDb,
     _label: &str,
 ) -> (MoaConfig, RunSkillLearningRequest, StoragePartitionId) {
+    let mut config = MoaConfig::default();
+    config.database.url = test_db.database_url().to_string();
+    config.query_rewrite.enabled = false;
     let tenant_id = TenantId::new();
     let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     let creator_id = Uuid::now_v7();
@@ -186,7 +198,7 @@ async fn seed_experience_fixture(
             .expect("append user message"),
     );
     let mut tools_used = Vec::new();
-    for index in 0..5 {
+    for index in 0..config.learning.skills.min_tool_calls {
         let tool_name = format!("bash-{index}");
         let tool_id = ToolCallId::new();
         tools_used.push(tool_name.clone());
@@ -325,9 +337,6 @@ async fn seed_experience_fixture(
         .await
         .expect("append attributions");
 
-    let mut config = MoaConfig::default();
-    config.database.url = test_db.database_url().to_string();
-    config.query_rewrite.enabled = false;
     (
         config,
         RunSkillLearningRequest {
@@ -404,7 +413,10 @@ impl LLMProvider for TestProvider {
         }
     }
 
-    async fn complete(&self, _request: CompletionRequest) -> moa_core::Result<CompletionStream> {
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
         let text = self
             .responses
             .lock()

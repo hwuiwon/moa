@@ -40,6 +40,7 @@ impl Session for SessionImpl {
                 contact: None,
                 max_turns: None,
             },
+            &self.session_limits,
         )
         .await?;
         Ok(())
@@ -96,7 +97,7 @@ impl Session for SessionImpl {
     ) -> Result<Json<StartTurnResponse>, HandlerError> {
         annotate_restate_handler_span("Session", "start_turn");
         Ok(Json::from(
-            start_turn_inner(&mut ctx, request.into_inner()).await?,
+            start_turn_inner(&mut ctx, request.into_inner(), &self.session_limits).await?,
         ))
     }
 
@@ -196,6 +197,7 @@ impl Session for SessionImpl {
                         &mut state,
                         session_id,
                         now,
+                        &self.session_limits,
                     )
                     .await?
             } else {
@@ -326,6 +328,7 @@ impl Session for SessionImpl {
                 contact: request.contact,
                 max_turns: request.max_turns,
             },
+            &self.session_limits,
         )
         .await?;
         Ok(Json::from(QueueMessageResponse {
@@ -370,7 +373,8 @@ impl Session for SessionImpl {
             pending_message_count: pending_state.pending_messages.len() as u64,
             last_outcome: pending_state.last_outcome,
         };
-        let events = load_progress_events(&ctx, session_id, event_range).await?;
+        let events =
+            load_progress_events(&ctx, session_id, event_range, &self.session_store).await?;
         let active_turn_progress = if let Some(turn_id) = active_turn_id {
             active_turn_progress_or_none(
                 &turn_id,
@@ -406,10 +410,17 @@ impl Session for SessionImpl {
         if state.register_child(child) {
             // Active edge: a child just became active, so ensure one narration tick is
             // outstanding (single-outstanding guard prevents overlapping schedules).
-            narration::ensure_narration_tick_scheduled(&ctx, &mut state).await?;
+            narration::ensure_narration_tick_scheduled(&ctx, &mut state, &self.session_limits)
+                .await?;
             // Active edge: schedule one single-outstanding per-child heartbeat-liveness
             // watchdog so a stuck child is detected without polling across sessions.
-            liveness::ensure_child_liveness_scheduled(&ctx, &mut state, &worker_id).await?;
+            liveness::ensure_child_liveness_scheduled(
+                &ctx,
+                &mut state,
+                &worker_id,
+                &self.session_limits,
+            )
+            .await?;
             state.persist(&ctx);
         }
         Ok(())
@@ -531,7 +542,14 @@ impl Session for SessionImpl {
         let input = input.into_inner();
         let worker_id = input.worker_id.clone();
         if state.mark_child_terminal(input) {
-            claim_check_child_output(&ctx, &mut state, session_id, &worker_id).await?;
+            claim_check_child_output(
+                &ctx,
+                &mut state,
+                session_id,
+                &worker_id,
+                &self.session_store,
+            )
+            .await?;
             maybe_complete_auto_delegation_run(
                 &mut ctx,
                 &mut pending_state,
@@ -562,7 +580,14 @@ impl Session for SessionImpl {
             // Return full-fidelity output: if the cached output was claim-checked, hydrate the
             // full body from its blob so the coordinator never receives a truncated preview.
             if let (Some(terminal), Some(claim_check)) = (terminal.as_mut(), blob) {
-                hydrate_child_terminal_output(&ctx, session_id, terminal, claim_check).await?;
+                hydrate_child_terminal_output(
+                    &ctx,
+                    session_id,
+                    terminal,
+                    claim_check,
+                    &self.session_store,
+                )
+                .await?;
             }
             state.persist(&ctx);
         }
@@ -684,8 +709,7 @@ impl Session for SessionImpl {
         // second resume turn. `maybe_arm_parent_resume` also re-blocks once the dispatched
         // turn is active, but this short-circuits even before the turn becomes active.
         let already_pending = state.pending_parent_resume_signal == Some(signal.signal_id);
-        let config = OrchestratorCtx::current_config();
-        let limits = &config.session_limits;
+        let limits = &self.session_limits;
         let now = durable_utc_now(&ctx).await?;
         let armed = !already_pending
             && state.maybe_arm_parent_resume(
@@ -824,7 +848,7 @@ impl Session for SessionImpl {
         req: Json<NarrationTickRequest>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Session", "narration_tick");
-        narration::run_narration_tick(&ctx, req.into_inner().generation).await
+        narration::run_narration_tick(&ctx, req.into_inner().generation, &self.session_limits).await
     }
 
     #[tracing::instrument(skip(self, ctx, req))]
@@ -839,7 +863,7 @@ impl Session for SessionImpl {
         req: Json<CheckChildLivenessRequest>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Session", "check_child_liveness");
-        liveness::run_child_liveness_check(&ctx, req.into_inner()).await
+        liveness::run_child_liveness_check(&ctx, req.into_inner(), &self.session_limits).await
     }
 }
 
@@ -993,11 +1017,12 @@ async fn claim_check_child_output(
     state: &mut SessionVoState,
     session_id: SessionId,
     worker_id: &str,
+    session_store: &Arc<dyn SessionRepository>,
 ) -> Result<(), HandlerError> {
     let Some(full_output) = state.large_child_terminal_output(worker_id) else {
         return Ok(());
     };
-    let store = OrchestratorCtx::current_session_store();
+    let store = session_store.clone();
     let claim = ctx
         .run(|| async move {
             store
@@ -1019,12 +1044,13 @@ async fn hydrate_child_terminal_output(
     session_id: SessionId,
     terminal: &mut WorkerTerminalResult,
     claim_check: ClaimCheck,
+    session_store: &Arc<dyn SessionRepository>,
 ) -> Result<(), HandlerError> {
     let name = format!(
         "child_terminal_output_hydrate_{}",
         terminal.result.worker_id
     );
-    let store = OrchestratorCtx::current_session_store();
+    let store = session_store.clone();
     let body = ctx
         .run(|| async move {
             store
@@ -1148,6 +1174,7 @@ async fn dispatch_queued_parent_resume_if_idle(
     state: &mut SessionVoState,
     session_id: SessionId,
     now: DateTime<Utc>,
+    limits: &SessionLimitsConfig,
 ) -> Result<bool, HandlerError> {
     if pending_state.active_turn_id.is_some() {
         return Ok(false);
@@ -1161,8 +1188,6 @@ async fn dispatch_queued_parent_resume_if_idle(
         return Ok(false);
     };
     let signal = unread_to_resume_signal(session_id, &unread, now);
-    let config = OrchestratorCtx::current_config();
-    let limits = &config.session_limits;
     if !state.maybe_arm_parent_resume(
         &signal,
         None,
@@ -1308,8 +1333,9 @@ async fn load_progress_events(
     ctx: &SharedObjectContext<'_>,
     session_id: SessionId,
     range: EventRange,
+    session_store: &Arc<dyn SessionRepository>,
 ) -> Result<Vec<EventRecord>, HandlerError> {
-    let store = OrchestratorCtx::current_session_store();
+    let store = session_store.clone();
     Ok(ctx
         .run(move || {
             let store = store.clone();
@@ -1329,6 +1355,7 @@ async fn load_progress_events(
 async fn start_turn_inner(
     ctx: &mut ObjectContext<'_>,
     request: StartTurnRequest,
+    session_limits: &SessionLimitsConfig,
 ) -> Result<StartTurnResponse, HandlerError> {
     let session_id = parse_session_key(ctx.key())?;
     let identity = require_session_participant(ctx, session_id).await?;
@@ -1396,7 +1423,7 @@ async fn start_turn_inner(
     }
     // Active edge: a coordinator turn is starting, so ensure a narration tick is
     // outstanding (single-outstanding guard prevents overlapping schedules).
-    narration::ensure_narration_tick_scheduled(ctx, &mut state).await?;
+    narration::ensure_narration_tick_scheduled(ctx, &mut state, session_limits).await?;
     let drained = state.drain_unread_child_signals();
     state.persist_into(ctx);
     persist_pending_state(ctx, &pending_state);
@@ -1466,7 +1493,9 @@ async fn require_session_participant(
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        Channel, ContactId, ContactRef, ContactVerificationState, ModelId, SessionMeta, TenantId,
+        types::channel::Channel, types::contact::ContactId, types::contact::ContactRef,
+        types::contact::ContactVerificationState, types::identifiers::ModelId,
+        types::identifiers::TenantId, types::session::SessionMeta,
     };
     use restate_sdk::prelude::TerminalError;
 

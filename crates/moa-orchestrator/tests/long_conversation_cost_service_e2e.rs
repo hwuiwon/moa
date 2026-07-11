@@ -87,7 +87,7 @@ async fn long_conversation_loop_cost_service_e2e() {
 
     let checkpoints = events
         .iter()
-        .filter(|rec| matches!(rec.event, moa_core::Event::Checkpoint { .. }))
+        .filter(|rec| matches!(rec.event, moa_core::events::Event::Checkpoint { .. }))
         .count();
 
     // A plain N-message conversation costs EXACTLY N model turns: the loop inserts no extra model

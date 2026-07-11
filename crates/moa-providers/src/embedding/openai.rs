@@ -1,7 +1,7 @@
 //! OpenAI embedding provider client.
 
 use async_trait::async_trait;
-use moa_core::Result;
+use moa_core::error::Result;
 use moa_core::traits::EmbeddingProvider;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -156,7 +156,7 @@ struct OpenAIEmbeddingData {
 mod tests {
     use std::sync::Arc;
 
-    use moa_core::MoaError;
+    use moa_core::error::MoaError;
     use moa_core::traits::EmbeddingProvider;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;

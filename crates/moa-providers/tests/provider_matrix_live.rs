@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use moa_core::{
-    CompletionContent, CompletionRequest, ContextMessage, JsonResponseFormat, LLMProvider,
+    traits::LLMProvider, types::completion::CompletionContent,
+    types::completion::CompletionRequest, types::completion::JsonResponseFormat,
+    types::context::ContextMessage,
 };
 use moa_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 use serde_json::json;
@@ -28,7 +30,7 @@ impl LiveProvider {
     async fn complete(
         &self,
         request: CompletionRequest,
-    ) -> moa_core::Result<moa_core::CompletionStream> {
+    ) -> moa_core::error::Result<moa_core::types::completion::CompletionStream> {
         match self {
             Self::OpenAi(provider) => provider.complete(request).await,
             Self::Anthropic(provider) => provider.complete(request).await,
@@ -130,7 +132,7 @@ fn emit_token_tool() -> serde_json::Value {
     })
 }
 
-fn normalized_response_text(response: &moa_core::CompletionResponse) -> String {
+fn normalized_response_text(response: &moa_core::types::completion::CompletionResponse) -> String {
     if !response.text.trim().is_empty() {
         return response.text.clone();
     }
@@ -150,7 +152,7 @@ async fn complete_until(
     request: CompletionRequest,
     attempts: usize,
     mut predicate: impl FnMut(&str) -> bool,
-) -> moa_core::CompletionResponse {
+) -> moa_core::types::completion::CompletionResponse {
     let mut last_response = None;
     for attempt in 0..attempts.max(1) {
         let response = provider
@@ -271,7 +273,7 @@ async fn live_providers_emit_tool_calls_across_available_keys() {
         let response = provider
             .complete(CompletionRequest {
                 model: None,
-                messages: vec![moa_core::ContextMessage::user(format!(
+                messages: vec![moa_core::types::context::ContextMessage::user(format!(
                     "You must call the emit_token tool exactly once with token \"{token}\". \
                      Do not answer in plain text before the tool call."
                 ))],

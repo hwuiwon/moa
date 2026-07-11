@@ -6,8 +6,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    Channel, ContactId, Credential, CredentialVault, MessagingConfig, MoaError, Result,
-    StoredCredentialMetadata,
+    config::MessagingConfig, error::MoaError, error::Result, traits::CredentialVault,
+    traits::StoredCredentialMetadata, types::channel::Channel, types::contact::ContactId,
+    types::model::Credential,
 };
 use tracing::Instrument;
 use uuid::Uuid;
@@ -492,7 +493,7 @@ fn delivery_span(message: &DeliveryMessage) -> tracing::Span {
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use moa_core::{Channel, ContactId};
+    use moa_core::{types::channel::Channel, types::contact::ContactId};
     use uuid::Uuid;
 
     use super::{DeliveryMessage, DeliveryPurpose};

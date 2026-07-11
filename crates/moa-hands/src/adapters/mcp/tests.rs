@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use moa_core::{McpServerConfig, McpTransportConfig};
+use moa_core::{config::McpServerConfig, config::McpTransportConfig};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;

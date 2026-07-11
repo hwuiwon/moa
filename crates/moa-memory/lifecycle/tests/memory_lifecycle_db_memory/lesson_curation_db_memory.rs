@@ -3,7 +3,7 @@
 //! renewal exemption that spares an old canonical still gathering restatements.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use moa_core::{StoragePartitionId, TenantId};
+use moa_core::{types::identifiers::StoragePartitionId, types::identifiers::TenantId};
 use moa_memory_lifecycle::{LessonCurationOptions, curate_skill_lessons};
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::json;

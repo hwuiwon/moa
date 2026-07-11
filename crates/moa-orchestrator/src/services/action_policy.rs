@@ -6,9 +6,12 @@ use chrono::Utc;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::{
-    ActionEnvelope, ActionPolicyEffect, ActionPolicyRule, ActionReviewPreview, ActionRuleScope,
-    AgentPolicySnapshot, ContactId, MoaError, SessionMeta, TenantId, ToolCallId, ToolInvocation,
-    UserId, WorkerId,
+    error::MoaError, types::action_policy::ActionEnvelope,
+    types::action_policy::ActionPolicyEffect, types::action_policy::ActionPolicyRule,
+    types::action_policy::ActionReviewPreview, types::action_policy::ActionRuleScope,
+    types::agent::AgentPolicySnapshot, types::completion::ToolInvocation,
+    types::contact::ContactId, types::identifiers::TenantId, types::identifiers::ToolCallId,
+    types::identifiers::UserId, types::session::SessionMeta, types::worker::state::WorkerId,
 };
 use moa_hands::{ActionOrigin, ToolRouter};
 use moa_security::{ActionPolicyRuleStore, stricter_effect};
@@ -292,7 +295,7 @@ fn agent_policy_snapshot(session: &SessionMeta) -> Result<Option<AgentPolicySnap
     session
         .agent_context
         .as_ref()
-        .map(moa_core::AgentContext::parsed_policy_snapshot)
+        .map(moa_core::types::agent::AgentContext::parsed_policy_snapshot)
         .transpose()
 }
 
@@ -324,9 +327,12 @@ fn allow_agent_action() -> AgentActionPolicyDecision {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        ActionPolicyEffect, AgentActionPolicy, AgentContext, AgentPolicySnapshot, AgentToolPolicy,
-        AgentToolPolicyMode, SYSTEM_DEFAULT_AGENT_POLICY_HASH, SYSTEM_DEFAULT_AGENT_REF,
-        SYSTEM_DEFAULT_AGENT_REVISION_UID, SessionMeta, ToolInvocation,
+        types::action_policy::ActionPolicyEffect, types::agent::AgentActionPolicy,
+        types::agent::AgentContext, types::agent::AgentPolicySnapshot,
+        types::agent::AgentToolPolicy, types::agent::AgentToolPolicyMode,
+        types::agent::SYSTEM_DEFAULT_AGENT_POLICY_HASH, types::agent::SYSTEM_DEFAULT_AGENT_REF,
+        types::agent::SYSTEM_DEFAULT_AGENT_REVISION_UID, types::completion::ToolInvocation,
+        types::session::SessionMeta,
     };
     use serde_json::json;
 

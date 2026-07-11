@@ -19,7 +19,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use moa_core::MoaConfig;
+use moa_core::config::MoaConfig;
 use moa_core::config::{ConcurrencyScope, ProviderConcurrencyConfig};
 use moa_core::traits::RuntimeCacheStore;
 use tokio::sync::Semaphore;
@@ -166,7 +166,7 @@ mod tests {
     use std::collections::HashMap;
 
     use async_trait::async_trait;
-    use moa_core::Result;
+    use moa_core::error::Result;
     use tokio::sync::Mutex;
 
     use super::*;

@@ -7,8 +7,8 @@
 use crate::jwks_cache::{JwksCache, JwksError};
 use async_trait::async_trait;
 use jsonwebtoken::{Algorithm, Validation, decode, decode_header};
-use moa_core::TenantId;
 use moa_core::traits::{AuthError, AuthProvider, Credential, Identity, IdentityType};
+use moa_core::types::identifiers::TenantId;
 use moka::future::Cache;
 use serde::Deserialize;
 use sqlx::PgPool;

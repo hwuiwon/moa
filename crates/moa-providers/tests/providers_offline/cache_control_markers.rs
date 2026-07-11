@@ -2,7 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use moa_core::{CompletionRequest, ContextMessage, ModelId};
+use moa_core::{
+    types::completion::CompletionRequest, types::context::ContextMessage,
+    types::identifiers::ModelId,
+};
 use moa_providers::debug_build_anthropic_request_body;
 use serde_json::{Value, json};
 

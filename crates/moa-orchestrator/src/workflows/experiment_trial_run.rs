@@ -1,5 +1,6 @@
 //! Restate workflow that executes one behavior-lab simulator trial.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -9,9 +10,12 @@ use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::turn::{QueueMessageRequest, TurnOutcome, TurnOutcomeKind};
 use moa_core::{
-    ActionRuleScope, AgentSessionSelection, Channel, CompletionRequest, ContextMessage, Event,
-    EventRange, EventRecord, EventType, ModelId, SessionActorRef, SessionId, SessionMeta,
-    SessionStatus, TenantId,
+    events::Event, events::EventType, traits::SessionStore, types::action_policy::ActionRuleScope,
+    types::agent::AgentSessionSelection, types::channel::Channel,
+    types::completion::CompletionRequest, types::contact::SessionActorRef,
+    types::context::ContextMessage, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::TenantId, types::session::SessionMeta, types::session::SessionStatus,
 };
 use moa_experiments::model::{
     ExperimentTarget, ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason,
@@ -24,6 +28,8 @@ use moa_observability::{
     current_trace_id, record_experiment_trial, record_experiment_trial_duration,
     record_simulation_cost_cents, record_simulation_tokens, record_simulation_turn,
 };
+use moa_providers::ProviderRegistry;
+use moa_session::PostgresSessionStore;
 use moa_skills::procedure::runtime::{ProcedureRuntime, StartProcedureRun};
 use restate_sdk::context::Request;
 use restate_sdk::prelude::*;
@@ -32,7 +38,6 @@ use serde_json::Value;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
 use crate::objects::session::SessionClient;
 use crate::services::llm_gateway::{LLMGatewayImpl, compute_cost_cents};
 use crate::services::session_store::inner::{
@@ -146,7 +151,27 @@ pub trait ExperimentTrialRun {
 }
 
 /// Concrete behavior-lab trial workflow implementation.
-pub struct ExperimentTrialRunImpl;
+pub struct ExperimentTrialRunImpl {
+    pool: sqlx::PgPool,
+    session_store: Arc<PostgresSessionStore>,
+    providers: Arc<ProviderRegistry>,
+}
+
+impl ExperimentTrialRunImpl {
+    /// Creates a trial workflow with its durable stores and provider registry.
+    #[must_use]
+    pub fn new(
+        pool: sqlx::PgPool,
+        session_store: Arc<PostgresSessionStore>,
+        providers: Arc<ProviderRegistry>,
+    ) -> Self {
+        Self {
+            pool,
+            session_store,
+            providers,
+        }
+    }
+}
 
 impl ExperimentTrialRun for ExperimentTrialRunImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -168,7 +193,15 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
         ctx.set(K_CANCEL_IDENTITY, Json(request.identity.clone()));
         annotate_trial_span(&request.trial, None);
 
-        match run_trial(&ctx, request.clone()).await {
+        match run_trial(
+            &ctx,
+            request.clone(),
+            &self.pool,
+            &self.session_store,
+            &self.providers,
+        )
+        .await
+        {
             Ok(response) => {
                 resolve_completion_awakeable(&ctx, &request);
                 Ok(Json(response))
@@ -184,6 +217,7 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
                     ExperimentTrialStatus::Failed,
                     Some(ExperimentTrialStopReason::Error),
                     Some(message),
+                    &self.pool,
                 )
                 .await
                 {
@@ -209,7 +243,7 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
     ) -> Result<Json<ExperimentTrialRunStatusResponse>, HandlerError> {
         annotate_restate_handler_span("ExperimentTrialRun", "status");
         let request = request.into_inner();
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         Ok(ctx
             .run(|| async move { trial_status_response(pool, request).await.map(Json::from) })
             .name("experiment_trial_status")
@@ -247,12 +281,15 @@ pub fn trial_workflow_key(run_uid: Uuid, trial_key: &str) -> String {
 async fn run_trial(
     ctx: &WorkflowContext<'_>,
     request: ExperimentTrialRunWorkflowRequest,
+    pool: &sqlx::PgPool,
+    session_store: &Arc<PostgresSessionStore>,
+    providers: &Arc<ProviderRegistry>,
 ) -> Result<ExperimentTrialRunStatusResponse, HandlerError> {
-    let trial = insert_or_load_trial(ctx, request.tenant_id, request.trial.clone()).await?;
+    let trial = insert_or_load_trial(ctx, request.tenant_id, request.trial.clone(), pool).await?;
     ctx.set(K_TRIAL_UID, Json(trial.trial_uid));
     ctx.set(K_STATUS, Json(trial.status));
     annotate_trial_record_span(&trial);
-    attach_current_trial_trace(ctx, request.tenant_id, trial.trial_uid).await?;
+    attach_current_trial_trace(ctx, request.tenant_id, trial.trial_uid, pool).await?;
     if !trial_status_allows_child_start(trial.status) {
         return status_response_from_record(request.tenant_id, trial);
     }
@@ -264,16 +301,27 @@ async fn run_trial(
         ExperimentTrialStatus::Running,
         None,
         None,
+        pool,
     )
     .await?;
     ctx.set(K_STATUS, Json(trial.status));
 
-    let simulator_context = load_simulator_context(ctx, request.tenant_id, trial.clone()).await?;
+    let simulator_context =
+        load_simulator_context(ctx, request.tenant_id, trial.clone(), pool).await?;
     match trial.target_kind {
         ExperimentTargetKind::AgentLoop => {
-            run_agent_loop_trial(ctx, request, trial, simulator_context).await
+            run_agent_loop_trial(
+                ctx,
+                request,
+                trial,
+                simulator_context,
+                pool,
+                session_store,
+                providers,
+            )
+            .await
         }
-        ExperimentTargetKind::Procedure => run_procedure_trial(ctx, request, trial).await,
+        ExperimentTargetKind::Procedure => run_procedure_trial(ctx, request, trial, pool).await,
     }
 }
 

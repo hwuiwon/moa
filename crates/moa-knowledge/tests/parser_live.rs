@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, path::PathBuf};
 
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use moa_knowledge::{
     domain::{KnowledgeObject, ObjectStatus, ParseInput},
     parser::{

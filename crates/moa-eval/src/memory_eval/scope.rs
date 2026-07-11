@@ -1,6 +1,6 @@
 //! Eval-only storage-partition scope conversion helpers.
 
-use moa_core::{StoragePartitionId, TenantId};
+use moa_core::{types::identifiers::StoragePartitionId, types::identifiers::TenantId};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -38,7 +38,7 @@ pub fn stable_uuid_from_label(label: &str) -> Uuid {
 #[cfg(test)]
 mod tests {
     use super::{tenant_id_from_storage_partition, tenant_id_from_storage_partition_id};
-    use moa_core::{StoragePartitionId, TenantId};
+    use moa_core::{types::identifiers::StoragePartitionId, types::identifiers::TenantId};
     use uuid::Uuid;
 
     #[test]

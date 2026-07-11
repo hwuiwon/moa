@@ -1,8 +1,8 @@
 //! Tenant/contact RLS coverage for graph-memory writes.
 
 use chrono::Utc;
-use moa_core::RlsContext;
-use moa_core::{ContactId, TenantId};
+use moa_core::types::memory::RlsContext;
+use moa_core::{types::contact::ContactId, types::identifiers::TenantId};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
     EdgeLabel, GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore,
@@ -28,7 +28,9 @@ fn node_intent(tenant_id: TenantId, name: &str) -> NodeWriteIntent {
     NodeWriteIntent {
         uid: Uuid::now_v7(),
         label: NodeLabel::Fact,
-        storage_partition_id: Some(moa_core::StoragePartitionId::for_tenant(tenant_id).to_string()),
+        storage_partition_id: Some(
+            moa_core::types::identifiers::StoragePartitionId::for_tenant(tenant_id).to_string(),
+        ),
         contact_id: None,
         scope: "tenant".to_string(),
         name: name.to_string(),
@@ -65,7 +67,8 @@ async fn insert_contact_edge_fixture(
     tenant_id: TenantId,
     contact_id: ContactId,
 ) -> (Uuid, Uuid, Uuid) {
-    let storage_partition_id = moa_core::StoragePartitionId::for_tenant(tenant_id).to_string();
+    let storage_partition_id =
+        moa_core::types::identifiers::StoragePartitionId::for_tenant(tenant_id).to_string();
     let start_uid = Uuid::now_v7();
     let end_uid = Uuid::now_v7();
     let edge_uid = Uuid::now_v7();
@@ -238,7 +241,7 @@ async fn contact_scoped_edge_index_rls_blocks_other_contacts_and_tenants_db_memo
     let (edge_uid, start_uid, end_uid) =
         insert_contact_edge_fixture(store.pool(), tenant_id, contact_a).await;
     let expected_storage_partition_id =
-        moa_core::StoragePartitionId::for_tenant(tenant_id).to_string();
+        moa_core::types::identifiers::StoragePartitionId::for_tenant(tenant_id).to_string();
     let expected_user_id = contact_a.to_string();
 
     let own_row = visible_edge_index_row(store.pool(), tenant_id, contact_a, edge_uid)

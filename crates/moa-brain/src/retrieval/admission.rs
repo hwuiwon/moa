@@ -3,8 +3,9 @@
 use std::str::FromStr;
 
 use moa_core::{
-    AgentKnowledgePolicy, AgentKnowledgeScopeMode, ContactId, MoaError, Result, SessionMeta,
-    TenantId, WorkingContext,
+    error::MoaError, error::Result, types::agent::AgentKnowledgePolicy,
+    types::agent::AgentKnowledgeScopeMode, types::contact::ContactId,
+    types::context::WorkingContext, types::identifiers::TenantId, types::session::SessionMeta,
 };
 use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_types::MemoryScope;
@@ -287,8 +288,10 @@ fn matches_string_filter(filters: &serde_json::Value, key: &str, candidate: &str
 mod tests {
     use chrono::{TimeZone, Utc};
     use moa_core::{
-        AgentContext, AgentKnowledgeScopeMode, AgentPolicySnapshot, Channel, ContactRef,
-        ContactVerificationState, ModelId, SessionId,
+        types::agent::AgentContext, types::agent::AgentKnowledgeScopeMode,
+        types::agent::AgentPolicySnapshot, types::channel::Channel, types::contact::ContactRef,
+        types::contact::ContactVerificationState, types::identifiers::ModelId,
+        types::identifiers::SessionId,
     };
     use serde_json::json;
     use uuid::Uuid;

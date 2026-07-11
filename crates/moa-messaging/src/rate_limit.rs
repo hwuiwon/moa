@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use moa_core::traits::RuntimeCacheStore;
-use moa_core::{Channel, MoaError, Result};
+use moa_core::{error::MoaError, error::Result, types::channel::Channel};
 use rand::Rng;
 use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep};
@@ -500,8 +500,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use moa_core::Channel;
     use moa_core::traits::RuntimeCacheStore;
+    use moa_core::types::channel::Channel;
     use moa_runtime_store::MemoryRuntimeCacheStore;
 
     use super::{MessagingFailureClass, MessagingRateLimiter, MessagingSendResponse};

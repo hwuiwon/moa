@@ -1,8 +1,9 @@
 //! Tool output budgeting, truncation, and claim-check artifactization.
 
 use moa_core::{
-    SessionMeta, ToolBudgetConfig, ToolContent, ToolDefinition, ToolOutput, ToolOutputArtifact,
-    ToolOutputConfig, truncate_head_tail,
+    config::ToolBudgetConfig, config::ToolOutputConfig, truncation::truncate_head_tail,
+    types::session::SessionMeta, types::tools::ToolContent, types::tools::ToolDefinition,
+    types::tools::ToolOutput, types::tools::ToolOutputArtifact,
 };
 use moa_observability::record_tool_output_truncated_metric;
 use serde_json::json;
@@ -422,7 +423,7 @@ fn is_empty_json_value(value: &serde_json::Value) -> bool {
 mod tests {
     use std::time::Duration;
 
-    use moa_core::ToolOutput;
+    use moa_core::types::tools::ToolOutput;
     use serde_json::json;
 
     use super::{JSON_PREVIEW_HEADER, json_compact_preview};

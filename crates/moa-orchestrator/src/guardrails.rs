@@ -3,9 +3,11 @@
 use std::collections::HashMap;
 
 use moa_core::{
-    AgentGuardrailStagePolicy, CompletionRequest, CompletionResponse, ContextMessage, Event,
-    GuardrailDecision, GuardrailDirection, GuardrailJudgeOutcome, GuardrailMode, MoaConfig,
-    ModelId, ModelTask,
+    config::MoaConfig, events::Event, types::completion::CompletionRequest,
+    types::completion::CompletionResponse, types::context::ContextMessage,
+    types::guardrails::AgentGuardrailStagePolicy, types::guardrails::GuardrailDecision,
+    types::guardrails::GuardrailDirection, types::guardrails::GuardrailJudgeOutcome,
+    types::guardrails::GuardrailMode, types::identifiers::ModelId, types::provider::ModelTask,
 };
 use serde_json::{Value, json};
 
@@ -205,8 +207,11 @@ fn first_verdict_token(trimmed: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        AgentGuardrailStagePolicy, CompletionContent, GuardrailDecision, GuardrailDirection,
-        GuardrailJudgeOutcome, GuardrailMode, MoaConfig, ModelId, StopReason, TokenUsage,
+        config::MoaConfig, types::completion::CompletionContent, types::completion::StopReason,
+        types::completion::TokenUsage, types::guardrails::AgentGuardrailStagePolicy,
+        types::guardrails::GuardrailDecision, types::guardrails::GuardrailDirection,
+        types::guardrails::GuardrailJudgeOutcome, types::guardrails::GuardrailMode,
+        types::identifiers::ModelId,
     };
     use serde_json::json;
 
@@ -452,8 +457,8 @@ mod tests {
         config
     }
 
-    fn response(text: &str, model: &str) -> moa_core::CompletionResponse {
-        moa_core::CompletionResponse {
+    fn response(text: &str, model: &str) -> moa_core::types::completion::CompletionResponse {
+        moa_core::types::completion::CompletionResponse {
             text: text.to_string(),
             content: vec![CompletionContent::Text(text.to_string())],
             stop_reason: StopReason::EndTurn,

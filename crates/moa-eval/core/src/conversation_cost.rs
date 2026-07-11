@@ -10,7 +10,9 @@
 
 use std::collections::BTreeMap;
 
-use moa_core::{CoordinationSnapshot, Event, EventRecord};
+use moa_core::{
+    coordination_counters::CoordinationSnapshot, events::Event, types::events_stream::EventRecord,
+};
 
 /// Per-model-turn cost (boundary = one `BrainResponse` event).
 #[derive(Debug, Clone, PartialEq)]
@@ -227,7 +229,10 @@ impl ConversationCost {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use moa_core::{EventType, ModelId, ModelTier, SessionId, ToolCallId};
+    use moa_core::{
+        events::EventType, types::identifiers::ModelId, types::identifiers::SessionId,
+        types::identifiers::ToolCallId, types::provider::ModelTier,
+    };
     use uuid::Uuid;
 
     fn record(session_id: SessionId, sequence_num: u64, event: Event) -> EventRecord {

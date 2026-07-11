@@ -4,8 +4,9 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use moa_core::{
-    ContextMessage, ContextProcessor, Event, MessageRole, ProcessorOutput, Result, WorkingContext,
-    estimate_text_tokens,
+    error::Result, events::Event, traits::ContextProcessor, types::context::ContextMessage,
+    types::context::MessageRole, types::context::ProcessorOutput, types::context::WorkingContext,
+    types::context::estimate_text_tokens,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -460,8 +461,10 @@ fn escape_xml_text(value: &str) -> String {
 mod tests {
     use chrono::Utc;
     use moa_core::{
-        Channel, EventRecord, EventType, ModelCapabilities, ModelId, SessionId, SessionMeta,
-        TenantId, TokenPricing, ToolCallFormat,
+        events::EventType, types::channel::Channel, types::events_stream::EventRecord,
+        types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
+        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
+        types::session::SessionMeta,
     };
     use uuid::Uuid;
 

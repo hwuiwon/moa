@@ -98,6 +98,10 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         sql: include_str!("../migrations/postgres/V000101__auth_baseline.sql"),
     },
     SchemaMigration {
+        name: "V000201__orchestrator_baseline.sql",
+        sql: include_str!("../migrations/postgres/V000201__orchestrator_baseline.sql"),
+    },
+    SchemaMigration {
         name: "V000302__action_policy_auto_mode.sql",
         sql: ACTION_POLICY_SCHEMA_MIGRATION_SQL,
     },
@@ -132,6 +136,10 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         ),
     },
     SchemaMigration {
+        name: "V000311__hand_leases.sql",
+        sql: include_str!("../migrations/postgres/V000311__hand_leases.sql"),
+    },
+    SchemaMigration {
         name: "V000313__authz_outbox_claims.sql",
         sql: include_str!("../migrations/postgres/V000313__authz_outbox_claims.sql"),
     },
@@ -158,12 +166,26 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         sql: include_str!("../migrations/postgres/V000318__session_event_dedupe.sql"),
     },
     SchemaMigration {
+        name: "V000319__hand_leases_worker_scope.sql",
+        sql: include_str!("../migrations/postgres/V000319__hand_leases_worker_scope.sql"),
+    },
+    SchemaMigration {
         name: "V000320__vector_sync_outbox.sql",
         sql: include_str!("../migrations/postgres/V000320__vector_sync_outbox.sql"),
     },
     SchemaMigration {
         name: "V000321__contact_action_policy_rules.sql",
         sql: include_str!("../migrations/postgres/V000321__contact_action_policy_rules.sql"),
+    },
+    SchemaMigration {
+        name: "V000323__tenant_accounts_and_local_user_auth.sql",
+        sql: include_str!(
+            "../migrations/postgres/V000323__tenant_accounts_and_local_user_auth.sql"
+        ),
+    },
+    SchemaMigration {
+        name: "V000324__tenant_user_invitations.sql",
+        sql: include_str!("../migrations/postgres/V000324__tenant_user_invitations.sql"),
     },
     SchemaMigration {
         name: "V000325__analytics_query_read_models.sql",
@@ -190,6 +212,10 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
     SchemaMigration {
         name: "V000330__analytics_mv_refresh_state.sql",
         sql: include_str!("../migrations/postgres/V000330__analytics_mv_refresh_state.sql"),
+    },
+    SchemaMigration {
+        name: "V000331__tenant_purge_operations.sql",
+        sql: include_str!("../migrations/postgres/V000331__tenant_purge_operations.sql"),
     },
 ];
 

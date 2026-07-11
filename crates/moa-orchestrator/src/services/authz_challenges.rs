@@ -8,7 +8,6 @@ use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
 use crate::authz_challenges::app as authz_challenge_app;
 use crate::authz_challenges::store as authz_challenge_store;
 use crate::handlers::authz_shim::require_identity;
@@ -53,8 +52,18 @@ pub trait AuthzChallenges {
 }
 
 /// Concrete async authorization challenge service implementation.
-#[derive(Clone, Default)]
-pub struct AuthzChallengesImpl;
+#[derive(Clone)]
+pub struct AuthzChallengesImpl {
+    pool: sqlx::PgPool,
+}
+
+impl AuthzChallengesImpl {
+    /// Creates the authorization challenge adapter with its backing pool.
+    #[must_use]
+    pub fn new(pool: sqlx::PgPool) -> Self {
+        Self { pool }
+    }
+}
 
 impl AuthzChallenges for AuthzChallengesImpl {
     #[tracing::instrument(skip(self, ctx))]
@@ -70,7 +79,7 @@ impl AuthzChallenges for AuthzChallengesImpl {
                 TerminalError::new_with_code(403, "only users can list authz challenges").into(),
             );
         }
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -104,7 +113,7 @@ impl AuthzChallenges for AuthzChallengesImpl {
             .into());
         }
         let request = request.into_inner();
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         let mark_resolved_pool = pool.clone();
         let resolved = ctx
             .run(|| async move {

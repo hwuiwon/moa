@@ -15,8 +15,11 @@ use moa_brain::{
     planning::{NerExtractor, PlanningCtx, QueryPlanner, QueryRetrievalCtx, retrieve_for_query},
     retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalHit},
 };
-use moa_core::RlsContext;
-use moa_core::{ContactId, SessionId, TenantId, traits::EmbeddingProvider};
+use moa_core::types::memory::RlsContext;
+use moa_core::{
+    traits::EmbeddingProvider, types::contact::ContactId, types::identifiers::SessionId,
+    types::identifiers::TenantId,
+};
 use moa_db::ScopedConn;
 use moa_eval::golden::comparator::dump_traces;
 use moa_memory_graph::{GraphStore, NodeLabel, PiiClass, PostgresGraphStore};
@@ -90,7 +93,7 @@ impl EmbeddingProvider for GoldenEmbedder {
         VECTOR_DIMENSION
     }
 
-    async fn embed(&self, texts: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+    async fn embed(&self, texts: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
         Ok(texts.iter().map(|text| golden_vector(text)).collect())
     }
 }

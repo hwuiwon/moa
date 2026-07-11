@@ -1,6 +1,9 @@
 //! Pure guardrail response helpers for turn workflows.
 
-use moa_core::{AgentGuardrailStagePolicy, CompletionContent, CompletionResponse, StopReason};
+use moa_core::{
+    types::completion::CompletionContent, types::completion::CompletionResponse,
+    types::completion::StopReason, types::guardrails::AgentGuardrailStagePolicy,
+};
 
 /// Request for deriving an enforced guardrail block message.
 #[derive(Clone, Copy, Debug)]
@@ -46,8 +49,10 @@ pub(crate) fn blocked_output_response(request: BlockedOutputResponse<'_>) -> Com
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        AgentGuardrailStagePolicy, CompletionContent, CompletionResponse, GuardrailMode, ModelId,
-        StopReason, TokenUsage,
+        types::completion::CompletionContent, types::completion::CompletionResponse,
+        types::completion::StopReason, types::completion::TokenUsage,
+        types::guardrails::AgentGuardrailStagePolicy, types::guardrails::GuardrailMode,
+        types::identifiers::ModelId,
     };
 
     use super::{

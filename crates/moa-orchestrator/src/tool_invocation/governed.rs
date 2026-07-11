@@ -1,16 +1,23 @@
 //! Governed tool invocation coordination for turn workflows.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequest};
+use moa_core::{config::SessionLimitsConfig, traits::ChannelAdapter};
 use moa_core::{
-    ActionPolicyEffect, Event, ProcedureTool, SessionId, SessionMeta, ToolCallContent, ToolCallId,
-    ToolCallRequest, ToolInvocation, ToolOutput, TrustedSandboxFileManifestRef, WorkerId,
-    is_delegation_tool_name, is_procedure_tool_name,
+    events::Event, types::action_policy::ActionPolicyEffect, types::channel::Channel,
+    types::completion::ToolCallContent, types::completion::ToolInvocation,
+    types::identifiers::SessionId, types::identifiers::ToolCallId,
+    types::procedure_tools::ProcedureTool, types::procedure_tools::is_procedure_tool_name,
+    types::session::SessionMeta, types::tools::ToolCallRequest, types::tools::ToolOutput,
+    types::tools::TrustedSandboxFileManifestRef, types::worker::state::WorkerId,
+    types::worker::tool_schema::is_delegation_tool_name,
 };
 use moa_observability::restate_observability::{event_persist_span, tool_dispatch_span};
 use moa_observability::{record_turn_event_persist_duration, record_turn_tool_dispatch_duration};
+use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
@@ -139,6 +146,9 @@ pub(crate) enum GovernedInvocationOutcome {
 pub(crate) async fn invoke_governed_tool(
     ctx: &WorkflowContext<'_>,
     request: GovernedInvocationRequest<'_>,
+    session_limits: &SessionLimitsConfig,
+    session_store: Arc<PostgresSessionStore>,
+    channel_adapters: &HashMap<Channel, Arc<dyn ChannelAdapter>>,
 ) -> Result<GovernedInvocationOutcome, HandlerError> {
     let invocation = request.tool_call.invocation.clone();
 
@@ -169,7 +179,15 @@ pub(crate) async fn invoke_governed_tool(
     // worker turn loops keep their existing `Completed` handling; the run's own
     // node actions remain action-policy governed inside ProcedureExecution.
     if is_procedure_tool_name(&invocation.name) {
-        return execute_procedure_tool(ctx, &request, invocation).await;
+        return execute_procedure_tool(
+            ctx,
+            &request,
+            invocation,
+            session_limits,
+            session_store,
+            channel_adapters,
+        )
+        .await;
     }
 
     append_tool_call_event(ctx, &request).await?;
@@ -198,7 +216,15 @@ pub(crate) async fn invoke_governed_tool(
         return request_action_review(ctx, request, invocation, prepared_action).await;
     }
 
-    execute_allowed_tool(ctx, request, invocation).await
+    execute_allowed_tool(
+        ctx,
+        request,
+        invocation,
+        session_limits,
+        session_store,
+        channel_adapters,
+    )
+    .await
 }
 
 async fn request_action_review(
@@ -247,12 +273,18 @@ async fn execute_allowed_tool(
     ctx: &WorkflowContext<'_>,
     request: GovernedInvocationRequest<'_>,
     invocation: ToolInvocation,
+    session_limits: &SessionLimitsConfig,
+    session_store: Arc<PostgresSessionStore>,
+    channel_adapters: &HashMap<Channel, Arc<dyn ChannelAdapter>>,
 ) -> Result<GovernedInvocationOutcome, HandlerError> {
     let span = tool_dispatch_span(&invocation.name);
     turn_progress::maybe_emit(
         ctx,
         request.session_id,
         turn_progress::running_tool_summary(&invocation.name),
+        session_limits,
+        session_store.clone(),
+        channel_adapters,
     )
     .await?;
     let dispatch_started = Instant::now();
@@ -295,6 +327,9 @@ async fn execute_procedure_tool(
     ctx: &WorkflowContext<'_>,
     request: &GovernedInvocationRequest<'_>,
     invocation: ToolInvocation,
+    session_limits: &SessionLimitsConfig,
+    session_store: Arc<PostgresSessionStore>,
+    channel_adapters: &HashMap<Channel, Arc<dyn ChannelAdapter>>,
 ) -> Result<GovernedInvocationOutcome, HandlerError> {
     append_tool_call_event(ctx, request).await?;
 
@@ -336,6 +371,9 @@ async fn execute_procedure_tool(
         ctx,
         request.session_id,
         turn_progress::running_tool_summary(&invocation.name),
+        session_limits,
+        session_store,
+        channel_adapters,
     )
     .await?;
 
@@ -590,9 +628,12 @@ mod tests {
     use std::collections::BTreeSet;
 
     use moa_core::{
-        ContactId, ContactRef, ContactVerificationState, SessionActorRef, SessionMeta, TenantId,
-        ToolCallContent, ToolCallId, ToolInvocation, TrustedSandboxFileEntry,
-        TrustedSandboxFileManifestRef, UserId,
+        types::completion::ToolCallContent, types::completion::ToolInvocation,
+        types::contact::ContactId, types::contact::ContactRef,
+        types::contact::ContactVerificationState, types::contact::SessionActorRef,
+        types::identifiers::TenantId, types::identifiers::ToolCallId, types::identifiers::UserId,
+        types::session::SessionMeta, types::tools::TrustedSandboxFileEntry,
+        types::tools::TrustedSandboxFileManifestRef,
     };
     use moa_test_support::fixtures::contact_ref_fixture;
     use serde_json::json;
@@ -892,7 +933,10 @@ mod tests {
         let result = super::GovernedInvocationResult {
             tool_id: ToolCallId(Uuid::from_u128(1)),
             invocation: tool_call().invocation,
-            output: moa_core::ToolOutput::text("ok", std::time::Duration::from_millis(5)),
+            output: moa_core::types::tools::ToolOutput::text(
+                "ok",
+                std::time::Duration::from_millis(5),
+            ),
             disposition: GovernedInvocationDisposition::Executed,
             event_plan: GovernedInvocationEventPlan::ToolExecutorResult,
         };

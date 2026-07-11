@@ -14,3 +14,4 @@ mode = "recorded"
 
 [cases.metadata]
 prompt_injection_attempts_blocked = 1
+errors_preserved = 1

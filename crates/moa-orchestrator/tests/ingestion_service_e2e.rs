@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
-use moa_core::{ContactId, SessionId, TenantId, config::MoaConfig};
+use moa_core::{
+    config::MoaConfig, types::contact::ContactId, types::identifiers::SessionId,
+    types::identifiers::TenantId,
+};
 use moa_memory_ingest::{IngestApplyReport, IngestRuntime, SessionTurn, should_ingest_degraded};
 use moa_test_support::postgres::test_database_url;
 use sqlx::PgPool;

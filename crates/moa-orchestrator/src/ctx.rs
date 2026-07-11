@@ -6,11 +6,13 @@ use std::sync::{Arc, OnceLock};
 use moa_authz::FgaClient;
 use moa_brain::pipeline::{memory::GraphMemoryRetriever, skills::SkillInjector};
 use moa_core::{
-    Channel, LineageHandle, MoaConfig,
+    config::MoaConfig,
+    traits::LineageHandle,
     traits::{
         ChannelAdapter, EmbeddingProvider, Identity, IdentityType, LearningCandidateStore,
         RuntimeCacheStore, SessionRepository,
     },
+    types::channel::Channel,
 };
 use moa_hands::ToolRouter;
 use moa_providers::ProviderRegistry;
@@ -577,7 +579,8 @@ pub fn extract_identity(
 
     let identity_type = parse_identity_type(raw_type)?;
     let id = parse_uuid(raw_id, "x-moa-identity-id")?;
-    let tenant_id = moa_core::TenantId::from(parse_uuid(raw_tenant, "x-moa-tenant-id")?);
+    let tenant_id =
+        moa_core::types::identifiers::TenantId::from(parse_uuid(raw_tenant, "x-moa-tenant-id")?);
     let api_key_id = get("x-moa-api-key-id")
         .map(|value| parse_uuid(value, "x-moa-api-key-id"))
         .transpose()?;

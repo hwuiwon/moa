@@ -10,8 +10,10 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use moa_core::{
-    HandHandle, HandProvider, HandSpec, HandStatus, MoaError, Result, SandboxFile, SandboxTier,
-    ToolFailureClass, ToolOutput, classify_tool_error, validate_sandbox_file_path,
+    error::MoaError, error::Result, error::ToolFailureClass, error::classify_tool_error,
+    traits::HandProvider, types::hands::HandHandle, types::hands::HandSpec,
+    types::hands::HandStatus, types::hands::SandboxFile, types::hands::SandboxTier,
+    types::hands::validate_sandbox_file_path, types::tools::ToolOutput,
 };
 use opentelemetry::trace::Status;
 use tokio::fs;
@@ -848,7 +850,10 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use moa_core::{HandProvider, HandResources, HandSpec, MoaError, SandboxTier};
+    use moa_core::{
+        error::MoaError, traits::HandProvider, types::hands::HandResources, types::hands::HandSpec,
+        types::hands::SandboxTier,
+    };
     use tempfile::tempdir;
 
     use super::LocalHandProvider;
@@ -906,7 +911,7 @@ mod tests {
             .await
             .expect("provision local sandbox");
         let sandbox_dir = match &handle {
-            moa_core::HandHandle::Local { sandbox_dir } => sandbox_dir,
+            moa_core::types::hands::HandHandle::Local { sandbox_dir } => sandbox_dir,
             other => panic!("expected local hand, got {other:?}"),
         };
         let mode = std::fs::metadata(sandbox_dir)

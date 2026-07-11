@@ -1,6 +1,6 @@
 //! Integration tests for rendering skills with learned graph lessons.
 
-use moa_core::{MoaError, Result, TenantId};
+use moa_core::{error::MoaError, error::Result, types::identifiers::TenantId};
 use moa_memory_graph::GraphStore;
 use moa_skills::lessons::{LessonContext, learn_lesson};
 use moa_skills::registry::{NewSkill, SkillRegistry};

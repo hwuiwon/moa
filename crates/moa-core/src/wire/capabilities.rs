@@ -6,7 +6,7 @@
 //! tools, connector/action artifacts, skill actions, graph-memory operations,
 //! and knowledge datasources visible to a tenant.
 
-use crate::TenantId;
+use crate::types::identifiers::TenantId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

@@ -1,17 +1,24 @@
 //! Restate endpoint binding and registration-readiness helpers.
 
+use moa_artifacts::registry::ArtifactRegistry;
+use moa_authz::FgaClient;
+use moa_core::{
+    config::MoaConfig, config::SessionLimitsConfig, traits::ChannelAdapter,
+    traits::EmbeddingProvider, traits::LineageHandle, types::channel::Channel,
+};
 use moa_hands::ToolRouter;
 use moa_memory_ingest::{IngestionVO, IngestionVOImpl};
 use moa_providers::ProviderRegistry;
 use restate_sdk::prelude::*;
 use serde::Deserialize;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::services::eval::{Eval, EvalImpl};
 use crate::services::experiments::{Experiments, ExperimentsImpl};
 use crate::workflows::experiment_run::{ExperimentRun, ExperimentRunImpl};
 use crate::workflows::experiment_trial_run::{ExperimentTrialRun, ExperimentTrialRunImpl};
 use crate::workflows::skill_learning::{SkillLearning, SkillLearningImpl};
+use crate::workflows::tenant_purge::{TenantPurge, TenantPurgeImpl};
 use crate::{
     objects::{
         cron_job::{CronJob, CronJobImpl},
@@ -31,7 +38,7 @@ use crate::{
         authz_challenges::{AuthzChallenges, AuthzChallengesImpl},
         contacts::{Contacts, ContactsImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
-        knowledge::{Knowledge, KnowledgeImpl},
+        knowledge::{Knowledge, KnowledgeImpl, KnowledgeService},
         learning_review::{LearningReview, LearningReviewImpl},
         llm_gateway::{LLMGateway, LLMGatewayImpl},
         memory::{Memory, MemoryImpl},
@@ -46,7 +53,7 @@ use crate::{
         consolidate::{Consolidate, ConsolidateImpl},
         knowledge_sync_ingestion::{KnowledgeSyncIngestion, KnowledgeSyncIngestionImpl},
         procedure_execution::{ProcedureExecution, ProcedureExecutionImpl},
-        turn_execution::{TurnExecution, TurnExecutionImpl},
+        turn_execution::{TurnExecution, implementation::TurnExecutionImpl},
         worker_turn_execution::{WorkerTurnExecution, WorkerTurnExecutionImpl},
     },
 };
@@ -84,6 +91,7 @@ const CORE_BODY_SERVICE_NAMES: &[&str] = &[
     "ProcedureExecution",
     "KnowledgeSyncIngestion",
     "Consolidate",
+    "TenantPurge",
 ];
 
 const CORE_TAIL_SERVICE_NAMES: &[&str] = &["WorkerTurnExecution", "TurnExecution"];
@@ -115,58 +123,140 @@ pub struct RegisteredService {
 }
 
 /// Builds the Restate endpoint with the production binding order.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the composition root keeps service dependencies explicit instead of hiding them in a dependency bag"
+)]
 pub fn build_endpoint(
     session_store: Arc<moa_session::PostgresSessionStore>,
     pool: sqlx::PgPool,
+    fga_client: Option<FgaClient>,
     providers: Arc<ProviderRegistry>,
     tool_router: Arc<ToolRouter>,
+    tool_schemas: Arc<Vec<serde_json::Value>>,
+    session_limits: SessionLimitsConfig,
+    config: Arc<MoaConfig>,
+    contact_token_issuer: Option<Arc<moa_auth_providers::ContactTokenIssuer>>,
+    lineage: Arc<dyn LineageHandle>,
+    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
 ) -> Endpoint {
     let mut builder = Endpoint::builder()
         .bind(SessionStoreImpl::new(session_store.clone(), pool.clone()).serve())
-        .bind(LLMGatewayImpl::new(providers.clone()).serve())
-        .bind(AgentDefinitionsImpl.serve())
-        .bind(AgentsImpl.serve())
-        .bind(AdminMaintenanceImpl.serve())
-        .bind(ArtifactsImpl.serve())
-        .bind(ActionReviewsImpl.serve())
-        .bind(ApiKeysImpl.serve())
-        .bind(AuthzImpl.serve())
-        .bind(AuthzChallengesImpl.serve())
-        .bind(ContactsImpl.serve())
-        .bind(EvalImpl.serve())
-        .bind(ExperimentsImpl.serve());
+        .bind(
+            LLMGatewayImpl::new(providers.clone())
+                .with_session_limits(session_limits.clone())
+                .serve(),
+        )
+        .bind(AgentDefinitionsImpl::new(pool.clone()).serve())
+        .bind(AgentsImpl::new(pool.clone(), fga_client.clone()).serve())
+        .bind(AdminMaintenanceImpl::new(pool.clone(), config.clone()).serve())
+        .bind(ArtifactsImpl::new(ArtifactRegistry::new(pool.clone())).serve())
+        .bind(ActionReviewsImpl::new(pool.clone(), session_store.clone()).serve())
+        .bind(ApiKeysImpl::new(pool.clone(), fga_client.clone()).serve())
+        .bind(AuthzImpl::new(pool.clone()).serve())
+        .bind(AuthzChallengesImpl::new(pool.clone()).serve())
+        .bind(
+            ContactsImpl::new(
+                pool.clone(),
+                session_store.clone(),
+                config.clone(),
+                contact_token_issuer,
+            )
+            .serve(),
+        )
+        .bind(EvalImpl::new(pool.clone(), config.clone()).serve())
+        .bind(ExperimentsImpl::new(pool.clone(), providers.clone(), session_store.clone()).serve());
 
     builder = builder
         .bind(IngestionVOImpl.serve())
-        .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
+        .bind(
+            ToolExecutorImpl::new(tool_router.clone())
+                .with_session_store(session_store.clone())
+                .serve(),
+        )
         .bind(ActionPolicyImpl::new(tool_router.clone(), session_store.clone()).serve())
-        .bind(GraphMemoryMaintImpl.serve())
-        .bind(KnowledgeImpl.serve())
-        .bind(LearningReviewImpl.serve())
-        .bind(MemoryImpl.serve())
-        .bind(NeonMaintImpl.serve())
-        .bind(PrivacyImpl.serve())
-        .bind(SkillsImpl.serve())
+        .bind(GraphMemoryMaintImpl::new(pool.clone(), config.clone()).serve())
+        .bind(
+            KnowledgeImpl::new(KnowledgeService::from_config(pool.clone(), config.as_ref()))
+                .serve(),
+        )
+        .bind(
+            LearningReviewImpl::new(
+                session_store.clone(),
+                pool.clone(),
+                config.clone(),
+                providers.clone(),
+            )
+            .serve(),
+        )
+        .bind(MemoryImpl::new(pool.clone(), config.clone(), lineage.clone()).serve())
+        .bind(NeonMaintImpl::new(config.clone()).serve())
+        .bind(PrivacyImpl::new(pool.clone(), config.compliance.clone()).serve())
+        .bind(SkillsImpl::new(pool.clone()).serve())
         .bind(CronJobImpl.serve())
-        .bind(SessionImpl.serve())
-        .bind(WorkerImpl.serve())
-        .bind(TenantsImpl.serve())
-        .bind(TenantImpl.serve())
-        .bind(ProcedureExecutionImpl.serve())
-        .bind(KnowledgeSyncIngestionImpl.serve())
-        .bind(ConsolidateImpl.serve());
+        .bind(SessionImpl::new(session_store.clone(), session_limits.clone()).serve())
+        .bind(
+            WorkerImpl::new(
+                session_store.clone(),
+                session_limits.clone(),
+                providers.clone(),
+                tool_schemas.clone(),
+            )
+            .serve(),
+        )
+        .bind(TenantsImpl::new(pool.clone(), fga_client.clone()).serve())
+        .bind(TenantImpl::new(pool.clone()).serve())
+        .bind(TenantPurgeImpl::new(pool.clone(), fga_client.clone(), config.as_ref()).serve())
+        .bind(
+            ProcedureExecutionImpl::new(ArtifactRegistry::new(pool.clone()), session_store.clone())
+                .serve(),
+        )
+        .bind(KnowledgeSyncIngestionImpl::new(pool.clone(), config.clone()).serve())
+        .bind(
+            ConsolidateImpl::new(
+                pool.clone(),
+                config.clone(),
+                embedding_provider,
+                session_store.clone(),
+            )
+            .serve(),
+        );
 
     {
-        builder = builder.bind(SkillLearningImpl.serve());
+        builder = builder.bind(
+            SkillLearningImpl::new(session_store.clone(), config.clone(), providers.clone())
+                .serve(),
+        );
     }
 
     builder = builder
-        .bind(ExperimentRunImpl.serve())
-        .bind(ExperimentTrialRunImpl.serve());
+        .bind(ExperimentRunImpl::new(pool.clone(), session_store.clone()).serve())
+        .bind(
+            ExperimentTrialRunImpl::new(pool.clone(), session_store.clone(), providers.clone())
+                .serve(),
+        );
 
     builder
-        .bind(WorkerTurnExecutionImpl.serve())
-        .bind(TurnExecutionImpl.serve())
+        .bind(
+            WorkerTurnExecutionImpl::new(
+                session_limits,
+                session_store.clone(),
+                channel_adapters.clone(),
+            )
+            .serve(),
+        )
+        .bind(
+            TurnExecutionImpl::new(
+                session_store,
+                config,
+                tool_router,
+                tool_schemas,
+                lineage,
+                channel_adapters,
+            )
+            .serve(),
+        )
         .build()
 }
 
@@ -262,6 +352,10 @@ mod tests {
         assert!(
             names.contains(&"ProcedureExecution"),
             "product readiness should include ProcedureExecution"
+        );
+        assert!(
+            names.contains(&"TenantPurge"),
+            "product readiness should include TenantPurge"
         );
     }
 

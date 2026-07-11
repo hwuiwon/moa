@@ -29,7 +29,7 @@ pub enum ContactError {
 
     /// Session-store failure represented by the shared core error.
     #[error("session store error: {0}")]
-    SessionStore(#[from] moa_core::MoaError),
+    SessionStore(#[from] moa_core::error::MoaError),
 }
 
 impl ContactError {

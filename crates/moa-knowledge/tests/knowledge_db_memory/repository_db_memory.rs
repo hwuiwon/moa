@@ -1,15 +1,18 @@
 //! Postgres repository coverage for tenant knowledge-base RLS and timelines.
 
 use chrono::{Duration, Utc};
-use moa_core::RlsContext;
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
+use moa_core::types::memory::RlsContext;
 use moa_knowledge::{
     domain::{
         ConnectionStatus, DocumentVersion, IngestionStepStatus, KnowledgeBlock, KnowledgeChunk,
         KnowledgeConnection, KnowledgeIngestionStep, KnowledgeObject, KnowledgeSyncRun,
         ObjectStatus, SyncRunStatus,
     },
-    repository::{KnowledgeRepository, PostgresKnowledgeRepository},
+    repository::{
+        KnowledgeDiscoveryStore, KnowledgeRepository, PostgresKnowledgeDiscoveryStore,
+        PostgresKnowledgeRepository, ProviderAccountConnectionLookup,
+    },
 };
 use moa_test_support::postgres;
 use serde_json::{Value, json};
@@ -20,6 +23,10 @@ fn repository(db: &postgres::TestDb, tenant_id: TenantId) -> PostgresKnowledgeRe
         db.store().pool().clone(),
         RlsContext::tenant(tenant_id),
     )
+}
+
+fn discovery(db: &postgres::TestDb) -> PostgresKnowledgeDiscoveryStore {
+    PostgresKnowledgeDiscoveryStore::for_app_role(db.store().pool().clone())
 }
 
 fn connection(tenant_id: TenantId, label: &str) -> KnowledgeConnection {
@@ -103,6 +110,56 @@ fn step(
         retry_count: 0,
         error_code: None,
     }
+}
+
+#[tokio::test]
+async fn discovery_rejects_missing_and_ambiguous_provider_bindings_db_knowledge() {
+    // Pins: control-plane discovery fails closed unless provider-owned account identity is unique.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated knowledge DB");
+    let tenant_a = TenantId::from(Uuid::now_v7());
+    let tenant_b = TenantId::from(Uuid::now_v7());
+    let repo_a = repository(&db, tenant_a);
+    let repo_b = repository(&db, tenant_b);
+    let mut connection_a = connection(tenant_a, "tenant-a");
+    let mut connection_b = connection(tenant_b, "tenant-b");
+    connection_a.connector = "shared-connector".to_string();
+    connection_b.connector = "shared-connector".to_string();
+    connection_a.provider_account_id = "shared-account".to_string();
+    connection_b.provider_account_id = "shared-account".to_string();
+    repo_a
+        .upsert_connection(connection_a)
+        .await
+        .expect("insert tenant A connection");
+    repo_b
+        .upsert_connection(connection_b)
+        .await
+        .expect("insert tenant B connection");
+
+    let discovery = discovery(&db);
+    assert_eq!(
+        discovery
+            .lookup_connection_by_provider_account(
+                "nango",
+                Some("shared-connector"),
+                "missing-account",
+            )
+            .await
+            .expect("missing provider lookup should complete"),
+        ProviderAccountConnectionLookup::NotFound
+    );
+    assert_eq!(
+        discovery
+            .lookup_connection_by_provider_account(
+                "nango",
+                Some("shared-connector"),
+                "shared-account",
+            )
+            .await
+            .expect("ambiguous provider lookup should complete"),
+        ProviderAccountConnectionLookup::Ambiguous { matches: 2 }
+    );
 }
 
 #[tokio::test]

@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::RlsContext;
-use moa_core::{StoragePartitionId, traits::EmbeddingProvider};
+use moa_core::types::memory::RlsContext;
+use moa_core::{traits::EmbeddingProvider, types::identifiers::StoragePartitionId};
 use moa_db::ScopedConn;
 use moa_memory_graph::{NodeIndexRow, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_types::normalize_entity_name;
 use moa_memory_vector::{VectorQuery, VectorStore};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -486,30 +487,6 @@ fn alias_mention(mention: &str, candidate_name: &str) -> Option<String> {
     (!trimmed.is_empty() && trimmed != candidate_name.trim()).then(|| trimmed.to_string())
 }
 
-/// Returns the deterministic blocking key for an extracted entity mention.
-#[must_use]
-pub fn normalize_entity_name(name: &str) -> String {
-    let mut tokens = Vec::new();
-    let mut token = String::new();
-    for character in name.chars() {
-        if character.is_alphanumeric() {
-            token.extend(character.to_lowercase());
-        } else if !token.is_empty() {
-            tokens.push(std::mem::take(&mut token));
-        }
-    }
-    if !token.is_empty() {
-        tokens.push(token);
-    }
-
-    let normalized = tokens.join(" ");
-    if normalized.is_empty() {
-        name.trim().to_lowercase()
-    } else {
-        normalized
-    }
-}
-
 fn deterministic_entity_uid(scope: &RlsContext, normalized_name: &str) -> Uuid {
     let mut hasher = Sha256::new();
     hasher.update(b"moa:entity:v1");
@@ -533,19 +510,12 @@ fn deterministic_entity_uid(scope: &RlsContext, normalized_name: &str) -> Uuid {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::RlsContext;
-    use moa_core::{ContactId, TenantId};
+    use moa_core::types::memory::RlsContext;
+    use moa_core::{types::contact::ContactId, types::identifiers::TenantId};
+    use moa_memory_types::normalize_entity_name;
     use uuid::Uuid;
 
-    use super::{deterministic_entity_uid, normalize_entity_name};
-
-    #[test]
-    fn entity_name_normalization_blocks_case_and_punctuation_variants() {
-        // Pins: entity blocking treats punctuation and case changes as the same mention.
-        assert_eq!(normalize_entity_name(" API_Service "), "api service");
-        assert_eq!(normalize_entity_name("api-service"), "api service");
-        assert_eq!(normalize_entity_name("api.service"), "api service");
-    }
+    use super::deterministic_entity_uid;
 
     #[test]
     fn deterministic_entity_uid_is_stable_inside_scope() {

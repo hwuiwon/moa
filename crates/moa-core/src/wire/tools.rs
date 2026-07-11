@@ -1,6 +1,9 @@
 //! Tool descriptor wire DTOs.
 
-use crate::*;
+use crate::types::{
+    action_policy::{ActionClass, RiskLevel},
+    tools::{IdempotencyClass, ToolDefinition},
+};
 use serde::{Deserialize, Serialize};
 
 /// Public metadata returned by `ToolExecutor/list_tools`.

@@ -1,7 +1,10 @@
 use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft};
 use moa_artifacts::validation::validate_for_status;
-use moa_core::{ActionRuleScope, Result, StoragePartitionId, TenantId};
+use moa_core::{
+    error::Result, types::action_policy::ActionRuleScope, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId,
+};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -93,7 +96,7 @@ async fn agent_revisions_remain_loadable_while_installation_pointer_moves() -> R
     .bind(deploy_v1_uid)
     .execute(&pool)
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     insert_deployment(
         &pool,
         deploy_v1_uid,
@@ -109,7 +112,7 @@ async fn agent_revisions_remain_loadable_while_installation_pointer_moves() -> R
         .bind(deploy_v1_uid)
         .execute(&pool)
         .await
-        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     insert_deployment(
         &pool,
         deploy_v2_uid,
@@ -129,7 +132,7 @@ async fn agent_revisions_remain_loadable_while_installation_pointer_moves() -> R
         .bind(deploy_v2_uid)
         .execute(&pool)
         .await
-        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     insert_deployment(
         &pool,
         rollback_uid,
@@ -199,7 +202,7 @@ async fn insert_deployment(
     .bind(format!("hash-{deployment_uid}"))
     .execute(pool)
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     Ok(())
 }
 
@@ -224,7 +227,7 @@ async fn set_installation_current(
     .bind(deployment_uid)
     .execute(pool)
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     Ok(())
 }
 
@@ -235,5 +238,5 @@ async fn load_current_revision(pool: &sqlx::PgPool, installation_uid: Uuid) -> R
     .bind(installation_uid)
     .fetch_one(pool)
     .await
-    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))
 }

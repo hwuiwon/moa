@@ -8,8 +8,8 @@ use crate::auth0_provider::{map_jwks_error, parse_identity_type, resolve_or_prov
 use crate::jwks_cache::JwksCache;
 use async_trait::async_trait;
 use jsonwebtoken::{Algorithm, Validation, decode, decode_header};
-use moa_core::TenantId;
 use moa_core::traits::{AuthError, AuthProvider, Credential, Identity};
+use moa_core::types::identifiers::TenantId;
 use serde::Deserialize;
 use sqlx::PgPool;
 use std::sync::Arc;

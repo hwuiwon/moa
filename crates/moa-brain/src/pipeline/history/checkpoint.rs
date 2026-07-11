@@ -8,13 +8,15 @@ use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use moa_core::{
-    CONTEXT_SNAPSHOT_FORMAT_VERSION, ContextMessage, ContextSnapshot, Event, EventRecord,
-    FileReadDedupState, Result, SequenceNum, WorkingContext,
+    error::Result, events::Event, types::context::ContextMessage, types::context::WorkingContext,
+    types::events_stream::EventRecord, types::events_stream::SequenceNum,
+    types::snapshot::CONTEXT_SNAPSHOT_FORMAT_VERSION, types::snapshot::ContextSnapshot,
+    types::snapshot::FileReadDedupState,
 };
 use moa_observability::record_turn_snapshot_load;
 
 use crate::compaction::recent_turn_boundary;
-use moa_core::sum_message_tokens;
+use moa_core::types::context::sum_message_tokens;
 
 use super::budgeting::keep_budgeted_older_messages;
 use super::conversion::{answered_worker_inputs, child_report_tool_ids, compile_records};
@@ -339,7 +341,7 @@ mod tests {
                     text: "noted".to_string(),
                     thought_signature: None,
                     model: ModelId::new("claude-sonnet-4-6"),
-                    model_tier: moa_core::ModelTier::Main,
+                    model_tier: moa_core::types::provider::ModelTier::Main,
                     input_tokens_uncached: 1,
                     input_tokens_cache_write: 0,
                     input_tokens_cache_read: 0,
@@ -553,7 +555,7 @@ mod tests {
                                 text: format!("assistant-{turn_index}-{seed}"),
                                 thought_signature: None,
                                 model: ModelId::new("claude-sonnet-4-6"),
-                                model_tier: moa_core::ModelTier::Main,
+                                model_tier: moa_core::types::provider::ModelTier::Main,
                                 input_tokens_uncached: 1,
                                 input_tokens_cache_write: 0,
                                 input_tokens_cache_read: 0,

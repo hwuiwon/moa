@@ -3,7 +3,7 @@
 use chrono::Utc;
 use moa_core::traits::IdentityType;
 use moa_core::wire::admin::CheckpointRollbackResponse;
-use moa_core::{CheckpointHandle, TenantId};
+use moa_core::{types::identifiers::TenantId, types::session::CheckpointHandle};
 use moa_memory_vector::PromotionReport;
 use moa_orchestrator::ctx::RequestHeaders;
 use moa_orchestrator::services::admin_maintenance::{
@@ -28,7 +28,10 @@ fn promotion_report_maps_to_wire_response() {
     let response = promotion_response_from_report(
         tenant_id,
         PromotionReport {
-            storage_partition_id: moa_core::StoragePartitionId::for_tenant(tenant_id).to_string(),
+            storage_partition_id: moa_core::types::identifiers::StoragePartitionId::for_tenant(
+                tenant_id,
+            )
+            .to_string(),
             copied: 42,
             validation_overlap: 0.981,
             vector_backend: "turbopuffer".to_string(),

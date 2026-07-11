@@ -1,7 +1,9 @@
 //! Conversation input loading for query rewriting.
 
 use moa_core::{
-    ContextMessage, Event, EventRange, EventRecord, MessageRole, Result, WorkingContext,
+    error::Result, events::Event, types::context::ContextMessage, types::context::MessageRole,
+    types::context::WorkingContext, types::events_stream::EventRange,
+    types::events_stream::EventRecord,
 };
 
 use super::QueryRewriter;

@@ -14,10 +14,14 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
-    CompletionRequest, CompletionResponse, CompletionStream, ContactId, ContactRef,
-    ContactVerificationState, ContextMessage, Event, EventRange, LLMProvider, MessageRole,
-    MoaConfig, Result, SessionActorRef, SessionMeta, SessionStore, StoragePartitionId, TenantId,
-    ToolContent, UserId, estimate_text_tokens,
+    config::MoaConfig, error::Result, events::Event, traits::LLMProvider, traits::SessionStore,
+    types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::completion::CompletionStream, types::contact::ContactId, types::contact::ContactRef,
+    types::contact::ContactVerificationState, types::contact::SessionActorRef,
+    types::context::ContextMessage, types::context::MessageRole,
+    types::context::estimate_text_tokens, types::events_stream::EventRange,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::identifiers::UserId, types::session::SessionMeta, types::tools::ToolContent,
 };
 use moa_hands::ToolRouter;
 use moa_providers::build_provider_from_config;
@@ -98,7 +102,7 @@ impl CacheTurnPlan {
         let model = request
             .model
             .clone()
-            .unwrap_or_else(|| moa_core::ModelId::new("unspecified"));
+            .unwrap_or_else(|| moa_core::types::identifiers::ModelId::new("unspecified"));
         let stable_message_count = static_prefix_message_count(request);
         let request_tools = request
             .tools
@@ -253,7 +257,7 @@ async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
                 query_rewrite_llm_provider: Some(provider.clone()),
                 identity_prompt_override: None,
                 tool_schemas: Vec::new(),
-                lineage: Arc::new(moa_core::NullLineageHandle),
+                lineage: Arc::new(moa_core::traits::NullLineageHandle),
             },
         );
 
@@ -351,7 +355,7 @@ impl LLMProvider for AuditedProvider {
         self.inner.name()
     }
 
-    fn capabilities(&self) -> moa_core::ModelCapabilities {
+    fn capabilities(&self) -> moa_core::types::model::ModelCapabilities {
         self.inner.capabilities()
     }
 
@@ -454,7 +458,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
                 query_rewrite_llm_provider: Some(sonnet_provider.clone()),
                 identity_prompt_override: None,
                 tool_schemas: tool_router.tool_schemas(),
-                lineage: Arc::new(moa_core::NullLineageHandle),
+                lineage: Arc::new(moa_core::traits::NullLineageHandle),
             },
         );
 
@@ -514,7 +518,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
                 query_rewrite_llm_provider: Some(cross_session_provider.clone()),
                 identity_prompt_override: None,
                 tool_schemas: tool_router.tool_schemas(),
-                lineage: Arc::new(moa_core::NullLineageHandle),
+                lineage: Arc::new(moa_core::traits::NullLineageHandle),
             },
         );
     let session_b = create_session(
@@ -560,7 +564,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
                 query_rewrite_llm_provider: Some(cold_session_provider.clone()),
                 identity_prompt_override: None,
                 tool_schemas: tool_router.tool_schemas(),
-                lineage: Arc::new(moa_core::NullLineageHandle),
+                lineage: Arc::new(moa_core::traits::NullLineageHandle),
             },
         );
     let session_c = create_session(
@@ -611,7 +615,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
             query_rewrite_llm_provider: Some(opus_provider.clone()),
             identity_prompt_override: None,
             tool_schemas: tool_router.tool_schemas(),
-            lineage: Arc::new(moa_core::NullLineageHandle),
+            lineage: Arc::new(moa_core::traits::NullLineageHandle),
         },
     );
     run_turn(
@@ -696,7 +700,7 @@ async fn create_session(
     storage_partition_id: &StoragePartitionId,
     user_id: &UserId,
     model: &str,
-) -> Result<moa_core::SessionId> {
+) -> Result<moa_core::types::identifiers::SessionId> {
     store
         .create_session(session_meta(storage_partition_id, user_id, model))
         .await
@@ -713,7 +717,7 @@ fn session_meta(
         tenant_id,
         contact: Some(contact_ref(tenant_id, contact_id)),
         created_by: Some(SessionActorRef::Contact { id: contact_id }),
-        model: moa_core::ModelId::new(model),
+        model: moa_core::types::identifiers::ModelId::new(model),
         ..SessionMeta::default()
     }
 }
@@ -756,7 +760,7 @@ fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
 
 async fn run_turn(
     store: Arc<dyn SessionStore>,
-    session_id: moa_core::SessionId,
+    session_id: moa_core::types::identifiers::SessionId,
     provider: Arc<dyn LLMProvider>,
     pipeline: &moa_brain::ContextPipeline,
     tool_router: Option<Arc<ToolRouter>>,
@@ -787,7 +791,7 @@ fn repo_root() -> Result<PathBuf> {
         }
     }
 
-    Err(moa_core::MoaError::ValidationError(format!(
+    Err(moa_core::error::MoaError::ValidationError(format!(
         "could not locate repo root from {}",
         cwd.display()
     )))

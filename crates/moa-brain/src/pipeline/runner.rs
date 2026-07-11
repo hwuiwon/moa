@@ -3,12 +3,13 @@
 use std::time::Instant;
 
 use moa_core::{
-    ContextProcessor, ContextSnapshotConfig, MessageRole, ProcessorOutput, Result, WorkingContext,
+    config::ContextSnapshotConfig, error::Result, traits::ContextProcessor,
+    types::context::MessageRole, types::context::ProcessorOutput, types::context::WorkingContext,
 };
 use moa_observability::record_query_rewrite_decision;
 use tracing::Instrument;
 
-use moa_core::{estimate_text_tokens, sum_message_tokens};
+use moa_core::{types::context::estimate_text_tokens, types::context::sum_message_tokens};
 
 /// Per-stage pipeline execution report.
 #[derive(Debug, Clone, PartialEq)]
@@ -224,7 +225,7 @@ async fn run_parallel_group(
                     .instrument(span)
                     .await
                     .map_err(|error| stage_error(&stage_name, error))?;
-                Ok::<_, moa_core::MoaError>((started.elapsed(), apply))
+                Ok::<_, moa_core::error::MoaError>((started.elapsed(), apply))
             }
         });
         futures_util::future::try_join_all(fetches).await?
@@ -336,39 +337,59 @@ fn metadata_str<'a>(output: &'a ProcessorOutput, key: &str) -> Option<&'a str> {
     output.metadata.get(key).and_then(serde_json::Value::as_str)
 }
 
-fn stage_error(stage_name: &str, error: moa_core::MoaError) -> moa_core::MoaError {
+fn stage_error(stage_name: &str, error: moa_core::error::MoaError) -> moa_core::error::MoaError {
     let message = format!("context pipeline stage '{stage_name}' failed: {error}");
     match error {
-        moa_core::MoaError::ProviderError(_) => moa_core::MoaError::ProviderError(message),
-        moa_core::MoaError::MissingEnvironmentVariable(_) => {
-            moa_core::MoaError::MissingEnvironmentVariable(message)
+        moa_core::error::MoaError::ProviderError(_) => {
+            moa_core::error::MoaError::ProviderError(message)
         }
-        moa_core::MoaError::ConfigError(_) => moa_core::MoaError::ConfigError(message),
-        moa_core::MoaError::StorageError(_) => moa_core::MoaError::StorageError(message),
-        moa_core::MoaError::ToolError(_) => moa_core::MoaError::ToolError(message),
-        moa_core::MoaError::ValidationError(_) => moa_core::MoaError::ValidationError(message),
-        moa_core::MoaError::ProviderQuirk(_) => moa_core::MoaError::ProviderQuirk(message),
-        moa_core::MoaError::SerializationError(_) => {
-            moa_core::MoaError::SerializationError(message)
+        moa_core::error::MoaError::MissingEnvironmentVariable(_) => {
+            moa_core::error::MoaError::MissingEnvironmentVariable(message)
         }
-        moa_core::MoaError::StreamError(_) => moa_core::MoaError::StreamError(message),
-        moa_core::MoaError::PermissionDenied(_) => moa_core::MoaError::PermissionDenied(message),
-        moa_core::MoaError::BudgetExhausted(_) => moa_core::MoaError::BudgetExhausted(message),
-        moa_core::MoaError::Unsupported(_) => moa_core::MoaError::Unsupported(message),
-        moa_core::MoaError::NotImplemented(_) => moa_core::MoaError::NotImplemented(message),
-        moa_core::MoaError::HttpStatus {
+        moa_core::error::MoaError::ConfigError(_) => {
+            moa_core::error::MoaError::ConfigError(message)
+        }
+        moa_core::error::MoaError::StorageError(_) => {
+            moa_core::error::MoaError::StorageError(message)
+        }
+        moa_core::error::MoaError::ToolError(_) => moa_core::error::MoaError::ToolError(message),
+        moa_core::error::MoaError::ValidationError(_) => {
+            moa_core::error::MoaError::ValidationError(message)
+        }
+        moa_core::error::MoaError::ProviderQuirk(_) => {
+            moa_core::error::MoaError::ProviderQuirk(message)
+        }
+        moa_core::error::MoaError::SerializationError(_) => {
+            moa_core::error::MoaError::SerializationError(message)
+        }
+        moa_core::error::MoaError::StreamError(_) => {
+            moa_core::error::MoaError::StreamError(message)
+        }
+        moa_core::error::MoaError::PermissionDenied(_) => {
+            moa_core::error::MoaError::PermissionDenied(message)
+        }
+        moa_core::error::MoaError::BudgetExhausted(_) => {
+            moa_core::error::MoaError::BudgetExhausted(message)
+        }
+        moa_core::error::MoaError::Unsupported(_) => {
+            moa_core::error::MoaError::Unsupported(message)
+        }
+        moa_core::error::MoaError::NotImplemented(_) => {
+            moa_core::error::MoaError::NotImplemented(message)
+        }
+        moa_core::error::MoaError::HttpStatus {
             status,
             retry_after,
             ..
-        } => moa_core::MoaError::HttpStatus {
+        } => moa_core::error::MoaError::HttpStatus {
             status,
             retry_after,
             message,
         },
-        moa_core::MoaError::RateLimited { retries, .. } => {
-            moa_core::MoaError::RateLimited { retries, message }
+        moa_core::error::MoaError::RateLimited { retries, .. } => {
+            moa_core::error::MoaError::RateLimited { retries, message }
         }
-        _other => moa_core::MoaError::ValidationError(message),
+        _other => moa_core::error::MoaError::ValidationError(message),
     }
 }
 
@@ -409,13 +430,15 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        Channel, ContextMessage, ContextProcessor, MoaError, ModelCapabilities, ModelId,
-        ProcessorOutput, Result, SessionId, SessionMeta, StageApply, TokenPricing, ToolCallFormat,
-        WorkingContext,
+        error::MoaError, error::Result, traits::ContextProcessor, traits::StageApply,
+        types::channel::Channel, types::context::ContextMessage, types::context::ProcessorOutput,
+        types::context::WorkingContext, types::identifiers::ModelId, types::identifiers::SessionId,
+        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
+        types::session::SessionMeta,
     };
     use serde_json::json;
 
-    use moa_core::estimate_text_tokens;
+    use moa_core::types::context::estimate_text_tokens;
 
     use super::{ContextPipeline, PipelineStageReport, cache_prefix_ratio};
 

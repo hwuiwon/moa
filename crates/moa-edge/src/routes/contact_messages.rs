@@ -5,11 +5,15 @@ use axum::extract::{FromRequest, Multipart, Request};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use moa_core::{
-    Attachment, ContactSessionMessageRequest, MAX_CONTACT_SESSION_ATTACHMENT_BYTES,
-    MAX_CONTACT_SESSION_ATTACHMENT_NAME_BYTES, MAX_CONTACT_SESSION_ATTACHMENT_TOTAL_BYTES,
-    MAX_CONTACT_SESSION_ATTACHMENTS_PER_MESSAGE, MoaError, SessionAttachmentStore, SessionId,
-    SessionStore, TenantId, normalize_contact_session_photo_mime,
-    validate_contact_session_message_text,
+    error::MoaError, traits::SessionAttachmentStore, traits::SessionStore,
+    types::channel::Attachment, types::contact::ContactSessionMessageRequest,
+    types::contact::MAX_CONTACT_SESSION_ATTACHMENT_BYTES,
+    types::contact::MAX_CONTACT_SESSION_ATTACHMENT_NAME_BYTES,
+    types::contact::MAX_CONTACT_SESSION_ATTACHMENT_TOTAL_BYTES,
+    types::contact::MAX_CONTACT_SESSION_ATTACHMENTS_PER_MESSAGE,
+    types::contact::normalize_contact_session_photo_mime,
+    types::contact::validate_contact_session_message_text, types::identifiers::SessionId,
+    types::identifiers::TenantId,
 };
 use uuid::Uuid;
 
@@ -545,7 +549,7 @@ fn read_u24_le(bytes: &[u8]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use axum::body::Bytes;
-    use moa_core::{SessionId, TenantId};
+    use moa_core::{types::identifiers::SessionId, types::identifiers::TenantId};
 
     use super::*;
 
@@ -636,7 +640,7 @@ mod tests {
             serde_json::json!({
                 "tenant_id": "22222222-2222-2222-2222-222222222222",
                 "contact_token": "token",
-                "user_message": "x".repeat(moa_core::MAX_CONTACT_SESSION_MESSAGE_TEXT_BYTES + 1),
+                "user_message": "x".repeat(moa_core::types::contact::MAX_CONTACT_SESSION_MESSAGE_TEXT_BYTES + 1),
             })
             .to_string(),
         );

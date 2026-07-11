@@ -3,7 +3,10 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use moa_core::{ExcludedItem, SkillMetadata, TaskStrategySuccessRate};
+use moa_core::{
+    types::context::ExcludedItem, types::experience::TaskStrategySuccessRate,
+    types::memory::SkillMetadata,
+};
 
 use crate::pipeline::memory::extract_search_keywords;
 
@@ -302,7 +305,10 @@ fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
 mod tests {
     use std::collections::HashMap;
 
-    use moa_core::{AttributionSubjectType, TaskStrategySuccessRate, TenantId};
+    use moa_core::{
+        types::experience::AttributionSubjectType, types::experience::TaskStrategySuccessRate,
+        types::identifiers::TenantId,
+    };
 
     use super::{
         DEFAULT_MIN_MANIFEST_CHARS, MANIFEST_FOOTER, MANIFEST_PREAMBLE, ResolvedSkillBudget,

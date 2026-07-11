@@ -75,9 +75,10 @@ readers = ["moa-orchestrator", "moa-messaging"]
 
 [[table]]
 name = "session_attachments"
-schema = "public"
+schema = "%I"
 owner = "moa-session"
 readers = ["moa-edge", "moa-orchestrator", "moa-brain"]
+notes = "Created in each tenant schema by a format-qualified migration."
 
 [[table]]
 name = "api_keys"
@@ -112,79 +113,374 @@ owner = "moa-ocsf"
 readers = ["services/audit-shipper"]
 
 [[table]]
-name = "moa.node_index"
+name = "node_index"
 schema = "moa"
 owner = "moa-memory/graph"
 readers = ["moa-memory/lifecycle", "moa-memory/vector", "moa-brain", "moa-knowledge"]
 
 [[table]]
-name = "moa.edge_index"
+name = "edge_index"
 schema = "moa"
 owner = "moa-memory/graph"
 readers = ["moa-memory/lifecycle", "moa-brain", "moa-knowledge"]
 
 [[table]]
-name = "moa.embeddings"
+name = "embeddings"
 schema = "moa"
 owner = "moa-memory/vector"
 readers = ["moa-memory/graph", "moa-brain"]
 
 [[table]]
-name = "moa.vector_sync_outbox"
+name = "vector_sync_outbox"
 schema = "moa"
 owner = "moa-memory/vector"
 readers = ["moa-memory/graph"]
 
 [[table]]
-name = "moa.graph_changelog"
+name = "graph_changelog"
 schema = "moa"
 owner = "moa-memory/graph"
 readers = ["moa-memory/lifecycle", "moa-memory/pii"]
 
 [[table]]
-name = "moa.storage_partition_state"
+name = "storage_partition_state"
 schema = "moa"
 owner = "moa-memory/graph"
 readers = ["moa-memory/ingest", "moa-memory/lifecycle", "moa-memory/vector"]
 
 [[table]]
-name = "moa.ingest_dedup"
+name = "ingest_dedup"
 schema = "moa"
 owner = "moa-memory/ingest"
 readers = ["moa-memory/graph"]
 
 [[table]]
-name = "moa.ingest_dlq"
+name = "ingest_dlq"
 schema = "moa"
 owner = "moa-memory/ingest"
 readers = ["moa-memory/graph"]
 
 [[table]]
-name = "moa.memory_digests"
+name = "memory_digests"
 schema = "moa"
 owner = "moa-memory/lifecycle"
 readers = ["moa-brain"]
 
 [[table]]
-name = "moa.retrieval_lineage"
+name = "retrieval_lineage"
 schema = "moa"
 owner = "moa-memory/lifecycle"
 readers = ["moa-brain", "moa-memory/graph"]
 
 [[table]]
-name = "analytics.turn_lineage"
+name = "turn_lineage"
 schema = "analytics"
 owner = "moa-session"
 readers = ["moa-lineage/*", "moa-eval"]
 
 [[table]]
-name = "analytics.scores"
+name = "scores"
 schema = "analytics"
 owner = "moa-session"
 readers = ["moa-eval", "moa-orchestrator"]
 
 [[table]]
-name = "pii_vault.subject_keys"
+name = "subject_keys"
 schema = "pii_vault"
 owner = "moa-session"
 readers = ["moa-lineage/audit", "moa-memory/pii"]
+
+[[table]]
+name = "session_blobs"
+schema = "%I"
+owner = "moa-session"
+readers = ["moa-edge", "moa-orchestrator", "moa-brain"]
+notes = "Created in each tenant schema by a format-qualified migration."
+
+[[table]]
+name = "audit_roots"
+schema = "analytics"
+owner = "moa-lineage/audit"
+
+[[table]]
+name = "clickhouse_export_state"
+schema = "analytics"
+owner = "moa-analytics"
+
+[[table]]
+name = "compliance_storage_partition_state"
+schema = "analytics"
+owner = "moa-analytics"
+
+[[table]]
+name = "compliance_tenants"
+schema = "analytics"
+owner = "moa-analytics"
+
+[[table]]
+name = "eval_dataset_items"
+schema = "analytics"
+owner = "moa-eval"
+
+[[table]]
+name = "eval_datasets"
+schema = "analytics"
+owner = "moa-eval"
+
+[[table]]
+name = "eval_run_status"
+schema = "analytics"
+owner = "moa-eval"
+
+[[table]]
+name = "lineage_dead_letters"
+schema = "analytics"
+owner = "moa-lineage/sink"
+
+[[table]]
+name = "materialized_view_refresh_state"
+schema = "analytics"
+owner = "moa-analytics"
+
+[[table]]
+name = "score_run"
+schema = "analytics"
+owner = "moa-scoring"
+readers = ["moa-experiments"]
+
+[[table]]
+name = "agent_deployment"
+schema = "moa"
+owner = "moa-agents"
+
+[[table]]
+name = "agent_installation"
+schema = "moa"
+owner = "moa-agents"
+
+[[table]]
+name = "artifact"
+schema = "moa"
+owner = "moa-artifacts"
+
+[[table]]
+name = "artifact_file"
+schema = "moa"
+owner = "moa-artifacts"
+
+[[table]]
+name = "artifact_node_run"
+schema = "moa"
+owner = "moa-artifacts"
+
+[[table]]
+name = "artifact_revision"
+schema = "moa"
+owner = "moa-artifacts"
+
+[[table]]
+name = "artifact_run"
+schema = "moa"
+owner = "moa-artifacts"
+
+[[table]]
+name = "audit_jti_used"
+schema = "moa"
+owner = "moa-orchestrator"
+
+[[table]]
+name = "erasure_jobs"
+schema = "moa"
+owner = "moa-memory/pii"
+
+[[table]]
+name = "experiment_run"
+schema = "moa"
+owner = "moa-experiments"
+
+[[table]]
+name = "experiment_run_artifact_revision"
+schema = "moa"
+owner = "moa-experiments"
+
+[[table]]
+name = "experiment_trial"
+schema = "moa"
+owner = "moa-experiments"
+
+[[table]]
+name = "hand_leases"
+schema = "moa"
+owner = "moa-hands"
+
+[[table]]
+name = "knowledge_blocks"
+schema = "moa"
+owner = "moa-knowledge"
+
+[[table]]
+name = "knowledge_chunks"
+schema = "moa"
+owner = "moa-knowledge"
+
+[[table]]
+name = "knowledge_connections"
+schema = "moa"
+owner = "moa-knowledge"
+
+[[table]]
+name = "knowledge_contact_group_memberships"
+schema = "moa"
+owner = "moa-knowledge"
+
+[[table]]
+name = "knowledge_contact_groups"
+schema = "moa"
+owner = "moa-knowledge"
+
+[[table]]
+name = "knowledge_document_versions"
+schema = "moa"
+owner = "moa-knowledge"
+
+[[table]]
+name = "knowledge_ingestion_steps"
+schema = "moa"
+owner = "moa-knowledge"
+
+[[table]]
+name = "knowledge_object_ingestion_claims"
+schema = "moa"
+owner = "moa-knowledge"
+
+[[table]]
+name = "knowledge_objects"
+schema = "moa"
+owner = "moa-knowledge"
+
+[[table]]
+name = "knowledge_provider_events"
+schema = "moa"
+owner = "moa-knowledge"
+
+[[table]]
+name = "knowledge_semantic_graph_extractions"
+schema = "moa"
+owner = "moa-knowledge"
+
+[[table]]
+name = "knowledge_sync_runs"
+schema = "moa"
+owner = "moa-knowledge"
+
+[[table]]
+name = "plaintext_side"
+schema = "pii_vault"
+owner = "moa-memory/pii"
+
+[[table]]
+name = "api_key_revocations"
+schema = "public"
+owner = "moa-auth/providers"
+
+[[table]]
+name = "auth0_ciba_approvals"
+schema = "public"
+owner = "moa-auth/auth0"
+
+[[table]]
+name = "auth0_user_map"
+schema = "public"
+owner = "moa-auth/auth0"
+
+[[table]]
+name = "context_snapshots"
+schema = "public"
+owner = "moa-session"
+
+[[table]]
+name = "experience_attributions"
+schema = "public"
+owner = "moa-session"
+
+[[table]]
+name = "experience_records"
+schema = "public"
+owner = "moa-session"
+
+[[table]]
+name = "learning_candidates"
+schema = "public"
+owner = "moa-session"
+readers = ["moa-skills"]
+
+[[table]]
+name = "learning_log"
+schema = "public"
+owner = "moa-session"
+
+[[table]]
+name = "linked_connections"
+schema = "public"
+owner = "moa-auth/auth0"
+
+[[table]]
+name = "local_user_credentials"
+schema = "public"
+owner = "moa-edge"
+
+[[table]]
+name = "password_reset_tokens"
+schema = "public"
+owner = "moa-edge"
+
+[[table]]
+name = "pending_signals"
+schema = "public"
+owner = "moa-session"
+
+[[table]]
+name = "scim_group_members"
+schema = "public"
+owner = "moa-orchestrator"
+
+[[table]]
+name = "scim_groups"
+schema = "public"
+owner = "moa-orchestrator"
+
+[[table]]
+name = "session_agent_context"
+schema = "public"
+owner = "moa-session"
+
+[[table]]
+name = "session_event_dedupe"
+schema = "public"
+owner = "moa-session"
+
+[[table]]
+name = "tenant_signing_keys"
+schema = "public"
+owner = "moa-ocsf"
+
+[[table]]
+name = "tenant_purge_operations"
+schema = "moa"
+owner = "moa-orchestrator"
+
+[[table]]
+name = "tenant_user_invitations"
+schema = "public"
+owner = "moa-edge"
+
+[[table]]
+name = "tenants"
+schema = "public"
+owner = "moa-edge"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "user_session_tokens"
+schema = "public"
+owner = "moa-edge"

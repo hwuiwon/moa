@@ -4,20 +4,23 @@ use chrono::{DateTime, Utc};
 use moa_authz_schema::Relation;
 use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::{
-    ActionClass, ActionEnvelope, ActionReviewPreview, ActionReviewStatus, Event, EventType,
-    StoragePartitionId, TenantId, ToolCallId, ToolCallRequest,
+    events::Event, events::EventType, types::action_policy::ActionClass,
+    types::action_policy::ActionEnvelope, types::action_policy::ActionReviewPreview,
+    types::action_policy::ActionReviewStatus, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::identifiers::ToolCallId, types::tools::ToolCallRequest,
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_observability::{record_action_review_decision, record_action_review_requested};
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
 use crate::action_reviews::app as action_review_app;
 use crate::handlers::authz_shim::authorize_tenant;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::services::tool_executor::ToolExecutorClient;
+use moa_core::traits::SessionRepository;
 
 /// Summary returned for one tenant action review.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,7 +30,7 @@ pub struct ActionReviewSummary {
     /// Owning tenant.
     pub tenant_id: TenantId,
     /// Owning session, when the action came from a session turn.
-    pub session_id: Option<moa_core::SessionId>,
+    pub session_id: Option<moa_core::types::identifiers::SessionId>,
     /// Worker that requested the action, when present.
     pub worker_id: Option<String>,
     /// Original tool call identifier.
@@ -37,7 +40,7 @@ pub struct ActionReviewSummary {
     /// Action class.
     pub action_class: ActionClass,
     /// Risk level.
-    pub risk_level: moa_core::RiskLevel,
+    pub risk_level: moa_core::types::action_policy::RiskLevel,
     /// Concise input summary.
     pub input_summary: String,
     /// Durable action envelope.
@@ -119,8 +122,22 @@ pub trait ActionReviews {
 }
 
 /// Concrete action-review service implementation.
-#[derive(Clone, Default)]
-pub struct ActionReviewsImpl;
+#[derive(Clone)]
+pub struct ActionReviewsImpl {
+    pool: sqlx::PgPool,
+    session_store: Arc<dyn SessionRepository>,
+}
+
+impl ActionReviewsImpl {
+    /// Creates the action-review adapter with its persistence dependencies.
+    #[must_use]
+    pub fn new(pool: sqlx::PgPool, session_store: Arc<dyn SessionRepository>) -> Self {
+        Self {
+            pool,
+            session_store,
+        }
+    }
+}
 
 impl ActionReviews for ActionReviewsImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -134,7 +151,7 @@ impl ActionReviews for ActionReviewsImpl {
         let mut request = request.into_inner();
         action_review_app::prepare_request(&mut request)?;
         let event = action_review_app::requested_event(&request);
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         let session_id = request.envelope.session_id;
         let action_class = request.envelope.action_class;
 
@@ -155,6 +172,7 @@ impl ActionReviews for ActionReviewsImpl {
                     session_id,
                     EventType::ActionReviewRequested,
                     stored.summary.id,
+                    &self.session_store,
                 )
                 .await?;
                 if !event_exists {
@@ -176,7 +194,7 @@ impl ActionReviews for ActionReviewsImpl {
                     "action review has no session id; skipping session event append"
                 );
             }
-            let pool = OrchestratorCtx::current_graph_pool();
+            let pool = self.pool.clone();
             let storage_partition_id = storage_partition_id(stored.summary.tenant_id);
             let review_id = stored.summary.id;
             ctx.run(|| async move {
@@ -192,7 +210,10 @@ impl ActionReviews for ActionReviewsImpl {
             .await?;
         }
         if stored.newly_inserted {
-            record_action_review_requested(moa_core::ActionPolicyEffect::AdminReview, action_class);
+            record_action_review_requested(
+                moa_core::types::action_policy::ActionPolicyEffect::AdminReview,
+                action_class,
+            );
         }
         Ok(Json::from(stored.summary))
     }
@@ -206,7 +227,7 @@ impl ActionReviews for ActionReviewsImpl {
         annotate_restate_handler_span("ActionReviews", "list_pending");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         let storage_partition_id = storage_partition_id(request.tenant_id);
 
         Ok(ctx
@@ -228,7 +249,7 @@ impl ActionReviews for ActionReviewsImpl {
         annotate_restate_handler_span("ActionReviews", "decide");
         let request = request.into_inner();
         let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         let decided = ctx
             .run(|| async move {
                 action_review_app::decide_review(pool, request, identity.id.to_string())
@@ -247,6 +268,7 @@ impl ActionReviews for ActionReviewsImpl {
                     session_id,
                     EventType::ActionReviewDecided,
                     decided.review_id,
+                    &self.session_store,
                 )
                 .await?;
                 if !event_exists {
@@ -265,7 +287,7 @@ impl ActionReviews for ActionReviewsImpl {
                         .await?;
                 }
             }
-            let pool = OrchestratorCtx::current_graph_pool();
+            let pool = self.pool.clone();
             let storage_partition_id = decided.storage_partition_id.clone();
             let review_id = decided.review_id;
             ctx.run(|| async move {
@@ -285,19 +307,32 @@ impl ActionReviews for ActionReviewsImpl {
         }
 
         if let Some(tool_request) = decided.tool_request.as_ref() {
-            if !prior_tool_result_exists(&ctx, &decided, tool_request.tool_call_id).await? {
+            if !prior_tool_result_exists(
+                &ctx,
+                &decided,
+                tool_request.tool_call_id,
+                &self.session_store,
+            )
+            .await?
+            {
                 let execution = ctx
                     .service_client::<ToolExecutorClient>()
                     .execute(Json::from(tool_request.clone()))
                     .call()
                     .await;
                 if let Err(error) = execution
-                    && !prior_tool_result_exists(&ctx, &decided, tool_request.tool_call_id).await?
+                    && !prior_tool_result_exists(
+                        &ctx,
+                        &decided,
+                        tool_request.tool_call_id,
+                        &self.session_store,
+                    )
+                    .await?
                 {
                     return Err(error.into());
                 }
             }
-            let pool = OrchestratorCtx::current_graph_pool();
+            let pool = self.pool.clone();
             let storage_partition_id = decided.storage_partition_id.clone();
             let review_id = decided.review_id;
             ctx.run(|| async move {
@@ -316,11 +351,12 @@ async fn prior_tool_result_exists(
     ctx: &Context<'_>,
     decided: &action_review_app::DecidedReview,
     tool_call_id: ToolCallId,
+    session_store: &Arc<dyn SessionRepository>,
 ) -> Result<bool, HandlerError> {
     let Some(session_id) = decided.session_id else {
         return Ok(false);
     };
-    let store = OrchestratorCtx::current_session_store();
+    let store = session_store.clone();
     let storage_partition_id = decided.storage_partition_id.clone();
     Ok(ctx
         .run(|| async move {
@@ -343,11 +379,12 @@ async fn prior_tool_result_exists(
 async fn prior_action_review_event_exists(
     ctx: &Context<'_>,
     storage_partition_id: &StoragePartitionId,
-    session_id: moa_core::SessionId,
+    session_id: moa_core::types::identifiers::SessionId,
     event_type: EventType,
     review_id: Uuid,
+    session_store: &Arc<dyn SessionRepository>,
 ) -> Result<bool, HandlerError> {
-    let store = OrchestratorCtx::current_session_store();
+    let store = session_store.clone();
     let storage_partition_id = storage_partition_id.clone();
     Ok(ctx
         .run(|| async move {

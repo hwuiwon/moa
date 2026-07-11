@@ -95,7 +95,7 @@ impl PostgresSessionStore {
     /// Loads the active task segment for a session, if present.
     pub async fn get_active_segment(
         &self,
-        session_id: moa_core::SessionId,
+        session_id: moa_core::types::identifiers::SessionId,
     ) -> Result<Option<TaskSegment>> {
         let task_segments = self.table_name("task_segments");
         let row = sqlx::query(&format!(
@@ -113,7 +113,10 @@ impl PostgresSessionStore {
     }
 
     /// Lists all task segments for a session in segment order.
-    pub async fn list_segments(&self, session_id: moa_core::SessionId) -> Result<Vec<TaskSegment>> {
+    pub async fn list_segments(
+        &self,
+        session_id: moa_core::types::identifiers::SessionId,
+    ) -> Result<Vec<TaskSegment>> {
         let task_segments = self.table_name("task_segments");
         let rows = sqlx::query(&format!(
             "SELECT {TASK_SEGMENT_COLUMNS} FROM {task_segments} \
@@ -238,7 +241,7 @@ impl PostgresSessionStore {
     /// Records a tool name on the active task segment for a session.
     pub async fn record_active_segment_tool_use(
         &self,
-        session_id: moa_core::SessionId,
+        session_id: moa_core::types::identifiers::SessionId,
         tool_name: &str,
     ) -> Result<()> {
         self.append_unique_active_segment_value(session_id, "tools_used", tool_name)
@@ -248,7 +251,7 @@ impl PostgresSessionStore {
     /// Records a skill activation on the active task segment for a session.
     pub async fn record_active_segment_skill_activation(
         &self,
-        session_id: moa_core::SessionId,
+        session_id: moa_core::types::identifiers::SessionId,
         skill_name: &str,
     ) -> Result<()> {
         self.append_unique_active_segment_value(session_id, "skills_activated", skill_name)
@@ -258,7 +261,7 @@ impl PostgresSessionStore {
     /// Adds one turn and token usage to the active task segment for a session.
     pub async fn record_active_segment_turn_usage(
         &self,
-        session_id: moa_core::SessionId,
+        session_id: moa_core::types::identifiers::SessionId,
         token_cost: u64,
     ) -> Result<()> {
         let task_segments = self.table_name("task_segments");
@@ -283,7 +286,7 @@ impl PostgresSessionStore {
 
     async fn append_unique_active_segment_value(
         &self,
-        session_id: moa_core::SessionId,
+        session_id: moa_core::types::identifiers::SessionId,
         column: &str,
         value: &str,
     ) -> Result<()> {

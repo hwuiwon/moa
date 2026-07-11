@@ -3,8 +3,9 @@
 use super::*;
 use moa_core::traits::Identity;
 use moa_core::{
-    AgentSignalId, ChildSignalKind, ParentResumePolicy, TurnOutcome, UnreadChildSignal,
-    WorkerSignal,
+    types::identifiers::AgentSignalId, types::session::TurnOutcome,
+    types::worker::state::ChildSignalKind, types::worker::state::ParentResumePolicy,
+    types::worker::state::UnreadChildSignal, types::worker::state::WorkerSignal,
 };
 
 pub(super) const K_META: &str = "meta";
@@ -896,10 +897,13 @@ fn child_output_preview(output: &str) -> String {
 }
 
 /// Builds a synthetic failed terminal for a worker that never reported one.
-fn failed_worker_terminal(worker_id: &str, reason: &str) -> moa_core::WorkerTerminalResult {
-    moa_core::WorkerTerminalResult {
-        state: moa_core::WorkerState::Failed,
-        result: moa_core::WorkerResult {
+fn failed_worker_terminal(
+    worker_id: &str,
+    reason: &str,
+) -> moa_core::types::worker::state::WorkerTerminalResult {
+    moa_core::types::worker::state::WorkerTerminalResult {
+        state: moa_core::types::worker::state::WorkerState::Failed,
+        result: moa_core::types::worker::state::WorkerResult {
             worker_id: worker_id.to_string(),
             success: false,
             output: String::new(),
@@ -1170,14 +1174,19 @@ impl VoState for SessionVoState {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{Attachment, Channel, ModelId};
+    use moa_core::{
+        types::channel::Attachment, types::channel::Channel, types::identifiers::ModelId,
+    };
 
     use super::{CHILD_OUTPUT_CLAIM_CHECK_THRESHOLD_BYTES, SessionVoState};
     use crate::objects::session::{ChildProgressFetch, plan_child_progress_fan_in};
-    use moa_core::{ClaimCheck, MarkWorkerChildTerminalInput, TurnOutcome};
+    use moa_core::{
+        types::events_stream::ClaimCheck, types::session::TurnOutcome,
+        types::worker::commands::MarkWorkerChildTerminalInput,
+    };
 
-    fn test_message(text: &str) -> moa_core::UserMessage {
-        moa_core::UserMessage {
+    fn test_message(text: &str) -> moa_core::types::session::UserMessage {
+        moa_core::types::session::UserMessage {
             text: text.to_string(),
             attachments: vec![Attachment {
                 id: None,
@@ -1191,19 +1200,22 @@ mod tests {
         }
     }
 
-    fn test_meta() -> moa_core::SessionMeta {
-        moa_core::SessionMeta {
-            tenant_id: moa_core::TenantId::new(),
+    fn test_meta() -> moa_core::types::session::SessionMeta {
+        moa_core::types::session::SessionMeta {
+            tenant_id: moa_core::types::identifiers::TenantId::new(),
             channel: Channel::Chat,
             model: ModelId::new("test-model"),
-            ..moa_core::SessionMeta::default()
+            ..moa_core::types::session::SessionMeta::default()
         }
     }
 
-    fn worker_terminal(worker_id: &str, output: &str) -> moa_core::WorkerTerminalResult {
-        moa_core::WorkerTerminalResult {
-            state: moa_core::WorkerState::Completed,
-            result: moa_core::WorkerResult {
+    fn worker_terminal(
+        worker_id: &str,
+        output: &str,
+    ) -> moa_core::types::worker::state::WorkerTerminalResult {
+        moa_core::types::worker::state::WorkerTerminalResult {
+            state: moa_core::types::worker::state::WorkerState::Completed,
+            result: moa_core::types::worker::state::WorkerResult {
                 worker_id: worker_id.to_string(),
                 success: true,
                 output: output.to_string(),
@@ -1218,12 +1230,12 @@ mod tests {
     /// that a genuinely failed/cancelled worker still counts as terminal for fan-in.
     fn terminal_in_state(
         worker_id: &str,
-        state: moa_core::WorkerState,
+        state: moa_core::types::worker::state::WorkerState,
         success: bool,
-    ) -> moa_core::WorkerTerminalResult {
-        moa_core::WorkerTerminalResult {
+    ) -> moa_core::types::worker::state::WorkerTerminalResult {
+        moa_core::types::worker::state::WorkerTerminalResult {
             state,
-            result: moa_core::WorkerResult {
+            result: moa_core::types::worker::state::WorkerResult {
                 worker_id: worker_id.to_string(),
                 success,
                 output: String::new(),
@@ -1253,7 +1265,10 @@ mod tests {
             .expect("enqueue should succeed");
 
         assert_eq!(state.pending.len(), 1);
-        assert_eq!(state.current_status(), moa_core::SessionStatus::Running);
+        assert_eq!(
+            state.current_status(),
+            moa_core::types::session::SessionStatus::Running
+        );
     }
 
     #[test]
@@ -1262,18 +1277,21 @@ mod tests {
         state.set_meta(test_meta());
         let status = state.apply_turn_outcome(TurnOutcome::Idle, Utc::now());
 
-        assert_eq!(status, moa_core::SessionStatus::Paused);
-        assert_eq!(state.current_status(), moa_core::SessionStatus::Paused);
+        assert_eq!(status, moa_core::types::session::SessionStatus::Paused);
+        assert_eq!(
+            state.current_status(),
+            moa_core::types::session::SessionStatus::Paused
+        );
     }
 
     #[test]
     fn session_vo_cancel_flag_round_trips() {
         let mut state = SessionVoState::default();
-        state.set_cancel_flag(moa_core::CancelScope::CoordinatorOnly);
+        state.set_cancel_flag(moa_core::types::session::CancelScope::CoordinatorOnly);
 
         assert_eq!(
             state.take_cancel_flag(),
-            Some(moa_core::CancelScope::CoordinatorOnly)
+            Some(moa_core::types::session::CancelScope::CoordinatorOnly)
         );
         assert_eq!(state.take_cancel_flag(), None);
     }
@@ -1285,14 +1303,16 @@ mod tests {
         state
             .enqueue_message(test_message("hello"), Utc::now())
             .expect("enqueue should succeed");
-        state.children.push(moa_core::WorkerChildRef {
-            id: "child-1".to_string(),
-            task_hash: "hash-1".to_string(),
-            budget_tokens: 0,
-            terminal: None,
-        });
+        state
+            .children
+            .push(moa_core::types::worker::state::WorkerChildRef {
+                id: "child-1".to_string(),
+                task_hash: "hash-1".to_string(),
+                budget_tokens: 0,
+                terminal: None,
+            });
         state.last_turn_summary = Some("summary".to_string());
-        state.set_cancel_flag(moa_core::CancelScope::TaskTree);
+        state.set_cancel_flag(moa_core::types::session::CancelScope::TaskTree);
         state.destroy();
 
         assert_eq!(state, SessionVoState::default());
@@ -1302,7 +1322,7 @@ mod tests {
     fn session_child_registry_is_idempotent_by_child_id() {
         // Pins: root delegation registration preserves one active child ref per id.
         let mut state = SessionVoState::default();
-        let child = moa_core::WorkerChildRef {
+        let child = moa_core::types::worker::state::WorkerChildRef {
             id: "child-1".to_string(),
             task_hash: "hash-1".to_string(),
             budget_tokens: 128,
@@ -1319,13 +1339,13 @@ mod tests {
     fn session_child_registry_remove_is_exact() {
         // Pins: root delegation cleanup removes only the requested active child ref.
         let mut state = SessionVoState::default();
-        state.register_child(moa_core::WorkerChildRef {
+        state.register_child(moa_core::types::worker::state::WorkerChildRef {
             id: "child-1".to_string(),
             task_hash: "hash-1".to_string(),
             budget_tokens: 128,
             terminal: None,
         });
-        state.register_child(moa_core::WorkerChildRef {
+        state.register_child(moa_core::types::worker::state::WorkerChildRef {
             id: "child-2".to_string(),
             task_hash: "hash-2".to_string(),
             budget_tokens: 256,
@@ -1336,7 +1356,7 @@ mod tests {
         assert!(!state.remove_child("missing"));
         assert_eq!(
             state.children,
-            vec![moa_core::WorkerChildRef {
+            vec![moa_core::types::worker::state::WorkerChildRef {
                 id: "child-2".to_string(),
                 task_hash: "hash-2".to_string(),
                 budget_tokens: 256,
@@ -1349,15 +1369,15 @@ mod tests {
     fn session_child_terminal_result_is_consumed_once() {
         // Pins: root wait consumes a cached terminal child result exactly once.
         let mut state = SessionVoState::default();
-        state.register_child(moa_core::WorkerChildRef {
+        state.register_child(moa_core::types::worker::state::WorkerChildRef {
             id: "child-1".to_string(),
             task_hash: "hash-1".to_string(),
             budget_tokens: 128,
             terminal: None,
         });
-        let terminal = moa_core::WorkerTerminalResult {
-            state: moa_core::WorkerState::Completed,
-            result: moa_core::WorkerResult {
+        let terminal = moa_core::types::worker::state::WorkerTerminalResult {
+            state: moa_core::types::worker::state::WorkerState::Completed,
+            result: moa_core::types::worker::state::WorkerResult {
                 worker_id: "child-1".to_string(),
                 success: true,
                 output: "done".to_string(),
@@ -1367,18 +1387,18 @@ mod tests {
             },
         };
 
-        assert!(
-            state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+        assert!(state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
                 worker_id: "child-1".to_string(),
                 terminal: terminal.clone(),
-            })
-        );
-        assert!(
-            !state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
+            }
+        ));
+        assert!(!state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
                 worker_id: "child-1".to_string(),
                 terminal: terminal.clone(),
-            })
-        );
+            }
+        ));
         assert_eq!(state.consume_child_terminal("child-1"), Some(terminal));
         assert_eq!(state.consume_child_terminal("child-1"), None);
         assert!(!state.owns_child("child-1"));
@@ -1389,13 +1409,13 @@ mod tests {
         // Pins: session-owned auto-delegation fan-in emits only when every scheduled
         // worker is terminal, and the result order follows the scheduled DAG order.
         let mut state = SessionVoState::default();
-        state.register_child(moa_core::WorkerChildRef {
+        state.register_child(moa_core::types::worker::state::WorkerChildRef {
             id: "worker-a".to_string(),
             task_hash: "hash-a".to_string(),
             budget_tokens: 128,
             terminal: None,
         });
-        state.register_child(moa_core::WorkerChildRef {
+        state.register_child(moa_core::types::worker::state::WorkerChildRef {
             id: "worker-b".to_string(),
             task_hash: "hash-b".to_string(),
             budget_tokens: 128,
@@ -1409,16 +1429,20 @@ mod tests {
             )
         );
         assert!(state.auto_delegation_waiting_for_workers());
-        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-            worker_id: "worker-a".to_string(),
-            terminal: worker_terminal("worker-a", "activation"),
-        });
+        state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
+                worker_id: "worker-a".to_string(),
+                terminal: worker_terminal("worker-a", "activation"),
+            },
+        );
         assert_eq!(state.ready_auto_delegation_bundle(), None);
         assert!(state.auto_delegation_waiting_for_workers());
-        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-            worker_id: "worker-b".to_string(),
-            terminal: worker_terminal("worker-b", "retention"),
-        });
+        state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
+                worker_id: "worker-b".to_string(),
+                terminal: worker_terminal("worker-b", "retention"),
+            },
+        );
 
         let (sequence, results) = state
             .ready_auto_delegation_bundle()
@@ -1441,8 +1465,8 @@ mod tests {
         assert_eq!(state.auto_delegation_run, None);
     }
 
-    fn pending_child(id: &str) -> moa_core::WorkerChildRef {
-        moa_core::WorkerChildRef {
+    fn pending_child(id: &str) -> moa_core::types::worker::state::WorkerChildRef {
+        moa_core::types::worker::state::WorkerChildRef {
             id: id.to_string(),
             task_hash: format!("hash-{id}"),
             budget_tokens: 128,
@@ -1465,18 +1489,22 @@ mod tests {
             )
         );
 
-        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-            worker_id: "worker-a".to_string(),
-            terminal: worker_terminal("worker-a", "first"),
-        });
+        state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
+                worker_id: "worker-a".to_string(),
+                terminal: worker_terminal("worker-a", "first"),
+            },
+        );
         // Fast worker A self-cleans (removed from the transient children registry).
         assert!(state.remove_child("worker-a"));
         assert!(!state.owns_child("worker-a"));
         // Slow worker B finishes afterward.
-        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-            worker_id: "worker-b".to_string(),
-            terminal: worker_terminal("worker-b", "second"),
-        });
+        state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
+                worker_id: "worker-b".to_string(),
+                terminal: worker_terminal("worker-b", "second"),
+            },
+        );
 
         let (sequence, results) = state
             .ready_auto_delegation_bundle()
@@ -1500,10 +1528,12 @@ mod tests {
         state.register_child(pending_child("worker-a"));
         state.register_child(pending_child("worker-b"));
         // Worker A finishes BEFORE the run is registered.
-        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-            worker_id: "worker-a".to_string(),
-            terminal: worker_terminal("worker-a", "early"),
-        });
+        state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
+                worker_id: "worker-a".to_string(),
+                terminal: worker_terminal("worker-a", "early"),
+            },
+        );
 
         assert!(
             state.register_auto_delegation_run(
@@ -1518,10 +1548,12 @@ mod tests {
         );
         assert_eq!(state.ready_auto_delegation_bundle(), None);
 
-        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-            worker_id: "worker-b".to_string(),
-            terminal: worker_terminal("worker-b", "late"),
-        });
+        state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
+                worker_id: "worker-b".to_string(),
+                terminal: worker_terminal("worker-b", "late"),
+            },
+        );
         assert_eq!(state.pending_auto_delegation_worker(), None);
         let (sequence, results) = state
             .ready_auto_delegation_bundle()
@@ -1544,18 +1576,22 @@ mod tests {
             )
         );
 
-        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-            worker_id: "worker-a".to_string(),
-            terminal: worker_terminal("worker-a", "consumed"),
-        });
+        state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
+                worker_id: "worker-a".to_string(),
+                terminal: worker_terminal("worker-a", "consumed"),
+            },
+        );
         // A manual wait consumes and removes A from children.
         assert!(state.consume_child_terminal("worker-a").is_some());
         assert!(!state.owns_child("worker-a"));
 
-        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-            worker_id: "worker-b".to_string(),
-            terminal: worker_terminal("worker-b", "kept"),
-        });
+        state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
+                worker_id: "worker-b".to_string(),
+                terminal: worker_terminal("worker-b", "kept"),
+            },
+        );
         let (_, results) = state
             .ready_auto_delegation_bundle()
             .expect("consumed worker's snapshot still completes the bundle");
@@ -1581,10 +1617,12 @@ mod tests {
                 vec!["worker-a".to_string(), "worker-b".to_string()]
             )
         );
-        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-            worker_id: "worker-a".to_string(),
-            terminal: worker_terminal("worker-a", "done"),
-        });
+        state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
+                worker_id: "worker-a".to_string(),
+                terminal: worker_terminal("worker-a", "done"),
+            },
+        );
         // worker-b never terminalizes → run cannot complete on its own.
         assert_eq!(
             state.pending_auto_delegation_worker(),
@@ -1600,7 +1638,10 @@ mod tests {
         assert_eq!(results.len(), 2);
         // worker-a keeps its real completed result; worker-b is a synthetic failed terminal.
         assert!(results[0].result.success);
-        assert_eq!(results[1].state, moa_core::WorkerState::Failed);
+        assert_eq!(
+            results[1].state,
+            moa_core::types::worker::state::WorkerState::Failed
+        );
         assert!(!results[1].result.success);
         // Nothing left to fail out.
         assert_eq!(state.fail_pending_auto_delegation_workers("stale"), 0);
@@ -1632,14 +1673,19 @@ mod tests {
         assert!(!state.fail_auto_delegation_worker("worker-unknown", "stale"));
 
         // worker-b completes normally → the run emits with a's Failed + b's real result.
-        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-            worker_id: "worker-b".to_string(),
-            terminal: worker_terminal("worker-b", "done"),
-        });
+        state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
+                worker_id: "worker-b".to_string(),
+                terminal: worker_terminal("worker-b", "done"),
+            },
+        );
         let (_, results) = state
             .ready_auto_delegation_bundle()
             .expect("run completes after the healthy sibling finishes");
-        assert_eq!(results[0].state, moa_core::WorkerState::Failed);
+        assert_eq!(
+            results[0].state,
+            moa_core::types::worker::state::WorkerState::Failed
+        );
         assert!(results[1].result.success);
     }
 
@@ -1657,10 +1703,12 @@ mod tests {
         // Synthesis ownership cannot be claimed before the bundle is emitted.
         assert!(!state.record_auto_delegation_synthesis_dispatch("premature".to_string()));
 
-        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-            worker_id: "worker-a".to_string(),
-            terminal: worker_terminal("worker-a", "done"),
-        });
+        state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
+                worker_id: "worker-a".to_string(),
+                terminal: worker_terminal("worker-a", "done"),
+            },
+        );
         let (sequence, _) = state
             .ready_auto_delegation_bundle()
             .expect("the single scheduled worker is terminal");
@@ -1699,20 +1747,34 @@ mod tests {
             ],
         ));
 
-        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-            worker_id: "worker-ok".to_string(),
-            terminal: worker_terminal("worker-ok", "answer"),
-        });
-        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-            worker_id: "worker-fail".to_string(),
-            terminal: terminal_in_state("worker-fail", moa_core::WorkerState::Failed, false),
-        });
+        state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
+                worker_id: "worker-ok".to_string(),
+                terminal: worker_terminal("worker-ok", "answer"),
+            },
+        );
+        state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
+                worker_id: "worker-fail".to_string(),
+                terminal: terminal_in_state(
+                    "worker-fail",
+                    moa_core::types::worker::state::WorkerState::Failed,
+                    false,
+                ),
+            },
+        );
         // Not ready until every scheduled worker — including the failed one — is terminal.
         assert_eq!(state.ready_auto_delegation_bundle(), None);
-        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-            worker_id: "worker-cancel".to_string(),
-            terminal: terminal_in_state("worker-cancel", moa_core::WorkerState::Cancelled, false),
-        });
+        state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
+                worker_id: "worker-cancel".to_string(),
+                terminal: terminal_in_state(
+                    "worker-cancel",
+                    moa_core::types::worker::state::WorkerState::Cancelled,
+                    false,
+                ),
+            },
+        );
 
         let (sequence, results) = state
             .ready_auto_delegation_bundle()
@@ -1720,13 +1782,22 @@ mod tests {
         assert_eq!(sequence, 8);
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].result.worker_id, "worker-ok");
-        assert_eq!(results[0].state, moa_core::WorkerState::Completed);
+        assert_eq!(
+            results[0].state,
+            moa_core::types::worker::state::WorkerState::Completed
+        );
         assert!(results[0].result.success);
         assert_eq!(results[1].result.worker_id, "worker-fail");
-        assert_eq!(results[1].state, moa_core::WorkerState::Failed);
+        assert_eq!(
+            results[1].state,
+            moa_core::types::worker::state::WorkerState::Failed
+        );
         assert!(!results[1].result.success);
         assert_eq!(results[2].result.worker_id, "worker-cancel");
-        assert_eq!(results[2].state, moa_core::WorkerState::Cancelled);
+        assert_eq!(
+            results[2].state,
+            moa_core::types::worker::state::WorkerState::Cancelled
+        );
         assert!(!results[2].result.success);
     }
 
@@ -1746,24 +1817,31 @@ mod tests {
             12,
             vec!["worker-fast".to_string(), "worker-stuck".to_string()],
         ));
-        state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-            worker_id: "worker-fast".to_string(),
-            terminal: worker_terminal("worker-fast", "real"),
-        });
+        state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
+                worker_id: "worker-fast".to_string(),
+                terminal: worker_terminal("worker-fast", "real"),
+            },
+        );
         // Fan-in bound exceeded: the stuck worker is force-filled with a synthetic Failed terminal.
         assert_eq!(state.fail_pending_auto_delegation_workers("stale"), 1);
         let (sequence, bundle) = state
             .ready_auto_delegation_bundle()
             .expect("force-fill completes the run");
-        assert_eq!(bundle[1].state, moa_core::WorkerState::Failed);
+        assert_eq!(
+            bundle[1].state,
+            moa_core::types::worker::state::WorkerState::Failed
+        );
         assert!(!bundle[1].result.success);
         assert!(state.mark_auto_delegation_bundle_emitted(sequence));
 
         // The stuck worker finally reports a real successful terminal — too late.
-        let accepted = state.mark_child_terminal(moa_core::MarkWorkerChildTerminalInput {
-            worker_id: "worker-stuck".to_string(),
-            terminal: worker_terminal("worker-stuck", "arrived late"),
-        });
+        let accepted = state.mark_child_terminal(
+            moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
+                worker_id: "worker-stuck".to_string(),
+                terminal: worker_terminal("worker-stuck", "arrived late"),
+            },
+        );
         assert!(
             accepted,
             "the children cache still accepts the late terminal"
@@ -1795,15 +1873,15 @@ mod tests {
         // Pins: workers are root-session-owned only; signal acceptance is the root
         // session child registry, not a nested worker tree.
         let mut state = SessionVoState::default();
-        state.register_child(moa_core::WorkerChildRef {
+        state.register_child(moa_core::types::worker::state::WorkerChildRef {
             id: "child".to_string(),
             task_hash: "hash".to_string(),
             budget_tokens: 128,
             terminal: None,
         });
         let root_signal = resume_signal(
-            moa_core::ChildSignalKind::Blocked,
-            moa_core::ParentResumePolicy::IfIdle,
+            moa_core::types::worker::state::ChildSignalKind::Blocked,
+            moa_core::types::worker::state::ParentResumePolicy::IfIdle,
         );
         let mut missing_signal = root_signal.clone();
         missing_signal.worker_id = "missing".to_string();
@@ -1813,10 +1891,10 @@ mod tests {
     }
 
     fn unread_entry(
-        signal_id: moa_core::AgentSignalId,
-        kind: moa_core::ChildSignalKind,
-    ) -> moa_core::UnreadChildSignal {
-        moa_core::UnreadChildSignal {
+        signal_id: moa_core::types::identifiers::AgentSignalId,
+        kind: moa_core::types::worker::state::ChildSignalKind,
+    ) -> moa_core::types::worker::state::UnreadChildSignal {
+        moa_core::types::worker::state::UnreadChildSignal {
             signal_id,
             worker_id: "child".to_string(),
             kind,
@@ -1827,15 +1905,15 @@ mod tests {
     }
 
     fn resume_signal(
-        kind: moa_core::ChildSignalKind,
-        resume_policy: moa_core::ParentResumePolicy,
-    ) -> moa_core::WorkerSignal {
-        moa_core::WorkerSignal {
-            signal_id: moa_core::AgentSignalId::new(),
+        kind: moa_core::types::worker::state::ChildSignalKind,
+        resume_policy: moa_core::types::worker::state::ParentResumePolicy,
+    ) -> moa_core::types::worker::state::WorkerSignal {
+        moa_core::types::worker::state::WorkerSignal {
+            signal_id: moa_core::types::identifiers::AgentSignalId::new(),
             worker_id: "child".to_string(),
-            parent_session: moa_core::SessionId::new(),
+            parent_session: moa_core::types::identifiers::SessionId::new(),
             kind,
-            severity: moa_core::SignalSeverity::Warning,
+            severity: moa_core::types::worker::state::SignalSeverity::Warning,
             summary: "needs attention".to_string(),
             payload: serde_json::Value::Null,
             created_at: Utc::now(),
@@ -1849,8 +1927,11 @@ mod tests {
     fn unread_child_signal_push_is_idempotent_by_signal_id() {
         // Pins: a retried child-signal delivery records exactly one unread entry.
         let mut state = SessionVoState::default();
-        let signal_id = moa_core::AgentSignalId::new();
-        let entry = unread_entry(signal_id, moa_core::ChildSignalKind::Finding);
+        let signal_id = moa_core::types::identifiers::AgentSignalId::new();
+        let entry = unread_entry(
+            signal_id,
+            moa_core::types::worker::state::ChildSignalKind::Finding,
+        );
 
         assert!(state.push_unread_child_signal(entry.clone()));
         assert!(!state.push_unread_child_signal(entry));
@@ -1861,12 +1942,12 @@ mod tests {
     fn unread_child_signal_cap_evicts_findings_before_action_required() {
         // Pins: when the unread window overflows, NeedsInput/Blocked are preserved while
         // informational Findings are evicted first.
-        use moa_core::ChildSignalKind;
+        use moa_core::types::worker::state::ChildSignalKind;
         let mut state = SessionVoState::default();
 
-        let blocked_id = moa_core::AgentSignalId::new();
+        let blocked_id = moa_core::types::identifiers::AgentSignalId::new();
         assert!(state.push_unread_child_signal(unread_entry(blocked_id, ChildSignalKind::Blocked)));
-        let needs_input_id = moa_core::AgentSignalId::new();
+        let needs_input_id = moa_core::types::identifiers::AgentSignalId::new();
         assert!(
             state.push_unread_child_signal(unread_entry(
                 needs_input_id,
@@ -1875,7 +1956,7 @@ mod tests {
         );
         for _ in 0..super::MAX_UNREAD_CHILD_SIGNALS + 5 {
             state.push_unread_child_signal(unread_entry(
-                moa_core::AgentSignalId::new(),
+                moa_core::types::identifiers::AgentSignalId::new(),
                 ChildSignalKind::Finding,
             ));
         }
@@ -1908,7 +1989,9 @@ mod tests {
         // Pins: the resume-eligibility gate arms a pending resume only for an idle
         // coordinator on a resume-eligible IfIdle signal under budget, and never
         // dispatches a turn (it only mutates VO state).
-        use moa_core::{ChildSignalKind, ParentResumePolicy};
+        use moa_core::{
+            types::worker::state::ChildSignalKind, types::worker::state::ParentResumePolicy,
+        };
         let now = Utc::now();
 
         let mut idle = SessionVoState::default();
@@ -1971,7 +2054,9 @@ mod tests {
     fn resume_gate_does_not_rearm_once_a_resume_turn_is_active() {
         // Pins: after a resume is dispatched (turn active), a repeated delivery of the
         // same signal does not arm a second resume — the active-turn gate blocks it.
-        use moa_core::{ChildSignalKind, ParentResumePolicy};
+        use moa_core::{
+            types::worker::state::ChildSignalKind, types::worker::state::ParentResumePolicy,
+        };
         let now = Utc::now();
         let signal = resume_signal(ChildSignalKind::Blocked, ParentResumePolicy::IfIdle);
 
@@ -2060,7 +2145,7 @@ mod tests {
         // Pins: removing a child (e.g. on self-clean) drops its outstanding liveness
         // watchdog so a later fired check recognizes it as superseded.
         let mut state = SessionVoState::default();
-        state.register_child(moa_core::WorkerChildRef {
+        state.register_child(moa_core::types::worker::state::WorkerChildRef {
             id: "child-1".to_string(),
             task_hash: "hash-1".to_string(),
             budget_tokens: 128,
@@ -2079,11 +2164,11 @@ mod tests {
     fn clear_resume_on_outcome_drains_only_dispatch_snapshot() {
         // Pins: completing the resume turn drains exactly the dispatch-time unread
         // snapshot and clears the pending signal, leaving mid-turn arrivals queued.
-        use moa_core::ChildSignalKind;
+        use moa_core::types::worker::state::ChildSignalKind;
         let now = Utc::now();
         let mut state = SessionVoState::default();
-        let snap_a = moa_core::AgentSignalId::new();
-        let snap_b = moa_core::AgentSignalId::new();
+        let snap_a = moa_core::types::identifiers::AgentSignalId::new();
+        let snap_b = moa_core::types::identifiers::AgentSignalId::new();
         state.push_unread_child_signal(unread_entry(snap_a, ChildSignalKind::Blocked));
         state.push_unread_child_signal(unread_entry(snap_b, ChildSignalKind::NeedsInput));
         state.pending_parent_resume_signal = Some(snap_a);
@@ -2092,7 +2177,7 @@ mod tests {
         assert_eq!(state.resume_budget.count, 1);
 
         // A signal that arrives mid-turn must NOT be drained on outcome.
-        let mid_turn = moa_core::AgentSignalId::new();
+        let mid_turn = moa_core::types::identifiers::AgentSignalId::new();
         state.push_unread_child_signal(unread_entry(mid_turn, ChildSignalKind::Finding));
 
         // A non-matching turn id is a no-op.

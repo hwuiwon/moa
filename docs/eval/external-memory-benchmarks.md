@@ -440,13 +440,13 @@ completion.
 Fetch both pinned packages:
 
 ```bash
-MOA_RUN_NETWORK_MEMORY_BENCHMARKS=1 cargo run -p xtask --quiet -- fetch-memory-benchmark \
+MOA_RUN_NETWORK_MEMORY_BENCHMARKS=1 cargo run -p xtask --quiet --features eval-tools -- fetch-memory-benchmark \
   --dataset personamem-32k \
   --revision 73dfd752d477d0c466cd441f1669397f5726d7ab \
   --output target/memory-benchmarks/personamem-32k \
   --summary-output target/memory-benchmarks/personamem-32k-fetch-summary.json
 
-MOA_RUN_NETWORK_MEMORY_BENCHMARKS=1 cargo run -p xtask --quiet -- fetch-memory-benchmark \
+MOA_RUN_NETWORK_MEMORY_BENCHMARKS=1 cargo run -p xtask --quiet --features eval-tools -- fetch-memory-benchmark \
   --dataset longmemeval-s-cleaned \
   --revision 98d7416c24c778c2fee6e6f3006e7a073259d48f \
   --output target/memory-benchmarks/longmemeval-s-cleaned \
@@ -468,7 +468,7 @@ Do not copy real credential values into a report, fixture, shell transcript, or
 review comment.
 
 ```bash
-MOA_RUN_LIVE_MEMORY_BENCHMARKS=1 cargo run -p xtask -- run-external-memory-eval \
+MOA_RUN_LIVE_MEMORY_BENCHMARKS=1 cargo run -p xtask --features eval-tools -- run-external-memory-eval \
   --dataset personamem-32k \
   --data target/memory-benchmarks/personamem-32k \
   --package-manifest target/memory-benchmarks/personamem-32k/package.json \
@@ -487,7 +487,7 @@ MOA_RUN_LIVE_MEMORY_BENCHMARKS=1 cargo run -p xtask -- run-external-memory-eval 
   --output target/memory-benchmarks/personamem-32k-report.json
 
 export MOA_ANTHROPIC_API_KEY='<approved Anthropic credential>'
-MOA_RUN_LIVE_MEMORY_BENCHMARKS=1 cargo run -p xtask -- run-external-memory-eval \
+MOA_RUN_LIVE_MEMORY_BENCHMARKS=1 cargo run -p xtask --features eval-tools -- run-external-memory-eval \
   --dataset longmemeval-s-cleaned \
   --data target/memory-benchmarks/longmemeval-s-cleaned \
   --package-manifest target/memory-benchmarks/longmemeval-s-cleaned/package.json \
@@ -511,7 +511,7 @@ unset MOA_ANTHROPIC_API_KEY
 Prepare and score the blinded calibration:
 
 ```bash
-cargo run -p xtask -- calibrate-external-memory-judge prepare \
+cargo run -p xtask --features eval-tools -- calibrate-external-memory-judge prepare \
   --dataset target/memory-benchmarks/longmemeval-s-cleaned \
   --report target/memory-benchmarks/longmemeval-s-cleaned-report.json \
   --output-manifest target/memory-benchmarks/calibration/manifest.json \
@@ -519,7 +519,7 @@ cargo run -p xtask -- calibrate-external-memory-judge prepare \
   --labeler-b-template target/memory-benchmarks/calibration/labeler-b.json
 
 # After two independent blinded labels and adjudication:
-cargo run -p xtask -- calibrate-external-memory-judge score \
+cargo run -p xtask --features eval-tools -- calibrate-external-memory-judge score \
   --manifest target/memory-benchmarks/calibration/manifest.json \
   --report target/memory-benchmarks/longmemeval-s-cleaned-report.json \
   --labeler-a target/memory-benchmarks/calibration/labeler-a.json \

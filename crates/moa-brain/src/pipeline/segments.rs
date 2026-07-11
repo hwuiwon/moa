@@ -4,8 +4,10 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ActiveSegment, Event, QueryRewriteResult, SegmentCompletion, SegmentId, SessionId, TaskSegment,
-    deterministic_segment_id,
+    events::Event, types::identifiers::SegmentId, types::identifiers::SessionId,
+    types::query_rewrite::QueryRewriteResult, types::segments::ActiveSegment,
+    types::segments::SegmentCompletion, types::segments::TaskSegment,
+    types::segments::deterministic_segment_id,
 };
 use serde_json::Value;
 
@@ -185,8 +187,9 @@ fn completed_from_active(segment: &ActiveSegment, now: DateTime<Utc>) -> Segment
 mod tests {
     use chrono::{Duration, TimeZone};
     use moa_core::{
-        ActiveSegment, QueryRewriteResult, RewriteReason, RewriteSource, SessionId,
-        deterministic_segment_id,
+        types::identifiers::SessionId, types::query_rewrite::QueryRewriteResult,
+        types::query_rewrite::RewriteReason, types::query_rewrite::RewriteSource,
+        types::segments::ActiveSegment, types::segments::deterministic_segment_id,
     };
     use serde_json::json;
 

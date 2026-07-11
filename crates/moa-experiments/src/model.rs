@@ -2,7 +2,10 @@
 
 use chrono::{DateTime, Utc};
 use moa_artifacts::simulation::ExperimentTargetKind;
-use moa_core::{ActionRuleScope, AgentSessionSelection, Attachment, ModelId, SessionId};
+use moa_core::{
+    types::action_policy::ActionRuleScope, types::agent::AgentSessionSelection,
+    types::channel::Attachment, types::identifiers::ModelId, types::identifiers::SessionId,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;

@@ -1,6 +1,6 @@
 //! Shared wiremock helpers for offline provider transport coverage.
 
-use moa_core::{CompletionRequest, ContextMessage};
+use moa_core::{types::completion::CompletionRequest, types::context::ContextMessage};
 use serde_json::json;
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, ResponseTemplate};

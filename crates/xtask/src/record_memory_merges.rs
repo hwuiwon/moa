@@ -110,7 +110,7 @@ impl Options {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- record-memory-merges --corpus <path> [--output <path>] [--extractions <path>] [--api-key-env MOA_OPENAI_API_KEY] [--model gpt-5.4-mini] [--timeout-ms N]"
+    "usage: cargo run -p xtask --features eval-tools -- record-memory-merges --corpus <path> [--output <path>] [--extractions <path>] [--api-key-env MOA_OPENAI_API_KEY] [--model gpt-5.4-mini] [--timeout-ms N]"
 }
 
 fn parse_u64(value: &str, flag: &str) -> Result<u64> {

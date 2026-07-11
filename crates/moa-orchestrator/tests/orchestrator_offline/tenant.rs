@@ -1,7 +1,7 @@
 //! Unit coverage for tenant scheduling helpers.
 
 use chrono::{TimeZone, Utc};
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use moa_orchestrator::objects::tenant::{
     compute_next_consolidation_utc, deterministic_consolidation_jitter_secs,
 };

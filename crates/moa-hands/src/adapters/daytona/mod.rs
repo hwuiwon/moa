@@ -5,8 +5,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{
-    HandHandle, HandProvider, HandSpec, HandStatus, MoaConfig, MoaError, Result, SandboxFile,
-    SandboxTier, ToolFailureClass, ToolOutput, classify_tool_error, validate_sandbox_file_path,
+    config::MoaConfig, error::MoaError, error::Result, error::ToolFailureClass,
+    error::classify_tool_error, traits::HandProvider, types::hands::HandHandle,
+    types::hands::HandSpec, types::hands::HandStatus, types::hands::SandboxFile,
+    types::hands::SandboxTier, types::hands::validate_sandbox_file_path, types::tools::ToolOutput,
 };
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::{Value, json};
@@ -626,7 +628,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use moa_core::{HandProvider, HandResources, HandSpec, SandboxTier};
+    use moa_core::{
+        traits::HandProvider, types::hands::HandResources, types::hands::HandSpec,
+        types::hands::SandboxTier,
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 

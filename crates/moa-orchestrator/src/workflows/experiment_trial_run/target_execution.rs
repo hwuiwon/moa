@@ -47,21 +47,32 @@ pub(super) async fn run_agent_loop_trial(
     request: ExperimentTrialRunWorkflowRequest,
     trial: ExperimentTrialRecord,
     simulator_context: SimulatorContext,
+    pool: &sqlx::PgPool,
+    session_store: &Arc<PostgresSessionStore>,
+    providers: &Arc<ProviderRegistry>,
 ) -> Result<ExperimentTrialRunStatusResponse, HandlerError> {
     let target = parse_payload::<ExperimentTarget>("target", request.target.clone())?;
     let variant = parse_payload::<ExperimentVariant>("variant", request.variant.clone())?;
     let (session_id, target_model) =
-        ensure_agent_loop_session(ctx, &request, &trial, target, variant).await?;
+        ensure_agent_loop_session(ctx, &request, &trial, target, variant, pool, session_store)
+            .await?;
     ctx.set(K_SESSION_ID, Json(session_id));
     tracing::Span::current().set_attribute("moa.experiment.session_id", session_id.to_string());
 
-    let initial_events = load_session_events(ctx, session_id, EventRange::all()).await?;
+    let initial_events =
+        load_session_events(ctx, session_id, EventRange::all(), session_store).await?;
     let mut transcript = transcript_from_events(&initial_events);
     let mut transcript_sequence = latest_sequence(&initial_events);
     let mut target_usage_sequence = transcript_sequence;
     for turn_index in trial.turn_count.max(0) as u32..simulator_context.max_turns {
-        let observation =
-            observe_session_after(ctx, &request.identity, session_id, transcript_sequence).await?;
+        let observation = observe_session_after(
+            ctx,
+            &request.identity,
+            session_id,
+            transcript_sequence,
+            session_store,
+        )
+        .await?;
         if let Some(stop) = stop_for_session_status(&observation.status) {
             return stop_trial(
                 ctx,
@@ -70,6 +81,7 @@ pub(super) async fn run_agent_loop_trial(
                 stop.0,
                 stop.1,
                 None,
+                pool,
             )
             .await;
         }
@@ -80,9 +92,15 @@ pub(super) async fn run_agent_loop_trial(
         }
         transcript_sequence = observation.latest_sequence;
 
-        let simulator_message =
-            simulator_next_user_message(ctx, &trial, &simulator_context, &transcript, turn_index)
-                .await?;
+        let simulator_message = simulator_next_user_message(
+            ctx,
+            &trial,
+            &simulator_context,
+            &transcript,
+            turn_index,
+            providers,
+        )
+        .await?;
         if simulator_done(&simulator_message) {
             return stop_trial(
                 ctx,
@@ -91,6 +109,7 @@ pub(super) async fn run_agent_loop_trial(
                 ExperimentTrialStatus::Completed,
                 ExperimentTrialStopReason::SimulatorDone,
                 None,
+                pool,
             )
             .await;
         }
@@ -115,12 +134,13 @@ pub(super) async fn run_agent_loop_trial(
             )
             .into());
         };
-        increment_trial_turn(ctx, request.tenant_id, trial.trial_uid).await?;
+        increment_trial_turn(ctx, request.tenant_id, trial.trial_uid, pool).await?;
         transcript.push(ContextMessage::user(simulator_message));
 
         let status =
             wait_for_target_after_turn(ctx, &request.identity, session_id, turn_id).await?;
-        record_target_usage_after(ctx, session_id, &mut target_usage_sequence).await?;
+        record_target_usage_after(ctx, session_id, &mut target_usage_sequence, session_store)
+            .await?;
         if let Some(stop) = stop_for_session_status(&status) {
             return stop_trial(
                 ctx,
@@ -129,6 +149,7 @@ pub(super) async fn run_agent_loop_trial(
                 stop.0,
                 stop.1,
                 None,
+                pool,
             )
             .await;
         }
@@ -141,6 +162,7 @@ pub(super) async fn run_agent_loop_trial(
         ExperimentTrialStatus::Completed,
         ExperimentTrialStopReason::MaxTurns,
         None,
+        pool,
     )
     .await
 }
@@ -151,6 +173,8 @@ async fn ensure_agent_loop_session(
     trial: &ExperimentTrialRecord,
     target: ExperimentTarget,
     variant: ExperimentVariant,
+    pool: &sqlx::PgPool,
+    session_store: &Arc<PostgresSessionStore>,
 ) -> Result<(SessionId, Option<ModelId>), HandlerError> {
     let (target_session_id, target_agent, target_model, attachments_empty) = match target {
         ExperimentTarget::AgentLoop {
@@ -187,8 +211,16 @@ async fn ensure_agent_loop_session(
             let agent = target_agent.ok_or_else(|| {
                 bad_request("agent-loop simulator target requires an agent selector")
             })?;
-            let (session_id, meta) =
-                create_new_session(ctx, request.tenant_id, model, &request.identity, agent).await?;
+            let (session_id, meta) = create_new_session(
+                ctx,
+                request.tenant_id,
+                model,
+                &request.identity,
+                agent,
+                pool,
+                session_store,
+            )
+            .await?;
             with_identity_headers(
                 ctx.object_client::<SessionClient>(session_id.to_string())
                     .set_meta(Json::from(meta)),
@@ -200,7 +232,7 @@ async fn ensure_agent_loop_session(
             session_id
         }
     };
-    attach_trial_session(ctx, scope, trial.trial_uid, session_id).await?;
+    attach_trial_session(ctx, scope, trial.trial_uid, session_id, pool).await?;
     Ok((session_id, target_model))
 }
 
@@ -226,6 +258,7 @@ pub(super) async fn run_procedure_trial(
     ctx: &WorkflowContext<'_>,
     request: ExperimentTrialRunWorkflowRequest,
     trial: ExperimentTrialRecord,
+    pool: &sqlx::PgPool,
 ) -> Result<ExperimentTrialRunStatusResponse, HandlerError> {
     let target = parse_payload::<ExperimentTarget>("target", request.target)?;
     let ExperimentTarget::Procedure {
@@ -251,6 +284,7 @@ pub(super) async fn run_procedure_trial(
             session_id,
             idempotency_key: idempotency_key.or_else(|| Some(trial.trial_key.clone())),
         },
+        pool,
     )
     .await?;
     ctx.set(K_PROCEDURE_RUN_UID, Json(run.run_uid));
@@ -268,6 +302,7 @@ pub(super) async fn run_procedure_trial(
             stop.status,
             stop.stop_reason,
             run.error,
+            pool,
         )
         .await;
     }
@@ -287,6 +322,7 @@ pub(super) async fn run_procedure_trial(
         stop.status,
         stop.stop_reason,
         error,
+        pool,
     )
     .await
 }
@@ -353,9 +389,11 @@ async fn create_new_session(
     model: ModelId,
     identity: &Identity,
     agent: AgentSessionSelection,
+    pool: &sqlx::PgPool,
+    session_store: &Arc<PostgresSessionStore>,
 ) -> Result<(SessionId, SessionMeta), HandlerError> {
-    let store = OrchestratorCtx::current().session_store_backend();
-    let pool = OrchestratorCtx::current_graph_pool();
+    let store = session_store.clone();
+    let pool = pool.clone();
     let identity = identity.clone();
     Ok(ctx
         .run(|| async move {
@@ -380,6 +418,7 @@ async fn observe_session_after(
     identity: &Identity,
     session_id: SessionId,
     sequence_num: u64,
+    session_store: &Arc<PostgresSessionStore>,
 ) -> Result<TargetObservation, HandlerError> {
     let status = with_identity_headers(
         ctx.object_client::<SessionClient>(session_id.to_string())
@@ -389,7 +428,13 @@ async fn observe_session_after(
     .call()
     .await?
     .into_inner();
-    let events = load_session_events(ctx, session_id, event_range_after(sequence_num)).await?;
+    let events = load_session_events(
+        ctx,
+        session_id,
+        event_range_after(sequence_num),
+        session_store,
+    )
+    .await?;
     Ok(TargetObservation {
         status,
         latest_response: latest_brain_response(&events),
@@ -401,8 +446,9 @@ async fn load_session_events(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     range: EventRange,
+    session_store: &Arc<PostgresSessionStore>,
 ) -> Result<Vec<EventRecord>, HandlerError> {
-    let store = OrchestratorCtx::current_session_store();
+    let store = session_store.clone();
     Ok(ctx
         .run(|| async move {
             store
@@ -465,8 +511,9 @@ async fn record_target_usage_after(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     sequence_num: &mut u64,
+    session_store: &Arc<PostgresSessionStore>,
 ) -> Result<(), HandlerError> {
-    let store = OrchestratorCtx::current_session_store();
+    let store = session_store.clone();
     let range = event_range_after(*sequence_num);
     let previous_sequence = *sequence_num;
     let observation = ctx
@@ -555,8 +602,9 @@ fn status_for_turn_outcome(outcome: &TurnOutcome) -> SessionStatus {
 async fn start_and_attach_workflow_run(
     ctx: &WorkflowContext<'_>,
     start: WorkflowTrialStart,
+    pool: &sqlx::PgPool,
 ) -> Result<StartedWorkflowRun, HandlerError> {
-    let pool = OrchestratorCtx::current_graph_pool();
+    let pool = pool.clone();
     Ok(ctx
         .run(|| async move {
             let run = workflow_runtime(pool.clone())
@@ -651,7 +699,9 @@ fn procedure_failure_stop() -> WorkflowTrialStop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moa_core::{EventRecord, MessageRole, ModelTier};
+    use moa_core::{
+        types::context::MessageRole, types::events_stream::EventRecord, types::provider::ModelTier,
+    };
 
     #[test]
     fn transcript_from_events_reconstructs_target_conversation_offline() {

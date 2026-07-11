@@ -1,6 +1,7 @@
 //! Restate workflow that admits one live behavior experiment into production paths.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -13,8 +14,10 @@ use moa_core::wire::experiments::{
 };
 use moa_core::wire::turn::QueueMessageRequest;
 use moa_core::{
-    ActionRuleScope, AgentSessionSelection, Channel, ModelId, SessionActorRef, SessionId,
-    SessionMeta, SessionStatus, TenantId,
+    traits::SessionStore, types::action_policy::ActionRuleScope,
+    types::agent::AgentSessionSelection, types::channel::Channel, types::contact::SessionActorRef,
+    types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
+    types::session::SessionMeta, types::session::SessionStatus,
 };
 use moa_experiments::model::{
     ExperimentRunRecord, ExperimentRunStatus, ExperimentTarget, ExperimentTrialRecord,
@@ -24,6 +27,7 @@ use moa_experiments::plan::{ExpandedPlanTrial, expand_plan_trials};
 use moa_experiments::store::ExperimentStore;
 use moa_observability::record_experiment_run;
 use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_session::PostgresSessionStore;
 use moa_skills::procedure::runtime::{ProcedureRuntime, StartProcedureRun};
 use restate_sdk::context::Request;
 use restate_sdk::prelude::*;
@@ -32,7 +36,6 @@ use serde_json::Value;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
 use crate::objects::session::SessionClient;
 use crate::services::session_store::inner::{
     apply_agent_model_policy, create_session_for_identity, resolve_agent_context_for_session,
@@ -109,7 +112,21 @@ pub trait ExperimentRun {
 }
 
 /// Concrete live behavior experiment workflow implementation.
-pub struct ExperimentRunImpl;
+pub struct ExperimentRunImpl {
+    pool: sqlx::PgPool,
+    session_store: Arc<PostgresSessionStore>,
+}
+
+impl ExperimentRunImpl {
+    /// Creates an experiment workflow with its durable product stores.
+    #[must_use]
+    pub fn new(pool: sqlx::PgPool, session_store: Arc<PostgresSessionStore>) -> Self {
+        Self {
+            pool,
+            session_store,
+        }
+    }
+}
 
 impl ExperimentRun for ExperimentRunImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -132,7 +149,7 @@ impl ExperimentRun for ExperimentRunImpl {
         ctx.set(K_CANCEL_IDENTITY, Json(request.identity.clone()));
         annotate_run_span(&request, None);
 
-        match run_experiment_target(&ctx, request.clone()).await {
+        match run_experiment_target(&ctx, request.clone(), &self.pool, &self.session_store).await {
             Ok(response) => Ok(Json(response)),
             Err(error) => {
                 let message = handler_error_message(&error);
@@ -145,6 +162,7 @@ impl ExperimentRun for ExperimentRunImpl {
                     ExperimentRunStatus::Failed,
                     Some(message),
                     Some(failed_at),
+                    &self.pool,
                 )
                 .await
                 {
@@ -171,9 +189,14 @@ impl ExperimentRun for ExperimentRunImpl {
         if request.run_uid.to_string() != ctx.key() {
             return Err(TerminalError::new_with_code(404, "experiment run id mismatch").into());
         }
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
+        let session_store = self.session_store.clone();
         Ok(ctx
-            .run(|| async move { status_response(pool, request).await.map(Json::from) })
+            .run(|| async move {
+                status_response(pool, session_store, request)
+                    .await
+                    .map(Json::from)
+            })
             .name("experiment_run_status")
             .await?)
     }
@@ -194,7 +217,7 @@ impl ExperimentRun for ExperimentRunImpl {
         // Plan runs fan cancellation out to every active trial workflow so their
         // own child targets stop even while the main run loop is blocked waiting
         // on a child completion signal.
-        fan_out_cancellation_to_active_trials(&ctx, reason).await?;
+        fan_out_cancellation_to_active_trials(&ctx, reason, &self.pool).await?;
         Ok(())
     }
 }
@@ -207,6 +230,7 @@ impl ExperimentRun for ExperimentRunImpl {
 async fn fan_out_cancellation_to_active_trials(
     ctx: &SharedWorkflowContext<'_>,
     reason: String,
+    pool: &sqlx::PgPool,
 ) -> Result<(), HandlerError> {
     let Some(run_uid) = ctx
         .get::<Json<Uuid>>(K_RUN_UID)
@@ -222,7 +246,7 @@ async fn fan_out_cancellation_to_active_trials(
     else {
         return Ok(());
     };
-    for trial_key in load_active_trial_keys(ctx, tenant_id, run_uid).await? {
+    for trial_key in load_active_trial_keys(ctx, tenant_id, run_uid, pool).await? {
         ctx.workflow_client::<ExperimentTrialRunClient>(trial_workflow_key(run_uid, &trial_key))
             .request_cancel(Json::from(reason.clone()))
             .send();
@@ -235,8 +259,9 @@ async fn load_active_trial_keys(
     ctx: &SharedWorkflowContext<'_>,
     tenant_id: TenantId,
     run_uid: Uuid,
+    pool: &sqlx::PgPool,
 ) -> Result<Vec<String>, HandlerError> {
-    let pool = OrchestratorCtx::current_graph_pool();
+    let pool = pool.clone();
     let scope = tenant_scope(tenant_id);
     Ok(ctx
         .run(|| async move {
@@ -259,9 +284,11 @@ async fn load_active_trial_keys(
 async fn run_experiment_target(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunWorkflowRequest,
+    pool: &sqlx::PgPool,
+    session_store: &Arc<PostgresSessionStore>,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
     if let Some(plan_revision_uid) = request.plan_revision_uid {
-        return run_experiment_plan(ctx, request, plan_revision_uid).await;
+        return run_experiment_plan(ctx, request, plan_revision_uid, pool, session_store).await;
     }
 
     match parse_payload::<ExperimentTarget>("target", request.target.clone())? {
@@ -273,7 +300,18 @@ async fn run_experiment_target(
             attachments,
         } => {
             annotate_run_span(&request, Some(ExperimentTargetKind::AgentLoop));
-            run_agent_loop_target(ctx, request, prompt, session_id, agent, model, attachments).await
+            run_agent_loop_target(
+                ctx,
+                request,
+                prompt,
+                session_id,
+                agent,
+                model,
+                attachments,
+                pool,
+                session_store,
+            )
+            .await
         }
         ExperimentTarget::Procedure {
             procedure_ref,
@@ -289,6 +327,8 @@ async fn run_experiment_target(
                 input,
                 session_id,
                 idempotency_key,
+                pool,
+                session_store,
             )
             .await
         }
@@ -302,8 +342,9 @@ async fn persist_run_status(
     status: ExperimentRunStatus,
     error: Option<String>,
     completed_at: Option<chrono::DateTime<Utc>>,
+    pool: &sqlx::PgPool,
 ) -> Result<(), HandlerError> {
-    let pool = OrchestratorCtx::current_graph_pool();
+    let pool = pool.clone();
     let scope = tenant_scope(tenant_id);
     ctx.run(|| async move {
         update_run_status(pool, scope, run_uid, status, error, completed_at).await?;
@@ -319,8 +360,9 @@ async fn persist_attached_session(
     scope: ActionRuleScope,
     run_uid: Uuid,
     session_id: SessionId,
+    pool: &sqlx::PgPool,
 ) -> Result<(), HandlerError> {
-    let pool = OrchestratorCtx::current_graph_pool();
+    let pool = pool.clone();
     ctx.run(|| async move {
         attach_session(pool, scope, run_uid, session_id).await?;
         Ok::<_, HandlerError>(Json::from(()))

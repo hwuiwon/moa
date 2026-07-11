@@ -50,7 +50,7 @@ jobs:
         run: cargo test -p moa-eval --test long_conversation_smoke_eval --locked -- --ignored
 
       - name: Check long-conversation budgets
-        run: cargo run -p xtask --release -- check-eval-budgets --suite long_conversation --max-regression-pct 5
+        run: cargo run -p xtask --release --features eval-tools -- check-eval-budgets --suite long_conversation --max-regression-pct 5
 
       - name: Upload nightly score cards
         if: always()
@@ -98,14 +98,14 @@ jobs:
           cache-on-failure: true
 
       - name: Generate natural memory corpus
-        run: cargo run -p xtask --release -- generate-memory-eval-corpus --profile pr --transcript-style natural --seed 1 --seed 2 --seed 3 --output target/memory-eval/pr-natural
+        run: cargo run -p xtask --release --features eval-tools -- generate-memory-eval-corpus --profile pr --transcript-style natural --seed 1 --seed 2 --seed 3 --output target/memory-eval/pr-natural
 
       - name: Run recorded natural memory eval
-        run: cargo run -p xtask --release -- run-memory-retrieval-eval --corpus target/memory-eval/pr-natural --extractor recorded --output target/memory-eval/natural-recorded.json
+        run: cargo run -p xtask --release --features eval-tools -- run-memory-retrieval-eval --corpus target/memory-eval/pr-natural --extractor recorded --output target/memory-eval/natural-recorded.json
 
       - name: Check natural memory floors
         run: |
-          cargo run -p xtask --release -- check-eval-budgets --suite memory_retrieval \
+          cargo run -p xtask --release --features eval-tools -- check-eval-budgets --suite memory_retrieval \
             --memory-eval-report target/memory-eval/natural-recorded.json \
             --min-metric ingestion_coverage=0.85 \
             --min-metric scope_match_rate=0.90 \

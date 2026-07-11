@@ -4,14 +4,17 @@ use std::sync::Arc;
 
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::RlsContext;
 use moa_core::traits::{Identity, IdentityType};
+use moa_core::types::memory::RlsContext;
 use moa_core::wire::admin::{
     CheckpointCleanupResponse, CheckpointCreateRequest, CheckpointCreateResponse,
     CheckpointListResponse, CheckpointRollbackRequest, CheckpointRollbackResponse,
     VectorPromoteRequest, VectorPromotionResponse, VectorPromotionUpdateRequest,
 };
-use moa_core::{BranchManager, StoragePartitionId, TenantId, WORKSPACE_ID};
+use moa_core::{
+    WORKSPACE_ID, config::MoaConfig, traits::BranchManager, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId,
+};
 use moa_memory_vector::{
     PromotionOptions, PromotionReport, TurbopufferStore, VectorPartitionPromotion,
     VectorStoreFactory, finalize_promotion, rollback_promotion,
@@ -19,7 +22,6 @@ use moa_memory_vector::{
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 
-use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{
     authorize_tenant, require_fga_client, require_identity, translate_authz_error,
@@ -66,8 +68,19 @@ pub trait AdminMaintenance {
 }
 
 /// Concrete administrative maintenance implementation.
-#[derive(Clone, Default)]
-pub struct AdminMaintenanceImpl;
+#[derive(Clone)]
+pub struct AdminMaintenanceImpl {
+    pool: sqlx::PgPool,
+    config: Arc<MoaConfig>,
+}
+
+impl AdminMaintenanceImpl {
+    /// Creates the maintenance adapter with its storage and backend configuration.
+    #[must_use]
+    pub fn new(pool: sqlx::PgPool, config: Arc<MoaConfig>) -> Self {
+        Self { pool, config }
+    }
+}
 
 impl AdminMaintenance for AdminMaintenanceImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -79,9 +92,8 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         annotate_restate_handler_span("AdminMaintenance", "promote_tenant_vector");
         let request = request.into_inner();
         authorize_tenant_admin_for_tenant(&ctx, request.tenant_id).await?;
-        let runtime = OrchestratorCtx::current();
-        let pool = runtime.graph_pool();
-        let config = runtime.config();
+        let pool = self.pool.clone();
+        let config = self.config.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -129,7 +141,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         let request = request.into_inner();
         authorize_tenant_admin_for_tenant(&ctx, request.tenant_id).await?;
         validate_promotion_action(&request.action, "rollback")?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -158,7 +170,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         let request = request.into_inner();
         authorize_tenant_admin_for_tenant(&ctx, request.tenant_id).await?;
         validate_promotion_action(&request.action, "finalize")?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -186,7 +198,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         annotate_restate_handler_span("AdminMaintenance", "checkpoint_create");
         authorize_platform_maintenance(&ctx).await?;
         let request = request.into_inner();
-        let config = OrchestratorCtx::current_config().clone();
+        let config = self.config.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -210,7 +222,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
     ) -> Result<Json<CheckpointListResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "checkpoint_list");
         authorize_platform_maintenance(&ctx).await?;
-        let config = OrchestratorCtx::current_config().clone();
+        let config = self.config.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -235,7 +247,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         annotate_restate_handler_span("AdminMaintenance", "checkpoint_rollback");
         authorize_platform_maintenance(&ctx).await?;
         let request = request.into_inner();
-        let config = OrchestratorCtx::current_config().clone();
+        let config = self.config.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -271,7 +283,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
     ) -> Result<Json<CheckpointCleanupResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "checkpoint_cleanup");
         authorize_platform_maintenance(&ctx).await?;
-        let config = OrchestratorCtx::current_config().clone();
+        let config = self.config.clone();
 
         Ok(ctx
             .run(|| async move {

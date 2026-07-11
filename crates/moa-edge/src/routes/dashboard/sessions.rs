@@ -8,7 +8,11 @@ use axum::response::{IntoResponse, Response};
 use base64::{Engine as _, engine::general_purpose};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::{Channel, ContactId, EventType, SessionId, SessionStatus, SessionSummary, TenantId};
+use moa_core::{
+    events::EventType, types::channel::Channel, types::contact::ContactId,
+    types::identifiers::SessionId, types::identifiers::TenantId, types::session::SessionStatus,
+    types::session::SessionSummary,
+};
 use moa_session::store::{
     DashboardEventCursor, DashboardEventPageRequest, DashboardEventTimelineItem,
     DashboardSessionListCursor, DashboardSessionListRequest,

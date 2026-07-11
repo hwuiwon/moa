@@ -3,8 +3,11 @@
 //! These collapse per-file copies of the same database, scope, JSON, and
 //! completion-request boilerplate into one place.
 
-use moa_core::{ActionRuleScope, MoaError, Result, RlsContext, TenantId};
-use moa_core::{CompletionRequest, ContextMessage};
+use moa_core::{
+    error::MoaError, error::Result, types::action_policy::ActionRuleScope,
+    types::identifiers::TenantId, types::memory::RlsContext,
+};
+use moa_core::{types::completion::CompletionRequest, types::context::ContextMessage};
 use serde_json::Value;
 use sqlx::PgConnection;
 

@@ -1,6 +1,6 @@
 //! Lexical lookup over the `moa.node_index` sidecar.
 
-use moa_core::RlsContext;
+use moa_core::types::memory::RlsContext;
 use moa_db::ScopedConn;
 use sqlx::PgPool;
 

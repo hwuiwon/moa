@@ -17,7 +17,8 @@ messages, observe session events, and show action-review state.
 
 ## Message Normalization
 
-Messaging channels normalize inbound traffic into the shared channel DTOs in `moa-core`:
+Messaging channels normalize inbound traffic into category-owned shared DTOs,
+primarily `moa_core::types::channel` and `moa_core::types::contact`:
 
 - channel
 - channel actor and optional channel account or MOA contact link
@@ -68,11 +69,16 @@ token, and calls `Contacts/promote_session`. Verification can deliver OTP codes
 only to email and phone contact points today. Email points use the
 Postmark-backed email channel; phone points use the Twilio-backed SMS channel.
 Verified email and SMS contact points receive channel accounts that can be used
-as delivery routes. If provider delivery fails, the service consumes the
-challenge before returning the error so an unsent code cannot later promote the
-contact. Promotion updates the session contact to the canonical verified
-contact. Contact memory remains contact-local: the promoted session does not
-inherit tenant memory or any other contact's memory by default.
+as delivery routes. If provider delivery fails, the service attempts one
+compensating challenge consume before returning the error; compensation
+failures are observable. Promotion updates the session contact to the canonical
+verified contact. Contact memory remains contact-local: the promoted session
+does not inherit tenant memory or any other contact's memory by default.
+
+`ContactVerificationService` owns the persist/deliver/consume sequence. It
+depends on the narrow `ContactOtpDelivery` port for provider delivery, so
+contact persistence does not depend on a concrete messaging provider and an
+undelivered challenge triggers one observable compensating consume attempt.
 
 ## Action Reviews
 
@@ -184,9 +190,11 @@ cluster rule book and per-scope counters that back this admission control.
 ## Messaging Adapters
 
 `moa-messaging` owns messaging adapters, renderers, and channel-neutral
-delivery helpers. The current conversation adapter is Slack; it converts Slack
-messages into the shared command/event model and renders outbound Slack content
-as plain text or Markdown, including action-review notifications. Interactive
+delivery helpers. `SlackAdapter` is the public Slack conversation seam; its
+adapter, inbound mapping, chunking, reference, and error concerns are split
+into Slack-owned modules rather than a new provider-neutral framework. It
+converts Slack messages into the shared command/event model and renders
+outbound Slack content as plain text or Markdown, including action-review notifications. Interactive
 Slack controls are intentionally out of scope; action-review decisions happen
 through the durable admin/API review surface. The crate also owns outbound
 notification connectors such as Postmark email and Twilio SMS, plus a delivery

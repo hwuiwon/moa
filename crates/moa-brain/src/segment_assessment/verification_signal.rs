@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use moa_core::{Event, EventRecord, ToolCallId};
+use moa_core::{events::Event, types::events_stream::EventRecord, types::identifiers::ToolCallId};
 
 use super::scorer::AssessmentOverride;
 
@@ -166,7 +166,10 @@ mod tests {
     use std::time::Duration;
 
     use chrono::Utc;
-    use moa_core::{Event, EventRecord, SessionId, ToolCallId};
+    use moa_core::{
+        events::Event, types::events_stream::EventRecord, types::identifiers::SessionId,
+        types::identifiers::ToolCallId,
+    };
     use serde_json::json;
     use uuid::Uuid;
 
@@ -205,7 +208,7 @@ mod tests {
                 Event::ToolResult {
                     tool_id,
                     provider_tool_use_id: None,
-                    output: moa_core::ToolOutput::from_process(
+                    output: moa_core::types::tools::ToolOutput::from_process(
                         String::new(),
                         String::new(),
                         if success { 0 } else { 1 },

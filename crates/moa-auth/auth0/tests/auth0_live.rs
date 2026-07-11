@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use moa_auth_providers_auth0::Auth0AuthProvider;
-use moa_core::TenantId;
 use moa_core::traits::{AuthError, AuthProvider, Credential, IdentityType};
+use moa_core::types::identifiers::TenantId;
 use uuid::Uuid;
 
 mod support;

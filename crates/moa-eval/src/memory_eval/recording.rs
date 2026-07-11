@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use moa_core::MoaConfig;
 use moa_core::config::MemoryExtractionConfig;
+use moa_core::config::MoaConfig;
 use moa_memory_graph::NodeIndexRow;
 use moa_memory_ingest::{
     COMPATIBLE_PROMPT_VERSIONS, EXTRACTION_PROMPT_VERSION, EntityMergeFixtureRecord,
@@ -20,10 +20,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 
-use super::runner::{
-    IsolatedEvalStore, LoadedMemoryEvalCorpus, cached_embedding_provider_for_corpus,
-    cleanup_eval_graph_rows,
-};
+use super::runner::store::{IsolatedEvalStore, LoadedMemoryEvalCorpus, cleanup_eval_graph_rows};
+use super::runner::validation::cached_embedding_provider_for_corpus;
 use super::{
     LedgerFact, SyntheticSession, read_ledger_jsonl, read_manifest_json, read_probes_jsonl,
     read_sessions_jsonl, validate_corpus,
@@ -338,7 +336,7 @@ pub async fn record_memory_merges(
         .clone()
         .unwrap_or_else(|| default_extractions_path(&corpus.manifest.corpus_id));
     let extraction_remediation = format!(
-        "cargo run -p xtask -- record-memory-extractions --corpus {} --output {}",
+        "cargo run -p xtask --features eval-tools -- record-memory-extractions --corpus {} --output {}",
         options.corpus_dir.display(),
         extraction_path.display()
     );

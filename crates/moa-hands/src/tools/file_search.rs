@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use globset::{Glob, GlobMatcher};
-use moa_core::{Result, ToolContent, ToolOutput};
+use moa_core::{error::Result, types::tools::ToolContent, types::tools::ToolOutput};
 use serde::Deserialize;
 use tokio::fs;
 use tokio_util::sync::CancellationToken;
@@ -90,7 +90,7 @@ pub async fn execute(
 ) -> Result<ToolOutput> {
     let params: FileSearchInput = serde_json::from_str(input)?;
     let matcher = Glob::new(&params.pattern)
-        .map_err(|error| moa_core::MoaError::ValidationError(error.to_string()))?
+        .map_err(|error| moa_core::error::MoaError::ValidationError(error.to_string()))?
         .compile_matcher();
     let mut matches = Vec::new();
     let hit_limit = collect_matches(

@@ -4,10 +4,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_core::{
-    ActionClass, ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, BuiltInTool,
-    CloudHandsConfig, IdempotencyClass, MoaConfig, MoaError, ModelId, Result, RiskLevel,
-    SessionMeta, TenantId, ToolContext, ToolDiffStrategy, ToolInputShape, ToolInvocation,
-    ToolOutput, ToolPolicySpec, UserId,
+    config::CloudHandsConfig, config::MoaConfig, error::MoaError, error::Result,
+    traits::BuiltInTool, traits::ToolContext, types::action_policy::ActionClass,
+    types::action_policy::ActionPolicyEffect, types::action_policy::ActionPolicyRule,
+    types::action_policy::ActionRuleScope, types::action_policy::RiskLevel,
+    types::completion::ToolInvocation, types::identifiers::ModelId, types::identifiers::TenantId,
+    types::identifiers::UserId, types::session::SessionMeta, types::tools::IdempotencyClass,
+    types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolOutput,
+    types::tools::ToolPolicySpec,
 };
 use moa_hands::{McpDiscoveredTool, ToolRegistry, ToolRouter};
 use moa_security::ActionPolicyRuleStore;

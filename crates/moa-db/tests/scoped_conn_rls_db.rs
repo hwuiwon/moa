@@ -8,7 +8,7 @@
 //! Requires a reachable Postgres (`MOA_DATABASE_URL`, else the compose default);
 //! no migrations or schema are needed because custom GUCs are session-scoped.
 
-use moa_core::{RlsContext, TenantId};
+use moa_core::{types::identifiers::TenantId, types::memory::RlsContext};
 use moa_db::ScopedConn;
 use sqlx::postgres::PgPoolOptions;
 

@@ -8,11 +8,11 @@ use moa_brain::{
     TurnResult, pipeline::history::HistoryCompiler, run_brain_turn, run_streamed_turn,
 };
 use moa_core::{
-    ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, CompletionContent, CompletionRequest,
-    CompletionResponse, CompletionStream, Event, EventRange, EventRecord, EventType, LLMProvider,
-    MoaConfig, ModelCapabilities, Result, RuntimeEvent, SessionActorRef, SessionId, SessionMeta,
-    SessionStore, StopReason, TokenPricing, ToolCallContent, ToolCallFormat, ToolInvocation,
-    UserId,
+    types::action_policy::ActionPolicyEffect, types::action_policy::ActionPolicyRule, types::action_policy::ActionRuleScope, types::completion::CompletionContent, types::completion::CompletionRequest,
+    types::completion::CompletionResponse, types::completion::CompletionStream, events::Event, types::events_stream::EventRange, types::events_stream::EventRecord, events::EventType, traits::LLMProvider,
+    config::MoaConfig, types::model::ModelCapabilities, error::Result, types::runtime_events::RuntimeEvent, types::contact::SessionActorRef, types::identifiers::SessionId, types::session::SessionMeta,
+    traits::SessionStore, types::completion::StopReason, types::model::TokenPricing, types::completion::ToolCallContent, types::model::ToolCallFormat, types::completion::ToolInvocation,
+    types::identifiers::UserId,
 };
 use moa_hands::ToolRouter;
 use moa_security::ActionPolicyRuleStore;
@@ -35,7 +35,7 @@ impl LLMProvider for MockLlmProvider {
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
-            model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
+            model_id: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -57,9 +57,9 @@ impl LLMProvider for MockLlmProvider {
     async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
         Ok(CompletionStream::from_response(CompletionResponse {
             text: "Hi there".to_string(),
-            content: vec![moa_core::CompletionContent::Text("Hi there".to_string())],
+            content: vec![moa_core::types::completion::CompletionContent::Text("Hi there".to_string())],
             stop_reason: StopReason::EndTurn,
-            model: moa_core::ModelId::new("claude-sonnet-4-6"),
+            model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
             usage: token_usage(32, 8),
             duration_ms: 25,
             thought_signature: None,
@@ -96,9 +96,9 @@ impl LLMProvider for CapturingTextLlmProvider {
         self.requests.lock().await.push(request);
         Ok(CompletionStream::from_response(CompletionResponse {
             text: self.text.clone(),
-            content: vec![moa_core::CompletionContent::Text(self.text.clone())],
+            content: vec![moa_core::types::completion::CompletionContent::Text(self.text.clone())],
             stop_reason: StopReason::EndTurn,
-            model: moa_core::ModelId::new("claude-sonnet-4-6"),
+            model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
             usage: token_usage(32, 8),
             duration_ms: 25,
             thought_signature: None,
@@ -119,7 +119,7 @@ impl LLMProvider for ToolLoopLlmProvider {
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
-            model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
+            model_id: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -152,7 +152,7 @@ impl LLMProvider for ToolLoopLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                 usage: token_usage(12, 5),
                 duration_ms: 10,
                 thought_signature: None,
@@ -170,7 +170,7 @@ impl LLMProvider for ToolLoopLlmProvider {
                     "Tool said hello from tool".to_string(),
                 )],
                 stop_reason: StopReason::EndTurn,
-                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                 usage: token_usage(20, 7),
                 duration_ms: 12,
                 thought_signature: None,
@@ -230,7 +230,7 @@ impl LLMProvider for PolicyBlockedToolLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                 usage: token_usage(12, 5),
                 duration_ms: 10,
                 thought_signature: None,
@@ -249,7 +249,7 @@ impl LLMProvider for PolicyBlockedToolLlmProvider {
                 text: self.final_text.to_string(),
                 content: vec![CompletionContent::Text(self.final_text.to_string())],
                 stop_reason: StopReason::EndTurn,
-                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                 usage: token_usage(16, 6),
                 duration_ms: 10,
                 thought_signature: None,
@@ -273,7 +273,7 @@ impl LLMProvider for LargeToolOutputLlmProvider {
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
-            model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
+            model_id: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -308,7 +308,7 @@ impl LLMProvider for LargeToolOutputLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                 usage: token_usage(14, 6),
                 duration_ms: 10,
                 thought_signature: None,
@@ -327,7 +327,7 @@ impl LLMProvider for LargeToolOutputLlmProvider {
                     "Large tool output handled".to_string(),
                 )],
                 stop_reason: StopReason::EndTurn,
-                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                 usage: token_usage(18, 5),
                 duration_ms: 11,
                 thought_signature: None,
@@ -351,7 +351,7 @@ impl LLMProvider for OpenAiToolLoopLlmProvider {
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
-            model_id: moa_core::ModelId::new("gpt-5.4"),
+            model_id: moa_core::types::identifiers::ModelId::new("gpt-5.4"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -384,14 +384,14 @@ impl LLMProvider for OpenAiToolLoopLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: moa_core::ModelId::new("gpt-5.4"),
+                model: moa_core::types::identifiers::ModelId::new("gpt-5.4"),
                 usage: token_usage(12, 5),
                 duration_ms: 10,
                 thought_signature: None,
             }
         } else {
             let tool_result = request.messages.iter().find(|message| {
-                message.role == moa_core::MessageRole::Tool
+                message.role == moa_core::types::context::MessageRole::Tool
                     && message.tool_use_id.as_deref() == Some("fc_action_1")
             });
             assert!(
@@ -409,7 +409,7 @@ impl LLMProvider for OpenAiToolLoopLlmProvider {
                 text: "Tool completed".to_string(),
                 content: vec![CompletionContent::Text("Tool completed".to_string())],
                 stop_reason: StopReason::EndTurn,
-                model: moa_core::ModelId::new("gpt-5.4"),
+                model: moa_core::types::identifiers::ModelId::new("gpt-5.4"),
                 usage: token_usage(20, 7),
                 duration_ms: 12,
                 thought_signature: None,
@@ -433,7 +433,7 @@ impl LLMProvider for OpenAiFailedReadLoopLlmProvider {
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
-            model_id: moa_core::ModelId::new("gpt-5.4"),
+            model_id: moa_core::types::identifiers::ModelId::new("gpt-5.4"),
             context_window: 200_000,
             max_output: 8_192,
             supports_tools: true,
@@ -466,7 +466,7 @@ impl LLMProvider for OpenAiFailedReadLoopLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: moa_core::ModelId::new("gpt-5.4"),
+                model: moa_core::types::identifiers::ModelId::new("gpt-5.4"),
                 usage: token_usage(12, 5),
                 duration_ms: 10,
                 thought_signature: None,
@@ -484,7 +484,7 @@ impl LLMProvider for OpenAiFailedReadLoopLlmProvider {
             );
             assert!(
                 request.messages.iter().any(|message| {
-                    message.role == moa_core::MessageRole::Tool
+                    message.role == moa_core::types::context::MessageRole::Tool
                         && message.tool_use_id.as_deref() == Some("fc_failed_read_1")
                         && message.content.contains("path traversal")
                 }),
@@ -496,7 +496,7 @@ impl LLMProvider for OpenAiFailedReadLoopLlmProvider {
                     "Read failed as expected".to_string(),
                 )],
                 stop_reason: StopReason::EndTurn,
-                model: moa_core::ModelId::new("gpt-5.4"),
+                model: moa_core::types::identifiers::ModelId::new("gpt-5.4"),
                 usage: token_usage(20, 7),
                 duration_ms: 12,
                 thought_signature: None,
@@ -528,7 +528,7 @@ impl LLMProvider for CanaryLeakLlmProvider {
             let canary = request
                 .messages
                 .iter()
-                .filter(|message| message.role == moa_core::MessageRole::System)
+                .filter(|message| message.role == moa_core::types::context::MessageRole::System)
                 .find_map(|message| {
                     message.content.split_whitespace().find_map(|token| {
                         token
@@ -548,7 +548,7 @@ impl LLMProvider for CanaryLeakLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                 usage: token_usage(20, 4),
                 duration_ms: 10,
                 thought_signature: None,
@@ -556,13 +556,13 @@ impl LLMProvider for CanaryLeakLlmProvider {
         } else {
             assert!(request.messages.iter().any(|message| matches!(
                 message.role,
-                moa_core::MessageRole::System | moa_core::MessageRole::Tool
+                moa_core::types::context::MessageRole::System | moa_core::types::context::MessageRole::Tool
             ) && message.content.contains("canary")));
             CompletionResponse {
                 text: "blocked".to_string(),
                 content: vec![CompletionContent::Text("blocked".to_string())],
                 stop_reason: StopReason::EndTurn,
-                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                 usage: token_usage(16, 2),
                 duration_ms: 8,
                 thought_signature: None,
@@ -602,7 +602,7 @@ impl LLMProvider for MaliciousToolOutputLlmProvider {
                     provider_metadata: None,
                 })],
                 stop_reason: StopReason::ToolUse,
-                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                 usage: token_usage(18, 3),
                 duration_ms: 12,
                 thought_signature: None,
@@ -611,7 +611,7 @@ impl LLMProvider for MaliciousToolOutputLlmProvider {
             let tool_message = request
                 .messages
                 .iter()
-                .find(|message| message.role == moa_core::MessageRole::Tool)
+                .find(|message| message.role == moa_core::types::context::MessageRole::Tool)
                 .expect("missing tool result message");
             assert!(
                 tool_message.content.contains("<untrusted_tool_output>"),
@@ -632,7 +632,7 @@ impl LLMProvider for MaliciousToolOutputLlmProvider {
                 text: "wrapped".to_string(),
                 content: vec![CompletionContent::Text("wrapped".to_string())],
                 stop_reason: StopReason::EndTurn,
-                model: moa_core::ModelId::new("claude-sonnet-4-6"),
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
                 usage: token_usage(22, 5),
                 duration_ms: 11,
                 thought_signature: None,
@@ -666,7 +666,7 @@ impl LLMProvider for ProviderToolResultTurnLlm {
                 CompletionContent::Text("Fresh answer from web search".to_string()),
             ],
             stop_reason: StopReason::EndTurn,
-            model: moa_core::ModelId::new("claude-sonnet-4-6"),
+            model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
             usage: token_usage(8, 5),
             duration_ms: 6,
             thought_signature: None,
@@ -696,7 +696,7 @@ struct StaticActionPolicyRuleStore {
 impl ActionPolicyRuleStore for StaticActionPolicyRuleStore {
     async fn list_action_policy_rules_for_tool(
         &self,
-        tenant_id: &moa_core::TenantId,
+        tenant_id: &moa_core::types::identifiers::TenantId,
         _user_id: &UserId,
         tool: &str,
     ) -> Result<Vec<ActionPolicyRule>> {
@@ -721,7 +721,7 @@ impl ActionPolicyRuleStore for StaticActionPolicyRuleStore {
 
     async fn delete_action_policy_rule(
         &self,
-        _tenant_id: &moa_core::TenantId,
+        _tenant_id: &moa_core::types::identifiers::TenantId,
         _user_id: Option<&UserId>,
         _tool: &str,
         _pattern: &str,
@@ -731,7 +731,7 @@ impl ActionPolicyRuleStore for StaticActionPolicyRuleStore {
 }
 
 fn allow_bash_commands_for_tenant<const N: usize>(
-    tenant_id: moa_core::TenantId,
+    tenant_id: moa_core::types::identifiers::TenantId,
     patterns: [&str; N],
 ) -> Arc<dyn ActionPolicyRuleStore> {
     Arc::new(StaticActionPolicyRuleStore {

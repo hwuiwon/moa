@@ -22,9 +22,12 @@ pub(crate) fn from_db<E: FromStr>(kind: &str, value: &str) -> Result<E> {
 mod tests {
     use super::*;
     use moa_core::{
-        ActionPolicyEffect, ActionRuleScope, AttributionEffect, AttributionSubjectType, Channel,
-        EventType, LearningCandidateStatus, LearningCandidateType, LearningRiskClass,
-        SegmentOutcome, SessionStatus,
+        events::EventType, types::action_policy::ActionPolicyEffect,
+        types::action_policy::ActionRuleScope, types::channel::Channel,
+        types::experience::AttributionEffect, types::experience::AttributionSubjectType,
+        types::experience::LearningCandidateStatus, types::experience::LearningCandidateType,
+        types::experience::LearningRiskClass, types::segment_assessment::SegmentOutcome,
+        types::session::SessionStatus,
     };
 
     #[test]
@@ -77,7 +80,7 @@ mod tests {
         );
         assert_eq!(
             ActionRuleScope::Tenant {
-                tenant_id: moa_core::TenantId::new()
+                tenant_id: moa_core::types::identifiers::TenantId::new()
             }
             .as_str(),
             "tenant"

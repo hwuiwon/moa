@@ -16,7 +16,7 @@ use offline_session_store::{MockSessionStore, session_meta};
 use openai_wiremock::{captured_json_bodies, mount_openai_text};
 
 #[tokio::test]
-async fn offline_brain_turn_returns_response() -> moa_core::Result<()> {
+async fn offline_brain_turn_returns_response() -> moa_core::error::Result<()> {
     let server = MockServer::start().await;
     mount_openai_text(&server, "4", 0).await;
 
@@ -72,7 +72,7 @@ async fn run_brain_turn_emits_brain_response_event() {
         created_by: Some(SessionActorRef::Contact {
             id: test_contact_id(),
         }),
-        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let initial_events = vec![make_event_record(
@@ -129,7 +129,7 @@ async fn run_brain_turn_marks_cache_prefix_reuse_on_second_request() {
         created_by: Some(SessionActorRef::Contact {
             id: test_contact_id(),
         }),
-        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let initial_events = vec![make_event_record(
@@ -182,7 +182,7 @@ async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
         created_by: Some(SessionActorRef::Contact {
             id: test_contact_id(),
         }),
-        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let initial_events = vec![
@@ -199,8 +199,8 @@ async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
             1,
             Event::BrainResponse {
                 text: "Existing reply".to_string(),
-                model: moa_core::ModelId::new("claude-sonnet-4-6"),
-                model_tier: moa_core::ModelTier::Main,
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
+                model_tier: moa_core::types::provider::ModelTier::Main,
                 input_tokens_uncached: 20,
                 input_tokens_cache_write: 0,
                 input_tokens_cache_read: 0,
@@ -221,7 +221,7 @@ async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
         .await
         .expect_err("budget should stop the turn");
     match error {
-        moa_core::MoaError::BudgetExhausted(message) => {
+        moa_core::error::MoaError::BudgetExhausted(message) => {
             assert!(message.contains("Daily tenant budget exhausted"));
         }
         other => panic!("expected budget exhaustion, got {other:?}"),
@@ -252,7 +252,7 @@ async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
         created_by: Some(SessionActorRef::Contact {
             id: test_contact_id(),
         }),
-        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let initial_events = vec![
@@ -269,8 +269,8 @@ async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
             1,
             Event::BrainResponse {
                 text: "Existing reply".to_string(),
-                model: moa_core::ModelId::new("claude-sonnet-4-6"),
-                model_tier: moa_core::ModelTier::Main,
+                model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
+                model_tier: moa_core::types::provider::ModelTier::Main,
                 input_tokens_uncached: 20,
                 input_tokens_cache_write: 0,
                 input_tokens_cache_read: 0,
@@ -304,7 +304,7 @@ async fn run_brain_turn_executes_tool_in_auto_mode() {
         created_by: Some(SessionActorRef::Contact {
             id: test_contact_id(),
         }),
-        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let initial_events = vec![make_event_record(
@@ -371,7 +371,7 @@ async fn run_brain_turn_preserves_openai_function_call_id_after_auto_mode_tool_e
         created_by: Some(SessionActorRef::Contact {
             id: test_contact_id(),
         }),
-        model: moa_core::ModelId::new("gpt-5.4"),
+        model: moa_core::types::identifiers::ModelId::new("gpt-5.4"),
         ..SessionMeta::default()
     };
     let initial_events = vec![make_event_record(
@@ -436,7 +436,7 @@ async fn run_brain_turn_persists_truncated_tool_result_metadata() {
         created_by: Some(SessionActorRef::Contact {
             id: test_contact_id(),
         }),
-        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let initial_events = vec![make_event_record(
@@ -504,7 +504,7 @@ async fn run_brain_turn_records_tool_call_before_auto_allowed_tool_error() {
         created_by: Some(SessionActorRef::Contact {
             id: test_contact_id(),
         }),
-        model: moa_core::ModelId::new("gpt-5.4"),
+        model: moa_core::types::identifiers::ModelId::new("gpt-5.4"),
         ..SessionMeta::default()
     };
     let initial_events = vec![make_event_record(
@@ -595,7 +595,8 @@ async fn run_brain_turn_denied_action_policy_skips_tool_body_and_records_tool_er
 async fn run_brain_turn_admin_review_action_policy_skips_tool_body_and_records_tool_error() {
     // Pins: local brain harnesses cannot queue durable admin review, so AdminReview is non-executing.
     let mut config = MoaConfig::default();
-    config.permissions.default_effect = moa_core::ActionPolicyEffect::AdminReview;
+    config.permissions.default_effect =
+        moa_core::types::action_policy::ActionPolicyEffect::AdminReview;
     let events = run_policy_blocked_file_write_turn(
         config,
         "policy_review_write_1",
@@ -623,7 +624,7 @@ async fn run_policy_blocked_file_write_turn(
         created_by: Some(SessionActorRef::Contact {
             id: test_contact_id(),
         }),
-        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let session_id = session.id;
@@ -731,7 +732,7 @@ async fn streamed_turn_provider_tool_result_surfaces_notice_without_router_execu
         created_by: Some(SessionActorRef::Contact {
             id: test_contact_id(),
         }),
-        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let session_id = session.id;
@@ -811,7 +812,7 @@ async fn canary_leaks_in_tool_input_are_detected_and_blocked() {
         created_by: Some(SessionActorRef::Contact {
             id: test_contact_id(),
         }),
-        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let session_id = session.id;
@@ -821,7 +822,7 @@ async fn canary_leaks_in_tool_input_are_detected_and_blocked() {
             id: uuid::Uuid::now_v7(),
             session_id,
             sequence_num: 0,
-            event_type: moa_core::EventType::UserMessage,
+            event_type: moa_core::events::EventType::UserMessage,
             event: Event::UserMessage {
                 text: "Read the skill".to_string(),
                 attachments: Vec::new(),
@@ -879,7 +880,7 @@ async fn tool_content_blocks_wrap_malicious_tool_results_as_untrusted_content() 
         created_by: Some(SessionActorRef::Contact {
             id: test_contact_id(),
         }),
-        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let session_id = session.id;
@@ -889,7 +890,7 @@ async fn tool_content_blocks_wrap_malicious_tool_results_as_untrusted_content() 
             id: uuid::Uuid::now_v7(),
             session_id,
             sequence_num: 0,
-            event_type: moa_core::EventType::UserMessage,
+            event_type: moa_core::events::EventType::UserMessage,
             event: Event::UserMessage {
                 text: "Read the unsafe skill".to_string(),
                 attachments: Vec::new(),
@@ -937,7 +938,7 @@ async fn tool_content_blocks_wrap_malicious_tool_results_as_untrusted_content() 
     let provider_tool_message = requests[1]
         .messages
         .iter()
-        .find(|message| message.role == moa_core::MessageRole::Tool)
+        .find(|message| message.role == moa_core::types::context::MessageRole::Tool)
         .expect("second provider request should include the tool result");
     let provider_blocks = provider_tool_message
         .content_blocks
@@ -945,8 +946,8 @@ async fn tool_content_blocks_wrap_malicious_tool_results_as_untrusted_content() 
         .expect("second provider request should carry native tool-result content blocks");
     assert_eq!(provider_blocks.len(), 1);
     let provider_block_text = match &provider_blocks[0] {
-        moa_core::ToolContent::Text { text } => text,
-        moa_core::ToolContent::Json { .. } => {
+        moa_core::types::tools::ToolContent::Text { text } => text,
+        moa_core::types::tools::ToolContent::Json { .. } => {
             panic!("provider request should serialize tool output into wrapped text")
         }
     };
@@ -972,7 +973,7 @@ async fn tool_content_blocks_wrap_malicious_tool_results_as_untrusted_content() 
     assert!(combined.contains("</untrusted_tool_output>"));
     let tool_message = messages
         .iter()
-        .find(|message| message.role == moa_core::MessageRole::Tool)
+        .find(|message| message.role == moa_core::types::context::MessageRole::Tool)
         .expect("compiled history should include the tool result");
     let blocks = tool_message
         .content_blocks
@@ -980,8 +981,8 @@ async fn tool_content_blocks_wrap_malicious_tool_results_as_untrusted_content() 
         .expect("provider-native replay should include safe content blocks");
     assert_eq!(blocks.len(), 1);
     let block_text = match &blocks[0] {
-        moa_core::ToolContent::Text { text } => text,
-        moa_core::ToolContent::Json { .. } => {
+        moa_core::types::tools::ToolContent::Text { text } => text,
+        moa_core::types::tools::ToolContent::Json { .. } => {
             panic!("tool result replay should serialize JSON/text into wrapped text")
         }
     };
@@ -995,7 +996,7 @@ fn tool_content_blocks_wrap_malicious_tool_errors_as_untrusted_content() {
     // Pins: persisted ToolError events with provider tool-use ids replay as native tool-result
     // blocks, so the block body must be wrapped/escaped just like successful tool output.
     let session = session_meta("tool-error-content-blocks", "claude-sonnet-4-6");
-    let tool_id = moa_core::ToolCallId::new();
+    let tool_id = moa_core::types::identifiers::ToolCallId::new();
     let events = vec![make_event_record(
         &session.id,
         0,
@@ -1016,7 +1017,7 @@ fn tool_content_blocks_wrap_malicious_tool_errors_as_untrusted_content() {
 
     assert_eq!(messages.len(), 1);
     let message = &messages[0];
-    assert_eq!(message.role, moa_core::MessageRole::Tool);
+    assert_eq!(message.role, moa_core::types::context::MessageRole::Tool);
     assert_eq!(message.tool_use_id.as_deref(), Some("toolerr_malicious"));
     let blocks = message
         .content_blocks
@@ -1024,8 +1025,8 @@ fn tool_content_blocks_wrap_malicious_tool_errors_as_untrusted_content() {
         .expect("tool-error replay should include provider-native blocks");
     assert_eq!(blocks.len(), 1);
     let block_text = match &blocks[0] {
-        moa_core::ToolContent::Text { text } => text,
-        moa_core::ToolContent::Json { .. } => {
+        moa_core::types::tools::ToolContent::Text { text } => text,
+        moa_core::types::tools::ToolContent::Json { .. } => {
             panic!("tool-error replay should serialize into wrapped text")
         }
     };
@@ -1042,7 +1043,7 @@ async fn streamed_turn_runtime_matches_buffered_response() {
         created_by: Some(SessionActorRef::Contact {
             id: test_contact_id(),
         }),
-        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
     let session_id = session.id;

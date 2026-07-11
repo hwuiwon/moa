@@ -6,7 +6,10 @@ use moa_artifacts::registry::{
     ArtifactFile, ArtifactRegistry, ArtifactScopeParts, NewPublishedArtifactRevision,
     StoredArtifactRevision, insert_published_revision,
 };
-use moa_core::{ActionRuleScope, MoaError, Result, SkillMetadata, TenantId, UserId};
+use moa_core::{
+    error::MoaError, error::Result, types::action_policy::ActionRuleScope,
+    types::identifiers::TenantId, types::identifiers::UserId, types::memory::SkillMetadata,
+};
 use moa_db::ScopedConn;
 use moa_memory_types::MemoryScope;
 use sqlx::PgPool;

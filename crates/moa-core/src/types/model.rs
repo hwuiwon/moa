@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::ModelId;
+use super::identifiers::ModelId;
 
 /// Provider-specific tool call encoding.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

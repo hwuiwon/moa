@@ -1,6 +1,6 @@
 //! Wiremock offline counterpart for ZeroEntropy embedding provider coverage.
 
-use moa_core::{MoaError, traits::EmbeddingProvider};
+use moa_core::{error::MoaError, traits::EmbeddingProvider};
 use moa_providers::ZeroEntropyEmbedding;
 use serde_json::{Value, json};
 use wiremock::matchers::{body_partial_json, header, method};

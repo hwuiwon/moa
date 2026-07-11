@@ -2,8 +2,11 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    LearningCandidate, LearningCandidateStatus, LearningCandidateType, LearningRiskClass,
-    SessionId, SessionMeta, SkillMetadata, TaskFacetSet, TaskFingerprint, TenantId,
+    types::experience::LearningCandidate, types::experience::LearningCandidateStatus,
+    types::experience::LearningCandidateType, types::experience::LearningRiskClass,
+    types::experience::TaskFacetSet, types::experience::TaskFingerprint,
+    types::identifiers::SessionId, types::identifiers::TenantId, types::memory::SkillMetadata,
+    types::session::SessionMeta,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};

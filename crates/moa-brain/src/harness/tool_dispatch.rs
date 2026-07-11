@@ -4,8 +4,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    ActionPolicyEffect, Event, EventRecord, MoaError, Result, RuntimeEvent, SessionId, SessionMeta,
-    SessionStore, ToolCallContent, ToolCallId, ToolCardStatus, ToolInvocation, ToolUpdate,
+    error::MoaError, error::Result, events::Event, traits::SessionStore,
+    types::action_policy::ActionPolicyEffect, types::completion::ToolCallContent,
+    types::completion::ToolInvocation, types::events_stream::EventRecord,
+    types::identifiers::SessionId, types::identifiers::ToolCallId,
+    types::runtime_events::RuntimeEvent, types::runtime_events::ToolCardStatus,
+    types::runtime_events::ToolUpdate, types::session::SessionMeta,
 };
 use moa_hands::ToolRouter;
 use moa_security::{InputClassification, ToolInputCanaryScreening, inspect_input};
@@ -439,11 +443,14 @@ async fn append_tool_call_event(
     .await
 }
 
-fn format_tool_output(output: &moa_core::ToolOutput) -> String {
+fn format_tool_output(output: &moa_core::types::tools::ToolOutput) -> String {
     output.to_text()
 }
 
-fn summarize_tool_completion(call: &ToolInvocation, output: &moa_core::ToolOutput) -> String {
+fn summarize_tool_completion(
+    call: &ToolInvocation,
+    output: &moa_core::types::tools::ToolOutput,
+) -> String {
     if !output.is_error {
         format!(
             "{} completed in {} ms",
@@ -478,7 +485,7 @@ struct SecuredToolOutput {
 }
 
 fn secure_tool_output(
-    output: &moa_core::ToolOutput,
+    output: &moa_core::types::tools::ToolOutput,
     active_canary: Option<&str>,
 ) -> SecuredToolOutput {
     let formatted = format_tool_output(output);
@@ -540,7 +547,7 @@ fn record_denied_tool_span(call: &ToolInvocation, tool_dispatch_span: Option<&tr
 #[cfg(test)]
 mod tests {
     use super::tool_error_class;
-    use moa_core::MoaError;
+    use moa_core::error::MoaError;
 
     #[test]
     fn tool_error_class_is_stable_and_low_cardinality() {

@@ -4,8 +4,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::RlsContext;
-use moa_core::{ContactId, SessionId, TenantId};
+use moa_core::types::memory::RlsContext;
+use moa_core::{
+    types::contact::ContactId, types::identifiers::SessionId, types::identifiers::TenantId,
+};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
@@ -137,7 +139,7 @@ impl moa_core::traits::EmbeddingProvider for RerankerDefaultEmbedder {
         VECTOR_DIMENSION
     }
 
-    async fn embed(&self, texts: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+    async fn embed(&self, texts: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
         Ok(texts
             .iter()
             .map(|text| deterministic_vector(text))

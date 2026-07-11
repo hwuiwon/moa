@@ -4,8 +4,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, LLMProvider,
-    MoaError, ModelCapabilities, ModelId, Result as MoaResult, StopReason, TokenUsage,
+    error::MoaError, error::Result as MoaResult, traits::LLMProvider,
+    types::completion::CompletionContent, types::completion::CompletionRequest,
+    types::completion::CompletionResponse, types::completion::CompletionStream,
+    types::completion::StopReason, types::completion::TokenUsage, types::identifiers::ModelId,
+    types::model::ModelCapabilities,
 };
 use moa_eval::memory_eval::{
     AnswerJudge, DeterministicJudge, JudgeInput, PairwiseLlmJudge, PairwiseWinner, ProbeType,

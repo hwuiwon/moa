@@ -5,8 +5,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::RlsContext;
-use moa_core::{ContactId, SessionId, TenantId, traits::EmbeddingProvider};
+use moa_core::types::memory::RlsContext;
+use moa_core::{
+    traits::EmbeddingProvider, types::contact::ContactId, types::identifiers::SessionId,
+    types::identifiers::TenantId,
+};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
     GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore,
@@ -40,7 +43,7 @@ impl EmbeddingProvider for MockEmbedder {
         VECTOR_DIMENSION
     }
 
-    async fn embed(&self, texts: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+    async fn embed(&self, texts: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
         Ok(texts
             .iter()
             .map(|text| deterministic_vector(text))

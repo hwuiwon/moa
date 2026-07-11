@@ -4,9 +4,12 @@ use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    Event, EventRecord, ExperienceRecord, ExperienceResource, QueryRewriteResult,
-    SegmentAssessment, SessionMeta, TaskFacetSet, TaskFingerprint, TaskSegment, UserId,
-    WorkingContext,
+    events::Event, types::context::WorkingContext, types::events_stream::EventRecord,
+    types::experience::ExperienceRecord, types::experience::ExperienceResource,
+    types::experience::TaskFacetSet, types::experience::TaskFingerprint,
+    types::identifiers::UserId, types::query_rewrite::QueryRewriteResult,
+    types::segment_assessment::SegmentAssessment, types::segments::TaskSegment,
+    types::session::SessionMeta,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -98,7 +101,10 @@ fn experience_user_id(session: &SessionMeta) -> UserId {
     UserId::new(id)
 }
 
-fn deterministic_experience_id(segment_id: moa_core::SegmentId, extraction_policy: &str) -> Uuid {
+fn deterministic_experience_id(
+    segment_id: moa_core::types::identifiers::SegmentId,
+    extraction_policy: &str,
+) -> Uuid {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"moa:experience-record:v1");
     hasher.update(segment_id.0.as_bytes());
@@ -490,7 +496,9 @@ fn normalized_list(values: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use moa_core::{SegmentId, SessionId, TenantId};
+    use moa_core::{
+        types::identifiers::SegmentId, types::identifiers::SessionId, types::identifiers::TenantId,
+    };
 
     use super::*;
 
@@ -530,9 +538,9 @@ mod tests {
             ..SessionMeta::default()
         };
         let assessment = SegmentAssessment {
-            outcome: moa_core::SegmentOutcome::Resolved,
+            outcome: moa_core::types::segment_assessment::SegmentOutcome::Resolved,
             confidence: 0.9,
-            phase: moa_core::AssessmentPhase::Immediate,
+            phase: moa_core::types::segment_assessment::AssessmentPhase::Immediate,
             evidence: Vec::new(),
             assessed_at: now,
             policy_version: "assessment_v1".to_string(),
@@ -558,9 +566,9 @@ mod tests {
             id: Uuid::now_v7(),
             session_id,
             sequence_num: 0,
-            event_type: moa_core::EventType::ToolCall,
+            event_type: moa_core::events::EventType::ToolCall,
             event: Event::ToolCall {
-                tool_id: moa_core::ToolCallId::new(),
+                tool_id: moa_core::types::identifiers::ToolCallId::new(),
                 provider_tool_use_id: None,
                 provider_thought_signature: None,
                 tool_name: "bash".to_string(),
@@ -576,7 +584,10 @@ mod tests {
         let experience = experience_from_segment(&session, &segment, &events, None, Some(100), now)
             .expect("assessed segment should produce experience");
 
-        assert_eq!(experience.outcome, moa_core::SegmentOutcome::Resolved);
+        assert_eq!(
+            experience.outcome,
+            moa_core::types::segment_assessment::SegmentOutcome::Resolved
+        );
         assert_eq!(experience.task_facets.domain.as_deref(), Some("auth"));
         assert_eq!(
             experience.task_facets.language_or_framework.as_deref(),
@@ -601,9 +612,9 @@ mod tests {
             ..SessionMeta::default()
         };
         let assessment = SegmentAssessment {
-            outcome: moa_core::SegmentOutcome::Partial,
+            outcome: moa_core::types::segment_assessment::SegmentOutcome::Partial,
             confidence: 0.7,
-            phase: moa_core::AssessmentPhase::Immediate,
+            phase: moa_core::types::segment_assessment::AssessmentPhase::Immediate,
             evidence: Vec::new(),
             assessed_at: now,
             policy_version: "assessment_v1".to_string(),

@@ -6,7 +6,10 @@ use moa_artifacts::registry::{
     NewArtifactDraft, NewArtifactFile, NewArtifactNodeRun, NewArtifactRun,
 };
 use moa_artifacts::validation::validate_for_status;
-use moa_core::{ActionRuleScope, ContactId, MoaError, Result, SessionId, TenantId};
+use moa_core::{
+    error::MoaError, error::Result, types::action_policy::ActionRuleScope,
+    types::contact::ContactId, types::identifiers::SessionId, types::identifiers::TenantId,
+};
 use serde_json::json;
 use uuid::Uuid;
 

@@ -5,7 +5,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use globset::Glob;
-use moa_core::{MoaError, Result};
+use moa_core::{error::MoaError, error::Result};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
@@ -295,7 +295,10 @@ mod tests {
     fn container_path_validation_rejects_traversal() {
         let error = resolve_container_workspace_path("/workspace", "../../../etc/passwd")
             .expect_err("traversal should be rejected");
-        assert!(matches!(error, moa_core::MoaError::PermissionDenied(_)));
+        assert!(matches!(
+            error,
+            moa_core::error::MoaError::PermissionDenied(_)
+        ));
     }
 
     #[test]
@@ -309,7 +312,10 @@ mod tests {
     fn container_path_validation_rejects_absolute_paths_outside_workspace() {
         let error = resolve_container_workspace_path("/workspace", "/etc/hosts")
             .expect_err("outside absolute path should be rejected");
-        assert!(matches!(error, moa_core::MoaError::PermissionDenied(_)));
+        assert!(matches!(
+            error,
+            moa_core::error::MoaError::PermissionDenied(_)
+        ));
     }
 
     #[test]

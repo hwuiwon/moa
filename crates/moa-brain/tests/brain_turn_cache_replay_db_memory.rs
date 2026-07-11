@@ -9,10 +9,14 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
-    CompletionRequest, ContactId, ContactRef, ContactVerificationState, Event, EventRange,
-    EventRecord, ModelCapabilities, Result, SessionActorRef, SessionMeta, SessionStore, TenantId,
-    TokenPricing, TokenUsage, ToolCallFormat, ToolOutput, TurnReplayCounters, TurnReplaySnapshot,
-    scope_turn_replay_counters,
+    error::Result, events::Event, session_replay::TurnReplayCounters,
+    session_replay::TurnReplaySnapshot, session_replay::scope_turn_replay_counters,
+    traits::SessionStore, types::completion::CompletionRequest, types::completion::TokenUsage,
+    types::contact::ContactId, types::contact::ContactRef,
+    types::contact::ContactVerificationState, types::contact::SessionActorRef,
+    types::events_stream::EventRange, types::events_stream::EventRecord,
+    types::identifiers::TenantId, types::model::ModelCapabilities, types::model::TokenPricing,
+    types::model::ToolCallFormat, types::session::SessionMeta, types::tools::ToolOutput,
 };
 use moa_hands::ToolRouter;
 use moa_providers::{ScriptedProvider, ScriptedResponse, debug_build_anthropic_request_body};
@@ -40,14 +44,14 @@ async fn allow_cache_replay_bash(
     // This replay test needs the deterministic bash fixture to execute, so it
     // opts into Allow without weakening the production AdminReview default.
     store
-        .upsert_action_policy_rule(moa_core::ActionPolicyRule {
+        .upsert_action_policy_rule(moa_core::types::action_policy::ActionPolicyRule {
             id: uuid::Uuid::now_v7(),
-            scope: moa_core::ActionRuleScope::Tenant { tenant_id },
+            scope: moa_core::types::action_policy::ActionRuleScope::Tenant { tenant_id },
             tool: "bash".to_string(),
             pattern: "python3 -c *".to_string(),
-            effect: moa_core::ActionPolicyEffect::Allow,
+            effect: moa_core::types::action_policy::ActionPolicyEffect::Allow,
             reason: Some("cache replay test bash opt-in".to_string()),
-            created_by: moa_core::UserId::new("cache-replay-test"),
+            created_by: moa_core::types::identifiers::UserId::new("cache-replay-test"),
             created_at: chrono::Utc::now(),
         })
         .await
@@ -83,7 +87,7 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
     .await?;
     tokio::fs::write(workspace.join(".gitignore"), "ignored_dir/\n").await?;
 
-    let mut config = moa_core::MoaConfig::default();
+    let mut config = moa_core::config::MoaConfig::default();
     config.models.main = "claude-sonnet-4-6".to_string();
     config.general.workspace_instructions = Some("Cache integration guidance.\n".repeat(200));
     config.compaction.recent_turns_verbatim = 2;
@@ -130,7 +134,7 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
             query_rewrite_llm_provider: None,
             identity_prompt_override: None,
             tool_schemas: extend_tool_schemas(router.tool_schemas()),
-            lineage: Arc::new(moa_core::NullLineageHandle),
+            lineage: Arc::new(moa_core::traits::NullLineageHandle),
         },
     );
     let mut replay_snapshots = Vec::new();
@@ -351,7 +355,7 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
     let turn_seven_tool_messages = turn_seven_request
         .messages
         .iter()
-        .filter(|message| message.role == moa_core::MessageRole::Tool)
+        .filter(|message| message.role == moa_core::types::context::MessageRole::Tool)
         .collect::<Vec<_>>();
     // Turn 5 re-read the file after turn 4 changed it. Between checkpoints,
     // already-compiled history is append-only: the stale older read keeps its
@@ -483,7 +487,7 @@ fn cached_usage(total_input_tokens: usize, cache_read_tokens: usize) -> TokenUsa
 
 fn scripted_capabilities() -> ModelCapabilities {
     ModelCapabilities {
-        model_id: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model_id: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         context_window: 200_000,
         max_output: 8_192,
         supports_tools: true,
@@ -542,7 +546,7 @@ fn last_user_message(request: &CompletionRequest) -> Option<&str> {
         .messages
         .iter()
         .rev()
-        .find(|message| message.role == moa_core::MessageRole::User)
+        .find(|message| message.role == moa_core::types::context::MessageRole::User)
         .map(|message| message.content.as_str())
 }
 
@@ -559,7 +563,7 @@ fn static_prefix_message_count(request: &CompletionRequest) -> usize {
     request
         .messages
         .iter()
-        .take_while(|message| message.role == moa_core::MessageRole::System)
+        .take_while(|message| message.role == moa_core::types::context::MessageRole::System)
         .count()
 }
 
@@ -612,7 +616,7 @@ struct ToolRun {
 }
 
 fn collect_tool_runs(events: &[EventRecord]) -> Vec<ToolRun> {
-    let mut calls = HashMap::<moa_core::ToolCallId, (String, Value)>::new();
+    let mut calls = HashMap::<moa_core::types::identifiers::ToolCallId, (String, Value)>::new();
     let mut runs = Vec::new();
 
     for record in events {

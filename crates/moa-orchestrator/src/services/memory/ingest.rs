@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use chrono::Utc;
 use moa_core::wire::memory::{MemoryIngestDocument, MemoryIngestRequest, MemoryIngestResponse};
-use moa_core::{ContactId, SessionId};
+use moa_core::{types::contact::ContactId, types::identifiers::SessionId};
 use moa_memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key};
 use moa_observability::record_memory_operation;
 use restate_sdk::prelude::*;
@@ -121,7 +121,7 @@ fn ingest_transcript(source_name: &str, content: &str) -> String {
 /// Derives the synthetic session id for one document-ingestion turn.
 #[must_use]
 pub fn document_ingest_session_id(
-    tenant_id: moa_core::TenantId,
+    tenant_id: moa_core::types::identifiers::TenantId,
     contact_id: Option<ContactId>,
     index: usize,
     document: &MemoryIngestDocument,

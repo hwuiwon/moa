@@ -4,9 +4,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{
-    ActionClass, ActionPolicyEffect, HandHandle, HandProvider, HandSpec, HandStatus,
-    IdempotencyClass, MoaError, Result, RiskLevel, SandboxTier, SessionId, SessionMeta, TenantId,
-    ToolDiffStrategy, ToolFailureClass, ToolInputShape, ToolInvocation, ToolOutput, ToolPolicySpec,
+    error::MoaError, error::Result, error::ToolFailureClass, traits::HandProvider,
+    types::action_policy::ActionClass, types::action_policy::ActionPolicyEffect,
+    types::action_policy::RiskLevel, types::completion::ToolInvocation, types::hands::HandHandle,
+    types::hands::HandSpec, types::hands::HandStatus, types::hands::SandboxTier,
+    types::identifiers::SessionId, types::identifiers::TenantId, types::session::SessionMeta,
+    types::tools::IdempotencyClass, types::tools::ToolDiffStrategy, types::tools::ToolInputShape,
+    types::tools::ToolOutput, types::tools::ToolPolicySpec,
 };
 use serde_json::json;
 
@@ -93,7 +97,7 @@ impl HandProvider for MockHandProvider {
         state
             .classifications
             .pop_front()
-            .unwrap_or_else(|| moa_core::classify_tool_error(error, consecutive_timeouts))
+            .unwrap_or_else(|| moa_core::error::classify_tool_error(error, consecutive_timeouts))
     }
 
     async fn health_check(&self, _handle: &HandHandle) -> Result<bool> {

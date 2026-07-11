@@ -34,5 +34,4 @@ workspace-hack = { workspace = true }
 axum.workspace = true
 moa-test-support.workspace = true
 proptest.workspace = true
-proptest-derive = "0.8"
 tempfile.workspace = true

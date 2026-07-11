@@ -1,6 +1,8 @@
 //! Integration coverage for chunk-provenance columns on retrieval lineage rows.
 
-use moa_core::{ContactId, SessionId, TenantId};
+use moa_core::{
+    types::contact::ContactId, types::identifiers::SessionId, types::identifiers::TenantId,
+};
 use moa_memory_types::MemoryScope;
 use moa_session::testing;
 use sqlx::Row;

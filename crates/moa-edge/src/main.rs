@@ -40,7 +40,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let moa_config = moa_core::MoaConfig::load_from_env().context("load MOA config")?;
+    let moa_config = moa_core::config::MoaConfig::load_from_env().context("load MOA config")?;
     let mut telemetry_config = moa_config.clone();
     if telemetry_config.observability.service_name == "moa" {
         telemetry_config.observability.service_name = "moa-edge".to_string();
@@ -113,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_fga_client(config: &moa_core::MoaConfig) -> anyhow::Result<Option<FgaClient>> {
+fn build_fga_client(config: &moa_core::config::MoaConfig) -> anyhow::Result<Option<FgaClient>> {
     if config.authz.engine != AuthzEngine::Openfga {
         return Ok(None);
     }
@@ -137,7 +137,7 @@ async fn shutdown_signal() {
 }
 
 fn knowledge_webhook_edge_config(
-    config: &moa_core::MoaConfig,
+    config: &moa_core::config::MoaConfig,
 ) -> anyhow::Result<KnowledgeWebhookEdgeConfig> {
     Ok(KnowledgeWebhookEdgeConfig {
         nango_signing_key: optional_config_secret(&config.knowledge.nango.webhook_signing_key),
@@ -164,7 +164,7 @@ fn custom_header(name: &Option<String>, value: &Option<String>) -> Option<(Strin
     }
 }
 
-fn edge_upstream_url(config: &moa_core::MoaConfig, override_url: Option<String>) -> String {
+fn edge_upstream_url(config: &moa_core::config::MoaConfig, override_url: Option<String>) -> String {
     override_url
         .filter(|url| !url.trim().is_empty())
         .or_else(|| config.orchestrator.restate_ingress_url.clone())
@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn edge_upstream_prefers_edge_override_then_shared_restate_config() {
         // Pins: edge uses shared Restate ingress config unless the edge-specific override is set.
-        let mut config = moa_core::MoaConfig::default();
+        let mut config = moa_core::config::MoaConfig::default();
         config.orchestrator.restate_ingress_url = Some("http://restate.example:8080".to_string());
         config.orchestrator.endpoint = Some("http://endpoint.example:8080".to_string());
 

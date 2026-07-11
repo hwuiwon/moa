@@ -2,8 +2,10 @@
 
 use chrono::Utc;
 use moa_core::{
-    AssessmentPhase, ResolutionWeights, SegmentAssessment, SegmentEvidence, SegmentEvidenceKind,
-    SegmentEvidencePolarity, SegmentOutcome,
+    config::ResolutionWeights, types::segment_assessment::AssessmentPhase,
+    types::segment_assessment::SegmentAssessment, types::segment_assessment::SegmentEvidence,
+    types::segment_assessment::SegmentEvidenceKind,
+    types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
 };
 
 const POLICY_VERSION: &str = "segment-assessment-v1";
@@ -297,8 +299,10 @@ fn polarity_for_strength(strength: f64) -> SegmentEvidencePolarity {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        AssessmentPhase, ResolutionWeights, SegmentEvidenceKind, SegmentEvidencePolarity,
-        SegmentOutcome,
+        config::ResolutionWeights, types::segment_assessment::AssessmentPhase,
+        types::segment_assessment::SegmentEvidenceKind,
+        types::segment_assessment::SegmentEvidencePolarity,
+        types::segment_assessment::SegmentOutcome,
     };
 
     use super::{AssessmentOverride, SegmentAssessor};

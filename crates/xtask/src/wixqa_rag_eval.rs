@@ -17,7 +17,7 @@ use moa_brain::retrieval::{
     SourceObjectFeatureContributions,
 };
 use moa_core::traits::EmbeddingProvider;
-use moa_core::{MoaConfig, RlsContext, TenantId};
+use moa_core::{config::MoaConfig, types::identifiers::TenantId, types::memory::RlsContext};
 use moa_db::ScopedConn;
 use moa_eval::kernel::cost::{
     COHERE_EMBED_V4_INPUT_USD_PER_MILLION_TOKENS, COHERE_RERANK_V4_FAST_USD_PER_SEARCH,
@@ -1571,7 +1571,7 @@ impl EmbeddingProvider for SharedEmbeddingProvider {
         self.inner.model_version()
     }
 
-    async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+    async fn embed(&self, inputs: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
         self.inner.embed(inputs).await
     }
 }
@@ -1850,7 +1850,7 @@ fn parse_graph_policy(value: &str) -> Result<GraphRetrievalPolicy> {
 
 fn print_help() {
     println!(
-        "Usage: cargo run -p xtask -- wixqa-rag-eval [options]\n\
+        "Usage: cargo run -p xtask --features eval-tools -- wixqa-rag-eval [options]\n\
          \n\
          Options:\n\
            --data-dir PATH              WixQA raw JSONL cache (default: {DEFAULT_DATA_DIR})\n\

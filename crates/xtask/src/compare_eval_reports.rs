@@ -80,5 +80,5 @@ impl Options {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- compare-eval-reports --baseline <a.json> --candidate <b.json> [--output <json>]"
+    "usage: cargo run -p xtask --features eval-tools -- compare-eval-reports --baseline <a.json> --candidate <b.json> [--output <json>]"
 }

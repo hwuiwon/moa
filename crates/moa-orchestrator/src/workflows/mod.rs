@@ -15,6 +15,7 @@ pub mod procedure_node_actions;
 pub(crate) mod procedure_target_wait;
 pub(crate) mod progress_delivery;
 pub mod skill_learning;
+pub mod tenant_purge;
 pub(crate) mod turn_events;
 pub mod turn_execution;
 pub(crate) mod turn_progress;

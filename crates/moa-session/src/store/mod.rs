@@ -11,16 +11,27 @@ use moa_core::traits::{
 };
 use moa_core::wire::analytics::LearningCandidateSummary;
 use moa_core::{
-    ActionPolicyRule, BlobStore, CacheDailyMetric, ChannelAccountId, ChannelRef, ClaimCheck,
-    ContactId, ContactPointId, ContextSnapshot, Event, EventFilter, EventRange, EventRecord,
-    EventType, ExperienceAttribution, ExperienceRecord, ExperienceStore, LearningCandidate,
-    LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateStore, LearningEntry,
-    MoaConfig, MoaError, Result, SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId,
-    SegmentStore, SessionAnalyticsSummary, SessionAttachmentStorageConfig, SessionChannelBinding,
-    SessionChannelBindingId, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
-    SessionSummary, SessionTurnMetric, SkillResolutionRate, StoragePartitionId, TaskSegment,
-    TaskStrategySuccessRate, TenantAnalyticsSummary, TenantId, ToolCallId, ToolCallSummary,
-    record_session_event_replay,
+    analytics::CacheDailyMetric, analytics::SessionAnalyticsSummary, analytics::SessionTurnMetric,
+    analytics::TenantAnalyticsSummary, analytics::ToolCallSummary, config::MoaConfig,
+    config::SessionAttachmentStorageConfig, error::MoaError, error::Result, events::Event,
+    events::EventType, session_replay::record_session_event_replay, traits::BlobStore,
+    traits::ExperienceStore, traits::LearningCandidateStore, traits::SegmentStore,
+    traits::SessionStore, types::action_policy::ActionPolicyRule, types::channel::ChannelAccountId,
+    types::channel::ChannelRef, types::channel::SessionChannelBinding,
+    types::channel::SessionChannelBindingId, types::contact::ContactId,
+    types::contact::ContactPointId, types::events_stream::ClaimCheck,
+    types::events_stream::EventFilter, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::experience::ExperienceAttribution,
+    types::experience::ExperienceRecord, types::experience::LearningCandidate,
+    types::experience::LearningCandidateStatus, types::experience::LearningCandidateStatusUpdate,
+    types::experience::TaskStrategySuccessRate, types::identifiers::SegmentId,
+    types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::identifiers::ToolCallId, types::learning::LearningEntry,
+    types::segment_assessment::SegmentAssessment, types::segment_assessment::SegmentBaseline,
+    types::segment_assessment::SkillResolutionRate, types::segments::SegmentCompletion,
+    types::segments::TaskSegment, types::session::SessionFilter, types::session::SessionMeta,
+    types::session::SessionStatus, types::session::SessionSummary,
+    types::snapshot::ContextSnapshot,
 };
 use moa_observability::{
     SessionEventAppendPhase, record_session_created, record_session_event_append,
@@ -57,6 +68,9 @@ mod helpers;
 mod learning;
 mod segments;
 mod session_attachments;
+mod session_channels;
+mod session_events;
+mod session_records;
 mod session_store;
 
 use helpers::*;
@@ -66,7 +80,7 @@ pub use dashboard::{
     DashboardEventTimelineItem, DashboardSessionDetail, DashboardSessionListCursor,
     DashboardSessionListPage, DashboardSessionListRequest,
 };
-pub use session_store::SessionCreateOutcome;
+pub use session_records::SessionCreateOutcome;
 
 fn local_rustfs_config() -> MoaConfig {
     let mut config = MoaConfig::default();
@@ -104,7 +118,7 @@ pub struct EventAppend {
 /// Request to replace a session's active channel route binding.
 pub struct SessionChannelBindingReplacement<'a> {
     /// Tenant that owns the contact and session.
-    pub tenant_id: moa_core::TenantId,
+    pub tenant_id: moa_core::types::identifiers::TenantId,
     /// Storage partition that owns the session.
     pub storage_partition_id: &'a StoragePartitionId,
     /// Session whose active channel is changing.
@@ -221,7 +235,7 @@ impl PostgresSessionStore {
     /// Loads one session analytics summary row.
     pub async fn get_session_summary(
         &self,
-        session_id: moa_core::SessionId,
+        session_id: moa_core::types::identifiers::SessionId,
     ) -> Result<SessionAnalyticsSummary> {
         crate::analytics::get_session_summary(&self.pool, self.schema_name(), session_id).await
     }
@@ -229,7 +243,7 @@ impl PostgresSessionStore {
     /// Lists per-tool analytics rows, optionally scoped to one tenant.
     pub async fn list_tool_call_summaries(
         &self,
-        tenant_id: Option<&moa_core::TenantId>,
+        tenant_id: Option<&moa_core::types::identifiers::TenantId>,
     ) -> Result<Vec<ToolCallSummary>> {
         crate::analytics::list_tool_call_summaries(&self.pool, self.schema_name(), tenant_id).await
     }
@@ -237,7 +251,7 @@ impl PostgresSessionStore {
     /// Lists per-turn analytics rows for one session.
     pub async fn list_session_turn_metrics(
         &self,
-        session_id: moa_core::SessionId,
+        session_id: moa_core::types::identifiers::SessionId,
     ) -> Result<Vec<SessionTurnMetric>> {
         crate::analytics::list_session_turn_metrics(&self.pool, self.schema_name(), session_id)
             .await
@@ -583,21 +597,21 @@ impl PostgresSessionStore {
 impl SessionAnalyticsStore for PostgresSessionStore {
     async fn get_session_summary(
         &self,
-        session_id: moa_core::SessionId,
+        session_id: moa_core::types::identifiers::SessionId,
     ) -> Result<SessionAnalyticsSummary> {
         PostgresSessionStore::get_session_summary(self, session_id).await
     }
 
     async fn list_tool_call_summaries(
         &self,
-        tenant_id: Option<&moa_core::TenantId>,
+        tenant_id: Option<&moa_core::types::identifiers::TenantId>,
     ) -> Result<Vec<ToolCallSummary>> {
         PostgresSessionStore::list_tool_call_summaries(self, tenant_id).await
     }
 
     async fn list_session_turn_metrics(
         &self,
-        session_id: moa_core::SessionId,
+        session_id: moa_core::types::identifiers::SessionId,
     ) -> Result<Vec<SessionTurnMetric>> {
         PostgresSessionStore::list_session_turn_metrics(self, session_id).await
     }

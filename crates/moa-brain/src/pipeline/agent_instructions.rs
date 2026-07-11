@@ -2,8 +2,9 @@
 
 use async_trait::async_trait;
 use moa_core::{
-    ContextMessage, ContextProcessor, ContextSourceRef, ProcessorOutput, Result, WorkingContext,
-    estimate_text_tokens,
+    error::Result, traits::ContextProcessor, types::context::ContextMessage,
+    types::context::ContextSourceRef, types::context::ProcessorOutput,
+    types::context::WorkingContext, types::context::estimate_text_tokens,
 };
 
 const AGENT_CONTEXT_METADATA_KEY: &str = "agent_context";
@@ -80,9 +81,11 @@ impl ContextProcessor for AgentInstructionProcessor {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        AgentContext, AgentPolicySnapshot, AgentToolPolicy, ContextProcessor, ModelCapabilities,
-        ModelId, SYSTEM_DEFAULT_AGENT_REF, SessionMeta, TokenPricing, ToolCallFormat,
-        WorkingContext,
+        traits::ContextProcessor, types::agent::AgentContext, types::agent::AgentPolicySnapshot,
+        types::agent::AgentToolPolicy, types::agent::SYSTEM_DEFAULT_AGENT_REF,
+        types::context::WorkingContext, types::identifiers::ModelId,
+        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
+        types::session::SessionMeta,
     };
     use uuid::Uuid;
 

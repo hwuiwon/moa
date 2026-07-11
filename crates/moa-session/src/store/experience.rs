@@ -1,6 +1,6 @@
 //! Experience-learning operations for the Postgres session store.
 
-use moa_core::LearningCandidateType;
+use moa_core::types::experience::LearningCandidateType;
 use sqlx::PgConnection;
 
 use super::*;
@@ -66,7 +66,7 @@ impl PostgresSessionStore {
     /// Lists experience records for a session in creation order.
     pub async fn list_experience_records(
         &self,
-        session_id: moa_core::SessionId,
+        session_id: moa_core::types::identifiers::SessionId,
     ) -> Result<Vec<ExperienceRecord>> {
         let experience_records = self.table_name("experience_records");
         let rows = sqlx::query(&format!(
@@ -84,7 +84,7 @@ impl PostgresSessionStore {
     /// Loads one experience record by session and experience ID.
     pub async fn get_experience_record(
         &self,
-        session_id: moa_core::SessionId,
+        session_id: moa_core::types::identifiers::SessionId,
         experience_id: Uuid,
     ) -> Result<Option<ExperienceRecord>> {
         let experience_records = self.table_name("experience_records");

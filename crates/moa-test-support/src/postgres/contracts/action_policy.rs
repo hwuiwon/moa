@@ -2,7 +2,9 @@
 
 use chrono::Utc;
 use moa_core::{
-    ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, ContactId, TenantId, UserId,
+    types::action_policy::ActionPolicyEffect, types::action_policy::ActionPolicyRule,
+    types::action_policy::ActionRuleScope, types::contact::ContactId, types::identifiers::TenantId,
+    types::identifiers::UserId,
 };
 use moa_security::ActionPolicyRuleStore;
 use uuid::Uuid;

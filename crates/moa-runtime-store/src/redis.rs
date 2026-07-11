@@ -124,7 +124,7 @@ fn map_redis_error(error: redis::RedisError) -> MoaError {
 mod tests {
     use std::time::Duration;
 
-    use moa_core::MoaError;
+    use moa_core::error::MoaError;
     use moa_core::traits::RuntimeCacheStore;
 
     use super::RedisRuntimeCacheStore;

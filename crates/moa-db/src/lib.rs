@@ -2,7 +2,10 @@
 
 use std::time::Instant;
 
-use moa_core::{ContactId, MoaError, Result, RlsContext, TenantId};
+use moa_core::{
+    error::MoaError, error::Result, types::contact::ContactId, types::identifiers::TenantId,
+    types::memory::RlsContext,
+};
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 struct DbScopeGucs {

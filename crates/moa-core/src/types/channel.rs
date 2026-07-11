@@ -7,8 +7,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ActionEnvelope, ActionReviewPreview, ContactId, ContactPointId, SessionAttachmentId, SessionId,
-    SessionStatus, TenantId, UserId,
+    action_policy::ActionEnvelope, action_policy::ActionReviewPreview, contact::ContactId,
+    contact::ContactPointId, identifiers::SessionAttachmentId, identifiers::SessionId,
+    identifiers::TenantId, identifiers::UserId, session::SessionStatus,
 };
 
 uuid_id!(

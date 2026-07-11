@@ -11,8 +11,9 @@ use moa_brain::{
     pipeline::{memory::GraphMemoryRetriever, skills::SkillInjector},
 };
 use moa_core::{
-    Channel, MoaConfig,
+    config::MoaConfig,
     traits::{ChannelAdapter, EmbeddingProvider, RuntimeCacheStore},
+    types::channel::Channel,
 };
 use moa_hands::{ToolRouter, core::leases::PostgresHandLeaseStore};
 use moa_observability::record_retrieval_embedder_construction;
@@ -120,7 +121,10 @@ impl RuntimeDeps {
                 .with_rule_store(session_store.clone())
                 .with_session_store(session_store.clone())
                 .with_memory_retrieval_executor(Arc::new(
-                    crate::services::memory::OrchestratorMemoryRetrievalExecutor,
+                    crate::services::memory::OrchestratorMemoryRetrievalExecutor::new(
+                        pool.clone(),
+                        config.clone(),
+                    ),
                 )),
         );
         validate_lineage_journal_startup(config.as_ref())?;
@@ -273,7 +277,7 @@ fn build_channel_adapters(
         Ok(adapter) => {
             adapters.insert(Channel::Slack, Arc::new(adapter));
         }
-        Err(moa_core::MoaError::MissingEnvironmentVariable(name)) => {
+        Err(moa_core::error::MoaError::MissingEnvironmentVariable(name)) => {
             tracing::warn!(
                 env = %name,
                 "Slack live progress delivery disabled because credentials are not configured"
@@ -348,7 +352,7 @@ mod tests {
     use std::time::Duration;
 
     use moa_core::{
-        MoaConfig,
+        config::MoaConfig,
         config::{RuntimeCacheBackend, RuntimeCacheConfig},
         traits::RuntimeCacheStore,
     };

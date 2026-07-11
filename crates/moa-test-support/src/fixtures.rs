@@ -6,8 +6,10 @@
 //! builders. Keeping a single copy here keeps behavior identical across lanes.
 
 use moa_core::{
-    ContactId, ContactRef, ContactVerificationState, ModelId, SessionActorRef, SessionMeta,
-    StoragePartitionId, TenantId,
+    types::contact::ContactId, types::contact::ContactRef,
+    types::contact::ContactVerificationState, types::contact::SessionActorRef,
+    types::identifiers::ModelId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::session::SessionMeta,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};

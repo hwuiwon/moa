@@ -17,8 +17,8 @@ use crate::enums::{
 };
 use crate::signing;
 use chrono::{DateTime, Utc};
-use moa_core::TenantId;
 use moa_core::traits::{Identity, IdentityType};
+use moa_core::types::identifiers::TenantId;
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;

@@ -5,7 +5,10 @@ use moa_core::wire::privacy::{
     ContactErasureScope, ParsedPrivacySubjectId, PrivacyEraseRequest,
     contact_privacy_subject_string,
 };
-use moa_core::{ContactId, StoragePartitionId, TenantId, UserId};
+use moa_core::{
+    types::contact::ContactId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::identifiers::UserId,
+};
 use restate_sdk::prelude::*;
 use sqlx::PgPool;
 use uuid::Uuid;

@@ -9,7 +9,7 @@ use moa_artifacts::registry::{
 use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::validate_for_status;
 use moa_authz_schema::Relation;
-use moa_core::ActionRuleScope;
+use moa_core::types::action_policy::ActionRuleScope;
 use moa_core::wire::artifacts::{
     ArtifactExportRequest, ArtifactExportResponse, ArtifactFileDocument, ArtifactImportRequest,
     ArtifactImportResponse, ArtifactListRequest, ArtifactListResponse, ArtifactPublishRequest,
@@ -18,7 +18,6 @@ use moa_core::wire::artifacts::{
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 
-use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::authorize_tenant;
 use crate::workflows::errors::moa_error_to_status_handler_error;
@@ -54,8 +53,18 @@ pub trait Artifacts {
 }
 
 /// Concrete artifact service implementation.
-#[derive(Clone, Default)]
-pub struct ArtifactsImpl;
+#[derive(Clone)]
+pub struct ArtifactsImpl {
+    registry: ArtifactRegistry,
+}
+
+impl ArtifactsImpl {
+    /// Creates the artifact adapter with its persistent registry.
+    #[must_use]
+    pub fn new(registry: ArtifactRegistry) -> Self {
+        Self { registry }
+    }
+}
 
 impl Artifacts for ArtifactsImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -68,8 +77,9 @@ impl Artifacts for ArtifactsImpl {
         let request = request.into_inner();
         let scope = authorized_write_scope(&ctx, request.scope).await?;
 
+        let registry = self.registry.clone();
         Ok(ctx
-            .run(|| async move { import_inner(scope, request).await.map(Json::from) })
+            .run(|| async move { import_inner(registry, scope, request).await.map(Json::from) })
             .name("artifacts_import")
             .await?)
     }
@@ -87,8 +97,9 @@ impl Artifacts for ArtifactsImpl {
         });
         authorize_read_scope(&ctx, &scope).await?;
 
+        let registry = self.registry.clone();
         Ok(ctx
-            .run(|| async move { export_inner(scope, request).await.map(Json::from) })
+            .run(|| async move { export_inner(registry, scope, request).await.map(Json::from) })
             .name("artifacts_export")
             .await?)
     }
@@ -106,8 +117,9 @@ impl Artifacts for ArtifactsImpl {
         });
         authorize_read_scope(&ctx, &scope).await?;
 
+        let registry = self.registry.clone();
         Ok(ctx
-            .run(|| async move { list_inner(scope, request).await.map(Json::from) })
+            .run(|| async move { list_inner(registry, scope, request).await.map(Json::from) })
             .name("artifacts_list")
             .await?)
     }
@@ -138,20 +150,26 @@ impl Artifacts for ArtifactsImpl {
         let request = request.into_inner();
         let scope = authorized_write_scope(&ctx, request.scope).await?;
 
+        let registry = self.registry.clone();
         Ok(ctx
-            .run(|| async move { publish_inner(scope, request).await.map(Json::from) })
+            .run(|| async move {
+                publish_inner(registry, scope, request)
+                    .await
+                    .map(Json::from)
+            })
             .name("artifacts_publish")
             .await?)
     }
 }
 
 async fn import_inner(
+    registry: ArtifactRegistry,
     scope: ActionRuleScope,
     request: ArtifactImportRequest,
 ) -> Result<ArtifactImportResponse, HandlerError> {
     let document = parse_document(&request.source_format, &request.source_text)?;
     let files = decode_files(request.files)?;
-    let stored = artifact_registry()
+    let stored = registry
         .create_draft(
             &scope,
             NewArtifactDraft {
@@ -173,11 +191,11 @@ async fn import_inner(
 }
 
 async fn export_inner(
+    registry: ArtifactRegistry,
     scope: ActionRuleScope,
     request: ArtifactExportRequest,
 ) -> Result<ArtifactExportResponse, HandlerError> {
     let kind = parse_kind(&request.kind)?;
-    let registry = artifact_registry();
     let stored = registry
         .load_visible(&scope, kind, &request.name)
         .await
@@ -211,12 +229,13 @@ async fn export_inner(
 }
 
 async fn list_inner(
+    registry: ArtifactRegistry,
     scope: ActionRuleScope,
     request: ArtifactListRequest,
 ) -> Result<ArtifactListResponse, HandlerError> {
     let kind = request.kind.as_deref().map(parse_kind).transpose()?;
     let status = request.status.as_deref().map(parse_status).transpose()?;
-    let artifacts = artifact_registry()
+    let artifacts = registry
         .list_visible(&scope, kind, status)
         .await
         .map_err(moa_error_to_status_handler_error)?
@@ -258,17 +277,17 @@ fn validate_inner(
 }
 
 async fn publish_inner(
+    registry: ArtifactRegistry,
     scope: ActionRuleScope,
     request: ArtifactPublishRequest,
 ) -> Result<ArtifactPublishResponse, HandlerError> {
-    let registry = artifact_registry();
     let stored = registry
         .load_revision(&scope, request.revision_uid)
         .await
         .map_err(moa_error_to_status_handler_error)?
         .ok_or_else(|| TerminalError::new_with_code(404, "artifact revision not found"))?;
     let mut document = stored.document.clone();
-    document.reference_resolutions = ArtifactResolver::new(artifact_registry())
+    document.reference_resolutions = ArtifactResolver::new(registry.clone())
         .resolve_document(&scope, &document)
         .await
         .map_err(moa_error_to_status_handler_error)?;
@@ -350,10 +369,6 @@ fn parse_status(status: &str) -> Result<ArtifactStatus, HandlerError> {
     status
         .parse::<ArtifactStatus>()
         .map_err(|error| TerminalError::new_with_code(400, error.to_string()).into())
-}
-
-fn artifact_registry() -> ArtifactRegistry {
-    ArtifactRegistry::new(OrchestratorCtx::current_graph_pool())
 }
 
 async fn authorized_write_scope(

@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use moa_core::{MoaError, Result, ToolOutput};
+use moa_core::{error::MoaError, error::Result, types::tools::ToolOutput};
 use serde::Deserialize;
 use tokio::fs;
 use tokio_util::sync::CancellationToken;

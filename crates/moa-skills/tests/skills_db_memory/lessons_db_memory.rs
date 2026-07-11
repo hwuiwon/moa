@@ -1,7 +1,7 @@
 //! Integration tests for skill lesson learning in graph memory.
 
-use moa_core::RlsContext;
-use moa_core::{MoaError, Result};
+use moa_core::types::memory::RlsContext;
+use moa_core::{error::MoaError, error::Result};
 use moa_db::ScopedConn;
 use moa_memory_graph::GraphStore;
 use moa_skills::lessons::{LessonContext, learn_lesson};

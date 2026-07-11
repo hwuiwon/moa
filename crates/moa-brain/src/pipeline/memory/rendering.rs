@@ -1,6 +1,6 @@
 //! Prompt rendering and source-reference helpers for graph-memory context.
 
-use moa_core::{ContextSourceRef, estimate_text_tokens};
+use moa_core::{types::context::ContextSourceRef, types::context::estimate_text_tokens};
 
 /// Prompt payload and metadata derived from admitted graph-memory hits.
 pub(super) struct RenderedMemoryContext {
@@ -370,12 +370,13 @@ mod tests {
             "excess ranked hits are omitted under the aggregate budget"
         );
         assert!(
-            moa_core::estimate_text_tokens(&budgeted.rendered.section) <= token_budget,
+            moa_core::types::context::estimate_text_tokens(&budgeted.rendered.section)
+                <= token_budget,
             "the rendered section stays within the aggregate token budget"
         );
         assert_eq!(
             budgeted.consumed_tokens,
-            moa_core::estimate_text_tokens(&budgeted.rendered.section),
+            moa_core::types::context::estimate_text_tokens(&budgeted.rendered.section),
             "reported consumed tokens match the rendered section"
         );
     }

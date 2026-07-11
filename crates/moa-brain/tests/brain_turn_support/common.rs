@@ -1,7 +1,7 @@
 // Base brain-turn integration-test support shared by offline and DB lanes.
 
 use moa_core::{
-    ContactId, ContactRef, ContactVerificationState, StoragePartitionId, TenantId, TokenUsage,
+    types::contact::ContactId, types::contact::ContactRef, types::contact::ContactVerificationState, types::identifiers::StoragePartitionId, types::identifiers::TenantId, types::completion::TokenUsage,
 };
 use moa_test_support::fixtures::contact_ref_fixture;
 use uuid::Uuid;

@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_core::{Credential, CredentialVault, MessagingConfig, MoaError};
+use moa_core::{
+    config::MessagingConfig, error::MoaError, traits::CredentialVault, types::model::Credential,
+};
 use moa_messaging::{
     TWILIO_ACCOUNT_SID_ENV, TWILIO_ACCOUNT_SID_SERVICE, TWILIO_API_KEY_SECRET_ENV,
     TWILIO_API_KEY_SECRET_SERVICE, TWILIO_API_KEY_SID_ENV, TWILIO_API_KEY_SID_SERVICE,
@@ -180,20 +182,25 @@ impl LocalTwilioVault {
 
 #[async_trait]
 impl CredentialVault for LocalTwilioVault {
-    async fn get(&self, service: &str, scope: &str) -> moa_core::Result<Credential> {
+    async fn get(&self, service: &str, scope: &str) -> moa_core::error::Result<Credential> {
         self.credentials
             .get(&(service.to_string(), scope.to_string()))
             .cloned()
             .ok_or_else(|| MoaError::MissingEnvironmentVariable(service.to_string()))
     }
 
-    async fn set(&self, _service: &str, _scope: &str, _cred: Credential) -> moa_core::Result<()> {
+    async fn set(
+        &self,
+        _service: &str,
+        _scope: &str,
+        _cred: Credential,
+    ) -> moa_core::error::Result<()> {
         Err(MoaError::StorageError(
             "Twilio e2e vault is read-only".to_string(),
         ))
     }
 
-    async fn delete(&self, _service: &str, _scope: &str) -> moa_core::Result<bool> {
+    async fn delete(&self, _service: &str, _scope: &str) -> moa_core::error::Result<bool> {
         Err(MoaError::StorageError(
             "Twilio e2e vault is read-only".to_string(),
         ))
@@ -202,7 +209,7 @@ impl CredentialVault for LocalTwilioVault {
     async fn list(
         &self,
         _service_prefix: &str,
-    ) -> moa_core::Result<Vec<moa_core::StoredCredentialMetadata>> {
+    ) -> moa_core::error::Result<Vec<moa_core::traits::StoredCredentialMetadata>> {
         Err(MoaError::StorageError(
             "Twilio e2e vault does not support listing".to_string(),
         ))

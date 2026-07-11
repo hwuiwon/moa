@@ -5,8 +5,12 @@ use moa_agents::AgentResolver;
 use moa_authz::{enqueue, enqueue_raw};
 use moa_authz_schema::{ObjectType, Relation, TupleKey, TupleOp, UserType};
 use moa_core::{
-    ActionRuleScope, AgentContext, AgentSessionSelection, ModelId, SessionChannelBindingId,
     traits::{Identity, IdentityType, SessionChannelBindingUpdate},
+    types::action_policy::ActionRuleScope,
+    types::agent::AgentContext,
+    types::agent::AgentSessionSelection,
+    types::channel::SessionChannelBindingId,
+    types::identifiers::ModelId,
 };
 use moa_session::SessionChannelBindingReplacement;
 use sqlx::{Postgres, Transaction};
@@ -20,8 +24,8 @@ async fn enqueue_session_authz_tuples(
     transaction: &mut Transaction<'_, Postgres>,
     identity: &Identity,
     session_id: SessionId,
-    tenant_id: moa_core::TenantId,
-    contact_id: Option<moa_core::ContactId>,
+    tenant_id: moa_core::types::identifiers::TenantId,
+    contact_id: Option<moa_core::types::contact::ContactId>,
 ) -> Result<(), HandlerError> {
     let (owner_user_type, owner_id) = owner_tuple_subject(identity)?;
     let owner_tuple = TupleKey::new(
@@ -374,9 +378,9 @@ impl SessionStoreImpl {
 
 /// Maps a session-store [`MoaError`] to a Restate handler error, surfacing a
 /// missing session as a 404 and other failures as a generic terminal error.
-fn session_store_handler_error(error: moa_core::MoaError) -> HandlerError {
+fn session_store_handler_error(error: moa_core::error::MoaError) -> HandlerError {
     match error {
-        moa_core::MoaError::SessionNotFound(_) => {
+        moa_core::error::MoaError::SessionNotFound(_) => {
             TerminalError::new_with_code(404, "session not found").into()
         }
         error => TerminalError::new(format!("session store error: {error}")).into(),
@@ -401,9 +405,10 @@ fn owner_tuple_subject(identity: &Identity) -> Result<(UserType, uuid::Uuid), Ha
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        AgentContext, AgentModelPolicy, AgentPolicySnapshot, ModelId,
-        SYSTEM_DEFAULT_AGENT_POLICY_HASH, SYSTEM_DEFAULT_AGENT_REF,
-        SYSTEM_DEFAULT_AGENT_REVISION_UID, SessionMeta,
+        types::agent::AgentContext, types::agent::AgentModelPolicy,
+        types::agent::AgentPolicySnapshot, types::agent::SYSTEM_DEFAULT_AGENT_POLICY_HASH,
+        types::agent::SYSTEM_DEFAULT_AGENT_REF, types::agent::SYSTEM_DEFAULT_AGENT_REVISION_UID,
+        types::identifiers::ModelId, types::session::SessionMeta,
     };
 
     use super::apply_agent_model_policy;

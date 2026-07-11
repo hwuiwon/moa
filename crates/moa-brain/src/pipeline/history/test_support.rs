@@ -6,12 +6,19 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    BrainId, CONTEXT_SNAPSHOT_FORMAT_VERSION, Channel, CompactionConfig, CompletionContent,
-    CompletionRequest, CompletionResponse, CompletionStream, ContextSnapshot,
-    ContextSnapshotConfig, Event, EventFilter, EventRange, EventRecord, LLMProvider, ModelId,
-    Result, SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
-    SessionSummary, StopReason, TenantId, TokenPricing, TokenUsage, ToolCallFormat, ToolCallId,
-    ToolOutput, ToolOutputConfig,
+    config::CompactionConfig, config::ContextSnapshotConfig, config::ToolOutputConfig,
+    error::Result, events::Event, traits::LLMProvider, traits::SessionStore,
+    types::channel::Channel, types::completion::CompletionContent,
+    types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::completion::CompletionStream, types::completion::StopReason,
+    types::completion::TokenUsage, types::events_stream::EventFilter,
+    types::events_stream::EventRange, types::events_stream::EventRecord,
+    types::events_stream::SequenceNum, types::identifiers::BrainId, types::identifiers::ModelId,
+    types::identifiers::SessionId, types::identifiers::TenantId, types::identifiers::ToolCallId,
+    types::model::TokenPricing, types::model::ToolCallFormat, types::session::SessionFilter,
+    types::session::SessionMeta, types::session::SessionStatus, types::session::SessionSummary,
+    types::snapshot::CONTEXT_SNAPSHOT_FORMAT_VERSION, types::snapshot::ContextSnapshot,
+    types::tools::ToolOutput,
 };
 use tokio::sync::Mutex;
 
@@ -23,9 +30,13 @@ pub(crate) mod prelude {
 
     pub(crate) use chrono::Utc;
     pub(crate) use moa_core::{
-        CONTEXT_SNAPSHOT_FORMAT_VERSION, CompactionConfig, ContextMessage, ContextProcessor,
-        ContextSnapshot, Event, EventRange, EventRecord, FileReadDedupState, ModelId, SessionMeta,
-        SessionStore, ToolCallId, ToolContent, ToolOutput, ToolOutputConfig, WorkingContext,
+        config::CompactionConfig, config::ToolOutputConfig, events::Event,
+        traits::ContextProcessor, traits::SessionStore, types::context::ContextMessage,
+        types::context::WorkingContext, types::events_stream::EventRange,
+        types::events_stream::EventRecord, types::identifiers::ModelId,
+        types::identifiers::ToolCallId, types::session::SessionMeta,
+        types::snapshot::CONTEXT_SNAPSHOT_FORMAT_VERSION, types::snapshot::ContextSnapshot,
+        types::snapshot::FileReadDedupState, types::tools::ToolContent, types::tools::ToolOutput,
     };
     pub(crate) use proptest::prelude::*;
     pub(crate) use serde_json::json;
@@ -204,7 +215,7 @@ impl LLMProvider for MockLlmProvider {
         "mock"
     }
 
-    fn capabilities(&self) -> moa_core::ModelCapabilities {
+    fn capabilities(&self) -> moa_core::types::model::ModelCapabilities {
         capabilities()
     }
 
@@ -224,8 +235,8 @@ impl LLMProvider for MockLlmProvider {
     }
 }
 
-pub(crate) fn capabilities() -> moa_core::ModelCapabilities {
-    moa_core::ModelCapabilities {
+pub(crate) fn capabilities() -> moa_core::types::model::ModelCapabilities {
+    moa_core::types::model::ModelCapabilities {
         model_id: ModelId::new("claude-sonnet-4-6"),
         context_window: 200_000,
         max_output: 8_192,

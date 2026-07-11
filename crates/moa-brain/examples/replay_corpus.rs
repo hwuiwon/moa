@@ -27,8 +27,10 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use moa_brain::pipeline::history::HistoryCompiler;
 use moa_core::{
-    ContextMessage, Event, EventRecord, ModelId, ModelTier, Result, SessionId, ToolCallId,
-    ToolOutput, estimate_text_tokens,
+    error::Result, events::Event, types::context::ContextMessage,
+    types::context::estimate_text_tokens, types::events_stream::EventRecord,
+    types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::ToolCallId,
+    types::provider::ModelTier, types::tools::ToolOutput,
 };
 use moa_session::testing;
 use serde::Serialize;
@@ -93,7 +95,7 @@ async fn replay(dir: &Path, as_json: bool) -> Result<()> {
     let compiler = HistoryCompiler::new(Arc::new(store));
 
     let mut paths = std::fs::read_dir(dir)
-        .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
         .collect::<Vec<_>>();
@@ -102,7 +104,7 @@ async fn replay(dir: &Path, as_json: bool) -> Result<()> {
     let mut reports = Vec::new();
     for path in &paths {
         let raw = std::fs::read_to_string(path)
-            .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+            .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
         let events: Vec<EventRecord> = serde_json::from_str(&raw)?;
         reports.push(replay_scenario(&compiler, path, &events)?);
     }
@@ -345,8 +347,9 @@ fn bash_output(turn: usize) -> String {
 }
 
 fn synthesize(dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(dir)
-        .map_err(|error| moa_core::MoaError::StorageError(format!("create corpus dir: {error}")))?;
+    std::fs::create_dir_all(dir).map_err(|error| {
+        moa_core::error::MoaError::StorageError(format!("create corpus dir: {error}"))
+    })?;
 
     // Scenario 1: a coding loop that re-reads the same files with unchanged
     // content — the dedup pointer path.
@@ -398,5 +401,5 @@ fn write_scenario(dir: &Path, name: &str, events: &[EventRecord]) -> Result<()> 
     let path = dir.join(format!("{name}.json"));
     let payload = serde_json::to_string_pretty(events)?;
     std::fs::write(&path, payload)
-        .map_err(|error| moa_core::MoaError::StorageError(format!("write {name}: {error}")))
+        .map_err(|error| moa_core::error::MoaError::StorageError(format!("write {name}: {error}")))
 }

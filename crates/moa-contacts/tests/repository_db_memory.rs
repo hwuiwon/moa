@@ -1,10 +1,11 @@
 //! Postgres repository coverage for contact issuance, OTP verification, token
 //! grants, channel resolution, and tenant isolation.
 //!
-//! `start_contact_verification` requires a configured messaging provider, so the
-//! verification round-trips seed the challenge row directly (the only piece that
-//! depends on outbound delivery) and then drive the real
-//! `complete_contact_verification` production path.
+//! Repository-only verification round-trips seed challenge rows directly, while
+//! the application-service coverage injects deterministic outbound delivery.
+
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, Utc};
 use moa_contacts::domain::hash_verification_code;
@@ -12,11 +13,18 @@ use moa_contacts::repository::{
     complete_contact_verification, create_contact_token_grant, ensure_contact_token_grant_active,
     issue_contact, load_contact_ref, resolve_contact_session_channel, resolve_verified_contact_ids,
 };
-use moa_core::{
-    Channel, ChannelAccountId, ChannelRef, ContactId, ContactPointId, ContactPointInput,
-    ContactPointKind, ContactTokenClaims, ContactTokenIssueRequest, ContactVerificationChallengeId,
-    ContactVerificationState, StoragePartitionId, TenantId,
+use moa_contacts::verification_service::{
+    ContactOtp, ContactOtpDelivery, ContactVerificationService, ContactVerificationStartCommand,
 };
+use moa_core::{
+    error::MoaError, types::channel::Channel, types::channel::ChannelAccountId,
+    types::channel::ChannelRef, types::contact::ContactId, types::contact::ContactPointId,
+    types::contact::ContactPointInput, types::contact::ContactPointKind,
+    types::contact::ContactTokenClaims, types::contact::ContactTokenIssueRequest,
+    types::contact::ContactVerificationChallengeId, types::contact::ContactVerificationState,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+};
+use moa_messaging::DeliveryReceipt;
 use moa_test_support::postgres;
 use serde_json::json;
 use sqlx::PgPool;
@@ -304,6 +312,68 @@ async fn contacts_repository_rejects_invalid_verification_code_db_memory() {
     );
 }
 
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn contact_verification_service_consumes_failed_delivery_and_retries_with_fresh_challenge_db_memory()
+ {
+    // Pins: challenge commit precedes delivery, failed delivery consumes its challenge, and retry creates a fresh usable OTP.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated contacts DB");
+    let pool = db.store().pool();
+    let tenant = TenantId::from(Uuid::now_v7());
+    let (contact, _points) = issue_contact(
+        pool.clone(),
+        KEY_HEX,
+        tenant,
+        issue_request(tenant, vec![email_point("retry@example.com")]),
+    )
+    .await
+    .expect("issue contact for verification retry");
+    let delivery = ScriptedOtpDelivery::new(
+        pool.clone(),
+        [DeliveryOutcome::Fail, DeliveryOutcome::Succeed],
+    );
+    let service = ContactVerificationService::new(pool.clone(), delivery.clone());
+
+    let first_error = service
+        .start_verification(verification_command(tenant, contact.contact_id))
+        .await
+        .expect_err("first provider delivery should fail");
+    assert_eq!(first_error.terminal_code(), Some(502));
+    let first = delivery.delivery(0);
+    assert!(challenge_consumed(pool, first.challenge_id).await);
+    let first_completion = complete_contact_verification(
+        pool.clone(),
+        tenant,
+        contact.contact_id,
+        first.challenge_id,
+        first.code,
+    )
+    .await
+    .expect_err("failed delivery challenge must not remain usable");
+    assert_eq!(first_completion.terminal_code(), Some(409));
+
+    let response = service
+        .start_verification(verification_command(tenant, contact.contact_id))
+        .await
+        .expect("retry delivery should succeed");
+    let second = delivery.delivery(1);
+    assert_ne!(second.challenge_id, first.challenge_id);
+    assert_eq!(response.challenge_id, second.challenge_id);
+    assert!(!challenge_consumed(pool, second.challenge_id).await);
+    let verified = complete_contact_verification(
+        pool.clone(),
+        tenant,
+        contact.contact_id,
+        second.challenge_id,
+        second.code,
+    )
+    .await
+    .expect("fresh retry challenge should verify contact");
+    assert_eq!(verified.state, ContactVerificationState::Verified);
+}
+
 fn issue_request(
     tenant: TenantId,
     contact_points: Vec<ContactPointInput>,
@@ -326,6 +396,114 @@ fn email_point(value: &str) -> ContactPointInput {
         value: value.to_string(),
         display_value: Some(value.to_string()),
     }
+}
+
+fn verification_command(
+    tenant_id: TenantId,
+    contact_id: ContactId,
+) -> ContactVerificationStartCommand {
+    ContactVerificationStartCommand {
+        tenant_id,
+        contact_id,
+        contact_point: email_point("retry@example.com"),
+        requested_channel: Some(Channel::Email),
+        ttl_seconds: 300,
+        contact_point_hash_key_hex: KEY_HEX.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DeliveryOutcome {
+    Succeed,
+    Fail,
+}
+
+#[derive(Clone)]
+struct ScriptedOtpDelivery {
+    pool: PgPool,
+    state: Arc<Mutex<ScriptedOtpDeliveryState>>,
+}
+
+struct ScriptedOtpDeliveryState {
+    outcomes: VecDeque<DeliveryOutcome>,
+    deliveries: Vec<ContactOtp>,
+}
+
+impl ScriptedOtpDelivery {
+    fn new(pool: PgPool, outcomes: impl IntoIterator<Item = DeliveryOutcome>) -> Self {
+        Self {
+            pool,
+            state: Arc::new(Mutex::new(ScriptedOtpDeliveryState {
+                outcomes: outcomes.into_iter().collect(),
+                deliveries: Vec::new(),
+            })),
+        }
+    }
+
+    fn delivery(&self, index: usize) -> ContactOtp {
+        self.state
+            .lock()
+            .expect("scripted delivery state lock")
+            .deliveries
+            .get(index)
+            .cloned()
+            .expect("expected recorded OTP delivery")
+    }
+}
+
+impl ContactOtpDelivery for ScriptedOtpDelivery {
+    async fn deliver_contact_verification_otp(
+        &self,
+        otp: ContactOtp,
+    ) -> moa_core::error::Result<DeliveryReceipt> {
+        let persisted = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM contact_verification_challenges
+                WHERE id = $1 AND consumed_at IS NULL
+            )
+            "#,
+        )
+        .bind(otp.challenge_id.0)
+        .fetch_one(&self.pool)
+        .await
+        .expect("delivery observes committed challenge");
+        assert!(persisted, "challenge must commit before OTP delivery");
+        let outcome = {
+            let mut state = self.state.lock().expect("scripted delivery state lock");
+            state.deliveries.push(otp.clone());
+            state
+                .outcomes
+                .pop_front()
+                .expect("scripted delivery outcome")
+        };
+        match outcome {
+            DeliveryOutcome::Succeed => Ok(DeliveryReceipt {
+                channel: otp.channel,
+                provider: "test".to_string(),
+                provider_message_id: Some(format!("test:{}", otp.challenge_id)),
+                provider_status: Some("accepted".to_string()),
+            }),
+            DeliveryOutcome::Fail => Err(MoaError::ProviderError(
+                "scripted OTP delivery failure".to_string(),
+            )),
+        }
+    }
+}
+
+async fn challenge_consumed(pool: &PgPool, challenge_id: ContactVerificationChallengeId) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT consumed_at IS NOT NULL
+        FROM contact_verification_challenges
+        WHERE id = $1
+        "#,
+    )
+    .bind(challenge_id.0)
+    .fetch_one(pool)
+    .await
+    .expect("load verification challenge consumption state")
 }
 
 fn token_claims(

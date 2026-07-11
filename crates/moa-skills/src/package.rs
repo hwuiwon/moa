@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::skill::{SkillActionDefinition, SkillDefinition};
-use moa_core::{MoaError, Result};
+use moa_core::{error::MoaError, error::Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};

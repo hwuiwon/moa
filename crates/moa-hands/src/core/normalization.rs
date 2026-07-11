@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 
 use moa_core::shell::split_shell_chain;
 use moa_core::{
-    ActionReviewField, ActionReviewFileDiff, MoaError, Result, ToolDiffStrategy, ToolInputShape,
-    ToolInvocation,
+    error::MoaError, error::Result, types::action_policy::ActionReviewField,
+    types::action_policy::ActionReviewFileDiff, types::completion::ToolInvocation,
+    types::tools::ToolDiffStrategy, types::tools::ToolInputShape,
 };
 use serde_json::Value;
 

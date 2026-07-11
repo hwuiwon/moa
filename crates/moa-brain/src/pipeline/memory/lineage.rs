@@ -1,7 +1,10 @@
 //! Retrieval lineage and metric emission for graph-memory context.
 
 use chrono::Utc;
-use moa_core::{LineageHandle, QueryRewriteResult, RewriteSource, StoragePartitionId, UserId};
+use moa_core::{
+    traits::LineageHandle, types::identifiers::StoragePartitionId, types::identifiers::UserId,
+    types::query_rewrite::QueryRewriteResult, types::query_rewrite::RewriteSource,
+};
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
     ScoreRecord, ScoreSource, ScoreTarget, ScoreValue, StageTimings, TurnId, VecHit,
@@ -21,7 +24,7 @@ use super::rendering::{hit_excerpt, hit_title, retrieval_leg_values, truncate_ex
 /// Records retrieval lineage, zero-recall scoring, and retrieval counters.
 pub(super) fn emit_retrieval_lineage(
     lineage: &dyn LineageHandle,
-    ctx: &moa_core::WorkingContext,
+    ctx: &moa_core::types::context::WorkingContext,
     query: &str,
     hits: &[crate::retrieval::RetrievalHit],
     elapsed: std::time::Duration,
@@ -125,7 +128,7 @@ pub(super) fn emit_retrieval_lineage(
 
 /// Builds the retrieval-lineage context passed into storage-backed retrieval.
 pub(super) fn lineage_context_from_context(
-    ctx: &moa_core::WorkingContext,
+    ctx: &moa_core::types::context::WorkingContext,
 ) -> crate::retrieval::LineageContext {
     crate::retrieval::LineageContext {
         session_id: ctx.session_id,
@@ -169,7 +172,9 @@ fn retrieval_selected_hit(
     }
 }
 
-fn lineage_searched_scopes_from_context(ctx: &moa_core::WorkingContext) -> Vec<String> {
+fn lineage_searched_scopes_from_context(
+    ctx: &moa_core::types::context::WorkingContext,
+) -> Vec<String> {
     let Ok(policy) = MemoryAdmissionPolicy::from_working_context(ctx) else {
         return Vec::new();
     };
@@ -191,7 +196,9 @@ fn lineage_scope_label(plan: &RetrievalScopePlan) -> String {
     }
 }
 
-fn lineage_filters_from_context(ctx: &moa_core::WorkingContext) -> serde_json::Value {
+fn lineage_filters_from_context(
+    ctx: &moa_core::types::context::WorkingContext,
+) -> serde_json::Value {
     let Ok(policy) = MemoryAdmissionPolicy::from_working_context(ctx) else {
         return serde_json::json!({});
     };
@@ -216,7 +223,9 @@ fn duration_ms_u32(duration: std::time::Duration) -> u32 {
     duration.as_millis().min(u128::from(u32::MAX)) as u32
 }
 
-fn lineage_memory_scope_from_context(ctx: &moa_core::WorkingContext) -> MemoryScope {
+fn lineage_memory_scope_from_context(
+    ctx: &moa_core::types::context::WorkingContext,
+) -> MemoryScope {
     MemoryAdmissionPolicy::from_working_context(ctx)
         .ok()
         .and_then(|policy| {
@@ -230,11 +239,13 @@ fn lineage_memory_scope_from_context(ctx: &moa_core::WorkingContext) -> MemorySc
         })
 }
 
-fn lineage_storage_partition_id_from_context(ctx: &moa_core::WorkingContext) -> StoragePartitionId {
+fn lineage_storage_partition_id_from_context(
+    ctx: &moa_core::types::context::WorkingContext,
+) -> StoragePartitionId {
     StoragePartitionId::for_tenant(ctx.tenant_id)
 }
 
-fn lineage_user_id_from_context(ctx: &moa_core::WorkingContext) -> UserId {
+fn lineage_user_id_from_context(ctx: &moa_core::types::context::WorkingContext) -> UserId {
     let id = ctx
         .contact
         .as_ref()
@@ -243,12 +254,12 @@ fn lineage_user_id_from_context(ctx: &moa_core::WorkingContext) -> UserId {
     UserId::new(id)
 }
 
-fn turn_id_from_context(ctx: &moa_core::WorkingContext) -> Option<TurnId> {
+fn turn_id_from_context(ctx: &moa_core::types::context::WorkingContext) -> Option<TurnId> {
     let value = ctx.metadata().get("_moa.turn_id")?.as_str()?;
     Uuid::parse_str(value).ok().map(TurnId)
 }
 
-fn turn_seq_from_context(ctx: &moa_core::WorkingContext) -> Option<i64> {
+fn turn_seq_from_context(ctx: &moa_core::types::context::WorkingContext) -> Option<i64> {
     let value = ctx.metadata().get("_moa.turn_seq")?;
     value
         .as_i64()
@@ -256,7 +267,7 @@ fn turn_seq_from_context(ctx: &moa_core::WorkingContext) -> Option<i64> {
         .or_else(|| value.as_str().and_then(|seq| seq.parse().ok()))
 }
 
-fn query_expansions_from_context(ctx: &moa_core::WorkingContext) -> Vec<String> {
+fn query_expansions_from_context(ctx: &moa_core::types::context::WorkingContext) -> Vec<String> {
     ctx.metadata()
         .get("query_rewrite")
         .and_then(retrieval_query_from_rewritten_metadata)

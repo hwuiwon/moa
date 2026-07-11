@@ -4,8 +4,9 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use moa_core::{
-    BranchManager, MoaConfig, ModelId, SessionActorRef, SessionAttachmentStorageConfig,
-    SessionFilter, SessionMeta, SessionStore, TenantId,
+    config::MoaConfig, config::SessionAttachmentStorageConfig, traits::BranchManager,
+    traits::SessionStore, types::contact::SessionActorRef, types::identifiers::ModelId,
+    types::identifiers::TenantId, types::session::SessionFilter, types::session::SessionMeta,
 };
 use moa_session::{NeonBranchManager, PostgresSessionStore};
 use reqwest::Client;
@@ -122,7 +123,7 @@ async fn wait_for_tenant_session_count(
     store: &PostgresSessionStore,
     tenant_id: TenantId,
     minimum: usize,
-) -> Vec<moa_core::SessionSummary> {
+) -> Vec<moa_core::types::session::SessionSummary> {
     for _attempt in 0..20 {
         let sessions = store
             .list_sessions(SessionFilter {

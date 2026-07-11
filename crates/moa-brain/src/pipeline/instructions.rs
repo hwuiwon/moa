@@ -2,7 +2,8 @@
 
 use async_trait::async_trait;
 use moa_core::{
-    ContextProcessor, MoaConfig, ProcessorOutput, Result, WorkingContext, estimate_text_tokens,
+    config::MoaConfig, error::Result, traits::ContextProcessor, types::context::ProcessorOutput,
+    types::context::WorkingContext, types::context::estimate_text_tokens,
 };
 
 /// Injects optional workspace and user instructions into the prompt.
@@ -77,8 +78,10 @@ impl ContextProcessor for InstructionProcessor {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        Channel, GeneralConfig, ModelCapabilities, ModelId, SessionId, SessionMeta, TenantId,
-        TokenPricing, ToolCallFormat,
+        config::GeneralConfig, types::channel::Channel, types::identifiers::ModelId,
+        types::identifiers::SessionId, types::identifiers::TenantId,
+        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
+        types::session::SessionMeta,
     };
 
     use super::*;

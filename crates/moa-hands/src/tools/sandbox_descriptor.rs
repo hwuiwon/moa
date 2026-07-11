@@ -1,8 +1,9 @@
 //! Descriptor-owned metadata for sandbox-backed hand tools.
 
 use moa_core::{
-    ActionClass, ActionPolicyEffect, IdempotencyClass, RiskLevel, ToolDefinition, ToolDiffStrategy,
-    ToolInputShape, ToolPolicySpec,
+    types::action_policy::ActionClass, types::action_policy::ActionPolicyEffect,
+    types::action_policy::RiskLevel, types::tools::IdempotencyClass, types::tools::ToolDefinition,
+    types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolPolicySpec,
 };
 use serde_json::{Value, json};
 
@@ -159,8 +160,8 @@ pub(crate) fn supported_capability_for_tool(
 }
 
 /// Builds a provider-specific unsupported-tool error.
-pub(crate) fn unsupported_tool(provider: &str, tool: &str) -> moa_core::MoaError {
-    moa_core::MoaError::ToolError(format!("unsupported {provider} tool: {tool}"))
+pub(crate) fn unsupported_tool(provider: &str, tool: &str) -> moa_core::error::MoaError {
+    moa_core::error::MoaError::ToolError(format!("unsupported {provider} tool: {tool}"))
 }
 
 const fn execute_policy(input_shape: ToolInputShape) -> ToolPolicySpec {

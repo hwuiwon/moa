@@ -13,8 +13,15 @@ use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_artifacts::validation::validate_for_status;
 use moa_core::{
-    ActionRuleScope, Event, EventRange, EventRecord, ModelId, SessionId, SessionMeta, TenantId,
+    events::Event,
     traits::Identity,
+    types::action_policy::ActionRuleScope,
+    types::events_stream::EventRange,
+    types::events_stream::EventRecord,
+    types::identifiers::ModelId,
+    types::identifiers::SessionId,
+    types::identifiers::TenantId,
+    types::session::SessionMeta,
     wire::procedures::{
         ProcedureReviewDecisionKind, ProcedureReviewDecisionRequest,
         ProcedureReviewDecisionResponse, ProcedureRunStatus, ProcedureStatusRequest,

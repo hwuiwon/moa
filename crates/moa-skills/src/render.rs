@@ -2,8 +2,8 @@
 
 use std::collections::BTreeSet;
 
-use moa_core::Result;
-use moa_core::RlsContext;
+use moa_core::error::Result;
+use moa_core::types::memory::RlsContext;
 use moa_db::ScopedConn;
 use moa_memory_types::MemoryScope;
 use sqlx::{PgConnection, PgPool, Row};

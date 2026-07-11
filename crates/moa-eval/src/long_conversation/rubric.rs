@@ -73,7 +73,7 @@ pub fn declared_success_without_evidence(
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{StoragePartitionId, UserId};
+    use moa_core::{types::identifiers::StoragePartitionId, types::identifiers::UserId};
     use moa_lineage_core::{ScoreRecord, ScoreSource, ScoreTarget, ScoreValue, TurnId};
     use uuid::Uuid;
 

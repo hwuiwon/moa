@@ -2,8 +2,10 @@
 
 use chrono::Utc;
 use moa_core::{
-    CancelScope, Channel, ModelId, SessionActorRef, SessionMeta, SessionStatus, TenantId,
-    WorkerResult, WorkerState, WorkerTerminalResult,
+    types::channel::Channel, types::contact::SessionActorRef, types::identifiers::ModelId,
+    types::identifiers::TenantId, types::session::CancelScope, types::session::SessionMeta,
+    types::session::SessionStatus, types::worker::state::WorkerResult,
+    types::worker::state::WorkerState, types::worker::state::WorkerTerminalResult,
 };
 use moa_orchestrator::objects::session::{
     ChildProgressFetch, SessionVoState, plan_child_progress_fan_in, terminal_child_summary,
@@ -26,8 +28,8 @@ fn test_meta() -> SessionMeta {
     }
 }
 
-fn test_message(text: &str) -> moa_core::UserMessage {
-    moa_core::UserMessage {
+fn test_message(text: &str) -> moa_core::types::session::UserMessage {
+    moa_core::types::session::UserMessage {
         text: text.to_string(),
         attachments: vec![],
     }
@@ -65,7 +67,7 @@ fn session_vo_post_message_updates_status_to_running_then_idle_parks_paused() {
     assert_eq!(state.current_status(), SessionStatus::Running);
 
     state.drain_pending_messages();
-    let status = state.apply_turn_outcome(moa_core::TurnOutcome::Idle, Utc::now());
+    let status = state.apply_turn_outcome(moa_core::types::session::TurnOutcome::Idle, Utc::now());
 
     assert_eq!(status, SessionStatus::Paused);
     assert_eq!(state.current_status(), SessionStatus::Paused);
@@ -80,8 +82,8 @@ fn session_vo_cancel_sets_flag() {
     assert_eq!(state.take_cancel_flag(), None);
 }
 
-fn test_child_ref(id: &str) -> moa_core::WorkerChildRef {
-    moa_core::WorkerChildRef {
+fn test_child_ref(id: &str) -> moa_core::types::worker::state::WorkerChildRef {
+    moa_core::types::worker::state::WorkerChildRef {
         id: id.to_string(),
         task_hash: format!("hash-{id}"),
         budget_tokens: 0,
@@ -127,8 +129,8 @@ fn task_tree_cancel_cancels_children() {
     assert_eq!(state.take_cancel_flag(), Some(CancelScope::TaskTree));
 }
 
-fn terminal_child_ref(id: &str, output: &str) -> moa_core::WorkerChildRef {
-    moa_core::WorkerChildRef {
+fn terminal_child_ref(id: &str, output: &str) -> moa_core::types::worker::state::WorkerChildRef {
+    moa_core::types::worker::state::WorkerChildRef {
         id: id.to_string(),
         task_hash: format!("hash-{id}"),
         budget_tokens: 256,
@@ -214,12 +216,14 @@ fn session_vo_destroy_clears_state() {
         .enqueue_message(test_message("hello"), Utc::now())
         .expect("enqueue should succeed");
     state.last_turn_summary = Some("summary".to_string());
-    state.children.push(moa_core::WorkerChildRef {
-        id: "child-1".to_string(),
-        task_hash: "hash-1".to_string(),
-        budget_tokens: 0,
-        terminal: None,
-    });
+    state
+        .children
+        .push(moa_core::types::worker::state::WorkerChildRef {
+            id: "child-1".to_string(),
+            task_hash: "hash-1".to_string(),
+            budget_tokens: 0,
+            terminal: None,
+        });
     state.set_cancel_flag(CancelScope::TaskTree);
     state.destroy();
 

@@ -5,8 +5,10 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::RlsContext;
-use moa_core::{ContactId, TenantId, traits::EmbeddingProvider};
+use moa_core::types::memory::RlsContext;
+use moa_core::{
+    traits::EmbeddingProvider, types::contact::ContactId, types::identifiers::TenantId,
+};
 use moa_db::ScopedConn;
 use moa_memory_graph::{NodeLabel, PiiClass, PostgresGraphStore};
 use moa_memory_ingest::{
@@ -54,7 +56,7 @@ impl EmbeddingProvider for RecordingEmbedder {
         VECTOR_DIMENSION
     }
 
-    async fn embed(&self, texts: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+    async fn embed(&self, texts: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
         self.calls.lock().await.push(texts.to_vec());
         Ok(texts
             .iter()

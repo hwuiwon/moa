@@ -5,9 +5,12 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use moa_core::transcript::{ProviderEvent, Transcript};
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, LLMProvider,
-    MessageRole, MoaError, ModelCapabilities, ModelId, Result as MoaResult, StopReason,
-    TokenPricing, TokenUsage, ToolCallFormat,
+    error::MoaError, error::Result as MoaResult, traits::LLMProvider,
+    types::completion::CompletionContent, types::completion::CompletionRequest,
+    types::completion::CompletionResponse, types::completion::CompletionStream,
+    types::completion::StopReason, types::completion::TokenUsage, types::context::MessageRole,
+    types::identifiers::ModelId, types::model::ModelCapabilities, types::model::TokenPricing,
+    types::model::ToolCallFormat,
 };
 
 const COMPACTION_MAX_OUTPUT_TOKENS: usize = 700;
@@ -193,7 +196,7 @@ fn latest_user_message(request: &CompletionRequest) -> Option<String> {
 /// replayed history) so they cannot disturb prompt-cache reuse of the frozen
 /// history region; transcript matching must skip them when locating the real
 /// user message.
-fn is_synthetic_user_section(message: &moa_core::ContextMessage) -> bool {
+fn is_synthetic_user_section(message: &moa_core::types::context::ContextMessage) -> bool {
     [
         "<system-reminder>",
         "<available_skills>",

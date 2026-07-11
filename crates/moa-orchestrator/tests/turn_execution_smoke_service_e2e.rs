@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use moa_core::traits::Identity;
-use moa_core::{ModelId, SessionActorRef, SessionId, SessionMeta, SessionStatus, TenantId};
+use moa_core::{
+    types::contact::SessionActorRef, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::TenantId, types::session::SessionMeta, types::session::SessionStatus,
+};
 use serde::Deserialize;
 use uuid::Uuid;
 

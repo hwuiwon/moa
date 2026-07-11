@@ -3,8 +3,8 @@
 use moa_auth_providers::api_keys::{self, CreateApiKeyRequest, CreateApiKeyResponse, Env};
 use moa_authz::{FgaClient, FgaConfig};
 use moa_authz_schema::{ObjectType, Relation, TupleKey, TupleOp, UserType};
-use moa_core::TenantId;
 use moa_core::traits::{Identity, IdentityType};
+use moa_core::types::identifiers::TenantId;
 use uuid::Uuid;
 
 /// Returns `true` when `name` is set to a common truthy value (`1`, `true`,

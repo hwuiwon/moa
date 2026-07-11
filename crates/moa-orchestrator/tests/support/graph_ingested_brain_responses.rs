@@ -3,7 +3,10 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use moa_core::{Event, EventRecord, SessionId, StoragePartitionId};
+use moa_core::{
+    events::Event, types::events_stream::EventRecord, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId,
+};
 use sqlx::PgPool;
 use tokio::time::sleep;
 

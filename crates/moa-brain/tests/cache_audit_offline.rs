@@ -10,7 +10,10 @@ include!("brain_turn_support/pipeline.rs");
 use std::sync::Arc;
 
 use moa_brain::{TurnResult, run_brain_turn};
-use moa_core::{Event, EventRange, LLMProvider, MoaConfig, SessionStore};
+use moa_core::{
+    config::MoaConfig, events::Event, traits::LLMProvider, traits::SessionStore,
+    types::events_stream::EventRange,
+};
 use moa_providers::OpenAIProvider;
 use wiremock::MockServer;
 
@@ -18,7 +21,8 @@ use offline_session_store::{MockSessionStore, session_meta};
 use openai_wiremock::{captured_json_bodies, mount_openai_text};
 
 #[tokio::test]
-async fn cache_audit_offline_tracks_stable_prefix_reuse_and_cached_usage() -> moa_core::Result<()> {
+async fn cache_audit_offline_tracks_stable_prefix_reuse_and_cached_usage()
+-> moa_core::error::Result<()> {
     let server = MockServer::start().await;
     mount_openai_text(&server, "READY", 8).await;
 

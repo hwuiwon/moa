@@ -4,11 +4,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use moa_core::config::SessionLimitsConfig;
 use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::{
-    CompletionRequest, CompletionResponse, ContactId, DEFER_BRAIN_RESPONSE_METADATA_KEY, Event,
-    ModelId, ModelTier, SessionId, TenantId, TokenPricing, TokenUsage, genai_operation_name,
-    genai_provider_name,
+    events::Event, types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::completion::DEFER_BRAIN_RESPONSE_METADATA_KEY, types::completion::TokenUsage,
+    types::contact::ContactId, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::TenantId, types::model::TokenPricing,
+    types::observability::genai_operation_name, types::observability::genai_provider_name,
+    types::provider::ModelTier,
 };
 use moa_memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
 use moa_observability::record_llm_cost_cents;
@@ -43,20 +47,31 @@ pub trait LLMGateway {
 #[derive(Clone)]
 pub struct LLMGatewayImpl {
     providers: Arc<ProviderRegistry>,
+    session_limits: Option<SessionLimitsConfig>,
 }
 
 impl LLMGatewayImpl {
     /// Creates a new Restate LLM gateway over a shared provider registry.
     #[must_use]
     pub fn new(providers: Arc<ProviderRegistry>) -> Self {
-        Self { providers }
+        Self {
+            providers,
+            session_limits: None,
+        }
+    }
+
+    /// Supplies the session limits used by progress narration.
+    #[must_use]
+    pub fn with_session_limits(mut self, session_limits: SessionLimitsConfig) -> Self {
+        self.session_limits = Some(session_limits);
+        self
     }
 
     /// Executes one completion directly and buffers the full provider response.
     pub async fn complete_buffered(
         &self,
         request: CompletionRequest,
-    ) -> moa_core::Result<CompletionResponse> {
+    ) -> moa_core::error::Result<CompletionResponse> {
         let requested_model = request.model.as_ref().map(ModelId::as_str);
         let (provider_id, model) = self.providers.resolve_provider_id(requested_model)?;
         let resolved = self.providers.provider_for_id(provider_id, &model)?;
@@ -99,11 +114,11 @@ impl LLMGateway for LLMGatewayImpl {
         let usage = response.token_usage();
         let cost_cents = compute_cost_cents(response.model.as_str(), usage);
         let finish_reason = match &response.stop_reason {
-            moa_core::StopReason::EndTurn => "end_turn",
-            moa_core::StopReason::MaxTokens => "max_tokens",
-            moa_core::StopReason::ToolUse => "tool_use",
-            moa_core::StopReason::Cancelled => "cancelled",
-            moa_core::StopReason::Other(_) => "other",
+            moa_core::types::completion::StopReason::EndTurn => "end_turn",
+            moa_core::types::completion::StopReason::MaxTokens => "max_tokens",
+            moa_core::types::completion::StopReason::ToolUse => "tool_use",
+            moa_core::types::completion::StopReason::Cancelled => "cancelled",
+            moa_core::types::completion::StopReason::Other(_) => "other",
         };
         let provider_name = genai_provider_name(provider_id.as_str());
         let operation_name = genai_operation_name(provider_id.as_str());
@@ -186,7 +201,13 @@ impl LLMGateway for LLMGatewayImpl {
         request: Json<NarrateSessionRequest>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("LLMGateway", "narrate_session");
-        crate::services::narration::run_narration_job(&ctx, self, request.into_inner()).await
+        crate::services::narration::run_narration_job(
+            &ctx,
+            self,
+            self.session_limits.as_ref(),
+            request.into_inner(),
+        )
+        .await
     }
 }
 
@@ -327,7 +348,11 @@ mod tests {
     use std::collections::HashMap;
 
     use chrono::{DateTime, Utc};
-    use moa_core::{CompletionRequest, ContactId, ContextMessage, SessionId, TenantId};
+    use moa_core::{
+        types::completion::CompletionRequest, types::contact::ContactId,
+        types::context::ContextMessage, types::identifiers::SessionId,
+        types::identifiers::TenantId,
+    };
     use serde_json::json;
 
     use super::session_turn_from_completion_request;

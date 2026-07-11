@@ -79,8 +79,8 @@ fn has_redis_url(config: &RuntimeCacheConfig) -> bool {
 mod tests {
     use std::time::Duration;
 
-    use moa_core::Result;
     use moa_core::config::{RuntimeCacheBackend, RuntimeCacheConfig};
+    use moa_core::error::Result;
     use moa_core::traits::RuntimeCacheStore;
     use tokio::time::advance;
 

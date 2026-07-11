@@ -10,8 +10,9 @@ use std::time::Instant;
 use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequest};
 use moa_core::wire::turn::TurnOutcomeKind;
 use moa_core::{
-    Event, ModelTier, SessionId, SessionMeta, ToolCallContent, ToolCallId, ToolInvocation,
-    ToolOutput,
+    events::Event, types::completion::ToolCallContent, types::completion::ToolInvocation,
+    types::identifiers::SessionId, types::identifiers::ToolCallId, types::provider::ModelTier,
+    types::session::SessionMeta, types::tools::ToolOutput,
 };
 use moa_observability::restate_observability::event_persist_span;
 use moa_observability::{record_session_error, record_turn_event_persist_duration};
@@ -32,7 +33,7 @@ pub(super) async fn append_session_event(
 ) -> Result<u64, HandlerError> {
     let persist_span = event_persist_span(1);
     let persist_started = Instant::now();
-    moa_core::record_durable_append();
+    moa_core::coordination_counters::record_durable_append();
     let sequence_num = ctx
         .service_client::<RestateSessionStoreClient>()
         .append_event(Json(AppendEventRequest {

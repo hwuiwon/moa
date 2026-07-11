@@ -17,8 +17,10 @@ use moa_artifacts::registry::ArtifactRegistry;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::procedures::{ProcedureNodeRunSummary, ProcedureRunStatus};
 use moa_core::{
-    ActionRuleScope, ProcedureTool, RunProcedureToolInput, SessionActorRef, SessionId, SessionMeta,
-    ToolOutput,
+    types::action_policy::ActionRuleScope, types::contact::SessionActorRef,
+    types::identifiers::SessionId, types::procedure_tools::ProcedureTool,
+    types::procedure_tools::RunProcedureToolInput, types::session::SessionMeta,
+    types::tools::ToolOutput,
 };
 use moa_skills::procedure::error::ProcedureError;
 use moa_skills::procedure::runtime::{ProcedureRuntime, StartProcedureRun};
@@ -342,8 +344,9 @@ mod tests {
 
     use moa_core::traits::IdentityType;
     use moa_core::{
-        ContactId, RunProcedureToolInput, SessionActorRef, SessionMeta, TenantId,
-        normalize_procedure_skill_ref,
+        types::contact::ContactId, types::contact::SessionActorRef, types::identifiers::TenantId,
+        types::procedure_tools::RunProcedureToolInput,
+        types::procedure_tools::normalize_procedure_skill_ref, types::session::SessionMeta,
     };
     use uuid::Uuid;
 
@@ -465,7 +468,7 @@ mod tests {
         meta.contact = Some(moa_test_support::fixtures::contact_ref_fixture(
             contact_id,
             meta.tenant_id,
-            moa_core::ContactVerificationState::Verified,
+            moa_core::types::contact::ContactVerificationState::Verified,
         ));
 
         let identity = session_identity(&meta).expect("contact identity");

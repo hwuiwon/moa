@@ -1,7 +1,10 @@
 //! End-to-end SessionStore coverage through a local Restate ingress.
 
 use anyhow::{Context, Result};
-use moa_core::{Event, EventRange, EventRecord, SessionId};
+use moa_core::{
+    events::Event, types::events_stream::EventRange, types::events_stream::EventRecord,
+    types::identifiers::SessionId,
+};
 use moa_test_support::postgres::test_database_url;
 use std::process::{Child, Command, Stdio};
 

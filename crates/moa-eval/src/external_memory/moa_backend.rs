@@ -9,8 +9,10 @@ use moa_brain::pipeline::MemoryEvidenceRequest;
 use moa_brain::pipeline::memory::GraphMemoryRetriever;
 use moa_core::traits::EmbeddingProvider;
 use moa_core::{
-    ContactId, ContactRef, ContactVerificationState, ModelCapabilities, ModelId, RlsContext,
-    SessionId, SessionMeta, TenantId, WorkingContext,
+    types::contact::ContactId, types::contact::ContactRef,
+    types::contact::ContactVerificationState, types::context::WorkingContext,
+    types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
+    types::memory::RlsContext, types::model::ModelCapabilities, types::session::SessionMeta,
 };
 use moa_db::ScopedConn;
 use moa_memory_graph::{GraphStore, PostgresGraphStore};
@@ -98,7 +100,7 @@ impl MoaMemoryBackend {
             )));
         }
         let retriever = GraphMemoryRetriever::new_with_config(
-            moa_core::MoaConfig::default(),
+            moa_core::config::MoaConfig::default(),
             pool.clone(),
             Some(embedder.clone()),
         )

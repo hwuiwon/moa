@@ -1,9 +1,12 @@
 //! Lineage emission helpers for streamed turns and production turn workflows.
 
 use moa_core::{
-    CompletionContent, CompletionResponse, ContextMessage, ContextSourceKind, EventRecord,
-    LineageHandle, MessageRole, SessionMeta, StoragePartitionId, UserId, WorkingContext,
-    estimate_text_tokens,
+    traits::LineageHandle, types::completion::CompletionContent,
+    types::completion::CompletionResponse, types::context::ContextMessage,
+    types::context::ContextSourceKind, types::context::MessageRole, types::context::WorkingContext,
+    types::context::estimate_text_tokens, types::events_stream::EventRecord,
+    types::identifiers::StoragePartitionId, types::identifiers::UserId,
+    types::session::SessionMeta,
 };
 use moa_lineage_citation::{CascadeConfig, CascadeVerifier, ChunkRef, NliVerifier};
 use moa_lineage_core::{
@@ -110,9 +113,11 @@ fn lineage_user_id(session: &SessionMeta) -> UserId {
         .map(|contact| contact.contact_id.to_string())
         .or_else(|| {
             session.created_by.as_ref().map(|actor| match actor {
-                moa_core::SessionActorRef::Identity { id } => format!("identity:{id}"),
-                moa_core::SessionActorRef::Contact { id } => id.to_string(),
-                moa_core::SessionActorRef::Anonymous => "anonymous".to_string(),
+                moa_core::types::contact::SessionActorRef::Identity { id } => {
+                    format!("identity:{id}")
+                }
+                moa_core::types::contact::SessionActorRef::Contact { id } => id.to_string(),
+                moa_core::types::contact::SessionActorRef::Anonymous => "anonymous".to_string(),
             })
         })
         .unwrap_or_else(|| format!("tenant:{}", session.tenant_id));
@@ -155,7 +160,7 @@ fn citation_source_chunks(source: SourceContextChunk<'_>) -> Vec<ChunkRef> {
 }
 
 /// Builds a per-hit citation source from one evidence-bearing source ref.
-fn evidence_chunk_ref(source_ref: &moa_core::ContextSourceRef) -> Option<ChunkRef> {
+fn evidence_chunk_ref(source_ref: &moa_core::types::context::ContextSourceRef) -> Option<ChunkRef> {
     let excerpt = source_ref
         .excerpt
         .as_deref()
@@ -451,9 +456,12 @@ fn tool_call_summaries(response: &CompletionResponse) -> Vec<ToolCallSummary> {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        CompletionResponse, ContextMessage, ContextSourceRef, Event, EventRecord, EventType,
-        ModelCapabilities, ModelId, NullLineageHandle, SessionMeta, StopReason, TokenUsage,
-        WorkingContext,
+        events::Event, events::EventType, traits::NullLineageHandle,
+        types::completion::CompletionResponse, types::completion::StopReason,
+        types::completion::TokenUsage, types::context::ContextMessage,
+        types::context::ContextSourceRef, types::context::WorkingContext,
+        types::events_stream::EventRecord, types::identifiers::ModelId,
+        types::model::ModelCapabilities, types::session::SessionMeta,
     };
     use moa_lineage_citation::ChunkRef;
     use uuid::Uuid;
@@ -558,7 +566,7 @@ mod tests {
                 text: response.text.clone(),
                 thought_signature: None,
                 model: response.model.clone(),
-                model_tier: moa_core::ModelTier::Main,
+                model_tier: moa_core::types::provider::ModelTier::Main,
                 input_tokens_uncached: 0,
                 input_tokens_cache_write: 0,
                 input_tokens_cache_read: 0,

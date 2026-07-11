@@ -5,11 +5,10 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use moa_core::{StoragePartitionId, TenantId};
+use moa_core::{types::identifiers::StoragePartitionId, types::identifiers::TenantId};
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
 use crate::objects::durable_utc_now;
 use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_scalar};
 use crate::workflows::consolidate::{
@@ -154,7 +153,17 @@ pub trait TenantObject {
 }
 
 /// Concrete `Tenant` virtual object implementation.
-pub struct TenantImpl;
+pub struct TenantImpl {
+    pool: sqlx::PgPool,
+}
+
+impl TenantImpl {
+    /// Creates a tenant object with the pool used for its memory summary projection.
+    #[must_use]
+    pub fn new(pool: sqlx::PgPool) -> Self {
+        Self { pool }
+    }
+}
 
 impl TenantObject for TenantImpl {
     #[tracing::instrument(skip(self, ctx, config))]
@@ -235,7 +244,7 @@ impl TenantObject for TenantImpl {
         annotate_restate_handler_span("Tenant", "status");
         let state = TenantVoState::load_from(&ctx).await?;
         let tenant_id = tenant_id_from_key(ctx.key())?;
-        let pages_count = count_graph_nodes(tenant_id).await?;
+        let pages_count = count_graph_nodes(&self.pool, tenant_id).await?;
 
         Ok(Json::from(TenantStatus {
             last_consolidation_at: state.last_consolidation,
@@ -246,9 +255,7 @@ impl TenantObject for TenantImpl {
     }
 }
 
-async fn count_graph_nodes(tenant_id: TenantId) -> Result<u64, HandlerError> {
-    let ctx = OrchestratorCtx::current();
-    let pool = ctx.graph_pool();
+async fn count_graph_nodes(pool: &sqlx::PgPool, tenant_id: TenantId) -> Result<u64, HandlerError> {
     let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
     let count = sqlx::query_scalar::<_, i64>(
         r#"
@@ -259,7 +266,7 @@ async fn count_graph_nodes(tenant_id: TenantId) -> Result<u64, HandlerError> {
         "#,
     )
     .bind(storage_partition_id)
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await
     .map_err(HandlerError::from)?;
     Ok(count.max(0) as u64)

@@ -7,4 +7,5 @@
 pub mod app;
 pub mod model;
 pub mod plan;
+pub mod scores;
 pub mod store;

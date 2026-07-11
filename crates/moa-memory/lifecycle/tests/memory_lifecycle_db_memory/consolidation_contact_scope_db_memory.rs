@@ -1,8 +1,10 @@
 //! Postgres-backed checks for contact-local memory consolidation.
 
 use chrono::{Duration, TimeZone, Utc};
-use moa_core::RlsContext;
-use moa_core::{ContactId, StoragePartitionId, TenantId};
+use moa_core::types::memory::RlsContext;
+use moa_core::{
+    types::contact::ContactId, types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+};
 use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
 use moa_memory_lifecycle::merge_duplicates;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};

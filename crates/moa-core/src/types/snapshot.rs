@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{ContextMessage, SequenceNum, SessionId, ToolCallId};
+use super::{
+    context::ContextMessage, events_stream::SequenceNum, identifiers::SessionId,
+    identifiers::ToolCallId,
+};
 
 /// Current serialized context snapshot format version.
 pub const CONTEXT_SNAPSHOT_FORMAT_VERSION: u32 = 4;

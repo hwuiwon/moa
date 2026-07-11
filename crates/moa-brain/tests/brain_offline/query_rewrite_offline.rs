@@ -7,8 +7,10 @@ use std::sync::Arc;
 
 use moa_brain::pipeline::query_rewrite::QueryRewriter;
 use moa_core::{
-    Channel, ContextMessage, ContextProcessor, LLMProvider, MoaConfig, QueryRewriteResult,
-    RewriteSource, SessionMeta, TenantId,
+    config::MoaConfig, traits::ContextProcessor, traits::LLMProvider, types::channel::Channel,
+    types::context::ContextMessage, types::identifiers::TenantId,
+    types::query_rewrite::QueryRewriteResult, types::query_rewrite::RewriteSource,
+    types::session::SessionMeta,
 };
 use moa_providers::OpenAIProvider;
 use serde_json::json;
@@ -17,7 +19,8 @@ use wiremock::MockServer;
 use openai_wiremock::{captured_json_bodies, mount_openai_json_text};
 
 #[tokio::test]
-async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> moa_core::Result<()> {
+async fn query_rewrite_offline_resolves_coreference_without_new_entities()
+-> moa_core::error::Result<()> {
     let server = MockServer::start().await;
     mount_openai_json_text(
         &server,
@@ -37,7 +40,7 @@ async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> mo
         OpenAIProvider::new("test-key", "gpt-5.4-nano")?
             .with_api_base(format!("{}/v1", server.uri()))?,
     );
-    let mut ctx = moa_core::WorkingContext::new(
+    let mut ctx = moa_core::types::context::WorkingContext::new(
         &SessionMeta {
             tenant_id: TenantId::new(),
             channel: Channel::Chat,

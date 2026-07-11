@@ -6,8 +6,8 @@ use moa_authz::{
     AuthzCheckError, FgaClient, FgaConfig, require_authz, require_authz_with_delegation,
 };
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::TenantId;
 use moa_core::traits::{Identity, IdentityType};
+use moa_core::types::identifiers::TenantId;
 use serde_json::json;
 use uuid::Uuid;
 

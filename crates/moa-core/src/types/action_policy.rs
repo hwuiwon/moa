@@ -4,7 +4,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{ContactId, SessionActorRef, SessionId, TenantId, ToolCallId, UserId, WorkerId};
+use super::{
+    contact::ContactId, contact::SessionActorRef, identifiers::SessionId, identifiers::TenantId,
+    identifiers::ToolCallId, identifiers::UserId, worker::state::WorkerId,
+};
 
 /// Risk level assigned to one policy-facing action.
 #[derive(

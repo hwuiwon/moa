@@ -1,6 +1,6 @@
 //! Shared helpers for `provider:model` model selectors.
 
-use moa_core::{MoaError, Result};
+use moa_core::{error::MoaError, error::Result};
 
 /// A model selector split into provider and model segments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

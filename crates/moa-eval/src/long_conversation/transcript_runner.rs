@@ -16,11 +16,17 @@ use moa_brain::{
 };
 use moa_core::transcript::Transcript;
 use moa_core::{
-    AssessmentPhase, AttributionSubjectType, CompletionRequest, CompletionStream, Event,
-    EventRange, EventRecord, LLMProvider, LearningCandidateStatus, MoaConfig, MoaError,
-    ModelCapabilities, RuntimeEvent, SegmentAssessment, SegmentEvidence, SegmentEvidenceKind,
-    SegmentEvidencePolarity, SegmentOutcome, SessionId, SessionMeta, SessionStore, TaskSegment,
-    deterministic_segment_id,
+    config::MoaConfig, error::MoaError, events::Event, traits::LLMProvider, traits::SessionStore,
+    types::completion::CompletionRequest, types::completion::CompletionStream,
+    types::events_stream::EventRange, types::events_stream::EventRecord,
+    types::experience::AttributionSubjectType, types::experience::LearningCandidateStatus,
+    types::identifiers::SessionId, types::model::ModelCapabilities,
+    types::runtime_events::RuntimeEvent, types::segment_assessment::AssessmentPhase,
+    types::segment_assessment::SegmentAssessment, types::segment_assessment::SegmentEvidence,
+    types::segment_assessment::SegmentEvidenceKind,
+    types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
+    types::segments::TaskSegment, types::segments::deterministic_segment_id,
+    types::session::SessionMeta,
 };
 use moa_eval_core::{
     AgentConfig, ConversationCost, EngineOptions, EvalError, EvalResult, EvalScore, EvalScoreValue,
@@ -591,7 +597,7 @@ async fn drive_one_turn(
                 }
             }
             StreamedTurnResult::Cancelled => {
-                return Err(EvalError::Moa(moa_core::MoaError::Cancelled));
+                return Err(EvalError::Moa(moa_core::error::MoaError::Cancelled));
             }
         }
     }
@@ -733,11 +739,11 @@ async fn create_secondary_session(
     llm_provider: Arc<dyn LLMProvider>,
 ) -> Result<SessionId> {
     let session_meta = SessionMeta {
-        tenant_id: moa_core::TenantId::from(
+        tenant_id: moa_core::types::identifiers::TenantId::from(
             uuid::Uuid::parse_str(environment.storage_partition_id.as_str())
                 .map_err(|error| EvalError::InvalidConfig(error.to_string()))?,
         ),
-        created_by: Some(moa_core::SessionActorRef::Identity {
+        created_by: Some(moa_core::types::contact::SessionActorRef::Identity {
             id: uuid::Uuid::now_v7(),
         }),
         model: llm_provider.capabilities().model_id,
@@ -1093,7 +1099,7 @@ impl ObservedRecordedProvider {
             .unwrap_or_default()
     }
 
-    fn record_observation(&self, request: &CompletionRequest) -> moa_core::Result<()> {
+    fn record_observation(&self, request: &CompletionRequest) -> moa_core::error::Result<()> {
         let selected_skills = selected_skills_from_request(request);
         if selected_skills.is_empty() {
             return Ok(());
@@ -1121,7 +1127,10 @@ impl LLMProvider for ObservedRecordedProvider {
         self.recorded.capabilities()
     }
 
-    async fn complete(&self, request: CompletionRequest) -> moa_core::Result<CompletionStream> {
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
         self.record_observation(&request)?;
         self.recorded
             .complete_recorded(&request)
@@ -1159,7 +1168,7 @@ fn latest_non_manifest_user_message(request: &CompletionRequest) -> Option<Strin
         .iter()
         .rev()
         .find(|message| {
-            message.role == moa_core::MessageRole::User
+            message.role == moa_core::types::context::MessageRole::User
                 && !message.content.starts_with("<system-reminder>")
                 && !message.content.contains("<available_skills>")
         })
@@ -1471,9 +1480,15 @@ fn first_checkpoint_input_tokens(events: &[Event]) -> Option<u32> {
 }
 
 fn errors_before_first_checkpoint(events: &[Event]) -> u32 {
-    events
+    let Some(checkpoint_index) = events
         .iter()
-        .take_while(|event| !matches!(event, Event::Checkpoint { .. }))
+        .position(|event| matches!(event, Event::Checkpoint { .. }))
+    else {
+        return 0;
+    };
+
+    events[..checkpoint_index]
+        .iter()
         .filter(|event| matches!(event, Event::Error { .. } | Event::ToolError { .. }))
         .count()
         .try_into()
@@ -1540,7 +1555,10 @@ async fn cleanup_workspace(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{CacheReport, EventType, ModelId, ModelTier};
+    use moa_core::{
+        events::EventType, types::identifiers::ModelId, types::observability::CacheReport,
+        types::provider::ModelTier,
+    };
 
     use super::super::memory_metrics::test_session_store::RecordingSessionStore;
     use super::*;
@@ -1755,6 +1773,42 @@ mod tests {
             !score_card.context.errors_preserved_strict,
             "absent preservation evidence with pre-compaction errors must fail strict"
         );
+    }
+
+    #[tokio::test]
+    async fn score_card_without_compaction_does_not_require_preservation_evidence() {
+        // Pins: ordinary errors in a run with no checkpoint do not require
+        // compaction-preservation evidence.
+        let session_id = SessionId::new();
+        let records = vec![event_record(
+            session_id,
+            1,
+            Event::Error {
+                message: "recoverable tool failure".to_string(),
+                recoverable: true,
+            },
+        )];
+        let case = TestCase {
+            name: "no-compaction".to_string(),
+            ..TestCase::default()
+        };
+        let session_store = RecordingSessionStore::default();
+
+        let score_card = build_score_card(
+            &case,
+            "recorded",
+            1,
+            &records,
+            &CollectedExecution::default(),
+            Utc::now(),
+            session_id,
+            &session_store,
+        )
+        .await;
+
+        assert_eq!(score_card.context.compaction_count, 0);
+        assert_eq!(score_card.context.errors_total_pre_compaction, 0);
+        assert!(score_card.context.errors_preserved_strict);
     }
 
     #[tokio::test]

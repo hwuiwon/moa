@@ -5,8 +5,10 @@ use std::time::Instant;
 use eventsource_stream::Eventsource;
 use futures_util::stream;
 use moa_core::{
-    CompletionContent, CompletionRequest, ContextMessage, JsonResponseFormat, LLMProvider, ModelId,
-    StopReason, ToolContent, ToolInvocation,
+    traits::LLMProvider, types::completion::CompletionContent,
+    types::completion::CompletionRequest, types::completion::JsonResponseFormat,
+    types::completion::StopReason, types::completion::ToolInvocation,
+    types::context::ContextMessage, types::identifiers::ModelId, types::tools::ToolContent,
 };
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -189,7 +191,7 @@ fn completion_request_marks_frozen_history_boundary_with_cache_control() {
     // Frozen region: system prefix + two replayed history messages (indexes
     // 0..3); index 3 onward (memory reminder + active user turn) is per-turn.
     metadata.insert(
-        moa_core::STABLE_HISTORY_END_METADATA_KEY.to_string(),
+        moa_core::types::completion::STABLE_HISTORY_END_METADATA_KEY.to_string(),
         json!(3),
     );
     let request = CompletionRequest {

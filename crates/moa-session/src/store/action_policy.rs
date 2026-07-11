@@ -1,6 +1,9 @@
 //! Action-policy rule operations for the Postgres session store.
 
-use moa_core::{ActionRuleScope, StoragePartitionId, TenantId, UserId};
+use moa_core::{
+    types::action_policy::ActionRuleScope, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::identifiers::UserId,
+};
 
 use super::*;
 

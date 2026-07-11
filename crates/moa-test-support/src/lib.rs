@@ -12,8 +12,10 @@ pub mod invariants;
 pub mod postgres;
 pub mod pricing;
 
+#[cfg(feature = "orchestrator-fixture")]
 mod orchestrator_fixture;
 
+#[cfg(feature = "orchestrator-fixture")]
 pub use orchestrator_fixture::{
     ConversationOptions, IsolatedTest, OrchestratorTestFixture, TestApiClient, TestSessionHandle,
     drive_conversation,

@@ -15,13 +15,14 @@ use crate::{
     should_ingest_degraded,
 };
 use futures_util::{StreamExt, TryStreamExt, stream};
-use moa_core::RlsContext;
-use moa_core::{MoaConfig, traits::EmbeddingProvider};
+use moa_core::types::memory::RlsContext;
+use moa_core::{config::MoaConfig, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, NodeLabel, NodeWriteIntent, PostgresGraphStore,
 };
 use moa_memory_pii::{PiiClassifier, PiiResult, PiiSpan, redact_text, redaction_replacement};
+use moa_memory_types::normalize_entity_name;
 use moa_memory_vector::{VectorStore, VectorStoreFactory};
 use restate_sdk::prelude::*;
 use serde_json::json;
@@ -373,10 +374,13 @@ pub fn ingestion_object_key(turn: &SessionTurn) -> String {
 
 /// Builds a finalized turn transcript from an LLM request and response.
 #[must_use]
-pub fn turn_transcript(messages: &[moa_core::ContextMessage], response_text: &str) -> String {
+pub fn turn_transcript(
+    messages: &[moa_core::types::context::ContextMessage],
+    response_text: &str,
+) -> String {
     let mut lines = messages
         .iter()
-        .filter(|message| matches!(message.role, moa_core::MessageRole::User))
+        .filter(|message| matches!(message.role, moa_core::types::context::MessageRole::User))
         .map(|message| format!("user: {}", message.content.trim()))
         .collect::<Vec<_>>();
     if !response_text.trim().is_empty() {
@@ -1069,7 +1073,7 @@ fn entity_embedding_for<'a>(
     name: &str,
 ) -> Option<&'a [f32]> {
     entity_embeddings
-        .get(&crate::entity_resolution::normalize_entity_name(name))
+        .get(&normalize_entity_name(name))
         .map(Vec::as_slice)
 }
 
@@ -1119,7 +1123,7 @@ async fn precompute_entity_embeddings(
         };
         let extracted = &fact.classified.fact;
         for raw in [extracted.subject.as_str(), extracted.object.as_str()] {
-            let normalized = crate::entity_resolution::normalize_entity_name(raw);
+            let normalized = normalize_entity_name(raw);
             if normalized.is_empty()
                 || map.contains_key(&normalized)
                 || pending_seen.contains(&normalized)
@@ -1250,7 +1254,7 @@ fn fact_entity_edge_intent(
 }
 
 fn fact_object_edge_label(predicate: &str) -> EdgeLabel {
-    let normalized = crate::entity_resolution::normalize_entity_name(predicate);
+    let normalized = normalize_entity_name(predicate);
     let tokens = normalized.split_whitespace().collect::<Vec<_>>();
     if tokens
         .iter()
@@ -1488,7 +1492,10 @@ mod tests {
 
     use chrono::Utc;
     use moa_core::traits::EmbeddingProvider;
-    use moa_core::{ContactId, ContextMessage, MoaConfig, SessionId, TenantId};
+    use moa_core::{
+        config::MoaConfig, types::contact::ContactId, types::context::ContextMessage,
+        types::identifiers::SessionId, types::identifiers::TenantId,
+    };
     use moa_memory_graph::{EdgeLabel, PiiClass};
     use moa_memory_pii::{PiiCategory, PiiClassifier, PiiResult, PiiSpan, classify_heuristic};
     use sqlx::postgres::PgPoolOptions;
@@ -1549,7 +1556,7 @@ mod tests {
             self.dim
         }
 
-        async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+        async fn embed(&self, inputs: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.last_batch_len.store(inputs.len(), Ordering::SeqCst);
             Ok(inputs
@@ -1580,7 +1587,7 @@ mod tests {
             self.dim
         }
 
-        async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+        async fn embed(&self, inputs: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
             let short = inputs.len().saturating_sub(1);
             Ok((0..short).map(|_| vec![0.0; self.dim]).collect())
         }

@@ -1,6 +1,7 @@
 use moa_core::{
-    McpCredentialConfig, McpServerConfig, McpTransportConfig, MoaConfig, ModelId, SessionMeta,
-    TenantId, ToolInvocation,
+    config::McpCredentialConfig, config::McpServerConfig, config::McpTransportConfig,
+    config::MoaConfig, types::completion::ToolInvocation, types::identifiers::ModelId,
+    types::identifiers::TenantId, types::session::SessionMeta,
 };
 use moa_hands::ToolRouter;
 use serde_json::json;
@@ -130,7 +131,7 @@ async fn router_fails_closed_when_credentialed_mcp_token_env_is_unset() {
         Err(error) => error,
     };
     match error {
-        moa_core::MoaError::MissingEnvironmentVariable(message) => {
+        moa_core::error::MoaError::MissingEnvironmentVariable(message) => {
             assert!(
                 message.contains(&token_env),
                 "expected the unset token env var name in the error, got: {message}"
@@ -255,7 +256,7 @@ async fn from_config_rejects_mcp_tool_name_that_collides_with_local_tool() {
     };
 
     assert!(
-        matches!(error, moa_core::MoaError::ConfigError(ref message) if message.contains("shadow-api") && message.contains("bash") && message.contains("conflicts with an existing local tool name")),
+        matches!(error, moa_core::error::MoaError::ConfigError(ref message) if message.contains("shadow-api") && message.contains("bash") && message.contains("conflicts with an existing local tool name")),
         "unexpected error: {error:?}"
     );
 }

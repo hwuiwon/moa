@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use moa_core::{Result, ToolOutput};
+use moa_core::{error::Result, types::tools::ToolOutput};
 use serde::Deserialize;
 use tokio::fs;
 use tokio_util::sync::CancellationToken;
@@ -43,7 +43,7 @@ pub async fn execute_docker(
     let path = resolve_container_workspace_path(workspace_root, &params.path)?;
     let existing = match docker_file_read(container_id, &path, timeout, hard_cancel_token).await {
         Ok(content) => ExistingFileContent::Text(content),
-        Err(moa_core::MoaError::ToolError(message))
+        Err(moa_core::error::MoaError::ToolError(message))
             if message.contains("No such file or directory") =>
         {
             ExistingFileContent::Missing
@@ -179,7 +179,10 @@ mod tests {
             .await
             .expect_err("symlink escape should be rejected");
 
-        assert!(matches!(error, moa_core::MoaError::PermissionDenied(_)));
+        assert!(matches!(
+            error,
+            moa_core::error::MoaError::PermissionDenied(_)
+        ));
         assert_eq!(
             fs::read_to_string(&outside_file)
                 .await
@@ -209,7 +212,10 @@ mod tests {
         .await
         .expect_err("bind-mounted symlink escape should be rejected");
 
-        assert!(matches!(error, moa_core::MoaError::PermissionDenied(_)));
+        assert!(matches!(
+            error,
+            moa_core::error::MoaError::PermissionDenied(_)
+        ));
         assert_eq!(
             fs::read_to_string(&outside_file)
                 .await

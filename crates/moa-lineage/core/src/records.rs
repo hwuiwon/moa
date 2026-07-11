@@ -1,7 +1,10 @@
 //! Serializable lineage records emitted by retrieval, context, and generation.
 
 use chrono::{DateTime, Utc};
-use moa_core::{ContextSourceRef, SessionId, StoragePartitionId, UserId};
+use moa_core::{
+    types::context::ContextSourceRef, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::identifiers::UserId,
+};
 use moa_memory_types::MemoryScope;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -683,7 +686,10 @@ impl LineageEvent {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{SessionId, StoragePartitionId, TenantId, UserId};
+    use moa_core::{
+        types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+        types::identifiers::TenantId, types::identifiers::UserId,
+    };
     use moa_memory_types::MemoryScope;
 
     use super::*;

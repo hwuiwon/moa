@@ -5,12 +5,12 @@ use std::error::Error;
 
 use chrono::{DateTime, Utc};
 use moa_brain::planning::parse_temporal;
-use moa_core::{MoaError, StoragePartitionId, UserId, traits::EmbeddingProvider};
+use moa_core::{error::MoaError, types::identifiers::StoragePartitionId, types::identifiers::UserId, traits::EmbeddingProvider};
 use moa_eval::memory_eval::{
     CORPUS_SCHEMA_VERSION, CachedEmbeddingProvider, CorpusManifest, CorpusProfile,
     EmbeddingInputKind, GeneratedMemoryEvalCorpus, LedgerFact, Probe, ProbeType,
     SyntheticSession, SyntheticTurn, TranscriptStyle, build_cached_embedding_fixtures,
-    embedding_text_hash, generate_memory_eval_corpus, generate_memory_eval_corpus_with_style,
+    embedding_text_hash, generate_memory_eval_corpus,
     read_embedding_inputs_jsonl, read_embeddings_jsonl, read_ledger_jsonl, read_manifest_json,
     read_probes_jsonl, read_sessions_jsonl, validate_corpus, write_embeddings_jsonl,
     write_ledger_jsonl, write_manifest_json, write_memory_eval_corpus, write_probes_jsonl,

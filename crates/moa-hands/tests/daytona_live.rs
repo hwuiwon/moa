@@ -10,8 +10,10 @@ use std::{panic::AssertUnwindSafe, panic::resume_unwind};
 
 use futures_util::FutureExt;
 use moa_core::{
-    CloudHandsConfig, HandHandle, HandProvider, HandResources, HandSpec, HandStatus, MoaConfig,
-    MoaError, Result, SessionMeta, TenantId, ToolInvocation,
+    config::CloudHandsConfig, config::MoaConfig, error::MoaError, error::Result,
+    traits::HandProvider, types::completion::ToolInvocation, types::hands::HandHandle,
+    types::hands::HandResources, types::hands::HandSpec, types::hands::HandStatus,
+    types::identifiers::TenantId, types::session::SessionMeta,
 };
 use moa_hands::{DaytonaHandProvider, ToolRouter};
 use serde_json::json;
@@ -22,7 +24,7 @@ use uuid::Uuid;
 fn session(_label: &str) -> SessionMeta {
     SessionMeta {
         tenant_id: TenantId::new(),
-        model: moa_core::ModelId::new("claude-sonnet-4-6"),
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     }
 }
@@ -126,7 +128,7 @@ async fn daytona_provider_round_trip() {
 
     let unsupported = provider
         .provision(HandSpec {
-            sandbox_tier: moa_core::SandboxTier::MicroVM,
+            sandbox_tier: moa_core::types::hands::SandboxTier::MicroVM,
             image: None,
             resources: HandResources::default(),
             env: std::collections::HashMap::new(),
@@ -139,7 +141,7 @@ async fn daytona_provider_round_trip() {
 
     let handle = provider
         .provision(HandSpec {
-            sandbox_tier: moa_core::SandboxTier::Container,
+            sandbox_tier: moa_core::types::hands::SandboxTier::Container,
             image: None,
             resources: HandResources::default(),
             env: std::collections::HashMap::new(),

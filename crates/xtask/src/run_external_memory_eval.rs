@@ -11,8 +11,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::traits::{EmbeddingProvider, LLMProvider};
 use moa_core::{
-    CompletionRequest, CompletionResponse, ContextMessage, MoaConfig, MoaError, ModelId,
-    estimate_text_tokens,
+    config::MoaConfig, error::MoaError, types::completion::CompletionRequest,
+    types::completion::CompletionResponse, types::context::ContextMessage,
+    types::context::estimate_text_tokens, types::identifiers::ModelId,
 };
 use moa_eval::external_memory::answer::{
     AbsoluteJudgeResponse, AnswerScore, AnswerScoreOutcome, ExternalMemoryMode, ReaderResponse,
@@ -285,7 +286,7 @@ impl EmbeddingProvider for AccountingEmbeddingProvider {
         self.inner.model_version()
     }
 
-    async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+    async fn embed(&self, inputs: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
         let input_tokens = inputs.iter().map(|input| estimate_text_tokens(input)).sum();
         let accounting_id = self
             .budget
@@ -2296,8 +2297,9 @@ mod tests {
     use std::time::Duration;
 
     use moa_core::{
-        CompletionContent, CompletionStream, ModelCapabilities, ModelId, StopReason, TokenPricing,
-        TokenUsage, ToolCallFormat,
+        types::completion::CompletionContent, types::completion::CompletionStream,
+        types::completion::StopReason, types::completion::TokenUsage, types::identifiers::ModelId,
+        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
 
     use super::*;
@@ -2646,7 +2648,7 @@ mod tests {
             2
         }
 
-        async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+        async fn embed(&self, inputs: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(vec![vec![0.0, 1.0]; inputs.len()])
         }
@@ -2785,7 +2787,7 @@ mod tests {
         async fn complete(
             &self,
             _request: CompletionRequest,
-        ) -> moa_core::Result<CompletionStream> {
+        ) -> moa_core::error::Result<CompletionStream> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(CompletionStream::from_response(CompletionResponse {
                 text: self.text.clone(),

@@ -2,10 +2,12 @@
 
 use std::borrow::Cow;
 
-use moa_core::estimate_text_tokens;
+use moa_core::types::context::estimate_text_tokens;
 use moa_core::{
-    CompactionConfig, CompletionRequest, ContextMessage, Event, EventRecord, LLMProvider,
-    ModelTier, Result, SequenceNum, SessionId, SessionStore, TokenPricing,
+    config::CompactionConfig, error::Result, events::Event, traits::LLMProvider,
+    traits::SessionStore, types::completion::CompletionRequest, types::context::ContextMessage,
+    types::events_stream::EventRecord, types::events_stream::SequenceNum,
+    types::identifiers::SessionId, types::model::TokenPricing, types::provider::ModelTier,
 };
 use tracing::Instrument;
 
@@ -516,8 +518,10 @@ fn calculate_cost_cents(input_tokens: usize, output_tokens: usize, pricing: &Tok
 mod tests {
     use chrono::Utc;
     use moa_core::{
-        Event, EventRecord, EventType, GuardrailDirection, GuardrailMode, MessageRole, ModelId,
-        SessionId,
+        events::Event, events::EventType, types::context::MessageRole,
+        types::events_stream::EventRecord, types::guardrails::GuardrailDirection,
+        types::guardrails::GuardrailMode, types::identifiers::ModelId,
+        types::identifiers::SessionId,
     };
     use uuid::Uuid;
 
@@ -527,11 +531,11 @@ mod tests {
     fn watermark_gate_matches_event_threshold_boundary() {
         // Pins: the cheap watermark opens exactly at the event-count threshold so
         // turns below it skip the full-log read entirely.
-        let config = moa_core::CompactionConfig {
+        let config = moa_core::config::CompactionConfig {
             enabled: true,
             event_threshold: 4,
             token_ratio_threshold: 1.0,
-            ..moa_core::CompactionConfig::default()
+            ..moa_core::config::CompactionConfig::default()
         };
         let budget = 1_000_000;
 
@@ -549,11 +553,11 @@ mod tests {
     fn watermark_gate_counts_events_after_last_checkpoint() {
         // Pins: events already folded into a checkpoint do not re-open the gate;
         // only the tail appended after `last_checkpoint_seq` counts.
-        let config = moa_core::CompactionConfig {
+        let config = moa_core::config::CompactionConfig {
             enabled: true,
             event_threshold: 3,
             token_ratio_threshold: 1.0,
-            ..moa_core::CompactionConfig::default()
+            ..moa_core::config::CompactionConfig::default()
         };
         let budget = 1_000_000;
 
@@ -571,10 +575,10 @@ mod tests {
 
     #[test]
     fn watermark_gate_stays_closed_when_disabled() {
-        let config = moa_core::CompactionConfig {
+        let config = moa_core::config::CompactionConfig {
             enabled: false,
             event_threshold: 1,
-            ..moa_core::CompactionConfig::default()
+            ..moa_core::config::CompactionConfig::default()
         };
         assert!(!watermark_may_compact(&config, 100, None, 1_000_000));
     }
@@ -635,12 +639,12 @@ mod tests {
         assert!(!request.messages[1].content.contains("policy-sha256"));
         assert!(!request.messages[1].content.contains(guarded_text));
         assert!(!should_compact(
-            &moa_core::CompactionConfig {
+            &moa_core::config::CompactionConfig {
                 enabled: true,
                 event_threshold: 1,
                 token_ratio_threshold: 1.0,
                 recent_turns_verbatim: 0,
-                ..moa_core::CompactionConfig::default()
+                ..moa_core::config::CompactionConfig::default()
             },
             &refs,
             1,

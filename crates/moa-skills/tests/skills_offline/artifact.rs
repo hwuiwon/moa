@@ -132,9 +132,11 @@ fn published_skill_artifact_revision_files_convert_to_skill_package() {
     let revision = StoredArtifactRevision {
         artifact_uid: Uuid::now_v7(),
         revision_uid: Uuid::now_v7(),
-        storage_partition_id: Some(moa_core::StoragePartitionId::for_tenant(
-            moa_core::TenantId::from(tenant_id),
-        )),
+        storage_partition_id: Some(
+            moa_core::types::identifiers::StoragePartitionId::for_tenant(
+                moa_core::types::identifiers::TenantId::from(tenant_id),
+            ),
+        ),
         user_id: None,
         scope: "tenant".to_string(),
         kind: ArtifactKind::Skill,

@@ -20,10 +20,12 @@ use chrono::Utc;
 use eventsource_stream::Eventsource as _;
 use futures_util::StreamExt as _;
 use moa_auth_providers::api_keys::{self, Env as ApiKeyEnv, KeyOwner, NewApiKey};
-use moa_core::types::SYSTEM_DEFAULT_AGENT_REVISION_UID;
+use moa_core::types::agent::SYSTEM_DEFAULT_AGENT_REVISION_UID;
 use moa_core::{
-    AgentSessionSelection, ChannelRef, ContactSessionChannelRequest, ContactSessionInitRequest,
-    ContactSessionInitResponse, ContactTokenIssueRequest, ContactTokenIssueResponse,
+    types::agent::AgentSessionSelection, types::channel::ChannelRef,
+    types::contact::ContactSessionChannelRequest, types::contact::ContactSessionInitRequest,
+    types::contact::ContactSessionInitResponse, types::contact::ContactTokenIssueRequest,
+    types::contact::ContactTokenIssueResponse,
 };
 use secrecy::ExposeSecret as _;
 use sqlx::postgres::PgPoolOptions;
@@ -312,7 +314,7 @@ pub(crate) async fn build_edge_backend_pool(
 #[cfg(test)]
 mod tests {
     use chrono::Duration as ChronoDuration;
-    use moa_core::{EventType, SessionId};
+    use moa_core::{events::EventType, types::identifiers::SessionId};
 
     use super::*;
 
@@ -329,7 +331,7 @@ mod tests {
                 text: "hello".to_string(),
                 thought_signature: None,
                 model: ModelId::new("test-model"),
-                model_tier: moa_core::ModelTier::Main,
+                model_tier: moa_core::types::provider::ModelTier::Main,
                 input_tokens_uncached: 1,
                 input_tokens_cache_write: 0,
                 input_tokens_cache_read: 0,

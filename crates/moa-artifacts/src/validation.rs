@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use moa_core::GuardrailMode;
+use moa_core::types::guardrails::GuardrailMode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -1005,7 +1005,7 @@ fn is_empty_value(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{ValidationReport, validate_for_status};
-    use moa_core::GuardrailMode;
+    use moa_core::types::guardrails::GuardrailMode;
 
     use crate::agent::{AgentDefinition, AgentPurpose, GuardrailPolicy, GuardrailStagePolicy};
     use crate::document::{

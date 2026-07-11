@@ -8,9 +8,12 @@ use moa_brain::{
     lineage::emit_context_lineage, pipeline::history::HISTORY_SNAPSHOT_METADATA_KEY,
 };
 use moa_core::{
-    CompletionRequest, ContextSnapshot, EventRange, EventRecord, EventType, QueryRewriteResult,
-    Result, SandboxFile, SessionId, SessionStore, WorkingContext, record_pipeline_compile_duration,
-    session_engine::session_requires_processing,
+    error::Result, events::EventType, session_engine::session_requires_processing,
+    session_replay::record_pipeline_compile_duration, traits::SessionStore,
+    types::completion::CompletionRequest, types::context::WorkingContext,
+    types::events_stream::EventRange, types::events_stream::EventRecord, types::hands::SandboxFile,
+    types::identifiers::SessionId, types::query_rewrite::QueryRewriteResult,
+    types::snapshot::ContextSnapshot,
 };
 use moa_lineage_citation::ChunkRef;
 use moa_lineage_core::TurnId;
@@ -369,7 +372,10 @@ fn query_rewrite_cache_from_context(
 mod tests {
     use super::{coordinator_tool_schemas, merge_active_user_event};
     use chrono::Utc;
-    use moa_core::{Event, EventRecord, EventType, SessionId};
+    use moa_core::{
+        events::Event, events::EventType, types::events_stream::EventRecord,
+        types::identifiers::SessionId,
+    };
     use serde_json::{Value, json};
     use uuid::Uuid;
 
@@ -494,7 +500,7 @@ mod tests {
                         text: format!("tool event {sequence_num}"),
                         thought_signature: None,
                         model: "test-model".into(),
-                        model_tier: moa_core::ModelTier::Main,
+                        model_tier: moa_core::types::provider::ModelTier::Main,
                         input_tokens_uncached: 1,
                         input_tokens_cache_write: 0,
                         input_tokens_cache_read: 0,

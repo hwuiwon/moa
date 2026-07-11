@@ -1,15 +1,15 @@
 //! Periodic graph-memory maintenance triggered by the CronJob virtual object.
 
 use chrono::{NaiveDate, Utc};
-use moa_core::TenantId;
+use moa_core::{config::MoaConfig, types::identifiers::TenantId};
 use moa_memory_lifecycle::TenantConsolidationCursor;
 use moa_memory_vector::{VectorStoreFactory, VectorSyncReport};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::sync::Arc;
 
-use crate::OrchestratorCtx;
 use crate::workflows::consolidate::{
     ConsolidateClient, ConsolidateRequest, consolidate_workflow_id,
 };
@@ -100,7 +100,18 @@ pub trait GraphMemoryMaint {
 }
 
 /// Concrete graph-memory maintenance service implementation.
-pub struct GraphMemoryMaintImpl;
+pub struct GraphMemoryMaintImpl {
+    pool: PgPool,
+    config: Arc<MoaConfig>,
+}
+
+impl GraphMemoryMaintImpl {
+    /// Creates graph-memory maintenance with its persistence and vector configuration.
+    #[must_use]
+    pub fn new(pool: PgPool, config: Arc<MoaConfig>) -> Self {
+        Self { pool, config }
+    }
+}
 
 impl GraphMemoryMaint for GraphMemoryMaintImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -120,7 +131,7 @@ impl GraphMemoryMaint for GraphMemoryMaintImpl {
                 .await?
                 .into_inner(),
         };
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
         let discovery_request = request.clone();
         let tenant_cursors = ctx
             .run(|| async move {
@@ -161,8 +172,8 @@ impl GraphMemoryMaint for GraphMemoryMaintImpl {
         if request.limit <= 0 {
             return Err(TerminalError::new("vector sync drain limit must be positive").into());
         }
-        let pool = OrchestratorCtx::current_graph_pool();
-        let config = OrchestratorCtx::current_config();
+        let pool = self.pool.clone();
+        let config = self.config.clone();
         Ok(ctx
             .run(|| async move {
                 let report = VectorStoreFactory::from_config(config.as_ref())
@@ -185,8 +196,8 @@ impl GraphMemoryMaint for GraphMemoryMaintImpl {
         annotate_restate_handler_span("GraphMemoryMaint", "redrive_dead_lettered_vectors");
         let request = request.into_inner();
         let scope_label = request.storage_partition_id.clone();
-        let pool = OrchestratorCtx::current_graph_pool();
-        let config = OrchestratorCtx::current_config();
+        let pool = self.pool.clone();
+        let config = self.config.clone();
         let partition = request.storage_partition_id;
         let report = ctx
             .run(|| async move {

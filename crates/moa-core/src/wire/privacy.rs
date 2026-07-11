@@ -1,6 +1,9 @@
 //! Privacy export and erasure wire DTOs.
 
-use crate::*;
+use crate::{
+    types::contact::ContactId,
+    types::identifiers::{TenantId, UserId},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;

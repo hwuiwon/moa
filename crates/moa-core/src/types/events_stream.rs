@@ -4,9 +4,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::events::{Event, EventType};
+use crate::events::Event;
 
-use super::{BrainId, ContactId, SessionId, TenantId};
+use crate::events::EventType;
+
+use super::{
+    contact::ContactId, identifiers::BrainId, identifiers::SessionId, identifiers::TenantId,
+};
 
 /// Monotonic event sequence number within a session.
 pub type SequenceNum = u64;

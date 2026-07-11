@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_core::{RlsContext, TenantId};
+use moa_core::{types::identifiers::TenantId, types::memory::RlsContext};
 use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
 use moa_memory_ingest::{ContradictionContext, RrfPlusJudgeDetector};
 use moa_memory_vector::{VECTOR_DIMENSION, VectorItem, VectorMatch, VectorQuery, VectorStore};

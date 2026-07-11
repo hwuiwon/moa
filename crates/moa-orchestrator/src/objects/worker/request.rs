@@ -4,12 +4,14 @@ use super::*;
 
 pub(super) fn build_completion_request(
     state: &WorkerVoState,
+    providers: &ProviderRegistry,
+    configured_tool_schemas: &[serde_json::Value],
 ) -> Result<CompletionRequest, HandlerError> {
     let model = state
         .model
         .clone()
         .ok_or_else(|| TerminalError::new("worker model missing"))?;
-    let capabilities = configured_model_capabilities(&model)?;
+    let capabilities = configured_model_capabilities(providers, &model)?;
     let max_output_tokens = clamp_worker_max_output(&capabilities, state.budget_remaining);
     let mut request = CompletionRequest {
         model: Some(model),
@@ -17,7 +19,7 @@ pub(super) fn build_completion_request(
             ContextMessage::system(WORKER_SYSTEM_PROMPT),
             ContextMessage::user(worker_context_prompt(state)),
         ],
-        tools: filtered_tool_schemas(&state.tool_subset)?,
+        tools: filtered_tool_schemas(configured_tool_schemas, &state.tool_subset)?,
         max_output_tokens: Some(max_output_tokens),
         temperature: None,
         response_format: None,
@@ -35,9 +37,9 @@ fn clamp_worker_max_output(capabilities: &ModelCapabilities, budget_remaining: u
 }
 
 pub(super) fn filtered_tool_schemas(
+    configured: &[serde_json::Value],
     tool_subset: &[String],
 ) -> Result<Vec<serde_json::Value>, HandlerError> {
-    let configured = OrchestratorCtx::current_tool_schemas();
     let allowed = tool_subset
         .iter()
         .cloned()
@@ -60,9 +62,10 @@ pub(super) fn filtered_tool_schemas(
 }
 
 pub(super) fn configured_model_capabilities(
+    providers: &ProviderRegistry,
     model: &ModelId,
 ) -> Result<ModelCapabilities, HandlerError> {
-    OrchestratorCtx::current_provider_registry()
+    providers
         .capabilities_for_model(Some(model.as_str()))
         .map_err(moa_error_to_handler_error)
 }
@@ -142,9 +145,8 @@ mod tests {
     fn child_report_tools_are_appended_and_disjoint_from_root_delegation_set() {
         // Pins: the schemas appended to every child subset are exactly the two child-only
         // report tools, and none of them leak into the root session's delegation set.
-        // (`filtered_tool_schemas` itself needs an installed OrchestratorCtx, so the
-        // appended set and its disjointness from root are pinned at the schema layer.)
-        let child_report_names = moa_core::child_report_tool_schemas()
+        // The appended set and its disjointness from root are pinned at the schema layer.
+        let child_report_names = moa_core::types::worker::tool_schema::child_report_tool_schemas()
             .iter()
             .filter_map(|schema| schema.get("name").and_then(serde_json::Value::as_str))
             .map(str::to_string)
@@ -154,7 +156,7 @@ mod tests {
             vec!["report_to_parent", "request_input"]
         );
 
-        let root_names = moa_core::delegation_tool_schemas()
+        let root_names = moa_core::types::worker::tool_schema::delegation_tool_schemas()
             .iter()
             .filter_map(|schema| schema.get("name").and_then(serde_json::Value::as_str))
             .map(str::to_string)

@@ -30,12 +30,14 @@ pub use runner::{ContextPipeline, PipelineStageReport};
 /// runtime reminder) insert here — after replayed history, immediately before
 /// the active user turn — so their per-turn byte churn lands past the frozen
 /// history region and provider prompt caches keep matching it.
-pub(crate) fn trailing_user_insertion_index(messages: &[moa_core::ContextMessage]) -> usize {
+pub(crate) fn trailing_user_insertion_index(
+    messages: &[moa_core::types::context::ContextMessage],
+) -> usize {
     let mut insertion_index = messages.len();
     while insertion_index > 0
         && matches!(
             messages[insertion_index - 1].role,
-            moa_core::MessageRole::User
+            moa_core::types::context::MessageRole::User
         )
     {
         insertion_index -= 1;

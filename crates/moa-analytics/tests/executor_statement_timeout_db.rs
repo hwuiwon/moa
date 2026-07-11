@@ -1,7 +1,7 @@
 //! DB coverage for the analytics executor's per-query Postgres budget.
 
 use moa_analytics::AnalyticsService;
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
 use moa_core::wire::analytics::{
     AnalyticsCell, AnalyticsDimension, AnalyticsFilter, AnalyticsFilterOperator, AnalyticsMeasure,
     AnalyticsQueryRequest,

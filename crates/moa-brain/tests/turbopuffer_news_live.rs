@@ -6,9 +6,11 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use moa_brain::retrieval::{HybridRetriever, RetrievalRequest};
-use moa_core::RlsContext;
+use moa_core::types::memory::RlsContext;
 use moa_core::{
-    ContactId, MoaConfig, SessionId, StoragePartitionId, TenantId, traits::EmbeddingProvider,
+    config::MoaConfig, traits::EmbeddingProvider, types::contact::ContactId,
+    types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId,
 };
 use moa_db::ScopedConn;
 use moa_memory_graph::{PiiClass, PostgresGraphStore};

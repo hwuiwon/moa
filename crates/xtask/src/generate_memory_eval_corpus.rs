@@ -6,14 +6,13 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use moa_eval::memory_eval::{
     CorpusProfile, HELD_OUT_GOLDEN_SEEDS, TranscriptStyle, build_cached_embedding_fixtures,
-    generate_memory_eval_corpus_with_style, write_embeddings_jsonl, write_memory_eval_corpus,
+    generate_memory_eval_corpus, write_embeddings_jsonl, write_memory_eval_corpus,
 };
 
 /// Runs the memory evaluation corpus generator command.
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     let options = Options::parse(args)?;
-    let corpus =
-        generate_memory_eval_corpus_with_style(options.profile, options.seeds, options.style)?;
+    let corpus = generate_memory_eval_corpus(options.profile, options.seeds, options.style)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -142,7 +141,7 @@ fn parse_transcript_style(value: &str) -> Result<TranscriptStyle> {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- generate-memory-eval-corpus --profile pr|full [--transcript-style marked|natural] (--held-out | --seed <u64> --seed <u64> --seed <u64>) --output <path>"
+    "usage: cargo run -p xtask --features eval-tools -- generate-memory-eval-corpus --profile pr|full [--transcript-style marked|natural] (--held-out | --seed <u64> --seed <u64> --seed <u64>) --output <path>"
 }
 
 #[cfg(test)]

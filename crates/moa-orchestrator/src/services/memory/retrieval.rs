@@ -9,12 +9,15 @@ use moa_brain::retrieval::{
     HybridRetriever, MemoryAdmissionPolicy, RetrievalHit, RetrievalRequest, SourceTier,
     dedupe_and_rank_hits,
 };
-use moa_core::traits::{EmbeddingProvider, Identity};
+use moa_core::traits::{EmbeddingProvider, Identity, LineageHandle};
 use moa_core::wire::memory::{
     MemoryRetrieveDebugRequest, MemoryRetrieveDebugResponse, MemorySearchRequest,
     MemorySearchResponse, MemoryShowRequest, MemoryShowResponse,
 };
-use moa_core::{MoaConfig, SessionId, StoragePartitionId, UserId};
+use moa_core::{
+    config::MoaConfig, types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+    types::identifiers::UserId,
+};
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage,
     RetrievalSelectedHit, RetrievalStage, StageTimings, TurnId, VecHit,
@@ -30,8 +33,6 @@ use restate_sdk::prelude::*;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
-
 use super::responses::memory_hit_from_retrieval;
 use super::{effective_user_id, memory_handler_error};
 
@@ -39,9 +40,11 @@ use super::{effective_user_id, memory_handler_error};
 pub(super) async fn search_inner(
     request: MemorySearchRequest,
     scope: MemoryScope,
+    pool: &sqlx::PgPool,
+    config: &MoaConfig,
 ) -> Result<MemorySearchResponse, HandlerError> {
     let started = Instant::now();
-    let (graph, retriever) = memory_stack(&scope).await?;
+    let (graph, retriever) = memory_stack(pool, config, &scope).await?;
     let seeds = lookup_seed_uids(graph.as_ref(), &request.query, request.limit).await?;
     let label_filter = parse_label_filter(request.label_filter)?;
     let max_pii_class = parse_pii_class(request.max_pii_class)?;
@@ -57,6 +60,7 @@ pub(super) async fn search_inner(
             use_reranker: request.use_reranker,
             disable_graph_expansion: false,
         },
+        config,
     )
     .await?;
     let result_count = hits.len() as u64;
@@ -71,12 +75,13 @@ pub(super) async fn search_inner(
 /// Loads one graph-memory node and bounded neighbor details.
 pub(super) async fn show_inner(
     request: MemoryShowRequest,
+    pool: &sqlx::PgPool,
 ) -> Result<MemoryShowResponse, HandlerError> {
     let started = Instant::now();
     let scope = MemoryScope::Tenant {
         tenant_id: request.tenant_id,
     };
-    let graph = graph_store(&scope);
+    let graph = graph_store(pool, &scope);
     let node = graph
         .get_node(request.uid)
         .await
@@ -123,9 +128,12 @@ pub(super) async fn retrieve_debug_inner(
     request: MemoryRetrieveDebugRequest,
     scope: MemoryScope,
     identity: &Identity,
+    pool: &sqlx::PgPool,
+    config: &MoaConfig,
+    lineage: &dyn LineageHandle,
 ) -> Result<MemoryRetrieveDebugResponse, HandlerError> {
     let started = Instant::now();
-    let (graph, retriever) = memory_stack(&scope).await?;
+    let (graph, retriever) = memory_stack(pool, config, &scope).await?;
     let seeds = lookup_seed_uids(graph.as_ref(), &request.query, request.limit).await?;
     let hits = retrieve_hits(
         retriever.as_ref(),
@@ -139,19 +147,18 @@ pub(super) async fn retrieve_debug_inner(
             use_reranker: true,
             disable_graph_expansion: false,
         },
+        config,
     )
     .await?;
 
-    let lineage_enabled = OrchestratorCtx::current_config()
-        .observability
-        .lineage
-        .enabled;
+    let lineage_enabled = config.observability.lineage.enabled;
     let lineage_turn = if lineage_enabled {
         Some(record_debug_retrieval_lineage(
             &request.query,
             &scope,
             identity,
             &hits,
+            lineage,
         )?)
     } else {
         None
@@ -261,8 +268,9 @@ pub(super) async fn neighbors_for_tool(
 async fn retrieve_hits(
     retriever: &HybridRetriever,
     inputs: RetrievalInputs,
+    config: &MoaConfig,
 ) -> Result<Vec<RetrievalHit>, HandlerError> {
-    let query_embedding = debug_query_embedding(&inputs.query).await?;
+    let query_embedding = debug_query_embedding_with_config(config, &inputs.query).await?;
     retrieve_hits_with_embedding(retriever, inputs, query_embedding).await
 }
 
@@ -290,11 +298,6 @@ async fn retrieve_hits_with_embedding(
         })
         .await
         .map_err(memory_handler_error)
-}
-
-async fn debug_query_embedding(query: &str) -> Result<Vec<f32>, HandlerError> {
-    let config = OrchestratorCtx::current_config();
-    debug_query_embedding_with_config(config.as_ref(), query).await
 }
 
 async fn debug_query_embedding_with_config(
@@ -341,12 +344,11 @@ async fn lookup_seed_uids(
 }
 
 async fn memory_stack(
+    pool: &sqlx::PgPool,
+    config: &MoaConfig,
     scope: &MemoryScope,
 ) -> Result<(Arc<dyn GraphStore>, Arc<HybridRetriever>), HandlerError> {
-    let runtime = OrchestratorCtx::current();
-    let pool = runtime.graph_pool();
-    let config = runtime.config();
-    memory_stack_with_runtime(&pool, config.as_ref(), scope).await
+    memory_stack_with_runtime(pool, config, scope).await
 }
 
 async fn memory_stack_with_runtime(
@@ -364,8 +366,8 @@ async fn memory_stack_with_runtime(
     Ok((graph, Arc::new(retriever)))
 }
 
-fn graph_store(scope: &MemoryScope) -> PostgresGraphStore {
-    graph_store_with_pool(OrchestratorCtx::current_graph_pool(), scope)
+fn graph_store(pool: &sqlx::PgPool, scope: &MemoryScope) -> PostgresGraphStore {
+    graph_store_with_pool(pool.clone(), scope)
 }
 
 fn graph_store_with_pool(pool: sqlx::PgPool, scope: &MemoryScope) -> PostgresGraphStore {
@@ -400,6 +402,7 @@ fn record_debug_retrieval_lineage(
     scope: &MemoryScope,
     identity: &Identity,
     hits: &[RetrievalHit],
+    lineage: &dyn LineageHandle,
 ) -> Result<TurnId, HandlerError> {
     let turn_id = TurnId::new_v7();
     let storage_partition_id = StoragePartitionId::for_tenant(scope.tenant_id());
@@ -465,7 +468,7 @@ fn record_debug_retrieval_lineage(
     };
     let json = serde_json::to_value(LineageEvent::Retrieval(record))
         .map_err(|error| TerminalError::new(format!("serialize debug lineage: {error}")))?;
-    OrchestratorCtx::current_lineage().record(json);
+    lineage.record(json);
     Ok(turn_id)
 }
 

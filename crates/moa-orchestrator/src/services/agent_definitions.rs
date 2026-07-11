@@ -12,7 +12,10 @@ use moa_core::wire::agents::{
     AgentDeploymentListResponse, AgentDeploymentSummary, AgentInstallRequest, AgentInstallResponse,
     AgentInstallationListRequest, AgentInstallationListResponse, AgentInstallationSummary,
 };
-use moa_core::{ActionRuleScope, MoaError, StoragePartitionId, TenantId};
+use moa_core::{
+    error::MoaError, types::action_policy::ActionRuleScope, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId,
+};
 use moa_db::ScopedConn;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
@@ -20,7 +23,6 @@ use serde_json::Value;
 use sqlx::{PgPool, Row, types::Json as SqlJson};
 use uuid::Uuid;
 
-use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{
     authorize_tenant, require_fga_client, require_identity, translate_authz_error,
@@ -60,8 +62,18 @@ pub trait AgentDefinitions {
 }
 
 /// Concrete tenant-configurable agent service implementation.
-#[derive(Clone, Default)]
-pub struct AgentDefinitionsImpl;
+#[derive(Clone)]
+pub struct AgentDefinitionsImpl {
+    pool: PgPool,
+}
+
+impl AgentDefinitionsImpl {
+    /// Creates the agent-definition adapter with its artifact and deployment pool.
+    #[must_use]
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
 
 impl AgentDefinitions for AgentDefinitionsImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -73,7 +85,7 @@ impl AgentDefinitions for AgentDefinitionsImpl {
         annotate_restate_handler_span("AgentDefinitions", "list_definitions");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move { list_definitions_inner(pool, request).await.map(Json::from) })
@@ -93,7 +105,7 @@ impl AgentDefinitions for AgentDefinitionsImpl {
         if let Some(agent_id) = request.agent_id {
             authorize_agent_operator(&ctx, agent_id).await?;
         }
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move { install_inner(pool, request, identity).await.map(Json::from) })
@@ -110,7 +122,7 @@ impl AgentDefinitions for AgentDefinitionsImpl {
         annotate_restate_handler_span("AgentDefinitions", "list_installations");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move {
@@ -131,7 +143,7 @@ impl AgentDefinitions for AgentDefinitionsImpl {
         annotate_restate_handler_span("AgentDefinitions", "deploy");
         let request = request.into_inner();
         let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move { deploy_inner(pool, request, identity).await.map(Json::from) })
@@ -148,7 +160,7 @@ impl AgentDefinitions for AgentDefinitionsImpl {
         annotate_restate_handler_span("AgentDefinitions", "list_deployments");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
-        let pool = OrchestratorCtx::current_graph_pool();
+        let pool = self.pool.clone();
 
         Ok(ctx
             .run(|| async move { list_deployments_inner(pool, request).await.map(Json::from) })
@@ -469,7 +481,7 @@ struct NewDeployment<'a> {
     revision_uid: Uuid,
     deployed_by: Option<&'a str>,
     reason: Option<&'a str>,
-    revision_lock: &'a moa_core::AgentRevisionLock,
+    revision_lock: &'a moa_core::types::agent::AgentRevisionLock,
 }
 
 async fn insert_deployment(
@@ -669,7 +681,7 @@ fn storage_partition_id_for_tenant(tenant_id: TenantId) -> StoragePartitionId {
 async fn scoped_conn_for_scope<'p>(
     pool: &'p PgPool,
     scope: &ActionRuleScope,
-) -> moa_core::Result<ScopedConn<'p>> {
+) -> moa_core::error::Result<ScopedConn<'p>> {
     match scope {
         ActionRuleScope::Tenant { tenant_id } => ScopedConn::begin_tenant(pool, *tenant_id).await,
         ActionRuleScope::Contact {

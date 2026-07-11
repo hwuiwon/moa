@@ -1,8 +1,8 @@
 //! DB integration coverage for tenant-knowledge graph labels.
 
 use chrono::{DateTime, Utc};
-use moa_core::RlsContext;
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
+use moa_core::types::memory::RlsContext;
 use moa_db::ScopedConn;
 use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, GraphStore, GraphWalkScoring, NodeLabel, NodeWriteIntent, PiiClass,

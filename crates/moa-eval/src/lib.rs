@@ -9,8 +9,14 @@ pub mod kernel;
 pub mod long_conversation;
 pub mod memory_eval;
 pub mod pentest;
+pub mod plan;
 pub mod setup;
 
 pub use collector::TrajectoryCollector;
 pub use engine::EvalEngine;
+pub use plan::build_eval_plan;
 pub use setup::{AgentEnvironment, EvalLineageHandle, build_agent_environment};
+
+pub(crate) fn eval_sqlx_error(error: sqlx::Error) -> moa_eval_core::EvalError {
+    moa_eval_core::EvalError::Storage(error.to_string())
+}

@@ -11,7 +11,7 @@ _Restate orchestration, hosted API runtime mode, turn execution, and workers._
 - Shared turn helpers: `crates/moa-orchestrator/src/turn/`
 - Session VO: `crates/moa-orchestrator/src/objects/session/`
 - Worker VO: `crates/moa-orchestrator/src/objects/worker/`
-- Turn workflows: `crates/moa-orchestrator/src/workflows/turn_execution.rs` and `crates/moa-orchestrator/src/workflows/worker_turn_execution.rs`
+- Turn workflows: `crates/moa-orchestrator/src/workflows/turn_execution/mod.rs` and `crates/moa-orchestrator/src/workflows/worker_turn_execution.rs`
 - Procedure execution: `crates/moa-orchestrator/src/workflows/procedure_execution.rs`
 - CronJob VO: `crates/moa-orchestrator/src/objects/cron_job.rs`
 - Pipeline assembly: `crates/moa-brain/src/pipeline/mod.rs`

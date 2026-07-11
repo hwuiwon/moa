@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use moa_core::{LLMProvider, MoaConfig, ModelTask, Result};
+use moa_core::{config::MoaConfig, error::Result, traits::LLMProvider, types::provider::ModelTask};
 
 use crate::ProviderRegistry;
 
@@ -44,8 +44,9 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        CompletionRequest, CompletionStream, ModelCapabilities, ModelId, ModelTask, ModelTier,
-        Result, TokenPricing, ToolCallFormat,
+        error::Result, types::completion::CompletionRequest, types::completion::CompletionStream,
+        types::identifiers::ModelId, types::model::ModelCapabilities, types::model::TokenPricing,
+        types::model::ToolCallFormat, types::provider::ModelTask, types::provider::ModelTier,
     };
 
     use super::ModelRouter;
@@ -56,7 +57,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl moa_core::LLMProvider for MockProvider {
+    impl moa_core::traits::LLMProvider for MockProvider {
         fn name(&self) -> &str {
             self.name
         }
@@ -70,7 +71,7 @@ mod tests {
         }
     }
 
-    fn provider(name: &'static str, model: &'static str) -> Arc<dyn moa_core::LLMProvider> {
+    fn provider(name: &'static str, model: &'static str) -> Arc<dyn moa_core::traits::LLMProvider> {
         Arc::new(MockProvider {
             name,
             capabilities: ModelCapabilities {

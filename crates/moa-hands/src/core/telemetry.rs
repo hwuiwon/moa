@@ -3,8 +3,9 @@
 use std::time::Duration;
 
 use moa_core::{
-    ActionPolicyEffect, MoaError, Result, SandboxTier, SessionMeta, ToolInvocation, ToolOutput,
-    TraceContext,
+    error::MoaError, error::Result, types::action_policy::ActionPolicyEffect,
+    types::completion::ToolInvocation, types::hands::SandboxTier,
+    types::observability::TraceContext, types::session::SessionMeta, types::tools::ToolOutput,
 };
 use moa_observability::{apply_trace_context_to_span, record_tool_call};
 use opentelemetry::trace::Status;

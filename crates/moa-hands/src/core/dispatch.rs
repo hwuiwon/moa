@@ -5,8 +5,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    HandHandle, HandStatus, MoaError, Result, SandboxTier, SessionMeta, ToolDefinition,
-    ToolInvocation, ToolOutput,
+    error::MoaError, error::Result, types::completion::ToolInvocation, types::hands::HandHandle,
+    types::hands::HandStatus, types::hands::SandboxTier, types::session::SessionMeta,
+    types::tools::ToolDefinition, types::tools::ToolOutput,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -93,7 +94,7 @@ impl ToolRouter {
                 &tool_span,
                 session,
                 &registered_tool.execution,
-                &moa_core::ActionPolicyEffect::Allow,
+                &moa_core::types::action_policy::ActionPolicyEffect::Allow,
             );
             let result = self
                 .execute_authorized_with_recovery_inner(session, worker_id, invocation)
@@ -181,7 +182,7 @@ impl ToolRouter {
 
         let memory_tool_executor = self.memory_tool_executor.read().await.clone();
         let memory_retrieval_executor = self.memory_retrieval_executor.read().await.clone();
-        let ctx = moa_core::ToolContext {
+        let ctx = moa_core::traits::ToolContext {
             session,
             lineage: self.lineage.as_ref(),
             session_store: self.session_store.as_deref(),

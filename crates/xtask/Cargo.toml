@@ -5,34 +5,62 @@ edition.workspace = true
 license.workspace = true
 default-run = "xtask"
 
+[features]
+default = []
+eval-tools = [
+    "dep:async-trait",
+    "dep:blake3",
+    "dep:chrono",
+    "dep:moa-core",
+    "dep:moa-brain",
+    "dep:moa-db",
+    "dep:moa-eval",
+    "dep:moa-knowledge",
+    "dep:moa-memory-graph",
+    "dep:moa-memory-ingest",
+    "dep:moa-memory-lifecycle",
+    "dep:moa-memory-pii",
+    "dep:moa-memory-types",
+    "dep:moa-memory-vector",
+    "dep:moa-migrations",
+    "dep:moa-providers",
+    "dep:pgvector",
+    "dep:reqwest",
+    "dep:sha2",
+    "dep:sqlx",
+    "dep:tokio",
+    "dep:uuid",
+    "dep:workspace-hack",
+]
+
 [dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
-blake3.workspace = true
-chrono.workspace = true
-moa-core = { workspace = true }
-moa-brain = { workspace = true }
-moa-db = { workspace = true }
-moa-eval = { workspace = true }
-moa-knowledge = { workspace = true }
-moa-memory-graph = { workspace = true }
-moa-memory-ingest = { workspace = true, features = ["test-util"] }
-moa-memory-lifecycle = { workspace = true }
-moa-memory-pii = { workspace = true }
-moa-memory-types = { workspace = true }
-moa-memory-vector = { workspace = true }
-moa-migrations = { workspace = true }
-moa-providers = { workspace = true }
-pgvector = { version = "0.4.1", features = ["sqlx", "halfvec"] }
-reqwest.workspace = true
+async-trait = { workspace = true, optional = true }
+blake3 = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+moa-core = { workspace = true, optional = true }
+moa-brain = { workspace = true, optional = true }
+moa-db = { workspace = true, optional = true }
+moa-eval = { workspace = true, optional = true }
+moa-knowledge = { workspace = true, optional = true }
+moa-memory-graph = { workspace = true, optional = true }
+moa-memory-ingest = { workspace = true, features = ["test-util"], optional = true }
+moa-memory-lifecycle = { workspace = true, optional = true }
+moa-memory-pii = { workspace = true, optional = true }
+moa-memory-types = { workspace = true, optional = true }
+moa-memory-vector = { workspace = true, optional = true }
+moa-migrations = { workspace = true, optional = true }
+moa-providers = { workspace = true, optional = true }
+pgvector = { version = "0.4.1", features = ["sqlx", "halfvec"], optional = true }
+reqwest = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
-sqlx = { workspace = true, features = ["tls-rustls", "runtime-tokio-rustls", "postgres"] }
-tokio.workspace = true
+sha2 = { workspace = true, optional = true }
+sqlx = { workspace = true, features = ["tls-rustls", "runtime-tokio-rustls", "postgres"], optional = true }
+tokio = { workspace = true, optional = true }
 toml.workspace = true
-uuid.workspace = true
-workspace-hack = { workspace = true }
+uuid = { workspace = true, optional = true }
+workspace-hack = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_yaml.workspace = true

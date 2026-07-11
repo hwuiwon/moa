@@ -4,8 +4,11 @@ use std::sync::Arc;
 use std::{future::Future, pin::Pin};
 
 use moa_artifacts::registry::ArtifactFile;
-use moa_core::{ActionRuleScope, LearningCandidate, MoaConfig, Result};
-use moa_core::{LLMProvider, MoaError, ModelTask};
+use moa_core::{
+    config::MoaConfig, error::Result, types::action_policy::ActionRuleScope,
+    types::experience::LearningCandidate,
+};
+use moa_core::{error::MoaError, traits::LLMProvider, types::provider::ModelTask};
 use moa_eval::EvalEngine;
 use moa_eval_core::engine::EvalRun;
 use moa_eval_core::{

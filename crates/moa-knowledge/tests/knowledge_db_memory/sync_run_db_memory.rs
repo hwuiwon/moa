@@ -1,8 +1,8 @@
 //! DB integration coverage for tenant knowledge sync-run inspection.
 
 use chrono::{Duration, Utc};
-use moa_core::RlsContext;
-use moa_core::TenantId;
+use moa_core::types::identifiers::TenantId;
+use moa_core::types::memory::RlsContext;
 use moa_knowledge::{
     domain::{
         ConnectionStatus, DocumentVersion, IngestionStepStatus, KnowledgeConnection,
@@ -10,8 +10,8 @@ use moa_knowledge::{
         ObjectStatus, SyncRunStatus,
     },
     repository::{
-        DocumentVersionIngestionClaim, KnowledgeRepository, PostgresKnowledgeRepository,
-        SyncRunClaim,
+        DocumentVersionIngestionClaim, KnowledgeDiscoveryStore, KnowledgeRepository,
+        PostgresKnowledgeDiscoveryStore, PostgresKnowledgeRepository, SyncRunClaim,
     },
 };
 use moa_test_support::postgres;
@@ -23,6 +23,10 @@ fn repository(db: &postgres::TestDb, tenant_id: TenantId) -> PostgresKnowledgeRe
         db.store().pool().clone(),
         RlsContext::tenant(tenant_id),
     )
+}
+
+fn discovery(db: &postgres::TestDb) -> PostgresKnowledgeDiscoveryStore {
+    PostgresKnowledgeDiscoveryStore::for_app_role(db.store().pool().clone())
 }
 
 fn connection(tenant_id: TenantId, label: &str) -> KnowledgeConnection {
@@ -166,6 +170,58 @@ async fn active_sync_run_claim_allows_one_runner_per_connection_db_knowledge() {
     assert!(
         [run_a.sync_run_uid, run_b.sync_run_uid].contains(&claimed_uid),
         "claim should return one of the racing run IDs"
+    );
+}
+
+#[tokio::test]
+async fn discovery_resolves_tenant_then_scoped_repository_enforces_run_visibility_db_knowledge() {
+    // Pins: pre-scope discovery returns only the owner tenant and never bypasses scoped run reads.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated knowledge DB");
+    let tenant_a = TenantId::from(Uuid::now_v7());
+    let tenant_b = TenantId::from(Uuid::now_v7());
+    let repo_a = repository(&db, tenant_a);
+    let repo_b = repository(&db, tenant_b);
+    let connection_b = connection(tenant_b, "tenant-b");
+    repo_b
+        .upsert_connection(connection_b.clone())
+        .await
+        .expect("insert tenant B connection");
+    let run_b = sync_run(tenant_b, connection_b.connection_uid);
+    repo_b
+        .create_sync_run(run_b.clone())
+        .await
+        .expect("insert tenant B sync run");
+
+    let discovery = discovery(&db);
+    assert_eq!(
+        discovery
+            .resolve_sync_run_tenant(run_b.sync_run_uid)
+            .await
+            .expect("resolve sync-run tenant"),
+        Some(tenant_b)
+    );
+    assert_eq!(
+        discovery
+            .resolve_sync_run_tenant(Uuid::now_v7())
+            .await
+            .expect("resolve missing sync-run tenant"),
+        None
+    );
+    assert_eq!(
+        repo_a
+            .get_sync_run(run_b.sync_run_uid)
+            .await
+            .expect("tenant A lookup for tenant B run"),
+        None
+    );
+    assert_eq!(
+        repo_b
+            .get_sync_run(run_b.sync_run_uid)
+            .await
+            .expect("tenant B lookup for its run"),
+        Some(run_b)
     );
 }
 

@@ -22,11 +22,17 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use moa_core::traits::Identity;
 use moa_core::{
-    AgentSignalId, CancelScope, ChildSignalKind, ConsumeWorkerChildResultInput,
-    ConsumeWorkerChildResultOutput, MarkWorkerChildTerminalInput, ModelId, ParentResumePolicy,
-    SessionActorRef, SessionId, SessionMeta, SignalSeverity, TenantId, WorkerChildRef,
-    WorkerProgressSummary, WorkerResult, WorkerSignal, WorkerState, WorkerStatus,
-    WorkerTerminalResult,
+    types::contact::SessionActorRef, types::identifiers::AgentSignalId,
+    types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
+    types::session::CancelScope, types::session::SessionMeta,
+    types::worker::commands::ConsumeWorkerChildResultInput,
+    types::worker::commands::ConsumeWorkerChildResultOutput,
+    types::worker::commands::MarkWorkerChildTerminalInput, types::worker::state::ChildSignalKind,
+    types::worker::state::ParentResumePolicy, types::worker::state::SignalSeverity,
+    types::worker::state::WorkerChildRef, types::worker::state::WorkerProgressSummary,
+    types::worker::state::WorkerResult, types::worker::state::WorkerSignal,
+    types::worker::state::WorkerState, types::worker::state::WorkerStatus,
+    types::worker::state::WorkerTerminalResult,
 };
 use serde::Deserialize;
 use uuid::Uuid;

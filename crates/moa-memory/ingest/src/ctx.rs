@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use moa_core::{MoaConfig, MoaError, traits::EmbeddingProvider};
+use moa_core::{config::MoaConfig, error::MoaError, traits::EmbeddingProvider};
 use moa_memory_graph::GraphStore;
 use moa_memory_pii::{HeuristicPiiClassifier, OpenAiPrivacyFilterClassifier, PiiClassifier};
 use moa_memory_vector::{VectorStore, VectorStoreFactory};
@@ -454,7 +454,7 @@ fn entity_resolver_from_config(config: &MoaConfig) -> (Arc<EntityResolver>, &'st
 /// without vectors. Every other factory error is propagated.
 pub(crate) fn build_configured_ingestion_embedder(
     config: &MoaConfig,
-) -> moa_core::Result<Option<Arc<dyn EmbeddingProvider>>> {
+) -> moa_core::error::Result<Option<Arc<dyn EmbeddingProvider>>> {
     let selector = config.memory.vector.embedder.name.trim();
     if selector.is_empty() || selector.eq_ignore_ascii_case("disabled") {
         tracing::warn!(
@@ -593,7 +593,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
 
-    use moa_core::{MoaConfig, MoaError};
+    use moa_core::{config::MoaConfig, error::MoaError};
     use sqlx::postgres::PgPoolOptions;
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Id, Record};

@@ -246,10 +246,11 @@ impl AnthropicStreamState {
                     name,
                     input,
                 };
-                let content = CompletionContent::ToolCall(moa_core::ToolCallContent {
-                    invocation: tool_call.clone(),
-                    provider_metadata: None,
-                });
+                let content =
+                    CompletionContent::ToolCall(moa_core::types::completion::ToolCallContent {
+                        invocation: tool_call.clone(),
+                        provider_metadata: None,
+                    });
                 self.completed_content[payload.index] = Some(content.clone());
                 vec![content]
             }
@@ -296,15 +297,16 @@ impl AnthropicStreamState {
                                 }
                             }
                         };
-                        self.completed_content[index] =
-                            Some(CompletionContent::ToolCall(moa_core::ToolCallContent {
+                        self.completed_content[index] = Some(CompletionContent::ToolCall(
+                            moa_core::types::completion::ToolCallContent {
                                 invocation: ToolInvocation {
                                     id: Some(id.clone()),
                                     name: name.clone(),
                                     input,
                                 },
                                 provider_metadata: None,
-                            }));
+                            },
+                        ));
                     }
                 }
                 BlockAccumulator::ServerTool { name, partial_json } => {

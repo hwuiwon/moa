@@ -49,7 +49,7 @@ pub enum GraphError {
     InvalidChangelogScope,
     /// A scoped Postgres transaction could not be started or committed.
     #[error("scope transaction: {0}")]
-    Scope(#[from] moa_core::MoaError),
+    Scope(#[from] moa_core::error::MoaError),
     /// A vector store operation failed.
     #[error("vector store: {0}")]
     Vector(#[from] moa_memory_vector::Error),

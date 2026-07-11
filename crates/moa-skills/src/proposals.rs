@@ -3,10 +3,11 @@
 use chrono::Utc;
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft};
-use moa_core::RlsContext;
+use moa_core::types::memory::RlsContext;
 use moa_core::{
-    ActionRuleScope, LearningCandidate, MoaError, Result, SessionMeta, SkillMetadata, TaskFacetSet,
-    TaskFingerprint,
+    error::MoaError, error::Result, types::action_policy::ActionRuleScope,
+    types::experience::LearningCandidate, types::experience::TaskFacetSet,
+    types::experience::TaskFingerprint, types::memory::SkillMetadata, types::session::SessionMeta,
 };
 use moa_db::ScopedConn;
 use moa_session::PostgresSessionStore;
@@ -129,7 +130,7 @@ pub(crate) struct SkillProposalSource {
 /// payload cannot be interpreted, so generation proceeds instead of failing.
 pub(crate) async fn find_open_skill_proposal(
     store: &PostgresSessionStore,
-    tenant_id: moa_core::TenantId,
+    tenant_id: moa_core::types::identifiers::TenantId,
     skill_name: Option<&str>,
     fingerprint_hash: Option<&str>,
 ) -> Result<Option<SkillDraftProposal>> {
@@ -140,7 +141,7 @@ pub(crate) async fn find_open_skill_proposal(
             .find_proposed_learning_candidate_by_target_with_conn(
                 conn.as_mut(),
                 &tenant_id,
-                moa_core::LearningCandidateType::Skill,
+                moa_core::types::experience::LearningCandidateType::Skill,
                 name,
             )
             .await?;
@@ -150,7 +151,7 @@ pub(crate) async fn find_open_skill_proposal(
             .find_proposed_learning_candidate_by_fingerprint_with_conn(
                 conn.as_mut(),
                 &tenant_id,
-                moa_core::LearningCandidateType::Skill,
+                moa_core::types::experience::LearningCandidateType::Skill,
                 hash,
             )
             .await?;
@@ -238,7 +239,7 @@ pub(crate) async fn store_skill_draft_proposal(
         .find_proposed_learning_candidate_by_target_with_conn(
             conn.as_mut(),
             &session.tenant_id,
-            moa_core::LearningCandidateType::Skill,
+            moa_core::types::experience::LearningCandidateType::Skill,
             &metadata.name,
         )
         .await?
@@ -271,7 +272,7 @@ pub(crate) async fn store_skill_draft_proposal(
             .find_proposed_learning_candidate_by_fingerprint_with_conn(
                 conn.as_mut(),
                 &session.tenant_id,
-                moa_core::LearningCandidateType::Skill,
+                moa_core::types::experience::LearningCandidateType::Skill,
                 &fingerprint.hash,
             )
             .await?
@@ -387,11 +388,11 @@ fn package_with_regression_suite(
 /// (`Evaluating`) candidate is left untouched.
 pub(crate) async fn accumulate_sibling_suite(
     store: &PostgresSessionStore,
-    tenant_id: moa_core::TenantId,
+    tenant_id: moa_core::types::identifiers::TenantId,
     open: &SkillDraftProposal,
     suite: GeneratedSkillSuite,
     source_experience_id: Uuid,
-    source_session_id: moa_core::SessionId,
+    source_session_id: moa_core::types::identifiers::SessionId,
 ) -> Result<()> {
     let mut conn = ScopedConn::begin(store.pool(), &RlsContext::tenant(tenant_id)).await?;
     acquire_proposal_advisory_lock(conn.as_mut(), tenant_id, &open.metadata.name).await?;
@@ -423,9 +424,9 @@ async fn accumulate_sibling_suite_in_tx(
     mut candidate: LearningCandidate,
     suite: &GeneratedSkillSuite,
     source_experience_id: Uuid,
-    source_session_id: moa_core::SessionId,
+    source_session_id: moa_core::types::identifiers::SessionId,
 ) -> Result<()> {
-    if candidate.status != moa_core::LearningCandidateStatus::Proposed {
+    if candidate.status != moa_core::types::experience::LearningCandidateStatus::Proposed {
         return Ok(());
     }
     // A replay of the proposal's own source experience is not a sibling.
@@ -457,7 +458,7 @@ async fn accumulate_sibling_suite_in_tx(
 fn append_sibling_suite_to_payload(
     payload: &mut serde_json::Value,
     source_experience_id: Uuid,
-    source_session_id: moa_core::SessionId,
+    source_session_id: moa_core::types::identifiers::SessionId,
     suite: &GeneratedSkillSuite,
 ) -> bool {
     let entries = payload
@@ -494,7 +495,7 @@ fn append_sibling_suite_to_payload(
 
 async fn acquire_proposal_advisory_lock(
     conn: &mut PgConnection,
-    tenant_id: moa_core::TenantId,
+    tenant_id: moa_core::types::identifiers::TenantId,
     skill_name: &str,
 ) -> Result<()> {
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -507,7 +508,7 @@ async fn acquire_proposal_advisory_lock(
 
 async fn acquire_fingerprint_advisory_lock(
     conn: &mut PgConnection,
-    tenant_id: moa_core::TenantId,
+    tenant_id: moa_core::types::identifiers::TenantId,
     fingerprint_hash: &str,
 ) -> Result<()> {
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -522,11 +523,18 @@ async fn acquire_fingerprint_advisory_lock(
     Ok(())
 }
 
-fn proposal_advisory_lock_key(tenant_id: moa_core::TenantId, skill_name: &str) -> i64 {
+fn proposal_advisory_lock_key(
+    tenant_id: moa_core::types::identifiers::TenantId,
+    skill_name: &str,
+) -> i64 {
     advisory_lock_key(b"moa.skill.proposal.lock.v1", tenant_id, skill_name)
 }
 
-fn advisory_lock_key(namespace: &[u8], tenant_id: moa_core::TenantId, key: &str) -> i64 {
+fn advisory_lock_key(
+    namespace: &[u8],
+    tenant_id: moa_core::types::identifiers::TenantId,
+    key: &str,
+) -> i64 {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(namespace);
