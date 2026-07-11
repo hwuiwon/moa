@@ -14,6 +14,7 @@ pub(super) async fn consume_sse_events<S>(
     fallback_model: String,
     started_at: Instant,
     span_recorder: &mut LLMSpanRecorder,
+    stream_timeouts: ProviderStreamTimeoutConfig,
 ) -> Result<CompletionResponse>
 where
     S: Stream<
@@ -22,8 +23,9 @@ where
 {
     let mut state = GeminiStreamState::new(fallback_model);
     pin_mut!(stream);
+    let mut deadline = StreamDeadline::new(stream_timeouts);
 
-    while let Some(event) = stream.next().await {
+    while let Some(event) = deadline.next(stream.as_mut()).await? {
         let event = match event {
             Ok(event) => event,
             Err(error) => {

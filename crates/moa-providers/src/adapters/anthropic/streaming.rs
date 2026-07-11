@@ -12,6 +12,7 @@ pub(super) async fn consume_sse_events<S, E>(
     fallback_model: String,
     started_at: Instant,
     span_recorder: &mut LLMSpanRecorder,
+    stream_timeouts: ProviderStreamTimeoutConfig,
 ) -> Result<CompletionResponse>
 where
     S: Stream<Item = std::result::Result<SseEvent, E>>,
@@ -19,8 +20,9 @@ where
 {
     let mut state = AnthropicStreamState::new(fallback_model);
     pin_mut!(events);
+    let mut deadline = StreamDeadline::new(stream_timeouts);
 
-    while let Some(event) = events.next().await {
+    while let Some(event) = deadline.next(events.as_mut()).await? {
         let event = event
             .map_err(|error| MoaError::StreamError(format!("failed to read SSE event: {error}")))?;
         let emitted = state.apply_event(&event)?;

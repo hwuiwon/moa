@@ -55,6 +55,14 @@ spec:
                 secretKeyRef:
                   name: moa-postgres
                   key: url
+            # Three edge replicas reserve at most 24 runtime connections,
+            # matching the orchestrator fleet budget documented above.
+            - name: MOA_EDGE_DB_MAX_CONNECTIONS
+              value: "8"
+            - name: MOA_EDGE_DB_MIN_CONNECTIONS
+              value: "2"
+            - name: MOA_EDGE_DB_ACQUIRE_TIMEOUT_SECONDS
+              value: "2"
           resources:
             requests:
               cpu: "250m"

@@ -119,9 +119,18 @@ async fn async_main() -> anyhow::Result<()> {
     )
     .await
     .context("connect runtime database pool")?;
+    let background_pool = build_database_pool(
+        moa_config.database.runtime_url(),
+        &database_search_path,
+        moa_config.database.background_max_connections,
+        Duration::from_secs(moa_config.database.connect_timeout_seconds),
+    )
+    .await
+    .context("connect background database pool")?;
     let mut runtime_deps = RuntimeDeps::build(
         moa_config.clone(),
         pool.clone(),
+        background_pool,
         &restate_ingress_url,
         providers_override,
         skip_fga,
@@ -153,7 +162,7 @@ async fn async_main() -> anyhow::Result<()> {
     let probe_state = ProbeState::new(readiness.clone(), pool.clone(), restate_admin_url)?;
     let shutdown = CancellationToken::new();
     let authz_challenge_reaper_handle = start_authz_challenge_reaper_if_configured(
-        &pool,
+        &runtime_deps.background_pool,
         moa_config.as_ref(),
         runtime_deps.awakeable_resolver.clone(),
     )?;
@@ -172,7 +181,7 @@ async fn async_main() -> anyhow::Result<()> {
         shutdown.clone(),
     );
     let mut analytics_export = moa_orchestrator::analytics_export::spawn_analytics_export(
-        pool.clone(),
+        runtime_deps.background_pool.clone(),
         moa_config.clickhouse.as_ref(),
         shutdown.clone(),
     );

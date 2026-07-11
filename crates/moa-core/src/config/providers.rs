@@ -79,6 +79,46 @@ impl ProviderConcurrencyConfig {
     }
 }
 
+/// Deadlines applied while consuming one streaming LLM response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderStreamTimeoutConfig {
+    /// Maximum wait for the first server-sent event, in milliseconds.
+    pub first_byte_ms: u64,
+    /// Maximum idle gap between server-sent events, in milliseconds.
+    pub idle_ms: u64,
+    /// Maximum wall-clock duration of the complete stream, in milliseconds.
+    pub total_ms: u64,
+}
+
+impl Default for ProviderStreamTimeoutConfig {
+    fn default() -> Self {
+        Self {
+            first_byte_ms: 30_000,
+            idle_ms: 60_000,
+            total_ms: 300_000,
+        }
+    }
+}
+
+impl ProviderStreamTimeoutConfig {
+    /// Validates that every streaming deadline is positive and fits within the total deadline.
+    pub fn validate(&self) -> Result<(), MoaError> {
+        if self.first_byte_ms == 0 || self.idle_ms == 0 || self.total_ms == 0 {
+            return Err(MoaError::ConfigError(
+                "providers.stream_timeouts values must be greater than zero".to_string(),
+            ));
+        }
+        if self.first_byte_ms > self.total_ms || self.idle_ms > self.total_ms {
+            return Err(MoaError::ConfigError(
+                "providers.stream_timeouts first_byte_ms and idle_ms must not exceed total_ms"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// General runtime settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -196,19 +236,35 @@ pub struct ProvidersConfig {
     /// In-flight concurrency limits and coordination scope for provider calls.
     #[serde(default)]
     pub concurrency: ProviderConcurrencyConfig,
+    /// First-byte, idle, and total deadlines for streaming LLM responses.
+    #[serde(default)]
+    pub stream_timeouts: ProviderStreamTimeoutConfig,
 }
 
 impl ProvidersConfig {
     /// Validates provider configuration, currently the concurrency settings.
     pub fn validate(&self) -> Result<(), MoaError> {
-        self.concurrency.validate()
+        self.concurrency.validate()?;
+        self.stream_timeouts.validate()?;
+        if self.concurrency.scope == ConcurrencyScope::Global
+            && self.concurrency.lease_ttl_ms <= self.stream_timeouts.total_ms
+        {
+            return Err(MoaError::ConfigError(
+                "providers.concurrency.lease_ttl_ms must exceed providers.stream_timeouts.total_ms under global scope"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::MoaError;
+
     use super::{
-        ConcurrencyScope, ProviderConcurrencyConfig, ProviderCredentialConfig, ProvidersConfig,
+        ConcurrencyScope, ProviderConcurrencyConfig, ProviderCredentialConfig,
+        ProviderStreamTimeoutConfig, ProvidersConfig,
     };
 
     #[test]
@@ -222,11 +278,43 @@ mod tests {
     }
 
     #[test]
+    fn provider_stream_timeouts_are_bounded_and_fit_the_global_lease() {
+        // Pins: production streams cannot hold provider permits indefinitely,
+        // and a global lease cannot expire while a valid stream is still running.
+        let defaults = ProvidersConfig::default();
+        assert_eq!(
+            defaults.stream_timeouts,
+            ProviderStreamTimeoutConfig {
+                first_byte_ms: 30_000,
+                idle_ms: 60_000,
+                total_ms: 300_000,
+            }
+        );
+        assert!(defaults.validate().is_ok());
+
+        let invalid = ProvidersConfig {
+            concurrency: ProviderConcurrencyConfig {
+                scope: ConcurrencyScope::Global,
+                lease_ttl_ms: 300_000,
+                ..ProviderConcurrencyConfig::default()
+            },
+            stream_timeouts: ProviderStreamTimeoutConfig {
+                total_ms: 300_000,
+                ..ProviderStreamTimeoutConfig::default()
+            },
+            ..ProvidersConfig::default()
+        };
+        assert!(
+            matches!(invalid.validate(), Err(MoaError::ConfigError(message)) if message.contains("lease_ttl_ms"))
+        );
+    }
+
+    #[test]
     fn provider_concurrency_config_parses_global_scope_and_rejects_bad_durations() {
         // Pins: operators opt into global coordination via config; a zero block
         // threshold and a zero global lease TTL are rejected.
         let parsed: ProvidersConfig = serde_json::from_value(serde_json::json!({
-            "concurrency": { "scope": "global", "default_max_in_flight": 64, "lease_ttl_ms": 300000 }
+            "concurrency": { "scope": "global", "default_max_in_flight": 64, "lease_ttl_ms": 600000 }
         }))
         .expect("providers config with global concurrency should parse");
         assert_eq!(parsed.concurrency.scope, ConcurrencyScope::Global);

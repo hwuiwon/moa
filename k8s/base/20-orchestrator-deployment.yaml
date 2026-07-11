@@ -60,6 +60,15 @@ spec:
                 secretKeyRef:
                   name: moa-postgres
                   key: url
+            # Fleet budget: each of 50 HPA replicas reserves 5 foreground + 1
+            # background connection = 300. Together with edge's 24, this leaves
+            # at least 76 connections of reserve on a 400-connection runtime tier.
+            - name: MOA_DATABASE_MAX_CONNECTIONS
+              value: "5"
+            - name: MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS
+              value: "1"
+            - name: MOA_DATABASE_CONNECT_TIMEOUT_SECONDS
+              value: "3"
             - name: MOA_ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:

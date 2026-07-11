@@ -45,7 +45,7 @@ impl TestApiClient {
 
     /// Appends one event to the durable session log.
     pub async fn append_event(&self, session_id: SessionId, event: Event) -> Result<u64> {
-        self.post_call(
+        self.post_call::<_, EventRecord>(
             "/SessionStore/append_event",
             &AppendEventRequest {
                 session_id,
@@ -54,6 +54,7 @@ impl TestApiClient {
             },
         )
         .await
+        .map(|record| record.sequence_num)
     }
 
     /// Loads one session metadata row.

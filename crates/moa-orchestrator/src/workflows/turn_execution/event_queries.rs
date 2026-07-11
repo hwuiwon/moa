@@ -3,7 +3,7 @@
 use moa_brain::turn_segments::{
     SegmentBoundarySequences, latest_user_message, segment_assessment_to_seq,
 };
-use moa_core::wire::session_store::{GetEventsRequest, GetSegmentBaselineRequest};
+use moa_core::wire::session_store::GetSegmentBaselineRequest;
 use moa_core::{
     events::EventType, traits::SessionStore as _, types::events_stream::EventRange,
     types::events_stream::EventRecord, types::identifiers::SegmentId,
@@ -12,7 +12,6 @@ use moa_core::{
 use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
 
-use crate::restate_identity::with_identity_headers;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::turn_driver::progress as driver_progress;
 
@@ -246,28 +245,4 @@ pub(super) async fn load_segment_baseline(
         .into_inner())
 }
 
-pub(super) async fn brain_response_event_by_sequence(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    identity: &moa_core::traits::Identity,
-    sequence_num: u64,
-) -> Result<Option<EventRecord>, HandlerError> {
-    let request = ctx
-        .service_client::<RestateSessionStoreClient>()
-        .get_events(Json(GetEventsRequest {
-            session_id,
-            range: EventRange {
-                from_seq: Some(sequence_num),
-                to_seq: Some(sequence_num),
-                event_types: Some(vec![EventType::BrainResponse]),
-                limit: Some(1),
-            },
-        }));
-    Ok(with_identity_headers(request, identity)
-        .call()
-        .await?
-        .into_inner()
-        .into_iter()
-        .next())
-}
 use std::sync::Arc;

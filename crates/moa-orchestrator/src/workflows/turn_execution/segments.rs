@@ -38,6 +38,7 @@ pub(super) struct PostOutcomeAssessment {
     overrides: Vec<AssessmentOverride>,
     cutoff_before_seq: Option<u64>,
     duration_ms: u64,
+    assessed_at: chrono::DateTime<chrono::Utc>,
     resolution_config: moa_core::config::ResolutionConfig,
 }
 
@@ -54,6 +55,7 @@ struct SegmentAssessmentInput<'a> {
     phase: AssessmentPhase,
     overrides: &'a [AssessmentOverride],
     duration_ms: u64,
+    assessed_at: chrono::DateTime<chrono::Utc>,
     resolution_config: &'a moa_core::config::ResolutionConfig,
 }
 
@@ -244,6 +246,7 @@ async fn assess_completed_segment_at_transition(
             phase,
             overrides: &[],
             duration_ms: completed.duration_ms,
+            assessed_at: completed.update.ended_at,
             resolution_config: &resolution_config,
         },
     )
@@ -274,8 +277,8 @@ pub(super) async fn capture_current_active_segment_assessment(
     else {
         return Ok(None);
     };
-    let duration_ms = durable_utc_now(ctx, "workflow_utc_now")
-        .await?
+    let assessed_at = durable_utc_now(ctx, "workflow_utc_now").await?;
+    let duration_ms = assessed_at
         .signed_duration_since(segment.started_at)
         .num_milliseconds()
         .max(0) as u64;
@@ -292,6 +295,7 @@ pub(super) async fn capture_current_active_segment_assessment(
         overrides: overrides.to_vec(),
         cutoff_before_seq,
         duration_ms,
+        assessed_at,
         resolution_config: workflow.config.resolution.clone(),
     }))
 }
@@ -376,6 +380,7 @@ async fn persist_post_outcome_assessment(
             phase: assessment.phase,
             overrides: &assessment.overrides,
             duration_ms: assessment.duration_ms,
+            assessed_at: assessment.assessed_at,
             resolution_config: &assessment.resolution_config,
         },
     )
@@ -397,6 +402,7 @@ async fn assess_and_persist_segment(
         baseline.as_ref(),
         input.next_user_message,
         input.rewrite.is_some_and(|rewrite| rewrite.is_new_task),
+        input.assessed_at,
         input.phase,
         input.overrides,
         input.resolution_config,

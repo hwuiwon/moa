@@ -37,6 +37,11 @@ pub(super) fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
             &["providers", "concurrency", "block_threshold_ms"]
         }
         "providers_concurrency_lease_ttl_ms" => &["providers", "concurrency", "lease_ttl_ms"],
+        "providers_stream_timeouts_first_byte_ms" => {
+            &["providers", "stream_timeouts", "first_byte_ms"]
+        }
+        "providers_stream_timeouts_idle_ms" => &["providers", "stream_timeouts", "idle_ms"],
+        "providers_stream_timeouts_total_ms" => &["providers", "stream_timeouts", "total_ms"],
         _ => return None,
     };
     Some(strings(path))
@@ -245,6 +250,26 @@ mod tests {
                 "anthropic:claude-haiku-4-5".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn stream_timeout_env_overrides_all_deadlines() {
+        // Pins: Kubernetes can tune first-byte, idle, and total stream deadlines
+        // without changing provider-specific credentials or adapter wiring.
+        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+            ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
+            ("MOA_PROVIDERS_STREAM_TIMEOUTS_FIRST_BYTE_MS", "1000"),
+            ("MOA_PROVIDERS_STREAM_TIMEOUTS_IDLE_MS", "2000"),
+            ("MOA_PROVIDERS_STREAM_TIMEOUTS_TOTAL_MS", "3000"),
+        ]))
+        .expect("overlay should deserialize");
+        let mut config = MoaConfig::default();
+
+        overlay.apply_to(&mut config).expect("overlay should apply");
+
+        assert_eq!(config.providers.stream_timeouts.first_byte_ms, 1000);
+        assert_eq!(config.providers.stream_timeouts.idle_ms, 2000);
+        assert_eq!(config.providers.stream_timeouts.total_ms, 3000);
     }
 
     #[test]

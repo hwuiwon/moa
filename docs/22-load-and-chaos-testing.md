@@ -35,7 +35,10 @@ the per-event-type row split. They also include
 `event_append_phase_latency_ms` from
 `moa_session_event_append_phase_seconds{phase=...}` so `event_persist` can be
 split into bounded append-store phases such as row-lock acquisition, event
-insert, aggregate update, and commit wait. Edge-mode reports include
+insert, aggregate update, and commit wait. Pool connection acquisition and SQL
+transaction start are separate phases (`acquire_connection` and
+`begin_transaction`) so saturation can be distinguished from PostgreSQL `BEGIN`
+latency. Edge-mode reports include
 `edge_observation_wait_ms` when the first `response` SSE frame carries a
 durable event timestamp, estimating post-persist observation lag that
 server-side turn metrics do not see.
@@ -47,9 +50,10 @@ Per-turn cost bill (measured, not assumed — T2 produces these numbers):
 | Resource | Cost per turn | Shared limit |
 |---|---|---|
 | Restate invocations | ~5–10 | per-tenant scope concurrency (1000 in compose/prod rules) |
-| Postgres event appends | 3–8 rows + blob offload >64KiB | orchestrator pool (default 20 conns/replica), single writer |
-| Postgres reads | snapshot load + authz + retrieval legs | same pool + edge pool (50) |
-| LLM call | 1+ (with retries/failover) | provider concurrency (default unbounded) + RatePacer |
+| Postgres event appends | 3–8 rows + blob offload >64KiB | foreground orchestrator pool (production base 5 conns/replica), single writer |
+| Postgres reads | snapshot load + authz + retrieval legs | same foreground pool + edge pool (production base 8) |
+| Background Postgres work | outbox, analytics, lineage, memory ingestion | independent orchestrator pool (production base 1 conn/replica) |
+| LLM call | 1+ (with retries/failover) | provider concurrency (default 16 per provider credential; production uses runtime-store-backed global scope) + process-local RatePacer/RateGuard + stream deadlines |
 | SSE stream | 1 long-lived HTTP conn | edge conn limits, broadcast channel capacity |
 
 Aggregate capacity ≈ per-replica sustainable turn rate × orchestrator
@@ -57,6 +61,22 @@ replicas, until a shared resource saturates. Expected first wall: Postgres
 write path (event appends are per-turn and unbatched). The per-tenant scope
 cap of 1000 concurrent invocations means a 10k QPS claim is only meaningful
 with a multi-tenant workload distribution.
+
+Production connection admission is explicit. `MOA_DATABASE_MAX_CONNECTIONS`
+controls the foreground orchestrator pool,
+`MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS` isolates continuous maintenance
+work, and `MOA_DATABASE_CONNECT_TIMEOUT_SECONDS` bounds pool acquisition. The
+base deployment uses 5 + 1 connections per orchestrator replica; at the HPA
+maximum of 50 replicas, plus the edge budget, this reserves headroom under the
+documented 400-connection database assumption.
+
+Provider production admission sets `MOA_PROVIDERS_CONCURRENCY_SCOPE=global`.
+Streaming requests are bounded independently by
+`MOA_PROVIDERS_STREAM_TIMEOUTS_FIRST_BYTE_MS`,
+`MOA_PROVIDERS_STREAM_TIMEOUTS_IDLE_MS`, and
+`MOA_PROVIDERS_STREAM_TIMEOUTS_TOTAL_MS`. The global concurrency lease TTL must
+exceed the total stream deadline so an active generation cannot outlive its
+lease under valid configuration.
 
 ## Tiers
 
@@ -121,7 +141,8 @@ Prometheus metrics — never traces, because Restate replay suppresses spans.
 ## Runbooks
 
 **T1 mock smoke (PR gate).** `make loadtest-mock` starts compose dependencies,
-bootstraps OpenFGA into `.env.fga`, restarts the orchestrator with
+installs the idempotent Restate `*` concurrency rule, bootstraps OpenFGA into
+`.env.fga`, restarts the orchestrator with
 `scripts/perf-gate.json`, and runs `cargo run --release -p moa-loadtest --bin
 perf_gate -- --profile mock-short`. The target defaults RustFS to host ports
 `10090` and `10091` for this local smoke path. Gates: corrected p95, turn error
@@ -138,8 +159,9 @@ client is missing. The release `retrieval` profile remains strict and is the
 only source for baseline updates.
 
 **T2 capacity (nightly).** `make loadtest-capacity` — recreates the
-orchestrator with `scripts/realistic.json` (real latency/TTFT pacing, tool
-loop) and ramps 5→200 turns/s over 10 minutes across 8 tenants. To test a
+dependencies, installs the Restate concurrency rule, bootstraps OpenFGA, then
+recreates the orchestrator with `scripts/realistic.json` (real latency/TTFT
+pacing, tool loop) and ramps 5→200 turns/s over 10 minutes across 8 tenants. To test a
 specific database pool profile, run
 `MOA_DATABASE_MAX_CONNECTIONS=<n> make loadtest-capacity` and record that
 profile with the result. Read the window series in
@@ -213,7 +235,8 @@ with the invariant sweep from `moa_test_support::invariants`.
   sub-10ms buckets (see `moa-observability/src/runtime_metrics.rs`).
 - Event append phase attribution:
   `moa_session_event_append_phase_seconds{phase=...}` splits the durable
-  append path into bounded phases for load reports.
+  append path into bounded phases for load reports, including distinct
+  `acquire_connection` and `begin_transaction` waits.
 - Tokio runtime gauges require a `tokio_unstable` build
   (`RUSTFLAGS="--cfg tokio_unstable"`); perf images should enable it.
 - Baselines live in `docs/18-performance.md` and are updated from T2 runs.

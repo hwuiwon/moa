@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use moa_core::{
-    events::Event, types::events_stream::EventRange, types::events_stream::EventRecord,
+    types::events_stream::EventRange, types::events_stream::EventRecord,
     types::identifiers::SessionId,
 };
 use moa_test_support::postgres::test_database_url;
@@ -70,6 +70,7 @@ async fn session_store_round_trip_through_restate() -> Result<()> {
             .context("deserialize create_session ingress response")?;
         grant_session_participant(&identity, session_id).await?;
 
+        let mut appended = Vec::new();
         for message in ["first", "second", "third"] {
             let append_response = client
                 .post(format!(
@@ -83,14 +84,17 @@ async fn session_store_round_trip_through_restate() -> Result<()> {
                 .send()
                 .await
                 .with_context(|| format!("append event `{message}` via restate ingress"))?;
-            let sequence_num = append_response
-                .json::<u64>()
+            let record = append_response
+                .json::<EventRecord>()
                 .await
                 .context("deserialize append_event ingress response")?;
             assert!(
-                sequence_num <= 2,
-                "expected zero-based sequence numbers 0..=2, got {sequence_num}"
+                record.sequence_num <= 2,
+                "expected zero-based sequence numbers 0..=2, got {}",
+                record.sequence_num
             );
+            assert_eq!(record.session_id, session_id);
+            appended.push(record);
         }
 
         let get_events_request_builder = client.post(format!(
@@ -108,11 +112,7 @@ async fn session_store_round_trip_through_restate() -> Result<()> {
             .context("deserialize get_events ingress response")?;
 
         assert_eq!(events.len(), 3);
-        assert!(
-            events
-                .iter()
-                .all(|record| matches!(record.event, Event::UserMessage { .. }))
-        );
+        assert_eq!(events, appended, "append_event must return the stored rows");
 
         Ok(())
     }

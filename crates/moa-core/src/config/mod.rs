@@ -60,7 +60,7 @@ pub use messaging::MessagingConfig;
 pub use orchestrator::OrchestratorConfig;
 pub use providers::{
     ConcurrencyScope, GeneralConfig, ModelsConfig, ProviderConcurrencyConfig,
-    ProviderCredentialConfig, ProvidersConfig,
+    ProviderCredentialConfig, ProviderStreamTimeoutConfig, ProvidersConfig,
 };
 pub use runtime_cache::{RuntimeCacheBackend, RuntimeCacheConfig};
 pub use sandbox::{
@@ -178,6 +178,17 @@ impl MoaConfig {
             return Err(MoaError::ConfigError(
                 "database.url is required and must point to a reachable Postgres instance"
                     .to_string(),
+            ));
+        }
+
+        if self.database.max_connections == 0 {
+            return Err(MoaError::ConfigError(
+                "database.max_connections must be greater than zero".to_string(),
+            ));
+        }
+        if self.database.background_max_connections == 0 {
+            return Err(MoaError::ConfigError(
+                "database.background_max_connections must be greater than zero".to_string(),
             ));
         }
 

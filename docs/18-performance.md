@@ -98,6 +98,129 @@ tail, so the next optimization target is DB acquisition/saturation around
 `pipeline_compile`, snapshot load/write, and append transaction start rather
 than asynchronous progress persistence or aggregate rollups.
 
+## Turn-Path Capacity Rebaseline (T2) - 2026-07-10
+
+Single-replica developer-laptop compose run after removing the foreground
+segment-view refresh, lineage event reread, serial bounded progress fan-in, and
+the authz poller's explicit claim transaction. The append metric now separates
+pool acquisition from transaction start. Command: `make loadtest-capacity`
+with the realistic scripted provider, mixed profile, 800 sessions, 8 tenants,
+2-second mean think time, and a 5-to-200 turns/s linear ramp over 10 minutes.
+
+This run is directional rather than a strict before/after comparison with the
+2026-07-03 ramp: the older ramp ended at 120 turns/s after 4 minutes and used a
+1-second mean think time. Both ran on the same developer laptop with Postgres,
+Restate, the orchestrator, and the generator co-located, but background host
+work was not controlled. Do not attribute the changed knee solely to the code
+changes.
+
+| Result | Value |
+|---|---:|
+| Last stable offered bracket | about 46-49 turns/s |
+| Stable completed throughput | about 43-44 turns/s |
+| First overloaded offered bracket | about 52 turns/s |
+| Whole-run achieved rate | 17.38 turns/s |
+| Corrected latency p50 / p95 / p99 | 35.13 s / 61.67 s / 104.01 s |
+| Durable rows per completed turn | 2.91 |
+| Dropped arrivals / scheduled arrivals | 49,921 / 61,498 |
+
+The knee is visible between adjacent 10-second windows: at about 49 turns/s
+offered, 44.1 turns/s completed with corrected p95 4.08 seconds; at about 52
+turns/s offered, completions fell to 33.1 turns/s and corrected p95 rose to 7.13
+seconds. The whole-run tail includes deliberate overload above the knee and the
+timeout-bounded drain, so it is not a steady-state service-level target.
+
+| Append phase | p50 | p95 | p99 |
+|---|---:|---:|---:|
+| `acquire_connection` | 2.5 ms | 1.0 s | 2.5 s |
+| `begin_transaction` | 1.0 ms | 10 ms | 25 ms |
+| `commit` | 2.5 ms | 100 ms | 250 ms |
+
+`event_persist` remains the dominant measured turn step at the tail (p95 10
+seconds, p99 30 seconds), ahead of `llm_call` and `pipeline_compile` (both p95
+5 seconds, p99 10 seconds). Within append, pool acquisition dominates;
+transaction start and commit are materially smaller. This rejects event
+batching as the next branch for the measured bottleneck.
+
+**Selected next workstream:** fleet admission and database connection capacity.
+Define an explicit foreground/background connection budget across replicas,
+bound admission before shared pools saturate, and evaluate a prepared-statement-
+compatible pooler configuration. Re-run the same T2 shape after that one branch
+before considering event batching, progress projection, or context/skill
+caching. This single-node result still does not certify 10,000 turns/s.
+
+## Admission and Connection-Budget Rebaseline (T2) - 2026-07-11
+
+The selected admission branch was repeated with the same 5-to-200 turns/s,
+10-minute scripted-provider ramp. The orchestrator used five foreground
+connections, one independently owned background connection, and a three-second
+foreground acquire timeout. The production overlay also enables the runtime-
+store-backed global provider concurrency scope and first-byte, idle, and total
+stream deadlines; scripted providers bypass those live-provider controls, so
+this T2 result measures the database admission branch only.
+
+| Result | 2026-07-10 | 2026-07-11 |
+|---|---:|---:|
+| Last stable offered bracket | about 46-49 turns/s | about 59 turns/s |
+| Stable completed throughput | about 43-44 turns/s | about 50 turns/s |
+| First overloaded offered bracket | about 52 turns/s | about 62 turns/s |
+| Whole-run achieved rate | 17.38 turns/s | 27.30 turns/s |
+| Corrected latency p50 / p95 / p99 | 35.13 s / 61.67 s / 104.01 s | 43.48 s / 75.17 s / 85.72 s |
+| Durable rows per completed turn | 2.91 | 2.58 |
+| Dropped arrivals / scheduled arrivals | 49,921 / 61,498 | 45,033 / 61,498 |
+| Turn timeouts | not recorded in the table | 645 |
+
+At about 59 turns/s offered, 50.3 turns/s completed with corrected p95 4.70
+seconds. At about 62 turns/s offered, completions fell to 39.0 turns/s and
+corrected p95 rose to 7.63 seconds. Whole-run latency remains dominated by the
+deliberate overload tail and must not be read as a steady-state SLO.
+
+| Append phase | 2026-07-10 p50 / p95 / p99 | 2026-07-11 p50 / p95 / p99 |
+|---|---:|---:|
+| `acquire_connection` | 2.5 ms / 1.0 s / 2.5 s | 50 ms / 1.0 s / 2.5 s |
+| `begin_transaction` | 1.0 ms / 10 ms / 25 ms | 1.0 ms / 1.0 ms / 5.0 ms |
+| `commit` | 2.5 ms / 100 ms / 250 ms | 2.5 ms / 25 ms / 100 ms |
+
+The smaller foreground pool deliberately moves queuing to acquisition while
+reducing contention after admission: `BEGIN` and commit tails improved, the
+directional knee moved right, and more scheduled work completed. Acquisition
+still dominates the append tail, so increasing per-pod pools is not the next
+step; it would violate the fleet budget and the previous pool-64 experiment did
+not improve capacity. The next required evidence is T3 scale-out with a real
+database connection ceiling. PgBouncer remains conditional on deployed-version
+and SQLx prepared-statement compatibility. This result does not certify 10,000
+turns/s.
+
+## Local Foreground Pool Sweep - 2026-07-11
+
+A controlled local A/B test evaluated whether increasing the orchestrator
+foreground pool from 5 to 10 improves the admission-branch result. Each profile
+used independently fresh Postgres, Restate, and OpenFGA volumes, the required
+Restate `*` virtual-queue rule at concurrency 1000, one background database
+connection, and the same realistic scripted-provider workload. The shorter
+5-to-100 turns/s ramp ran for five minutes, preserving approximately the same
+offered-rate slope through the previously observed knee.
+
+| Result | Pool 5 | Pool 10 |
+|---|---:|---:|
+| Whole-run achieved rate | 43.92 turns/s | 25.80 turns/s |
+| Completed turns | 12,104 | 7,217 |
+| Failed sessions / turn timeouts | 0 / 0 | 623 / 623 |
+| Dropped arrivals / scheduled arrivals | 3,644 / 15,748 | 7,908 / 15,748 |
+| Corrected latency p50 / p95 / p99 | 8.72 s / 50.86 s / 53.87 s | 15.97 s / 56.69 s / 101.78 s |
+| Durable rows per completed turn | 2.37 | 2.70 |
+| `acquire_connection` p50 / p95 / p99 | 50 ms / 500 ms / 2.5 s | 1 ms / 1.0 s / 2.5 s |
+| `begin_transaction` p50 / p95 / p99 | 1 ms / 1 ms / 2.5 ms | 1 ms / 2.5 ms / 10 ms |
+| `commit` p50 / p95 / p99 | 2.5 ms / 25 ms / 50 ms | 2.5 ms / 25 ms / 100 ms |
+
+Pool 10 admits more concurrent database work but increases transaction and
+commit contention, moves the latency knee left, and completes substantially
+less work. This agrees with the older pool-64 experiment, which also failed to
+improve throughput. The measured local maximum among the tested production-
+relevant profiles remains five foreground connections per orchestrator replica;
+do not raise the checked-in value without a different database topology and a
+new controlled sweep.
+
 ## Memory Retrieval Baseline - 2026-06-29
 
 Task 0 of the final low-latency RAG plan refreshed the hermetic PR memory eval

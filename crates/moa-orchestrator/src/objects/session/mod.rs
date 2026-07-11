@@ -406,3 +406,14 @@ pub fn plan_child_progress_fan_in(
     }
     plan
 }
+
+/// Restores child-progress summaries to plan order after concurrent live reads.
+///
+/// Missing slots represent failed live reads and are omitted without disturbing
+/// the relative order of the remaining cached and live summaries.
+#[must_use]
+pub fn child_progress_in_plan_order(
+    summaries: Vec<Option<WorkerProgressSummary>>,
+) -> Vec<WorkerProgressSummary> {
+    summaries.into_iter().flatten().collect()
+}

@@ -118,7 +118,6 @@ impl OutboxPoller {
 
     async fn claim_batch(&self) -> Result<Vec<ClaimedOutboxRow>, AuthzError> {
         let lease_token = Uuid::new_v4();
-        let mut tx = self.pool.begin().await?;
         let claimed: Vec<ClaimedOutboxRecord> = sqlx::query_as(
             r#"
             WITH candidate AS (
@@ -154,9 +153,8 @@ impl OutboxPoller {
         .bind(limit_i64(self.cfg.batch_size))
         .bind(lease_token)
         .bind(duration_millis_string(self.cfg.lease_duration))
-        .fetch_all(&mut *tx)
+        .fetch_all(&self.pool)
         .await?;
-        tx.commit().await?;
         Ok(claimed.into_iter().map(ClaimedOutboxRow::from).collect())
     }
 

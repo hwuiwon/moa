@@ -190,6 +190,7 @@ pub fn assess_segment_events(
     baseline: Option<&SegmentBaseline>,
     next_user_message: Option<&str>,
     is_new_task: bool,
+    assessed_at: chrono::DateTime<chrono::Utc>,
     phase: AssessmentPhase,
     extra_overrides: &[AssessmentOverride],
     config: &ResolutionConfig,
@@ -228,6 +229,7 @@ pub fn assess_segment_events(
         continuation,
         self_assessment,
         structural,
+        assessed_at,
         phase,
         &overrides,
     )
@@ -249,17 +251,41 @@ fn last_brain_response(events: &[EventRecord]) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
     use moa_core::{
-        events::Event, types::events_stream::EventRecord, types::identifiers::SegmentId,
-        types::identifiers::SessionId,
+        config::ResolutionConfig, events::Event, types::events_stream::EventRecord,
+        types::identifiers::SegmentId, types::identifiers::SessionId,
+        types::segment_assessment::AssessmentPhase,
     };
     use uuid::Uuid;
 
     use super::{
-        SegmentBoundarySequences, segment_assessment_to_seq, segment_boundary_sequences,
-        segment_events_for_assessment,
+        SegmentBoundarySequences, assess_segment_events, segment_assessment_to_seq,
+        segment_boundary_sequences, segment_events_for_assessment,
     };
+
+    #[test]
+    fn assessment_preserves_caller_timestamp() {
+        let assessed_at = Utc
+            .with_ymd_and_hms(2026, 7, 11, 0, 0, 0)
+            .single()
+            .expect("fixed assessment timestamp must be valid");
+        let assessment = assess_segment_events(
+            &[],
+            0,
+            0,
+            0,
+            None,
+            None,
+            false,
+            assessed_at,
+            AssessmentPhase::Immediate,
+            &[],
+            &ResolutionConfig::default(),
+        );
+
+        assert_eq!(assessment.assessed_at, assessed_at);
+    }
 
     fn event_record(session_id: SessionId, sequence_num: u64, event: Event) -> EventRecord {
         let event_type = event.event_type();

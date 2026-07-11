@@ -425,44 +425,64 @@ fn completed_terminal(worker_id: &str, output: &str) -> WorkerTerminalResult {
 #[tokio::test]
 #[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
 async fn session_progress_includes_child_progress_service_e2e() -> Result<()> {
-    // Pins: after a child is registered and reaches terminal on the parent, Session/progress
-    // surfaces a non-empty child_progress fan-in carrying that child's terminal summary
-    // (synthesized from the cached parent ref, no live child call).
+    // Pins: Session/progress concurrently fans in active child summaries around an immediate
+    // cached terminal summary, then restores registration order regardless of completion order.
     let client = reqwest::Client::new();
     let session = create_initialized_session(&client).await?;
-    let child_id = unique_child_id();
+    let active_before = unique_child_id();
+    let terminal_child = unique_child_id();
+    let active_after = unique_child_id();
 
-    register_child(
-        &client,
-        &session,
-        &WorkerChildRef {
-            id: child_id.clone(),
-            task_hash: "task-hash-progress".to_string(),
-            budget_tokens: 4_096,
-            terminal: None,
-        },
-    )
-    .await?;
+    for (index, child_id) in [&active_before, &terminal_child, &active_after]
+        .into_iter()
+        .enumerate()
+    {
+        register_child(
+            &client,
+            &session,
+            &WorkerChildRef {
+                id: child_id.clone(),
+                task_hash: format!("task-hash-progress-{index}"),
+                budget_tokens: 4_096,
+                terminal: None,
+            },
+        )
+        .await?;
+    }
     mark_child_terminal(
         &client,
         &session,
         &MarkWorkerChildTerminalInput {
-            worker_id: child_id.clone(),
-            terminal: completed_terminal(&child_id, "child finished the research"),
+            worker_id: terminal_child.clone(),
+            terminal: completed_terminal(&terminal_child, "child finished the research"),
         },
     )
     .await?;
 
     let progress = await_progress_matching(&client, &session, Duration::from_secs(10), |p| {
-        !p.child_progress.is_empty()
+        p.child_progress.len() == 3
     })
     .await?;
 
+    let ordered_worker_ids: Vec<&str> = progress
+        .child_progress
+        .iter()
+        .map(|summary| summary.worker_id.as_str())
+        .collect();
+    assert_eq!(
+        ordered_worker_ids,
+        vec![
+            active_before.as_str(),
+            terminal_child.as_str(),
+            active_after.as_str(),
+        ],
+        "concurrent child-progress completion must be restored to registration order"
+    );
     let summary = progress
         .child_progress
         .iter()
-        .find(|summary| summary.worker_id == child_id)
-        .with_context(|| format!("child_progress should include {child_id}"))?;
+        .find(|summary| summary.worker_id == terminal_child)
+        .with_context(|| format!("child_progress should include {terminal_child}"))?;
     assert_eq!(summary.state, WorkerState::Completed);
     assert_eq!(
         summary.last_summary.as_deref(),

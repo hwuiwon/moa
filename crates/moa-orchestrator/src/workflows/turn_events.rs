@@ -11,8 +11,9 @@ use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequ
 use moa_core::wire::turn::TurnOutcomeKind;
 use moa_core::{
     events::Event, types::completion::ToolCallContent, types::completion::ToolInvocation,
-    types::identifiers::SessionId, types::identifiers::ToolCallId, types::provider::ModelTier,
-    types::session::SessionMeta, types::tools::ToolOutput,
+    types::events_stream::EventRecord, types::identifiers::SessionId,
+    types::identifiers::ToolCallId, types::provider::ModelTier, types::session::SessionMeta,
+    types::tools::ToolOutput,
 };
 use moa_observability::restate_observability::event_persist_span;
 use moa_observability::{record_session_error, record_turn_event_persist_duration};
@@ -22,7 +23,7 @@ use tracing::Instrument;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::workflows::turn_responsiveness::ToolBudgetExhausted;
 
-/// Appends one durable session event and returns its assigned sequence number.
+/// Appends one durable session event and returns its stored record.
 ///
 /// Wraps the append in the standard persistence span and latency counters so
 /// every turn-event write is measured identically across both workflows.
@@ -30,11 +31,11 @@ pub(super) async fn append_session_event(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     event: Event,
-) -> Result<u64, HandlerError> {
+) -> Result<EventRecord, HandlerError> {
     let persist_span = event_persist_span(1);
     let persist_started = Instant::now();
     moa_core::coordination_counters::record_durable_append();
-    let sequence_num = ctx
+    let record = ctx
         .service_client::<RestateSessionStoreClient>()
         .append_event(Json(AppendEventRequest {
             session_id,
@@ -43,9 +44,10 @@ pub(super) async fn append_session_event(
         }))
         .call()
         .instrument(persist_span)
-        .await?;
+        .await?
+        .into_inner();
     record_turn_event_persist_duration(persist_started.elapsed(), 1);
-    Ok(sequence_num)
+    Ok(record)
 }
 
 /// Persists a `ToolCall` event for a model-issued tool invocation.
@@ -158,7 +160,7 @@ pub(super) async fn append_zero_cost_assistant_response_with_sequence(
     meta: &SessionMeta,
     text: String,
 ) -> Result<(String, u64), HandlerError> {
-    let sequence_num = append_session_event(
+    let record = append_session_event(
         ctx,
         session_id,
         Event::BrainResponse {
@@ -175,7 +177,7 @@ pub(super) async fn append_zero_cost_assistant_response_with_sequence(
         },
     )
     .await?;
-    Ok((text, sequence_num))
+    Ok((text, record.sequence_num))
 }
 
 /// Maps a turn outcome kind to its stable label for tracing and metrics.

@@ -347,7 +347,7 @@ impl RemoteHttpClient {
         session_id: SessionId,
         event: Event,
     ) -> std::result::Result<u64, RemoteHttpError> {
-        self.post_call(
+        self.post_call::<_, EventRecord>(
             "/SessionStore/append_event",
             &AppendEventRequest {
                 session_id,
@@ -356,6 +356,7 @@ impl RemoteHttpClient {
             },
         )
         .await
+        .map(|record| record.sequence_num)
     }
 
     async fn get_session(

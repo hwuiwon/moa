@@ -19,4 +19,17 @@ mod tests {
             "MOA_DATABASE_MAX_CONNECTIONS",
         );
     }
+
+    #[test]
+    fn invalid_background_pool_size_reports_env_name() {
+        // Pins: background-pool parse failures identify the deployment knob that
+        // owns the isolated maintenance connection budget.
+        assert_config_error_contains(
+            MoaEnvOverlay::from_iter(env_pairs([(
+                "MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS",
+                "many",
+            )])),
+            "MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS",
+        );
+    }
 }

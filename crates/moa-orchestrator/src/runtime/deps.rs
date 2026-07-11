@@ -42,6 +42,8 @@ pub struct RuntimeDeps {
     pub config: Arc<MoaConfig>,
     /// Runtime Postgres pool.
     pub pool: PgPool,
+    /// Postgres pool reserved for process-owned background workers.
+    pub background_pool: PgPool,
     /// Session and analytics store backed by Postgres.
     pub session_store: Arc<PostgresSessionStore>,
     /// Optional OpenFGA authorization client.
@@ -77,6 +79,7 @@ impl RuntimeDeps {
     pub async fn build(
         config: Arc<MoaConfig>,
         pool: PgPool,
+        background_pool: PgPool,
         restate_ingress_url: &str,
         providers_override: ProvidersOverride,
         skip_fga: bool,
@@ -90,7 +93,7 @@ impl RuntimeDeps {
         };
         let authz_outbox_poller = fga_client
             .clone()
-            .map(|fga_client| start_authz_outbox_poller(&pool, fga_client));
+            .map(|fga_client| start_authz_outbox_poller(&background_pool, fga_client));
         let session_store = Arc::new(
             PostgresSessionStore::from_existing_pool_with_config(config.as_ref(), pool.clone())
                 .await?,
@@ -128,7 +131,7 @@ impl RuntimeDeps {
                 )),
         );
         validate_lineage_journal_startup(config.as_ref())?;
-        let lineage = build_lineage_sink(config.as_ref(), pool.clone()).await?;
+        let lineage = build_lineage_sink(config.as_ref(), background_pool.clone()).await?;
         let retrieval_embedder = build_retrieval_embedder(config.as_ref());
         let graph_memory_retriever = build_graph_memory_retriever(
             config.as_ref(),
@@ -144,12 +147,13 @@ impl RuntimeDeps {
         );
         let tool_schemas = Arc::new(tool_router.tool_schemas());
         let channel_adapters = build_channel_adapters(config.as_ref(), runtime_cache.clone())?;
-        moa_memory_ingest::install_runtime_with_config(pool.clone(), config.as_ref())
+        moa_memory_ingest::install_runtime_with_config(background_pool.clone(), config.as_ref())
             .context("install graph-memory ingestion runtime")?;
 
         Ok(Self {
             config,
             pool,
+            background_pool,
             session_store,
             fga_client,
             auth_providers,

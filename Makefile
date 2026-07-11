@@ -104,11 +104,15 @@ loadtest-mock:
 	@MOA_RUSTFS_PORT=$${MOA_RUSTFS_PORT:-10090} \
 	  MOA_RUSTFS_CONSOLE_PORT=$${MOA_RUSTFS_CONSOLE_PORT:-10091} \
 	  docker compose up -d --build postgres restate openfga valkey rustfs rustfs-init moa-pii-service moa-audit-shipper
+	@docker compose run --rm restate-rules-bootstrap >/dev/null
 	@$(MAKE) fga-bootstrap
 	@echo "restarting orchestrator with scripted providers..."
 	@set -a; . ./.env.fga; set +a; \
 	  MOA_RUSTFS_PORT=$${MOA_RUSTFS_PORT:-10090} \
 	  MOA_RUSTFS_CONSOLE_PORT=$${MOA_RUSTFS_CONSOLE_PORT:-10091} \
+	  MOA_DATABASE_MAX_CONNECTIONS=$${MOA_DATABASE_MAX_CONNECTIONS:-5} \
+	  MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS=$${MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS:-1} \
+	  MOA_DATABASE_CONNECT_TIMEOUT_SECONDS=$${MOA_DATABASE_CONNECT_TIMEOUT_SECONDS:-3} \
 	  MOA_PROVIDERS_OVERRIDE=scripted:/loadtest-scripts/perf-gate.json \
 	  docker compose up -d --build --force-recreate moa-orchestrator restate-register
 	@$(MAKE) dev-status
@@ -130,17 +134,42 @@ loadtest-live:
 # T2 capacity run: realistic scripted workload, ramp to the knee, windowed
 # report written to target/perf-gate/capacity.json.
 loadtest-capacity:
+	@echo "starting capacity dependencies with the production Restate rule..."
+	@MOA_RUSTFS_PORT=$${MOA_RUSTFS_PORT:-10090} \
+	  MOA_RUSTFS_CONSOLE_PORT=$${MOA_RUSTFS_CONSOLE_PORT:-10091} \
+	  docker compose up -d --build postgres restate openfga valkey rustfs rustfs-init moa-pii-service moa-audit-shipper
+	@docker compose run --rm restate-rules-bootstrap >/dev/null
+	@$(MAKE) fga-bootstrap
 	@echo "restarting orchestrator with realistic scripted providers..."
-	@MOA_PROVIDERS_OVERRIDE=scripted:/loadtest-scripts/realistic.json \
+	@set -a; . ./.env.fga; set +a; \
+	  MOA_RUSTFS_PORT=$${MOA_RUSTFS_PORT:-10090} \
+	  MOA_RUSTFS_CONSOLE_PORT=$${MOA_RUSTFS_CONSOLE_PORT:-10091} \
+	  MOA_DATABASE_MAX_CONNECTIONS=$${MOA_DATABASE_MAX_CONNECTIONS:-5} \
+	  MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS=$${MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS:-1} \
+	  MOA_DATABASE_CONNECT_TIMEOUT_SECONDS=$${MOA_DATABASE_CONNECT_TIMEOUT_SECONDS:-3} \
+	  MOA_PROVIDERS_OVERRIDE=scripted:/loadtest-scripts/realistic.json \
 	  docker compose up -d --build --force-recreate moa-orchestrator restate-register
 	@$(MAKE) dev-status
 	@mkdir -p target/perf-gate
+	@set -a; . ./.env.fga; set +a; \
+	  report_tmp=target/perf-gate/capacity.json.tmp; \
+	  status=0; \
 	cargo run -p moa-loadtest --release --bin moa-loadtest -- \
 	  --mode mock --endpoint http://localhost:10010 \
 	  --shape ramp --rate 5 --rate-end 200 --duration 10m \
 	  --profile mixed --think-time-ms 2000 --sessions 800 --tenants 8 \
 	  --metrics-endpoint http://localhost:10023/metrics \
-	  --output json | tee target/perf-gate/capacity.json >/dev/null
+	  --output json > $$report_tmp || status=$$?; \
+	  if jq -e . $$report_tmp >/dev/null 2>&1; then \
+	    mv $$report_tmp target/perf-gate/capacity.json; \
+	    if [ $$status -ne 0 ]; then \
+	      echo "capacity ramp reached expected overload; preserving valid report"; \
+	    fi; \
+	  else \
+	    rm -f $$report_tmp; \
+	    if [ $$status -eq 0 ]; then status=1; fi; \
+	    exit $$status; \
+	  fi
 	@echo "capacity report: target/perf-gate/capacity.json"
 
 # Long steady soak at ~70% of measured capacity; watch the window series for

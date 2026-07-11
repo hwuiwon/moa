@@ -95,6 +95,12 @@ pub struct MoaEnvOverlay {
     pub providers_concurrency_block_threshold_ms: Option<u64>,
     /// `MOA_PROVIDERS_CONCURRENCY_LEASE_TTL_MS`.
     pub providers_concurrency_lease_ttl_ms: Option<u64>,
+    /// Provider first-byte stream timeout in milliseconds.
+    pub providers_stream_timeouts_first_byte_ms: Option<u64>,
+    /// Provider stream idle timeout in milliseconds.
+    pub providers_stream_timeouts_idle_ms: Option<u64>,
+    /// Provider total stream timeout in milliseconds.
+    pub providers_stream_timeouts_total_ms: Option<u64>,
     /// `MOA_DATABASE_URL`.
     pub database_url: Option<String>,
     /// `MOA_DATABASE_ADMIN_URL`.
@@ -103,6 +109,8 @@ pub struct MoaEnvOverlay {
     pub database_schema: Option<String>,
     /// `MOA_DATABASE_MAX_CONNECTIONS`.
     pub database_max_connections: Option<u32>,
+    /// `MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS`.
+    pub database_background_max_connections: Option<u32>,
     /// `MOA_DATABASE_CONNECT_TIMEOUT_SECONDS`.
     pub database_connect_timeout_seconds: Option<u64>,
     /// `MOA_DATABASE_NEON_ENABLED`.
@@ -1222,6 +1230,7 @@ mod tests {
         let overlay = MoaEnvOverlay::from_iter(env_pairs([
             ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
             ("MOA_DATABASE_MAX_CONNECTIONS", "42"),
+            ("MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS", "3"),
             ("MOA_AUTH_PROVIDER", "oidc"),
             ("MOA_AUTHZ_ENGINE", "openfga"),
             ("MOA_AUTHZ_OPENFGA_URL", "http://openfga.example"),
@@ -1314,6 +1323,7 @@ mod tests {
 
         assert_eq!(config.database.url, "postgres://moa:test@db.example/moa");
         assert_eq!(config.database.max_connections, 42);
+        assert_eq!(config.database.background_max_connections, 3);
         assert_eq!(config.auth.provider, AuthProviderKind::Oidc);
         assert_eq!(
             config.auth.auth0_webhook_secret.as_deref(),

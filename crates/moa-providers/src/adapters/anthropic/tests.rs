@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use eventsource_stream::Eventsource;
 use futures_util::stream;
+use moa_core::config::ProviderStreamTimeoutConfig;
 use moa_core::{
     traits::LLMProvider, types::completion::CompletionContent,
     types::completion::CompletionRequest, types::completion::JsonResponseFormat,
@@ -579,6 +580,7 @@ async fn parses_recorded_sse_stream_into_content_blocks() {
         MODEL_SONNET_4_6.to_string(),
         Instant::now(),
         &mut span_recorder,
+        ProviderStreamTimeoutConfig::default(),
     )
     .await
     .unwrap();

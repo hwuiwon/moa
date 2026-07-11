@@ -38,9 +38,10 @@ use moa_core::{
     coordination_counters::scope_coordination_counters, events::Event,
     session_replay::TurnReplayCounters, session_replay::scope_turn_replay_counters,
     types::completion::CompletionRequest, types::completion::CompletionResponse,
-    types::completion::DEFER_BRAIN_RESPONSE_METADATA_KEY, types::identifiers::SessionId,
-    types::provider::ModelTier, types::segment_assessment::AssessmentPhase,
-    types::session::SessionMeta, types::session::TurnOutcome as CoreTurnOutcome,
+    types::completion::DEFER_BRAIN_RESPONSE_METADATA_KEY, types::events_stream::EventRecord,
+    types::identifiers::SessionId, types::provider::ModelTier,
+    types::segment_assessment::AssessmentPhase, types::session::SessionMeta,
+    types::session::TurnOutcome as CoreTurnOutcome,
 };
 use moa_lineage_core::TurnId;
 use moa_memory_ingest::{IngestionVOClient, ingestion_object_key};
@@ -60,9 +61,7 @@ use self::delegation::{
     maybe_fan_in_auto_delegation_results, maybe_schedule_auto_delegation,
     root_request_turn_cap_for_auto_delegation,
 };
-use self::event_queries::{
-    brain_response_event_by_sequence, load_recent_target_events, load_session_meta,
-};
+use self::event_queries::{load_recent_target_events, load_session_meta};
 use self::guardrails::{evaluate_input_guardrail, visible_response_after_output_guardrail};
 use self::implementation::TurnExecutionImpl;
 use self::request::{BuiltTurnRequest, build_request_inside_workflow};
@@ -102,10 +101,9 @@ struct BodyOutcome {
 }
 
 #[derive(Clone, Copy)]
-struct RunOnceContext<'a> {
+struct RunOnceContext {
     session_id: SessionId,
     turn_id: TurnId,
-    identity: &'a moa_core::traits::Identity,
 }
 
 #[derive(Clone, Debug)]
@@ -157,7 +155,7 @@ async fn execute_turn_inside_workflow(
                 return Ok(outcome);
             }
 
-            let user_sequence_num = append_session_event(
+            let user_event = append_session_event(
                 ctx,
                 session_id,
                 Event::UserMessage {
@@ -166,6 +164,7 @@ async fn execute_turn_inside_workflow(
                 },
             )
             .await?;
+            let user_sequence_num = user_event.sequence_num;
             ctx.set(
                 driver_progress::RootTurnStateKey::USER_MESSAGE_SEQUENCE,
                 Json::from(user_sequence_num),
@@ -275,7 +274,6 @@ async fn execute_turn_inside_workflow(
                             RunOnceContext {
                                 session_id,
                                 turn_id,
-                                identity: &request.identity,
                             },
                             &mut last_summary,
                             &mut turn_evidence,
@@ -422,7 +420,7 @@ async fn append_brain_response_from_completion(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     response: &CompletionResponse,
-) -> Result<u64, HandlerError> {
+) -> Result<EventRecord, HandlerError> {
     let usage = response.token_usage();
     let cost_cents =
         crate::services::llm_gateway::compute_cost_cents(response.model.as_str(), usage);
@@ -487,7 +485,7 @@ async fn ingest_deferred_session_turn(
 async fn run_once_inside_workflow(
     workflow: &TurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
-    turn_context: RunOnceContext<'_>,
+    turn_context: RunOnceContext,
     last_summary: &mut Option<String>,
     turn_evidence: &mut TurnEvidence,
     tool_budget: &mut ToolBudgetState,
@@ -641,21 +639,15 @@ async fn run_once_inside_workflow(
         visible_response.model.as_str(),
         response_usage,
     );
-    let response_sequence_num =
+    let response_event =
         append_brain_response_from_completion(ctx, session_id, &visible_response).await?;
+    let response_sequence_num = response_event.sequence_num;
     record_last_response_sequence(ctx, response_sequence_num);
     ingest_deferred_session_turn(
         ctx,
         session_id,
         &request,
         &visible_response,
-        response_sequence_num,
-    )
-    .await?;
-    let response_event = brain_response_event_by_sequence(
-        ctx,
-        session_id,
-        turn_context.identity,
         response_sequence_num,
     )
     .await?;
@@ -670,7 +662,7 @@ async fn run_once_inside_workflow(
         response_cost_cents,
         llm_call_duration,
         &span,
-        response_event.as_ref(),
+        Some(&response_event),
     )
     .await;
 

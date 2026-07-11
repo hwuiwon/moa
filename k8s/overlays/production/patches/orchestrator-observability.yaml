@@ -18,3 +18,23 @@
   value:
     name: MOA_OBSERVABILITY_ENVIRONMENT
     value: production
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_PROVIDERS_CONCURRENCY_SCOPE
+    value: global
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_PROVIDERS_STREAM_TIMEOUTS_FIRST_BYTE_MS
+    value: "30000"
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_PROVIDERS_STREAM_TIMEOUTS_IDLE_MS
+    value: "60000"
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_PROVIDERS_STREAM_TIMEOUTS_TOTAL_MS
+    value: "300000"

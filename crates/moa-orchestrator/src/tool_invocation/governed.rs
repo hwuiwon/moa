@@ -618,7 +618,9 @@ async fn append_session_event(
         }))
         .call()
         .instrument(persist_span)
-        .await?;
+        .await?
+        .into_inner()
+        .sequence_num;
     record_turn_event_persist_duration(persist_started.elapsed(), 1);
     Ok(sequence_num)
 }

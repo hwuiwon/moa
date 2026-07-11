@@ -1,6 +1,6 @@
 //! Composite task-segment assessor.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use moa_core::{
     config::ResolutionWeights, types::segment_assessment::AssessmentPhase,
     types::segment_assessment::SegmentAssessment, types::segment_assessment::SegmentEvidence,
@@ -48,6 +48,7 @@ impl SegmentAssessor {
         continuation: Option<f64>,
         self_assessment: Option<f64>,
         structural: Option<f64>,
+        assessed_at: DateTime<Utc>,
         phase: AssessmentPhase,
         overrides: &[AssessmentOverride],
     ) -> SegmentAssessment {
@@ -60,6 +61,7 @@ impl SegmentAssessor {
                 continuation,
                 self_assessment,
                 structural,
+                assessed_at,
                 phase,
                 overrides,
             );
@@ -73,6 +75,7 @@ impl SegmentAssessor {
                 continuation,
                 self_assessment,
                 structural,
+                assessed_at,
                 phase,
                 overrides,
             );
@@ -86,6 +89,7 @@ impl SegmentAssessor {
                 continuation,
                 self_assessment,
                 structural,
+                assessed_at,
                 phase,
                 overrides,
             );
@@ -119,6 +123,7 @@ impl SegmentAssessor {
             continuation,
             self_assessment,
             structural,
+            assessed_at,
             phase,
             overrides,
         )
@@ -177,6 +182,7 @@ fn segment_assessment(
     continuation: Option<f64>,
     self_assessment: Option<f64>,
     structural: Option<f64>,
+    assessed_at: DateTime<Utc>,
     phase: AssessmentPhase,
     overrides: &[AssessmentOverride],
 ) -> SegmentAssessment {
@@ -192,7 +198,7 @@ fn segment_assessment(
             structural,
             overrides,
         ),
-        assessed_at: Utc::now(),
+        assessed_at,
         policy_version: POLICY_VERSION.to_string(),
     }
 }
@@ -298,6 +304,7 @@ fn polarity_for_strength(strength: f64) -> SegmentEvidencePolarity {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
     use moa_core::{
         config::ResolutionWeights, types::segment_assessment::AssessmentPhase,
         types::segment_assessment::SegmentEvidenceKind,
@@ -306,6 +313,12 @@ mod tests {
     };
 
     use super::{AssessmentOverride, SegmentAssessor};
+
+    fn assessed_at() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 7, 11, 0, 0, 0)
+            .single()
+            .expect("fixed assessment timestamp must be valid")
+    }
 
     #[test]
     fn null_signals_are_excluded_and_weights_renormalized() {
@@ -316,6 +329,7 @@ mod tests {
             None,
             Some(0.7),
             None,
+            assessed_at(),
             AssessmentPhase::Immediate,
             &[],
         );
@@ -328,18 +342,21 @@ mod tests {
     #[test]
     fn cancellation_overrides_to_abandoned() {
         let assessor = SegmentAssessor::default();
+        let timestamp = assessed_at();
         let assessment = assessor.assess(
             Some(0.8),
             Some(0.95),
             Some(0.85),
             Some(0.7),
             Some(0.6),
+            timestamp,
             AssessmentPhase::Final,
             &[AssessmentOverride::Cancelled],
         );
 
         assert_eq!(assessment.outcome, SegmentOutcome::Abandoned);
         assert_eq!(assessment.confidence, 1.0);
+        assert_eq!(assessment.assessed_at, timestamp);
         assert!(assessment.evidence.iter().any(|evidence| {
             evidence.kind == SegmentEvidenceKind::Override
                 && evidence.polarity == SegmentEvidencePolarity::SupportsAbandoned
@@ -355,6 +372,7 @@ mod tests {
             None,
             Some(0.7),
             None,
+            assessed_at(),
             AssessmentPhase::Immediate,
             &[AssessmentOverride::TurnCapExceeded],
         );
@@ -372,6 +390,7 @@ mod tests {
             None,
             Some(0.15),
             None,
+            assessed_at(),
             AssessmentPhase::Immediate,
             &[AssessmentOverride::VerificationPassed],
         );
@@ -391,6 +410,7 @@ mod tests {
             None,
             Some(0.5),
             None,
+            assessed_at(),
             AssessmentPhase::Immediate,
             &[AssessmentOverride::AllToolsFailed],
         );
@@ -402,16 +422,22 @@ mod tests {
     #[test]
     fn absent_signals_do_not_create_placeholder_evidence() {
         let assessor = SegmentAssessor::default();
-        let assessment = assessor.assess(
-            None,
-            None,
-            None,
-            None,
-            None,
-            AssessmentPhase::Immediate,
-            &[],
-        );
+        let assess = || {
+            assessor.assess(
+                None,
+                None,
+                None,
+                None,
+                None,
+                assessed_at(),
+                AssessmentPhase::Immediate,
+                &[],
+            )
+        };
+        let assessment = assess();
 
         assert_eq!(assessment.evidence, Vec::new());
+        assert_eq!(assessment.assessed_at, assessed_at());
+        assert_eq!(assessment, assess());
     }
 }

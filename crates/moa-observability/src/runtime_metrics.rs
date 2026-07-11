@@ -119,7 +119,9 @@ impl TurnLatencyStep {
 pub enum SessionEventAppendPhase {
     /// Pre-transaction payload encoding and claim-check preparation.
     Prepare,
-    /// Pool acquire plus `BEGIN`.
+    /// Wait for a pooled PostgreSQL connection.
+    AcquireConnection,
+    /// Start a transaction on an acquired connection.
     BeginTransaction,
     /// `sessions ... FOR UPDATE` lock acquisition and session metadata load.
     LockSession,
@@ -141,8 +143,9 @@ pub enum SessionEventAppendPhase {
 
 impl SessionEventAppendPhase {
     /// All session event append phases in a stable order for cached metric handles.
-    const ALL: [SessionEventAppendPhase; 10] = [
+    const ALL: [SessionEventAppendPhase; 11] = [
         Self::Prepare,
+        Self::AcquireConnection,
         Self::BeginTransaction,
         Self::LockSession,
         Self::DedupeLookup,
@@ -159,6 +162,7 @@ impl SessionEventAppendPhase {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Prepare => "prepare",
+            Self::AcquireConnection => "acquire_connection",
             Self::BeginTransaction => "begin_transaction",
             Self::LockSession => "lock_session",
             Self::DedupeLookup => "dedupe_lookup",
@@ -175,15 +179,16 @@ impl SessionEventAppendPhase {
     const fn index(self) -> usize {
         match self {
             Self::Prepare => 0,
-            Self::BeginTransaction => 1,
-            Self::LockSession => 2,
-            Self::DedupeLookup => 3,
-            Self::DedupeFetchRecords => 4,
-            Self::BuildInsertPayloads => 5,
-            Self::InsertEvents => 6,
-            Self::InsertDedupeRows => 7,
-            Self::UpdateSessionAggregates => 8,
-            Self::Commit => 9,
+            Self::AcquireConnection => 1,
+            Self::BeginTransaction => 2,
+            Self::LockSession => 3,
+            Self::DedupeLookup => 4,
+            Self::DedupeFetchRecords => 5,
+            Self::BuildInsertPayloads => 6,
+            Self::InsertEvents => 7,
+            Self::InsertDedupeRows => 8,
+            Self::UpdateSessionAggregates => 9,
+            Self::Commit => 10,
         }
     }
 }
@@ -567,7 +572,7 @@ pub fn record_session_event_append_phase_duration(
     phase: SessionEventAppendPhase,
     duration: Duration,
 ) {
-    static APPEND_PHASE_HISTOGRAMS: OnceLock<[metrics::Histogram; 10]> = OnceLock::new();
+    static APPEND_PHASE_HISTOGRAMS: OnceLock<[metrics::Histogram; 11]> = OnceLock::new();
     let histograms = APPEND_PHASE_HISTOGRAMS.get_or_init(|| {
         SessionEventAppendPhase::ALL
             .map(|phase| histogram!(SESSION_EVENT_APPEND_PHASE_METRIC, "phase" => phase.as_str()))
@@ -1426,6 +1431,14 @@ mod tests {
         record_scoped_guc_application_duration(Duration::from_millis(2));
         record_session_event_append("ToolCall");
         record_session_event_append_phase_duration(
+            SessionEventAppendPhase::AcquireConnection,
+            Duration::from_millis(2),
+        );
+        record_session_event_append_phase_duration(
+            SessionEventAppendPhase::BeginTransaction,
+            Duration::from_millis(1),
+        );
+        record_session_event_append_phase_duration(
             SessionEventAppendPhase::LockSession,
             Duration::from_millis(3),
         );
@@ -1475,6 +1488,8 @@ mod tests {
         assert!(scrape.contains("moa_scoped_guc_application_seconds"));
         assert!(scrape.contains("moa_session_events_appended_total"));
         assert!(scrape.contains("moa_session_event_append_phase_seconds"));
+        assert!(scrape.contains("phase=\"acquire_connection\""));
+        assert!(scrape.contains("phase=\"begin_transaction\""));
         assert!(scrape.contains("moa_session_event_loads_total"));
         assert!(scrape.contains("moa_session_event_load_events"));
         assert!(scrape.contains("moa_session_event_decoded_bytes_total"));

@@ -61,7 +61,6 @@ pub(super) async fn emit_experience_for_assessment(
                     for candidate in &learning.candidates {
                         store.append_learning_candidate(candidate).await?;
                     }
-                    store.refresh_segment_materialized_views().await?;
                     Ok::<(), MoaError>(())
                 }
                 .await;

@@ -4,9 +4,15 @@ use std::env;
 use std::time::{Duration, Instant};
 
 use moa_core::{
-    config::MoaConfig, error::MoaError, error::Result, traits::LLMProvider,
-    types::completion::CompletionRequest, types::completion::CompletionStream,
-    types::identifiers::ModelId, types::model::ModelCapabilities, types::model::ProviderNativeTool,
+    config::{MoaConfig, ProviderStreamTimeoutConfig},
+    error::MoaError,
+    error::Result,
+    traits::LLMProvider,
+    types::completion::CompletionRequest,
+    types::completion::CompletionStream,
+    types::identifiers::ModelId,
+    types::model::ModelCapabilities,
+    types::model::ProviderNativeTool,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -63,6 +69,7 @@ pub struct OpenAIProvider {
     pacer: RatePacer,
     limiter: ConcurrencyLimiter,
     guard: RateGuard,
+    stream_timeouts: ProviderStreamTimeoutConfig,
 }
 
 impl OpenAIProvider {
@@ -95,6 +102,7 @@ impl OpenAIProvider {
             // path overrides it per credential (0 opts back into unbounded).
             limiter: ConcurrencyLimiter::new(DEFAULT_MAX_IN_FLIGHT),
             guard: RateGuard::new(),
+            stream_timeouts: ProviderStreamTimeoutConfig::default(),
         })
     }
 
@@ -128,6 +136,7 @@ impl OpenAIProvider {
             &api_key,
             config.providers.openai.max_concurrent_requests,
         );
+        provider.stream_timeouts = config.providers.stream_timeouts;
         Ok(provider)
     }
 
@@ -240,6 +249,7 @@ impl LLMProvider for OpenAIProvider {
         let api_key = self.api_key.clone();
         let retry_policy = self.retry_policy.clone();
         let guard = self.guard.clone();
+        let stream_timeouts = self.stream_timeouts;
         let (tx, rx) = mpsc::channel(DEFAULT_STREAM_BUFFER);
 
         let completion_task = tokio::spawn(
@@ -259,6 +269,7 @@ impl LLMProvider for OpenAIProvider {
                     retry_policy,
                     &guard,
                     span_recorder,
+                    stream_timeouts,
                 )
                 .await
             }

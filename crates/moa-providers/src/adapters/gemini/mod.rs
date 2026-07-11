@@ -11,16 +11,28 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use eventsource_stream::{Event as SseEvent, Eventsource};
-use futures_util::{Stream, StreamExt, pin_mut};
+use futures_util::{Stream, pin_mut};
 use moa_core::{
-    config::MoaConfig, error::MoaError, error::Result, traits::LLMProvider,
-    types::completion::CompletionContent, types::completion::CompletionRequest,
-    types::completion::CompletionResponse, types::completion::CompletionStream,
-    types::completion::JsonResponseFormat, types::completion::ProviderToolCallMetadata,
-    types::completion::StopReason, types::completion::TokenUsage,
-    types::completion::ToolCallContent, types::completion::ToolInvocation,
-    types::context::ContextMessage, types::context::MessageRole, types::identifiers::ModelId,
-    types::model::ModelCapabilities, types::model::ProviderNativeTool, types::tools::ToolContent,
+    config::{MoaConfig, ProviderStreamTimeoutConfig},
+    error::MoaError,
+    error::Result,
+    traits::LLMProvider,
+    types::completion::CompletionContent,
+    types::completion::CompletionRequest,
+    types::completion::CompletionResponse,
+    types::completion::CompletionStream,
+    types::completion::JsonResponseFormat,
+    types::completion::ProviderToolCallMetadata,
+    types::completion::StopReason,
+    types::completion::TokenUsage,
+    types::completion::ToolCallContent,
+    types::completion::ToolInvocation,
+    types::context::ContextMessage,
+    types::context::MessageRole,
+    types::identifiers::ModelId,
+    types::model::ModelCapabilities,
+    types::model::ProviderNativeTool,
+    types::tools::ToolContent,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -37,7 +49,7 @@ use crate::core::provider_tools::enabled_native_tools;
 use crate::core::rate_guard::{self, RateGuard};
 use crate::core::retry::RetryPolicy;
 use crate::core::streaming::{
-    finalize_streamed_completion, parse_sse_json, send_with_transport_phase,
+    StreamDeadline, finalize_streamed_completion, parse_sse_json, send_with_transport_phase,
 };
 
 pub(crate) mod model;
@@ -97,6 +109,7 @@ pub struct GeminiProvider {
     pacer: RatePacer,
     limiter: ConcurrencyLimiter,
     guard: RateGuard,
+    stream_timeouts: ProviderStreamTimeoutConfig,
 }
 
 impl GeminiProvider {
@@ -128,6 +141,7 @@ impl GeminiProvider {
             // path overrides it per credential (0 opts back into unbounded).
             limiter: ConcurrencyLimiter::new(DEFAULT_MAX_IN_FLIGHT),
             guard: RateGuard::new(),
+            stream_timeouts: ProviderStreamTimeoutConfig::default(),
         })
     }
 
@@ -161,6 +175,7 @@ impl GeminiProvider {
             &api_key,
             config.providers.google.max_concurrent_requests,
         );
+        provider.stream_timeouts = config.providers.stream_timeouts;
         Ok(provider)
     }
 
@@ -281,6 +296,7 @@ impl LLMProvider for GeminiProvider {
         let api_base = Arc::clone(&self.api_base);
         let retry_policy = self.retry_policy.clone();
         let guard = self.guard.clone();
+        let stream_timeouts = self.stream_timeouts;
         let (tx, rx) = mpsc::channel(DEFAULT_STREAM_BUFFER);
 
         let completion_task = tokio::spawn(
@@ -314,6 +330,7 @@ impl LLMProvider for GeminiProvider {
                     resolved_model,
                     started_at,
                     &mut span_recorder,
+                    stream_timeouts,
                 )
                 .await;
 

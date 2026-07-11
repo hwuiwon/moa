@@ -469,6 +469,14 @@ moa_session_event_append_phase_seconds_bucket{phase="lock_session",le="0.1"} 2
 moa_session_event_append_phase_seconds_bucket{phase="lock_session",le="+Inf"} 2
 moa_session_event_append_phase_seconds_sum{phase="lock_session"} 0.06
 moa_session_event_append_phase_seconds_count{phase="lock_session"} 2
+moa_session_event_append_phase_seconds_bucket{phase="acquire_connection",le="0.01"} 2
+moa_session_event_append_phase_seconds_bucket{phase="acquire_connection",le="+Inf"} 2
+moa_session_event_append_phase_seconds_sum{phase="acquire_connection"} 0.01
+moa_session_event_append_phase_seconds_count{phase="acquire_connection"} 2
+moa_session_event_append_phase_seconds_bucket{phase="begin_transaction",le="0.01"} 2
+moa_session_event_append_phase_seconds_bucket{phase="begin_transaction",le="+Inf"} 2
+moa_session_event_append_phase_seconds_sum{phase="begin_transaction"} 0.01
+moa_session_event_append_phase_seconds_count{phase="begin_transaction"} 2
 "#,
         );
         let after = parse_runtime_metrics_snapshot(
@@ -479,18 +487,35 @@ moa_session_event_append_phase_seconds_bucket{phase="lock_session",le="0.1"} 5
 moa_session_event_append_phase_seconds_bucket{phase="lock_session",le="+Inf"} 5
 moa_session_event_append_phase_seconds_sum{phase="lock_session"} 0.28
 moa_session_event_append_phase_seconds_count{phase="lock_session"} 5
+moa_session_event_append_phase_seconds_bucket{phase="acquire_connection",le="0.01"} 5
+moa_session_event_append_phase_seconds_bucket{phase="acquire_connection",le="+Inf"} 5
+moa_session_event_append_phase_seconds_sum{phase="acquire_connection"} 0.025
+moa_session_event_append_phase_seconds_count{phase="acquire_connection"} 5
+moa_session_event_append_phase_seconds_bucket{phase="begin_transaction",le="0.01"} 5
+moa_session_event_append_phase_seconds_bucket{phase="begin_transaction",le="+Inf"} 5
+moa_session_event_append_phase_seconds_sum{phase="begin_transaction"} 0.019
+moa_session_event_append_phase_seconds_count{phase="begin_transaction"} 5
 "#,
         );
 
         let reports = event_append_phase_latency_delta_reports(Some(&before), Some(&after));
 
-        assert_eq!(reports.len(), 1);
-        assert_eq!(reports[0].phase, "lock_session");
-        assert_eq!(reports[0].sample_count, 3);
-        assert_eq!(reports[0].latency_ms.mean.round(), 73.0);
-        assert_eq!(reports[0].latency_ms.p50, 100.0);
-        assert_eq!(reports[0].latency_ms.p95, 100.0);
-        assert_eq!(reports[0].latency_ms.p99, 100.0);
+        assert_eq!(
+            reports
+                .iter()
+                .map(|report| report.phase.as_str())
+                .collect::<Vec<_>>(),
+            vec!["acquire_connection", "begin_transaction", "lock_session"]
+        );
+        let lock_report = reports
+            .iter()
+            .find(|report| report.phase == "lock_session")
+            .expect("lock_session phase report should be present");
+        assert_eq!(lock_report.sample_count, 3);
+        assert_eq!(lock_report.latency_ms.mean.round(), 73.0);
+        assert_eq!(lock_report.latency_ms.p50, 100.0);
+        assert_eq!(lock_report.latency_ms.p95, 100.0);
+        assert_eq!(lock_report.latency_ms.p99, 100.0);
     }
 
     #[test]

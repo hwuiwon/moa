@@ -335,7 +335,19 @@ impl PostgresSessionStore {
         let dedupe = self.table_name("session_event_dedupe");
 
         let phase_started = Instant::now();
-        let mut transaction = match self.pool.begin().await {
+        let mut connection = match self.pool.acquire().await {
+            Ok(connection) => {
+                record_append_phase(SessionEventAppendPhase::AcquireConnection, phase_started);
+                connection
+            }
+            Err(error) => {
+                record_append_phase(SessionEventAppendPhase::AcquireConnection, phase_started);
+                return Err(map_sqlx_error(error));
+            }
+        };
+
+        let phase_started = Instant::now();
+        let mut transaction = match connection.begin().await {
             Ok(transaction) => {
                 record_append_phase(SessionEventAppendPhase::BeginTransaction, phase_started);
                 transaction

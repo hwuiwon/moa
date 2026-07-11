@@ -77,6 +77,52 @@ async fn concurrent_pollers_claim_pending_row_once_db() {
 }
 
 #[tokio::test]
+async fn concurrent_pollers_claim_disjoint_pending_batches_db() {
+    // Pins: concurrent pods claim disjoint batches rather than applying any tuple twice.
+    let pool = test_pool().await;
+    let server = MockServer::start();
+    let write = server.mock(|when, then| {
+        when.method(POST).path("/stores/store/write");
+        then.status(200).json_body(json!({}));
+    });
+    let row_ids = [
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    ];
+    for row_id in row_ids {
+        insert_outbox_row(&pool, row_id, "pending", None, "NULL").await;
+    }
+    let first = poller_with_url(pool.clone(), 2, server.base_url());
+    let second = poller_with_url(pool.clone(), 2, server.base_url());
+
+    let (first_result, second_result) = tokio::join!(first.tick(), second.tick());
+
+    assert_eq!(
+        first_result.expect("first tick should complete")
+            + second_result.expect("second tick should complete"),
+        row_ids.len(),
+        "concurrent pollers should drain each pending row exactly once"
+    );
+    write.assert_hits(row_ids.len());
+    let statuses: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT id, status, lease_token FROM authz_outbox WHERE id = ANY($1) ORDER BY id",
+    )
+    .bind(row_ids.as_slice())
+    .fetch_all(&pool)
+    .await
+    .expect("claimed rows should remain readable");
+    assert_eq!(statuses.len(), row_ids.len());
+    assert!(
+        statuses
+            .iter()
+            .all(|(_, status, lease_token)| status == "succeeded" && lease_token.is_none()),
+        "every claimed row should succeed and release its lease: {statuses:?}"
+    );
+}
+
+#[tokio::test]
 async fn poller_drains_pending_row_to_succeeded_db() {
     // Pins: when OpenFGA accepts the write (200), the poller counts the row as
     // drained and transitions it to 'succeeded' with the lease released — the

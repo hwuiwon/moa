@@ -21,6 +21,11 @@ pub struct DatabaseConfig {
     pub schema: Option<String>,
     /// Maximum pool size for the shared Postgres client.
     pub max_connections: u32,
+    /// Maximum pool size reserved for process-owned background workers.
+    ///
+    /// This is a separate pool from foreground Restate handlers so maintenance,
+    /// export, and outbox work cannot consume the foreground connection budget.
+    pub background_max_connections: u32,
     /// Pool acquire timeout, in seconds.
     ///
     /// Applied as the sqlx pool `acquire_timeout` (see `runtime::database`): the
@@ -39,6 +44,7 @@ impl Default for DatabaseConfig {
             admin_url: None,
             schema: None,
             max_connections: 20,
+            background_max_connections: 2,
             connect_timeout_seconds: 10,
             neon: DatabaseNeonConfig::default(),
         }

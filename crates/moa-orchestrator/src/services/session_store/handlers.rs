@@ -111,7 +111,7 @@ impl RestateSessionStore for SessionStoreImpl {
         &self,
         ctx: Context<'_>,
         request: Json<AppendEventRequest>,
-    ) -> Result<u64, HandlerError> {
+    ) -> Result<Json<EventRecord>, HandlerError> {
         annotate_restate_handler_span("SessionStore", "append_event");
         let request = request.into_inner();
         let store = self.store.clone();
@@ -124,7 +124,7 @@ impl RestateSessionStore for SessionStoreImpl {
                 store
                     .emit_event_record(request.session_id, request.event, request.dedupe_key)
                     .await
-                    .map(|record| record.sequence_num)
+                    .map(Json::from)
                     .map_err(HandlerError::from)
             })
             .name("append_event")

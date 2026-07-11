@@ -50,8 +50,10 @@ pub trait RestateSessionStore {
         request: Json<CreateAgentSessionRequest>,
     ) -> Result<Json<CreateAgentSessionResponse>, HandlerError>;
 
-    /// Appends one event to the durable session log.
-    async fn append_event(request: Json<AppendEventRequest>) -> Result<u64, HandlerError>;
+    /// Appends one event to the durable session log and returns its stored record.
+    async fn append_event(
+        request: Json<AppendEventRequest>,
+    ) -> Result<Json<EventRecord>, HandlerError>;
 
     /// Loads events from one session within a requested range.
     async fn get_events(

@@ -175,7 +175,9 @@ impl LLMGateway for LLMGatewayImpl {
                     dedupe_key: None,
                 }))
                 .call()
-                .await?;
+                .await?
+                .into_inner()
+                .sequence_num;
 
             if let Some(turn) = session_turn_from_completion_request(
                 &request,

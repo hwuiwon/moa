@@ -4,11 +4,13 @@ use chrono::Utc;
 use moa_core::{
     types::channel::Channel, types::contact::SessionActorRef, types::identifiers::ModelId,
     types::identifiers::TenantId, types::session::CancelScope, types::session::SessionMeta,
-    types::session::SessionStatus, types::worker::state::WorkerResult,
-    types::worker::state::WorkerState, types::worker::state::WorkerTerminalResult,
+    types::session::SessionStatus, types::worker::state::WorkerProgressSummary,
+    types::worker::state::WorkerResult, types::worker::state::WorkerState,
+    types::worker::state::WorkerTerminalResult,
 };
 use moa_orchestrator::objects::session::{
-    ChildProgressFetch, SessionVoState, plan_child_progress_fan_in, terminal_child_summary,
+    ChildProgressFetch, SessionVoState, child_progress_in_plan_order, plan_child_progress_fan_in,
+    terminal_child_summary,
 };
 use uuid::Uuid;
 
@@ -152,14 +154,16 @@ fn terminal_child_ref(id: &str, output: &str) -> moa_core::types::worker::state:
 fn session_progress_fan_in_includes_active_child_and_synthesizes_terminal() {
     // Pins: Session/progress builds child_progress by bounded on-demand fan-in — an active
     // child is scheduled for a live progress_summary read, a terminal child is synthesized
-    // in place from its cached parent ref without a live call.
+    // in place from its cached parent ref without a live call, and their mixed plan order is
+    // stable even when the live reads later complete out of order.
     let children = vec![
         test_child_ref("active-1"),
         terminal_child_ref("done-1", "summary for done-1"),
+        test_child_ref("active-2"),
     ];
 
     let plan = plan_child_progress_fan_in(&children, 4);
-    assert_eq!(plan.len(), 2);
+    assert_eq!(plan.len(), 3);
     assert_eq!(plan[0], ChildProgressFetch::Fetch("active-1".to_string()));
     match &plan[1] {
         ChildProgressFetch::Ready(summary) => {
@@ -172,6 +176,7 @@ fn session_progress_fan_in_includes_active_child_and_synthesizes_terminal() {
         }
         other => panic!("expected a synthesized terminal summary, got {other:?}"),
     }
+    assert_eq!(plan[2], ChildProgressFetch::Fetch("active-2".to_string()));
 
     // The synthesized summary matches the standalone synthesis helper.
     let direct = terminal_child_summary(
@@ -206,6 +211,44 @@ fn session_progress_fan_in_caps_live_child_calls() {
         .count();
     assert_eq!(fetches, 2, "live fan-out is capped at max_live");
     assert_eq!(ready, 1, "cached terminal children are always synthesized");
+}
+
+#[test]
+fn session_progress_fan_in_restores_plan_order_and_omits_failed_reads() {
+    // Pins: live reads may complete in any order and one may fail, but Session/progress and
+    // list_workers both emit the successful summaries in their original bounded-plan order.
+    let summary = |worker_id: &str| WorkerProgressSummary {
+        worker_id: worker_id.to_string(),
+        state: WorkerState::Running,
+        active_turn_id: None,
+        last_summary: None,
+        tokens_used: 0,
+        budget_remaining: 100,
+        last_heartbeat_at: None,
+        stale: false,
+        awaiting_input: false,
+    };
+    let mut completion_slots = vec![None, None, None, None];
+
+    completion_slots[3] = Some(summary("fourth-completed-first"));
+    completion_slots[0] = Some(summary("first-completed-second"));
+    completion_slots[2] = Some(summary("third-completed-last"));
+    // Slot 1 remains empty to model one failed Worker/progress_summary read.
+
+    let ordered = child_progress_in_plan_order(completion_slots);
+    let worker_ids: Vec<&str> = ordered
+        .iter()
+        .map(|summary| summary.worker_id.as_str())
+        .collect();
+    assert_eq!(
+        worker_ids,
+        vec![
+            "first-completed-second",
+            "third-completed-last",
+            "fourth-completed-first",
+        ],
+        "failed reads are omitted and successful reads retain plan order"
+    );
 }
 
 #[test]

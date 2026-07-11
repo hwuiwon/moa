@@ -926,18 +926,31 @@ async fn collect_child_progress(
     ctx: &SharedObjectContext<'_>,
     children: &[WorkerChildRef],
 ) -> Vec<WorkerProgressSummary> {
-    let mut summaries = Vec::new();
-    for item in plan_child_progress_fan_in(children, MAX_WORKER_FAN_OUT) {
+    let plan = plan_child_progress_fan_in(children, MAX_WORKER_FAN_OUT);
+    let mut summaries: Vec<Option<WorkerProgressSummary>> = (0..plan.len()).map(|_| None).collect();
+    let mut fetch_plan_slots = Vec::new();
+    let mut inflight = DurableFuturesUnordered::new();
+
+    for (plan_slot, item) in plan.into_iter().enumerate() {
         match item {
-            ChildProgressFetch::Ready(summary) => summaries.push(summary),
+            ChildProgressFetch::Ready(summary) => summaries[plan_slot] = Some(summary),
             ChildProgressFetch::Fetch(child_id) => {
-                match ctx
-                    .object_client::<WorkerClient>(child_id.clone())
-                    .progress_summary()
-                    .call()
-                    .await
-                {
-                    Ok(summary) => summaries.push(summary.into_inner()),
+                fetch_plan_slots.push((plan_slot, child_id.clone()));
+                inflight.push(
+                    ctx.object_client::<WorkerClient>(child_id)
+                        .progress_summary()
+                        .call(),
+                );
+            }
+        }
+    }
+
+    loop {
+        match inflight.next().await {
+            Ok(Some((fetch_slot, result))) => {
+                let (plan_slot, child_id) = &fetch_plan_slots[fetch_slot];
+                match result {
+                    Ok(summary) => summaries[*plan_slot] = Some(summary.into_inner()),
                     Err(error) => tracing::warn!(
                         child_id = %child_id,
                         error = %error,
@@ -945,9 +958,18 @@ async fn collect_child_progress(
                     ),
                 }
             }
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "child progress fan-in interrupted; omitting unfinished summaries"
+                );
+                break;
+            }
         }
     }
-    summaries
+
+    child_progress_in_plan_order(summaries)
 }
 
 async fn forward_user_input_reply(

@@ -10,7 +10,9 @@ use super::tools::{
 use super::*;
 use crate::core::provider_tools::{web_search_completed_block, web_search_started_block};
 use crate::core::rate_guard::RateGuard;
+use crate::core::streaming::StreamDeadline;
 use eventsource_stream::Eventsource;
+use moa_core::config::ProviderStreamTimeoutConfig;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_responses_with_retry(
@@ -24,6 +26,7 @@ pub(crate) async fn stream_responses_with_retry(
     retry_policy: RetryPolicy,
     guard: &RateGuard,
     mut span_recorder: LLMSpanRecorder,
+    stream_timeouts: ProviderStreamTimeoutConfig,
 ) -> Result<CompletionResponse> {
     if request.text.is_some() {
         return create_response_with_retry(
@@ -54,6 +57,7 @@ pub(crate) async fn stream_responses_with_retry(
                     fallback_model.clone(),
                     started_at,
                     &mut span_recorder,
+                    stream_timeouts,
                 )
                 .await
                 {
@@ -387,6 +391,7 @@ async fn consume_responses_stream_once(
     fallback_model: ModelId,
     started_at: Instant,
     span_recorder: &mut LLMSpanRecorder,
+    stream_timeouts: ProviderStreamTimeoutConfig,
 ) -> std::result::Result<CompletionResponse, ResponsesStreamError> {
     let mut text = String::new();
     let mut content = Vec::new();
@@ -394,8 +399,21 @@ async fn consume_responses_stream_once(
     let mut function_items: HashMap<String, FunctionToolCall> = HashMap::new();
     let mut response: Option<Response> = None;
     let mut emitted_content = false;
+    let mut deadline = StreamDeadline::new(stream_timeouts);
 
-    while let Some(event) = stream.next().await {
+    loop {
+        let event = match deadline.next(stream.as_mut()).await {
+            Ok(Some(event)) => event,
+            Ok(None) => break,
+            Err(error) => {
+                return Err(ResponsesStreamError {
+                    error,
+                    retryable: false,
+                    emitted_content,
+                    rate_limited: false,
+                });
+            }
+        };
         let event = match event {
             Ok(event) => event,
             Err(error) if is_ignorable_openai_stream_error(&error) => continue,
