@@ -495,7 +495,7 @@ not trip the unknown-variable audit. They do not affect application config.
 | `MOA_POSTMARK_*` | Postmark live-email credentials |
 | `MOA_E2B_*` | E2B sandbox credentials |
 | `MOA_OPENROUTER_*` | OpenRouter credentials (deploy) |
-| `MOA_EDGE_*` | Edge binary bind/upstream (`MOA_EDGE_BIND`, `MOA_EDGE_UPSTREAM`) |
+| `MOA_EDGE_*` | Edge binary bind/upstream and exact MCP allowlists (`MOA_EDGE_BIND`, `MOA_EDGE_UPSTREAM`, `MOA_EDGE_MCP_ALLOWED_HOSTS`, `MOA_EDGE_MCP_ALLOWED_ORIGINS`) |
 | `MOA_RESTATE_DEPLOYMENT_*` | Restate deploy-registration (`MOA_RESTATE_DEPLOYMENT_HOST`/`_URI`) |
 
 ### Approved exact names

@@ -58,7 +58,7 @@ pub async fn handle_explain(
     {
         return response;
     }
-    match explain_inner(&state, request).await {
+    match explain(&state, request).await {
         Ok(response) => Json(response).into_response(),
         Err(response) => response,
     }
@@ -130,7 +130,8 @@ pub async fn handle_verify(
     }
 }
 
-async fn explain_inner(
+/// Explain one tenant-scoped lineage identifier using the configured lineage backend.
+pub(crate) async fn explain(
     state: &AppState,
     request: LineageExplainRequest,
 ) -> Result<LineageExplainResponse, Response> {

@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! Canonical artifact definitions for MOA agents, skills, connectors, actions, and experiment plans.
 //!
 //! The crate owns the code-addressable document model used by API imports,

@@ -172,6 +172,73 @@ fn build_responses_request_sets_structured_output_schema() {
 }
 
 #[test]
+fn build_responses_request_compiles_strict_structured_output_schema() {
+    // Pins: strict structured outputs use the same recursive OpenAI schema
+    // normalization as tools while leaving the canonical domain schema untouched.
+    let canonical_schema = json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "api_version": { "const": "moa.artifact/v1" },
+            "kind": { "enum": ["experiment_plan"] },
+            "metadata": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                    "name": { "type": "string" },
+                    "description": { "type": "string" }
+                },
+                "required": ["name"]
+            }
+        },
+        "required": ["api_version", "kind", "metadata"]
+    });
+    let original_schema = canonical_schema.clone();
+    let mut request = CompletionRequest::new("Return an experiment plan.");
+    request.response_format = Some(JsonResponseFormat::strict_json_schema(
+        "experiment_plan",
+        "Generated plan.",
+        canonical_schema,
+    ));
+
+    let built = build_responses_request(&request, "gpt-5.4-mini", "medium", &[])
+        .expect("strict structured request should build");
+    let text = built
+        .text
+        .expect("strict request should include text format");
+    let TextResponseFormatConfiguration::JsonSchema(format) = text.format else {
+        panic!("expected json_schema text format");
+    };
+    let schema = format
+        .schema
+        .expect("strict format should include a schema");
+
+    assert_eq!(schema["additionalProperties"], json!(false));
+    assert_eq!(schema["properties"]["api_version"]["type"], json!("string"));
+    assert_eq!(schema["properties"]["kind"]["type"], json!("string"));
+    assert_eq!(
+        schema["properties"]["metadata"]["additionalProperties"],
+        json!(false)
+    );
+    assert_eq!(
+        schema["properties"]["metadata"]["required"],
+        json!(["name", "description"])
+    );
+    assert_eq!(
+        schema["properties"]["metadata"]["properties"]["description"]["type"],
+        json!(["string", "null"])
+    );
+    assert_eq!(
+        request
+            .response_format
+            .as_ref()
+            .expect("request keeps response format")
+            .schema,
+        original_schema
+    );
+}
+
+#[test]
 fn build_responses_request_omits_native_tools_for_structured_output() {
     // Pins: structured extraction calls must be direct model calls; provider-native
     // tools such as web search add latency and can be incompatible with minimal reasoning.

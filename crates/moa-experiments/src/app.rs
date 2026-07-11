@@ -115,7 +115,10 @@ The document must validate as a draft experiment_plan artifact. Put scenarios, p
 and optional data_bundles inside definition.spec.simulation as embedded objects with stable `id` \
 fields. Include at least one scenario, persona, profile, target variant, simulator_model, \
 parallelism, trials_per_combination, and budget.max_total_cents. Use stable snake_case or \
-kebab-case names in metadata.name, simulation IDs, and target variant keys.";
+kebab-case names in metadata.name, simulation IDs, and target variant keys. Every scenario must \
+have a non-empty initial_situation, at least one goal, at least one success criterion, and max_turns \
+between 1 and 100. Every persona must have a non-empty voice, at least one goal, and non-empty \
+stop_behavior. Every profile must have a non-empty facts object.";
 
 /// Builds the structured provider request for behavior-lab plan generation.
 pub fn plan_generation_request(
@@ -133,6 +136,26 @@ pub fn plan_generation_request(
     completion.max_output_tokens = Some(4096);
     completion.temperature = Some(0.2);
     completion.response_format = Some(experiment_plan_response_format());
+    Ok(completion)
+}
+
+/// Builds one bounded repair request after generated artifact parsing or
+/// validation fails.
+pub fn plan_generation_repair_request(
+    request: &ExperimentGeneratePlanRequest,
+    invalid_output: &str,
+    validation_error: &str,
+) -> Result<CompletionRequest> {
+    let mut completion = plan_generation_request(request)?;
+    let repair_prompt = format!(
+        "The previous JSON did not validate. Return a corrected complete JSON object only.\n\n\
+         Validation failure:\n{}\n\nPrevious JSON:\n{}",
+        validation_error.trim(),
+        invalid_output.trim()
+    );
+    completion
+        .messages
+        .push(ContextMessage::user(repair_prompt));
     Ok(completion)
 }
 
@@ -1257,6 +1280,35 @@ mod tests {
                 .contains("agent:refund-baseline@1")
         );
         assert_eq!(completion.model, Some(ModelId::new("gpt-5.4-mini")));
+        assert!(completion.response_format.is_some());
+    }
+
+    #[test]
+    fn plan_generation_repair_request_keeps_feedback_in_dynamic_user_message() {
+        // Pins: invalid structured output receives one actionable repair turn
+        // without contaminating the reusable system-prompt cache prefix.
+        let request = ExperimentGeneratePlanRequest {
+            tenant_id: TenantId::new(),
+            description: "Create a greeting experiment.".to_string(),
+            model: Some("gpt-5.4-mini".to_string()),
+            artifact_refs: Vec::new(),
+        };
+
+        let completion = plan_generation_repair_request(
+            &request,
+            r#"{"definition":{"spec":{"simulation":{"scenarios":[]}}}}"#,
+            "simulation scenario must include at least one goal",
+        )
+        .expect("repair request should build");
+
+        assert_eq!(completion.messages.len(), 3);
+        assert!(!completion.messages[0].content.contains("previous JSON"));
+        assert!(completion.messages[2].content.contains("Previous JSON"));
+        assert!(
+            completion.messages[2]
+                .content
+                .contains("must include at least one goal")
+        );
         assert!(completion.response_format.is_some());
     }
 

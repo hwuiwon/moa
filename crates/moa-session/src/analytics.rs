@@ -211,12 +211,12 @@ pub async fn list_learning_candidate_summaries(
 ) -> Result<Vec<LearningCandidateSummary>> {
     let learning_candidates = qualified_relation(schema_name, "learning_candidates");
     let mut query = QueryBuilder::<Postgres>::new(format!(
-        "SELECT id, tenant_id, storage_partition_id, contact_id, candidate_type, status, \
+        "SELECT id, tenant_id::UUID AS tenant_id, storage_partition_id, user_id, candidate_type, status, \
          target_id, target_label, task_fingerprint, payload, \
          confidence::DOUBLE PRECISION AS confidence, risk_class, created_at, updated_at \
          FROM {learning_candidates} WHERE tenant_id = "
     ));
-    query.push_bind(tenant_id.0);
+    query.push_bind(tenant_id.to_string());
     if let Some(status) = status {
         query.push(" AND status = ");
         query.push_bind(status.as_str());
@@ -455,7 +455,11 @@ fn learning_candidate_summary_from_row(row: &PgRow) -> Result<LearningCandidateS
     Ok(LearningCandidateSummary {
         id: row.try_get("id").map_err(map_sqlx_error)?,
         tenant_id: row.try_get("tenant_id").map_err(map_sqlx_error)?,
-        contact_id: row.try_get("contact_id").map_err(map_sqlx_error)?,
+        contact_id: row
+            .try_get::<Option<String>, _>("user_id")
+            .map_err(map_sqlx_error)?
+            .and_then(|value| Uuid::parse_str(&value).ok())
+            .map(ContactId),
         candidate_type,
         status,
         target_id: row.try_get("target_id").map_err(map_sqlx_error)?,

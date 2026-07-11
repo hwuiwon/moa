@@ -6,6 +6,44 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+/// Request body for registering an agent principal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterAgentRequest {
+    /// Human-readable agent display name.
+    pub display_name: String,
+}
+
+/// Request body for an agent-principal `can_act_as` grant mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentActAsRequest {
+    /// Agent receiving or losing the delegation relation.
+    pub agent_id: Uuid,
+    /// User principal the agent may act as.
+    pub user_id: Uuid,
+}
+
+/// Agent-principal summary returned by list, get, and register.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AgentSummary {
+    /// Agent UUID.
+    pub id: Uuid,
+    /// Tenant UUID.
+    pub tenant_id: Uuid,
+    /// User who operates the agent. Deactivation cascades can orphan agents.
+    pub operator_user_id: Option<Uuid>,
+    /// Human-readable agent display name.
+    pub display_name: String,
+    /// Lifecycle status.
+    pub status: String,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Deactivation timestamp.
+    pub deactivated_at: Option<DateTime<Utc>>,
+    /// Optional deactivation reason.
+    pub deactivated_reason: Option<String>,
+}
+
 /// Request payload for listing visible published agent definitions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentDefinitionListRequest {

@@ -168,6 +168,14 @@ long-running `moa-orchestrator` service with Restate and Postgres, and tests use
 `moa-test-support` fixtures or raw `reqwest` calls to exercise the same API
 surface.
 
+Tenant admins and operators may use the stateless Streamable HTTP MCP endpoint
+at `/mcp`. Every HTTP message is authenticated by the edge, authorized against
+`tenant:<authenticated tenant>#operator`, and then dispatched to an explicit
+tool allowlist. Read tools use the same edge read-model functions as the REST
+dashboard; command tools use shared wire DTOs and the existing sanitized
+edge-to-ingress proxy. MCP clients discover capabilities with `tools/list`; the
+server does not mirror them as MCP resources or prompts.
+
 ### Edge-to-ingress forwarding
 
 `moa-edge` terminates the caller credential, resolves identity and tenant, and

@@ -407,9 +407,20 @@ pub fn experiment_plan_response_schema() -> Value {
                                         "minItems": 1,
                                         "items": {
                                             "type": "object",
-                                            "required": ["id"],
+                                            "additionalProperties": false,
+                                            "required": ["id", "initial_situation", "goals", "success_criteria", "max_turns"],
                                             "properties": {
-                                                "id": { "type": "string", "minLength": 1 }
+                                                "id": { "type": "string", "minLength": 1, "description": "Stable scenario identifier." },
+                                                "initial_situation": { "type": "string", "minLength": 1, "description": "Non-empty starting situation shown to the simulated user." },
+                                                "goals": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "At least one user goal." },
+                                                "allowed_user_intents": { "type": "array", "items": { "type": "string" } },
+                                                "success_criteria": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "At least one observable success criterion." },
+                                                "failure_criteria": { "type": "array", "items": { "type": "string" } },
+                                                "max_turns": { "type": "integer", "minimum": 1, "maximum": MAX_SCENARIO_TURNS, "description": "Maximum target-agent turns, from 1 through 100." },
+                                                "admin_review_behavior": { "enum": ["stop_on_admin_review", "continue_with_synthetic_clearance", "continue_with_synthetic_denial"] },
+                                                "scoring_rubric": { "type": "object" },
+                                                "data_bundle_ids": { "type": "array", "items": { "type": "string" } },
+                                                "ui": { "type": "object" }
                                             }
                                         }
                                     },
@@ -418,9 +429,17 @@ pub fn experiment_plan_response_schema() -> Value {
                                         "minItems": 1,
                                         "items": {
                                             "type": "object",
-                                            "required": ["id"],
+                                            "additionalProperties": false,
+                                            "required": ["id", "voice", "goals", "stop_behavior"],
                                             "properties": {
-                                                "id": { "type": "string", "minLength": 1 }
+                                                "id": { "type": "string", "minLength": 1, "description": "Stable persona identifier." },
+                                                "voice": { "type": "string", "minLength": 1, "description": "Non-empty description of how the simulated user speaks." },
+                                                "goals": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "At least one user goal." },
+                                                "constraints": { "type": "array", "items": { "type": "string" } },
+                                                "temperament": { "type": "string" },
+                                                "likely_missing_information": { "type": "array", "items": { "type": "string" } },
+                                                "stop_behavior": { "type": "string", "minLength": 1, "description": "Non-empty rule for when and how the simulated user stops." },
+                                                "ui": { "type": "object" }
                                             }
                                         }
                                     },
@@ -429,9 +448,20 @@ pub fn experiment_plan_response_schema() -> Value {
                                         "minItems": 1,
                                         "items": {
                                             "type": "object",
-                                            "required": ["id"],
+                                            "additionalProperties": false,
+                                            "required": ["id", "facts"],
                                             "properties": {
-                                                "id": { "type": "string", "minLength": 1 }
+                                                "id": { "type": "string", "minLength": 1, "description": "Stable profile identifier." },
+                                                "facts": {
+                                                    "type": "object",
+                                                    "additionalProperties": false,
+                                                    "required": ["summary"],
+                                                    "properties": {
+                                                        "summary": { "type": "string", "minLength": 1, "description": "Non-empty summary of the simulated user or account facts." }
+                                                    }
+                                                },
+                                                "data_classification": { "type": "string" },
+                                                "ui": { "type": "object" }
                                             }
                                         }
                                     },
@@ -439,9 +469,27 @@ pub fn experiment_plan_response_schema() -> Value {
                                         "type": "array",
                                         "items": {
                                             "type": "object",
-                                            "required": ["id"],
+                                            "additionalProperties": false,
+                                            "required": ["id", "sources"],
                                             "properties": {
-                                                "id": { "type": "string", "minLength": 1 }
+                                                "id": { "type": "string", "minLength": 1 },
+                                                "sources": {
+                                                    "type": "array",
+                                                    "items": {
+                                                        "type": "object",
+                                                        "additionalProperties": false,
+                                                        "required": ["id", "kind"],
+                                                        "properties": {
+                                                            "id": { "type": "string", "minLength": 1 },
+                                                            "kind": { "enum": ["connector_fixture", "mock_data", "live_data_scope"] },
+                                                            "connector_ref": { "type": "string" },
+                                                            "fixture": { "type": "object" },
+                                                            "scope": { "type": "string" },
+                                                            "notes": { "type": "string" }
+                                                        }
+                                                    }
+                                                },
+                                                "ui": { "type": "object" }
                                             }
                                         }
                                     },
@@ -520,7 +568,7 @@ mod tests {
     use super::{
         ExperimentPlanDefinition, ExperimentSimulationDefinition, ExperimentTargetKind,
         ExperimentTargetVariant, MAX_SCENARIO_TURNS, SimulationDataBundleDefinition,
-        SimulationDataSource, SimulationDataSourceKind,
+        SimulationDataSource, SimulationDataSourceKind, experiment_plan_response_schema,
     };
     use crate::document::{ArtifactDocument, ArtifactStatus};
     use crate::reference::ArtifactRef;
@@ -668,6 +716,43 @@ mod tests {
             }),
             "max_turns above the limit must reject with the bound message: {:?}",
             over_limit.errors
+        );
+    }
+
+    #[test]
+    fn generated_plan_schema_exposes_every_draft_required_simulation_field() {
+        // Pins: strict provider compilation cannot close scenario/persona/profile
+        // objects before exposing the fields artifact validation requires.
+        let schema = experiment_plan_response_schema();
+        let simulation = &schema["properties"]["definition"]["properties"]["spec"]["properties"]["simulation"]
+            ["properties"];
+
+        assert_eq!(
+            simulation["scenarios"]["items"]["required"],
+            json!([
+                "id",
+                "initial_situation",
+                "goals",
+                "success_criteria",
+                "max_turns"
+            ])
+        );
+        assert!(
+            simulation["scenarios"]["items"]["properties"]
+                .get("admin_review_behavior")
+                .is_some()
+        );
+        assert_eq!(
+            simulation["personas"]["items"]["required"],
+            json!(["id", "voice", "goals", "stop_behavior"])
+        );
+        assert_eq!(
+            simulation["profiles"]["items"]["required"],
+            json!(["id", "facts"])
+        );
+        assert_eq!(
+            simulation["profiles"]["items"]["properties"]["facts"]["required"],
+            json!(["summary"])
         );
     }
 }

@@ -213,6 +213,13 @@ retrieval. Read-only analytics, identity diagnostics, audit verification, and
 lineage read routes are served directly from `moa-edge` against Postgres/domain
 stores instead of going through Restate.
 
+`moa-edge` also serves the inbound, stateless tenant-operations MCP protected
+resource at `/mcp`. It is a transport adapter over those same direct read
+models and typed Restate handlers: MCP does not own domain state, accept raw
+SQL, or choose a tenant from tool input. This inbound operator surface is
+separate from the outbound agent-tool MCP clients and credential proxy in
+`moa-hands`.
+
 The binary composition root constructs `RuntimeDeps` and passes concrete
 dependencies through implementation constructors before `build_endpoint`
 binds the Restate services, virtual objects, and workflows. The architecture

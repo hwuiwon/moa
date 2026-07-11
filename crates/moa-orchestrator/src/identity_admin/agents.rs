@@ -4,12 +4,11 @@ use moa_auth_providers::api_keys;
 use moa_authz::{FgaTuple, enqueue_raw};
 use moa_authz_schema::TupleOp;
 use moa_core::traits::{Identity, IdentityType};
+use moa_core::wire::agents::{AgentActAsRequest, AgentSummary, RegisterAgentRequest};
 use moa_ocsf::ActorInput;
 use restate_sdk::prelude::{HandlerError, TerminalError};
 use sqlx::PgPool;
 use uuid::Uuid;
-
-use crate::services::agents::{AgentActAsRequest, AgentSummary, RegisterAgentRequest};
 
 /// Register an agent in the caller's tenant.
 pub(crate) async fn register_agent(

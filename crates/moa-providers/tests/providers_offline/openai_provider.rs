@@ -122,7 +122,7 @@ async fn openai_provider_uses_non_streaming_response_for_structured_output() {
                 "status": "completed",
                 "content": [{
                     "type": "output_text",
-                    "text": "{\"retrieval_query\":\"fix auth/refresh.rs\",\"is_new_task\":false,\"task_summary\":null,\"task_facets\":null}",
+                    "text": "{\"retrieval_query\":\"fix auth/refresh.rs\",\"is_new_task\":false,\"task_summary\":null,\"task_facets\":null,\"labels\":null}",
                     "annotations": [],
                     "logprobs": null
                 }]
@@ -164,7 +164,8 @@ async fn openai_provider_uses_non_streaming_response_for_structured_output() {
                 "retrieval_query": { "type": "string" },
                 "is_new_task": { "type": "boolean" },
                 "task_summary": { "type": ["string", "null"] },
-                "task_facets": { "type": ["object", "null"] }
+                "task_facets": { "type": ["object", "null"] },
+                "labels": { "type": "array", "items": { "type": "string" } }
             },
             "required": ["retrieval_query", "is_new_task", "task_summary", "task_facets"]
         }),

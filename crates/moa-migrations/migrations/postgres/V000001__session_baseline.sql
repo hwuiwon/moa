@@ -8,6 +8,7 @@ BEGIN
     CREATE ROLE moa_app NOLOGIN;
 EXCEPTION
     WHEN duplicate_object THEN NULL;
+    WHEN unique_violation THEN NULL;
 END $$;
 
 DO $$
@@ -15,6 +16,7 @@ BEGIN
     CREATE ROLE moa_promoter NOLOGIN;
 EXCEPTION
     WHEN duplicate_object THEN NULL;
+    WHEN unique_violation THEN NULL;
 END $$;
 
 DO $$
@@ -22,6 +24,7 @@ BEGIN
     CREATE ROLE moa_owner NOLOGIN;
 EXCEPTION
     WHEN duplicate_object THEN NULL;
+    WHEN unique_violation THEN NULL;
 END $$;
 
 DO $$
@@ -29,6 +32,7 @@ BEGIN
     CREATE ROLE moa_auditor NOLOGIN;
 EXCEPTION
     WHEN duplicate_object THEN NULL;
+    WHEN unique_violation THEN NULL;
 END $$;
 
 DO $$
@@ -36,6 +40,7 @@ BEGIN
     CREATE ROLE moa_replicator LOGIN REPLICATION;
 EXCEPTION
     WHEN duplicate_object THEN NULL;
+    WHEN unique_violation THEN NULL;
 END $$;
 
 GRANT moa_app TO CURRENT_USER;

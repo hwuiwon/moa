@@ -29,6 +29,9 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+#[path = "direct_read_routes_db/mcp_db.rs"]
+mod mcp_db;
+
 #[derive(Clone)]
 struct FixedAuth {
     identity: Identity,
@@ -150,12 +153,31 @@ async fn start_edge_with_upstream(
     fga: Option<FgaClient>,
     upstream: &str,
 ) -> EdgeServer {
+    start_edge_with_auth_and_upstream(
+        store,
+        database_url,
+        schema_name,
+        Arc::new(FixedAuth { identity }),
+        fga,
+        upstream,
+    )
+    .await
+}
+
+async fn start_edge_with_auth_and_upstream(
+    store: &PostgresSessionStore,
+    database_url: &str,
+    schema_name: &str,
+    auth: Arc<dyn AuthProvider>,
+    fga: Option<FgaClient>,
+    upstream: &str,
+) -> EdgeServer {
     let mut config = MoaConfig::default();
     config.database.url = database_url.to_string();
     config.database.schema = Some(schema_name.to_string());
     let state = AppState {
         config: Arc::new(config),
-        auth: Arc::new(FixedAuth { identity }),
+        auth,
         fga: fga.map(Arc::new),
         auth0_webhook_secret: None,
         knowledge_webhooks: KnowledgeWebhookEdgeConfig::default(),

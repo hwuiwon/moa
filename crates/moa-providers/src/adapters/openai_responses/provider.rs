@@ -210,6 +210,11 @@ impl LLMProvider for OpenAIProvider {
             .to_string();
         let resolved_model = canonical_model_id(&requested_model)?;
         let model_capabilities = capabilities_for_model(&resolved_model)?;
+        let canonical_response_schema = request
+            .response_format
+            .as_ref()
+            .filter(|format| format.strict)
+            .map(|format| format.schema.clone());
         let span_recorder = LLMSpanRecorder::new(
             "openai",
             resolved_model.clone(),
@@ -270,6 +275,7 @@ impl LLMProvider for OpenAIProvider {
                     &guard,
                     span_recorder,
                     stream_timeouts,
+                    canonical_response_schema,
                 )
                 .await
             }

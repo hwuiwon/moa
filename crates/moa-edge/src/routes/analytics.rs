@@ -10,7 +10,9 @@ use moa_analytics::{AnalyticsError, AnalyticsService};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::identifiers::TenantId;
-use moa_core::wire::analytics::AnalyticsQueryRequest;
+use moa_core::wire::analytics::{
+    AnalyticsCatalogResponse, AnalyticsQueryRequest, AnalyticsQueryResponse,
+};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -51,7 +53,7 @@ pub(super) async fn handle_catalog(
     {
         return response;
     }
-    Json(AnalyticsService::new().catalog()).into_response()
+    Json(catalog()).into_response()
 }
 
 /// Handles tenant-scoped analytics queries at the edge.
@@ -86,11 +88,25 @@ pub(super) async fn handle_query(
     {
         return response;
     }
-    // The edge request path is read-only for both backends. Materialized-view
-    // refresh is owned by the durable maintenance cron (single-flighted under a
-    // Postgres advisory lock), not triggered per request; the query serves the
-    // current read-model state and reports its freshness.
-    let result = if let Some(clickhouse) = state.clickhouse_analytics.as_deref() {
+    match query(&state, request).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => analytics_error_response(error),
+    }
+}
+
+/// Return the stable curated analytics catalog shared by HTTP and MCP.
+pub(crate) fn catalog() -> AnalyticsCatalogResponse {
+    AnalyticsService::new().catalog()
+}
+
+/// Execute one tenant-scoped curated analytics query using the configured read backend.
+pub(crate) async fn query(
+    state: &AppState,
+    request: AnalyticsQueryRequest,
+) -> Result<AnalyticsQueryResponse, AnalyticsError> {
+    // Materialized-view refresh is owned by the durable maintenance cron, not
+    // triggered per request; reads serve current state and report freshness.
+    if let Some(clickhouse) = state.clickhouse_analytics.as_deref() {
         let response = AnalyticsService::clickhouse()
             .query_clickhouse(clickhouse, request)
             .await;
@@ -115,10 +131,6 @@ pub(super) async fn handle_query(
             }
             Err(error) => Err(error),
         }
-    };
-    match result {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => analytics_error_response(error),
     }
 }
 

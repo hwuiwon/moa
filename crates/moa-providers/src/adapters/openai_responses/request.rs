@@ -125,11 +125,16 @@ pub(crate) fn build_responses_request(
 }
 
 fn openai_response_text_param(format: &JsonResponseFormat) -> ResponseTextParam {
+    let schema = if format.strict {
+        compile_for_openai_strict(&format.schema)
+    } else {
+        format.schema.clone()
+    };
     ResponseTextParam {
         format: TextResponseFormatConfiguration::JsonSchema(ResponseFormatJsonSchema {
             description: format.description.clone(),
             name: format.name.clone(),
-            schema: Some(format.schema.clone()),
+            schema: Some(schema),
             strict: Some(format.strict),
         }),
         verbosity: None,

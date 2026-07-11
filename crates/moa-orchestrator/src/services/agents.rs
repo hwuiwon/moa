@@ -1,56 +1,17 @@
 //! Restate service for agent principal lifecycle operations.
 
-use chrono::{DateTime, Utc};
 use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{Identity, IdentityType};
+use moa_core::wire::agents::{AgentActAsRequest, AgentSummary, RegisterAgentRequest};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::handlers::authz_shim::{
     require_configured_fga_client, require_identity, translate_authz_error,
 };
 use crate::identity_admin::agents as agent_admin;
-
-/// Request body for registering an agent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RegisterAgentRequest {
-    /// Human-readable agent display name.
-    pub display_name: String,
-}
-
-/// Request body for a `can_act_as` grant mutation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentActAsRequest {
-    /// Agent receiving or losing the delegation relation.
-    pub agent_id: Uuid,
-    /// User principal the agent may act as.
-    pub user_id: Uuid,
-}
-
-/// Agent summary returned by list, get, and register.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct AgentSummary {
-    /// Agent UUID.
-    pub id: Uuid,
-    /// Tenant UUID.
-    pub tenant_id: Uuid,
-    /// User who operates the agent. Deactivation cascades can orphan agents.
-    pub operator_user_id: Option<Uuid>,
-    /// Human-readable agent display name.
-    pub display_name: String,
-    /// Lifecycle status.
-    pub status: String,
-    /// Creation timestamp.
-    pub created_at: DateTime<Utc>,
-    /// Deactivation timestamp.
-    pub deactivated_at: Option<DateTime<Utc>>,
-    /// Optional deactivation reason.
-    pub deactivated_reason: Option<String>,
-}
 
 /// Restate service surface for agent management.
 #[restate_sdk::service]

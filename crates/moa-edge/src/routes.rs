@@ -34,15 +34,15 @@ const SESSION_MESSAGE_BODY_LIMIT_BYTES: usize = 12 * 1024 * 1024;
 const USER_SESSION_COOKIE_NAME: &str = "__Host-user_session";
 
 mod agents;
-mod analytics;
+pub(crate) mod analytics;
 mod artifacts;
 mod audit;
 mod auth;
 pub(crate) mod auth_accounts;
 mod contact_messages;
-mod dashboard;
+pub(crate) mod dashboard;
 mod knowledge;
-mod lineage;
+pub(crate) mod lineage;
 mod memory;
 mod session;
 mod session_stream;
@@ -108,6 +108,15 @@ pub struct KnowledgeWebhookEdgeConfig {
 
 /// Build the edge router.
 pub fn router(state: AppState) -> Router {
+    crate::mcp::router(
+        state,
+        crate::mcp::McpHttpConfig::local_default(),
+        tokio_util::sync::CancellationToken::new(),
+    )
+}
+
+/// Build the REST route ladder without the sibling MCP transport router.
+pub(crate) fn base_router(state: AppState) -> Router {
     moa_authz::configure_security_audit((*state.pool).clone(), false);
 
     Router::new()

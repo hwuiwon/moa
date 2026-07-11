@@ -11,8 +11,10 @@ use anyhow::Context;
 use clap::Parser;
 use moa_authz::{FgaClient, FgaConfig};
 use moa_core::config::{AuthzEngine, optional_config_secret};
+use moa_edge::mcp::{self, McpHttpConfig};
 use moa_edge::proxy::OrchestratorProxy;
-use moa_edge::routes::{self, AppState, KnowledgeWebhookEdgeConfig};
+use moa_edge::routes::{AppState, KnowledgeWebhookEdgeConfig};
+use tokio_util::sync::CancellationToken;
 
 /// Process arguments for `moa-edge`.
 #[derive(Debug, Parser)]
@@ -35,6 +37,20 @@ struct Args {
     /// Maximum lifetime, in seconds, of a pooled connection.
     #[arg(long, env = "MOA_EDGE_DB_MAX_LIFETIME_SECONDS", default_value_t = 1800)]
     db_max_lifetime_seconds: u64,
+    /// Comma-delimited exact Host headers accepted by the MCP endpoint.
+    #[arg(
+        long,
+        env = "MOA_EDGE_MCP_ALLOWED_HOSTS",
+        default_value = "localhost:10000,127.0.0.1:10000,[::1]:10000"
+    )]
+    mcp_allowed_hosts: String,
+    /// Comma-delimited exact browser origins accepted by the MCP endpoint.
+    #[arg(
+        long,
+        env = "MOA_EDGE_MCP_ALLOWED_ORIGINS",
+        default_value = "http://localhost:10000,http://127.0.0.1:10000,http://[::1]:10000"
+    )]
+    mcp_allowed_origins: String,
 }
 
 #[tokio::main]
@@ -56,6 +72,8 @@ async fn main() -> anyhow::Result<()> {
 
     let database_url = moa_config.database.url.clone();
     let upstream = edge_upstream_url(&moa_config, args.upstream);
+    let mcp_config = McpHttpConfig::parse(&args.mcp_allowed_hosts, &args.mcp_allowed_origins)
+        .context("validate MCP Host and Origin allowlists")?;
     tracing::info!(bind = %args.bind, upstream = %upstream, "starting moa-edge");
 
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -105,10 +123,15 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("bind {}", args.bind))?;
 
-    axum::serve(listener, routes::router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("serve moa-edge")?;
+    let shutdown = CancellationToken::new();
+    tokio::spawn(cancel_on_shutdown_signal(shutdown.clone()));
+    axum::serve(
+        listener,
+        mcp::router(state, mcp_config, shutdown.child_token()),
+    )
+    .with_graceful_shutdown(shutdown.cancelled_owned())
+    .await
+    .context("serve moa-edge")?;
 
     Ok(())
 }
@@ -131,9 +154,10 @@ fn build_fga_client(config: &moa_core::config::MoaConfig) -> anyhow::Result<Opti
     .map_err(Into::into)
 }
 
-async fn shutdown_signal() {
+async fn cancel_on_shutdown_signal(shutdown: CancellationToken) {
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("moa-edge shutdown signal received");
+    shutdown.cancel();
 }
 
 fn knowledge_webhook_edge_config(

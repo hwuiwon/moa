@@ -217,7 +217,8 @@ async fn require_dashboard_authz(
     .await
 }
 
-fn decode_cursor<T>(cursor: Option<&str>) -> Result<Option<T>, Response>
+/// Decode an opaque URL-safe JSON dashboard cursor.
+pub(crate) fn decode_cursor<T>(cursor: Option<&str>) -> Result<Option<T>, Response>
 where
     T: DeserializeOwned,
 {
@@ -232,7 +233,8 @@ where
         .map_err(|_| malformed_cursor())
 }
 
-fn encode_cursor<T>(cursor: Option<&T>) -> Result<Option<String>, Response>
+/// Encode a dashboard keyset cursor as opaque URL-safe JSON.
+pub(crate) fn encode_cursor<T>(cursor: Option<&T>) -> Result<Option<String>, Response>
 where
     T: Serialize,
 {

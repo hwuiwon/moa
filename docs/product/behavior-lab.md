@@ -117,13 +117,14 @@ learning entries. Promotion must happen through the relevant review surface, so
 experiment evidence can inform a change without publishing or materializing it
 as live behavior.
 
-## Future MCP Adapter
+## Tenant-Operations MCP Adapter
 
-Product/default MCP should be a thin adapter over `Artifacts`, `Experiments`,
-direct edge analytics reads, `Skills`, and other typed services. It must not
-own Behavior Lab domain logic, bypass service authorization, or publish public
-`/v1/evals/*` semantics. If internal eval is exposed at all, it remains
-explicitly internal and operator/admin-authorized.
+The `/mcp` protected resource is a thin adapter over `Artifacts`,
+`Experiments`, direct edge analytics reads, `Skills`, and other typed services.
+It does not own Behavior Lab domain logic, bypass service authorization, or
+publish public `/v1/evals/*` semantics. Its eval tools are explicitly internal
+and operator/admin-authorized. Eval suites remain caller-supplied inline TOML;
+persistent Behavior Lab plans remain generic `experiment_plan` artifacts.
 
 ## Verification Commands
 

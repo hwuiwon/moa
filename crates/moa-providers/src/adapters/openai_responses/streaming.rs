@@ -10,6 +10,7 @@ use super::tools::{
 use super::*;
 use crate::core::provider_tools::{web_search_completed_block, web_search_started_block};
 use crate::core::rate_guard::RateGuard;
+use crate::core::schema::normalize_openai_strict_output;
 use crate::core::streaming::StreamDeadline;
 use eventsource_stream::Eventsource;
 use moa_core::config::ProviderStreamTimeoutConfig;
@@ -27,6 +28,7 @@ pub(crate) async fn stream_responses_with_retry(
     guard: &RateGuard,
     mut span_recorder: LLMSpanRecorder,
     stream_timeouts: ProviderStreamTimeoutConfig,
+    canonical_response_schema: Option<Value>,
 ) -> Result<CompletionResponse> {
     if request.text.is_some() {
         return create_response_with_retry(
@@ -40,6 +42,7 @@ pub(crate) async fn stream_responses_with_retry(
             retry_policy,
             guard,
             span_recorder,
+            canonical_response_schema.as_ref(),
         )
         .await;
     }
@@ -151,6 +154,7 @@ async fn create_response_with_retry(
     retry_policy: RetryPolicy,
     guard: &RateGuard,
     mut span_recorder: LLMSpanRecorder,
+    canonical_response_schema: Option<&Value>,
 ) -> Result<CompletionResponse> {
     let mut request = request.clone();
     request.stream = Some(false);
@@ -166,6 +170,7 @@ async fn create_response_with_retry(
                     fallback_model.clone(),
                     started_at,
                     &mut span_recorder,
+                    canonical_response_schema,
                 )?;
                 if response.text.trim().is_empty()
                     && response.content.is_empty()
@@ -587,9 +592,10 @@ fn completion_response_from_response(
     fallback_model: ModelId,
     started_at: Instant,
     span_recorder: &mut LLMSpanRecorder,
+    canonical_response_schema: Option<&Value>,
 ) -> Result<CompletionResponse> {
     let mut text = response_text_from_output(&response.output);
-    let content = response_content_from_output(&response.output)?;
+    let mut content = response_content_from_output(&response.output)?;
     if text.is_empty() {
         text = content
             .iter()
@@ -600,6 +606,25 @@ fn completion_response_from_response(
                 }
             })
             .collect();
+    }
+    if let Some(schema) = canonical_response_schema
+        && !text.trim().is_empty()
+    {
+        // Unparseable strict output (e.g. JSON truncated at the token cap) is
+        // returned raw so callers can run their own validation/repair loops.
+        match serde_json::from_str::<Value>(&text) {
+            Ok(mut output) => {
+                normalize_openai_strict_output(&mut output, schema);
+                text = serde_json::to_string(&output)?;
+                content = vec![CompletionContent::Text(text.clone())];
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "strict provider response is not valid JSON; returning raw text"
+                );
+            }
+        }
     }
     for block in &content {
         span_recorder.observe_block(block);

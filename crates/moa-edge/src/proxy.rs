@@ -38,13 +38,10 @@ impl OrchestratorProxy {
         validate_upstream_path(path)?;
         let url = format!("{}{}", self.upstream_base, path);
         let mut request = self.http.request(method, url);
+        let has_body = !body.is_empty();
 
         for (name, value) in request_headers {
-            let name_str = name.as_str();
-            if headers::is_moa_header(name_str)
-                || name_str.eq_ignore_ascii_case("authorization")
-                || is_hop_by_hop_header(name_str)
-            {
+            if !should_forward_header(name.as_str(), has_body) {
                 continue;
             }
             request = request.header(name.clone(), value.clone());
@@ -81,13 +78,10 @@ impl OrchestratorProxy {
         validate_upstream_path(path)?;
         let url = format!("{}{}", self.upstream_base, path);
         let mut request = self.http.request(method, url);
+        let has_body = !body.is_empty();
 
         for (name, value) in request_headers {
-            let name_str = name.as_str();
-            if headers::is_moa_header(name_str)
-                || name_str.eq_ignore_ascii_case("authorization")
-                || is_hop_by_hop_header(name_str)
-            {
+            if !should_forward_header(name.as_str(), has_body) {
                 continue;
             }
             request = request.header(name.clone(), value.clone());
@@ -98,6 +92,14 @@ impl OrchestratorProxy {
 
         Ok(request.send().await?)
     }
+}
+
+fn should_forward_header(name: &str, has_body: bool) -> bool {
+    !headers::is_moa_header(name)
+        && !name.eq_ignore_ascii_case("authorization")
+        && !name.eq_ignore_ascii_case("content-length")
+        && (has_body || !name.eq_ignore_ascii_case("content-type"))
+        && !is_hop_by_hop_header(name)
 }
 
 fn validate_upstream_path(path: &str) -> Result<(), anyhow::Error> {

@@ -288,6 +288,12 @@ services:
       MOA_EDGE_BIND: 0.0.0.0:8080
       MOA_EDGE_UPSTREAM: http://restate:8080
       MOA_DATABASE_URL: postgres://moa_owner:${POSTGRES_PASSWORD:-dev}@postgres:5432/moa?sslmode=disable
+      # Without OpenFGA settings the edge has no authz engine and fails every
+      # protected direct read (dashboard, analytics, MCP) closed with 503.
+      MOA_AUTHZ_OPENFGA_URL: http://openfga:8080
+      MOA_AUTHZ_OPENFGA_PRESHARED_KEY: ${MOA_AUTHZ_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod}
+      MOA_AUTHZ_OPENFGA_STORE_ID: ${MOA_AUTHZ_OPENFGA_STORE_ID:-}
+      MOA_AUTHZ_OPENFGA_MODEL_ID: ${MOA_AUTHZ_OPENFGA_MODEL_ID:-}
       MOA_SESSION_ATTACHMENT_ENDPOINT: http://rustfs:9000
       MOA_SESSION_ATTACHMENT_BUCKET: ${MOA_SESSION_ATTACHMENT_BUCKET:-moa-session-attachments}
       MOA_SESSION_ATTACHMENT_REGION: ${MOA_SESSION_ATTACHMENT_REGION:-us-east-1}

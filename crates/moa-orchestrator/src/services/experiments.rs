@@ -23,8 +23,8 @@ use moa_core::wire::experiments::{
 use moa_core::{types::action_policy::ActionRuleScope, types::identifiers::TenantId};
 use moa_experiments::app::{
     ExperimentAppError, admit_run, cancel_run, compare_runs, list_runs, list_trials,
-    plan_generation_request, propose_improvement_candidate, scores, store_generated_plan,
-    trial_status,
+    plan_generation_repair_request, plan_generation_request, propose_improvement_candidate, scores,
+    store_generated_plan, trial_status,
 };
 use moa_experiments::model::{ExperimentRunStatus, ExperimentTrialStatus, ExperimentVariant};
 use moa_experiments::scores::{
@@ -452,9 +452,27 @@ async fn generate_plan_inner(
         .await
         .map_err(moa_error_to_handler_error)?;
 
-    store_generated_plan(pool, request, &completion.text)
-        .await
-        .map_err(experiment_app_error_to_handler_error)
+    match store_generated_plan(pool.clone(), request.clone(), &completion.text).await {
+        Ok(response) => Ok(response),
+        // Only generation defects are model-repairable; storage/infra errors
+        // would bill a second completion just to fail the same way again.
+        Err(initial_error @ ExperimentAppError::BadRequest(_)) => {
+            let repair = plan_generation_repair_request(
+                &request,
+                &completion.text,
+                &initial_error.to_string(),
+            )
+            .map_err(experiment_app_error_to_handler_error)?;
+            let repaired = gateway
+                .complete_buffered(repair)
+                .await
+                .map_err(moa_error_to_handler_error)?;
+            store_generated_plan(pool, request, &repaired.text)
+                .await
+                .map_err(experiment_app_error_to_handler_error)
+        }
+        Err(error) => Err(experiment_app_error_to_handler_error(error)),
+    }
 }
 
 async fn run_inner(

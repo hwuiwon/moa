@@ -32,14 +32,19 @@ moa-observability.workspace = true
 moa-ocsf.workspace = true
 moa-session.workspace = true
 reqwest.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 secrecy.workspace = true
 sha2.workspace = true
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"] }
 subtle.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
+url.workspace = true
 uuid = { workspace = true, features = ["v4", "serde"] }
 workspace-hack = { workspace = true }
 

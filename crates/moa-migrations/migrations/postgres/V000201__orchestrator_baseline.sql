@@ -8,7 +8,8 @@
 -- stores only the fields required for first enforcement.
 
 CREATE TABLE IF NOT EXISTS agents (
-    id               UUID        PRIMARY KEY,
+    -- Registration omits `id` and relies on the database to generate it.
+    id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id        UUID        NOT NULL,
     operator_user_id UUID        NOT NULL,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()

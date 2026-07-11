@@ -5,7 +5,7 @@ use axum::routing::get;
 
 use super::AppState;
 
-mod sessions;
+pub(crate) mod sessions;
 
 /// Builds the operator dashboard route subtree.
 pub(super) fn router() -> Router<AppState> {

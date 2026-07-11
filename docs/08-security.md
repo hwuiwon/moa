@@ -33,6 +33,20 @@ authorize against the target tenant/resource; they do not implement local
 workspace-admin bypasses. Tenant remains the runtime, RLS, and data isolation
 boundary.
 
+The tenant-operations MCP protected resource is `/mcp`. Its tenant scope is
+always taken from the verified `Identity`; tools have no `tenant_id` override,
+and contact or agent identities are rejected before JSON-RPC dispatch. Exact
+Host and Origin allowlists protect the Streamable HTTP endpoint. Caller access
+tokens terminate at `moa-edge`: the proxy strips them and forwards only trusted
+`X-Moa-*` identity headers to the internal Restate ingress.
+
+A future dashboard OAuth flow may authorize MCP clients after customer login,
+but it must still map the audience-bound token through the existing
+`AuthProvider` and OpenFGA checks. The dashboard authorization server must use
+Authorization Code with PKCE and RFC 8707 `resource`, publish RFC 9728
+protected-resource metadata and RFC 8414/OIDC authorization-server metadata,
+and issue short-lived tokens whose resource is the canonical `/mcp` endpoint.
+
 The public edge injects trusted `X-Moa-*` identity headers after stripping any
 caller-provided values. The orchestrator trusts those headers, so production
 deployments must keep the Restate handler port internal-only. See

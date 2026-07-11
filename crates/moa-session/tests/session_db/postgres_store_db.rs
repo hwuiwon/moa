@@ -140,6 +140,117 @@ fn contact_session_meta(label: &str, model: &str, contact_id: ContactId) -> Sess
 }
 
 #[tokio::test]
+#[ignore = "requires local Postgres via MOA_DATABASE_URL"]
+async fn learning_candidate_summaries_project_contact_scope_and_redact_payload_db() {
+    // Pins: the operator candidate inbox projects contact ownership from canonical
+    // user scope, tolerates tenant sentinels, redacts payloads, and stays tenant scoped.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let tenant = tenant_id("candidate-summary");
+    let other_tenant = tenant_id("candidate-summary-other");
+    let contact_id = ContactId::new();
+    let now = Utc::now();
+    let contact_candidate_id = Uuid::now_v7();
+    let tenant_candidate_id = Uuid::now_v7();
+
+    for candidate in [
+        LearningCandidate {
+            id: contact_candidate_id,
+            tenant_id: tenant,
+            user_id: Some(UserId::new(contact_id.to_string())),
+            candidate_type: LearningCandidateType::Skill,
+            status: LearningCandidateStatus::Proposed,
+            target_id: Some("skill:contact-summary".to_string()),
+            target_label: Some("contact summary".to_string()),
+            task_fingerprint: None,
+            task_facets: None,
+            payload: serde_json::json!({
+                "description": "safe preview",
+                "api_key": "raw-dashboard-secret"
+            }),
+            evaluation_payload: None,
+            source_experience_ids: Vec::new(),
+            confidence: Some(0.9),
+            risk_class: LearningRiskClass::Low,
+            promotion_requirements: vec!["human_review".to_string()],
+            status_reason: None,
+            batch_id: None,
+            created_at: now,
+            updated_at: now + chrono::Duration::seconds(2),
+        },
+        LearningCandidate {
+            id: tenant_candidate_id,
+            tenant_id: tenant,
+            user_id: Some(UserId::new(format!("tenant:{tenant}"))),
+            candidate_type: LearningCandidateType::Prompt,
+            status: LearningCandidateStatus::Proposed,
+            target_id: None,
+            target_label: Some("tenant summary".to_string()),
+            task_fingerprint: None,
+            task_facets: None,
+            payload: serde_json::json!({"description": "tenant safe preview"}),
+            evaluation_payload: None,
+            source_experience_ids: Vec::new(),
+            confidence: None,
+            risk_class: LearningRiskClass::Medium,
+            promotion_requirements: Vec::new(),
+            status_reason: None,
+            batch_id: None,
+            created_at: now,
+            updated_at: now + chrono::Duration::seconds(1),
+        },
+        LearningCandidate {
+            id: Uuid::now_v7(),
+            tenant_id: other_tenant,
+            user_id: None,
+            candidate_type: LearningCandidateType::Eval,
+            status: LearningCandidateStatus::Proposed,
+            target_id: None,
+            target_label: Some("other tenant".to_string()),
+            task_fingerprint: None,
+            task_facets: None,
+            payload: serde_json::json!({"description": "must stay hidden"}),
+            evaluation_payload: None,
+            source_experience_ids: Vec::new(),
+            confidence: None,
+            risk_class: LearningRiskClass::Low,
+            promotion_requirements: Vec::new(),
+            status_reason: None,
+            batch_id: None,
+            created_at: now,
+            updated_at: now + chrono::Duration::seconds(3),
+        },
+    ] {
+        store
+            .append_learning_candidate(&candidate)
+            .await
+            .expect("append candidate summary fixture");
+    }
+
+    let summaries = store
+        .list_learning_candidate_summaries(tenant, Some(LearningCandidateStatus::Proposed), 10)
+        .await
+        .expect("list tenant candidate summaries");
+
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries[0].id, contact_candidate_id);
+    assert_eq!(summaries[0].contact_id, Some(contact_id));
+    assert_eq!(
+        summaries[0].payload_preview,
+        r#"{"api_key":"[redacted]","description":"safe preview"}"#
+    );
+    assert!(
+        !summaries[0]
+            .payload_preview
+            .contains("raw-dashboard-secret")
+    );
+    assert_eq!(summaries[1].id, tenant_candidate_id);
+    assert_eq!(summaries[1].contact_id, None);
+
+    drop(store);
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
 #[ignore]
 async fn learning_log_round_trips_skill_entry_and_rollback_invalidates_batch() {
     with_test_store(|store| async move {
