@@ -73,10 +73,21 @@ pub async fn compute_quality_scores(
               AND started_at >= now() - ($2::text::interval)
         ),
         scored AS (
+            -- Rank-tiered attribution: hits inside the rendered evidence
+            -- window (rank <= 3, the reranked injection window) carry full
+            -- outcome weight; deeper ranks were retrieved but not shown to
+            -- the model, so a successful turn says little about them. Flat
+            -- attribution reinforced every retrieved passenger equally,
+            -- letting irrelevant hits ride successful turns to high priors.
             SELECT
                 lineage.uid,
-                COUNT(*)::bigint AS uses,
-                COUNT(*) FILTER (WHERE segment_ranges.outcome = 'resolved')::bigint AS successes
+                SUM(CASE WHEN lineage.rank <= 3 THEN 1.0 ELSE 0.25 END)
+                    ::double precision AS uses,
+                COALESCE(
+                    SUM(CASE WHEN lineage.rank <= 3 THEN 1.0 ELSE 0.25 END)
+                        FILTER (WHERE segment_ranges.outcome = 'resolved'),
+                    0.0
+                )::double precision AS successes
             FROM moa.retrieval_lineage AS lineage
             JOIN segment_ranges
               ON segment_ranges.storage_partition_id = lineage.storage_partition_id
@@ -88,15 +99,14 @@ pub async fn compute_quality_scores(
         ),
         updates AS (
             UPDATE moa.node_index AS node
-            SET quality_score = (1.0 + scored.successes::double precision)
-                              / (2.0 + scored.uses::double precision)
+            SET quality_score = (1.0 + scored.successes)
+                              / (2.0 + scored.uses)
             FROM scored
             WHERE node.uid = scored.uid
               AND node.storage_partition_id = $1
               AND ABS(
                     node.quality_score
-                    - ((1.0 + scored.successes::double precision)
-                       / (2.0 + scored.uses::double precision))
+                    - ((1.0 + scored.successes) / (2.0 + scored.uses))
                   ) > $3
             RETURNING node.uid
         ),

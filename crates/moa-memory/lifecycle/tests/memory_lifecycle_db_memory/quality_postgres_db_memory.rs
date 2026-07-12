@@ -281,6 +281,102 @@ async fn quality_scores_skip_when_task_segment_outcome_source_is_unavailable() {
 }
 
 #[tokio::test]
+async fn quality_scoring_weights_rendered_window_hits_above_deep_rank_passengers() {
+    // Pins: rank-tiered outcome attribution — a hit inside the rendered
+    // evidence window (rank <= 3) carries full weight, while a deep-rank
+    // passenger retrieved but never shown to the model earns a quarter
+    // weight, so successful turns no longer inflate passenger priors at the
+    // same rate as the evidence that earned the success.
+    let _guard = QUALITY_TEST_LOCK.lock().await;
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let tenant_id = TenantId::new();
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
+    let user_id = UserId::new("quality-rank-user");
+    let session_id = SessionId::new();
+    let rendered_uid = Uuid::now_v7();
+    let passenger_uid = Uuid::now_v7();
+    let now = Utc::now();
+
+    test_db
+        .store()
+        .create_session(SessionMeta {
+            id: session_id,
+            tenant_id,
+            created_by: Some(SessionActorRef::Identity { id: Uuid::now_v7() }),
+            channel: Channel::Chat,
+            model: ModelId::new("mock"),
+            ..SessionMeta::default()
+        })
+        .await
+        .expect("create session row");
+    seed_node_index_row(
+        test_db.store().pool(),
+        &storage_partition_id,
+        &user_id,
+        rendered_uid,
+        "rendered window hit",
+        now,
+    )
+    .await;
+    seed_node_index_row(
+        test_db.store().pool(),
+        &storage_partition_id,
+        &user_id,
+        passenger_uid,
+        "deep rank passenger",
+        now,
+    )
+    .await;
+    seed_task_segment(
+        test_db.store().pool(),
+        &storage_partition_id,
+        &user_id,
+        tenant_id,
+        session_id,
+        0,
+        Some("resolved"),
+        now,
+    )
+    .await;
+    seed_retrieval_lineage_at_rank(
+        test_db.store().pool(),
+        &storage_partition_id,
+        &user_id,
+        session_id,
+        rendered_uid,
+        1,
+        1,
+        now,
+    )
+    .await;
+    seed_retrieval_lineage_at_rank(
+        test_db.store().pool(),
+        &storage_partition_id,
+        &user_id,
+        session_id,
+        passenger_uid,
+        1,
+        10,
+        now,
+    )
+    .await;
+
+    let stats = compute_quality_scores(test_db.store().pool(), &tenant_id, 30)
+        .await
+        .expect("compute quality scores");
+
+    assert_eq!(stats.scored, 2);
+    // Rendered: full weight 1.0 -> (1 + 1) / (2 + 1).
+    assert_quality_score(test_db.store().pool(), rendered_uid, 2.0 / 3.0).await;
+    // Passenger: quarter weight -> (1 + 0.25) / (2 + 0.25).
+    assert_quality_score(test_db.store().pool(), passenger_uid, 1.25 / 2.25).await;
+
+    cleanup_quality_rows(test_db.store().pool(), &storage_partition_id).await;
+}
+
+#[tokio::test]
 async fn quality_scoring_excludes_task_segments_outside_lookback_window() {
     // Pins: quality scoring only credits task segments started within the lookback
     // window; a resolved segment older than the window leaves its node neutral even
@@ -460,11 +556,35 @@ async fn seed_retrieval_lineage(
     turn_seq: i64,
     retrieved_at: chrono::DateTime<Utc>,
 ) {
+    seed_retrieval_lineage_at_rank(
+        pool,
+        storage_partition_id,
+        user_id,
+        session_id,
+        node_uid,
+        turn_seq,
+        1,
+        retrieved_at,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_retrieval_lineage_at_rank(
+    pool: &PgPool,
+    storage_partition_id: &StoragePartitionId,
+    user_id: &UserId,
+    session_id: SessionId,
+    node_uid: Uuid,
+    turn_seq: i64,
+    rank: i32,
+    retrieved_at: chrono::DateTime<Utc>,
+) {
     sqlx::query(
         r#"
         INSERT INTO moa.retrieval_lineage
             (storage_partition_id, user_id, session_id, turn_seq, uid, rank, retrieved_at)
-        VALUES ($1, $2, $3, $4, $5, 1, $6)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(storage_partition_id.as_str())
@@ -472,6 +592,7 @@ async fn seed_retrieval_lineage(
     .bind(session_id.0)
     .bind(turn_seq)
     .bind(node_uid)
+    .bind(rank)
     .bind(retrieved_at)
     .execute(pool)
     .await

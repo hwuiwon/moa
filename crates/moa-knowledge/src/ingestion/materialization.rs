@@ -265,7 +265,10 @@ where
             }
             if let Some(graph_uid) = chunk.graph_node_uid {
                 embedding_uids.push(graph_uid);
-                embedding_inputs.push(chunk.text.clone());
+                embedding_inputs.push(contextual_embedding_input(
+                    object.title.as_deref(),
+                    chunk,
+                ));
             }
         }
         let embeddings = if embedding_inputs.is_empty() {
@@ -549,6 +552,38 @@ fn mark_metadata_active(metadata: Value) -> Value {
     };
     object.insert("active".to_string(), Value::Bool(true));
     Value::Object(object)
+}
+
+/// Builds the embedding input for one chunk with its document context.
+///
+/// Chunk text alone loses where the chunk sits: "Click Save" embeds
+/// identically whether it ends a billing article or a DNS guide. Prepending
+/// the document title and heading path (contextual retrieval) disambiguates
+/// the vector without changing the stored chunk text, chunk hash, or the
+/// evidence excerpt shown to the model. Only newly embedded chunks pick this
+/// up — unchanged chunk hashes keep their cached vectors, so mixed corpora
+/// converge as content changes; rebuild embeddings to convert wholesale.
+fn contextual_embedding_input(
+    document_title: Option<&str>,
+    chunk: &crate::domain::KnowledgeChunk,
+) -> String {
+    let mut context = Vec::new();
+    if let Some(title) = document_title {
+        let title = title.trim();
+        if !title.is_empty() {
+            context.push(title.to_string());
+        }
+    }
+    for heading in &chunk.heading_path {
+        let heading = heading.trim();
+        if !heading.is_empty() && context.last().map(String::as_str) != Some(heading) {
+            context.push(heading.to_string());
+        }
+    }
+    if context.is_empty() {
+        return chunk.text.clone();
+    }
+    format!("{}\n\n{}", context.join(" > "), chunk.text)
 }
 
 fn chunk_graph_uid(
