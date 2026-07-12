@@ -56,6 +56,12 @@ pub struct LegCandidate {
     pub uid: Uuid,
     /// RRF contribution for this leg.
     pub score: f64,
+    /// Raw cosine similarity for vector-leg candidates.
+    ///
+    /// RRF scores are rank-relative and survive fusion; this is the absolute
+    /// signal the vector leg ranked by, kept so the injection evidence floor
+    /// can distinguish "nearest of nothing" from genuinely similar hits.
+    pub similarity: Option<f64>,
 }
 
 /// Graph-leg candidates and raw traversal diagnostics.
@@ -546,7 +552,15 @@ pub async fn vector_leg(
             as_of: req.as_of,
         })
         .await?;
-    Ok(rank_uids(hits.into_iter().map(|hit| hit.uid).collect()))
+    Ok(hits
+        .into_iter()
+        .enumerate()
+        .map(|(rank, hit)| LegCandidate {
+            uid: hit.uid,
+            score: 1.0 / (RRF_K + rank as f64 + 1.0),
+            similarity: Some(f64::from(hit.score)),
+        })
+        .collect())
 }
 
 /// Runs the Turbopuffer BM25 lexical leg.
@@ -1029,6 +1043,7 @@ fn rank_uids(uids: Vec<Uuid>) -> Vec<LegCandidate> {
         .map(|(rank, uid)| LegCandidate {
             uid,
             score: 1.0 / (RRF_K + rank as f64 + 1.0),
+            similarity: None,
         })
         .collect()
 }
@@ -1177,19 +1192,23 @@ mod tests {
                 LegCandidate {
                     uid: graph_only,
                     score: 1.0 / 61.0,
+                    similarity: None,
                 },
                 LegCandidate {
                     uid: shared,
                     score: 1.0 / 62.0,
+                    similarity: None,
                 },
             ],
             &[LegCandidate {
                 uid: shared,
                 score: 1.0 / 61.0,
+                similarity: None,
             }],
             &[LegCandidate {
                 uid: lexical_only,
                 score: 1.0 / 61.0,
+                similarity: None,
             }],
             (GRAPH_WEIGHT, VECTOR_WEIGHT, LEXICAL_WEIGHT),
         );
@@ -1789,6 +1808,7 @@ mod tests {
             &[LegCandidate {
                 uid: graph_uid,
                 score: 1.0 / 61.0,
+                similarity: None,
             }],
             &[],
             &[],

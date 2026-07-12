@@ -287,6 +287,23 @@ impl MemoryRetrievalEvalOptions {
         &self.ranking_config
     }
 
+    /// Returns the ranking config adjusted for the eval lane's embedding realism.
+    ///
+    /// Hermetic lanes use pseudo-embeddings whose cosine values are
+    /// uninformative (measured 2026-07-11: p50 0.000, max 0.26 across all
+    /// window hits), so the absolute-evidence window-abstention threshold is
+    /// zeroed outside the live lane — a deterministic lane cannot exercise it,
+    /// it can only distort. The live lane keeps the production default and is
+    /// the lane that gates this behavior.
+    #[must_use]
+    pub fn lane_ranking_config(&self) -> RankingConfig {
+        let mut config = self.ranking_config.clone();
+        if self.lane != EvalLane::Live {
+            config.abstain_below_window_evidence = 0.0;
+        }
+        config
+    }
+
     /// Returns the configured query rewrite policy.
     #[must_use]
     pub fn rewrite_policy(&self) -> QueryRewritePolicy {

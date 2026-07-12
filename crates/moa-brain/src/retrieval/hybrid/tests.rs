@@ -1662,7 +1662,11 @@ fn vector_request() -> RetrievalRequest {
 }
 
 fn leg_candidate(uid: Uuid) -> LegCandidate {
-    LegCandidate { uid, score: 1.0 }
+    LegCandidate {
+        uid,
+        score: 1.0,
+        similarity: None,
+    }
 }
 
 struct PanicReranker;
@@ -1715,6 +1719,7 @@ fn hit(uid: Uuid, scope: &str, score: f64) -> RetrievalHit {
             vector: true,
             lexical: false,
         },
+        similarity: None,
         lexical_backend: None,
         source_tier: SourceTier::UserMemory,
         knowledge_chunk: None,
@@ -2005,4 +2010,172 @@ impl GraphStore for EmptyGraph {
     ) -> std::result::Result<Vec<NodeIndexRow>, GraphError> {
         Ok(Vec::new())
     }
+}
+
+#[test]
+fn evidence_floor_drops_lexically_unsupported_hits_but_keeps_graph_hits() {
+    // Pins: the injection evidence floor is absolute (not rank-relative), so a
+    // window of nearest-neighbor noise empties out while graph-admitted hits
+    // (whose evidence is the anchored path) always survive. Default-off: the
+    // 2026-07-11 hermetic sweep showed a lexical-only floor trades recall@4
+    // for precision, so it must never fire unless explicitly configured.
+    let query = RetrievalRequest {
+        seeds: Vec::new(),
+        query_text: "what is the deploy target for checkout".to_string(),
+        query_embedding: Vec::new(),
+        scope: tenant_scope(),
+        label_filter: None,
+        max_pii_class: PiiClass::Restricted,
+        k_final: 4,
+        use_reranker: false,
+        strategy: None,
+        as_of: None,
+        ranking_reference_time: None,
+        lineage: None,
+        disable_leg_timeouts: false,
+        disable_graph_expansion: false,
+    };
+    let mut supported = fact_hit_with_spo(
+        Uuid::from_u128(1),
+        1.0,
+        "checkout service",
+        "deploy target",
+        "us-east-1",
+    );
+    supported
+        .node
+        .properties_summary
+        .as_mut()
+        .expect("summary json")
+        .as_object_mut()
+        .expect("summary object")
+        .insert(
+            "summary".to_string(),
+            serde_json::json!("checkout deploy target is us-east-1"),
+        );
+    let unrelated = fact_hit_with_spo(Uuid::from_u128(2), 0.9, "lunch order", "was", "sandwiches");
+    let mut graph_only = hit(Uuid::from_u128(3), "contact", 0.8);
+    graph_only.legs = LegSources {
+        graph: true,
+        vector: false,
+        lexical: false,
+    };
+    // Paraphrased evidence: zero token overlap with the query, but the vector
+    // leg surfaced it with high cosine similarity. Dropping hits like this is
+    // what sank the lexical-only floor, so similarity must clear the floor.
+    let mut paraphrased = fact_hit_with_spo(
+        Uuid::from_u128(5),
+        0.85,
+        "release destination",
+        "is",
+        "primary region",
+    );
+    paraphrased.similarity = Some(0.82);
+    // Low-similarity vector noise must not be rescued by its similarity.
+    let mut weak_neighbor =
+        fact_hit_with_spo(Uuid::from_u128(6), 0.7, "lunch order", "was", "salad");
+    weak_neighbor.similarity = Some(0.12);
+
+    let mut hits = vec![supported, unrelated, graph_only, paraphrased, weak_neighbor];
+    let config = RankingConfig {
+        min_hit_evidence: 0.25,
+        ..RankingConfig::default()
+    };
+    apply_injection_evidence_floor(&mut hits, &config, &query);
+
+    assert_eq!(
+        hits.iter().map(|hit| hit.uid).collect::<Vec<_>>(),
+        vec![Uuid::from_u128(1), Uuid::from_u128(3), Uuid::from_u128(5)],
+        "lexical-evidence, graph, and high-similarity hits stay; noise drops"
+    );
+
+    // With both the per-hit floor and window abstention disabled, the stage
+    // must be a no-op even for pure noise.
+    let mut noise = vec![fact_hit_with_spo(
+        Uuid::from_u128(4),
+        0.9,
+        "lunch order",
+        "was",
+        "sandwiches",
+    )];
+    let disabled = RankingConfig {
+        min_hit_evidence: 0.0,
+        abstain_below_window_evidence: 0.0,
+        ..RankingConfig::default()
+    };
+    apply_injection_evidence_floor(&mut noise, &disabled, &query);
+    assert_eq!(noise.len(), 1);
+
+    // The production default, by contrast, abstains on that same
+    // evidence-free window (live-calibrated threshold, 2026-07-11).
+    let mut default_noise = vec![fact_hit_with_spo(
+        Uuid::from_u128(7),
+        0.9,
+        "lunch order",
+        "was",
+        "sandwiches",
+    )];
+    apply_injection_evidence_floor(&mut default_noise, &RankingConfig::default(), &query);
+    assert!(
+        default_noise.is_empty(),
+        "default config must abstain on an evidence-free window"
+    );
+}
+
+#[test]
+fn window_abstention_clears_low_evidence_windows_but_spares_supported_and_graph_windows() {
+    // Pins: whole-window abstention fires only when the BEST window evidence is
+    // below the threshold and nothing is graph-admitted — an unanswerable query
+    // returns nothing instead of nearest-of-nothing noise, while one supported
+    // hit (or any graph-admitted hit) keeps the whole window alive.
+    let query = RetrievalRequest {
+        seeds: Vec::new(),
+        query_text: "what is the deploy target for checkout".to_string(),
+        query_embedding: Vec::new(),
+        scope: tenant_scope(),
+        label_filter: None,
+        max_pii_class: PiiClass::Restricted,
+        k_final: 4,
+        use_reranker: false,
+        strategy: None,
+        as_of: None,
+        ranking_reference_time: None,
+        lineage: None,
+        disable_leg_timeouts: false,
+        disable_graph_expansion: false,
+    };
+    let config = RankingConfig {
+        abstain_below_window_evidence: 0.68,
+        ..RankingConfig::default()
+    };
+    let noise = |uid: u128, sim: f64| {
+        let mut hit = fact_hit_with_spo(Uuid::from_u128(uid), 0.9, "lunch order", "was", "salad");
+        hit.similarity = Some(sim);
+        hit
+    };
+
+    // Unanswerable: every hit is sub-threshold noise — the window clears.
+    let mut unanswerable = vec![noise(1, 0.62), noise(2, 0.60), noise(3, 0.55)];
+    apply_injection_evidence_floor(&mut unanswerable, &config, &query);
+    assert!(unanswerable.is_empty(), "low-evidence window must abstain");
+
+    // Answerable: one high-similarity hit keeps the whole window (per-hit
+    // floor is off, so the low-evidence neighbors stay too).
+    let mut answerable = vec![noise(4, 0.85), noise(5, 0.60)];
+    apply_injection_evidence_floor(&mut answerable, &config, &query);
+    assert_eq!(answerable.len(), 2, "a supported window must not abstain");
+
+    // Graph-admitted evidence exempts the window from abstention entirely.
+    let mut graph_backed = vec![noise(6, 0.55)];
+    graph_backed[0].legs = LegSources {
+        graph: true,
+        vector: false,
+        lexical: false,
+    };
+    apply_injection_evidence_floor(&mut graph_backed, &config, &query);
+    assert_eq!(
+        graph_backed.len(),
+        1,
+        "graph-admitted windows never abstain"
+    );
 }

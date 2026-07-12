@@ -372,21 +372,23 @@ pub fn ingestion_object_key(turn: &SessionTurn) -> String {
     format!("{}:{}", turn.tenant_id, turn.session_id)
 }
 
-/// Builds a finalized turn transcript from an LLM request and response.
+/// Builds a finalized turn transcript from the durable user-turn text.
+///
+/// Ingestion must never read the compiled provider request: compiled messages
+/// carry replayed history, injected memory reminders, digests, and planning
+/// hints, all user-role, so extracting from them re-ingests retrieved memory
+/// and old turns every turn (a self-reinforcing feedback loop). Callers pass
+/// the user-turn text exactly as persisted in the session event log. Assistant
+/// response text is excluded until facts can carry assistant provenance:
+/// model-generated claims must not be stored with the same trust as user
+/// statements.
 #[must_use]
-pub fn turn_transcript(
-    messages: &[moa_core::types::context::ContextMessage],
-    response_text: &str,
-) -> String {
-    let mut lines = messages
-        .iter()
-        .filter(|message| matches!(message.role, moa_core::types::context::MessageRole::User))
-        .map(|message| format!("user: {}", message.content.trim()))
-        .collect::<Vec<_>>();
-    if !response_text.trim().is_empty() {
-        lines.push(format!("assistant: {}", response_text.trim()));
+pub fn turn_transcript(user_turn_text: &str) -> String {
+    let user = user_turn_text.trim();
+    if user.is_empty() {
+        return String::new();
     }
-    lines.join("\n")
+    format!("user: {user}")
 }
 
 async fn classify_facts_with(
@@ -1493,8 +1495,8 @@ mod tests {
     use chrono::Utc;
     use moa_core::traits::EmbeddingProvider;
     use moa_core::{
-        config::MoaConfig, types::contact::ContactId, types::context::ContextMessage,
-        types::identifiers::SessionId, types::identifiers::TenantId,
+        config::MoaConfig, types::contact::ContactId, types::identifiers::SessionId,
+        types::identifiers::TenantId,
     };
     use moa_memory_graph::{EdgeLabel, PiiClass};
     use moa_memory_pii::{PiiCategory, PiiClassifier, PiiResult, PiiSpan, classify_heuristic};
@@ -1852,19 +1854,18 @@ mod tests {
     }
 
     #[test]
-    fn turn_transcript_keeps_user_messages_and_response() {
-        let messages = vec![
-            ContextMessage::system("system prompt"),
-            ContextMessage::user("Remember that auth uses JWT."),
-            ContextMessage::assistant("Previous answer"),
-        ];
+    fn turn_transcript_carries_only_the_durable_user_turn() {
+        // Pins: ingestion transcripts are built from the durable user event, so
+        // injected reminders and assistant claims can never re-enter extraction.
+        let transcript = turn_transcript("  Remember that auth uses JWT.  ");
 
-        let transcript = turn_transcript(&messages, "Stored that.");
+        assert_eq!(transcript, "user: Remember that auth uses JWT.");
+    }
 
-        assert!(transcript.contains("user: Remember that auth uses JWT."));
-        assert!(transcript.contains("assistant: Stored that."));
-        assert!(!transcript.contains("system prompt"));
-        assert!(!transcript.contains("Previous answer"));
+    #[test]
+    fn turn_transcript_is_empty_for_blank_user_turns() {
+        // Pins: attachment-only or empty turns produce no ingestable transcript.
+        assert_eq!(turn_transcript("   \n\t"), "");
     }
 
     #[test]

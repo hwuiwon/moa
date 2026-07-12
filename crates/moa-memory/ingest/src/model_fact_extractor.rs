@@ -279,39 +279,26 @@ pub(crate) fn normalize_extracted_fact(mut fact: ExtractedFact) -> ExtractedFact
     fact
 }
 
+/// Returns whether an extracted fact is durable enough to store.
+///
+/// Only structural rules belong here: predicate shapes that describe one-off
+/// events rather than standing facts. Content-specific phrase filters are
+/// forbidden — an earlier version hardcoded eval-corpus phrases, which gamed
+/// the extraction-precision metric while silently dropping any production fact
+/// containing those substrings. Salience guidance for specific content belongs
+/// in the extraction prompt, where it generalizes.
 pub(crate) fn should_keep_extracted_fact(fact: &ExtractedFact) -> bool {
-    let subject = normalize_filter_text(&fact.subject);
     let predicate = normalize_filter_text(&fact.predicate);
-    let object = normalize_filter_text(&fact.object);
-    let summary = normalize_filter_text(&fact.summary);
-    let combined = format!("{subject} {predicate} {object} {summary}");
 
-    if combined.contains("busy week")
-        || combined.contains("nothing in particular")
-        || combined.contains("reasonable to me")
-        || combined.contains("many meetings without a specific focus")
-    {
-        return false;
-    }
-
-    if matches!(
-        object.as_str(),
-        "last sprint" | "platform decision" | "user s schedule" | "by the team"
-    ) {
-        return false;
-    }
-
-    if predicate.contains("occurred")
+    // Event-shaped predicates describe something that happened once, not a
+    // standing fact about the user or tenant; they churn every session and do
+    // not answer later retrieval queries.
+    !(predicate.contains("occurred")
         || predicate.contains("completed")
         || predicate.contains("determined by")
         || predicate.contains("based on")
         || predicate.contains("defined by")
-        || predicate == "follows"
-    {
-        return false;
-    }
-
-    !(subject == "week" || subject == "meetings")
+        || predicate == "follows")
 }
 
 fn is_user_scoped_fact(fact: &ExtractedFact) -> bool {
@@ -562,8 +549,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_extractor_filters_small_talk_and_meta_facts() {
-        // Pins: the model path drops non-durable model artifacts before ingestion.
+    async fn model_extractor_filters_event_shaped_predicates_only() {
+        // Pins: the durability filter is structural (event-shaped predicates), never
+        // content-phrase matching — content salience is the extraction prompt's job.
+        // A previous phrase filter was tuned to the eval corpus and silently dropped
+        // real facts, so content the model chose to extract must survive this filter.
         let extractor = extractor_for_response(
             r#"[
 {"subject":"week","predicate":"was busy","object":"user","summary":"The user had a busy week.","scope":"user","confidence":0.8},
@@ -575,9 +565,12 @@ mod tests {
 
         let facts = extractor.extract(&[chunk()]).await.expect("extract facts");
 
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].subject, "auth");
-        assert_eq!(facts[0].predicate, "uses");
-        assert_eq!(facts[0].object, "JWT");
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0].subject, "week");
+        assert_eq!(facts[1].subject, "auth");
+        assert!(
+            !facts.iter().any(|fact| fact.predicate.contains("occurred")),
+            "event-shaped predicates must not reach ingestion"
+        );
     }
 }

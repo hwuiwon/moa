@@ -45,7 +45,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         .map(str::to_string)
         .unwrap_or_else(|| format!("{:?}", options.extractor_mode));
     println!(
-        "wrote memory retrieval eval report: output={} probes={} lane={:?} rewrite_policy={:?} graph_expansion_policy={} graph_policy={} rewrite_calls={} rewrite_skips={} rewrite_call_rate={:.3} reranker={} extractor={} consolidate={} digests={} merged={} duplicates_remaining={} digests_rebuilt={} est_usd={:.4} aborted_over_budget={} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} preference_context_rate={:.3} p95_retrieval_latency_ms={} retrieval_plus_rewrite_p95_latency_ms={}",
+        "wrote memory retrieval eval report: output={} probes={} lane={:?} rewrite_policy={:?} graph_expansion_policy={} graph_policy={} rewrite_calls={} rewrite_skips={} rewrite_call_rate={:.3} reranker={} extractor={} consolidate={} digests={} merged={} duplicates_remaining={} digests_rebuilt={} est_usd={:.4} aborted_over_budget={} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} precision_at_4={:.3} pre_precision_at_4={:.3} abstention_fp_rate={:.3} preference_context_rate={:.3} p95_retrieval_latency_ms={} retrieval_plus_rewrite_p95_latency_ms={}",
         options.output.display(),
         report.probe_results.len(),
         options.lane,
@@ -77,6 +77,9 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         report.metrics.pre_rerank_recall_at_25.value,
         report.metrics.post_rerank_recall_at_4.value,
         report.metrics.ndcg_at_4.value,
+        report.metrics.precision_at_4.value,
+        report.metrics.pre_rerank_precision_at_4.value,
+        report.metrics.abstention_false_positive_rate.value,
         report.metrics.preference_context_rate.value,
         report.metrics.p95_retrieval_latency_ms,
         report.retrieval_plus_rewrite_p95_latency_ms

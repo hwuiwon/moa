@@ -179,13 +179,9 @@ impl LLMGateway for LLMGatewayImpl {
                 .into_inner()
                 .sequence_num;
 
-            if let Some(turn) = session_turn_from_completion_request(
-                &request,
-                &response.text,
-                session_id,
-                turn_seq,
-                Utc::now(),
-            ) {
+            if let Some(turn) =
+                session_turn_from_completion_request(&request, session_id, turn_seq, Utc::now())
+            {
                 ctx.object_client::<IngestionVOClient>(ingestion_object_key(&turn))
                     .ingest_turn(Json(turn))
                     .send();
@@ -276,15 +272,23 @@ fn turn_scope_from_request(request: &CompletionRequest) -> Option<(TenantId, Con
     Some((tenant_id, contact_id))
 }
 
+/// Metadata key carrying the active turn's durable user-message text.
+///
+/// Turn compilation stamps this from the session event log. Memory ingestion
+/// reads it instead of the compiled provider messages so injected context
+/// (memory reminders, digests, planning hints) and replayed history never
+/// re-enter fact extraction, and requests without a durable user turn (worker
+/// sub-requests, internal jobs) never write conversational memory.
+pub(crate) const USER_TURN_METADATA_KEY: &str = "_moa.user_turn";
+
 pub(crate) fn session_turn_from_completion_request(
     request: &CompletionRequest,
-    response_text: &str,
     session_id: SessionId,
     turn_seq: u64,
     finalized_at: DateTime<Utc>,
 ) -> Option<SessionTurn> {
     let (tenant_id, contact_id) = turn_scope_from_request(request)?;
-    let transcript = turn_transcript(&request.messages, response_text);
+    let transcript = turn_transcript(string_metadata(request, USER_TURN_METADATA_KEY)?);
     if transcript.trim().is_empty() {
         return None;
     }
@@ -357,7 +361,7 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::session_turn_from_completion_request;
+    use super::{USER_TURN_METADATA_KEY, session_turn_from_completion_request};
 
     #[test]
     fn session_turn_contact_id_matches_turn_author() {
@@ -372,11 +376,19 @@ mod tests {
         metadata.insert("_moa.session_id".to_string(), json!(session_id.to_string()));
         metadata.insert("_moa.tenant_id".to_string(), json!(tenant_id.to_string()));
         metadata.insert("_moa.contact_id".to_string(), json!(contact_id.to_string()));
+        metadata.insert(
+            USER_TURN_METADATA_KEY.to_string(),
+            json!("My email is user-alpha@example.com."),
+        );
         let request = CompletionRequest {
             model: None,
             messages: vec![
                 ContextMessage::system("system policy"),
                 ContextMessage::assistant("prior assistant answer"),
+                ContextMessage::user("history user turn from a previous exchange"),
+                ContextMessage::user(
+                    "<memory-reminder>\nuser-alpha deploys to us-east-1\n</memory-reminder>",
+                ),
                 ContextMessage::user("My email is user-alpha@example.com."),
             ],
             tools: Vec::new(),
@@ -386,14 +398,8 @@ mod tests {
             metadata,
         };
 
-        let turn = session_turn_from_completion_request(
-            &request,
-            "Stored that.",
-            session_id,
-            42,
-            finalized_at,
-        )
-        .expect("request metadata should produce an ingestable turn");
+        let turn = session_turn_from_completion_request(&request, session_id, 42, finalized_at)
+            .expect("request metadata should produce an ingestable turn");
 
         assert_eq!(turn.tenant_id, tenant_id);
         assert_eq!(turn.contact_id, Some(contact_id));
@@ -401,11 +407,44 @@ mod tests {
         assert_eq!(turn.turn_seq, 42);
         assert_eq!(turn.finalized_at, finalized_at);
         assert_eq!(turn.dominant_pii_class, "pii");
-        assert_eq!(
-            turn.transcript,
-            "user: My email is user-alpha@example.com.\nassistant: Stored that."
-        );
+        assert_eq!(turn.transcript, "user: My email is user-alpha@example.com.");
         assert!(!turn.transcript.contains("system policy"));
         assert!(!turn.transcript.contains("prior assistant answer"));
+        // Pins the feedback-loop fix: injected memory reminders and replayed
+        // history in the compiled request never reach the ingestion transcript.
+        assert!(!turn.transcript.contains("memory-reminder"));
+        assert!(!turn.transcript.contains("us-east-1"));
+        assert!(!turn.transcript.contains("previous exchange"));
+    }
+
+    #[test]
+    fn session_turn_requires_a_durable_user_turn() {
+        // Pins: requests without user-turn metadata (worker sub-requests,
+        // internal jobs) never write conversational memory, even when their
+        // compiled messages contain user-role content.
+        let session_id = SessionId::new();
+        let mut metadata = HashMap::new();
+        metadata.insert("_moa.session_id".to_string(), json!(session_id.to_string()));
+        metadata.insert(
+            "_moa.tenant_id".to_string(),
+            json!(TenantId::new().to_string()),
+        );
+        metadata.insert(
+            "_moa.contact_id".to_string(),
+            json!(ContactId::new().to_string()),
+        );
+        let request = CompletionRequest {
+            model: None,
+            messages: vec![ContextMessage::user("worker task prompt")],
+            tools: Vec::new(),
+            max_output_tokens: None,
+            temperature: None,
+            response_format: None,
+            metadata,
+        };
+
+        assert!(
+            session_turn_from_completion_request(&request, session_id, 7, Utc::now()).is_none()
+        );
     }
 }

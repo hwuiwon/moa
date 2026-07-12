@@ -313,10 +313,11 @@ mod tests {
 
     #[tokio::test]
     async fn recorded_extractor_applies_model_durability_filter() {
-        // Pins: recorded replay follows the same ingestion filter as live model extraction.
+        // Pins: recorded replay follows the same structural ingestion filter as live
+        // model extraction — event-shaped predicates are dropped on replay too.
         let chunk = TurnChunk {
             index: 0,
-            text: "Busy week here, lots of meetings about nothing in particular.".to_string(),
+            text: "The standardization occurred during last sprint.".to_string(),
             token_estimate: 12,
         };
         let key = chunk_hash(&chunk.text);
@@ -325,11 +326,11 @@ mod tests {
             model: "command-test".to_string(),
             prompt_version: EXTRACTION_PROMPT_VERSION.to_string(),
             facts: vec![RecordedFact {
-                subject: "week".to_string(),
-                predicate: "was busy".to_string(),
-                object: "user".to_string(),
-                summary: "The user had a busy week.".to_string(),
-                scope_hint: ExtractedFactScopeHint::Contact,
+                subject: "standardization".to_string(),
+                predicate: "occurred during".to_string(),
+                object: "last sprint".to_string(),
+                summary: "The standardization occurred during last sprint.".to_string(),
+                scope_hint: ExtractedFactScopeHint::Tenant,
                 confidence: Some(0.8),
                 event_time: None,
             }],

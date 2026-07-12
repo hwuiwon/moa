@@ -115,6 +115,11 @@ pub async fn bulk_create_nodes(
     }
 
     let mut conn = store.begin_required().await?;
+    // Node uids are identity-derived (content hash for knowledge chunks, fact
+    // identity for memory facts), so a uid conflict means another writer
+    // created the same entity concurrently — e.g. two documents sharing chunk
+    // content ingested in parallel. Skipping is the correct outcome; failing
+    // aborted whole corpus syncs on the first shared chunk.
     sqlx::query(
         r#"
         INSERT INTO moa.node_index
@@ -128,6 +133,7 @@ pub async fn bulk_create_nodes(
             $8::TEXT[], $9::DOUBLE PRECISION[], $10::BIGINT[], $11::TIMESTAMPTZ[], $12::TEXT[]
         ) AS n(uid, label, storage_partition_id, user_id, tenant_id, contact_id, name, pii_class,
                confidence, reference_count, valid_from, properties)
+        ON CONFLICT (uid) DO NOTHING
         "#,
     )
     .bind(&uids)

@@ -737,6 +737,7 @@ mod tests {
                     vector: false,
                     lexical: false,
                 },
+                similarity: None,
                 lexical_backend: None,
                 source_tier: crate::retrieval::SourceTier::UserMemory,
                 knowledge_chunk: None,

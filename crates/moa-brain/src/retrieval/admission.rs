@@ -605,6 +605,7 @@ mod tests {
             uid: node.uid,
             score: 1.0,
             legs: LegSources::default(),
+            similarity: None,
             lexical_backend: None,
             source_tier: SourceTier::TenantKnowledge,
             knowledge_chunk: None,

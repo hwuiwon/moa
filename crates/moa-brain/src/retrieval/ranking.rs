@@ -9,7 +9,7 @@ use moa_memory_types::MemoryScope;
 use serde::{Deserialize, Serialize};
 
 /// Ranking pipeline version included in cache fingerprints.
-pub const RANKING_PIPELINE_VERSION: u32 = 11;
+pub const RANKING_PIPELINE_VERSION: u32 = 13;
 
 /// Weights used by the FeatureV1 deterministic scorer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -69,6 +69,16 @@ pub struct RankingConfig {
     pub graph_walk_prune_below: f64,
     /// Minimum summed activation an anchored-rescue graph candidate needs.
     pub graph_rescue_evidence_floor: f64,
+    /// Minimum absolute lexical evidence a non-graph hit needs to enter the
+    /// final injected window. `0.0` disables the floor.
+    pub min_hit_evidence: f64,
+    /// Whole-window abstain threshold on the best evidence in the final
+    /// window. `0.0` disables abstention. See
+    /// `MemoryRankingConfig::abstain_below_window_evidence`.
+    pub abstain_below_window_evidence: f64,
+    /// Final window size when a real reranker is active. `0` keeps the
+    /// caller's `k_final`. See `MemoryRankingConfig::rerank_window`.
+    pub rerank_window: usize,
 }
 
 impl Default for RankingConfig {
@@ -78,6 +88,9 @@ impl Default for RankingConfig {
             graph_walk_decay: 0.5,
             graph_walk_prune_below: 0.05,
             graph_rescue_evidence_floor: 0.10,
+            min_hit_evidence: 0.0,
+            abstain_below_window_evidence: 0.68,
+            rerank_window: 3,
         }
     }
 }
@@ -89,6 +102,9 @@ impl From<&MemoryRankingConfig> for RankingConfig {
             graph_walk_decay: value.graph_walk_decay,
             graph_walk_prune_below: value.graph_walk_prune_below,
             graph_rescue_evidence_floor: value.graph_rescue_evidence_floor,
+            min_hit_evidence: value.min_hit_evidence,
+            abstain_below_window_evidence: value.abstain_below_window_evidence,
+            rerank_window: value.rerank_window,
         }
     }
 }
@@ -196,6 +212,19 @@ impl<'a> FeatureRanker<'a> {
             + weights.overlap * overlap
             + weights.quality * (row.quality_score - 0.5) * 2.0
             + scope_term
+    }
+
+    /// Absolute lexical-evidence score for one candidate against the query.
+    ///
+    /// The strongest of subject match, predicate match, and summary-token
+    /// overlap, each roughly in `[0, 1]`. Unlike the fused score, this is not
+    /// rank-relative: a query with no supporting memory scores near zero on
+    /// every candidate, which is what makes it usable as an injection floor.
+    #[must_use]
+    pub fn evidence(query_tokens: &BTreeSet<String>, row: &NodeIndexRow) -> f64 {
+        subject_match_score(query_tokens, &row.name)
+            .max(predicate_match_score(query_tokens, row))
+            .max(overlap_score(query_tokens, row))
     }
 
     fn contact_row_matches_request(&self, row: &NodeIndexRow) -> bool {

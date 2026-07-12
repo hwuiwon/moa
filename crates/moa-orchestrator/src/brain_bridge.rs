@@ -8,7 +8,7 @@ use moa_brain::{
     lineage::emit_context_lineage, pipeline::history::HISTORY_SNAPSHOT_METADATA_KEY,
 };
 use moa_core::{
-    error::Result, events::EventType, session_engine::session_requires_processing,
+    error::Result, events::Event, events::EventType, session_engine::session_requires_processing,
     session_replay::record_pipeline_compile_duration, traits::SessionStore,
     types::completion::CompletionRequest, types::context::WorkingContext,
     types::events_stream::EventRange, types::events_stream::EventRecord, types::hands::SandboxFile,
@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
 use crate::OrchestratorCtx;
+use crate::services::llm_gateway::USER_TURN_METADATA_KEY;
 
 const TURN_EVENT_TAIL_LIMIT: usize = 32;
 const QUERY_REWRITE_METADATA_KEY: &str = "query_rewrite";
@@ -138,9 +139,16 @@ pub(crate) async fn prepare_turn_request(
         },
     );
     let mut context = WorkingContext::new(&session, capabilities);
+    let active_user_turn = active_user_turn_text(&recent_events, active_user_sequence_num);
     context.set_recent_events(recent_events);
     if let Some(sequence_num) = active_user_sequence_num {
         context.insert_metadata("_moa.turn_seq", serde_json::json!(sequence_num));
+    }
+    if let Some(user_turn) = active_user_turn {
+        // Memory ingestion reads this durable user-turn text instead of the
+        // compiled messages, so injected reminders and replayed history never
+        // re-enter fact extraction.
+        context.insert_metadata(USER_TURN_METADATA_KEY, serde_json::json!(user_turn));
     }
     context.insert_metadata("_moa.turn_id", serde_json::json!(turn_id.0.to_string()));
     if let Some(cache) = cached_query_rewrite
@@ -248,6 +256,26 @@ fn merge_active_user_event(
     recent_events.sort_by_key(|record| record.sequence_num);
     recent_events.dedup_by_key(|record| record.sequence_num);
     recent_events
+}
+
+/// Returns the active turn's durable user-message text from the merged event tail.
+///
+/// This is the only text memory ingestion may extract from: it is the user
+/// event exactly as persisted, before any pipeline stage injects reminders,
+/// digests, or planning hints into the compiled request.
+fn active_user_turn_text(
+    recent_events: &[EventRecord],
+    active_user_sequence_num: Option<u64>,
+) -> Option<String> {
+    let sequence_num = active_user_sequence_num?;
+    recent_events
+        .iter()
+        .find(|record| record.sequence_num == sequence_num)
+        .and_then(|record| match &record.event {
+            Event::UserMessage { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .filter(|text| !text.trim().is_empty())
 }
 
 /// Removes sandbox-requiring (hand-routed) tool schemas so the root coordinator
@@ -483,6 +511,55 @@ mod tests {
 
         assert_eq!(coordinator.len(), 1);
         assert!(coordinator[0].get("name").is_none());
+    }
+
+    #[test]
+    fn active_user_turn_text_reads_only_the_anchored_user_event() {
+        // Pins: the ingestion user-turn metadata comes from the durable user event
+        // for the active sequence number — never from another event type and never
+        // when the turn has no user anchor (worker/internal requests).
+        let session_id = SessionId::new();
+        let events = vec![
+            event_record(
+                session_id,
+                4,
+                Event::UserMessage {
+                    text: "old turn".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            event_record(
+                session_id,
+                7,
+                Event::UserMessage {
+                    text: "  set the deploy target to us-east-1  ".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+        ];
+
+        assert_eq!(
+            super::active_user_turn_text(&events, Some(7)),
+            Some("  set the deploy target to us-east-1  ".to_string())
+        );
+        assert_eq!(super::active_user_turn_text(&events, Some(5)), None);
+        assert_eq!(super::active_user_turn_text(&events, None), None);
+    }
+
+    #[test]
+    fn active_user_turn_text_skips_blank_user_events() {
+        // Pins: attachment-only user events must not stamp an empty ingestion turn.
+        let session_id = SessionId::new();
+        let events = vec![event_record(
+            session_id,
+            2,
+            Event::UserMessage {
+                text: "   ".to_string(),
+                attachments: Vec::new(),
+            },
+        )];
+
+        assert_eq!(super::active_user_turn_text(&events, Some(2)), None);
     }
 
     #[test]

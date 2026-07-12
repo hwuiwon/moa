@@ -90,6 +90,7 @@ pub(crate) fn metric_candidates(base: u128, specs: &[CandidateSpec]) -> Vec<Retr
                 uid,
                 score: 1.0 / (index + 1) as f64,
                 legs: spec.legs,
+                similarity: None,
                 lexical_backend: None,
                 source_tier: SourceTier::UserMemory,
                 knowledge_chunk: None,
@@ -97,7 +98,7 @@ pub(crate) fn metric_candidates(base: u128, specs: &[CandidateSpec]) -> Vec<Retr
             }
         })
         .collect::<Vec<_>>();
-    candidates_from_retrieval_hits(&hits, &fact_ids_by_uid, &HashMap::new())
+    candidates_from_retrieval_hits(&hits, &fact_ids_by_uid, &HashMap::new(), "")
 }
 
 pub(crate) fn memory_budget_report(probe_results: Vec<ProbeResult>) -> MemoryRetrievalEvalReport {

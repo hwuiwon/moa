@@ -442,6 +442,11 @@ pub struct RetrievalHit {
     pub score: f64,
     /// Source legs that contributed to the score.
     pub legs: LegSources,
+    /// Raw vector cosine similarity when the vector leg surfaced this hit.
+    ///
+    /// Absolute (not rank-relative), so the injection evidence floor can
+    /// separate genuinely similar hits from nearest-of-nothing noise.
+    pub similarity: Option<f64>,
     /// Lexical backend selected for this hit when `legs.lexical` is true.
     pub lexical_backend: Option<LexicalBackend>,
     /// Source tier used for context assembly and query tracing.

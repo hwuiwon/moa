@@ -20,6 +20,9 @@ use super::{
 
 const MEMORY_PR_ZERO_RECALL_RATE_MAX: f64 = 0.10;
 const MEMORY_RERANKER_RECALL_REGRESSION_MAX: f64 = 0.03;
+/// A reranker's job is precision; one that reduces final-window precision by
+/// more than noise is strictly worse than `noop` and must not ship silently.
+const MEMORY_RERANKER_PRECISION_REGRESSION_MAX: f64 = 0.03;
 const MEMORY_RERANKER_RECALL_GAIN_MIN_FOR_LATENCY: f64 = 0.03;
 const MEMORY_RERANKER_P95_LATENCY_MS_MAX: u64 = 2_000;
 const MEMORY_REWRITE_P95_LATENCY_MS_MAX: u64 = 2_000;
@@ -306,6 +309,18 @@ fn memory_retrieval_gate_violations(report: &MemoryRetrievalEvalReport) -> Vec<B
                 ),
             ));
         }
+        let pre_precision_at_4 = report.metrics.pre_rerank_precision_at_4.value;
+        let post_precision_at_4 = report.metrics.precision_at_4.value;
+        let precision_regression = pre_precision_at_4 - post_precision_at_4;
+        if precision_regression > MEMORY_RERANKER_PRECISION_REGRESSION_MAX {
+            violations.push(BudgetViolation::new(
+                "retrieval.reranker_precision_at_4_regression",
+                format!("<= {MEMORY_RERANKER_PRECISION_REGRESSION_MAX:.2}"),
+                format!(
+                    "{precision_regression:.4} (pre {pre_precision_at_4:.4}, post {post_precision_at_4:.4})"
+                ),
+            ));
+        }
         if report.metrics.p95_retrieval_latency_ms > MEMORY_RERANKER_P95_LATENCY_MS_MAX
             && recall_delta < MEMORY_RERANKER_RECALL_GAIN_MIN_FOR_LATENCY
         {
@@ -410,6 +425,15 @@ fn compare_memory_regression(
             "retrieval.ndcg_at_4",
             current.metrics.ndcg_at_4.value,
             previous.metrics.ndcg_at_4.value,
+        ),
+        // Precision is the counterweight to the recall metrics above: without
+        // it, a change can pass this gate by widening the window with noise.
+        // Baselines recorded before the metric existed deserialize to 0.0 and
+        // are skipped by `regression_pct`.
+        (
+            "retrieval.precision_at_4",
+            current.metrics.precision_at_4.value,
+            previous.metrics.precision_at_4.value,
         ),
     ]
     .into_iter()
@@ -752,6 +776,10 @@ mod tests {
             pre_rerank_recall_at_4: MetricSummary::default(),
             pre_rerank_recall_at_25: MetricSummary::default(),
             post_rerank_recall_at_4: MetricSummary::default(),
+            precision_at_4: MetricSummary::default(),
+            pre_rerank_precision_at_4: MetricSummary::default(),
+            graded_precision_at_4: MetricSummary::default(),
+            abstention_false_positive_rate: MetricSummary::default(),
             all_expected_found_at_4: MetricSummary::default(),
             forbidden_fact_absent_at_4: MetricSummary::default(),
             stored_pii_redacted: MetricSummary::default(),

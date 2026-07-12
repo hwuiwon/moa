@@ -2629,6 +2629,7 @@ mod tests {
                 vector: false,
                 lexical: true,
             },
+            similarity: None,
             lexical_backend: Some(crate::retrieval::LexicalBackend::PostgresTsvector),
             source_tier,
             knowledge_chunk: None,

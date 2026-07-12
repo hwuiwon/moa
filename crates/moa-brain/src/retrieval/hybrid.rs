@@ -374,7 +374,7 @@ impl HybridRetriever {
             req.as_of,
         )
         .await?;
-        let mut hits = build_hits(fused, nodes);
+        let mut hits = build_hits(fused, nodes, &vector_hits);
         annotate_lexical_backend(&mut hits, lexical_hits.backend);
         hydrate_knowledge_chunks(&self.pool, &req.scope, &mut hits, self.assume_app_role).await?;
         rank_hydrated_hits_for_policy(
@@ -393,12 +393,21 @@ impl HybridRetriever {
                 graph_policy,
             );
         }
-        let final_hits = if req.use_reranker && hits.len() > req.k_final {
+        let mut final_hits = if req.use_reranker && hits.len() > req.k_final {
             let reranked = self.rerank_hits(&req, &hits).await?;
-            select_final_hits_for_policy(reranked, &hits, req.k_final, graph_policy)
+            // A trustworthy reranker concentrates gold at the top, so the
+            // reranked window can be tighter than the caller's k: the tail
+            // slots are the noise the precision metrics measure. Without a
+            // reranker the tail still carries recall and k is kept.
+            let rerank_k = match self.ranking_config.rerank_window {
+                0 => req.k_final,
+                window => req.k_final.min(window),
+            };
+            select_final_hits_for_policy(reranked, &hits, rerank_k, graph_policy)
         } else {
             select_final_hits_for_policy(hits, &[], req.k_final, graph_policy)
         };
+        apply_injection_evidence_floor(&mut final_hits, &self.ranking_config, &req);
         metrics::histogram!("moa_retrieval_rrf_rerank_seconds")
             .record(fusion_started.elapsed().as_secs_f64());
 
@@ -748,6 +757,7 @@ fn merge_lexical_candidates(
         .map(|(index, uid)| LegCandidate {
             uid,
             score: 1.0 / (RRF_K + index as f64 + 1.0),
+            similarity: None,
         })
         .collect()
 }
@@ -986,7 +996,19 @@ where
     }
 }
 
-fn build_hits(fused: Vec<(Uuid, f64, LegSources)>, nodes: Vec<NodeIndexRow>) -> Vec<RetrievalHit> {
+fn build_hits(
+    fused: Vec<(Uuid, f64, LegSources)>,
+    nodes: Vec<NodeIndexRow>,
+    vector_hits: &[LegCandidate],
+) -> Vec<RetrievalHit> {
+    let similarity_by_uid = vector_hits
+        .iter()
+        .filter_map(|candidate| {
+            candidate
+                .similarity
+                .map(|similarity| (candidate.uid, similarity))
+        })
+        .collect::<HashMap<_, _>>();
     let mut nodes_by_uid = nodes
         .into_iter()
         .map(|node| (node.uid, node))
@@ -998,6 +1020,7 @@ fn build_hits(fused: Vec<(Uuid, f64, LegSources)>, nodes: Vec<NodeIndexRow>) -> 
                 uid,
                 score,
                 legs,
+                similarity: similarity_by_uid.get(&uid).copied(),
                 lexical_backend: None,
                 source_tier: source_tier_for_node(&node),
                 knowledge_chunk: None,
@@ -1013,6 +1036,78 @@ fn annotate_lexical_backend(hits: &mut [RetrievalHit], backend: Option<LexicalBa
             hit.lexical_backend = backend;
         }
     }
+}
+
+/// Drops final-window hits with no absolute lexical evidence for the query.
+///
+/// Fused scores are rank-relative: the nearest-neighbor legs always fill the
+/// window, so a query with no supporting memory still injects
+/// confident-looking noise (measured before this floor as
+/// `abstention_false_positive_rate` 1.0 and `precision_at_4` 0.31). The
+/// evidence score is absolute, so a floor on it separates "best of nothing"
+/// from "supported". Graph-admitted hits are exempt: their evidence is the
+/// anchored path that admitted them, and multi-hop facts legitimately share
+/// no tokens with the query.
+fn apply_injection_evidence_floor(
+    hits: &mut Vec<RetrievalHit>,
+    config: &RankingConfig,
+    req: &RetrievalRequest,
+) {
+    if config.min_hit_evidence <= 0.0 && config.abstain_below_window_evidence <= 0.0 {
+        return;
+    }
+    let query_tokens = normalize_tokens(&req.query_text);
+    if query_tokens.is_empty() {
+        return;
+    }
+    // A hit's evidence clears on either signal: lexical overlap catches
+    // exact-term matches the embedding may miss, and raw vector similarity
+    // catches paraphrased evidence with no token overlap (dropping those is
+    // what sank the lexical-only floor in the 2026-07-11 sweep).
+    let evidence_of = |hit: &RetrievalHit| -> f64 {
+        // Mirror the ranking stage: knowledge chunks are scored on their text.
+        let lexical_evidence = if let Some(chunk) = &hit.knowledge_chunk {
+            let mut node = hit.node.clone();
+            node.name.clone_from(&chunk.text);
+            FeatureRanker::evidence(&query_tokens, &node)
+        } else {
+            FeatureRanker::evidence(&query_tokens, &hit.node)
+        };
+        lexical_evidence.max(hit.similarity.unwrap_or(0.0))
+    };
+
+    // Whole-window abstention: when the BEST evidence in the window is below
+    // the abstain threshold and nothing is graph-admitted, the query has no
+    // supporting memory — return nothing instead of nearest-of-nothing noise.
+    // Per-hit floors cannot do this job: gold and near-miss evidence overlap
+    // per hit, but window maxima separate answerable queries from
+    // unanswerable ones (live calibration 2026-07-11: abstention window
+    // maxima ≤ 0.67 while answerable windows reach ≥ 0.68).
+    if config.abstain_below_window_evidence > 0.0
+        && !hits.is_empty()
+        && !hits.iter().any(|hit| hit.legs.graph)
+    {
+        let window_max = hits.iter().map(&evidence_of).fold(0.0_f64, f64::max);
+        if window_max < config.abstain_below_window_evidence {
+            metrics::counter!("moa_retrieval_window_abstained_total").increment(1);
+            hits.clear();
+            return;
+        }
+    }
+
+    if config.min_hit_evidence <= 0.0 {
+        return;
+    }
+    hits.retain(|hit| {
+        if hit.legs.graph {
+            return true;
+        }
+        let admitted = evidence_of(hit) >= config.min_hit_evidence;
+        if !admitted {
+            metrics::counter!("moa_retrieval_evidence_floor_dropped_total").increment(1);
+        }
+        admitted
+    });
 }
 
 fn graph_candidate_counts(fused: &[(Uuid, f64, LegSources)]) -> GraphCandidateCounts {

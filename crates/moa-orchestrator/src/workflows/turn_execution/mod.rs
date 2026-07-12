@@ -464,13 +464,11 @@ async fn ingest_deferred_session_turn(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     request: &CompletionRequest,
-    response: &CompletionResponse,
     response_sequence_num: u64,
 ) -> Result<(), HandlerError> {
     let finalized_at = durable_utc_now(ctx, "workflow_utc_now").await?;
     if let Some(turn) = crate::services::llm_gateway::session_turn_from_completion_request(
         request,
-        &response.text,
         session_id,
         response_sequence_num,
         finalized_at,
@@ -643,14 +641,7 @@ async fn run_once_inside_workflow(
         append_brain_response_from_completion(ctx, session_id, &visible_response).await?;
     let response_sequence_num = response_event.sequence_num;
     record_last_response_sequence(ctx, response_sequence_num);
-    ingest_deferred_session_turn(
-        ctx,
-        session_id,
-        &request,
-        &visible_response,
-        response_sequence_num,
-    )
-    .await?;
+    ingest_deferred_session_turn(ctx, session_id, &request, response_sequence_num).await?;
     emit_generation_lineage(
         workflow.lineage.as_ref(),
         turn_id,

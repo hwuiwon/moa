@@ -73,6 +73,15 @@ pub struct RetrievedCandidate {
     pub rank: usize,
     /// Retrieval score assigned by fusion or reranking.
     pub score: f64,
+    /// Raw vector cosine similarity when the vector leg surfaced this hit.
+    ///
+    /// Recorded so injection-floor thresholds can be calibrated offline from
+    /// one report instead of re-running the live lane per candidate value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<f64>,
+    /// Absolute lexical-evidence score against the probe query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lexical_evidence: Option<f64>,
     /// Ledger fact resolved to this candidate, when known.
     pub fact_id: Option<String>,
     /// Other ledger facts represented by this candidate after consolidation supersession.
@@ -347,6 +356,91 @@ impl ProbeResult {
         }
     }
 
+    /// Computes final-window precision@k for this probe.
+    ///
+    /// Precision is the fraction of returned window candidates that support at
+    /// least one expected fact. Recall, MRR, and nDCG cannot see noise: one
+    /// relevant hit at rank 1 plus three irrelevant hits scores 1.0 on all
+    /// three, yet three quarters of the injected context is waste. Duplicate
+    /// candidates supporting an already-counted fact still count as relevant —
+    /// distinct chunks backing the same fact are corroborating evidence, not
+    /// noise (see the duplicate-crowding retrieval pin).
+    #[must_use]
+    pub fn precision_at(&self, k: usize) -> Option<f64> {
+        self.window_precision(self.final_candidates(), k)
+    }
+
+    /// Computes pre-rerank precision@k for this probe.
+    ///
+    /// Paired with [`Self::precision_at`], the delta measures what the
+    /// reranker actually buys: its whole job is precision, so a reranker that
+    /// only preserves recall is not earning its latency.
+    #[must_use]
+    pub fn pre_rerank_precision_at(&self, k: usize) -> Option<f64> {
+        self.window_precision(&self.candidates, k)
+    }
+
+    fn window_precision(&self, candidates: &[RetrievedCandidate], k: usize) -> Option<f64> {
+        let expected = self.expected_fact_set();
+        if expected.is_empty() {
+            return None;
+        }
+        let mut window_len = 0_usize;
+        let mut relevant = 0_usize;
+        for candidate in candidates
+            .iter()
+            .filter(|candidate| candidate.rank > 0 && candidate.rank <= k)
+        {
+            window_len += 1;
+            if candidate
+                .matching_expected_fact_ids(&expected)
+                .next()
+                .is_some()
+            {
+                relevant += 1;
+            }
+        }
+        // An empty window on an expected-fact probe is a recall failure;
+        // precision over zero returned candidates is undefined, not zero.
+        (window_len > 0).then(|| relevant as f64 / window_len as f64)
+    }
+
+    /// Computes graded precision@k: the mean normalized relevance grade of the
+    /// window's candidates, where each candidate scores its best matching
+    /// expected fact's grade over [`MAX_RELEVANCE_GRADE`] and non-matching
+    /// candidates score zero.
+    #[must_use]
+    pub fn graded_precision_at(&self, k: usize) -> Option<f64> {
+        let expected = self.expected_fact_set();
+        if expected.is_empty() {
+            return None;
+        }
+        let grade_of = |fact_id: &str| -> u8 {
+            self.expected_fact_grades
+                .get(fact_id)
+                .copied()
+                .unwrap_or(MAX_RELEVANCE_GRADE)
+                .min(MAX_RELEVANCE_GRADE)
+        };
+        let mut window_len = 0_usize;
+        let mut gain = 0.0_f64;
+        for candidate in self
+            .final_candidates()
+            .iter()
+            .filter(|candidate| candidate.rank > 0 && candidate.rank <= k)
+        {
+            window_len += 1;
+            if let Some(best) = candidate
+                .matching_expected_fact_ids(&expected)
+                .map(grade_of)
+                .max()
+            {
+                gain += f64::from(best) / f64::from(MAX_RELEVANCE_GRADE);
+            }
+        }
+        (window_len > 0).then(|| gain / window_len as f64)
+    }
+
     /// Returns whether this probe has no expected recall within the top-25 candidates.
     #[must_use]
     pub fn zero_recall(&self) -> Option<bool> {
@@ -448,6 +542,28 @@ pub struct RetrievalMetrics {
     /// Mean graded-relevance nDCG@10 over probes with expected facts.
     #[serde(default)]
     pub graded_ndcg_at_10: MetricSummary,
+    /// Mean final-window precision@4 over probes with expected facts.
+    ///
+    /// Recall-only gates structurally reward widening the retrieval net; this
+    /// is the counterweight that makes noisy context visible.
+    #[serde(default)]
+    pub precision_at_4: MetricSummary,
+    /// Mean pre-rerank precision@4 over probes with expected facts.
+    ///
+    /// `precision_at_4 - pre_rerank_precision_at_4` is the reranker's
+    /// measured precision gain.
+    #[serde(default)]
+    pub pre_rerank_precision_at_4: MetricSummary,
+    /// Mean graded precision@4 over probes with expected facts.
+    #[serde(default)]
+    pub graded_precision_at_4: MetricSummary,
+    /// Fraction of abstention probes whose final top-four window is non-empty.
+    ///
+    /// Abstention probes have no expected facts, so they contribute to none of
+    /// the ranking metrics; without this rate, injecting confident-looking
+    /// noise on unanswerable queries is free.
+    #[serde(default)]
+    pub abstention_false_positive_rate: MetricSummary,
     /// Core ranking metrics sliced by probe type.
     ///
     /// Routing, rewrite, and graph-policy changes help some intents and hurt
@@ -509,6 +625,9 @@ pub struct ProbeTypeSlice {
     /// Pre-rerank recall@25 over this slice's probes with expected facts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recall_at_25: Option<SliceStat>,
+    /// Final-window precision@4 over this slice's probes with expected facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precision_at_4: Option<SliceStat>,
     /// Reciprocal rank over this slice's probes with expected facts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mrr: Option<SliceStat>,
@@ -563,24 +682,42 @@ pub struct RetrievalEvalReport {
 }
 
 /// Converts production retrieval hits into serializable candidates with fact ids.
+///
+/// `query_text` is the probe query; it is used to record each candidate's
+/// absolute lexical evidence next to its vector similarity so injection-floor
+/// thresholds can be simulated offline from the report.
 #[must_use]
 pub fn candidates_from_retrieval_hits(
     hits: &[RetrievalHit],
     fact_ids_by_uid: &HashMap<Uuid, String>,
     equivalent_fact_ids_by_uid: &HashMap<Uuid, Vec<String>>,
+    query_text: &str,
 ) -> Vec<RetrievedCandidate> {
+    let query_tokens = moa_brain::retrieval::ranking::normalize_tokens(query_text);
     hits.iter()
         .enumerate()
-        .map(|(index, hit)| RetrievedCandidate {
-            uid: hit.uid,
-            rank: index + 1,
-            score: hit.score,
-            fact_id: fact_ids_by_uid.get(&hit.uid).cloned(),
-            equivalent_fact_ids: equivalent_fact_ids_by_uid
-                .get(&hit.uid)
-                .cloned()
-                .unwrap_or_default(),
-            legs: CandidateLegs::from(hit),
+        .map(|(index, hit)| {
+            // Mirror the production floor: knowledge chunks score on their text.
+            let lexical_evidence = if let Some(chunk) = &hit.knowledge_chunk {
+                let mut node = hit.node.clone();
+                node.name.clone_from(&chunk.text);
+                moa_brain::retrieval::ranking::FeatureRanker::evidence(&query_tokens, &node)
+            } else {
+                moa_brain::retrieval::ranking::FeatureRanker::evidence(&query_tokens, &hit.node)
+            };
+            RetrievedCandidate {
+                uid: hit.uid,
+                rank: index + 1,
+                score: hit.score,
+                similarity: hit.similarity,
+                lexical_evidence: Some(lexical_evidence),
+                fact_id: fact_ids_by_uid.get(&hit.uid).cloned(),
+                equivalent_fact_ids: equivalent_fact_ids_by_uid
+                    .get(&hit.uid)
+                    .cloned()
+                    .unwrap_or_default(),
+                legs: CandidateLegs::from(hit),
+            }
         })
         .collect()
 }
@@ -782,8 +919,33 @@ fn aggregate_metrics(
         graded_ndcg_at_10: summarize_probe_values(probe_results, |probe| {
             probe.graded_ndcg_at(NDCG_AT_10)
         }),
+        precision_at_4: summarize_probe_values(probe_results, |probe| {
+            probe.precision_at(RECALL_AT_4)
+        }),
+        pre_rerank_precision_at_4: summarize_probe_values(probe_results, |probe| {
+            probe.pre_rerank_precision_at(RECALL_AT_4)
+        }),
+        graded_precision_at_4: summarize_probe_values(probe_results, |probe| {
+            probe.graded_precision_at(RECALL_AT_4)
+        }),
+        abstention_false_positive_rate: abstention_false_positive_rate(probe_results),
         per_probe_type: per_probe_type_slices(probe_results),
     }
+}
+
+/// Fraction of abstention probes that still surfaced final-window context.
+fn abstention_false_positive_rate(probe_results: &[ProbeResult]) -> MetricSummary {
+    let (false_positives, total) = probe_results
+        .iter()
+        .filter(|probe| probe.probe_type == ProbeType::Abstention)
+        .fold((0_usize, 0_usize), |(false_positives, total), probe| {
+            let surfaced = probe
+                .final_candidates()
+                .iter()
+                .any(|candidate| candidate.rank > 0 && candidate.rank <= RECALL_AT_4);
+            (false_positives + usize::from(surfaced), total + 1)
+        });
+    MetricSummary::from_counts(false_positives, total)
 }
 
 /// Aggregates core ranking metrics per probe type.
@@ -803,6 +965,7 @@ fn per_probe_type_slices(probe_results: &[ProbeResult]) -> BTreeMap<String, Prob
         slice.graded_ndcg_at_10 = slice_stat(&probes, |probe| probe.graded_ndcg_at(NDCG_AT_10));
         slice.recall_at_4 = slice_stat(&probes, |probe| probe.post_rerank_recall_at(RECALL_AT_4));
         slice.recall_at_25 = slice_stat(&probes, |probe| probe.pre_rerank_recall_at(RECALL_AT_25));
+        slice.precision_at_4 = slice_stat(&probes, |probe| probe.precision_at(RECALL_AT_4));
         slice.mrr = slice_stat(&probes, ProbeResult::reciprocal_rank);
         slice.zero_recall_rate = slice_stat(&probes, |probe| probe.zero_recall().map(bool_value));
     }
@@ -1013,6 +1176,7 @@ fn bootstrap_reports(
         ("retrieval.recall_at_25", observation_recall_at_25),
         ("retrieval.mrr", observation_mrr),
         ("retrieval.ndcg_at_4", observation_ndcg_at_4),
+        ("retrieval.precision_at_4", observation_precision_at_4),
     ]
     .into_iter()
     .map(|(metric_name, value_for_probe)| {
@@ -1052,6 +1216,10 @@ fn observation_mrr(probe: &ProbeResult) -> Option<f64> {
 
 fn observation_ndcg_at_4(probe: &ProbeResult) -> Option<f64> {
     probe.ndcg_at(RECALL_AT_4)
+}
+
+fn observation_precision_at_4(probe: &ProbeResult) -> Option<f64> {
+    probe.precision_at(RECALL_AT_4)
 }
 
 fn bool_value(value: bool) -> f64 {
@@ -1132,6 +1300,8 @@ mod tests {
                 uid: Uuid::from_u128(1),
                 rank: 1,
                 score: 1.0,
+                similarity: None,
+                lexical_evidence: None,
                 fact_id: Some("fact-canonical".to_string()),
                 equivalent_fact_ids: vec!["fact-merged".to_string()],
                 legs: CandidateLegs::default(),
@@ -1154,6 +1324,109 @@ mod tests {
         assert_eq!(probe.ndcg_at(4), Some(1.0));
     }
 
+    #[test]
+    fn precision_at_4_sees_window_noise_that_recall_mrr_and_ndcg_cannot() {
+        // Pins: the motivating case for the precision metric — one relevant hit at
+        // rank 1 plus three irrelevant hits scores perfect recall/MRR/nDCG while
+        // three quarters of the injected window is noise.
+        let mut probe = probe_result("noisy", None);
+        probe.probe_type = ProbeType::PointRecall;
+        probe.candidates = vec![
+            candidate(1, Some("fact-a")),
+            candidate(2, None),
+            candidate(3, None),
+            candidate(4, None),
+        ];
+
+        assert_eq!(probe.recall_at(4), Some(1.0));
+        assert_eq!(probe.reciprocal_rank(), Some(1.0));
+        assert_eq!(probe.ndcg_at(4), Some(1.0));
+        assert_eq!(probe.precision_at(4), Some(0.25));
+    }
+
+    #[test]
+    fn precision_is_undefined_for_empty_windows_and_probes_without_expectations() {
+        // Pins: an empty window is a recall failure, not perfect precision, and
+        // probes without expected facts contribute nothing to the mean.
+        let mut no_hits = probe_result("empty-window", None);
+        no_hits.probe_type = ProbeType::PointRecall;
+        no_hits.candidates = Vec::new();
+        assert_eq!(no_hits.precision_at(4), None);
+
+        let mut no_expectations = probe_result("no-expected", None);
+        no_expectations.probe_type = ProbeType::Abstention;
+        no_expectations.expected_fact_ids = Vec::new();
+        assert_eq!(no_expectations.precision_at(4), None);
+    }
+
+    #[test]
+    fn graded_precision_scores_partial_relevance_below_full() {
+        // Pins: a grade-1 hit fills a window slot at one third of a grade-3 hit's
+        // value, so swapping high-grade evidence for marginal evidence regresses.
+        let mut probe = probe_result("graded", None);
+        probe.probe_type = ProbeType::PointRecall;
+        probe.expected_fact_ids = vec!["fact-a".to_string(), "fact-b".to_string()];
+        probe.expected_fact_grades = BTreeMap::from([("fact-b".to_string(), 1_u8)]);
+        probe.candidates = vec![
+            candidate(1, Some("fact-a")),
+            candidate(2, Some("fact-b")),
+            candidate(3, None),
+            candidate(4, None),
+        ];
+
+        // fact-a defaults to grade 3 (1.0), fact-b is grade 1 (1/3), two empty slots.
+        let expected = (1.0 + 1.0 / 3.0) / 4.0;
+        let actual = probe.graded_precision_at(4).expect("graded precision");
+        assert!((actual - expected).abs() < 1e-9);
+        assert_eq!(probe.precision_at(4), Some(0.5));
+    }
+
+    #[test]
+    fn abstention_false_positive_rate_counts_surfaced_windows_only() {
+        // Pins: abstention probes contribute to no ranking metric, so surfacing
+        // confident-looking noise on unanswerable queries must show up here.
+        let mut surfaced = probe_result("abstain-noisy", None);
+        surfaced.probe_type = ProbeType::Abstention;
+        surfaced.expected_fact_ids = Vec::new();
+        surfaced.candidates = vec![candidate(1, None)];
+
+        let mut clean = probe_result("abstain-clean", None);
+        clean.probe_type = ProbeType::Abstention;
+        clean.expected_fact_ids = Vec::new();
+        clean.candidates = Vec::new();
+
+        let mut unrelated = probe_result("point", None);
+        unrelated.probe_type = ProbeType::PointRecall;
+
+        let report = aggregate_retrieval_eval_from_counts(
+            0,
+            0,
+            vec![surfaced, clean, unrelated],
+            BootstrapConfig {
+                resamples: 0,
+                seed: 1,
+            },
+        );
+
+        let rate = report.metrics.abstention_false_positive_rate;
+        assert_eq!(rate.numerator, 1.0);
+        assert_eq!(rate.denominator, 2);
+        assert_eq!(rate.value, 0.5);
+    }
+
+    fn candidate(rank: usize, fact_id: Option<&str>) -> RetrievedCandidate {
+        RetrievedCandidate {
+            uid: Uuid::from_u128(rank as u128),
+            rank,
+            score: 1.0 / rank as f64,
+            similarity: None,
+            lexical_evidence: None,
+            fact_id: fact_id.map(str::to_string),
+            equivalent_fact_ids: Vec::new(),
+            legs: CandidateLegs::default(),
+        }
+    }
+
     fn probe_result(probe_id: &str, preference_context_hit: Option<bool>) -> ProbeResult {
         ProbeResult {
             probe_id: probe_id.to_string(),
@@ -1166,6 +1439,8 @@ mod tests {
                 uid: Uuid::from_u128(1),
                 rank: 1,
                 score: 1.0,
+                similarity: None,
+                lexical_evidence: None,
                 fact_id: Some("fact-a".to_string()),
                 equivalent_fact_ids: Vec::new(),
                 legs: CandidateLegs {

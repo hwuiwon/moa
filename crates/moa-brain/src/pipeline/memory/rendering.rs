@@ -390,6 +390,7 @@ mod tests {
                 vector: true,
                 lexical: false,
             },
+            similarity: None,
             lexical_backend: None,
             source_tier: SourceTier::UserMemory,
             knowledge_chunk: None,

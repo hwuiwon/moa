@@ -95,7 +95,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
 }
 
 async fn run_async(options: Options) -> Result<RunSummary> {
-    let corpus = load_corpus(&options.data_dir)?;
+    let corpus = load_corpus(&options.data_dir, options.dataset)?;
     let questions = load_questions(&options.data_dir, options.dataset)?;
     let selected = select_workload(&corpus, &questions, &options)?;
     let config = benchmark_config(&options)?;
@@ -670,8 +670,19 @@ async fn retrieve_questions(inputs: RetrievalEvalInputs<'_>) -> Result<QueryRun>
         pool.clone(),
         scope.clone(),
     ));
+    // The evidence-window knobs (rerank_window, abstain_below_window_evidence)
+    // are calibrated for the memory-evidence path's small injected window.
+    // This harness does article-level retrieval that sizes its own window via
+    // --top-k, so the window policy must stay off here: the global
+    // rerank_window default once clamped k=10 requests to 3 and cut
+    // MultiHop-RAG recall@10 from 0.227 to 0.144 (2026-07-11 results log).
+    let mut harness_ranking =
+        moa_brain::retrieval::ranking::RankingConfig::from(&config.memory.retrieval.ranking);
+    harness_ranking.rerank_window = 0;
+    harness_ranking.abstain_below_window_evidence = 0.0;
     let retriever =
         HybridRetriever::from_config(config, pool.clone(), graph_store, pgvector_source)
+            .with_ranking_config(harness_ranking)
             .with_assume_app_role(true)
             .with_graph_policy(graph_policy);
     let memory_scope = MemoryScope::Tenant { tenant_id };
@@ -1410,9 +1421,9 @@ fn article_to_record(article: &WixArticle) -> ProviderRecord {
     }
 }
 
-fn load_corpus(data_dir: &Path) -> Result<Vec<WixArticle>> {
-    let path = data_dir.join("wix_kb_corpus/wix_kb_corpus.jsonl");
-    read_jsonl(&path).with_context(|| format!("load WixQA KB corpus {}", path.display()))
+fn load_corpus(data_dir: &Path, dataset: Dataset) -> Result<Vec<WixArticle>> {
+    let path = data_dir.join(dataset.corpus_path());
+    read_jsonl(&path).with_context(|| format!("load KB corpus {}", path.display()))
 }
 
 fn load_questions(data_dir: &Path, dataset: Dataset) -> Result<Vec<WixQuestion>> {
@@ -1581,6 +1592,11 @@ enum Dataset {
     ExpertWritten,
     Simulated,
     Synthetic,
+    /// MultiHop-RAG (yixuantt, COLM 2024): news queries whose gold evidence
+    /// spans 2-4 of 609 articles — the external relationship-based retrieval
+    /// lane from the 2026-07-11 RAG accuracy plan. Fetch and convert with
+    /// `scripts/fetch_multihoprag.py`.
+    MultihopRag,
 }
 
 impl Dataset {
@@ -1589,6 +1605,7 @@ impl Dataset {
             "expertwritten" | "expert" | "wixqa_expertwritten" => Ok(Self::ExpertWritten),
             "simulated" | "wixqa_simulated" => Ok(Self::Simulated),
             "synthetic" | "wixqa_synthetic" => Ok(Self::Synthetic),
+            "multihoprag" | "multihop" => Ok(Self::MultihopRag),
             other => bail!("unknown WixQA dataset `{other}`"),
         }
     }
@@ -1598,6 +1615,7 @@ impl Dataset {
             Self::ExpertWritten => "expertwritten",
             Self::Simulated => "simulated",
             Self::Synthetic => "synthetic",
+            Self::MultihopRag => "multihoprag",
         }
     }
 
@@ -1606,6 +1624,16 @@ impl Dataset {
             Self::ExpertWritten => "wixqa_expertwritten/test.jsonl",
             Self::Simulated => "wixqa_simulated/test.jsonl",
             Self::Synthetic => "wixqa_synthetic/test.jsonl",
+            Self::MultihopRag => "multihoprag/questions.jsonl",
+        }
+    }
+
+    fn corpus_path(self) -> &'static str {
+        match self {
+            Self::ExpertWritten | Self::Simulated | Self::Synthetic => {
+                "wix_kb_corpus/wix_kb_corpus.jsonl"
+            }
+            Self::MultihopRag => "multihoprag/corpus.jsonl",
         }
     }
 }
@@ -1855,7 +1883,7 @@ fn print_help() {
          Options:\n\
            --data-dir PATH              WixQA raw JSONL cache (default: {DEFAULT_DATA_DIR})\n\
            --output PATH                Report JSON path (default: {DEFAULT_OUTPUT})\n\
-           --dataset NAME               simulated|expertwritten|synthetic (default: simulated)\n\
+           --dataset NAME               simulated|expertwritten|synthetic|multihoprag (default: simulated)\n\
            --backend NAME               pgvector|turbopuffer (default: pgvector)\n\
            --question-limit N|all       Questions to evaluate (default: 20)\n\
            --question-offset N          Offset into the selected QA split (default: 0)\n\
@@ -2576,6 +2604,7 @@ mod tests {
                 vector: false,
                 lexical: false,
             },
+            similarity: None,
             lexical_backend: None,
             source_tier: SourceTier::TenantKnowledge,
             knowledge_chunk: Some(KnowledgeChunkHydration {

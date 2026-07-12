@@ -109,7 +109,7 @@ pub(super) async fn run_memory_retrieval_eval_in_store(
             &retrieval_probe,
             ProbeRetrieveOptions {
                 use_reranker: options.reranker_enabled(),
-                ranking_config: options.ranking_config().clone(),
+                ranking_config: options.lane_ranking_config(),
                 ranking_reference_time: Some(ranking_reference_time),
                 deterministic_replay: providers.deterministic_replay,
                 graph_expansion_policy: options.graph_expansion_policy,
@@ -120,6 +120,7 @@ pub(super) async fn run_memory_retrieval_eval_in_store(
             &retrieval.pre_rerank_hits,
             &fact_ids_by_uid,
             &equivalent_fact_ids_by_uid,
+            &probe.query,
         );
         let graph_comparison =
             retrieval
@@ -129,6 +130,7 @@ pub(super) async fn run_memory_retrieval_eval_in_store(
                         &retrieval.graph_off_hits,
                         &fact_ids_by_uid,
                         &equivalent_fact_ids_by_uid,
+                        &probe.query,
                     );
                     probe_graph_comparison(
                         &probe.expected_fact_ids,
@@ -142,6 +144,7 @@ pub(super) async fn run_memory_retrieval_eval_in_store(
             &retrieval.post_rerank_hits,
             &fact_ids_by_uid,
             &equivalent_fact_ids_by_uid,
+            &probe.query,
         );
         let preference_context_hit = preference_context_hit(
             probe,

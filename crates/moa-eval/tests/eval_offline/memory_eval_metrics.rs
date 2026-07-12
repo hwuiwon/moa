@@ -289,6 +289,8 @@ fn backend_probe(probe_id: &str, fact_id: &str, backend: LexicalBackend, uid: u1
             uid: Uuid::from_u128(uid),
             rank: 1,
             score: 1.0,
+            similarity: None,
+            lexical_evidence: None,
             fact_id: Some(fact_id.to_string()),
             equivalent_fact_ids: Vec::new(),
             legs: CandidateLegs {
@@ -1038,6 +1040,8 @@ fn graded_ndcg_penalizes_misranking_a_high_grade_memory_below_a_low_grade_one() 
         uid: Uuid::from_u128(uid),
         rank,
         score: 1.0 / rank as f64,
+        similarity: None,
+        lexical_evidence: None,
         fact_id: Some(fact_id.to_string()),
         equivalent_fact_ids: Vec::new(),
         legs: CandidateLegs::default(),

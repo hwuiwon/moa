@@ -103,7 +103,14 @@ pub struct MemoryRetrievalConfig {
 impl Default for MemoryRetrievalConfig {
     fn default() -> Self {
         Self {
-            reranker_model: "noop".to_string(),
+            // 2026-07-11 bake-off: Cohere rerank-v4.0-fast tied zerank-2 on
+            // quality (synthetic 500q MRR 0.876 vs 0.878, nDCG@10 0.889 vs
+            // 0.891) and both beat noop decisively on every lane. Cohere is
+            // the operator-selected default; zerank-2 measured lower
+            // in-harness latency (486 ms vs 927 ms p95) and remains available
+            // via `zeroentropy:zerank-2`. Falls back to noop with a warning
+            // when MOA_COHERE_API_KEY is absent.
+            reranker_model: "cohere:rerank-v4.0-fast".to_string(),
             reranker_latency: None,
             // Lineage rows are the dashboard's provenance source of truth, so
             // retrieval records them unless a deployment opts out.
@@ -126,6 +133,31 @@ pub struct MemoryRankingConfig {
     pub graph_walk_prune_below: f64,
     /// Minimum summed activation an anchored-rescue graph candidate needs.
     pub graph_rescue_evidence_floor: f64,
+    /// Minimum absolute lexical evidence a non-graph hit needs to enter the
+    /// final injected window. `0.0` disables the floor.
+    ///
+    /// Fused scores are rank-relative, so nearest-neighbor legs fill the
+    /// window even when nothing relevant exists; this floor is what lets a
+    /// query with no supporting memory return nothing instead of noise.
+    pub min_hit_evidence: f64,
+    /// Whole-window abstain threshold on the best evidence in the final
+    /// window: when no hit reaches this evidence (and none is graph-admitted),
+    /// retrieval returns nothing instead of nearest-of-nothing noise. `0.0`
+    /// disables abstention.
+    ///
+    /// Evidence is `max(lexical evidence, vector cosine)` per hit, so the
+    /// useful threshold depends on the configured embedder's cosine floor for
+    /// unrelated text; recalibrate when the embedder changes.
+    pub abstain_below_window_evidence: f64,
+    /// Final window size when a real reranker is active. `0` keeps the
+    /// caller's `k_final`.
+    ///
+    /// A reranker that reliably ranks gold at the top makes the tail slots
+    /// pure noise: the 2026-07-11 live curve showed zerank-2 at window 3
+    /// strictly dominates the unreranked window 4 on both recall and
+    /// precision. Only applied on the reranked path — without a reranker the
+    /// tail slots still carry recall.
+    pub rerank_window: usize,
 }
 
 impl Default for MemoryRankingConfig {
@@ -135,6 +167,9 @@ impl Default for MemoryRankingConfig {
             graph_walk_decay: 0.5,
             graph_walk_prune_below: 0.05,
             graph_rescue_evidence_floor: 0.10,
+            min_hit_evidence: 0.0,
+            abstain_below_window_evidence: 0.68,
+            rerank_window: 3,
         }
     }
 }
