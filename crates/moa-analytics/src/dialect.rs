@@ -36,6 +36,11 @@ impl AnalyticsBackend {
 /// to collapse `ReplacingMergeTree` duplicates; the append-only `events_raw`
 /// stream is never read with `FINAL`. Table names are unqualified because the
 /// executor pins the target database on the client.
+///
+/// A `None` return means the dataset is Postgres-only and the compiler rejects
+/// it on the ClickHouse backend with a `BackendFieldUnavailable` error.
+/// Currently only `citation_precision` is Postgres-only: it joins
+/// `moa.retrieval_lineage`, which is never exported to ClickHouse.
 pub fn clickhouse_from_sql(dataset_id: &str) -> Option<&'static str> {
     let sql = match dataset_id {
         "sessions" => {
@@ -137,8 +142,9 @@ pub fn clickhouse_from_sql(dataset_id: &str) -> Option<&'static str> {
 /// aliases established by [`clickhouse_from_sql`] (`d`, `sac`, `s`, `ar`, `ev`).
 ///
 /// A `None` return means the catalog exposes a field the ClickHouse sources do
-/// not provide and the compiler cannot emit it; every catalog field for every
-/// dataset is covered here by construction.
+/// not provide and the compiler cannot emit it; every catalog field of every
+/// dataset that [`clickhouse_from_sql`] serves is covered here by construction
+/// (Postgres-only datasets such as `citation_precision` have no entries).
 pub fn clickhouse_field_expr(dataset_id: &str, field_id: &str) -> Option<&'static str> {
     let expr = match (dataset_id, field_id) {
         // sessions -> dim_sessions (d) + dim_session_agent_context (sac) + events_raw agg (ev)

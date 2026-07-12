@@ -831,6 +831,7 @@ mod tests {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
+            window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
         }
     }
 }

@@ -164,6 +164,7 @@ impl TenantRetriever {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
+            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
         };
         let hits = self
             .cache

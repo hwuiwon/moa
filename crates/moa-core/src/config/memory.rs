@@ -145,12 +145,22 @@ pub struct MemoryRankingConfig {
     /// retrieval returns nothing instead of nearest-of-nothing noise. `0.0`
     /// disables abstention.
     ///
+    /// This is the SOURCE the memory-retrieval stage reads to populate its
+    /// per-request `EvidenceWindowPolicy`; it is not imposed by the shared
+    /// retriever, so knowledge-lane retrievals with their own window policy are
+    /// never clamped by it.
+    ///
     /// Evidence is `max(lexical evidence, vector cosine)` per hit, so the
     /// useful threshold depends on the configured embedder's cosine floor for
     /// unrelated text; recalibrate when the embedder changes.
     pub abstain_below_window_evidence: f64,
     /// Final window size when a real reranker is active. `0` keeps the
     /// caller's `k_final`.
+    ///
+    /// This is the SOURCE the memory-retrieval stage reads to populate its
+    /// per-request `EvidenceWindowPolicy`; it is not imposed by the shared
+    /// retriever, so knowledge-lane retrievals sizing their own top-k window
+    /// are never clamped by it.
     ///
     /// A reranker that reliably ranks gold at the top makes the tail slots
     /// pure noise: the 2026-07-11 live curve showed zerank-2 at window 3
@@ -242,6 +252,12 @@ pub struct MemoryVectorConfig {
     /// on a 512-dim prefix, so the shortlist stage is index-accelerated only when
     /// this is set to `512`; any other value forces a sequential shortlist scan
     /// unless the migration's index expression is updated to match.
+    ///
+    /// Default-on (`Some(512)`) was measured and DISCARDED on 2026-07-12: the
+    /// hermetic lane's pseudo-embeddings are not MRL-ordered, so the shortlist
+    /// discarded true neighbors (recall@4 0.976 -> 0.738, McNemar p ~= 0).
+    /// Enabling by default needs a live-lane paired sweep with the real
+    /// MRL-trained embedder plus a lane-aware exemption; until then: opt-in.
     pub mrl_shortlist_dims: Option<usize>,
 }
 

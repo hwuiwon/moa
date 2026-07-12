@@ -13,8 +13,8 @@ use moa_brain::planning::{
     should_skip_graph_expansion_for_direct_lookup,
 };
 use moa_brain::retrieval::{
-    GraphPathTrace, GraphRetrievalDiagnostics, GraphRetrievalPolicy, HybridRetriever,
-    RankingConfig, RetrievalHit, RetrievalOutput, RetrievalRequest,
+    EvidenceWindowPolicy, GraphPathTrace, GraphRetrievalDiagnostics, GraphRetrievalPolicy,
+    HybridRetriever, RankingConfig, RetrievalHit, RetrievalOutput, RetrievalRequest,
 };
 use moa_core::types::memory::RlsContext;
 use moa_core::{
@@ -65,6 +65,7 @@ use moa_eval_core::{EvalError, Result};
 
 use super::io::io_error;
 
+mod parity;
 mod providers;
 mod quality;
 mod report;
@@ -76,6 +77,7 @@ pub(crate) mod validation;
 
 pub use report::{MemoryGraphDiagnostics, MemoryRetrievalEvalReport, QueryRewriteClassMetrics};
 
+use parity::*;
 use providers::*;
 use quality::*;
 use report::{ReportBuildInput, build_eval_report};
@@ -112,6 +114,7 @@ pub struct MemoryRetrievalEvalOptions {
     digests: bool,
     invert_quality_priors: bool,
     graph_expansion_policy: GraphExpansionEvalPolicy,
+    parity: bool,
 }
 
 /// Eval-only graph expansion policy used for memory-retrieval A/B runs.
@@ -169,6 +172,7 @@ impl MemoryRetrievalEvalOptions {
             digests: false,
             invert_quality_priors: false,
             graph_expansion_policy: GraphExpansionEvalPolicy::Current,
+            parity: false,
         }
     }
 
@@ -263,6 +267,18 @@ impl MemoryRetrievalEvalOptions {
         self
     }
 
+    /// Enables production-parity retrieval through the stage-7 evidence seam.
+    ///
+    /// Parity probes retrieve via `GraphMemoryRetriever::retrieve_evidence`
+    /// (deterministic lexical router, per-scope admission, cross-scope merge,
+    /// and evidence token-budget packing) instead of calling `HybridRetriever`
+    /// directly, and record the rendered-context window that survived packing.
+    #[must_use]
+    pub fn with_parity(mut self, parity: bool) -> Self {
+        self.parity = parity;
+        self
+    }
+
     /// Returns the corpus directory.
     #[must_use]
     pub fn corpus_dir(&self) -> &Path {
@@ -289,17 +305,22 @@ impl MemoryRetrievalEvalOptions {
 
     /// Returns the ranking config adjusted for the eval lane's embedding realism.
     ///
+    /// This config supplies both the retriever's ranking weights and the source
+    /// values for each probe's request-scoped evidence-window policy
+    /// (`rerank_window`, `abstain_below_window_evidence`).
+    ///
     /// Hermetic lanes use pseudo-embeddings whose cosine values are
     /// uninformative (measured 2026-07-11: p50 0.000, max 0.26 across all
-    /// window hits), so the absolute-evidence window-abstention threshold is
-    /// zeroed outside the live lane — a deterministic lane cannot exercise it,
-    /// it can only distort. The live lane keeps the production default and is
-    /// the lane that gates this behavior.
+    /// window hits), so both window knobs are zeroed outside the live lane: a
+    /// deterministic lane cannot exercise absolute-evidence abstention or a
+    /// reranked-window trim, it can only distort them. The live lane keeps the
+    /// production defaults and is the lane that gates this behavior.
     #[must_use]
     pub fn lane_ranking_config(&self) -> RankingConfig {
         let mut config = self.ranking_config.clone();
         if self.lane != EvalLane::Live {
             config.abstain_below_window_evidence = 0.0;
+            config.rerank_window = 0;
         }
         config
     }
@@ -328,6 +349,12 @@ impl MemoryRetrievalEvalOptions {
         self.invert_quality_priors
     }
 
+    /// Returns whether probes retrieve through the production stage-7 seam.
+    #[must_use]
+    pub fn parity(&self) -> bool {
+        self.parity
+    }
+
     fn validate(&self) -> Result<()> {
         if self
             .budget_usd
@@ -340,6 +367,13 @@ impl MemoryRetrievalEvalOptions {
         if !self.ranking_config.weights.quality.is_finite() {
             return Err(EvalError::InvalidConfig(
                 "--quality-weight must be finite".to_string(),
+            ));
+        }
+        if self.parity && self.graph_expansion_policy != GraphExpansionEvalPolicy::Current {
+            return Err(EvalError::InvalidConfig(
+                "--parity drives the production graph-expansion policy; \
+                 --graph-expansion-policy must be current"
+                    .to_string(),
             ));
         }
         if self.lane == EvalLane::Pr {

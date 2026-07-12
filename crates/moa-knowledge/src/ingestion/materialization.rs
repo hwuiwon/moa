@@ -265,10 +265,7 @@ where
             }
             if let Some(graph_uid) = chunk.graph_node_uid {
                 embedding_uids.push(graph_uid);
-                embedding_inputs.push(contextual_embedding_input(
-                    object.title.as_deref(),
-                    chunk,
-                ));
+                embedding_inputs.push(contextual_embedding_input(object.title.as_deref(), chunk));
             }
         }
         let embeddings = if embedding_inputs.is_empty() {
@@ -514,7 +511,8 @@ where
                 extracted.push(extraction);
             } else {
                 cache_misses = cache_misses.saturating_add(1);
-                let extraction = extract_chunk_semantics(object, chunk);
+                let extraction =
+                    extract_chunk_semantics(object, chunk, self.semantic_generic_entities);
                 new_extractions.push(extraction.clone());
                 extracted.push(extraction);
             }

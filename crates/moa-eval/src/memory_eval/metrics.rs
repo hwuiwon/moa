@@ -120,6 +120,10 @@ pub struct ProbeResult {
     /// Final top-k window after reranking, when the eval collected a post-rerank pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_rerank_candidates: Option<Vec<RetrievedCandidate>>,
+    /// Number of ranked candidates that survived stage-7 evidence-budget
+    /// packing in a production-parity run; `None` for direct-retrieval runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendered_candidate_count: Option<usize>,
     /// End-to-end retrieval latency observed for this probe.
     #[serde(default)]
     pub retrieval_latency_ms: u64,
@@ -405,6 +409,20 @@ impl ProbeResult {
         (window_len > 0).then(|| relevant as f64 / window_len as f64)
     }
 
+    /// Computes precision over the rendered-context window — the ranked-hit
+    /// prefix that survived `render_memory_context_with_budget` packing in a
+    /// production-parity run, i.e. exactly what would be injected into the
+    /// prompt.
+    ///
+    /// Returns `None` when the probe carries no `rendered_candidate_count`
+    /// (direct-retrieval runs), expects no facts, or rendered an empty window
+    /// (precision over zero injected candidates is undefined, not zero).
+    #[must_use]
+    pub fn rendered_context_precision(&self) -> Option<f64> {
+        let rendered_candidate_count = self.rendered_candidate_count?;
+        self.window_precision(self.final_candidates(), rendered_candidate_count)
+    }
+
     /// Computes graded precision@k: the mean normalized relevance grade of the
     /// window's candidates, where each candidate scores its best matching
     /// expected fact's grade over [`MAX_RELEVANCE_GRADE`] and non-matching
@@ -546,23 +564,31 @@ pub struct RetrievalMetrics {
     ///
     /// Recall-only gates structurally reward widening the retrieval net; this
     /// is the counterweight that makes noisy context visible.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "MetricSummary::is_empty")]
     pub precision_at_4: MetricSummary,
     /// Mean pre-rerank precision@4 over probes with expected facts.
     ///
     /// `precision_at_4 - pre_rerank_precision_at_4` is the reranker's
     /// measured precision gain.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "MetricSummary::is_empty")]
     pub pre_rerank_precision_at_4: MetricSummary,
     /// Mean graded precision@4 over probes with expected facts.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "MetricSummary::is_empty")]
     pub graded_precision_at_4: MetricSummary,
+    /// Mean rendered-context precision over probes with expected facts.
+    ///
+    /// Populated by production-parity runs only: precision over the ranked-hit
+    /// prefix that survived stage-7 evidence-budget packing — what would
+    /// actually be injected — instead of a fixed top-k window. Skipped when
+    /// empty so pre-parity baseline reports keep round-tripping byte-for-byte.
+    #[serde(default, skip_serializing_if = "MetricSummary::is_empty")]
+    pub rendered_context_precision: MetricSummary,
     /// Fraction of abstention probes whose final top-four window is non-empty.
     ///
     /// Abstention probes have no expected facts, so they contribute to none of
     /// the ranking metrics; without this rate, injecting confident-looking
     /// noise on unanswerable queries is free.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "MetricSummary::is_empty")]
     pub abstention_false_positive_rate: MetricSummary,
     /// Core ranking metrics sliced by probe type.
     ///
@@ -928,6 +954,10 @@ fn aggregate_metrics(
         graded_precision_at_4: summarize_probe_values(probe_results, |probe| {
             probe.graded_precision_at(RECALL_AT_4)
         }),
+        rendered_context_precision: summarize_probe_values(
+            probe_results,
+            ProbeResult::rendered_context_precision,
+        ),
         abstention_false_positive_rate: abstention_false_positive_rate(probe_results),
         per_probe_type: per_probe_type_slices(probe_results),
     }
@@ -1307,6 +1337,7 @@ mod tests {
                 legs: CandidateLegs::default(),
             }],
             post_rerank_candidates: None,
+            rendered_candidate_count: None,
             retrieval_latency_ms: 0,
             all_expected_found_at_4: Some(true),
             forbidden_fact_absent_at_4: None,
@@ -1357,6 +1388,59 @@ mod tests {
         no_expectations.probe_type = ProbeType::Abstention;
         no_expectations.expected_fact_ids = Vec::new();
         assert_eq!(no_expectations.precision_at(4), None);
+    }
+
+    #[test]
+    fn rendered_context_precision_scores_only_the_packed_prefix() {
+        // Pins: the parity metric scores the budget-packed rendered prefix, so
+        // a window shorter than the top-4 cut diverges from precision_at_4.
+        let mut probe = probe_result("packed", None);
+        probe.probe_type = ProbeType::PointRecall;
+        probe.candidates = vec![
+            candidate(1, Some("fact-a")),
+            candidate(2, None),
+            candidate(3, None),
+            candidate(4, None),
+        ];
+        probe.rendered_candidate_count = Some(2);
+
+        assert_eq!(probe.precision_at(4), Some(0.25));
+        assert_eq!(probe.rendered_context_precision(), Some(0.5));
+    }
+
+    #[test]
+    fn rendered_context_precision_skips_probes_without_a_rendered_window() {
+        // Pins: direct-retrieval probes (no rendered count) and empty packed
+        // windows contribute nothing to the parity precision mean.
+        let mut direct = probe_result("direct", None);
+        direct.probe_type = ProbeType::PointRecall;
+        assert_eq!(direct.rendered_candidate_count, None);
+        assert_eq!(direct.rendered_context_precision(), None);
+
+        let mut empty_window = probe_result("empty-window", None);
+        empty_window.probe_type = ProbeType::PointRecall;
+        empty_window.rendered_candidate_count = Some(0);
+        assert_eq!(empty_window.rendered_context_precision(), None);
+
+        let mut rendered = probe_result("rendered", None);
+        rendered.probe_type = ProbeType::PointRecall;
+        rendered.candidates = vec![candidate(1, Some("fact-a")), candidate(2, None)];
+        rendered.rendered_candidate_count = Some(2);
+
+        let report = aggregate_retrieval_eval_from_counts(
+            0,
+            0,
+            vec![direct, empty_window, rendered],
+            BootstrapConfig {
+                resamples: 0,
+                seed: 1,
+            },
+        );
+
+        let summary = report.metrics.rendered_context_precision;
+        assert_eq!(summary.numerator, 0.5);
+        assert_eq!(summary.denominator, 1);
+        assert_eq!(summary.value, 0.5);
     }
 
     #[test]
@@ -1451,6 +1535,7 @@ mod tests {
                 },
             }],
             post_rerank_candidates: None,
+            rendered_candidate_count: None,
             retrieval_latency_ms: 0,
             all_expected_found_at_4: Some(true),
             forbidden_fact_absent_at_4: None,

@@ -9,7 +9,7 @@ use moa_memory_types::MemoryScope;
 use serde::{Deserialize, Serialize};
 
 /// Ranking pipeline version included in cache fingerprints.
-pub const RANKING_PIPELINE_VERSION: u32 = 13;
+pub const RANKING_PIPELINE_VERSION: u32 = 14;
 
 /// Weights used by the FeatureV1 deterministic scorer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,12 +72,16 @@ pub struct RankingConfig {
     /// Minimum absolute lexical evidence a non-graph hit needs to enter the
     /// final injected window. `0.0` disables the floor.
     pub min_hit_evidence: f64,
-    /// Whole-window abstain threshold on the best evidence in the final
-    /// window. `0.0` disables abstention. See
+    /// Retained for cache-fingerprint stability only; no longer read by the
+    /// retriever. The whole-window abstain threshold now rides the request as
+    /// [`crate::retrieval::EvidenceWindowPolicy::abstain_below_window_evidence`],
+    /// calibrated per retrieval path. See
     /// `MemoryRankingConfig::abstain_below_window_evidence`.
     pub abstain_below_window_evidence: f64,
-    /// Final window size when a real reranker is active. `0` keeps the
-    /// caller's `k_final`. See `MemoryRankingConfig::rerank_window`.
+    /// Retained for cache-fingerprint stability only; no longer read by the
+    /// retriever. The reranked-window size now rides the request as
+    /// [`crate::retrieval::EvidenceWindowPolicy::rerank_window`], calibrated per
+    /// retrieval path. See `MemoryRankingConfig::rerank_window`.
     pub rerank_window: usize,
 }
 

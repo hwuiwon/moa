@@ -18,6 +18,12 @@ pub(super) async fn retrieve_probe(
         graph_expansion_policy,
     } = options;
     let started = Instant::now();
+    // The lane's ranking config is the source of the request window policy;
+    // the retriever no longer imposes these knobs globally.
+    let window_policy = EvidenceWindowPolicy {
+        rerank_window: ranking_config.rerank_window,
+        abstain_below_window_evidence: ranking_config.abstain_below_window_evidence,
+    };
     let scope = MemoryScope::Contact {
         tenant_id: tenant_id_from_storage_partition_id(&probe.storage_partition_id),
         contact_id: contact_id_from_user_id(&probe.user_id),
@@ -54,6 +60,7 @@ pub(super) async fn retrieve_probe(
             ranking_reference_time,
             graph_expansion_policy,
             force_graph_off: false,
+            window_policy,
         },
     )
     .await?;
@@ -69,6 +76,7 @@ pub(super) async fn retrieve_probe(
                 ranking_reference_time,
                 graph_expansion_policy,
                 force_graph_off: false,
+                window_policy,
             },
         )
         .await?
@@ -100,6 +108,7 @@ pub(super) async fn retrieve_probe(
                     ranking_reference_time,
                     graph_expansion_policy,
                     force_graph_off: true,
+                    window_policy,
                 },
             )
             .await?;
@@ -186,6 +195,7 @@ pub(super) fn probe_retrieval_request(
         options.k_final,
         options.use_reranker,
     );
+    request.window_policy = options.window_policy;
     request.ranking_reference_time = options.ranking_reference_time;
     request.disable_leg_timeouts = true;
     request.disable_graph_expansion = options.force_graph_off
@@ -422,6 +432,7 @@ pub(super) struct ProbeHitOptions {
     ranking_reference_time: Option<DateTime<Utc>>,
     graph_expansion_policy: GraphExpansionEvalPolicy,
     force_graph_off: bool,
+    window_policy: EvidenceWindowPolicy,
 }
 
 pub(super) fn duration_ms_u64(elapsed: std::time::Duration) -> u64 {
@@ -482,6 +493,7 @@ pub(super) fn probe_result_for(input: ProbeResultInput<'_>) -> ProbeResult {
         blocked_fact_ids: probe.blocked_fact_ids.clone(),
         candidates,
         post_rerank_candidates,
+        rendered_candidate_count: None,
         retrieval_latency_ms,
         all_expected_found_at_4,
         forbidden_fact_absent_at_4,

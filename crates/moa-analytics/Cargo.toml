@@ -19,5 +19,6 @@ workspace-hack.workspace = true
 [dev-dependencies]
 clickhouse = { workspace = true, features = ["test-util"] }
 insta.workspace = true
+moa-lineage-core.workspace = true
 moa-test-support.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

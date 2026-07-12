@@ -71,6 +71,16 @@ Contact-point lookup hashes use a separate 32-byte key from
 `MOA_CONTACT_POINT_HASH_KEY_HEX`; raw emails and phone numbers must not be
 stored in contact lookup columns.
 
+Tenant knowledge base content is tenant-public by design: synced documents are
+written tenant-scoped and admitted to every enabled contact session, and
+connector-source ACLs (Drive per-file sharing, Nango scopes, Merge HRIS) are not
+mirrored or enforced at retrieval — tenant remains the only isolation boundary
+for this content. The prerequisite before connecting permission-bearing
+enterprise sources is indexed source-ACL admission: store each document version's
+source ACL principals at sync time, then join the caller's principal set in the
+retrieval admission filter so only authorized chunks are admitted. See
+[Tenant Knowledge Base](21-tenant-knowledge-base.md) for the operator contract.
+
 ## Credential Isolation
 
 Credentials never enter the sandbox where generated code runs.

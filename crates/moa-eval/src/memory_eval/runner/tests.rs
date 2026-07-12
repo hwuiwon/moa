@@ -228,6 +228,7 @@ fn request_for_policy(query_text: &str) -> RetrievalRequest {
         lineage: None,
         disable_leg_timeouts: true,
         disable_graph_expansion: false,
+        window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
     }
 }
 
@@ -275,6 +276,26 @@ fn pr_lane_refuses_live_only_flags() {
         .expect_err("PR lane with a live budget should fail");
 
     assert!(error.to_string().contains("--budget-usd"));
+}
+
+#[test]
+fn parity_refuses_eval_only_graph_expansion_overrides() {
+    // Pins: parity mode drives the production graph-expansion policy, so an
+    // eval-only A/B override would silently measure a different system.
+    let options = MemoryRetrievalEvalOptions::new("target/missing-corpus", "target/report.json")
+        .with_parity(true)
+        .with_graph_expansion_policy(GraphExpansionEvalPolicy::SkipExactDirect);
+
+    let error = options
+        .validate()
+        .expect_err("parity with an eval-only graph expansion override should fail");
+
+    assert!(error.to_string().contains("--parity"));
+
+    MemoryRetrievalEvalOptions::new("target/missing-corpus", "target/report.json")
+        .with_parity(true)
+        .validate()
+        .expect("parity with the production graph policy should be valid");
 }
 
 #[test]

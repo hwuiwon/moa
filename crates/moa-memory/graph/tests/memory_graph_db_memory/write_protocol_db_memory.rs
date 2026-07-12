@@ -445,6 +445,97 @@ async fn bulk_create_nodes_matches_looped_singles_including_changelog_db_memory(
         .expect("drop isolated schema");
 }
 
+fn shared_entity_intent(
+    partition: &str,
+    uid: Uuid,
+    name: &str,
+    now: chrono::DateTime<Utc>,
+) -> NodeWriteIntent {
+    NodeWriteIntent {
+        uid,
+        label: NodeLabel::Entity,
+        storage_partition_id: Some(partition.to_string()),
+        contact_id: None,
+        scope: "tenant".to_string(),
+        name: name.to_string(),
+        properties: json!({ "name": name, "source": "deadlock_probe" }),
+        pii_class: PiiClass::None,
+        confidence: Some(0.9),
+        valid_from: now,
+        embedding: None,
+        embedding_model: Some("test-model".to_string()),
+        embedding_model_version: Some(1),
+        embedding_text: None,
+        actor_id: "system".to_string(),
+        actor_kind: "system".to_string(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_create_nodes_shared_uids_concurrent_do_not_deadlock_db_memory() {
+    // Pins: concurrent bulk_create_nodes calls writing the SAME shared entity
+    // uids in different array orders — as parallel document ingestion does for
+    // cross-document entities like "OpenAI" — acquire row locks in a
+    // deterministic (uid-sorted) order and all succeed, instead of one writer
+    // aborting with a Postgres 40P01 deadlock. Reverting the sort in
+    // `bulk_create_nodes` makes this fail with a deadlock under load.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool();
+    let partition = Uuid::now_v7().to_string();
+    seed_workspace_embedder_state(pool, &partition).await;
+    let now = Utc::now();
+
+    // Shared entity nodes every writer references, with stable uids so all
+    // transactions contend on the same node_index rows.
+    let shared_uids = (0..8)
+        .map(|i| stable_uuid_from_label(&format!("shared-entity-{i}")))
+        .collect::<Vec<_>>();
+
+    // Each writer submits the shared uids in a distinct rotation, the worst case
+    // for lock ordering before the deterministic sort.
+    let mut handles = Vec::new();
+    for writer in 0..8_usize {
+        let pool = pool.clone();
+        let partition = partition.clone();
+        let mut order = shared_uids.clone();
+        order.rotate_left(writer);
+        handles.push(tokio::spawn(async move {
+            let store = graph_store(&pool, &partition);
+            let intents = order
+                .iter()
+                .enumerate()
+                .map(|(index, uid)| {
+                    shared_entity_intent(&partition, *uid, &format!("shared entity {index}"), now)
+                })
+                .collect::<Vec<_>>();
+            store.bulk_create_nodes(intents).await
+        }));
+    }
+
+    for handle in handles {
+        handle
+            .await
+            .expect("writer task joins")
+            .expect("concurrent bulk_create_nodes must not deadlock");
+    }
+
+    // Every shared node was created exactly once (ON CONFLICT DO NOTHING dedup).
+    for uid in &shared_uids {
+        assert!(
+            node_exists(pool, &partition, *uid).await,
+            "node {uid} present"
+        );
+    }
+
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
 async fn edge_index_row(pool: &PgPool, storage_partition_id: &str, uid: Uuid) -> EdgeIndexRow {
     let mut conn = scoped_conn(pool, storage_partition_id).await;
     let row = sqlx::query(

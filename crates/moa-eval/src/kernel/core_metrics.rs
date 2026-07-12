@@ -20,6 +20,14 @@ impl MetricSummary {
         Self::from_total(numerator as f64, denominator)
     }
 
+    /// Returns whether this summary carries no observations at all, so report
+    /// serialization can omit metrics a run never measured (`skip_serializing_if`)
+    /// while keeping older checked-in baseline reports byte-for-byte round-trippable.
+    #[must_use]
+    pub fn is_empty(value: &Self) -> bool {
+        *value == Self::default()
+    }
+
     /// Builds a mean summary from a total and denominator.
     #[must_use]
     pub fn from_total(numerator: f64, denominator: usize) -> Self {

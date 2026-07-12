@@ -124,6 +124,99 @@ async fn semantic_graph_extraction_is_cached_reported_and_written_db_memory() {
 }
 
 #[tokio::test]
+async fn generic_entity_fallback_writes_graph_entities_on_general_corpus_db_memory() {
+    // Pins: on a general-corpus document with no domain-rule match, the generic
+    // proper-noun fallback still emits Entity nodes and MENTIONS edges, so the
+    // graph retrieval leg has nodes to seed on arbitrary corpora.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated Postgres");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let scope = RlsContext::tenant(tenant_id);
+    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        scope,
+    ));
+    let parser = Arc::new(ParagraphParser);
+    let embedder = Arc::new(CountingEmbedder::default());
+    let graph = Arc::new(FakeGraphWriter::default());
+    let pipeline = KnowledgeIngestionPipeline::new(
+        repository.clone(),
+        parser,
+        embedder,
+        graph.clone(),
+        KnowledgeIngestionPipelineConfig {
+            chunking: ChunkingConfig {
+                target_tokens: 32,
+                max_tokens: 64,
+                min_tokens: 1,
+            },
+            provider: "test_provider".to_string(),
+            parser_label: "test_parser".to_string(),
+        },
+    );
+    repository
+        .upsert_connection(KnowledgeConnection {
+            connection_uid,
+            tenant_id,
+            provider: "test_provider".to_string(),
+            connector: "docs".to_string(),
+            provider_account_id: "acct_generic".to_string(),
+            credential_ref: "vault://knowledge/generic".to_string(),
+            status: ConnectionStatus::Active,
+            metadata: json!({}),
+            source_selection: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_synced_at: None,
+        })
+        .await
+        .expect("upsert connection");
+    // No Wix support phrases or requirement keywords, so the domain ruleset
+    // matches nothing and only the generic fallback can produce entities.
+    let text = "Barack Obama met Angela Merkel in Berlin during the Geneva Summit.";
+    let sync_run_uid = create_run(&repository, tenant_id, connection_uid).await;
+
+    let result = pipeline
+        .ingest_record_page(
+            sync_run_uid,
+            connection_uid,
+            tenant_id,
+            RecordPage {
+                records: vec![record_with_source("generic-a", "v1", false, text)],
+                next_cursor: None,
+            },
+        )
+        .await
+        .expect("ingest general-corpus record");
+
+    assert_eq!(result.records_ingested, 1);
+    let object_uid = object_uid_for_source(connection_uid, "generic-a");
+    let counters = semantic_graph_step_counters(&pool, sync_run_uid, object_uid).await;
+    assert!(
+        counters["entities_extracted"].as_u64().unwrap_or(0) > 0,
+        "generic fallback extracts entities on general text: {counters}"
+    );
+
+    let node_json = graph.properties_json();
+    assert!(
+        node_json.contains("Barack Obama"),
+        "a generic proper-noun Entity node is written: {node_json}"
+    );
+    assert!(
+        node_json.contains("semantic_graph_extraction"),
+        "generic entities flow through the semantic extraction node path: {node_json}"
+    );
+    let edge_json = graph.edge_properties_json();
+    assert!(
+        edge_json.contains("MENTIONS"),
+        "chunk -> entity MENTIONS edges are graph-visible: {edge_json}"
+    );
+}
+
+#[tokio::test]
 async fn ingestion_preserves_chunk_structure_for_bounded_neighbor_context_db_memory() {
     // Pins: ingested chunks preserve document version, ordinal, heading path, and active status for bounded neighbor lookup.
     let db = postgres::bootstrap_test_db()

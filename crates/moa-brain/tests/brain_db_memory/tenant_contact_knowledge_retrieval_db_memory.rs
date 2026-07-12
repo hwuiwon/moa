@@ -908,6 +908,7 @@ fn tenant_chunk_request(tenant_id: TenantId, query: &str) -> RetrievalRequest {
         lineage: None,
         disable_leg_timeouts: false,
         disable_graph_expansion: false,
+        window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
     }
 }
 

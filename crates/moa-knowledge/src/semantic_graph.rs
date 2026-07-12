@@ -10,7 +10,35 @@ use crate::domain::{KnowledgeChunk, KnowledgeObject};
 pub const SEMANTIC_GRAPH_SCHEMA_VERSION: &str = "wix_support_v1";
 
 /// Current prompt or ruleset version used to produce semantic graph facts.
-pub const SEMANTIC_GRAPH_PROMPT_VERSION: &str = "deterministic_rules_v1";
+///
+/// Bumped to `v2` when the generic proper-noun entity fallback was added: the
+/// version is part of the extraction cache key, so a bump forces every cached
+/// chunk to re-extract instead of masking the new fallback behind stale rows.
+pub const SEMANTIC_GRAPH_PROMPT_VERSION: &str = "deterministic_rules_v2";
+
+/// Maximum generic entities emitted per chunk when the domain-specific ruleset
+/// matches nothing. Bounds graph fan-out on large general-corpus chunks.
+const GENERIC_ENTITY_CHUNK_CAP: usize = 16;
+
+/// Minimum in-chunk repetitions for a lone capitalized token to qualify as a
+/// generic entity. Multi-word proper-noun spans qualify on first sight; single
+/// tokens must recur so incidental sentence-initial capitalization does not mint
+/// spurious nodes.
+const GENERIC_ENTITY_SINGLE_TOKEN_MIN_COUNT: usize = 3;
+
+/// Confidence assigned to generic proper-noun entities. Kept at the
+/// same-document chunk-link threshold (0.72) so cross-chunk shared-entity links
+/// form for these fallback entities exactly as they do for curated ones.
+const GENERIC_ENTITY_CONFIDENCE: f64 = 0.72;
+
+/// Common capitalized sentence-initial or function words excluded from generic
+/// proper-noun extraction so ordinary sentence starts do not become entities.
+const GENERIC_ENTITY_STOP_WORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "he", "her", "his",
+    "how", "i", "if", "in", "into", "is", "it", "its", "of", "on", "or", "our", "she", "that",
+    "the", "their", "there", "these", "they", "this", "those", "to", "was", "we", "were", "what",
+    "when", "where", "which", "who", "why", "with", "you", "your",
+];
 
 /// Stable model identifier for deterministic semantic graph extraction.
 pub const SEMANTIC_GRAPH_MODEL: &str = "moa-deterministic-support-v1";
@@ -187,10 +215,18 @@ impl SemanticRelationKind {
 }
 
 /// Builds a deterministic support-domain extraction for one chunk.
+///
+/// When `generic_entities` is enabled and the domain-specific phrase and
+/// requirement rules match nothing in the chunk, a deterministic generic
+/// proper-noun fallback ([`generic_entity_candidates`]) supplies entities so the
+/// graph retrieval leg has nodes to seed on arbitrary corpora. The fallback is
+/// suppressed whenever domain rules fire, preserving existing support-corpus
+/// output exactly.
 #[must_use]
 pub fn extract_chunk_semantics(
     object: &KnowledgeObject,
     chunk: &KnowledgeChunk,
+    generic_entities: bool,
 ) -> SemanticGraphExtraction {
     let mut entities = BTreeMap::<String, SemanticEntity>::new();
     if let Some(title) = object
@@ -221,10 +257,13 @@ pub fn extract_chunk_semantics(
     }
 
     let lower = chunk.text.to_ascii_lowercase();
-    for (phrase, kind, confidence) in support_phrase_entities(&lower) {
+    let phrase_entities = support_phrase_entities(&lower);
+    let requirement_entities = requirement_phrases(&chunk.text);
+    let domain_matched = !phrase_entities.is_empty() || !requirement_entities.is_empty();
+    for (phrase, kind, confidence) in phrase_entities {
         insert_entity(&mut entities, phrase, kind, confidence, phrase);
     }
-    for requirement in requirement_phrases(&chunk.text) {
+    for requirement in requirement_entities {
         insert_entity(
             &mut entities,
             &requirement,
@@ -232,6 +271,18 @@ pub fn extract_chunk_semantics(
             0.86,
             &requirement,
         );
+    }
+
+    if generic_entities && !domain_matched {
+        for name in generic_entity_candidates(&chunk.text) {
+            insert_entity(
+                &mut entities,
+                &name,
+                classify_entity(&name),
+                GENERIC_ENTITY_CONFIDENCE,
+                &name,
+            );
+        }
     }
 
     let ordered_entities = entities.values().cloned().collect::<Vec<_>>();
@@ -399,6 +450,89 @@ fn requirement_phrases(text: &str) -> Vec<String> {
     phrases
 }
 
+/// Extracts deterministic generic entity names from free text.
+///
+/// Emits multi-word capitalized proper-noun spans (two or more consecutive
+/// capitalized tokens) plus lone capitalized tokens that recur at least
+/// [`GENERIC_ENTITY_SINGLE_TOKEN_MIN_COUNT`] times in the chunk, capped at
+/// [`GENERIC_ENTITY_CHUNK_CAP`]. Spans are preferred over lone tokens and both
+/// follow first-appearance order so cached extractions stay byte-stable. Text
+/// with no capitalized spans (for example, all-lowercase prose) yields nothing.
+fn generic_entity_candidates(text: &str) -> Vec<String> {
+    let mut spans = Vec::new();
+    let mut seen_spans = std::collections::BTreeSet::new();
+    let mut group: Vec<String> = Vec::new();
+    // Lowercase key -> (display form, in-chunk occurrence count).
+    let mut singles = BTreeMap::<String, (String, usize)>::new();
+    let mut single_order = Vec::new();
+
+    for raw in text.split_whitespace() {
+        let cleaned = raw.trim_matches(|ch: char| !ch.is_ascii_alphanumeric());
+        let ends_sentence = raw
+            .trim_end_matches(['"', '\'', ')', ']'])
+            .ends_with(['.', '!', '?', ':', ';']);
+        if is_generic_proper_token(cleaned) {
+            let key = cleaned.to_ascii_lowercase();
+            let entry = singles.entry(key.clone()).or_insert_with(|| {
+                single_order.push(key.clone());
+                (cleaned.to_string(), 0)
+            });
+            entry.1 += 1;
+            group.push(cleaned.to_string());
+            if ends_sentence {
+                flush_generic_span(&mut group, &mut spans, &mut seen_spans);
+            }
+        } else {
+            flush_generic_span(&mut group, &mut spans, &mut seen_spans);
+        }
+    }
+    flush_generic_span(&mut group, &mut spans, &mut seen_spans);
+
+    let mut out = spans;
+    for key in single_order {
+        if out.len() >= GENERIC_ENTITY_CHUNK_CAP {
+            break;
+        }
+        if let Some((display, count)) = singles.get(&key)
+            && *count >= GENERIC_ENTITY_SINGLE_TOKEN_MIN_COUNT
+        {
+            out.push(display.clone());
+        }
+    }
+    out.truncate(GENERIC_ENTITY_CHUNK_CAP);
+    out
+}
+
+/// Emits the buffered capitalized run as a span when it holds two or more
+/// tokens, deduplicating case-insensitively, then clears the buffer.
+fn flush_generic_span(
+    group: &mut Vec<String>,
+    spans: &mut Vec<String>,
+    seen: &mut std::collections::BTreeSet<String>,
+) {
+    if group.len() >= 2 {
+        let span = group.join(" ");
+        if seen.insert(span.to_ascii_lowercase()) {
+            spans.push(span);
+        }
+    }
+    group.clear();
+}
+
+/// Returns whether `token` looks like a capitalized proper-noun token: it starts
+/// with an ASCII uppercase letter, is at least two characters, contains a
+/// letter, and is not a common function word.
+fn is_generic_proper_token(token: &str) -> bool {
+    let mut chars = token.chars();
+    if !chars.next().is_some_and(|first| first.is_ascii_uppercase()) {
+        return false;
+    }
+    if token.chars().count() < 2 || !token.chars().any(|ch| ch.is_ascii_alphabetic()) {
+        return false;
+    }
+    !GENERIC_ENTITY_STOP_WORDS.contains(&token.to_ascii_lowercase().as_str())
+}
+
 fn semantic_relations(entities: &[SemanticEntity], lower_text: &str) -> Vec<SemanticRelation> {
     let mut relations = BTreeMap::<(String, String, &'static str), SemanticRelation>::new();
     let primary = entities
@@ -551,7 +685,7 @@ mod tests {
             metadata: json!({}),
         };
 
-        let extraction = extract_chunk_semantics(&object, &chunk);
+        let extraction = extract_chunk_semantics(&object, &chunk, true);
 
         assert_eq!(extraction.schema_version, SEMANTIC_GRAPH_SCHEMA_VERSION);
         assert!(
@@ -565,6 +699,107 @@ mod tests {
                 .relations
                 .iter()
                 .any(|relation| relation.kind == SemanticRelationKind::Requires)
+        );
+    }
+
+    #[test]
+    fn generic_entity_candidates_extracts_proper_nouns_deterministically() {
+        // Pins: multi-word capitalized spans are extracted in first-appearance
+        // order, sentence boundaries do not merge adjacent proper nouns, and a
+        // lone token needs three occurrences to qualify.
+        let text = "The Acme Corporation shipped Widget Pro. Acme runs on Kubernetes. \
+             Acme leads the market. Acme again.";
+
+        let entities = generic_entity_candidates(text);
+
+        assert_eq!(
+            entities,
+            vec![
+                "Acme Corporation".to_string(),
+                "Widget Pro".to_string(),
+                "Acme".to_string(),
+            ],
+            "spans first in order, then the lone token repeated >= 3 times"
+        );
+        assert!(
+            !entities.iter().any(|entity| entity == "Kubernetes"),
+            "a single-occurrence lone token is excluded: {entities:?}"
+        );
+    }
+
+    #[test]
+    fn generic_entity_candidates_is_empty_on_lowercase_text() {
+        // Pins: text without capitalized proper-noun spans yields no generic
+        // entities, so ordinary prose does not flood the graph with noise.
+        let entities = generic_entity_candidates(
+            "connecting a custom domain requires a premium plan and dns records.",
+        );
+
+        assert!(entities.is_empty(), "{entities:?}");
+    }
+
+    #[test]
+    fn generic_entity_candidates_respects_chunk_cap() {
+        // Pins: generic extraction never emits more than the per-chunk cap even
+        // when the text contains many distinct proper-noun spans.
+        let text = (0..40)
+            .map(|index| format!("Alpha{index} Beta{index}"))
+            .collect::<Vec<_>>()
+            .join(". ");
+
+        let entities = generic_entity_candidates(&text);
+
+        assert_eq!(entities.len(), GENERIC_ENTITY_CHUNK_CAP);
+    }
+
+    #[test]
+    fn extract_chunk_semantics_generic_fallback_only_without_domain_match() {
+        // Pins: on general-corpus text the generic fallback populates entities
+        // when enabled and stays empty when disabled or when domain rules fire.
+        let tenant_id = TenantId::from(Uuid::from_u128(11));
+        let object = KnowledgeObject {
+            object_uid: Uuid::from_u128(12),
+            tenant_id,
+            connection_uid: Uuid::from_u128(13),
+            object_type: "article".to_string(),
+            source_id: "news".to_string(),
+            parent_source_id: None,
+            title: None,
+            source_uri: None,
+            change_token: None,
+            source_updated_at: None,
+            deleted_at: None,
+            status: ObjectStatus::Active,
+            metadata: json!({}),
+        };
+        let chunk = KnowledgeChunk {
+            chunk_uid: Uuid::from_u128(14),
+            version_uid: Uuid::from_u128(15),
+            graph_node_uid: None,
+            chunk_hash: "chunk-generic".to_string(),
+            block_hashes: vec!["block-generic".to_string()],
+            heading_path: vec![],
+            text: "Barack Obama met Angela Merkel at the summit in Berlin.".to_string(),
+            ordinal: 0,
+            token_count: 10,
+            metadata: json!({}),
+        };
+
+        let enabled = extract_chunk_semantics(&object, &chunk, true);
+        assert!(
+            enabled
+                .entities
+                .iter()
+                .any(|entity| entity.canonical_name == "Barack Obama"),
+            "{:?}",
+            enabled.entities
+        );
+
+        let disabled = extract_chunk_semantics(&object, &chunk, false);
+        assert!(
+            disabled.entities.is_empty(),
+            "no title, heading, or domain match leaves nothing without the fallback: {:?}",
+            disabled.entities
         );
     }
 }

@@ -84,6 +84,7 @@ async fn reranker_reorders_candidates_when_enabled() {
         lineage: None,
         disable_leg_timeouts: false,
         disable_graph_expansion: false,
+        window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
     };
     let first = hit(Uuid::now_v7(), "workspace", 2.0);
     let second = hit(Uuid::now_v7(), "workspace", 1.0);
@@ -126,6 +127,7 @@ async fn reranker_receives_hydrated_chunk_text_for_knowledge_hits() {
         lineage: None,
         disable_leg_timeouts: false,
         disable_graph_expansion: false,
+        window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
     };
     let mut candidate = hit(Uuid::now_v7(), "tenant", 1.0);
     candidate.node.name = "thin sidecar name".to_string();
@@ -201,6 +203,7 @@ fn feature_ranker_rescues_lexical_non_vector_hit_over_vector_noise() {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
+            window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
         },
     );
 
@@ -257,6 +260,7 @@ fn feature_ranker_rescue_skips_graph_lexical_neighbors() {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
+            window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
         },
     );
 
@@ -313,6 +317,7 @@ fn feature_ranker_rescues_graph_only_expansion_hit() {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
+            window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
         },
     );
 
@@ -371,6 +376,7 @@ fn anchored_rescue_preserves_vector_rank_one_over_graph_only_hit() {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
+            window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
         },
         GraphRetrievalPolicy::AnchoredRescue,
         Some(vector_uid),
@@ -454,6 +460,7 @@ fn source_graph_ranking_groups_chunks_and_reports_typed_graph_features() {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
+            window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
         },
         &[GraphPathTrace {
             seed_uid: Uuid::from_u128(99),
@@ -542,6 +549,7 @@ fn source_graph_preserves_vector_article_without_typed_graph_evidence() {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
+            window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
         },
         &[],
         Some(vector_uid),
@@ -618,6 +626,7 @@ fn source_graph_keeps_original_order_when_top_article_is_unchanged() {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
+            window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
         },
         &[],
         Some(top_uid),
@@ -706,6 +715,7 @@ fn entity_local_search_keeps_original_order_when_top_article_is_unchanged() {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
+            window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
         },
         &[GraphPathTrace {
             seed_uid: Uuid::from_u128(99),
@@ -789,6 +799,7 @@ fn entity_local_source_object_ranking_preserves_vector_rank_one_with_semantic_pa
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
+            window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
         },
         &[GraphPathTrace {
             seed_uid: Uuid::from_u128(99),
@@ -859,6 +870,7 @@ fn entity_local_source_object_ranking_ignores_disallowed_raw_paths() {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
+            window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
         },
         &[GraphPathTrace {
             seed_uid: Uuid::from_u128(99),
@@ -1650,6 +1662,7 @@ fn empty_corpus_request(k_final: usize, use_reranker: bool) -> RetrievalRequest 
         lineage: None,
         disable_leg_timeouts: false,
         disable_graph_expansion: false,
+        window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
     }
 }
 
@@ -2034,6 +2047,7 @@ fn evidence_floor_drops_lexically_unsupported_hits_but_keeps_graph_hits() {
         lineage: None,
         disable_leg_timeouts: false,
         disable_graph_expansion: false,
+        window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
     };
     let mut supported = fact_hit_with_spo(
         Uuid::from_u128(1),
@@ -2106,8 +2120,9 @@ fn evidence_floor_drops_lexically_unsupported_hits_but_keeps_graph_hits() {
     apply_injection_evidence_floor(&mut noise, &disabled, &query);
     assert_eq!(noise.len(), 1);
 
-    // The production default, by contrast, abstains on that same
-    // evidence-free window (live-calibrated threshold, 2026-07-11).
+    // A request carrying the production abstain window policy, by contrast,
+    // abstains on that same evidence-free window (live-calibrated threshold,
+    // 2026-07-11). The threshold now rides the request, not the config.
     let mut default_noise = vec![fact_hit_with_spo(
         Uuid::from_u128(7),
         0.9,
@@ -2115,10 +2130,17 @@ fn evidence_floor_drops_lexically_unsupported_hits_but_keeps_graph_hits() {
         "was",
         "sandwiches",
     )];
-    apply_injection_evidence_floor(&mut default_noise, &RankingConfig::default(), &query);
+    let abstaining = RetrievalRequest {
+        window_policy: crate::retrieval::EvidenceWindowPolicy {
+            rerank_window: 0,
+            abstain_below_window_evidence: 0.68,
+        },
+        ..query.clone()
+    };
+    apply_injection_evidence_floor(&mut default_noise, &RankingConfig::default(), &abstaining);
     assert!(
         default_noise.is_empty(),
-        "default config must abstain on an evidence-free window"
+        "request abstain policy must clear an evidence-free window"
     );
 }
 
@@ -2143,11 +2165,14 @@ fn window_abstention_clears_low_evidence_windows_but_spares_supported_and_graph_
         lineage: None,
         disable_leg_timeouts: false,
         disable_graph_expansion: false,
+        // The whole-window abstain threshold rides the request per retrieval
+        // path, not the shared ranking config.
+        window_policy: crate::retrieval::EvidenceWindowPolicy {
+            rerank_window: 0,
+            abstain_below_window_evidence: 0.68,
+        },
     };
-    let config = RankingConfig {
-        abstain_below_window_evidence: 0.68,
-        ..RankingConfig::default()
-    };
+    let config = RankingConfig::default();
     let noise = |uid: u128, sim: f64| {
         let mut hit = fact_hit_with_spo(Uuid::from_u128(uid), 0.9, "lunch order", "was", "salad");
         hit.similarity = Some(sim);
@@ -2177,5 +2202,54 @@ fn window_abstention_clears_low_evidence_windows_but_spares_supported_and_graph_
         graph_backed.len(),
         1,
         "graph-admitted windows never abstain"
+    );
+}
+
+#[test]
+fn default_window_policy_ignores_nonzero_ranking_config_window_knobs() {
+    // Pins: the evidence window is request-scoped. A request carrying the
+    // default (off) EvidenceWindowPolicy is never abstained, even when the
+    // retriever's RankingConfig still holds non-zero window knobs (retained
+    // only for cache-fingerprint stability). This is the guard against the
+    // 2026-07-11 clamp where a retriever-global window policy cut a
+    // knowledge-lane retrieval down to the memory-lane window.
+    let query = RetrievalRequest {
+        seeds: Vec::new(),
+        query_text: "what is the deploy target for checkout".to_string(),
+        query_embedding: Vec::new(),
+        scope: tenant_scope(),
+        label_filter: None,
+        max_pii_class: PiiClass::Restricted,
+        k_final: 4,
+        use_reranker: false,
+        strategy: None,
+        as_of: None,
+        ranking_reference_time: None,
+        lineage: None,
+        disable_leg_timeouts: false,
+        disable_graph_expansion: false,
+        window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
+    };
+    // The config still carries the production non-zero window knobs; they must
+    // not drive abstention now that the policy rides the request.
+    let config = RankingConfig {
+        abstain_below_window_evidence: 0.68,
+        rerank_window: 3,
+        ..RankingConfig::default()
+    };
+    let mut noise = vec![fact_hit_with_spo(
+        Uuid::from_u128(1),
+        0.9,
+        "lunch order",
+        "was",
+        "sandwiches",
+    )];
+
+    apply_injection_evidence_floor(&mut noise, &config, &query);
+
+    assert_eq!(
+        noise.len(),
+        1,
+        "a default request policy must not abstain even with non-zero config window knobs"
     );
 }

@@ -28,6 +28,8 @@ pub struct KnowledgeConfig {
     pub sync: KnowledgeSyncConfig,
     /// Chunking controls.
     pub chunking: KnowledgeChunkingConfig,
+    /// Semantic graph extraction controls.
+    pub semantic: KnowledgeSemanticConfig,
     /// Knowledge observability controls.
     pub observability: KnowledgeObservabilityConfig,
 }
@@ -322,6 +324,27 @@ impl Default for KnowledgeChunkingConfig {
             target_tokens: 700,
             max_tokens: 1_000,
             min_tokens: 120,
+        }
+    }
+}
+
+/// Tenant knowledge semantic graph extraction controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KnowledgeSemanticConfig {
+    /// Emit deterministic generic proper-noun entities when the domain-specific
+    /// ruleset matches nothing in a chunk.
+    ///
+    /// Defaults to `true`: the fallback is purely lexical (no provider or LLM
+    /// calls) and cheap, and without it the graph retrieval leg never fires on
+    /// non-domain corpora because no entity nodes exist to seed traversal.
+    pub generic_entities: bool,
+}
+
+impl Default for KnowledgeSemanticConfig {
+    fn default() -> Self {
+        Self {
+            generic_entities: true,
         }
     }
 }

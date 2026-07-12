@@ -37,7 +37,9 @@ use moa_knowledge::parser::native::NativeDocumentParser;
 use moa_knowledge::repository::{KnowledgeRepository, PostgresKnowledgeRepository, SyncRunClaim};
 use moa_memory_graph::{NodeLabel, PiiClass, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
-use moa_memory_vector::{VectorStoreFactory, VectorSyncReport};
+use moa_memory_vector::{
+    VectorPartitionPromotion, VectorStore, VectorStoreFactory, VectorSyncReport,
+};
 use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
 use pgvector::HalfVector;
 use serde::{Deserialize, Serialize};
@@ -155,6 +157,20 @@ async fn run_async(options: Options) -> Result<RunSummary> {
             drain_external_vector_sync(&pool, &config, options.vector_sync_drain_limit).await?;
         (ingestion, vector_sync)
     };
+    // The Turbopuffer read side is a projection of the Postgres-canonical
+    // embeddings. The incremental outbox drain above only carries rows written
+    // by THIS run's ingestion, so a reused/already-ingested tenant would leave
+    // the namespace empty. Reproject the whole partition so retrieval reads a
+    // complete namespace regardless of ingestion skips.
+    let turbopuffer_reprojected = if matches!(options.backend, Backend::Turbopuffer) {
+        let copied = reproject_partition_to_turbopuffer(&pool, &config, tenant_id).await?;
+        eprintln!(
+            "reprojected {copied} partition embeddings into Turbopuffer (storage_partition_id={storage_partition_id}) before retrieval"
+        );
+        Some(copied as u64)
+    } else {
+        None
+    };
     let query_run = retrieve_questions(RetrievalEvalInputs {
         pool: &pool,
         tenant_id,
@@ -185,7 +201,7 @@ async fn run_async(options: Options) -> Result<RunSummary> {
             format!("write embedding export {}", embedding_export_path.display())
         })?;
     }
-    let report = build_report(
+    let mut report = build_report(
         &options,
         tenant_id,
         connection_uid,
@@ -194,6 +210,7 @@ async fn run_async(options: Options) -> Result<RunSummary> {
         vector_sync,
         query_run.measurements,
     );
+    report.turbopuffer_reprojected = turbopuffer_reprojected;
     write_pretty_json(&options.output, &report)
         .with_context(|| format!("write {}", options.output.display()))?;
     Ok(RunSummary {
@@ -225,6 +242,39 @@ async fn drain_external_vector_sync(
         .drain_external_sync(pool, limit)
         .await
         .context("drain external vector sync outbox")
+}
+
+/// Reprojects a storage partition's stored pgvector embeddings into Turbopuffer.
+///
+/// The Turbopuffer path seeds `vector_backend = 'turbopuffer'` and reads the
+/// tenant's Turbopuffer namespace directly, but that namespace is only populated
+/// by draining the incremental `vector_sync_outbox`, which ingestion fills at
+/// write time. When a run reuses a tenant whose Postgres partition was already
+/// ingested (e.g. a prior `--backend pgvector` run on the same corpus),
+/// ingestion skips every record, the outbox is empty, the drain is a no-op, and
+/// the Turbopuffer namespace stays empty — retrieval then reads an empty
+/// projection and reports near-zero recall. This full reproject copies the
+/// partition's stored embeddings into Turbopuffer so the read side mirrors
+/// Postgres regardless of ingestion skips. It is an idempotent upsert and reuses
+/// the stored embeddings, so it issues no new embedding-provider calls.
+async fn reproject_partition_to_turbopuffer(
+    pool: &PgPool,
+    config: &MoaConfig,
+    tenant_id: TenantId,
+) -> Result<usize> {
+    let vector_factory = VectorStoreFactory::from_config(config);
+    let scope = RlsContext::tenant(tenant_id);
+    let source: Arc<dyn VectorStore> =
+        vector_factory.pgvector_source_for_app_role(pool.clone(), scope);
+    let turbopuffer = vector_factory.turbopuffer().context(
+        "--backend turbopuffer selected but no Turbopuffer client is configured (set MOA_TURBOPUFFER_API_KEY)",
+    )?;
+    let target: Arc<dyn VectorStore> = Arc::new(turbopuffer.scoped_to_tenant(tenant_id));
+    let promotion = VectorPartitionPromotion::new(pool.clone(), source, target);
+    promotion
+        .copy_storage_partition(&tenant_id.0.to_string())
+        .await
+        .context("reproject storage partition into Turbopuffer")
 }
 
 async fn build_embedding_export(
@@ -670,19 +720,11 @@ async fn retrieve_questions(inputs: RetrievalEvalInputs<'_>) -> Result<QueryRun>
         pool.clone(),
         scope.clone(),
     ));
-    // The evidence-window knobs (rerank_window, abstain_below_window_evidence)
-    // are calibrated for the memory-evidence path's small injected window.
-    // This harness does article-level retrieval that sizes its own window via
-    // --top-k, so the window policy must stay off here: the global
-    // rerank_window default once clamped k=10 requests to 3 and cut
-    // MultiHop-RAG recall@10 from 0.227 to 0.144 (2026-07-11 results log).
-    let mut harness_ranking =
-        moa_brain::retrieval::ranking::RankingConfig::from(&config.memory.retrieval.ranking);
-    harness_ranking.rerank_window = 0;
-    harness_ranking.abstain_below_window_evidence = 0.0;
+    // This harness sizes its own article-level window via --top-k and leaves
+    // the request's default (off) `EvidenceWindowPolicy`, so the memory-lane
+    // window knobs never clamp it (2026-07-11 MultiHop-RAG recall@10 clamp).
     let retriever =
         HybridRetriever::from_config(config, pool.clone(), graph_store, pgvector_source)
-            .with_ranking_config(harness_ranking)
             .with_assume_app_role(true)
             .with_graph_policy(graph_policy);
     let memory_scope = MemoryScope::Tenant { tenant_id };
@@ -836,6 +878,9 @@ async fn retrieve_wixqa_output(
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion,
+            // Article-level retrieval sizes its own window via --top-k; the
+            // memory-lane window knobs must not clamp it.
+            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
         })
         .await
         .with_context(|| format!("retrieve WixQA query `{}`", question.question))
@@ -1216,6 +1261,7 @@ fn build_report(
         chunking: ChunkingReport::from(selected.chunking),
         ingestion,
         vector_sync: VectorSyncReportJson::from(vector_sync),
+        turbopuffer_reprojected: None,
         fallback,
         metrics: aggregate,
         latency,
@@ -1597,6 +1643,10 @@ enum Dataset {
     /// lane from the 2026-07-11 RAG accuracy plan. Fetch and convert with
     /// `scripts/fetch_multihoprag.py`.
     MultihopRag,
+    /// FinanceBench (PatronusAI): 150 SEC-filing questions over an
+    /// evidence-snippet corpus (84 documents) — the financial external lane.
+    /// Fetch and convert with `scripts/fetch_financebench.py`.
+    Financebench,
 }
 
 impl Dataset {
@@ -1606,6 +1656,7 @@ impl Dataset {
             "simulated" | "wixqa_simulated" => Ok(Self::Simulated),
             "synthetic" | "wixqa_synthetic" => Ok(Self::Synthetic),
             "multihoprag" | "multihop" => Ok(Self::MultihopRag),
+            "financebench" | "finbench" => Ok(Self::Financebench),
             other => bail!("unknown WixQA dataset `{other}`"),
         }
     }
@@ -1616,6 +1667,7 @@ impl Dataset {
             Self::Simulated => "simulated",
             Self::Synthetic => "synthetic",
             Self::MultihopRag => "multihoprag",
+            Self::Financebench => "financebench",
         }
     }
 
@@ -1625,6 +1677,7 @@ impl Dataset {
             Self::Simulated => "wixqa_simulated/test.jsonl",
             Self::Synthetic => "wixqa_synthetic/test.jsonl",
             Self::MultihopRag => "multihoprag/questions.jsonl",
+            Self::Financebench => "financebench/questions.jsonl",
         }
     }
 
@@ -1634,6 +1687,7 @@ impl Dataset {
                 "wix_kb_corpus/wix_kb_corpus.jsonl"
             }
             Self::MultihopRag => "multihoprag/corpus.jsonl",
+            Self::Financebench => "financebench/corpus.jsonl",
         }
     }
 }
@@ -1883,7 +1937,7 @@ fn print_help() {
          Options:\n\
            --data-dir PATH              WixQA raw JSONL cache (default: {DEFAULT_DATA_DIR})\n\
            --output PATH                Report JSON path (default: {DEFAULT_OUTPUT})\n\
-           --dataset NAME               simulated|expertwritten|synthetic|multihoprag (default: simulated)\n\
+           --dataset NAME               simulated|expertwritten|synthetic|multihoprag|financebench (default: simulated)\n\
            --backend NAME               pgvector|turbopuffer (default: pgvector)\n\
            --question-limit N|all       Questions to evaluate (default: 20)\n\
            --question-offset N          Offset into the selected QA split (default: 0)\n\
@@ -1999,6 +2053,8 @@ struct WixQaReport {
     chunking: ChunkingReport,
     ingestion: IngestionReport,
     vector_sync: VectorSyncReportJson,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turbopuffer_reprojected: Option<u64>,
     fallback: FallbackReport,
     metrics: AggregateMetrics,
     latency: LatencyReport,

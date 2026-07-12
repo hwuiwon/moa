@@ -29,6 +29,10 @@ pub struct MemoryRetrievalEvalReport {
     /// Whether the eval collected a post-rerank top-4 retrieval pass.
     #[serde(default)]
     pub reranker_enabled: bool,
+    /// Whether probes retrieved through the production stage-7 evidence seam
+    /// (router, admission, cross-scope merge, and evidence-budget packing).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub parity: bool,
     /// Query rewrite policy used by this run.
     #[serde(default)]
     pub query_rewrite_policy: QueryRewritePolicy,
@@ -184,6 +188,7 @@ pub(super) struct ReportBuildInput {
     pub(super) extraction_precision: ExtractionPrecisionCounts,
     pub(super) entity_fragmentation: EntityFragmentationCounts,
     pub(super) reranker_enabled: bool,
+    pub(super) parity: bool,
     pub(super) rewrite_summary: QueryRewriteSummary,
     pub(super) graph_expansion_policy: GraphExpansionEvalPolicy,
     pub(super) aborted_over_budget: bool,
@@ -212,6 +217,7 @@ pub(super) fn build_eval_report(input: ReportBuildInput) -> MemoryRetrievalEvalR
         candidate_k: RETRIEVAL_EVAL_CANDIDATE_K,
         final_k: RETRIEVAL_EVAL_FINAL_K,
         reranker_enabled: input.reranker_enabled,
+        parity: input.parity,
         query_rewrite_policy: input.rewrite_summary.policy,
         graph_expansion_policy: input.graph_expansion_policy,
         graph_retrieval_policy: input.graph_expansion_policy.graph_retrieval_policy(),

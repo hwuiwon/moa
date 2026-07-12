@@ -1890,6 +1890,7 @@ mod tests {
             lineage: None,
             disable_leg_timeouts: true,
             disable_graph_expansion: false,
+            window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
         }
     }
 

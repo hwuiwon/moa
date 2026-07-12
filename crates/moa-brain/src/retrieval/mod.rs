@@ -24,9 +24,9 @@ pub use ranking::{
 };
 pub use router::{RetrievalStrategy, decompose_query, route_query};
 pub use types::{
-    GraphCandidateCounts, GraphPathTrace, GraphRetrievalDiagnostics, GraphSeedDiagnostics,
-    GraphSeedSource, KnowledgeChunkHydration, KnowledgeChunkWindowPart, LegSources, LexicalBackend,
-    LineageContext, Result, RetrievalError, RetrievalHit, RetrievalLineageHit, RetrievalOutput,
-    RetrievalRequest, SourceObjectFeatureContribution, SourceObjectFeatureContributions,
-    SourceObjectRankingDiagnostics, SourceTier,
+    EvidenceWindowPolicy, GraphCandidateCounts, GraphPathTrace, GraphRetrievalDiagnostics,
+    GraphSeedDiagnostics, GraphSeedSource, KnowledgeChunkHydration, KnowledgeChunkWindowPart,
+    LegSources, LexicalBackend, LineageContext, Result, RetrievalError, RetrievalHit,
+    RetrievalLineageHit, RetrievalOutput, RetrievalRequest, SourceObjectFeatureContribution,
+    SourceObjectFeatureContributions, SourceObjectRankingDiagnostics, SourceTier,
 };

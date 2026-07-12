@@ -385,6 +385,40 @@ mod tests {
         assert_eq!(strengths, vec![(planner, 1.0), (exact, 1.0)]);
     }
 
+    #[test]
+    fn semantic_entity_seed_terms_extracts_generic_entity_tokens() {
+        // Pins: the entity seed tsquery is built from generic proper-noun tokens
+        // in the query, so Entity nodes minted by the ingestion generic-entity
+        // fallback are reachable by name lookup, not just curated support terms.
+        let terms = semantic_entity_seed_terms("What did Angela Merkel say about Berlin?");
+
+        assert!(terms.contains(&"angela".to_string()), "{terms:?}");
+        assert!(terms.contains(&"merkel".to_string()), "{terms:?}");
+        assert!(terms.contains(&"berlin".to_string()), "{terms:?}");
+        assert!(
+            !terms.contains(&"what".to_string()),
+            "stop words are dropped: {terms:?}"
+        );
+    }
+
+    #[test]
+    fn exact_semantic_entity_seed_uids_accepts_generic_multi_word_entity() {
+        // Pins: a generic multi-word proper-noun Entity node is admitted as an
+        // exact semantic seed when every token appears in the query, matching the
+        // parity the curated support entities already enjoy.
+        let seed = Uuid::from_u128(77);
+        let mut row = node_row(seed, "Angela Merkel");
+        row.label = NodeLabel::Entity;
+
+        let accepted = exact_semantic_entity_seed_uids(
+            &[seed],
+            &[row],
+            "What did Angela Merkel say about the summit?",
+        );
+
+        assert_eq!(accepted, vec![seed]);
+    }
+
     fn node_row(uid: Uuid, name: &str) -> NodeIndexRow {
         NodeIndexRow {
             uid,

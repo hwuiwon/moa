@@ -86,6 +86,7 @@ pub struct KnowledgeIngestionPipeline<R, P, E, G> {
     chunking: ChunkingConfig,
     provider: String,
     parser_label: String,
+    semantic_generic_entities: bool,
     content_fetcher: Option<Arc<dyn RecordContentFetcher>>,
 }
 

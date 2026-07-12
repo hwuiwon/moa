@@ -399,7 +399,7 @@ impl HybridRetriever {
             // reranked window can be tighter than the caller's k: the tail
             // slots are the noise the precision metrics measure. Without a
             // reranker the tail still carries recall and k is kept.
-            let rerank_k = match self.ranking_config.rerank_window {
+            let rerank_k = match req.window_policy.rerank_window {
                 0 => req.k_final,
                 window => req.k_final.min(window),
             };
@@ -1053,7 +1053,11 @@ fn apply_injection_evidence_floor(
     config: &RankingConfig,
     req: &RetrievalRequest,
 ) {
-    if config.min_hit_evidence <= 0.0 && config.abstain_below_window_evidence <= 0.0 {
+    // The whole-window abstain threshold is request-scoped (calibrated per
+    // retrieval path); the per-hit `min_hit_evidence` floor stays an experiment
+    // knob read from the retriever's ranking config.
+    let abstain_below_window_evidence = req.window_policy.abstain_below_window_evidence;
+    if config.min_hit_evidence <= 0.0 && abstain_below_window_evidence <= 0.0 {
         return;
     }
     let query_tokens = normalize_tokens(&req.query_text);
@@ -1083,12 +1087,12 @@ fn apply_injection_evidence_floor(
     // per hit, but window maxima separate answerable queries from
     // unanswerable ones (live calibration 2026-07-11: abstention window
     // maxima ≤ 0.67 while answerable windows reach ≥ 0.68).
-    if config.abstain_below_window_evidence > 0.0
+    if abstain_below_window_evidence > 0.0
         && !hits.is_empty()
         && !hits.iter().any(|hit| hit.legs.graph)
     {
         let window_max = hits.iter().map(&evidence_of).fold(0.0_f64, f64::max);
-        if window_max < config.abstain_below_window_evidence {
+        if window_max < abstain_below_window_evidence {
             metrics::counter!("moa_retrieval_window_abstained_total").increment(1);
             hits.clear();
             return;

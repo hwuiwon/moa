@@ -169,6 +169,39 @@ privacy-filtered summaries. There is no separate public answer endpoint for
 tenant knowledge; normal agent/session answer generation consumes the assembled
 context.
 
+## Visibility And Access Control
+
+Tenant knowledge is tenant-public by design. Every synced document is visible to
+every contact of the owning tenant. Knowledge nodes are written tenant-scoped
+with `PiiClass::None`, and retrieval admission adds a fixed
+`SourceTier::TenantKnowledge` leg to every session whose agent knowledge policy is
+enabled. The only admission controls today are that pinned agent knowledge policy
+— which can disable knowledge retrieval entirely, cap the retrieval budget, and
+set a PII floor — plus tenant-level RLS isolation. There is no per-contact,
+per-source, or per-document visibility filter.
+
+Source-system permissions are not mirrored. Connector-source ACLs — Google Drive
+per-file sharing, Nango record scopes, Merge HRIS object permissions — are neither
+read at sync time nor enforced at retrieval. A document that only one person could
+open in the source system becomes visible to every contact of the tenant once it
+is synced.
+
+Operator contract: only connect sources whose full content is acceptable
+tenant-wide. Treat linking a `KnowledgeConnection` as publishing its selected
+objects to the entire tenant. Do not connect permission-bearing sources —
+per-file-shared Drive folders, HRIS records, access-controlled ticket queues —
+whose contents are not uniformly safe for every contact of the tenant.
+
+Indexed per-source ACL admission filters are the documented prerequisite before
+permission-bearing enterprise sources (Drive per-file sharing, Merge HRIS) can be
+connected safely. The intended design stores each document version's source ACL
+principals at sync time and joins the caller's principal set against them in the
+retrieval admission filter, so only authorized chunks are admitted. Until that
+ships, tenant-public is the enforced and intended semantics, and connectors that
+carry per-record permissions must not be treated as access-controlled. See
+[Security](08-security.md) for the cross-referenced policy and admission-filter
+sketch.
+
 ## Public Endpoints
 
 The public HTTP routes for this surface are:

@@ -649,6 +649,90 @@ fn dataset_specs() -> Vec<DatasetSpec> {
                 ),
             ],
         ),
+        // Live retrieval precision proxy. Each row is one injected retrieval hit
+        // (a `moa.retrieval_lineage` row inside the rank <= 3 rendered evidence
+        // window) joined against the turn's durable citation lineage
+        // (`analytics.turn_lineage`, record_kind 4 = Citation). A hit counts as
+        // cited when any citation's `source_chunk_id` matches the hit's knowledge
+        // chunk uid or graph node uid, or its `source_node_uid` matches the graph
+        // node uid — the exact key mapping `emit_context_lineage` uses when it
+        // fans evidence refs into `ChunkRef`s. Aggregate `count()` for
+        // injected_hits, `sum(cited_hit)` for cited_hits, and `avg(cited_hit)`
+        // for the citation rate; group by `retrieved_day` for per-day series.
+        //
+        // Postgres-only: `moa.retrieval_lineage` is not exported to ClickHouse,
+        // so this dataset has no ClickHouse source and deployments running the
+        // ClickHouse analytics backend (which also move `turn_lineage` rows out
+        // of Postgres) cannot serve it.
+        dataset(
+            "citation_precision",
+            "Citation Precision",
+            "Per-turn precision proxy: injected retrieval hits and whether the final answer cited them.",
+            "(SELECT rl.tenant_id AS tenant_id, \
+             rl.session_id AS session_id, \
+             rl.turn_id AS turn_id, \
+             rl.rank AS rank, \
+             rl.retrieved_at AS retrieved_at, \
+             date_trunc('day', rl.retrieved_at) AS retrieved_day, \
+             COALESCE(cit.cited, FALSE) AS cited, \
+             COALESCE(cit.cited_verified, FALSE) AS cited_verified, \
+             (CASE WHEN COALESCE(cit.cited, FALSE) THEN 1.0 ELSE 0.0 END)::DOUBLE PRECISION AS cited_hit, \
+             (CASE WHEN COALESCE(cit.cited_verified, FALSE) THEN 1.0 ELSE 0.0 END)::DOUBLE PRECISION AS cited_verified_hit \
+             FROM moa.retrieval_lineage AS rl \
+             LEFT JOIN LATERAL ( \
+             SELECT bool_or( \
+             citation.value ->> 'source_chunk_id' = rl.uid::TEXT \
+             OR citation.value ->> 'source_chunk_id' = rl.chunk_uid::TEXT \
+             OR citation.value ->> 'source_node_uid' = rl.uid::TEXT \
+             ) AS cited, \
+             bool_or( \
+             (citation.value ->> 'source_chunk_id' = rl.uid::TEXT \
+             OR citation.value ->> 'source_chunk_id' = rl.chunk_uid::TEXT \
+             OR citation.value ->> 'source_node_uid' = rl.uid::TEXT) \
+             AND COALESCE((citation.value -> 'verifier' ->> 'verified')::BOOLEAN, FALSE) \
+             ) AS cited_verified \
+             FROM analytics.turn_lineage AS tl \
+             CROSS JOIN LATERAL jsonb_array_elements( \
+             CASE WHEN jsonb_typeof(tl.payload -> 'record' -> 'citations') = 'array' \
+             THEN tl.payload -> 'record' -> 'citations' ELSE '[]'::JSONB END \
+             ) AS citation(value) \
+             WHERE tl.turn_id = rl.turn_id AND tl.record_kind = 4 \
+             ) AS cit ON TRUE \
+             WHERE rl.turn_id IS NOT NULL AND rl.rank <= 3)",
+            Some("retrieved_at"),
+            vec![
+                tenant_filter(),
+                dimension(
+                    "session_id",
+                    "session_id",
+                    "Session",
+                    AnalyticsFieldKind::Uuid,
+                ),
+                dimension("turn_id", "turn_id", "Turn", AnalyticsFieldKind::Uuid),
+                dimension("rank", "rank", "Rank", AnalyticsFieldKind::Integer),
+                dimension("cited", "cited", "Cited", AnalyticsFieldKind::Boolean),
+                dimension(
+                    "cited_verified",
+                    "cited_verified",
+                    "Cited Verified",
+                    AnalyticsFieldKind::Boolean,
+                ),
+                timestamp("retrieved_at", "retrieved_at", "Retrieved At"),
+                timestamp("retrieved_day", "retrieved_day", "Retrieved Day"),
+                measure(
+                    "cited_hit",
+                    "cited_hit",
+                    "Cited Hit",
+                    AnalyticsFieldKind::Float,
+                ),
+                measure(
+                    "cited_verified_hit",
+                    "cited_verified_hit",
+                    "Cited Verified Hit",
+                    AnalyticsFieldKind::Float,
+                ),
+            ],
+        ),
     ]
 }
 
@@ -845,6 +929,7 @@ mod tests {
             "learning_candidates",
             "experiment_runs",
             "events",
+            "citation_precision",
         ] {
             assert!(ids.contains(&expected), "missing dataset {expected}");
         }

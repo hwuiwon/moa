@@ -35,6 +35,25 @@ pub enum RetrievalError {
     Scope(#[from] moa_core::error::MoaError),
 }
 
+/// Evidence-window policy applied to the final hits of one retrieval.
+///
+/// These knobs are calibrated per retrieval PATH, not globally: the memory
+/// evidence window is a small injected block that benefits from a tight
+/// reranked window and whole-window abstention, while a knowledge-lane top-k
+/// retrieval sizes its own window and must never be clamped by memory-lane
+/// values. They therefore ride the request instead of the shared retriever —
+/// the retriever must not impose them. A retriever-global window policy is what
+/// clamped a knowledge-lane `k = 10` retrieval to the memory-lane
+/// `rerank_window = 3` in the 2026-07-11 MultiHop-RAG incident, cutting
+/// recall@10 from 0.227 to 0.144.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct EvidenceWindowPolicy {
+    /// Final window size when a real reranker is active (`0` keeps `k_final`).
+    pub rerank_window: usize,
+    /// Whole-window abstain threshold on best evidence (`0.0` disables).
+    pub abstain_below_window_evidence: f64,
+}
+
 /// Retrieval request supplied by the query planner.
 #[derive(Debug, Clone)]
 pub struct RetrievalRequest {
@@ -66,6 +85,8 @@ pub struct RetrievalRequest {
     pub disable_leg_timeouts: bool,
     /// Whether graph expansion should be skipped for this request.
     pub disable_graph_expansion: bool,
+    /// Evidence-window policy calibrated for this retrieval path.
+    pub window_policy: EvidenceWindowPolicy,
 }
 
 /// Source that admitted a graph traversal seed for one retrieval request.

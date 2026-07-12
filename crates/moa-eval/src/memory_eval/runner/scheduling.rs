@@ -76,6 +76,7 @@ pub(super) async fn run_memory_retrieval_eval_in_store(
             extraction_precision,
             entity_fragmentation,
             reranker_enabled: options.reranker_enabled(),
+            parity: options.parity(),
             rewrite_summary: QueryRewriteSummary::empty(options.rewrite_policy()),
             graph_expansion_policy: options.graph_expansion_policy,
             aborted_over_budget: true,
@@ -95,73 +96,110 @@ pub(super) async fn run_memory_retrieval_eval_in_store(
         HashMap::new()
     };
     let planner = QueryPlanner::new();
+    let parity_retriever = options.parity().then(|| {
+        ParityProbeRetriever::new(
+            store.pool().clone(),
+            providers.embedder.clone(),
+            providers.reranker.clone(),
+            options.lane_ranking_config(),
+            providers.deterministic_replay,
+        )
+    });
     let mut probe_results = Vec::with_capacity(corpus.probes.len());
     let mut rewrite_accounting = QueryRewriteAccounting::new(options.rewrite_policy());
 
     for (probe_index, probe) in corpus.probes.iter().enumerate() {
         let rewrite_decision = rewrite_accounting.record(probe);
         let retrieval_probe = probe_for_rewrite_policy(probe, rewrite_decision);
-        let retrieval = retrieve_probe(
-            store.pool(),
-            &planner,
-            providers.embedder.as_ref(),
-            providers.reranker.clone(),
-            &retrieval_probe,
-            ProbeRetrieveOptions {
-                use_reranker: options.reranker_enabled(),
-                ranking_config: options.lane_ranking_config(),
-                ranking_reference_time: Some(ranking_reference_time),
-                deterministic_replay: providers.deterministic_replay,
-                graph_expansion_policy: options.graph_expansion_policy,
-            },
-        )
-        .await?;
-        let candidates = candidates_from_retrieval_hits(
-            &retrieval.pre_rerank_hits,
-            &fact_ids_by_uid,
-            &equivalent_fact_ids_by_uid,
-            &probe.query,
-        );
-        let graph_comparison =
-            retrieval
-                .graph_off_retrieval_latency_ms
-                .map(|graph_off_retrieval_latency_ms| {
-                    let graph_off_candidates = candidates_from_retrieval_hits(
-                        &retrieval.graph_off_hits,
-                        &fact_ids_by_uid,
-                        &equivalent_fact_ids_by_uid,
-                        &probe.query,
-                    );
-                    probe_graph_comparison(
-                        &probe.expected_fact_ids,
-                        candidates.as_slice(),
-                        graph_off_candidates,
-                        &retrieval.graph_diagnostics,
-                        graph_off_retrieval_latency_ms,
-                    )
-                });
-        let post_rerank_candidates = candidates_from_retrieval_hits(
-            &retrieval.post_rerank_hits,
-            &fact_ids_by_uid,
-            &equivalent_fact_ids_by_uid,
-            &probe.query,
-        );
-        let preference_context_hit = preference_context_hit(
-            probe,
-            post_rerank_candidates.as_slice(),
-            &digest_context,
-            &ledger_by_fact_id,
-        );
-        probe_results.push(probe_result_for(ProbeResultInput {
-            probe,
-            candidates,
-            post_rerank_candidates: Some(post_rerank_candidates),
-            retrieval_latency_ms: retrieval.retrieval_latency_ms,
-            gold_records_by_fact_id: &gold_records_by_fact_id,
-            preference_context_hit,
-            graph_diagnostics: Some(retrieval.graph_diagnostics),
-            graph_comparison,
-        }));
+        if let Some(parity_retriever) = &parity_retriever {
+            let retrieval = parity_retriever.retrieve(&retrieval_probe).await?;
+            let candidates = candidates_from_retrieval_hits(
+                &retrieval.hits,
+                &fact_ids_by_uid,
+                &equivalent_fact_ids_by_uid,
+                &probe.query,
+            );
+            let preference_context_hit = preference_context_hit(
+                probe,
+                candidates.as_slice(),
+                &digest_context,
+                &ledger_by_fact_id,
+            );
+            let mut result = probe_result_for(ProbeResultInput {
+                probe,
+                candidates,
+                post_rerank_candidates: None,
+                retrieval_latency_ms: retrieval.retrieval_latency_ms,
+                gold_records_by_fact_id: &gold_records_by_fact_id,
+                preference_context_hit,
+                graph_diagnostics: None,
+                graph_comparison: None,
+            });
+            result.rendered_candidate_count = Some(retrieval.rendered_candidate_count);
+            probe_results.push(result);
+        } else {
+            let retrieval = retrieve_probe(
+                store.pool(),
+                &planner,
+                providers.embedder.as_ref(),
+                providers.reranker.clone(),
+                &retrieval_probe,
+                ProbeRetrieveOptions {
+                    use_reranker: options.reranker_enabled(),
+                    ranking_config: options.lane_ranking_config(),
+                    ranking_reference_time: Some(ranking_reference_time),
+                    deterministic_replay: providers.deterministic_replay,
+                    graph_expansion_policy: options.graph_expansion_policy,
+                },
+            )
+            .await?;
+            let candidates = candidates_from_retrieval_hits(
+                &retrieval.pre_rerank_hits,
+                &fact_ids_by_uid,
+                &equivalent_fact_ids_by_uid,
+                &probe.query,
+            );
+            let graph_comparison =
+                retrieval
+                    .graph_off_retrieval_latency_ms
+                    .map(|graph_off_retrieval_latency_ms| {
+                        let graph_off_candidates = candidates_from_retrieval_hits(
+                            &retrieval.graph_off_hits,
+                            &fact_ids_by_uid,
+                            &equivalent_fact_ids_by_uid,
+                            &probe.query,
+                        );
+                        probe_graph_comparison(
+                            &probe.expected_fact_ids,
+                            candidates.as_slice(),
+                            graph_off_candidates,
+                            &retrieval.graph_diagnostics,
+                            graph_off_retrieval_latency_ms,
+                        )
+                    });
+            let post_rerank_candidates = candidates_from_retrieval_hits(
+                &retrieval.post_rerank_hits,
+                &fact_ids_by_uid,
+                &equivalent_fact_ids_by_uid,
+                &probe.query,
+            );
+            let preference_context_hit = preference_context_hit(
+                probe,
+                post_rerank_candidates.as_slice(),
+                &digest_context,
+                &ledger_by_fact_id,
+            );
+            probe_results.push(probe_result_for(ProbeResultInput {
+                probe,
+                candidates,
+                post_rerank_candidates: Some(post_rerank_candidates),
+                retrieval_latency_ms: retrieval.retrieval_latency_ms,
+                gold_records_by_fact_id: &gold_records_by_fact_id,
+                preference_context_hit,
+                graph_diagnostics: Some(retrieval.graph_diagnostics),
+                graph_comparison,
+            }));
+        }
         if options.lane == EvalLane::Live
             && (probe_index + 1) % 10 == 0
             && let Err(error) = check_budget(&providers.ledger).await
@@ -174,6 +212,7 @@ pub(super) async fn run_memory_retrieval_eval_in_store(
                 extraction_precision,
                 entity_fragmentation,
                 reranker_enabled: options.reranker_enabled(),
+                parity: options.parity(),
                 rewrite_summary: rewrite_accounting.summary(),
                 graph_expansion_policy: options.graph_expansion_policy,
                 aborted_over_budget: true,
@@ -196,6 +235,7 @@ pub(super) async fn run_memory_retrieval_eval_in_store(
             extraction_precision,
             entity_fragmentation,
             reranker_enabled: options.reranker_enabled(),
+            parity: options.parity(),
             rewrite_summary: rewrite_accounting.summary(),
             graph_expansion_policy: options.graph_expansion_policy,
             aborted_over_budget: true,
@@ -216,6 +256,7 @@ pub(super) async fn run_memory_retrieval_eval_in_store(
         extraction_precision,
         entity_fragmentation,
         reranker_enabled: options.reranker_enabled(),
+        parity: options.parity(),
         rewrite_summary: rewrite_accounting.summary(),
         graph_expansion_policy: options.graph_expansion_policy,
         aborted_over_budget: false,

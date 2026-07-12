@@ -109,6 +109,13 @@ async fn analytics_parity_all_datasets_docker() -> TestResult<()> {
     let mut coverage: Vec<String> = Vec::new();
 
     for dataset in &catalog.datasets {
+        // Postgres-only datasets (no ClickHouse source, e.g. citation_precision
+        // over the never-exported moa.retrieval_lineage table) cannot have
+        // cross-backend parity; the compiler rejects them for ClickHouse.
+        if moa_analytics::dialect::clickhouse_from_sql(&dataset.id).is_none() {
+            coverage.push(format!("{}: skipped (postgres-only dataset)", dataset.id));
+            continue;
+        }
         let queries = build_battery(dataset, tenant_id);
         let dims = role_fields(dataset, AnalyticsFieldRole::Dimension).len();
         let measures = role_fields(dataset, AnalyticsFieldRole::Measure).len();

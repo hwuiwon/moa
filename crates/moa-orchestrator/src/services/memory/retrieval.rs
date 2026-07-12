@@ -295,6 +295,7 @@ async fn retrieve_hits_with_embedding(
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: inputs.disable_graph_expansion,
+            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
         })
         .await
         .map_err(memory_handler_error)

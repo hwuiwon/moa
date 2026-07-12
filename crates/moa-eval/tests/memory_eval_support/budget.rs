@@ -44,6 +44,7 @@ fn memory_budget_probe_results(cross_user_leak: bool) -> Vec<ProbeResult> {
                     },
                 ],
             ),
+            rendered_candidate_count: None,
             post_rerank_candidates: None,
             retrieval_latency_ms: 0,
             all_expected_found_at_4: Some(true),
@@ -64,6 +65,7 @@ fn memory_budget_probe_results(cross_user_leak: bool) -> Vec<ProbeResult> {
             expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: fact_ids(&["fact-bob-secret"]),
             candidates: cross_user_candidates,
+            rendered_candidate_count: None,
             post_rerank_candidates: None,
             retrieval_latency_ms: 0,
             all_expected_found_at_4: None,
@@ -90,6 +92,7 @@ fn memory_budget_probe_results(cross_user_leak: bool) -> Vec<ProbeResult> {
                     legs: legs(false, false, true),
                 }],
             ),
+            rendered_candidate_count: None,
             post_rerank_candidates: None,
             retrieval_latency_ms: 0,
             all_expected_found_at_4: Some(true),
@@ -120,7 +123,8 @@ fn reranker_recall_regression_probe_results() -> Vec<ProbeResult> {
                 legs: legs(true, false, false),
             }],
         ),
-        post_rerank_candidates: Some(metric_candidates(
+        rendered_candidate_count: None,
+            post_rerank_candidates: Some(metric_candidates(
             0xe10,
             &[CandidateSpec {
                 fact_id: None,
@@ -155,7 +159,8 @@ fn reranker_latency_without_gain_probe_results() -> Vec<ProbeResult> {
                 legs: legs(true, false, false),
             }],
         ),
-        post_rerank_candidates: Some(metric_candidates(
+        rendered_candidate_count: None,
+            post_rerank_candidates: Some(metric_candidates(
             0xe30,
             &[CandidateSpec {
                 fact_id: Some("fact-owner"),
@@ -209,6 +214,7 @@ fn memory_budget_regression_probe_results(full_recall: bool) -> Vec<ProbeResult>
             expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: Vec::new(),
             candidates: metric_candidates(0xd00, &candidate_specs),
+            rendered_candidate_count: None,
             post_rerank_candidates: None,
             retrieval_latency_ms: 0,
             all_expected_found_at_4: Some(full_recall),
@@ -229,6 +235,7 @@ fn memory_budget_regression_probe_results(full_recall: bool) -> Vec<ProbeResult>
             expected_fact_grades: std::collections::BTreeMap::new(),
             blocked_fact_ids: fact_ids(&["fact-bob-secret"]),
             candidates: Vec::new(),
+            rendered_candidate_count: None,
             post_rerank_candidates: None,
             retrieval_latency_ms: 0,
             all_expected_found_at_4: None,

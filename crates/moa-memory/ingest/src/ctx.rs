@@ -703,6 +703,9 @@ mod tests {
         let mut config = MoaConfig::default();
         config.memory.vector.embedder.name = "gemini:gemini-embedding-2".to_string();
         config.providers.google.api_key.clear();
+        // Isolate the embedder diagnostic: the default reranker also warns at
+        // construction when its provider key is absent in the test env.
+        config.memory.retrieval.reranker_model = "noop".to_string();
         let subscriber = WarningSubscriber::default();
         let captured = subscriber.warnings.clone();
 
@@ -740,6 +743,9 @@ mod tests {
         // boundary as missing credentials and is diagnosed once at construction.
         let mut config = MoaConfig::default();
         config.memory.vector.embedder.name = "disabled".to_string();
+        // Isolate the embedder diagnostic from the default reranker's own
+        // missing-credential warning.
+        config.memory.retrieval.reranker_model = "noop".to_string();
         let subscriber = WarningSubscriber::default();
         let captured = subscriber.warnings.clone();
 

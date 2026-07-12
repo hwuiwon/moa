@@ -130,6 +130,7 @@ pub(crate) fn memory_budget_report_with_reranker(
         candidate_k: RETRIEVAL_EVAL_CANDIDATE_K,
         final_k: RETRIEVAL_EVAL_FINAL_K,
         reranker_enabled,
+        parity: false,
         query_rewrite_policy: QueryRewritePolicy::Gated,
         graph_expansion_policy: GraphExpansionEvalPolicy::Current,
         graph_retrieval_policy: GraphExpansionEvalPolicy::Current.graph_retrieval_policy(),

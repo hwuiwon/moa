@@ -27,6 +27,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
                 .with_digests(options.digests)
                 .with_inverted_quality_priors(options.invert_quality_priors)
                 .with_graph_expansion_policy(options.graph_expansion_policy)
+                .with_parity(options.parity)
                 .apply_budget_usd(options.budget_usd)
                 .apply_extractions_path(options.extractions_path.clone())
                 .apply_merges_path(options.merges_path.clone()),
@@ -45,10 +46,11 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         .map(str::to_string)
         .unwrap_or_else(|| format!("{:?}", options.extractor_mode));
     println!(
-        "wrote memory retrieval eval report: output={} probes={} lane={:?} rewrite_policy={:?} graph_expansion_policy={} graph_policy={} rewrite_calls={} rewrite_skips={} rewrite_call_rate={:.3} reranker={} extractor={} consolidate={} digests={} merged={} duplicates_remaining={} digests_rebuilt={} est_usd={:.4} aborted_over_budget={} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} precision_at_4={:.3} pre_precision_at_4={:.3} abstention_fp_rate={:.3} preference_context_rate={:.3} p95_retrieval_latency_ms={} retrieval_plus_rewrite_p95_latency_ms={}",
+        "wrote memory retrieval eval report: output={} probes={} lane={:?} parity={} rewrite_policy={:?} graph_expansion_policy={} graph_policy={} rewrite_calls={} rewrite_skips={} rewrite_call_rate={:.3} reranker={} extractor={} consolidate={} digests={} merged={} duplicates_remaining={} digests_rebuilt={} est_usd={:.4} aborted_over_budget={} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} precision_at_4={:.3} pre_precision_at_4={:.3} rendered_context_precision={:.3} abstention_fp_rate={:.3} preference_context_rate={:.3} p95_retrieval_latency_ms={} retrieval_plus_rewrite_p95_latency_ms={}",
         options.output.display(),
         report.probe_results.len(),
         options.lane,
+        report.parity,
         options.rewrite_policy,
         options.graph_expansion_policy.as_str(),
         report.graph_retrieval_policy.as_str(),
@@ -79,6 +81,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         report.metrics.ndcg_at_4.value,
         report.metrics.precision_at_4.value,
         report.metrics.pre_rerank_precision_at_4.value,
+        report.metrics.rendered_context_precision.value,
         report.metrics.abstention_false_positive_rate.value,
         report.metrics.preference_context_rate.value,
         report.metrics.p95_retrieval_latency_ms,
@@ -103,6 +106,7 @@ struct Options {
     digests: bool,
     invert_quality_priors: bool,
     graph_expansion_policy: GraphExpansionEvalPolicy,
+    parity: bool,
 }
 
 impl Options {
@@ -121,6 +125,7 @@ impl Options {
         let mut digests = false;
         let mut invert_quality_priors = false;
         let mut graph_expansion_policy = GraphExpansionEvalPolicy::Current;
+        let mut parity = false;
         let mut extractor_specified = false;
         let mut args = args.peekable();
 
@@ -162,6 +167,9 @@ impl Options {
                 }
                 "--invert-quality-priors" => {
                     invert_quality_priors = true;
+                }
+                "--parity" => {
+                    parity = true;
                 }
                 "--graph-expansion-policy" => {
                     let value = args
@@ -268,12 +276,13 @@ impl Options {
             digests,
             invert_quality_priors,
             graph_expansion_policy,
+            parity,
         })
     }
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--consolidate] [--digests] [--invert-quality-priors] [--graph-expansion-policy current|skip-exact-direct|legacy-broad-expansion] [--rewrite-policy off|always|gated] [--reranker off|on] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--quality-weight N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
+    "usage: cargo run -p xtask --features eval-tools -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--parity] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--consolidate] [--digests] [--invert-quality-priors] [--graph-expansion-policy current|skip-exact-direct|legacy-broad-expansion] [--rewrite-policy off|always|gated] [--reranker off|on] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--quality-weight N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
 }
 
 fn parse_reranker(value: &str) -> Result<bool> {

@@ -19,6 +19,39 @@ use crate::{
     },
 };
 
+/// Maximum attempts for a write transaction that aborts on a Postgres
+/// serialization deadlock (SQLSTATE `40P01`).
+const MAX_DEADLOCK_RETRIES: u32 = 5;
+
+/// Returns whether `error` is a Postgres deadlock (`40P01`).
+///
+/// Concurrent ingestion transactions that touch the same graph rows — shared
+/// entity nodes reused across documents, plus the per-partition changelog bump
+/// on `moa.storage_partition_state` — can be chosen as the deadlock victim.
+/// Deterministic lock ordering removes the common cycle; this predicate lets the
+/// remaining, rare cases be retried instead of aborting the caller.
+fn is_deadlock(error: &GraphError) -> bool {
+    matches!(
+        error,
+        GraphError::Sidecar(sqlx_error)
+            if sqlx_error
+                .as_database_error()
+                .and_then(|db| db.code())
+                .as_deref()
+                == Some("40P01")
+    )
+}
+
+/// Sleeps a short, jittered backoff before retrying a deadlocked transaction.
+///
+/// Exponential in the attempt with per-call jitter so two writers that collided
+/// do not re-collide on an identical retry schedule.
+async fn deadlock_backoff(attempt: u32) {
+    let base_ms = 4_u64.saturating_mul(1_u64 << attempt.min(5));
+    let jitter_ms = (std::time::Instant::now().elapsed().subsec_nanos() as u64) % 8;
+    tokio::time::sleep(std::time::Duration::from_millis(base_ms + jitter_ms)).await;
+}
+
 /// Creates a graph node, sidecar row, optional vector, and changelog row atomically.
 pub async fn create_node(store: &PostgresGraphStore, intent: NodeWriteIntent) -> Result<Uuid> {
     let mut conn = store.begin_required().await?;
@@ -66,7 +99,7 @@ pub async fn create_node_in_conn(
 /// the created uids in input order.
 pub async fn bulk_create_nodes(
     store: &PostgresGraphStore,
-    intents: Vec<NodeWriteIntent>,
+    mut intents: Vec<NodeWriteIntent>,
 ) -> Result<Vec<Uuid>> {
     if intents.is_empty() {
         return Ok(Vec::new());
@@ -74,6 +107,15 @@ pub async fn bulk_create_nodes(
     for intent in &intents {
         validate_node_scope(intent)?;
     }
+    // Preserve the caller-visible return order (uids in input order); the sort
+    // below is a purely internal lock-ordering optimization.
+    let input_order_uids = intents.iter().map(|intent| intent.uid).collect::<Vec<_>>();
+    // Acquire row locks in a deterministic (uid-sorted) order across every
+    // concurrent writer. Shared entity nodes are reused across documents, so two
+    // documents ingesting in parallel would otherwise INSERT the same uids in
+    // different array orders and deadlock; sorting removes that cycle. It also
+    // fixes the order of the per-intent changelog writes below.
+    intents.sort_by_key(|intent| intent.uid);
 
     let count = intents.len();
     let mut uids = Vec::with_capacity(count);
@@ -114,64 +156,83 @@ pub async fn bulk_create_nodes(
         properties.push(serde_json::to_string(&intent.properties)?);
     }
 
-    let mut conn = store.begin_required().await?;
-    // Node uids are identity-derived (content hash for knowledge chunks, fact
-    // identity for memory facts), so a uid conflict means another writer
-    // created the same entity concurrently — e.g. two documents sharing chunk
-    // content ingested in parallel. Skipping is the correct outcome; failing
-    // aborted whole corpus syncs on the first shared chunk.
-    sqlx::query(
-        r#"
-        INSERT INTO moa.node_index
-            (uid, label, storage_partition_id, user_id, tenant_id, contact_id, name, pii_class,
-             confidence, reference_count, valid_from, properties_summary)
-        SELECT n.uid, n.label, n.storage_partition_id, n.user_id, n.tenant_id, n.contact_id,
-               n.name, n.pii_class, n.confidence, n.reference_count, n.valid_from,
-               n.properties::JSONB
-        FROM UNNEST(
-            $1::UUID[], $2::TEXT[], $3::TEXT[], $4::TEXT[], $5::UUID[], $6::UUID[], $7::TEXT[],
-            $8::TEXT[], $9::DOUBLE PRECISION[], $10::BIGINT[], $11::TIMESTAMPTZ[], $12::TEXT[]
-        ) AS n(uid, label, storage_partition_id, user_id, tenant_id, contact_id, name, pii_class,
-               confidence, reference_count, valid_from, properties)
-        ON CONFLICT (uid) DO NOTHING
-        "#,
-    )
-    .bind(&uids)
-    .bind(&labels)
-    .bind(&storage_partition_ids)
-    .bind(&user_ids)
-    .bind(&tenant_ids)
-    .bind(&contact_ids)
-    .bind(&names)
-    .bind(&pii_classes)
-    .bind(&confidences)
-    .bind(&reference_counts)
-    .bind(&valid_froms)
-    .bind(&properties)
-    .execute(conn.as_mut())
-    .await?;
-
-    if !vector_items.is_empty() {
-        for (storage_partition_id, embedding_model, embedding_model_version) in &vector_state_seeds
-        {
-            ensure_storage_partition_embedder_state(
-                conn.as_mut(),
-                storage_partition_id.as_deref(),
-                embedding_model,
-                *embedding_model_version,
+    // The whole write is idempotent (node INSERT is `ON CONFLICT DO NOTHING`
+    // and the changelog rows roll back with a failed attempt), so a deadlock
+    // victim is retried under a fresh transaction rather than propagated.
+    let mut attempt = 0_u32;
+    loop {
+        let outcome: Result<()> = async {
+            let mut conn = store.begin_required().await?;
+            // Node uids are identity-derived (content hash for knowledge chunks,
+            // fact identity for memory facts), so a uid conflict means another
+            // writer created the same entity concurrently — e.g. two documents
+            // sharing chunk content ingested in parallel. Skipping is the correct
+            // outcome; failing aborted whole corpus syncs on the first shared chunk.
+            sqlx::query(
+                r#"
+                INSERT INTO moa.node_index
+                    (uid, label, storage_partition_id, user_id, tenant_id, contact_id, name, pii_class,
+                     confidence, reference_count, valid_from, properties_summary)
+                SELECT n.uid, n.label, n.storage_partition_id, n.user_id, n.tenant_id, n.contact_id,
+                       n.name, n.pii_class, n.confidence, n.reference_count, n.valid_from,
+                       n.properties::JSONB
+                FROM UNNEST(
+                    $1::UUID[], $2::TEXT[], $3::TEXT[], $4::TEXT[], $5::UUID[], $6::UUID[], $7::TEXT[],
+                    $8::TEXT[], $9::DOUBLE PRECISION[], $10::BIGINT[], $11::TIMESTAMPTZ[], $12::TEXT[]
+                ) AS n(uid, label, storage_partition_id, user_id, tenant_id, contact_id, name, pii_class,
+                       confidence, reference_count, valid_from, properties)
+                ON CONFLICT (uid) DO NOTHING
+                "#,
             )
+            .bind(&uids)
+            .bind(&labels)
+            .bind(&storage_partition_ids)
+            .bind(&user_ids)
+            .bind(&tenant_ids)
+            .bind(&contact_ids)
+            .bind(&names)
+            .bind(&pii_classes)
+            .bind(&confidences)
+            .bind(&reference_counts)
+            .bind(&valid_froms)
+            .bind(&properties)
+            .execute(conn.as_mut())
             .await?;
+
+            if !vector_items.is_empty() {
+                for (storage_partition_id, embedding_model, embedding_model_version) in
+                    &vector_state_seeds
+                {
+                    ensure_storage_partition_embedder_state(
+                        conn.as_mut(),
+                        storage_partition_id.as_deref(),
+                        embedding_model,
+                        *embedding_model_version,
+                    )
+                    .await?;
+                }
+                let vector = require_vector_store(store)?;
+                vector.upsert_in_tx(conn.as_mut(), &vector_items).await?;
+            }
+
+            for intent in &intents {
+                write_and_bump(conn.as_mut(), create_changelog(intent, None)).await?;
+            }
+
+            conn.commit().await?;
+            Ok(())
         }
-        let vector = require_vector_store(store)?;
-        vector.upsert_in_tx(conn.as_mut(), &vector_items).await?;
+        .await;
+        match outcome {
+            Ok(()) => break,
+            Err(error) if is_deadlock(&error) && attempt < MAX_DEADLOCK_RETRIES => {
+                attempt += 1;
+                deadlock_backoff(attempt).await;
+            }
+            Err(error) => return Err(error),
+        }
     }
-
-    for intent in &intents {
-        write_and_bump(conn.as_mut(), create_changelog(intent, None)).await?;
-    }
-
-    conn.commit().await?;
-    Ok(uids)
+    Ok(input_order_uids)
 }
 
 /// Supersedes one active graph node with a replacement node atomically.
@@ -725,10 +786,28 @@ pub async fn hard_purge_with_audit(
 
 /// Creates a graph edge and changelog row atomically.
 pub async fn create_edge(store: &PostgresGraphStore, intent: EdgeWriteIntent) -> Result<Uuid> {
-    let mut conn = store.begin_required().await?;
-    let uid = create_edge_in_conn(store, conn.as_mut(), intent).await?;
-    conn.commit().await?;
-    Ok(uid)
+    // `create_edge_in_conn` is idempotent (it no-ops when the edge already
+    // exists), so a deadlock victim — e.g. an edge onto a shared entity node
+    // whose partition changelog row another writer holds — is retried on a fresh
+    // transaction rather than aborting the ingesting document.
+    let mut attempt = 0_u32;
+    loop {
+        let outcome: Result<Uuid> = async {
+            let mut conn = store.begin_required().await?;
+            let uid = create_edge_in_conn(store, conn.as_mut(), intent.clone()).await?;
+            conn.commit().await?;
+            Ok(uid)
+        }
+        .await;
+        match outcome {
+            Ok(uid) => return Ok(uid),
+            Err(error) if is_deadlock(&error) && attempt < MAX_DEADLOCK_RETRIES => {
+                attempt += 1;
+                deadlock_backoff(attempt).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Creates a graph edge and changelog row in a caller-owned transaction.

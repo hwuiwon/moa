@@ -197,6 +197,7 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
         lineage: None,
         disable_leg_timeouts: false,
         disable_graph_expansion: false,
+        window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
     };
 
     let dual_read_hits = retriever.retrieve(req.clone()).await?;

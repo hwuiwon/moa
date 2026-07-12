@@ -46,8 +46,9 @@ pub use env_overlay::MoaEnvOverlay;
 pub use knowledge::{
     KnowledgeChunkingConfig, KnowledgeConfig, KnowledgeObservabilityConfig,
     KnowledgeParserDefaultsConfig, KnowledgeParsersConfig, KnowledgeProvidersConfig,
-    KnowledgeSyncConfig, LlamaParseKnowledgeParserConfig, MergeKnowledgeProviderConfig,
-    NangoKnowledgeProviderConfig, ReductoKnowledgeParserConfig, UnstructuredKnowledgeParserConfig,
+    KnowledgeSemanticConfig, KnowledgeSyncConfig, LlamaParseKnowledgeParserConfig,
+    MergeKnowledgeProviderConfig, NangoKnowledgeProviderConfig, ReductoKnowledgeParserConfig,
+    UnstructuredKnowledgeParserConfig,
 };
 pub use learning::{LearningConfig, SkillLearningConfig};
 pub use lineage::LineageConfig;

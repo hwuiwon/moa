@@ -26,8 +26,20 @@ where
             chunking: config.chunking,
             provider: config.provider,
             parser_label: config.parser_label,
+            semantic_generic_entities: true,
             content_fetcher: None,
         }
+    }
+
+    /// Sets whether semantic extraction emits the deterministic generic
+    /// proper-noun entity fallback for chunks with no domain-rule match.
+    ///
+    /// Defaults to enabled; wire this from `knowledge.semantic.generic_entities`
+    /// to disable the fallback for a deployment.
+    #[must_use]
+    pub fn with_semantic_generic_entities(mut self, enabled: bool) -> Self {
+        self.semantic_generic_entities = enabled;
+        self
     }
 
     /// Attaches a per-run content fetcher used to download byte content for

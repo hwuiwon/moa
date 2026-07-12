@@ -663,6 +663,15 @@ impl GraphMemoryRetriever {
             result_limit,
             true,
         );
+        // The memory evidence window is calibrated for the small injected
+        // block, so this stage rides its request-scoped window policy from the
+        // configured memory ranking knobs. Knowledge-lane retrievals keep the
+        // default (off) policy and size their own top-k window.
+        let ranking = &self.config.memory.retrieval.ranking;
+        request.window_policy = crate::retrieval::EvidenceWindowPolicy {
+            rerank_window: ranking.rerank_window,
+            abstain_below_window_evidence: ranking.abstain_below_window_evidence,
+        };
         if let Some(label_filter) = scope_plan.label_filter() {
             request.label_filter = Some(label_filter.to_vec());
         }

@@ -178,6 +178,7 @@ fn build_ingestion_pipeline(
             parser_label,
         },
     )
+    .with_semantic_generic_entities(config.knowledge.semantic.generic_entities)
     .with_content_fetcher(content_fetcher))
 }
 
