@@ -38,7 +38,12 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
 
     let mut config = moa_core::config::MoaConfig::default();
     config.models.main = "claude-sonnet-4-6".to_string();
-    config.skill_budget.max_manifest_chars = Some(512);
+    // The manifest budget must clear the fixed preamble/footer (~550 chars, now that
+    // each entry carries the exact [activate: <path>] activation guidance) plus one
+    // package skill entry; the earlier 512 left no room for a single entry, starving
+    // selection to zero. Sized generously so this test exercises materialization, not
+    // budget starvation.
+    config.skill_budget.max_manifest_chars = Some(2048);
 
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store().await?;
     let graph_pool = session_store.pool().clone();
@@ -183,7 +188,12 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
 
     let mut config = moa_core::config::MoaConfig::default();
     config.models.main = "claude-sonnet-4-6".to_string();
-    config.skill_budget.max_manifest_chars = Some(512);
+    // The manifest budget must clear the fixed preamble/footer (~550 chars, now that
+    // each entry carries the exact [activate: <path>] activation guidance) plus one
+    // package skill entry; the earlier 512 left no room for a single entry, starving
+    // selection to zero. Sized generously so this test exercises materialization, not
+    // budget starvation.
+    config.skill_budget.max_manifest_chars = Some(2048);
 
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store().await?;
     let graph_pool = session_store.pool().clone();
