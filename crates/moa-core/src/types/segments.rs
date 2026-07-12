@@ -40,8 +40,11 @@ pub struct TaskSegment {
     pub turn_count: u32,
     /// Tool names used during the segment.
     pub tools_used: Vec<String>,
-    /// Skill names activated during the segment.
+    /// Skill names injected into the segment's turn manifest (candidates offered to the model).
     pub skills_activated: Vec<String>,
+    /// Skill names the model actually engaged during the segment (subset of injected skills).
+    #[serde(default)]
+    pub skills_used: Vec<String>,
     /// Token cost attributed to the segment.
     pub token_cost: u64,
     /// Previous segment in the same session, when present.
@@ -65,6 +68,7 @@ impl TaskSegment {
             started_at: self.started_at,
             tools_used: self.tools_used.clone(),
             skills_activated: self.skills_activated.clone(),
+            skills_used: self.skills_used.clone(),
             turn_count: self.turn_count,
             token_cost: self.token_cost,
         }
@@ -84,8 +88,11 @@ pub struct ActiveSegment {
     pub started_at: DateTime<Utc>,
     /// Tool names used during the segment.
     pub tools_used: Vec<String>,
-    /// Skill names activated during the segment.
+    /// Skill names injected into the segment's turn manifest (candidates offered to the model).
     pub skills_activated: Vec<String>,
+    /// Skill names the model actually engaged during the segment (subset of injected skills).
+    #[serde(default)]
+    pub skills_used: Vec<String>,
     /// Number of turns attributed to the segment.
     pub turn_count: u32,
     /// Token cost attributed to the segment.
@@ -101,8 +108,11 @@ pub struct SegmentCompletion {
     pub turn_count: u32,
     /// Final segment tool list.
     pub tools_used: Vec<String>,
-    /// Final segment skill list.
+    /// Final list of skills injected into the segment.
     pub skills_activated: Vec<String>,
+    /// Final list of skills the model actually engaged during the segment.
+    #[serde(default)]
+    pub skills_used: Vec<String>,
     /// Final token cost attributed to the segment.
     pub token_cost: u64,
 }

@@ -26,6 +26,14 @@ const LATENCY_BUCKETS: &[f64] = &[
     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
 ];
 const CACHE_HIT_RATE_BUCKETS: &[f64] = &[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0];
+// Skill-learning review latency spans minutes (fast operator triage) to days (a
+// candidate waiting out a review backlog); the default second-scale latency
+// buckets top out at 30s and would pile the whole distribution into the last
+// bucket, so the spread is explicitly minutes-to-days.
+const SKILL_LEARNING_REVIEW_LATENCY_BUCKETS: &[f64] = &[
+    60.0, 300.0, 900.0, 1800.0, 3600.0, 14400.0, 43200.0, 86400.0, 172800.0, 604800.0,
+];
+const SKILL_LEARNING_TIME_IN_REVIEW_METRIC: &str = "moa_skill_learning_time_in_review_seconds";
 const GENAI_CLIENT_DURATION_BUCKETS: &[f64] = &[
     0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92,
 ];
@@ -227,6 +235,11 @@ pub fn init_metrics(config: &MetricsConfig) -> Result<()> {
             .set_buckets_for_metric(
                 Matcher::Full(GENAI_CLIENT_TOKEN_USAGE_METRIC.to_string()),
                 GENAI_CLIENT_TOKEN_BUCKETS,
+            )
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?
+            .set_buckets_for_metric(
+                Matcher::Full(SKILL_LEARNING_TIME_IN_REVIEW_METRIC.to_string()),
+                SKILL_LEARNING_REVIEW_LATENCY_BUCKETS,
             )
             .map_err(|error| MoaError::ConfigError(error.to_string()))?;
 
@@ -881,6 +894,51 @@ pub fn record_experiment_learning_candidates(status: &str, count: u64) {
     .increment(count);
 }
 
+/// Records one filed skill-learning candidate, labeled by source stage and kind.
+///
+/// `source` is the loop stage that filed it (`distilled`, `recurrence_mined`,
+/// `mined`, or `rollback_monitor`); `kind` is the bounded operation within that
+/// source (`created`, `improved`, `resynthesized`, `weakness`, or `regression`).
+/// The `resynthesized` kind marks a distilled dedupe-hit that rewrote an open
+/// draft; `recurrence_mined` marks a candidate filed because a task fingerprint
+/// recurred across sessions rather than one session clearing the dispatch gate.
+/// A zero count is a no-op so a filing pass that filed nothing never adds a
+/// metric series.
+pub fn record_skill_learning_candidates_filed(source: &str, kind: &str, count: u64) {
+    if count == 0 {
+        return;
+    }
+
+    counter!(
+        "moa_skill_learning_candidates_filed_total",
+        "source" => source.to_string(),
+        "kind" => kind.to_string()
+    )
+    .increment(count);
+}
+
+/// Records one skill-learning review decision, labeled by action and outcome.
+///
+/// `action` is the review endpoint (`accept_skill`, `accept_rollback`, or
+/// `reject`); `outcome` is its terminal result (`promoted`, `gate_rejected`,
+/// `rejected`, or `error`).
+pub fn record_skill_learning_review_decision(action: &str, outcome: &str) {
+    counter!(
+        "moa_skill_learning_review_decisions_total",
+        "action" => action.to_string(),
+        "outcome" => outcome.to_string()
+    )
+    .increment(1);
+}
+
+/// Records how long a skill-learning candidate waited before its review decision.
+///
+/// Observed at decision time as the span from candidate creation to now; the
+/// bucket spread runs minutes to days to match operator review latency.
+pub fn record_skill_learning_time_in_review(duration: Duration) {
+    histogram!(SKILL_LEARNING_TIME_IN_REVIEW_METRIC).record(duration.as_secs_f64());
+}
+
 /// Records that action policy queued a tenant-admin review.
 pub fn record_action_review_requested(effect: ActionPolicyEffect, action_class: ActionClass) {
     counter!(
@@ -1304,6 +1362,18 @@ fn register_metric_descriptions() {
         "Experiment learning candidates proposed, labeled by candidate status."
     );
     describe_counter!(
+        "moa_skill_learning_candidates_filed_total",
+        "Skill-learning candidates filed for review, labeled by source loop stage and bounded operation kind."
+    );
+    describe_counter!(
+        "moa_skill_learning_review_decisions_total",
+        "Skill-learning review decisions, labeled by review action and terminal outcome."
+    );
+    describe_histogram!(
+        SKILL_LEARNING_TIME_IN_REVIEW_METRIC,
+        "Skill-learning candidate wait from creation to review decision, in seconds."
+    );
+    describe_counter!(
         "moa_action_review_requests_total",
         "Action reviews requested by policy evaluation, labeled by effect and action class."
     );
@@ -1456,6 +1526,9 @@ mod tests {
         record_simulation_cost_cents("simulator", 1);
         record_experiment_score_rows("scores", 3);
         record_experiment_learning_candidates("proposed", 1);
+        record_skill_learning_candidates_filed("distilled", "created", 1);
+        record_skill_learning_review_decision("accept_skill", "promoted");
+        record_skill_learning_time_in_review(Duration::from_secs(120));
         record_action_review_requested(ActionPolicyEffect::AdminReview, ActionClass::LocalWrite);
         record_action_review_decision(ActionReviewStatus::Cleared, ActionClass::LocalWrite);
 
@@ -1506,6 +1579,9 @@ mod tests {
         assert!(scrape.contains("moa_simulation_cost_cents_total"));
         assert!(scrape.contains("moa_experiment_score_rows_total"));
         assert!(scrape.contains("moa_experiment_learning_candidates_total"));
+        assert!(scrape.contains("moa_skill_learning_candidates_filed_total"));
+        assert!(scrape.contains("moa_skill_learning_review_decisions_total"));
+        assert!(scrape.contains("moa_skill_learning_time_in_review_seconds"));
         assert!(scrape.contains("moa_action_review_requests_total"));
         assert!(scrape.contains("moa_action_review_decisions_total"));
 
@@ -1616,6 +1692,102 @@ mod tests {
                 assert!(
                     !line.contains(forbidden),
                     "experiment series `{line}` must not carry high-cardinality label `{forbidden}`"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn skill_learning_metrics_export_descriptions_and_bounded_labels() {
+        // Pins: the skill-learning loop metrics export HELP descriptions and carry only the
+        // bounded source/kind/action/outcome labels — never a per-tenant, per-candidate, or
+        // per-skill identifier. Asserted against rendered Prometheus output, not source text.
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            register_metric_descriptions();
+            record_skill_learning_candidates_filed("distilled", "created", 1);
+            record_skill_learning_candidates_filed("distilled", "resynthesized", 1);
+            record_skill_learning_candidates_filed("recurrence_mined", "created", 1);
+            record_skill_learning_candidates_filed("mined", "weakness", 2);
+            record_skill_learning_candidates_filed("rollback_monitor", "regression", 1);
+            // A zero-count filing pass must not add a series.
+            record_skill_learning_candidates_filed("distilled", "improved", 0);
+            record_skill_learning_review_decision("accept_skill", "gate_rejected");
+            record_skill_learning_review_decision("reject", "rejected");
+            record_skill_learning_time_in_review(Duration::from_secs(3600));
+        });
+        let rendered = handle.render();
+
+        let skill_learning_metrics = [
+            "moa_skill_learning_candidates_filed_total",
+            "moa_skill_learning_review_decisions_total",
+            "moa_skill_learning_time_in_review_seconds",
+        ];
+        for metric in skill_learning_metrics {
+            assert!(
+                rendered.contains(&format!("# HELP {metric} ")),
+                "skill-learning metric {metric} should export a HELP description; rendered:\n{rendered}"
+            );
+        }
+
+        for label in ["source=", "kind=", "action=", "outcome="] {
+            assert!(
+                rendered.contains(label),
+                "expected bounded skill-learning label `{label}` in rendered output:\n{rendered}"
+            );
+        }
+
+        // A distilled dedupe-hit that rewrote an open draft files under the
+        // `resynthesized` kind, distinct from `created`/`improved`.
+        assert!(
+            rendered.contains("kind=\"resynthesized\""),
+            "a re-synthesized draft must export the resynthesized kind:\n{rendered}"
+        );
+
+        // A recurrence-cron dispatch files under the `recurrence_mined` source,
+        // distinct from single-session `distilled`.
+        assert!(
+            rendered.contains("source=\"recurrence_mined\""),
+            "a recurrence-mined candidate must export the recurrence_mined source:\n{rendered}"
+        );
+
+        // A zero-count filing pass adds no series, so `improved` never appears.
+        assert!(
+            !rendered.contains("kind=\"improved\""),
+            "zero-count filing must not export a series:\n{rendered}"
+        );
+
+        let skill_learning_series = rendered
+            .lines()
+            .filter(|line| {
+                skill_learning_metrics
+                    .iter()
+                    .any(|metric| line.starts_with(metric))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !skill_learning_series.is_empty(),
+            "skill-learning metric series should be exported:\n{rendered}"
+        );
+        // Checked as `=`-suffixed label keys so the assertion targets labels, not
+        // the metric name (which itself contains "skill").
+        for forbidden in [
+            "tenant=",
+            "candidate_id=",
+            "candidate_uid=",
+            "skill=",
+            "skill_name=",
+            "artifact_uid=",
+            "revision=",
+            "session_id=",
+            "experience_id=",
+            "reviewer=",
+        ] {
+            for line in &skill_learning_series {
+                assert!(
+                    !line.contains(forbidden),
+                    "skill-learning series `{line}` must not carry high-cardinality label `{forbidden}`"
                 );
             }
         }

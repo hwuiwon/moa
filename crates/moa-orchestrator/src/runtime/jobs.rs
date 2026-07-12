@@ -298,6 +298,39 @@ fn default_cron_jobs() -> Vec<DefaultCronJob> {
             version: "v1",
         },
         DefaultCronJob {
+            key: "skill_regression_monitor",
+            body: serde_json::json!({
+                "schedule": "0 */15 * * * *",
+                "timezone": "UTC",
+                "target_service": "SessionStore",
+                "target_handler": "monitor_skill_regressions",
+                "payload": {}
+            }),
+            version: "v1",
+        },
+        DefaultCronJob {
+            key: "task_recurrence_monitor",
+            body: serde_json::json!({
+                "schedule": "0 */15 * * * *",
+                "timezone": "UTC",
+                "target_service": "SessionStore",
+                "target_handler": "mine_task_recurrences",
+                "payload": {}
+            }),
+            version: "v1",
+        },
+        DefaultCronJob {
+            key: "learning_embeddings_backfill",
+            body: serde_json::json!({
+                "schedule": "0 */15 * * * *",
+                "timezone": "UTC",
+                "target_service": "SessionStore",
+                "target_handler": "backfill_learning_embeddings",
+                "payload": {}
+            }),
+            version: "v1",
+        },
+        DefaultCronJob {
             key: "neon_prune_branches",
             body: serde_json::json!({
                 "schedule": "0 0 0,6,12,18 * * *",
@@ -446,6 +479,57 @@ mod tests {
                 "already-installed job {key} should not be re-attempted"
             );
         }
+    }
+
+    #[test]
+    fn default_cron_jobs_include_skill_regression_monitor() {
+        // Pins: the post-promotion regression monitor is installed as a 15-minute
+        // SessionStore cron job so a regressed skill becomes a reviewed rollback
+        // proposal instead of a silent decline.
+        let jobs = default_cron_jobs();
+        let job = jobs
+            .iter()
+            .find(|job| job.key == "skill_regression_monitor")
+            .expect("default skill regression monitor cron job should be installed");
+
+        assert_eq!(job.version, "v1");
+        assert_eq!(job.body["schedule"], "0 */15 * * * *");
+        assert_eq!(job.body["target_service"], "SessionStore");
+        assert_eq!(job.body["target_handler"], "monitor_skill_regressions");
+    }
+
+    #[test]
+    fn default_cron_jobs_include_task_recurrence_monitor() {
+        // Pins: the exact-fingerprint recurrence monitor is installed as a 15-minute
+        // SessionStore cron job so a task that recurs across sub-gate sessions
+        // dispatches skill learning instead of being invisible.
+        let jobs = default_cron_jobs();
+        let job = jobs
+            .iter()
+            .find(|job| job.key == "task_recurrence_monitor")
+            .expect("default task recurrence monitor cron job should be installed");
+
+        assert_eq!(job.version, "v1");
+        assert_eq!(job.body["schedule"], "0 */15 * * * *");
+        assert_eq!(job.body["target_service"], "SessionStore");
+        assert_eq!(job.body["target_handler"], "mine_task_recurrences");
+    }
+
+    #[test]
+    fn default_cron_jobs_include_learning_embeddings_backfill() {
+        // Pins: the learning-embeddings backfill is installed as a 15-minute
+        // SessionStore cron job so task-summary and skill-identity embeddings are
+        // populated out-of-band, never on the turn path.
+        let jobs = default_cron_jobs();
+        let job = jobs
+            .iter()
+            .find(|job| job.key == "learning_embeddings_backfill")
+            .expect("default learning embeddings backfill cron job should be installed");
+
+        assert_eq!(job.version, "v1");
+        assert_eq!(job.body["schedule"], "0 */15 * * * *");
+        assert_eq!(job.body["target_service"], "SessionStore");
+        assert_eq!(job.body["target_handler"], "backfill_learning_embeddings");
     }
 
     #[test]

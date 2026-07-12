@@ -63,9 +63,12 @@ use crate::queries::{
 };
 mod action_policy;
 mod dashboard;
+mod embeddings;
 mod experience;
 mod helpers;
 mod learning;
+mod recurrence;
+mod regression;
 mod segments;
 mod session_attachments;
 mod session_channels;
@@ -80,6 +83,11 @@ pub use dashboard::{
     DashboardEventTimelineItem, DashboardSessionDetail, DashboardSessionListCursor,
     DashboardSessionListPage, DashboardSessionListRequest,
 };
+pub use embeddings::{ExperienceEmbeddingNeighbor, MissingTaskEmbedding, OpenProposalSource};
+pub use recurrence::{
+    RecurrenceExperienceMember, RecurringExperienceCluster, SkillCandidateDecision,
+};
+pub use regression::{RecentSkillPromotion, SkillResolutionSample};
 pub use session_records::SessionCreateOutcome;
 
 fn local_rustfs_config() -> MoaConfig {

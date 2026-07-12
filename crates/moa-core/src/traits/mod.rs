@@ -373,8 +373,15 @@ pub trait SegmentStore: Send + Sync {
         tool_name: &str,
     ) -> Result<()>;
 
-    /// Records a skill activation on the active segment for a session.
+    /// Records a skill activation (injection) on the active segment for a session.
     async fn record_active_segment_skill_activation(
+        &self,
+        session_id: SessionId,
+        skill_name: &str,
+    ) -> Result<()>;
+
+    /// Records that the model engaged a skill on the active segment for a session.
+    async fn record_active_segment_skill_use(
         &self,
         session_id: SessionId,
         skill_name: &str,

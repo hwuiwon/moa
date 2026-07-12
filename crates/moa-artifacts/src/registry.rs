@@ -21,8 +21,10 @@ use crate::validation::ValidationReport;
 
 mod revisions;
 mod runs;
+mod skill_embeddings;
 
-pub use revisions::insert_published_revision;
+pub use revisions::{RollbackApplication, insert_published_revision};
+pub use skill_embeddings::{MissingSkillEmbedding, NewSkillEmbedding, SkillEmbeddingNeighbor};
 
 /// Maximum size, in bytes, accepted for a single stored artifact package file.
 ///

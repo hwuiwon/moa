@@ -20,7 +20,10 @@ use moa_core::{config::MoaConfig, error::Result};
 pub use blob::FileBlobStore;
 pub use neon::NeonBranchManager;
 pub use store::{
-    EventAppend, PostgresSessionStore, SessionChannelBindingReplacement, SessionCreateOutcome,
+    EventAppend, ExperienceEmbeddingNeighbor, MissingTaskEmbedding, OpenProposalSource,
+    PostgresSessionStore, RecentSkillPromotion, RecurrenceExperienceMember,
+    RecurringExperienceCluster, SessionChannelBindingReplacement, SessionCreateOutcome,
+    SkillCandidateDecision, SkillResolutionSample,
 };
 
 /// Creates the shared Postgres session store from config and verifies connectivity.

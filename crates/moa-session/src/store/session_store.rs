@@ -670,6 +670,14 @@ impl SegmentStore for PostgresSessionStore {
             .await
     }
 
+    async fn record_active_segment_skill_use(
+        &self,
+        session_id: moa_core::types::identifiers::SessionId,
+        skill_name: &str,
+    ) -> Result<()> {
+        PostgresSessionStore::record_active_segment_skill_use(self, session_id, skill_name).await
+    }
+
     async fn record_active_segment_turn_usage(
         &self,
         session_id: moa_core::types::identifiers::SessionId,

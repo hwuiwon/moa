@@ -5,6 +5,7 @@
 pub mod artifact;
 pub mod candidates;
 pub mod distiller;
+pub mod embeddings;
 pub mod format;
 pub mod improver;
 pub mod lessons;
@@ -13,8 +14,11 @@ pub mod package;
 /// Deterministic procedure graph execution for skill-backed procedures.
 pub mod procedure;
 pub mod proposals;
+pub mod recurrence;
 pub mod registry;
 pub mod regression;
 pub mod render;
 pub mod review;
+pub mod rollback;
+pub mod semantic;
 mod util;

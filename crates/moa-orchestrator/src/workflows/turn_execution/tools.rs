@@ -1,16 +1,19 @@
 //! Root-turn governed tool selection, dispatch, persistence, and approval routing.
 
+use std::collections::HashMap;
+
 use moa_core::wire::turn::TurnPhase;
 use moa_core::{
     types::completion::ToolCallContent, types::completion::ToolInvocation,
-    types::identifiers::SessionId, types::session::SessionMeta,
+    types::identifiers::SessionId, types::session::SessionMeta, types::tools::ToolOutput,
     types::tools::TrustedSandboxFileManifestRef,
 };
 use restate_sdk::prelude::*;
 
 use crate::tool_invocation::governed::{
     GovernedInvocationOrigin, GovernedInvocationOutcome, GovernedInvocationRequest,
-    invoke_governed_tool, record_segment_tool_use as record_governed_segment_tool_use,
+    append_cached_tool_result, invoke_governed_tool,
+    record_segment_tool_use as record_governed_segment_tool_use,
 };
 use crate::turn::util::{TurnEvidence, stable_tool_call_id};
 use crate::turn_driver::progress as driver_progress;
@@ -28,13 +31,158 @@ pub(super) enum ToolDispatchOutcome {
     ToolBudgetExceeded(ToolBudgetExhausted),
 }
 
+/// Number of cache serves of one file after which the notice escalates to a STOP.
+const ESCALATED_SERVE_THRESHOLD: usize = 3;
+
+/// Filesystem prefix of the immutable skill-package mount.
+///
+/// Root-turn `file_read` is served only from the content-addressed, SHA256-validated
+/// skill-package manifest (`root_trusted_file_read` in `services::tool_executor`),
+/// never the live sandbox filesystem, and every manifest path lives under this prefix
+/// (`.moa/skills/<slug>/...`). Restricting the cache to these paths keeps a
+/// load-bearing invariant local to the cache itself: it can only ever hold immutable
+/// content, so a cache serve can never return a stale body. Even if a future root tool
+/// gained `file_read` access to a mutable filesystem, a read of that path would not
+/// match this prefix and so would never be cached.
+const SKILL_PACKAGE_PATH_PREFIX: &str = ".moa/skills/";
+
+/// One remembered skill-package `file_read`, tracking how many times it has been
+/// re-served this turn. The body is intentionally not stored: the first read already
+/// placed the content in context, so a repeat is served as a notice-only reference.
+struct CachedRead {
+    serves: usize,
+}
+
+/// Per-turn memory of successful skill-package `file_read` calls, keyed by canonical
+/// input.
+///
+/// Created once per user turn and dropped when the turn ends, so entries never leak
+/// across turns. A repeated identical successful read of an immutable skill-package
+/// file is answered from memory with a corrective, notice-only reference (the file
+/// body is not repeated, since it is already in context from the first read) instead
+/// of re-dispatching the tool; the notice escalates to a STOP once the same file has
+/// been re-served [`ESCALATED_SERVE_THRESHOLD`] times. Only successful `file_read`
+/// calls whose path is under [`SKILL_PACKAGE_PATH_PREFIX`] are remembered; every other
+/// tool, every non-skill path, and every error is ignored.
+#[derive(Default)]
+pub(super) struct FileReadTurnCache {
+    seen: HashMap<String, CachedRead>,
+}
+
+impl FileReadTurnCache {
+    /// Returns whether this exact `file_read` would be served from the cache, without
+    /// mutating serve state. Used to pick the budget path before dispatch.
+    fn will_serve(&self, invocation: &ToolInvocation) -> bool {
+        is_cacheable_skill_read(invocation)
+            && self
+                .seen
+                .contains_key(&canonical_input_key(&invocation.input))
+    }
+
+    /// Serves a repeated skill-package `file_read` from memory, counting the serve and
+    /// returning the notice-only reference; `None` for the first read, any non-skill
+    /// path, or any non-`file_read` call. The notice escalates once the file has been
+    /// re-served enough times.
+    fn serve_repeat(&mut self, invocation: &ToolInvocation) -> Option<ToolOutput> {
+        let path = cacheable_skill_read_path(invocation)?;
+        let entry = self.seen.get_mut(&canonical_input_key(&invocation.input))?;
+        entry.serves = entry.serves.saturating_add(1);
+        Some(annotate_cached_file_read(path, entry.serves))
+    }
+
+    /// Remembers a successful skill-package `file_read` so later identical reads are
+    /// served from memory. Non-`file_read` calls, reads of paths outside the immutable
+    /// skill-package mount, and error outputs are ignored; the first successful read
+    /// for a given input wins (later identical reads reuse its serve counter).
+    fn remember(&mut self, invocation: &ToolInvocation, output: &ToolOutput) {
+        if output.is_error || !is_cacheable_skill_read(invocation) {
+            return;
+        }
+        self.seen
+            .entry(canonical_input_key(&invocation.input))
+            .or_insert(CachedRead { serves: 0 });
+    }
+}
+
+/// Returns the `path` of a `file_read` that targets an immutable skill-package file,
+/// or `None` for any other tool or a path outside [`SKILL_PACKAGE_PATH_PREFIX`].
+fn cacheable_skill_read_path(invocation: &ToolInvocation) -> Option<&str> {
+    if invocation.name != "file_read" {
+        return None;
+    }
+    invocation
+        .input
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| path.starts_with(SKILL_PACKAGE_PATH_PREFIX))
+}
+
+/// Returns whether this read targets an immutable skill-package file and is therefore
+/// safe to serve from the per-turn cache without any staleness risk.
+fn is_cacheable_skill_read(invocation: &ToolInvocation) -> bool {
+    cacheable_skill_read_path(invocation).is_some()
+}
+
+/// Serializes a tool input with object keys sorted so two equivalent reads that
+/// differ only in key order share a cache key.
+fn canonical_input_key(input: &serde_json::Value) -> String {
+    fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut sorted = serde_json::Map::new();
+                let mut keys = map.keys().collect::<Vec<_>>();
+                keys.sort();
+                for key in keys {
+                    sorted.insert(key.clone(), canonicalize(&map[key]));
+                }
+                serde_json::Value::Object(sorted)
+            }
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(canonicalize).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    canonicalize(input).to_string()
+}
+
+/// Builds the notice-only output for a repeated skill-package `file_read`.
+///
+/// The file body is deliberately omitted: the first read this turn already placed the
+/// content in context, so repeating it would only re-grow the event log and prompt
+/// tokens for content the model already has. The output is a pure function of the read
+/// path and serve count (both deterministic from turn state), so it replays
+/// identically. The notice escalates to a STOP once the same file has been re-served
+/// [`ESCALATED_SERVE_THRESHOLD`] times.
+fn annotate_cached_file_read(path: &str, serves: usize) -> ToolOutput {
+    let notice = if serves >= ESCALATED_SERVE_THRESHOLD {
+        format!(
+            "STOP: you have requested this identical read of `{path}` {serves} times this turn. \
+             The file is unchanged and its full content is already in your context from the \
+             earlier read; it is not repeated here. Do not read it again — continue the task \
+             with the content you already have."
+        )
+    } else {
+        format!(
+            "(cached: `{path}` is unchanged and identical to your earlier read this turn — its \
+             content is already in your context from that read and is not repeated here; do not \
+             request it again)"
+        )
+    };
+    ToolOutput::text(notice, std::time::Duration::ZERO)
+}
+
 pub(super) struct RootToolContext<'a> {
     pub(super) meta: &'a SessionMeta,
     pub(super) session_id: SessionId,
     pub(super) active_canary: Option<&'a str>,
     pub(super) trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
     pub(super) selected_procedure_skills: &'a std::collections::BTreeSet<String>,
+    /// Skills injected into this turn's manifest, used to detect which the model engaged.
+    pub(super) selected_skills: &'a [String],
     pub(super) turn_evidence: &'a mut TurnEvidence,
+    /// Per-turn `file_read` result memory shared across this turn's model-loop iterations.
+    pub(super) file_read_cache: &'a mut FileReadTurnCache,
 }
 
 pub(super) async fn dispatch_response_tool_calls(
@@ -51,8 +199,13 @@ pub(super) async fn dispatch_response_tool_calls(
             *last_summary = Some(reason);
             return Ok(ToolDispatchOutcome::Cancelled);
         }
+        // A call the per-turn cache will serve is not a dispatch, so it does not advance
+        // the consecutive-repeat loop counter (it still counts against max_tool_calls).
+        let cache_will_serve = tool_context
+            .file_read_cache
+            .will_serve(&tool_call.invocation);
         if let Some(exhaustion) =
-            record_tool_budget(ctx, tool_budget, &tool_call.invocation).await?
+            record_tool_budget(ctx, tool_budget, &tool_call.invocation, cache_will_serve).await?
         {
             return Ok(ToolDispatchOutcome::ToolBudgetExceeded(exhaustion));
         }
@@ -73,8 +226,14 @@ pub(super) async fn record_tool_budget(
     ctx: &WorkflowContext<'_>,
     tool_budget: &mut ToolBudgetState,
     invocation: &ToolInvocation,
+    cache_will_serve: bool,
 ) -> Result<Option<ToolBudgetExhausted>, HandlerError> {
-    match tool_budget.before_tool_dispatch(invocation) {
+    let decision = if cache_will_serve {
+        tool_budget.record_cached_serve(invocation)
+    } else {
+        tool_budget.before_tool_dispatch(invocation)
+    };
+    match decision {
         ToolBudgetDecision::Allow {
             attempted_tool_calls,
         } => {
@@ -100,8 +259,36 @@ async fn handle_tool_call(
     let meta = tool_context.meta;
     let session_id = tool_context.session_id;
     let active_canary = tool_context.active_canary;
-    let turn_evidence = &mut *tool_context.turn_evidence;
+    let selected_skills = tool_context.selected_skills;
     let tool_id = stable_tool_call_id(session_id, index, tool_call);
+
+    // Serve a repeated identical successful file_read from the per-turn cache with a
+    // (possibly escalated) notice, so the model learns the content is already in context
+    // and stops re-reading. The tool is not re-dispatched; the call/result pair is still
+    // persisted so the notice reaches the next context.
+    if let Some(cached_output) = tool_context
+        .file_read_cache
+        .serve_repeat(&tool_call.invocation)
+    {
+        let request = GovernedInvocationRequest {
+            session: meta,
+            session_id,
+            tool_id,
+            tool_call,
+            allowed_tools,
+            selected_procedure_skills: tool_context.selected_procedure_skills,
+            active_canary,
+            trusted_sandbox_manifest: tool_context.trusted_sandbox_manifest,
+            origin: GovernedInvocationOrigin::RootTurn,
+        };
+        append_cached_tool_result(ctx, &request, &cached_output).await?;
+        tool_context
+            .turn_evidence
+            .record_tool_result(&tool_call.invocation, &cached_output);
+        return Ok(());
+    }
+
+    let turn_evidence = &mut *tool_context.turn_evidence;
     let outcome = invoke_governed_tool(
         ctx,
         GovernedInvocationRequest {
@@ -124,9 +311,20 @@ async fn handle_tool_call(
     match outcome {
         GovernedInvocationOutcome::Completed(result) => {
             turn_evidence.record_tool_result(&result.invocation, &result.output);
+            tool_context
+                .file_read_cache
+                .remember(&result.invocation, &result.output);
             if result.should_record_segment_tool_use() {
                 record_governed_segment_tool_use(ctx, session_id, &result.invocation.name).await?;
             }
+            crate::workflows::turn_events::record_segment_skill_use_for_tool_call(
+                ctx,
+                session_id,
+                &tool_call.invocation.name,
+                &tool_call.invocation.input,
+                selected_skills,
+            )
+            .await?;
         }
         GovernedInvocationOutcome::Delegation { tool_id, .. } => {
             handle_delegation_tool(
@@ -145,4 +343,194 @@ async fn handle_tool_call(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use moa_core::types::completion::ToolInvocation;
+    use moa_core::types::tools::ToolOutput;
+    use serde_json::json;
+
+    use super::{ESCALATED_SERVE_THRESHOLD, FileReadTurnCache};
+
+    fn file_read(path: &str) -> ToolInvocation {
+        ToolInvocation {
+            id: Some("call-1".to_string()),
+            name: "file_read".to_string(),
+            input: json!({ "path": path }),
+        }
+    }
+
+    #[test]
+    fn second_identical_file_read_is_served_as_a_notice_only_reference() {
+        // Pins: after one successful skill read this turn, an identical repeat is served
+        // from memory as a corrective notice that names the file and does NOT repeat the
+        // body (the content is already in context from the first read).
+        let path = ".moa/skills/memory-privacy-check/SKILL.md";
+        let mut cache = FileReadTurnCache::default();
+        let call = file_read(path);
+
+        assert!(
+            !cache.will_serve(&call),
+            "first read must not be cache-served"
+        );
+        assert!(cache.serve_repeat(&call).is_none());
+        cache.remember(&call, &ToolOutput::text("SKILL BODY", Duration::ZERO));
+
+        assert!(cache.will_serve(&call), "a remembered read is cache-served");
+        let served = cache.serve_repeat(&call).expect("repeat served from cache");
+        let text = served.to_text();
+        assert!(
+            text.starts_with("(cached:"),
+            "served text must lead with the cached notice: {text}"
+        );
+        assert!(
+            text.contains(path),
+            "the notice names the file path: {text}"
+        );
+        assert!(
+            !text.contains("SKILL BODY"),
+            "the file body must not be repeated on a cache serve: {text}"
+        );
+        assert!(!served.is_error, "a cached read is not an error");
+    }
+
+    #[test]
+    fn repeated_serves_escalate_the_notice_to_stop_without_repeating_the_body() {
+        // Pins: once the same file has been re-served ESCALATED_SERVE_THRESHOLD times, the
+        // notice hardens from the soft "(cached: ...)" hint to a STOP with the serve count;
+        // neither form repeats the file body.
+        let mut cache = FileReadTurnCache::default();
+        let call = file_read(".moa/skills/x/SKILL.md");
+        cache.remember(&call, &ToolOutput::text("BODY", Duration::ZERO));
+
+        for serve in 1..ESCALATED_SERVE_THRESHOLD {
+            let text = cache.serve_repeat(&call).expect("served").to_text();
+            assert!(
+                text.starts_with("(cached:"),
+                "serve {serve} should use the soft notice: {text}"
+            );
+            assert!(
+                !text.contains("BODY"),
+                "serve {serve} must omit the body: {text}"
+            );
+        }
+        let escalated = cache.serve_repeat(&call).expect("served").to_text();
+        assert!(
+            escalated.starts_with("STOP:"),
+            "the escalated serve must lead with STOP: {escalated}"
+        );
+        assert!(
+            escalated.contains(&format!("{ESCALATED_SERVE_THRESHOLD} times")),
+            "the escalated notice names the serve count: {escalated}"
+        );
+        assert!(
+            !escalated.contains("BODY"),
+            "the escalated serve must omit the body: {escalated}"
+        );
+    }
+
+    #[test]
+    fn a_different_path_read_is_not_served_from_cache() {
+        // Pins: caching is keyed on the exact input, so an unrelated read still executes.
+        let mut cache = FileReadTurnCache::default();
+        cache.remember(
+            &file_read(".moa/skills/a/SKILL.md"),
+            &ToolOutput::text("A", Duration::ZERO),
+        );
+
+        assert!(!cache.will_serve(&file_read(".moa/skills/b/SKILL.md")));
+        assert!(
+            cache
+                .serve_repeat(&file_read(".moa/skills/b/SKILL.md"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cache_key_ignores_object_key_order() {
+        // Pins: equivalent reads that differ only in JSON key order share a cache entry.
+        let mut cache = FileReadTurnCache::default();
+        let stored = ToolInvocation {
+            id: Some("1".to_string()),
+            name: "file_read".to_string(),
+            input: json!({ "path": ".moa/skills/x/SKILL.md", "start_line": 1 }),
+        };
+        let reordered = ToolInvocation {
+            id: Some("2".to_string()),
+            name: "file_read".to_string(),
+            input: json!({ "start_line": 1, "path": ".moa/skills/x/SKILL.md" }),
+        };
+        cache.remember(&stored, &ToolOutput::text("BODY", Duration::ZERO));
+
+        assert!(cache.will_serve(&reordered));
+        assert!(cache.serve_repeat(&reordered).is_some());
+    }
+
+    #[test]
+    fn non_file_read_tool_is_never_cached() {
+        // Pins: only file_read is memoized; other tools always dispatch.
+        let mut cache = FileReadTurnCache::default();
+        let bash = ToolInvocation {
+            id: Some("1".to_string()),
+            name: "bash".to_string(),
+            input: json!({ "cmd": "ls" }),
+        };
+        cache.remember(&bash, &ToolOutput::text("out", Duration::ZERO));
+
+        assert!(!cache.will_serve(&bash));
+        assert!(cache.serve_repeat(&bash).is_none());
+    }
+
+    #[test]
+    fn a_non_skill_package_path_read_is_never_cached() {
+        // Pins: the cache only ever holds immutable skill-package files. A successful read
+        // of any path outside the `.moa/skills/` mount is not memoized, so if a future root
+        // tool could read a mutable file, the cache could never serve its stale body.
+        let mut cache = FileReadTurnCache::default();
+        for path in [
+            "src/lib.rs",
+            "README.md",
+            "notes/skills/plan.md",
+            ".moa/skill.md",
+        ] {
+            let call = file_read(path);
+            cache.remember(&call, &ToolOutput::text("MUTABLE BODY", Duration::ZERO));
+            assert!(
+                !cache.will_serve(&call),
+                "non-skill path {path} must not be cache-served"
+            );
+            assert!(
+                cache.serve_repeat(&call).is_none(),
+                "non-skill path {path} must never be served from cache"
+            );
+        }
+    }
+
+    #[test]
+    fn error_output_is_not_remembered() {
+        // Pins: a failed read is never served from cache, so a miss-path retry still
+        // dispatches (and can trip genuine loop detection, since only successes are cached).
+        let mut cache = FileReadTurnCache::default();
+        let call = file_read(".moa/skills/x/SKILL.md");
+        cache.remember(&call, &ToolOutput::error("boom", Duration::ZERO));
+
+        assert!(!cache.will_serve(&call));
+        assert!(cache.serve_repeat(&call).is_none());
+    }
+
+    #[test]
+    fn a_fresh_cache_serves_nothing() {
+        // Pins: the cache is per-turn — each turn builds a fresh FileReadTurnCache, so an
+        // identical read in a later turn is not served from a prior turn's memory.
+        let mut cache = FileReadTurnCache::default();
+        assert!(!cache.will_serve(&file_read(".moa/skills/x/SKILL.md")));
+        assert!(
+            cache
+                .serve_repeat(&file_read(".moa/skills/x/SKILL.md"))
+                .is_none()
+        );
+    }
 }

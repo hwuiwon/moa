@@ -597,11 +597,35 @@ mod tests {
         let mut ctx =
             moa_core::types::context::WorkingContext::new(&session(), capabilities(200_000));
 
+        // Size the override budget to fit exactly one ranked entry (independent of the
+        // exact entry length) so the other two skills are excluded by budget.
+        let sizing_budget = super::ResolvedSkillBudget {
+            max_manifest_chars: super::DEFAULT_MIN_MANIFEST_CHARS,
+            max_per_skill_chars: 1_536,
+            show_token_estimates: true,
+        };
+        let ranked = super::rank_skills(
+            &static_skills,
+            &[],
+            &sizing_budget,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        );
+        let one_entry = super::select_skills_within_budget_and_limit(
+            &ranked,
+            super::DEFAULT_MIN_MANIFEST_CHARS,
+            Some(1),
+            &[],
+        );
+        let one_entry_budget = one_entry.chars_used
+            - MANIFEST_PREAMBLE.chars().count()
+            - MANIFEST_FOOTER.chars().count();
+        let budget_chars =
+            MANIFEST_PREAMBLE.chars().count() + MANIFEST_FOOTER.chars().count() + one_entry_budget;
+
         let output = SkillInjector::from_skills(static_skills)
             .with_budget_config(SkillBudgetConfig {
-                max_manifest_chars: Some(
-                    MANIFEST_PREAMBLE.chars().count() + MANIFEST_FOOTER.chars().count() + 60,
-                ),
+                max_manifest_chars: Some(budget_chars),
                 max_per_skill_chars: 1_536,
                 show_token_estimates: true,
             })
@@ -614,9 +638,7 @@ mod tests {
         assert_eq!(output.excluded_items.len(), 2);
         assert_eq!(
             output.metadata.get("manifest_budget_chars"),
-            Some(&json!(
-                MANIFEST_PREAMBLE.chars().count() + MANIFEST_FOOTER.chars().count() + 60
-            ))
+            Some(&json!(budget_chars))
         );
     }
 

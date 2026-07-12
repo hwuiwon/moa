@@ -223,6 +223,42 @@ impl ToolBudgetState {
         }
     }
 
+    /// Records a tool call that a per-turn cache will serve instead of dispatching.
+    ///
+    /// Loop detection exists to stop unbounded identical *dispatches* (cost and hang
+    /// protection). A cache-served repeat is not a dispatch: it costs nothing and
+    /// cannot hang, so it must not advance the consecutive-repeat counter that trips
+    /// [`ToolBudgetExhaustedReason::RepeatedToolCall`]. It still counts against
+    /// `max_tool_calls` so total attempted work stays bounded, and it breaks the
+    /// real-dispatch streak (an intervening cache serve means the next real dispatch
+    /// is not consecutive with whatever preceded the serve). [`Self::before_tool_dispatch`]
+    /// is intentionally left byte-identical for genuine dispatches.
+    pub(crate) fn record_cached_serve(
+        &mut self,
+        invocation: &ToolInvocation,
+    ) -> ToolBudgetDecision {
+        self.attempted_tool_calls = self.attempted_tool_calls.saturating_add(1);
+        // A cache serve is not a dispatch, so it neither extends nor is counted by the
+        // consecutive-dispatch streak; clear it so later real dispatches start fresh.
+        self.last_fingerprint = None;
+        self.consecutive_repeats = 0;
+
+        if self.max_tool_calls == 0 || self.attempted_tool_calls > self.max_tool_calls {
+            let fingerprint = ToolFingerprint::from_invocation(invocation);
+            return ToolBudgetDecision::Stop(ToolBudgetExhausted {
+                attempted_tool_calls: self.attempted_tool_calls,
+                max_tool_calls: self.max_tool_calls,
+                tool_name: fingerprint.tool_name,
+                consecutive_repeats: self.consecutive_repeats,
+                reason: ToolBudgetExhaustedReason::MaxToolCallsExceeded,
+            });
+        }
+
+        ToolBudgetDecision::Allow {
+            attempted_tool_calls: self.attempted_tool_calls,
+        }
+    }
+
     /// Returns the number of tool calls attempted during this turn.
     pub(crate) fn attempted_tool_calls(&self) -> usize {
         self.attempted_tool_calls
@@ -1065,6 +1101,92 @@ mod tests {
         );
         assert_eq!(stop.consecutive_repeats, 3);
         assert_eq!(stop.tool_name, "bash");
+    }
+
+    #[test]
+    fn cached_serves_never_trip_the_loop_detector_but_still_count_toward_the_cap() {
+        // Pins: a cache-served repeat is not a dispatch, so identical cached serves never
+        // trip RepeatedToolCall regardless of count; they still increment the attempted
+        // count and stop the turn at max_tool_calls with MaxToolCallsExceeded.
+        let mut budget = ToolBudgetState::new(4, 3);
+        let call = invocation(
+            "cached",
+            "file_read",
+            serde_json::json!({"path": ".moa/skills/x/SKILL.md"}),
+        );
+
+        for attempted in 1..=4 {
+            assert_eq!(
+                budget.record_cached_serve(&call),
+                ToolBudgetDecision::Allow {
+                    attempted_tool_calls: attempted
+                },
+                "cached serve {attempted} must be allowed without a loop stop"
+            );
+        }
+        let ToolBudgetDecision::Stop(stop) = budget.record_cached_serve(&call) else {
+            panic!("the attempt beyond max_tool_calls must stop");
+        };
+        assert_eq!(stop.reason, ToolBudgetExhaustedReason::MaxToolCallsExceeded);
+        assert_eq!(stop.attempted_tool_calls, 5);
+        assert_eq!(budget.attempted_tool_calls(), 5);
+    }
+
+    #[test]
+    fn a_cached_serve_breaks_the_consecutive_dispatch_streak() {
+        // Pins: two identical real dispatches build a streak of 2; an intervening cached
+        // serve clears it, so the next identical dispatch restarts at 1 instead of tripping
+        // the loop detector as a third consecutive call.
+        let mut budget = ToolBudgetState::new(10, 3);
+        let dispatched = invocation("d", "bash", serde_json::json!({"cmd": "cargo test"}));
+        let cached = invocation("c", "file_read", serde_json::json!({"path": "a/SKILL.md"}));
+
+        assert!(matches!(
+            budget.before_tool_dispatch(&dispatched),
+            ToolBudgetDecision::Allow { .. }
+        ));
+        assert!(matches!(
+            budget.before_tool_dispatch(&dispatched),
+            ToolBudgetDecision::Allow { .. }
+        ));
+        assert!(matches!(
+            budget.record_cached_serve(&cached),
+            ToolBudgetDecision::Allow { .. }
+        ));
+
+        assert_eq!(
+            budget.before_tool_dispatch(&dispatched),
+            ToolBudgetDecision::Allow {
+                attempted_tool_calls: 4
+            },
+            "the dispatch after a cached serve is consecutive #1 again, not the tripping #3"
+        );
+    }
+
+    #[test]
+    fn identical_failing_file_reads_still_trip_the_loop_detector() {
+        // Pins: only successful reads are cached, so a miss-path file_read loop takes the
+        // real-dispatch path (before_tool_dispatch) and still trips at the threshold.
+        let mut budget = ToolBudgetState::new(10, 3);
+        let miss = invocation(
+            "m",
+            "file_read",
+            serde_json::json!({"path": ".moa/skills/x.md"}),
+        );
+
+        for _ in 1..=2 {
+            assert!(matches!(
+                budget.before_tool_dispatch(&miss),
+                ToolBudgetDecision::Allow { .. }
+            ));
+        }
+        let ToolBudgetDecision::Stop(stop) = budget.before_tool_dispatch(&miss) else {
+            panic!("third identical failing read should stop before dispatch");
+        };
+        assert_eq!(
+            stop.reason,
+            ToolBudgetExhaustedReason::RepeatedToolCall { threshold: 3 }
+        );
     }
 
     #[test]

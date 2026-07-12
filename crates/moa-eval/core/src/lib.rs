@@ -26,5 +26,6 @@ pub use results::{EvalMetrics, EvalResult, EvalScore, EvalScoreValue, EvalStatus
 pub use types::{
     ActionPolicyOverride, ActionPolicyRuleOverride, AgentConfig, ExpectedOutput,
     InstructionOverride, LongConversationMode, LongSessionInterleaving, LongTestCase,
-    MemoryOverride, SecondaryLongSession, TestCase, TestCaseKind, TestSuite, ToolOverride,
+    MemoryOverride, SecondaryLongSession, SuiteOracle, TestCase, TestCaseKind, TestSuite,
+    ToolOverride,
 };

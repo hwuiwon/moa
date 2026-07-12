@@ -142,7 +142,7 @@ pub fn build_endpoint(
     channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
 ) -> Endpoint {
     let mut builder = Endpoint::builder()
-        .bind(SessionStoreImpl::new(session_store.clone(), pool.clone()).serve())
+        .bind(SessionStoreImpl::new(session_store.clone(), pool.clone(), config.clone()).serve())
         .bind(
             LLMGatewayImpl::new(providers.clone())
                 .with_session_limits(session_limits.clone())

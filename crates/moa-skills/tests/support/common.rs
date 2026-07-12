@@ -8,26 +8,54 @@
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use moa_core::{
-    config::MoaConfig, error::MoaError, events::Event, traits::LLMProvider,
-    types::action_policy::ActionRuleScope, types::channel::Attachment, types::channel::Channel,
-    types::completion::CompletionContent, types::completion::CompletionRequest,
-    types::completion::CompletionResponse, types::completion::CompletionStream,
-    types::completion::StopReason, types::completion::TokenUsage,
-    types::events_stream::EventRecord, types::experience::ExperienceRecord,
-    types::experience::TaskFacetSet, types::experience::TaskFingerprint,
-    types::identifiers::ModelId, types::identifiers::SegmentId, types::identifiers::SessionId,
-    types::identifiers::StoragePartitionId, types::identifiers::ToolCallId,
-    types::identifiers::UserId, types::model::ModelCapabilities, types::model::TokenPricing,
-    types::model::ToolCallFormat, types::provider::ModelTier,
-    types::segment_assessment::SegmentEvidence, types::segment_assessment::SegmentEvidenceKind,
-    types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
-    types::session::SessionMeta, types::session::SessionStatus, types::tools::ToolOutput,
+    config::MoaConfig,
+    error::MoaError,
+    error::Result as MoaResult,
+    events::Event,
+    traits::EmbeddingProvider,
+    traits::LLMProvider,
+    traits::SessionStore,
+    types::action_policy::ActionRuleScope,
+    types::agent::AgentContext,
+    types::channel::Attachment,
+    types::channel::Channel,
+    types::completion::CompletionContent,
+    types::completion::CompletionRequest,
+    types::completion::CompletionResponse,
+    types::completion::CompletionStream,
+    types::completion::StopReason,
+    types::completion::TokenUsage,
+    types::contact::SessionActorRef,
+    types::events_stream::EventRecord,
+    types::experience::ExperienceRecord,
+    types::experience::TaskFacetSet,
+    types::experience::TaskFingerprint,
+    types::identifiers::ModelId,
+    types::identifiers::SegmentId,
+    types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId,
+    types::identifiers::ToolCallId,
+    types::identifiers::UserId,
+    types::model::ModelCapabilities,
+    types::model::TokenPricing,
+    types::model::ToolCallFormat,
+    types::provider::ModelTier,
+    types::segment_assessment::SegmentEvidence,
+    types::segment_assessment::SegmentEvidenceKind,
+    types::segment_assessment::SegmentEvidencePolarity,
+    types::segment_assessment::SegmentOutcome,
+    types::segments::{TaskSegment, deterministic_segment_id},
+    types::session::SessionMeta,
+    types::session::SessionStatus,
+    types::tools::ToolOutput,
 };
 use moa_providers::ModelRouter;
 use moa_session::PostgresSessionStore;
@@ -245,6 +273,7 @@ pub fn experience_input(loaded: &LoadedSession, task_summary: &str) -> Experienc
         }],
         tools_used,
         skills_activated: Vec::new(),
+        skills_used: Vec::new(),
         turn_count: 2,
         token_cost: 10,
         duration_ms: Some(100),
@@ -442,22 +471,115 @@ impl LLMProvider for TestProvider {
             .ok_or_else(|| {
                 MoaError::ProviderError("skill test provider ran out of responses".to_string())
             })?;
-        let output_tokens = text.chars().count().div_ceil(4);
-        Ok(CompletionStream::from_response(CompletionResponse {
-            text: text.clone(),
-            content: vec![CompletionContent::Text(text)],
-            stop_reason: StopReason::EndTurn,
-            model: ModelId::new("scripted-skill-model"),
-            usage: TokenUsage {
-                input_tokens_uncached: 32,
-                input_tokens_cache_write: 0,
-                input_tokens_cache_read: 0,
-                output_tokens,
-            },
-            duration_ms: 1,
-            thought_signature: None,
-        }))
+        Ok(text_completion_stream(text))
     }
+}
+
+/// Builds a single-shot text completion stream for a scripted provider response.
+fn text_completion_stream(text: String) -> CompletionStream {
+    let output_tokens = text.chars().count().div_ceil(4);
+    CompletionStream::from_response(CompletionResponse {
+        text: text.clone(),
+        content: vec![CompletionContent::Text(text)],
+        stop_reason: StopReason::EndTurn,
+        model: ModelId::new("scripted-skill-model"),
+        usage: TokenUsage {
+            input_tokens_uncached: 32,
+            input_tokens_cache_write: 0,
+            input_tokens_cache_read: 0,
+            output_tokens,
+        },
+        duration_ms: 1,
+        thought_signature: None,
+    })
+}
+
+/// A model provider that simulates a rival generalization pass landing while this
+/// pass's model call is in flight.
+///
+/// On its first `complete`, it rewrites the target candidate's
+/// `draft_artifact_revision_uid` to a fresh value — exactly what a concurrent pass
+/// that rewrote the draft would do — before returning `response`. Later calls just
+/// return `response`. This drives the optimistic-concurrency retry deterministically:
+/// the first apply sees the changed revision and retries, and the retry lands
+/// cleanly against the rival's draft instead of clobbering it.
+struct RaceMutatingProvider {
+    store: Arc<PostgresSessionStore>,
+    tenant_id: TenantId,
+    candidate_id: Uuid,
+    response: String,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl LLMProvider for RaceMutatingProvider {
+    fn name(&self) -> &str {
+        "race-mutating-skill"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            model_id: ModelId::new("scripted-skill-model"),
+            context_window: 32_000,
+            max_output: 1_024,
+            supports_tools: true,
+            supports_vision: false,
+            supports_prefix_caching: false,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 0.0,
+                output_per_mtok: 0.0,
+                cached_input_per_mtok: None,
+                cache_write_5m_per_mtok: None,
+                cache_write_1h_per_mtok: None,
+            },
+            native_tools: Vec::new(),
+        }
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            // A rival pass advances the draft revision while this model call runs.
+            if let Some(mut candidate) = self
+                .store
+                .get_learning_candidate(&self.tenant_id, self.candidate_id)
+                .await?
+            {
+                if let Some(object) = candidate.payload.as_object_mut() {
+                    object.insert(
+                        "draft_artifact_revision_uid".to_string(),
+                        Value::String(Uuid::now_v7().to_string()),
+                    );
+                }
+                candidate.updated_at = Utc::now();
+                self.store.append_learning_candidate(&candidate).await?;
+            }
+        }
+        Ok(text_completion_stream(self.response.clone()))
+    }
+}
+
+/// Builds a router whose provider rewrites the candidate's draft revision on its
+/// first call, plus the call counter, for the optimistic-concurrency retry test.
+pub fn race_mutating_router(
+    store: Arc<PostgresSessionStore>,
+    tenant_id: TenantId,
+    candidate_id: Uuid,
+    response: impl Into<String>,
+) -> (Arc<ModelRouter>, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = RaceMutatingProvider {
+        store,
+        tenant_id,
+        candidate_id,
+        response: response.into(),
+        calls: calls.clone(),
+    };
+    (Arc::new(ModelRouter::new(Arc::new(provider), None)), calls)
 }
 
 /// Returns a tenant artifact-visibility scope for tests.
@@ -470,4 +592,150 @@ pub fn tenant_scope(storage_partition_id: &StoragePartitionId) -> ActionRuleScop
 /// Returns the tenant storage key for session-scoped learning rows.
 pub fn session_storage_partition_id(session: &SessionMeta) -> StoragePartitionId {
     StoragePartitionId::for_tenant(session.tenant_id)
+}
+
+/// Dimensionality of the learning vector space; must match `halfvec(1024)`.
+const LEARNING_EMBEDDING_DIM: usize = 1024;
+
+/// A fixed unit probe vector every scripted embedding maps to.
+///
+/// Because every input embeds to the same vector, a probe and a stored embedding
+/// are always at cosine distance `0` — the maximally-similar case — which lets a
+/// semantic test drive dedup/routing deterministically without a real model.
+pub fn learning_probe_vector() -> Vec<f32> {
+    let mut vector = vec![0.0_f32; LEARNING_EMBEDDING_DIM];
+    vector[0] = 1.0;
+    vector
+}
+
+/// A deterministic embedding provider that maps every input to one fixed 1024-dim
+/// vector and counts the inputs it was asked to embed.
+///
+/// The call counter lets a test assert that the semantic layer either ran (the
+/// probe was embedded) or was skipped entirely (zero embeds on the lexical path).
+pub struct ScriptedEmbedder {
+    vector: Vec<f32>,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl EmbeddingProvider for ScriptedEmbedder {
+    fn model_id(&self) -> &str {
+        "scripted-embed"
+    }
+
+    fn dimensions(&self) -> usize {
+        self.vector.len()
+    }
+
+    async fn embed(&self, inputs: &[String]) -> MoaResult<Vec<Vec<f32>>> {
+        self.calls.fetch_add(inputs.len(), Ordering::SeqCst);
+        Ok(inputs.iter().map(|_| self.vector.clone()).collect())
+    }
+}
+
+/// Builds a scripted embedder and the shared counter of inputs it embeds.
+pub fn scripted_embedder() -> (Arc<dyn EmbeddingProvider>, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let embedder = Arc::new(ScriptedEmbedder {
+        vector: learning_probe_vector(),
+        calls: calls.clone(),
+    });
+    (embedder, calls)
+}
+
+fn embedding_session_meta(tenant_id: TenantId) -> SessionMeta {
+    SessionMeta {
+        tenant_id,
+        created_by: Some(SessionActorRef::Identity { id: Uuid::now_v7() }),
+        model: ModelId::new("scripted-skill-model"),
+        agent_context: Some(AgentContext::system_default()),
+        ..SessionMeta::default()
+    }
+}
+
+/// Persists a real session + segment + assessed experience with a task embedding.
+///
+/// Semantic tests need experience rows whose `task_embedding` the nearest-neighbor
+/// queries can find, which requires the full FK chain (session, segment,
+/// experience) plus a set embedding. The experience id is supplied by the caller
+/// so a test can align it with the source-experience id an open proposal already
+/// references. Returns nothing; the caller already holds the id.
+pub async fn seed_embedded_experience(
+    test_db: &TestDb,
+    experience_id: Uuid,
+    tenant_id: TenantId,
+    fingerprint_hash: &str,
+    task_summary: &str,
+    embedding: &[f32],
+    created_at: DateTime<Utc>,
+) {
+    let store = test_db.store();
+    let session_id: SessionId = store
+        .create_session(embedding_session_meta(tenant_id))
+        .await
+        .expect("create embedded-experience session");
+    let segment_id = deterministic_segment_id(session_id, 0);
+    let tools_used = vec!["bash".to_string(), "file_read".to_string()];
+    store
+        .create_segment(&TaskSegment {
+            id: segment_id,
+            session_id,
+            tenant_id: tenant_id.to_string(),
+            segment_index: 0,
+            task_summary: Some(task_summary.to_string()),
+            started_at: created_at,
+            ended_at: Some(created_at),
+            turn_count: 1,
+            tools_used: tools_used.clone(),
+            skills_activated: Vec::new(),
+            skills_used: Vec::new(),
+            token_cost: 0,
+            previous_segment_id: None,
+            outcome: Some(SegmentOutcome::Resolved.as_str().to_string()),
+            assessment: None,
+            outcome_confidence: Some(0.9),
+        })
+        .await
+        .expect("create embedded-experience segment");
+    let experience = ExperienceRecord {
+        id: experience_id,
+        segment_id,
+        session_id,
+        tenant_id,
+        user_id: UserId::new("fixture-user"),
+        task_summary: Some(task_summary.to_string()),
+        task_fingerprint: TaskFingerprint {
+            hash: fingerprint_hash.to_string(),
+            normalized_summary: task_summary.to_ascii_lowercase(),
+            policy_version: "experience_v1".to_string(),
+        },
+        task_facets: TaskFacetSet::default(),
+        actions: Vec::new(),
+        resources: Vec::new(),
+        outcome: SegmentOutcome::Resolved,
+        confidence: 0.9,
+        evidence: Vec::new(),
+        tools_used,
+        skills_activated: Vec::new(),
+        skills_used: Vec::new(),
+        turn_count: 1,
+        token_cost: 0,
+        duration_ms: None,
+        assessment_policy_version: "assessment_v1".to_string(),
+        extraction_policy_version: "experience_v1".to_string(),
+        created_at,
+    };
+    store
+        .append_experience_record(&experience)
+        .await
+        .expect("persist embedded experience");
+    store
+        .set_experience_task_embeddings(
+            &[(experience_id, task_summary.to_string(), embedding.to_vec())],
+            "scripted-embed",
+            1,
+        )
+        .await
+        .expect("set experience embedding");
 }

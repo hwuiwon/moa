@@ -16,7 +16,8 @@ use crate::format::{
 };
 use crate::package::{SKILL_MD_PATH, SkillPackage, SkillPackageFile, ValidatedSkillPackageFile};
 use crate::proposals::{
-    SkillDraftProposal, SkillProposalOperation, SkillProposalSource, store_skill_draft_proposal,
+    SiblingResynthesis, SkillDraftProposal, SkillProposalOperation, SkillProposalSource,
+    store_skill_draft_proposal,
 };
 use crate::registry::SkillRegistry;
 use crate::regression::generate_skill_test_suite_source;
@@ -32,6 +33,15 @@ pub enum ImprovementResult {
         previous_version: String,
         /// Proposed semantic skill version.
         version: String,
+    },
+    /// A recurring sibling experience deduped onto an already-open improvement
+    /// proposal. No new draft was filed; `resynthesis` records whether the
+    /// sibling's generalization pass rewrote the open draft.
+    Deduped {
+        /// The open proposal the sibling deduped onto.
+        proposal: SkillDraftProposal,
+        /// Whether the sibling's generalization pass rewrote the open draft.
+        resynthesis: SiblingResynthesis,
     },
     /// The LLM concluded the current skill already covers the successful run.
     Unchanged {
@@ -65,7 +75,12 @@ pub async fn improve_skill_from_experience_with_learning(
         "matched_skill": existing.name.clone(),
         "reason": "caller-directed improvement of a named skill",
     });
-    let source = crate::distiller::proposal_source_from_experience(input, Some(routing));
+    // Caller-directed improvement stands on the caller's own gate, not recurrence.
+    let source = crate::distiller::proposal_source_from_experience(
+        input,
+        Some(routing),
+        &crate::distiller::DispatchEvidence::SingleSession,
+    );
     improve_skill_with_learning_for_sources(
         session,
         existing,
@@ -102,30 +117,32 @@ pub(crate) async fn improve_skill_with_learning_for_sources(
     )
     .await?
     {
-        if let Some(source_experience_id) = source.source_experience_ids.first().copied() {
-            let sibling_suite = crate::regression::generate_skill_test_suite_source_for_name(
-                session.tenant_id,
-                &open.metadata.name,
-                events,
-            )?;
-            crate::proposals::accumulate_sibling_suite(
-                store.as_ref(),
-                session.tenant_id,
-                &open,
-                sibling_suite,
-                source_experience_id,
-                session.id,
-            )
-            .await?;
-        }
-        let previous_version = match &open.operation {
-            SkillProposalOperation::Improved { previous_version } => previous_version.clone(),
-            SkillProposalOperation::Created => String::new(),
-        };
-        return Ok(ImprovementResult::Improved {
+        let resynthesis =
+            if let Some(source_experience_id) = source.source_experience_ids.first().copied() {
+                let sibling_suite = crate::regression::generate_skill_test_suite_source_for_name(
+                    session.tenant_id,
+                    &open.metadata.name,
+                    events,
+                )?;
+                crate::proposals::accumulate_sibling_and_resynthesize(
+                    store.as_ref(),
+                    model_router.as_ref(),
+                    session.tenant_id,
+                    &open,
+                    crate::proposals::SiblingContribution {
+                        suite: sibling_suite,
+                        events,
+                        source_experience_id,
+                        source_session_id: session.id,
+                    },
+                )
+                .await?
+            } else {
+                SiblingResynthesis::DraftUnchanged
+            };
+        return Ok(ImprovementResult::Deduped {
             proposal: open,
-            previous_version: previous_version.clone(),
-            version: previous_version,
+            resynthesis,
         });
     }
     let registry = SkillRegistry::new(store.pool().clone());

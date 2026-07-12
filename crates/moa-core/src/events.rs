@@ -112,8 +112,11 @@ pub enum Event {
         turn_count: u32,
         /// Tool names used during the segment.
         tools_used: Vec<String>,
-        /// Skill names activated during the segment.
+        /// Skill names injected into the segment's turn manifest.
         skills_activated: Vec<String>,
+        /// Skill names the model actually engaged during the segment.
+        #[serde(default)]
+        skills_used: Vec<String>,
         /// Token cost attributed to the segment.
         token_cost: u64,
         /// Segment duration in milliseconds.

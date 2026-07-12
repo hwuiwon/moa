@@ -701,6 +701,145 @@ impl RestateSessionStore for SessionStoreImpl {
             .await?)
     }
 
+    #[tracing::instrument(skip(self, ctx, _request))]
+    // SAFETY: Internal maintenance handler; reads derived learning aggregates and files
+    // tenant-scoped rollback proposals into the human review queue. No caller data is returned.
+    async fn monitor_skill_regressions(
+        &self,
+        ctx: Context<'_>,
+        _request: Json<serde_json::Value>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SessionStore", "monitor_skill_regressions");
+        let store = self.store.clone();
+        let config = self.config.clone();
+
+        Ok(ctx
+            .run(|| async move {
+                let filed = moa_skills::rollback::monitor_and_file_skill_regressions(
+                    &store,
+                    &config.learning.regression_monitor,
+                    chrono::Utc::now(),
+                )
+                .await
+                .map_err(HandlerError::from)?;
+                // Recorded inside the durable step so a replay reuses the journaled
+                // result instead of re-incrementing the counter.
+                moa_observability::runtime_metrics::record_skill_learning_candidates_filed(
+                    "rollback_monitor",
+                    "regression",
+                    filed as u64,
+                );
+                Ok::<(), HandlerError>(())
+            })
+            .name("monitor_skill_regressions")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, _request))]
+    // SAFETY: Internal maintenance handler; embeds tenant-owned task summaries and
+    // published skill identities into derived vector columns. No caller data is returned.
+    async fn backfill_learning_embeddings(
+        &self,
+        ctx: Context<'_>,
+        _request: Json<serde_json::Value>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SessionStore", "backfill_learning_embeddings");
+        let Some(embedder) = self.embedder.clone() else {
+            // No embedder configured: the deployment runs without learning
+            // embeddings. Nothing to backfill, so this is a clean no-op.
+            tracing::debug!("learning-embeddings backfill skipped: embedder disabled");
+            return Ok(());
+        };
+        let store = self.store.clone();
+        let registry = moa_artifacts::registry::ArtifactRegistry::new(self.pool.clone());
+        let config = self.config.clone();
+
+        Ok(ctx
+            .run(|| async move {
+                let embedder_ref = embedder.as_ref();
+                let experiences = moa_skills::embeddings::backfill_experience_embeddings(
+                    &store,
+                    embedder_ref,
+                    &config.learning.embeddings,
+                    chrono::Utc::now(),
+                )
+                .await
+                .map_err(HandlerError::from)?;
+                let skills = moa_skills::embeddings::backfill_skill_embeddings(
+                    &registry,
+                    embedder_ref,
+                    &config.learning.embeddings,
+                )
+                .await
+                .map_err(HandlerError::from)?;
+                // Counted inside the durable step so a replay reuses the journaled
+                // result instead of double-incrementing the counter.
+                metrics::counter!(
+                    "moa_learning_embeddings_backfilled_total",
+                    "kind" => "experience"
+                )
+                .increment(experiences as u64);
+                metrics::counter!(
+                    "moa_learning_embeddings_backfilled_total",
+                    "kind" => "skill"
+                )
+                .increment(skills as u64);
+                Ok::<(), HandlerError>(())
+            })
+            .name("backfill_learning_embeddings")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, _request))]
+    // SAFETY: Internal maintenance handler; reads derived tenant-owned learning
+    // aggregates and dispatches tenant-scoped skill-learning workflows into the
+    // human review pipeline. No caller data is returned.
+    async fn mine_task_recurrences(
+        &self,
+        ctx: Context<'_>,
+        _request: Json<serde_json::Value>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SessionStore", "mine_task_recurrences");
+        let store = self.store.clone();
+        let config = self.config.clone();
+
+        // Discovery + qualification runs in one durable step so the dispatch set
+        // is journaled: a replay re-dispatches the exact same exemplars instead of
+        // re-reading a changed ledger.
+        let dispatches = ctx
+            .run(|| async move {
+                discover_recurrence_dispatches(
+                    &store,
+                    &config.learning.recurrence,
+                    chrono::Utc::now(),
+                )
+                .await
+                .map(Json::from)
+                .map_err(HandlerError::from)
+            })
+            .name("mine_task_recurrences")
+            .await?
+            .into_inner();
+
+        // Each SkillLearning workflow is keyed by its exemplar experience id, so a
+        // re-dispatch of the same exemplar attaches to the existing run rather than
+        // filing twice; the open-candidate/cooldown suppression above keeps a later
+        // tick from re-qualifying a fingerprint whose proposal is already filed.
+        let dispatched = dispatches.len();
+        for request in dispatches {
+            ctx.workflow_client::<crate::workflows::skill_learning::SkillLearningClient>(
+                request.experience_id.to_string(),
+            )
+            .run(Json::from(request))
+            .send();
+        }
+        tracing::info!(
+            dispatched,
+            "recurrence mining dispatched skill-learning passes"
+        );
+        Ok(())
+    }
+
     #[tracing::instrument(skip(self, ctx, request))]
     // SAFETY: Internal learning telemetry write emitted by admitted session workflows.
     async fn record_segment_tool_use(
@@ -747,6 +886,28 @@ impl RestateSessionStore for SessionStoreImpl {
 
     #[tracing::instrument(skip(self, ctx, request))]
     // SAFETY: Internal learning telemetry write emitted by admitted session workflows.
+    async fn record_segment_skill_use(
+        &self,
+        ctx: Context<'_>,
+        request: Json<RecordSegmentSkillUseRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SessionStore", "record_segment_skill_use");
+        let request = request.into_inner();
+        let store = self.store.clone();
+
+        Ok(ctx
+            .run(|| async move {
+                store
+                    .record_active_segment_skill_use(request.session_id, &request.skill_name)
+                    .await
+                    .map_err(HandlerError::from)
+            })
+            .name("record_segment_skill_use")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: Internal learning telemetry write emitted by admitted session workflows.
     async fn record_segment_turn_usage(
         &self,
         ctx: Context<'_>,
@@ -766,6 +927,145 @@ impl RestateSessionStore for SessionStoreImpl {
             .name("record_segment_turn_usage")
             .await?)
     }
+}
+
+/// Discovers the recurrence-triggered skill-learning dispatches for one tick.
+///
+/// Store-coupled driver over the pure qualifier: for each tenant with recent
+/// resolved/partial experiences, it groups them into recurring fingerprint
+/// clusters, consults the fingerprint's candidate decision history for
+/// suppression, and turns each qualifying cluster into a keyed
+/// [`RunSkillLearningRequest`] whose exemplar carries the relaxed floor and whose
+/// siblings ride along for immediate generalization. Pure ranking/suppression
+/// stays in `moa-skills`; only the reads happen here.
+async fn discover_recurrence_dispatches(
+    store: &moa_session::PostgresSessionStore,
+    config: &moa_core::config::RecurrenceConfig,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<crate::workflows::skill_learning::RunSkillLearningRequest>, moa_core::error::MoaError>
+{
+    use crate::workflows::skill_learning::{
+        RecurrenceDispatch, RecurrenceSiblingRef, RunSkillLearningRequest,
+    };
+    use std::collections::HashMap;
+
+    use moa_skills::recurrence::{
+        RecurrenceThresholds, cluster_recurrence_groups, qualify_recurrence_cluster,
+    };
+
+    let thresholds = RecurrenceThresholds::from_config(config);
+    let since = now - chrono::Duration::days(config.lookback_days.max(0));
+    let tenants = store
+        .list_tenants_with_recent_learnable_experiences(since)
+        .await?;
+
+    let mut dispatches = Vec::new();
+    for tenant_id in tenants {
+        // Load every candidate group down to a single occurrence (bounded by
+        // recency): the occurrence threshold is applied after clustering by the
+        // pure qualifier, so sub-threshold aliases can still merge into a
+        // qualifying cluster.
+        let groups = store
+            .list_candidate_experience_groups(&tenant_id, since, config.max_candidate_groups)
+            .await?;
+
+        // Probe one representative per group against the tenant's task embeddings
+        // so semantically-equal groups ("same loop, different wording") merge into
+        // one cluster. The breadth is bounded by the total grouped members so a
+        // representative can reach every other group's members; an unembedded
+        // representative yields None and its group stays exact (NULL degradation).
+        let neighbor_limit = recurrence_cluster_neighbor_limit(&groups);
+        let mut neighbor_lists = Vec::with_capacity(groups.len());
+        for group in &groups {
+            let representative = group.members.first().map(|member| member.experience_id);
+            let neighbors = match representative {
+                Some(experience_id) => {
+                    store
+                        .nearest_task_embeddings_for_experience(
+                            &tenant_id,
+                            experience_id,
+                            neighbor_limit,
+                        )
+                        .await?
+                }
+                None => None,
+            };
+            neighbor_lists.push(neighbors);
+        }
+        let clusters =
+            cluster_recurrence_groups(&groups, &neighbor_lists, config.cluster_similarity);
+
+        // Batch the per-cluster suppression history: one `= ANY(...)` scan over
+        // every fingerprint across every cluster replaces the per-fingerprint N+1,
+        // then each cluster reads its merged fingerprints' decisions from the map.
+        let all_fingerprints: Vec<String> = clusters
+            .iter()
+            .flat_map(|cluster| cluster.merged_fingerprints.iter().cloned())
+            .collect();
+        let mut decisions_by_fingerprint: HashMap<String, Vec<_>> = HashMap::new();
+        for (fingerprint_hash, decision) in store
+            .list_skill_candidate_decisions_for_fingerprints(&tenant_id, &all_fingerprints)
+            .await?
+        {
+            decisions_by_fingerprint
+                .entry(fingerprint_hash)
+                .or_default()
+                .push(decision);
+        }
+
+        for cluster in clusters {
+            // Per-cluster suppression: gather the candidate history across every
+            // merged fingerprint so an open/promoted/cooldown candidate on any one
+            // member suppresses the whole cluster.
+            let decisions: Vec<_> = cluster
+                .merged_fingerprints
+                .iter()
+                .filter_map(|hash| decisions_by_fingerprint.get(hash))
+                .flatten()
+                .cloned()
+                .collect();
+            let Some(plan) = qualify_recurrence_cluster(&cluster, &decisions, &thresholds, now)
+            else {
+                continue;
+            };
+            let siblings = plan
+                .siblings
+                .iter()
+                .map(|sibling| RecurrenceSiblingRef {
+                    session_id: sibling.session_id,
+                    experience_id: sibling.experience_id,
+                })
+                .collect();
+            dispatches.push(RunSkillLearningRequest {
+                session_id: plan.exemplar.session_id,
+                experience_id: plan.exemplar.experience_id,
+                recurrence: Some(RecurrenceDispatch {
+                    occurrences: plan.occurrences,
+                    merged_fingerprints: plan.merged_fingerprints,
+                    first_seen: plan.first_seen,
+                    last_seen: plan.last_seen,
+                    siblings,
+                }),
+            });
+        }
+    }
+    Ok(dispatches)
+}
+
+/// Upper bound on the per-representative neighbor breadth used for recurrence
+/// clustering, so a pathological tenant never triggers an unbounded scan.
+const RECURRENCE_CLUSTER_NEIGHBOR_LIMIT_MAX: usize = 200;
+
+/// Neighbor breadth to request per group representative when clustering.
+///
+/// A representative must be able to see every other grouped member to discover a
+/// merge (within-group members saturate the closest ranks), so the breadth tracks
+/// the total grouped members, clamped to at least one and at most
+/// [`RECURRENCE_CLUSTER_NEIGHBOR_LIMIT_MAX`]. A clamp-induced miss only fails to
+/// merge, degrading safely to exact grouping.
+fn recurrence_cluster_neighbor_limit(groups: &[moa_session::RecurringExperienceCluster]) -> usize {
+    let total_members: usize = groups.iter().map(|group| group.members.len()).sum();
+    total_members.clamp(1, RECURRENCE_CLUSTER_NEIGHBOR_LIMIT_MAX)
 }
 
 async fn authorize_session_read(

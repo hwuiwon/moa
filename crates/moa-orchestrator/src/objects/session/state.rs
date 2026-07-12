@@ -346,6 +346,16 @@ impl SessionVoState {
         }
     }
 
+    /// Records that the model engaged a skill on the active task segment.
+    pub fn record_segment_skill_use(&mut self, skill_name: &str) {
+        let Some(segment) = self.current_segment.as_mut() else {
+            return;
+        };
+        if !segment.skills_used.iter().any(|skill| skill == skill_name) {
+            segment.skills_used.push(skill_name.to_string());
+        }
+    }
+
     /// Records one completed model turn on the active task segment.
     pub fn record_segment_turn_usage(&mut self, token_cost: u64) {
         let Some(segment) = self.current_segment.as_mut() else {

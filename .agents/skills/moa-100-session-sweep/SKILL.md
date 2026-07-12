@@ -59,7 +59,10 @@ counts as a fail. Before treating a marked fail as a regression, re-run that ses
 `MOA_SWEEP_IDS`. Signatures: `stale-worker-timeout` (a stale worker hangs fan-in until timeout),
 `canary-session_search-false-positive` (canary guardrail trips on `session_search`),
 `loop-detector-memory_remember-false-positive` (tool-loop detector trips on repeated
-`memory_remember`).
+`memory_remember`), `turn-cap-memory-store-pacing` (a multi-fact memory-store persona paces one
+`memory_remember` per model turn and exhausts the 6-turn budget; harness defects in this chain
+were fixed 2026-07-12 — activation path in the skill manifest, corrective file_read misses,
+per-turn read cache exempt from loop detection — the residual is stochastic model pacing).
 
 ## Runner Requirements
 

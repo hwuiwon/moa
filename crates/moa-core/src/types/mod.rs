@@ -25,6 +25,7 @@ pub mod runtime_events;
 pub mod segment_assessment;
 pub mod segments;
 pub mod session;
+pub mod skill_use;
 pub mod snapshot;
 pub mod tools;
 pub mod worker;

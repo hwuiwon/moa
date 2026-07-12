@@ -827,7 +827,10 @@ async fn materialize_primary_learning_if_requested(
         ended_at: Some(ended_at),
         turn_count: primary.user_turn_count as u32,
         tools_used,
-        skills_activated: config.skills_activated,
+        skills_activated: config.skills_activated.clone(),
+        // The learning-phase fixture represents a session where the activated skills were
+        // engaged, so credit them as used; unused injections are covered by unit tests.
+        skills_used: config.skills_activated,
         token_cost,
         previous_segment_id: None,
         outcome: Some(assessment.outcome.as_str().to_string()),

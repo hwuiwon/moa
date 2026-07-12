@@ -21,7 +21,22 @@ const LARGE_FILE_HINT_LINES: usize = 200;
 /// Executes the `file_read` tool against a sandbox directory.
 pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
     let params: FileReadInput = serde_json::from_str(input)?;
-    let resolved = resolve_existing_sandbox_path(sandbox_dir, &params.path).await?;
+    let resolved = match resolve_existing_sandbox_path(sandbox_dir, &params.path).await {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            // A miss under a skill package is a known failure mode: the model
+            // guesses `.moa/skills/<name>.md` and retries the identical read.
+            // Enrich only the not-found skill miss with the canonical activation
+            // path so the model self-corrects on the first miss; every other
+            // error (traversal, permission, non-skill miss) keeps its plain form.
+            if let Some(guidance) =
+                skill_path_miss_guidance(sandbox_dir, &params.path, &error).await
+            {
+                return Err(MoaError::ToolError(guidance));
+            }
+            return Err(error);
+        }
+    };
     if is_ranged(&params) {
         return render_ranged_file_read(&resolved.path, &resolved.display_path, &params).await;
     }
@@ -38,6 +53,103 @@ pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
 pub fn execute_with_content(input: &str, display_path: &str, content: &str) -> Result<ToolOutput> {
     let params: FileReadInput = serde_json::from_str(input)?;
     Ok(render_file_read_output(content, display_path, &params))
+}
+
+/// Path fragments marking a `file_read` target as a skill-package read.
+///
+/// A miss on such a path is enriched with the canonical activation path; any
+/// other miss keeps its plain not-found error.
+const SKILL_PACKAGE_MARKERS: [&str; 2] = [".moa/", "skills/"];
+
+/// Maximum materialized skill directories named in a single miss-guidance message.
+const MAX_LISTED_SKILL_DIRS: usize = 20;
+
+/// Returns true when a requested path targets a skill package.
+fn references_skill_path(raw_path: &str) -> bool {
+    let lowered = raw_path.to_ascii_lowercase();
+    SKILL_PACKAGE_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(marker))
+}
+
+/// Builds corrective guidance for a skill-package `file_read` miss.
+///
+/// Returns `None` unless the error is a not-found miss *and* the path references
+/// a skill package, so unrelated reads keep their plain error. On a skill miss it
+/// reshapes the guessed path to the canonical `.moa/skills/<slug>/SKILL.md` form
+/// and, when the sandbox has a materialized `.moa/skills/` directory, names the
+/// available skill directories (capped). The work is one bounded directory
+/// listing on the miss path only; successful reads are untouched.
+async fn skill_path_miss_guidance(
+    sandbox_dir: &Path,
+    raw_path: &str,
+    error: &MoaError,
+) -> Option<String> {
+    let is_not_found = matches!(error, MoaError::Io(io) if io.kind() == ErrorKind::NotFound);
+    if !is_not_found || !references_skill_path(raw_path) {
+        return None;
+    }
+
+    let mut guidance = format!(
+        "no file at `{raw_path}`. Skill packages materialize at \
+         `.moa/skills/<slug>/SKILL.md`; read that exact path, not a bare \
+         `.moa/skills/<name>.md`."
+    );
+    if let Some(canonical) = canonical_skill_path_suggestion(raw_path) {
+        guidance.push_str(&format!(" Did you mean `{canonical}`?"));
+    }
+    let available = list_materialized_skill_slugs(sandbox_dir).await;
+    if !available.is_empty() {
+        guidance.push_str(&format!(" Available skills: {}.", available.join(", ")));
+    }
+    Some(guidance)
+}
+
+/// Reshapes a guessed skill path into the canonical `.moa/skills/<slug>/SKILL.md`.
+///
+/// Uses the final path segment's `.md` stem as the slug so a guess like
+/// `.moa/skills/memory-privacy-check.md` (or `.well-known/skills/memory-privacy-check.md`)
+/// maps to `.moa/skills/memory-privacy-check/SKILL.md`. Returns `None` when there
+/// is no `.md` segment or it is already `SKILL.md`.
+fn canonical_skill_path_suggestion(raw_path: &str) -> Option<String> {
+    let last = Path::new(raw_path)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(segment) => segment.to_str(),
+            _ => None,
+        })
+        .next_back()?;
+    let stem = last.strip_suffix(".md")?;
+    if stem.is_empty() || stem.eq_ignore_ascii_case("skill") {
+        return None;
+    }
+    Some(format!(".moa/skills/{stem}/SKILL.md"))
+}
+
+/// Lists the materialized skill directories under `<sandbox>/.moa/skills`.
+///
+/// Returns an empty vector when the directory is absent. The names are sorted
+/// and capped so the guidance message is deterministic and bounded.
+async fn list_materialized_skill_slugs(sandbox_dir: &Path) -> Vec<String> {
+    let skills_root = sandbox_dir.join(".moa").join("skills");
+    let Ok(mut entries) = fs::read_dir(&skills_root).await else {
+        return Vec::new();
+    };
+
+    let mut slugs = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let is_dir = entry
+            .file_type()
+            .await
+            .map(|file_type| file_type.is_dir())
+            .unwrap_or(false);
+        if is_dir && let Some(name) = entry.file_name().to_str() {
+            slugs.push(name.to_string());
+        }
+    }
+    slugs.sort();
+    slugs.truncate(MAX_LISTED_SKILL_DIRS);
+    slugs
 }
 
 /// Executes the `file_read` tool inside an existing Docker sandbox.
@@ -549,6 +661,93 @@ mod tests {
         assert!(text.contains("1\tline 1"));
         assert!(text.contains("3\tline 3"));
         assert!(!text.contains("4\tline 4"));
+    }
+
+    #[tokio::test]
+    async fn skill_path_miss_returns_canonical_activation_guidance() {
+        // Pins: a miss on the guessed `.moa/skills/<name>.md` (the live S085/S090
+        // failure) is corrective — it names the exact `.moa/skills/<name>/SKILL.md`
+        // form so the model reads the right path on the first miss instead of
+        // retrying the identical guess.
+        let dir = tempdir().expect("tempdir");
+
+        let error = execute(
+            dir.path(),
+            r#"{"path":".moa/skills/memory-privacy-check.md"}"#,
+        )
+        .await
+        .expect_err("missing skill file should error");
+
+        let MoaError::ToolError(message) = error else {
+            panic!("skill miss should surface corrective ToolError guidance: {error:?}");
+        };
+        assert!(
+            message.contains(".moa/skills/memory-privacy-check/SKILL.md"),
+            "guidance must name the canonical activation path: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn well_known_skill_path_miss_is_also_corrective() {
+        // Pins: the second observed guessed shape (`.well-known/skills/<name>.md`)
+        // is reshaped to the same canonical `.moa/skills/<name>/SKILL.md` form.
+        let dir = tempdir().expect("tempdir");
+
+        let error = execute(
+            dir.path(),
+            r#"{"path":".well-known/skills/memory-privacy-check.md"}"#,
+        )
+        .await
+        .expect_err("missing skill file should error");
+
+        let MoaError::ToolError(message) = error else {
+            panic!("skill miss should surface corrective ToolError guidance: {error:?}");
+        };
+        assert!(
+            message.contains(".moa/skills/memory-privacy-check/SKILL.md"),
+            "guidance must name the canonical activation path: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_path_miss_lists_materialized_skill_directories() {
+        // Pins: when the sandbox has a materialized `.moa/skills/` directory, the
+        // miss guidance names the actual available skill directories so the model
+        // can pick the real slug, not only the reshaped guess.
+        let dir = tempdir().expect("tempdir");
+        for slug in ["memory-privacy-check", "refund-policy"] {
+            fs::create_dir_all(dir.path().join(".moa").join("skills").join(slug))
+                .await
+                .expect("create skill dir");
+        }
+
+        let error = execute(dir.path(), r#"{"path":".moa/skills/privacy.md"}"#)
+            .await
+            .expect_err("missing skill file should error");
+
+        let MoaError::ToolError(message) = error else {
+            panic!("skill miss should surface corrective ToolError guidance: {error:?}");
+        };
+        assert!(
+            message.contains("Available skills: memory-privacy-check, refund-policy"),
+            "guidance must list materialized skill directories: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unrelated_path_miss_keeps_plain_not_found_error() {
+        // Pins: a miss on a non-skill path is NOT decorated with skill guidance and
+        // keeps its plain I/O not-found error.
+        let dir = tempdir().expect("tempdir");
+
+        let error = execute(dir.path(), r#"{"path":"docs/nope.txt"}"#)
+            .await
+            .expect_err("missing file should error");
+
+        assert!(
+            matches!(&error, MoaError::Io(io) if io.kind() == ErrorKind::NotFound),
+            "unrelated miss should keep the plain not-found error: {error:?}"
+        );
     }
 
     #[cfg(unix)]

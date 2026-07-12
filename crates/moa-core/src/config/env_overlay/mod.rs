@@ -553,6 +553,30 @@ pub struct MoaEnvOverlay {
     pub resolution_idle_timeout_minutes: Option<u64>,
     /// `MOA_LEARNING_SKILLS_MIN_TOOL_CALLS`.
     pub learning_skills_min_tool_calls: Option<usize>,
+    /// `MOA_LEARNING_SKILLS_IMPROVE_ROUTE_SIMILARITY`.
+    pub learning_skills_improve_route_similarity: Option<f64>,
+    /// `MOA_LEARNING_SKILLS_PROPOSAL_DEDUP_SIMILARITY`.
+    pub learning_skills_proposal_dedup_similarity: Option<f64>,
+    /// `MOA_LEARNING_SEGMENTS_IDLE_GAP_MINUTES`.
+    pub learning_segments_idle_gap_minutes: Option<u64>,
+    /// `MOA_LEARNING_EMBEDDINGS_EXPERIENCE_BATCH_SIZE`.
+    pub learning_embeddings_experience_batch_size: Option<usize>,
+    /// `MOA_LEARNING_EMBEDDINGS_EXPERIENCE_LOOKBACK_DAYS`.
+    pub learning_embeddings_experience_lookback_days: Option<i64>,
+    /// `MOA_LEARNING_EMBEDDINGS_SKILL_BATCH_SIZE`.
+    pub learning_embeddings_skill_batch_size: Option<usize>,
+    /// `MOA_LEARNING_RECURRENCE_MIN_OCCURRENCES`.
+    pub learning_recurrence_min_occurrences: Option<usize>,
+    /// `MOA_LEARNING_RECURRENCE_LOOKBACK_DAYS`.
+    pub learning_recurrence_lookback_days: Option<i64>,
+    /// `MOA_LEARNING_RECURRENCE_RELAXED_MIN_TOOL_CALLS`.
+    pub learning_recurrence_relaxed_min_tool_calls: Option<usize>,
+    /// `MOA_LEARNING_RECURRENCE_REJECTION_COOLDOWN_DAYS`.
+    pub learning_recurrence_rejection_cooldown_days: Option<i64>,
+    /// `MOA_LEARNING_RECURRENCE_CLUSTER_SIMILARITY`.
+    pub learning_recurrence_cluster_similarity: Option<f64>,
+    /// `MOA_LEARNING_RECURRENCE_MAX_CANDIDATE_GROUPS`.
+    pub learning_recurrence_max_candidate_groups: Option<usize>,
     /// `MOA_CONTEXT_SNAPSHOT_ENABLED`.
     pub context_snapshot_enabled: Option<bool>,
     /// `MOA_CONTEXT_SNAPSHOT_MAX_SIZE_BYTES`.

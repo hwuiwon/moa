@@ -3,6 +3,20 @@
 use super::*;
 use crate::validation::validate_for_status;
 
+/// Outcome of attempting to roll a published skill revision back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RollbackApplication {
+    /// The promoted revision was still serving and was archived; any predecessor
+    /// was restored as the serving revision.
+    Applied,
+    /// A newer published revision now serves, so nothing was changed. The
+    /// rollback proposal is stale and must not be retried.
+    Superseded {
+        /// Revision currently serving (highest-version published revision).
+        serving_revision_uid: Uuid,
+    },
+}
+
 impl ArtifactRegistry {
     /// Creates a new draft revision and stores optional package files.
     pub async fn create_draft(
@@ -142,6 +156,149 @@ impl ArtifactRegistry {
         .map_err(map_sqlx_error)?;
 
         load_revision_by_uid(conn, revision_uid).await
+    }
+
+    /// Rolls the serving revision of a skill back, archiving it and restoring a
+    /// prior one — but only when the promoted revision is still the serving one.
+    ///
+    /// Publishing a newer revision does not archive older published ones
+    /// ([`Self::publish_revision_in_tx`]), and the serving revision is the
+    /// highest-version published revision ([`Self::load_visible_published`]
+    /// orders by `version DESC`). So a rollback proposal filed against an
+    /// already-superseded revision would archive a revision that is not serving
+    /// and repoint metadata around the one that is — reporting success while the
+    /// newer revision keeps serving. This method therefore first checks
+    /// currentness: if a higher-version published revision exists it applies
+    /// nothing and returns [`RollbackApplication::Superseded`]. The caller must
+    /// treat that as terminal (the proposal is stale) rather than retry.
+    ///
+    /// When current, archiving the promoted revision (`status = 'archived'`)
+    /// removes it from the serving path so the highest remaining published
+    /// revision serves again. With a predecessor, the artifact's
+    /// `latest_revision_uid` pointer and its serving-side `description`/`tags`
+    /// are restored from that predecessor's document (they are mutated on every
+    /// publish, so they otherwise keep advertising the regressed metadata), and
+    /// the stale identity embedding is dropped so nearest-neighbor consumers stop
+    /// seeing it. With no predecessor (a created skill), the artifact identity is
+    /// retired (`valid_to` set) along with its embedding, since nothing should
+    /// continue to advertise the regressed skill. The caller owns commit or
+    /// rollback and should apply matching MOA scope GUCs before calling.
+    pub async fn rollback_published_revision_in_tx(
+        conn: &mut PgConnection,
+        promoted_revision_uid: Uuid,
+        restore_revision_uid: Option<Uuid>,
+    ) -> Result<RollbackApplication> {
+        let artifact_uid = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT artifact_uid
+            FROM moa.artifact_revision
+            WHERE revision_uid = $1
+              AND valid_to IS NULL
+              AND status = 'published'
+            FOR UPDATE
+            "#,
+        )
+        .bind(promoted_revision_uid)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(map_sqlx_error)?
+        .ok_or_else(|| {
+            MoaError::ValidationError(
+                "promoted artifact revision is not published or no longer exists".to_string(),
+            )
+        })?;
+
+        // Currentness guard: the promoted revision must still be the serving
+        // (highest-version published) revision, or the proposal is stale.
+        let serving_revision_uid = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT revision_uid
+            FROM moa.artifact_revision
+            WHERE artifact_uid = $1
+              AND status = 'published'
+              AND valid_to IS NULL
+            ORDER BY version DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(artifact_uid)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(map_sqlx_error)?;
+        if serving_revision_uid != promoted_revision_uid {
+            return Ok(RollbackApplication::Superseded {
+                serving_revision_uid,
+            });
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE moa.artifact_revision
+            SET status = 'archived',
+                updated_at = now()
+            WHERE revision_uid = $1
+              AND valid_to IS NULL
+            "#,
+        )
+        .bind(promoted_revision_uid)
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        if let Some(restore_revision_uid) = restore_revision_uid {
+            // Restore the pointer and the serving-side identity (description and
+            // tags) from the predecessor's stored document in one statement.
+            let restored = sqlx::query(
+                r#"
+                UPDATE moa.artifact a
+                SET latest_revision_uid = r.revision_uid,
+                    description = COALESCE(r.definition->'metadata'->>'description', ''),
+                    tags = COALESCE(
+                        (SELECT array_agg(t)
+                         FROM jsonb_array_elements_text(r.definition->'metadata'->'tags') AS t),
+                        ARRAY[]::text[]
+                    ),
+                    updated_at = now()
+                FROM moa.artifact_revision r
+                WHERE a.artifact_uid = $2
+                  AND r.revision_uid = $1
+                  AND r.artifact_uid = $2
+                  AND r.status = 'published'
+                  AND r.valid_to IS NULL
+                "#,
+            )
+            .bind(restore_revision_uid)
+            .bind(artifact_uid)
+            .execute(&mut *conn)
+            .await
+            .map_err(map_sqlx_error)?
+            .rows_affected();
+            if restored == 0 {
+                return Err(MoaError::ValidationError(
+                    "revision to restore is not a published revision of the same artifact"
+                        .to_string(),
+                ));
+            }
+            super::skill_embeddings::delete_skill_embedding_in_tx(conn, artifact_uid).await?;
+        } else {
+            // Created skill with no predecessor: retire the identity entirely so
+            // no serving path, ranking, or embedding keeps advertising it.
+            sqlx::query(
+                r#"
+                UPDATE moa.artifact
+                SET valid_to = now(), updated_at = now()
+                WHERE artifact_uid = $1
+                  AND valid_to IS NULL
+                "#,
+            )
+            .bind(artifact_uid)
+            .execute(&mut *conn)
+            .await
+            .map_err(map_sqlx_error)?;
+            super::skill_embeddings::delete_skill_embedding_in_tx(conn, artifact_uid).await?;
+        }
+
+        Ok(RollbackApplication::Applied)
     }
 
     /// Loads the most specific visible artifact revision by kind and name.

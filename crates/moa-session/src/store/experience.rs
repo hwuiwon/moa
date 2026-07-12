@@ -7,18 +7,33 @@ use super::*;
 
 impl PostgresSessionStore {
     /// Appends or idempotently refreshes one experience record.
+    ///
+    /// On a re-assessment of the same `(segment_id, extraction_policy_version)`
+    /// the upsert overwrites `task_summary`; when the summary actually changes it
+    /// also clears `task_embedding` and its provenance so the backfill re-embeds
+    /// the new text. Without that, a summary edit would strand a vector describing
+    /// the old text on a non-NULL (never re-selected) row.
     pub async fn append_experience_record(&self, experience: &ExperienceRecord) -> Result<()> {
         let experience_records = self.table_name("experience_records");
         sqlx::query(&format!(
             "INSERT INTO {experience_records} \
              (id, segment_id, session_id, storage_partition_id, user_id, tenant_id, task_summary, \
               task_fingerprint, task_fingerprint_payload, task_facets, actions, resources, \
-              outcome, confidence, evidence, tools_used, skills_activated, turn_count, token_cost, \
+              outcome, confidence, evidence, tools_used, skills_activated, skills_used, turn_count, token_cost, \
               duration_ms, assessment_policy_version, extraction_policy_version, created_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
-                     $18, $19, $20, $21, $22, $23) \
+                     $18, $19, $20, $21, $22, $23, $24) \
              ON CONFLICT (segment_id, extraction_policy_version) DO UPDATE SET \
                  task_summary = EXCLUDED.task_summary, \
+                 task_embedding = CASE \
+                     WHEN {experience_records}.task_summary IS DISTINCT FROM EXCLUDED.task_summary \
+                     THEN NULL ELSE {experience_records}.task_embedding END, \
+                 task_embedding_model = CASE \
+                     WHEN {experience_records}.task_summary IS DISTINCT FROM EXCLUDED.task_summary \
+                     THEN NULL ELSE {experience_records}.task_embedding_model END, \
+                 task_embedding_model_version = CASE \
+                     WHEN {experience_records}.task_summary IS DISTINCT FROM EXCLUDED.task_summary \
+                     THEN NULL ELSE {experience_records}.task_embedding_model_version END, \
                  task_fingerprint = EXCLUDED.task_fingerprint, \
                  task_fingerprint_payload = EXCLUDED.task_fingerprint_payload, \
                  task_facets = EXCLUDED.task_facets, \
@@ -29,6 +44,7 @@ impl PostgresSessionStore {
                  evidence = EXCLUDED.evidence, \
                  tools_used = EXCLUDED.tools_used, \
                  skills_activated = EXCLUDED.skills_activated, \
+                 skills_used = EXCLUDED.skills_used, \
                  turn_count = EXCLUDED.turn_count, \
                  token_cost = EXCLUDED.token_cost, \
                  duration_ms = EXCLUDED.duration_ms, \
@@ -51,6 +67,7 @@ impl PostgresSessionStore {
         .bind(Json(experience.evidence.clone()))
         .bind(&experience.tools_used)
         .bind(&experience.skills_activated)
+        .bind(&experience.skills_used)
         .bind(experience.turn_count as i32)
         .bind(experience.token_cost as i64)
         .bind(experience.duration_ms.map(|value| value as i64))
@@ -114,10 +131,11 @@ impl PostgresSessionStore {
             sqlx::query(&format!(
                 "INSERT INTO {experience_attributions} \
                  (id, experience_id, tenant_id, storage_partition_id, user_id, subject_type, subject_id, \
-                  effect, confidence, evidence, created_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+                  effect, kind, confidence, evidence, created_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
                  ON CONFLICT (experience_id, subject_type, subject_id) DO UPDATE SET \
                      effect = EXCLUDED.effect, \
+                     kind = EXCLUDED.kind, \
                      confidence = EXCLUDED.confidence, \
                      evidence = EXCLUDED.evidence"
             ))
@@ -129,6 +147,7 @@ impl PostgresSessionStore {
             .bind(attribution.subject_type.as_str())
             .bind(&attribution.subject_id)
             .bind(attribution.effect.as_str())
+            .bind(attribution.kind.as_str())
             .bind(attribution.confidence)
             .bind(Json(attribution.evidence.clone()))
             .bind(attribution.created_at)

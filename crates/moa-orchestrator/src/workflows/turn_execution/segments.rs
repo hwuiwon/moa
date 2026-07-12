@@ -1,6 +1,6 @@
 //! Segment lifecycle transitions and deterministic outcome assessment.
 
-use moa_brain::pipeline::segments::{SegmentCompleted, SegmentTracker};
+use moa_brain::pipeline::segments::{BoundaryFallbackInput, SegmentCompleted, SegmentTracker};
 use moa_brain::segment_assessment::AssessmentOverride;
 use moa_brain::turn_segments::{
     assess_segment_events, latest_user_message, segment_boundary_sequences,
@@ -20,12 +20,13 @@ use restate_sdk::prelude::*;
 
 use super::TurnExecutionImpl;
 use super::event_queries::{
-    latest_event_cutoff_before_seq, load_next_user_message_cutoff, load_segment_assessment_events,
-    load_segment_baseline, load_segment_boundary_events, load_session_events_fallback,
-    load_session_meta,
+    latest_event_cutoff_before_seq, load_next_user_message_cutoff, load_recent_target_events,
+    load_segment_assessment_events, load_segment_baseline, load_segment_boundary_events,
+    load_session_events_fallback, load_session_meta,
 };
 use super::experience::{emit_experience_for_assessment, record_segment_assessment_learning};
 use crate::services::session_store::RestateSessionStoreClient;
+use crate::turn_driver::progress as driver_progress;
 use crate::turn_driver::segments as driver_segments;
 use crate::workflows::durable_utc_now;
 use crate::workflows::turn_events::append_session_event;
@@ -117,12 +118,25 @@ pub(super) async fn ensure_current_segment(
 
     let now = durable_utc_now(ctx, "workflow_utc_now").await?;
     let mut active_segment = active_segment;
+    let boundary_config = workflow.config.learning.segments.clone();
+    let fallback_owned = build_boundary_fallback(
+        ctx,
+        workflow,
+        session_id,
+        &active_segment,
+        &request.metadata,
+    )
+    .await?;
+    let fallback = fallback_owned
+        .as_ref()
+        .map(|owned| owned.as_input(&boundary_config));
     if let Some(transition) = SegmentTracker::transition_from_metadata(
         &request.metadata,
         session_id,
         &tenant_key(meta),
         &active_segment,
         now,
+        fallback,
     ) {
         if let Some(completed) = transition.completed.clone() {
             ctx.service_client::<RestateSessionStoreClient>()
@@ -169,6 +183,101 @@ pub(super) async fn ensure_current_segment(
     }
 
     Ok(active_segment)
+}
+
+/// Owned storage backing a [`BoundaryFallbackInput`]; the borrowed input is
+/// rebuilt against a borrowed config just before the tracker call.
+struct OwnedBoundaryFallback {
+    user_message: String,
+    previous_event_at: Option<chrono::DateTime<chrono::Utc>>,
+    user_message_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl OwnedBoundaryFallback {
+    fn as_input<'a>(
+        &'a self,
+        config: &'a moa_core::config::SegmentBoundaryConfig,
+    ) -> BoundaryFallbackInput<'a> {
+        BoundaryFallbackInput {
+            user_message: &self.user_message,
+            previous_event_at: self.previous_event_at,
+            user_message_at: self.user_message_at,
+            config,
+        }
+    }
+}
+
+/// Gathers deterministic segment-boundary inputs for the fallback path.
+///
+/// Returns `None` (skipping the extra event load) when there is no active
+/// segment, when the rewrite LLM already produced a boundary signal, or when the
+/// active segment already began at/after the current user message — the last
+/// guard prevents the marker/idle heuristics from re-firing across model-loop
+/// iterations of the same user turn.
+async fn build_boundary_fallback(
+    ctx: &WorkflowContext<'_>,
+    workflow: &TurnExecutionImpl,
+    session_id: SessionId,
+    active_segment: &Option<ActiveSegment>,
+    metadata: &std::collections::HashMap<String, serde_json::Value>,
+) -> Result<Option<OwnedBoundaryFallback>, HandlerError> {
+    let Some(active) = active_segment.as_ref() else {
+        return Ok(None);
+    };
+    if driver_segments::query_rewrite_from_metadata(metadata)
+        .is_some_and(|rewrite| rewrite.has_boundary_signal)
+    {
+        return Ok(None);
+    }
+    let Some(user_sequence_num) = ctx
+        .get::<Json<u64>>(driver_progress::RootTurnStateKey::USER_MESSAGE_SEQUENCE)
+        .await?
+        .map(Json::into_inner)
+    else {
+        return Ok(None);
+    };
+
+    let events = load_recent_target_events(ctx, workflow.session_store.clone(), session_id).await?;
+    let Some((user_message, user_message_at)) = user_message_event(&events, user_sequence_num)
+    else {
+        return Ok(None);
+    };
+    if active.started_at >= user_message_at {
+        return Ok(None);
+    }
+
+    Ok(Some(OwnedBoundaryFallback {
+        user_message,
+        previous_event_at: previous_event_timestamp(&events, user_sequence_num),
+        user_message_at,
+    }))
+}
+
+/// Extracts the raw text and timestamp of the user message at `user_sequence_num`.
+fn user_message_event(
+    events: &[EventRecord],
+    user_sequence_num: u64,
+) -> Option<(String, chrono::DateTime<chrono::Utc>)> {
+    events
+        .iter()
+        .find(|record| record.sequence_num == user_sequence_num)
+        .and_then(|record| match &record.event {
+            Event::UserMessage { text, .. } => Some((text.clone(), record.timestamp)),
+            _ => None,
+        })
+}
+
+/// Returns the timestamp of the newest session event strictly before the current
+/// user message, used to measure the idle gap.
+fn previous_event_timestamp(
+    events: &[EventRecord],
+    user_sequence_num: u64,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    events
+        .iter()
+        .filter(|record| record.sequence_num < user_sequence_num)
+        .map(|record| record.timestamp)
+        .max()
 }
 
 async fn assess_completed_segment_at_transition(

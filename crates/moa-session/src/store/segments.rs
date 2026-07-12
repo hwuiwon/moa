@@ -11,8 +11,8 @@ impl PostgresSessionStore {
             "INSERT INTO {task_segments} \
              (id, session_id, storage_partition_id, user_id, tenant_id, segment_index, task_summary, \
               started_at, ended_at, outcome, assessment, outcome_confidence, \
-              tools_used, skills_activated, turn_count, token_cost, previous_segment_id) \
-             SELECT $1, $2, s.storage_partition_id, s.user_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15 \
+              tools_used, skills_activated, skills_used, turn_count, token_cost, previous_segment_id) \
+             SELECT $1, $2, s.storage_partition_id, s.user_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16 \
              FROM {sessions} s WHERE s.id = $2 \
              ON CONFLICT (id) DO UPDATE SET \
                  storage_partition_id = EXCLUDED.storage_partition_id, \
@@ -25,6 +25,7 @@ impl PostgresSessionStore {
                  outcome_confidence = EXCLUDED.outcome_confidence, \
                  tools_used = EXCLUDED.tools_used, \
                  skills_activated = EXCLUDED.skills_activated, \
+                 skills_used = EXCLUDED.skills_used, \
                  turn_count = EXCLUDED.turn_count, \
                  token_cost = EXCLUDED.token_cost, \
                  previous_segment_id = EXCLUDED.previous_segment_id"
@@ -43,6 +44,7 @@ impl PostgresSessionStore {
         .bind(segment.outcome_confidence)
         .bind(&segment.tools_used)
         .bind(&segment.skills_activated)
+        .bind(&segment.skills_used)
         .bind(segment.turn_count as i32)
         .bind(segment.token_cost as i64)
         .bind(segment.previous_segment_id.map(|id| id.0))
@@ -70,13 +72,15 @@ impl PostgresSessionStore {
                  turn_count = $2, \
                  tools_used = $3, \
                  skills_activated = $4, \
-                 token_cost = $5 \
-             WHERE id = $6"
+                 skills_used = $5, \
+                 token_cost = $6 \
+             WHERE id = $7"
         ))
         .bind(update.ended_at)
         .bind(update.turn_count as i32)
         .bind(&update.tools_used)
         .bind(&update.skills_activated)
+        .bind(&update.skills_used)
         .bind(update.token_cost as i64)
         .bind(segment_id.0)
         .execute(&self.pool)
@@ -248,13 +252,23 @@ impl PostgresSessionStore {
             .await
     }
 
-    /// Records a skill activation on the active task segment for a session.
+    /// Records a skill activation (injection) on the active task segment for a session.
     pub async fn record_active_segment_skill_activation(
         &self,
         session_id: moa_core::types::identifiers::SessionId,
         skill_name: &str,
     ) -> Result<()> {
         self.append_unique_active_segment_value(session_id, "skills_activated", skill_name)
+            .await
+    }
+
+    /// Records that the model engaged a skill on the active task segment for a session.
+    pub async fn record_active_segment_skill_use(
+        &self,
+        session_id: moa_core::types::identifiers::SessionId,
+        skill_name: &str,
+    ) -> Result<()> {
+        self.append_unique_active_segment_value(session_id, "skills_used", skill_name)
             .await
     }
 
@@ -294,6 +308,7 @@ impl PostgresSessionStore {
         let column = match column {
             "tools_used" => "tools_used",
             "skills_activated" => "skills_activated",
+            "skills_used" => "skills_used",
             _ => {
                 return Err(MoaError::StorageError(format!(
                     "unsupported task segment array column `{column}`"

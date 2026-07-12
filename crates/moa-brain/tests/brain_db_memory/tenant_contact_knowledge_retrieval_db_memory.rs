@@ -105,10 +105,14 @@ async fn mock_tenant_and_contact_retrieval() {
         "Find the pto runbook answer and contact deployment preference answer",
     ));
     let contact_lineage = Arc::new(CapturedLineage::default());
-    let retriever = GraphMemoryRetriever::new(pool.clone(), Some(Arc::new(TestEmbedder)))
-        .with_assume_app_role(true)
-        .with_lineage(contact_lineage.clone())
-        .with_result_limit(6);
+    let retriever = GraphMemoryRetriever::new_with_config(
+        abstention_disabled_config(),
+        pool.clone(),
+        Some(Arc::new(TestEmbedder)),
+    )
+    .with_assume_app_role(true)
+    .with_lineage(contact_lineage.clone())
+    .with_result_limit(6);
 
     let output = retriever
         .process(&mut ctx)
@@ -224,10 +228,14 @@ async fn mock_tenant_and_contact_retrieval() {
         moa_core::types::context::WorkingContext::new(&tenant_session, capabilities());
     tenant_ctx.append_message(ContextMessage::user("Find the pto runbook answer"));
     let tenant_lineage = Arc::new(CapturedLineage::default());
-    let tenant_retriever = GraphMemoryRetriever::new(pool.clone(), Some(Arc::new(TestEmbedder)))
-        .with_assume_app_role(true)
-        .with_lineage(tenant_lineage.clone())
-        .with_result_limit(6);
+    let tenant_retriever = GraphMemoryRetriever::new_with_config(
+        abstention_disabled_config(),
+        pool.clone(),
+        Some(Arc::new(TestEmbedder)),
+    )
+    .with_assume_app_role(true)
+    .with_lineage(tenant_lineage.clone())
+    .with_result_limit(6);
     let tenant_output = tenant_retriever
         .process(&mut tenant_ctx)
         .await
@@ -627,6 +635,26 @@ async fn vector_promotion_bumps_retrieval_cache_version() {
 fn graph_store(pool: PgPool, scope: RlsContext) -> PostgresGraphStore {
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     PostgresGraphStore::scoped_for_app_role(pool, scope).with_vector_store(vector)
+}
+
+/// Runtime config with memory-stage whole-window abstention disabled.
+///
+/// The production `abstain_below_window_evidence` default (0.68) is calibrated
+/// for the embed-v4.0 cosine floor. This test admits knowledge and memory with a
+/// deterministic mock embedder whose cosine scores are not on that scale, so the
+/// tenant-knowledge chunk (vector-only, not graph-admitted) would abstain out of
+/// the window even though it matches. Abstention is pinned directly in the
+/// `moa_brain::retrieval::hybrid` unit tests; disabling it here keeps this test
+/// focused on its actual invariant — the tenant-knowledge/current-contact
+/// admission and cross-contact/operator-memory privacy boundaries.
+fn abstention_disabled_config() -> moa_core::config::MoaConfig {
+    let mut config = moa_core::config::MoaConfig::default();
+    config
+        .memory
+        .retrieval
+        .ranking
+        .abstain_below_window_evidence = 0.0;
+    config
 }
 
 async fn seed_storage_partition_embedder_state(

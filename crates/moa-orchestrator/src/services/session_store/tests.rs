@@ -48,7 +48,11 @@ async fn test_service() -> Result<(SessionStoreImpl, String, String)> {
     let (store, database_url, schema_name) = testing::create_isolated_test_store().await?;
     let pool = store.pool().clone();
     Ok((
-        SessionStoreImpl::new(Arc::new(store), pool),
+        SessionStoreImpl::new(
+            Arc::new(store),
+            pool,
+            Arc::new(moa_core::config::MoaConfig::default()),
+        ),
         database_url,
         schema_name,
     ))

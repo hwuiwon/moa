@@ -7,7 +7,9 @@
 
 use std::time::Instant;
 
-use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequest};
+use moa_core::wire::session_store::{
+    AppendEventRequest, RecordSegmentSkillUseRequest, RecordSegmentToolUseRequest,
+};
 use moa_core::wire::turn::TurnOutcomeKind;
 use moa_core::{
     events::Event, types::completion::ToolCallContent, types::completion::ToolInvocation,
@@ -114,6 +116,32 @@ pub(super) async fn record_segment_tool_use(
             tool_name: tool_name.to_string(),
         }))
         .send();
+    Ok(())
+}
+
+/// Records the skills a tool call engaged on the current segment, without blocking the turn.
+///
+/// Detection is a deterministic match of the tool call's input against the turn's
+/// selected skill names ([`moa_core::types::skill_use::skills_used_in_tool_call`]),
+/// so only skills the model actually engaged are credited, distinct from the full
+/// set of injected (activated) skills.
+pub(super) async fn record_segment_skill_use_for_tool_call(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    tool_name: &str,
+    input: &serde_json::Value,
+    selected_skills: &[String],
+) -> Result<(), HandlerError> {
+    let engaged =
+        moa_core::types::skill_use::skills_used_in_tool_call(tool_name, input, selected_skills);
+    for skill_name in engaged {
+        ctx.service_client::<RestateSessionStoreClient>()
+            .record_segment_skill_use(Json(RecordSegmentSkillUseRequest {
+                session_id,
+                skill_name,
+            }))
+            .send();
+    }
     Ok(())
 }
 

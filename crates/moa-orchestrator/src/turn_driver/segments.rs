@@ -61,6 +61,7 @@ mod tests {
             started_at: Utc::now(),
             tools_used: Vec::new(),
             skills_activated: Vec::new(),
+            skills_used: Vec::new(),
             turn_count: 0,
             token_cost: 0,
         };

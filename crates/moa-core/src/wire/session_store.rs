@@ -254,12 +254,21 @@ pub struct RecordSegmentToolUseRequest {
     pub tool_name: String,
 }
 
-/// Request payload for recording active-segment skill usage.
+/// Request payload for recording active-segment skill activation (injection).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordSegmentSkillActivationRequest {
     /// Session whose active segment receives the skill activation.
     pub session_id: SessionId,
     /// Skill name to record.
+    pub skill_name: String,
+}
+
+/// Request payload for recording that the model engaged a skill on the active segment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordSegmentSkillUseRequest {
+    /// Session whose active segment receives the skill use.
+    pub session_id: SessionId,
+    /// Skill name the model engaged.
     pub skill_name: String,
 }
 

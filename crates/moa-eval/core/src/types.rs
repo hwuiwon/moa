@@ -44,9 +44,29 @@ pub struct TestCase {
     pub tags: Vec<String>,
     /// Arbitrary case metadata.
     pub metadata: HashMap<String, Value>,
+    /// Which oracle produced the `expected_output` expectations, when the case
+    /// was machine-generated. Reporting distinguishes fact-grounded cases from
+    /// keyword-fallback cases; execution treats both identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle: Option<SuiteOracle>,
     /// Long-conversation case details when `kind = "long"`.
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub long: Option<LongTestCase>,
+}
+
+/// Provenance of a generated case's expected-output expectations.
+///
+/// Auto-generated skill regression cases derive their `contains` expectations
+/// from session events. This records which extraction strategy produced them so
+/// gate reports can weight a fact-grounded oracle differently from a weaker
+/// keyword fallback. It carries no execution semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuiteOracle {
+    /// Expectations are verifiable facts present in both tool results and the response.
+    GroundedFacts,
+    /// Expectations fell back to the longest response keywords (no grounded facts found).
+    Keywords,
 }
 
 impl TestCase {

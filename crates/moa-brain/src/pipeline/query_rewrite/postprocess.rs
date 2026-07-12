@@ -55,6 +55,9 @@ impl RawQueryRewriteResult {
             source: RewriteSource::Rewritten,
             reason: Some(reason),
             is_new_task: self.is_new_task,
+            // The rewrite LLM ran and returned a parseable result, so `is_new_task`
+            // is an authoritative task-boundary judgment.
+            has_boundary_signal: true,
             task_summary: self.task_summary,
             task_facets: self.task_facets,
         }

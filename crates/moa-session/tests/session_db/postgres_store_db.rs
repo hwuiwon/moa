@@ -6,12 +6,13 @@ use moa_core::{
     error::MoaError, events::Event, events::EventType, traits::SessionStore,
     types::agent::AgentContext, types::channel::ChannelRef, types::contact::ContactId,
     types::contact::ContactRef, types::contact::SessionActorRef,
-    types::experience::AttributionEffect, types::experience::AttributionSubjectType,
-    types::experience::ExperienceAttribution, types::experience::ExperienceRecord,
-    types::experience::LearningCandidate, types::experience::LearningCandidateStatus,
-    types::experience::LearningCandidateStatusUpdate, types::experience::LearningCandidateType,
-    types::experience::LearningRiskClass, types::experience::TaskFacetSet,
-    types::experience::TaskFingerprint, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::experience::AttributionEffect, types::experience::AttributionKind,
+    types::experience::AttributionSubjectType, types::experience::ExperienceAttribution,
+    types::experience::ExperienceRecord, types::experience::LearningCandidate,
+    types::experience::LearningCandidateStatus, types::experience::LearningCandidateStatusUpdate,
+    types::experience::LearningCandidateType, types::experience::LearningRiskClass,
+    types::experience::TaskFacetSet, types::experience::TaskFingerprint,
+    types::identifiers::ModelId, types::identifiers::SessionId,
     types::identifiers::StoragePartitionId, types::identifiers::TenantId,
     types::identifiers::ToolCallId, types::identifiers::UserId, types::learning::LearningEntry,
     types::provider::ModelTier, types::segment_assessment::AssessmentPhase,
@@ -916,6 +917,7 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
             turn_count: 0,
             tools_used: Vec::new(),
             skills_activated: Vec::new(),
+            skills_used: Vec::new(),
             token_cost: 0,
             previous_segment_id: None,
             outcome: None,
@@ -932,6 +934,16 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
         .record_active_segment_skill_activation(session_id, "moa-rust")
         .await
         .expect("record skill");
+    // `moa-rust` was injected AND engaged; `moa-idle` is injected-only below, so used
+    // must be the strict subset the model actually engaged.
+    store
+        .record_active_segment_skill_activation(session_id, "moa-idle")
+        .await
+        .expect("record injected-only skill");
+    store
+        .record_active_segment_skill_use(session_id, "moa-rust")
+        .await
+        .expect("record skill use");
     store
         .record_active_segment_turn_usage(session_id, 250)
         .await
@@ -943,7 +955,11 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
         .expect("load active")
         .expect("active segment exists");
     assert_eq!(active.tools_used, vec!["bash".to_string()]);
-    assert_eq!(active.skills_activated, vec!["moa-rust".to_string()]);
+    assert_eq!(
+        active.skills_activated,
+        vec!["moa-rust".to_string(), "moa-idle".to_string()]
+    );
+    assert_eq!(active.skills_used, vec!["moa-rust".to_string()]);
     assert_eq!(active.turn_count, 1);
     assert_eq!(active.token_cost, 250);
 
@@ -955,6 +971,7 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
                 turn_count: active.turn_count,
                 tools_used: active.tools_used,
                 skills_activated: active.skills_activated,
+                skills_used: active.skills_used,
                 token_cost: active.token_cost,
             },
         )
@@ -972,6 +989,7 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
             turn_count: 0,
             tools_used: Vec::new(),
             skills_activated: Vec::new(),
+            skills_used: Vec::new(),
             token_cost: 0,
             previous_segment_id: Some(first_id),
             outcome: None,
@@ -987,6 +1005,12 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
         .expect("list segments");
     assert_eq!(segments.len(), 2);
     assert!(segments[0].ended_at.is_some());
+    // The completed segment persisted skills_used distinctly from skills_activated.
+    assert_eq!(
+        segments[0].skills_activated,
+        vec!["moa-rust".to_string(), "moa-idle".to_string()]
+    );
+    assert_eq!(segments[0].skills_used, vec!["moa-rust".to_string()]);
     assert_eq!(segments[1].previous_segment_id, Some(first_id));
     assert_eq!(segments[1].outcome, None);
 
@@ -1034,6 +1058,7 @@ async fn postgres_session_owned_writes_fail_when_session_is_missing() {
             turn_count: 0,
             tools_used: Vec::new(),
             skills_activated: Vec::new(),
+            skills_used: Vec::new(),
             token_cost: 0,
             previous_segment_id: None,
             outcome: None,
@@ -1272,6 +1297,7 @@ async fn postgres_task_segment_assessments_and_views_refresh() {
                 turn_count: 0,
                 tools_used: vec!["bash".to_string()],
                 skills_activated: vec!["moa-rust".to_string()],
+                skills_used: vec!["moa-rust".to_string()],
                 token_cost: 0,
                 previous_segment_id,
                 outcome: None,
@@ -1288,6 +1314,7 @@ async fn postgres_task_segment_assessments_and_views_refresh() {
                     turn_count: 2,
                     tools_used: vec!["bash".to_string()],
                     skills_activated: vec!["moa-rust".to_string()],
+                    skills_used: vec!["moa-rust".to_string()],
                     token_cost: 500,
                 },
             )
@@ -1400,6 +1427,7 @@ async fn experience_records_and_candidates_round_trip() {
             turn_count: 2,
             tools_used: vec!["bash".to_string()],
             skills_activated: vec!["moa-rust".to_string()],
+            skills_used: vec!["moa-rust".to_string()],
             token_cost: 500,
             previous_segment_id: None,
             outcome: Some("resolved".to_string()),
@@ -1440,6 +1468,7 @@ async fn experience_records_and_candidates_round_trip() {
         evidence: assessment.evidence.clone(),
         tools_used: vec!["bash".to_string()],
         skills_activated: vec!["moa-rust".to_string()],
+        skills_used: vec!["moa-rust".to_string()],
         turn_count: 2,
         token_cost: 500,
         duration_ms: Some(1_000),
@@ -1459,12 +1488,28 @@ async fn experience_records_and_candidates_round_trip() {
         subject_type: AttributionSubjectType::Skill,
         subject_id: "moa-rust".to_string(),
         effect: AttributionEffect::Helpful,
+        kind: AttributionKind::Standard,
         confidence: 0.9,
         evidence: vec!["skill was active during a resolved segment".to_string()],
         created_at: now,
     };
+    // A skill injected into the same segment but never engaged: a separate subject row
+    // that must be counted only as an unused injection, never in uses/success_rate.
+    let unused_attribution = ExperienceAttribution {
+        id: Uuid::now_v7(),
+        experience_id: experience.id,
+        tenant_id,
+        user_id: Some(UserId::new("user")),
+        subject_type: AttributionSubjectType::Skill,
+        subject_id: "moa-unused".to_string(),
+        effect: AttributionEffect::Neutral,
+        kind: AttributionKind::UnusedInjection,
+        confidence: 0.9,
+        evidence: vec!["skill was injected but never engaged".to_string()],
+        created_at: now,
+    };
     store
-        .append_experience_attributions(std::slice::from_ref(&attribution))
+        .append_experience_attributions(&[attribution, unused_attribution])
         .await
         .expect("append attribution");
     let candidate = LearningCandidate {
@@ -1530,9 +1575,10 @@ async fn experience_records_and_candidates_round_trip() {
         .list_experience_attributions(experience.id)
         .await
         .expect("list attributions");
-    assert_eq!(attributions.len(), 1);
-    assert_eq!(attributions[0].subject_type, AttributionSubjectType::Skill);
-    assert_eq!(attributions[0].subject_id, "moa-rust");
+    assert_eq!(attributions.len(), 2);
+    assert!(attributions.iter().any(
+        |row| row.subject_id == "moa-rust" && row.subject_type == AttributionSubjectType::Skill
+    ));
     let candidates = store
         .list_learning_candidates(
             &tenant_id.to_string(),
@@ -1556,12 +1602,31 @@ async fn experience_records_and_candidates_round_trip() {
         .list_task_strategy_success_rates(&tenant_id.to_string(), "task-hash")
         .await
         .expect("list task strategy rates");
-    assert_eq!(rates.len(), 1);
-    assert_eq!(rates[0].subject_type, AttributionSubjectType::Skill);
-    assert_eq!(rates[0].subject_id, "moa-rust");
-    assert_eq!(rates[0].uses, 1);
-    assert!((rates[0].success_rate - 1.0_f64).abs() < f64::EPSILON);
-    assert!((rates[0].avg_confidence - 0.9_f64).abs() < f64::EPSILON);
+    // Both the engaged skill and the unused-injection skill surface as separate rows.
+    assert_eq!(rates.len(), 2);
+    let engaged = rates
+        .iter()
+        .find(|rate| rate.subject_id == "moa-rust")
+        .expect("engaged skill rate");
+    assert_eq!(engaged.subject_type, AttributionSubjectType::Skill);
+    assert_eq!(engaged.uses, 1);
+    assert!((engaged.success_rate - 1.0_f64).abs() < f64::EPSILON);
+    assert!((engaged.avg_confidence - 0.9_f64).abs() < f64::EPSILON);
+    // Helpful attribution -> effect_score 1.0; no unused injections for this subject.
+    assert!((engaged.effect_score - 1.0_f64).abs() < f64::EPSILON);
+    assert_eq!(engaged.unused_injections, 0);
+
+    // The injected-but-unused skill contributes only an unused_injection count: its
+    // uses stay zero (excluded from success_rate) and effect_score falls back to the
+    // 0.5 neutral prior since it has no engaged rows.
+    let unused = rates
+        .iter()
+        .find(|rate| rate.subject_id == "moa-unused")
+        .expect("unused-injection skill rate");
+    assert_eq!(unused.uses, 0);
+    assert_eq!(unused.unused_injections, 1);
+    assert!((unused.success_rate - 0.0_f64).abs() < f64::EPSILON);
+    assert!((unused.effect_score - 0.5_f64).abs() < f64::EPSILON);
 
     drop(store);
     cleanup_schema(&database_url, &schema_name).await;
@@ -2312,6 +2377,7 @@ async fn postgres_analytics_query_read_models_refresh() {
             turn_count: 1,
             tools_used: vec!["file_read".to_string()],
             skills_activated: vec!["support-triage".to_string()],
+            skills_used: vec!["support-triage".to_string()],
             token_cost: 22,
             previous_segment_id: None,
             outcome: Some(SegmentOutcome::Resolved.as_str().to_string()),
@@ -2781,6 +2847,515 @@ async fn analytics_mv_refresh_records_freshness_db() {
     assert!(
         duration_ms.is_some(),
         "a completed refresh records its duration"
+    );
+
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+/// Builds a 1024-dim one-hot embedding for deterministic cosine-distance tests.
+fn one_hot_embedding(index: usize) -> Vec<f32> {
+    let mut vector = vec![0.0_f32; 1024];
+    vector[index] = 1.0;
+    vector
+}
+
+/// Persists an assessed segment and its experience record with a task summary.
+async fn seed_experience_with_summary(
+    store: &PostgresSessionStore,
+    session_id: SessionId,
+    tenant: TenantId,
+    index: u32,
+    summary: &str,
+    created_at: chrono::DateTime<Utc>,
+) -> Uuid {
+    let segment_id = deterministic_segment_id(session_id, index);
+    let assessment = SegmentAssessment {
+        outcome: SegmentOutcome::Resolved,
+        confidence: 0.9,
+        phase: AssessmentPhase::Immediate,
+        evidence: Vec::new(),
+        assessed_at: created_at,
+        policy_version: "assessment-test".to_string(),
+    };
+    store
+        .create_segment(&TaskSegment {
+            id: segment_id,
+            session_id,
+            tenant_id: tenant.to_string(),
+            segment_index: index,
+            task_summary: Some(summary.to_string()),
+            started_at: created_at,
+            ended_at: Some(created_at),
+            turn_count: 2,
+            tools_used: vec!["bash".to_string()],
+            skills_activated: Vec::new(),
+            skills_used: Vec::new(),
+            token_cost: 10,
+            previous_segment_id: None,
+            outcome: Some("resolved".to_string()),
+            assessment: Some(assessment.clone()),
+            outcome_confidence: Some(assessment.confidence),
+        })
+        .await
+        .expect("create segment");
+    let experience = ExperienceRecord {
+        id: Uuid::now_v7(),
+        segment_id,
+        session_id,
+        tenant_id: tenant,
+        user_id: UserId::new("user"),
+        task_summary: Some(summary.to_string()),
+        task_fingerprint: TaskFingerprint {
+            hash: format!("hash-{index}"),
+            normalized_summary: summary.to_string(),
+            policy_version: "experience_v1".to_string(),
+        },
+        task_facets: TaskFacetSet::default(),
+        actions: Vec::new(),
+        resources: Vec::new(),
+        outcome: SegmentOutcome::Resolved,
+        confidence: 0.9,
+        evidence: Vec::new(),
+        tools_used: vec!["bash".to_string()],
+        skills_activated: Vec::new(),
+        skills_used: Vec::new(),
+        turn_count: 2,
+        token_cost: 10,
+        duration_ms: Some(100),
+        assessment_policy_version: assessment.policy_version.clone(),
+        extraction_policy_version: "experience_v1".to_string(),
+        created_at,
+    };
+    store
+        .append_experience_record(&experience)
+        .await
+        .expect("append experience");
+    experience.id
+}
+
+#[tokio::test]
+#[ignore]
+async fn experience_task_embedding_backfill_lists_sets_and_ranks_neighbors() {
+    // Pins: the R2 embedding infrastructure round-trips end to end — missing rows
+    // are selected newest-first within the lookback, a batch set clears them, and
+    // the tenant nearest-neighbor primitive ranks by ascending cosine distance
+    // and honors the self-exclusion.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let session_id = store
+        .create_session(test_session_meta("pg-task-embedding", "test-model"))
+        .await
+        .expect("create session");
+    let tenant = tenant_id("pg-task-embedding");
+    let now = Utc::now();
+    let older = now - chrono::Duration::seconds(30);
+    let alpha = seed_experience_with_summary(&store, session_id, tenant, 0, "alpha", older).await;
+    let beta = seed_experience_with_summary(&store, session_id, tenant, 1, "beta", now).await;
+
+    let missing = store
+        .list_experience_records_missing_task_embedding(
+            now - chrono::Duration::days(30),
+            "mock-embedding-1024",
+            1,
+            10,
+        )
+        .await
+        .expect("list missing");
+    assert_eq!(
+        missing.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![beta, alpha],
+        "missing rows are returned newest-first",
+    );
+    assert_eq!(missing[0].task_summary, "beta");
+
+    store
+        .set_experience_task_embeddings(
+            &[
+                (alpha, "alpha".to_string(), one_hot_embedding(0)),
+                (beta, "beta".to_string(), one_hot_embedding(1)),
+            ],
+            "mock-embedding-1024",
+            1,
+        )
+        .await
+        .expect("set embeddings");
+
+    let after = store
+        .list_experience_records_missing_task_embedding(
+            now - chrono::Duration::days(30),
+            "mock-embedding-1024",
+            1,
+            10,
+        )
+        .await
+        .expect("list missing after set");
+    assert!(after.is_empty(), "no rows remain missing after backfill");
+
+    let neighbors = store
+        .nearest_experience_task_embeddings(&tenant, &one_hot_embedding(0), 10, None)
+        .await
+        .expect("nearest neighbors");
+    assert_eq!(
+        neighbors.iter().map(|n| n.id).collect::<Vec<_>>(),
+        vec![alpha, beta],
+        "the probe's exact match ranks ahead of the orthogonal row",
+    );
+    assert!(neighbors[0].distance < 1e-3, "exact match has ~0 distance");
+    assert!(
+        neighbors[0].distance < neighbors[1].distance,
+        "distances are ascending",
+    );
+
+    let excluded = store
+        .nearest_experience_task_embeddings(&tenant, &one_hot_embedding(0), 10, Some(alpha))
+        .await
+        .expect("nearest neighbors excluding self");
+    assert_eq!(
+        excluded.iter().map(|n| n.id).collect::<Vec<_>>(),
+        vec![beta],
+        "the excluded id is dropped from the ranking",
+    );
+
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn experience_backfill_reselects_model_mismatched_rows() {
+    // Pins: after an embedder switch, a row whose stored vector was produced by
+    // the previous model is re-selected for embedding under the active model, so
+    // incompatible vectors converge to one space instead of persisting forever.
+    // Mutation guard: dropping the model/version predicate from the selection
+    // query stops the row from re-selecting and fails the first assertion.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let session_id = store
+        .create_session(test_session_meta("pg-embed-mismatch", "test-model"))
+        .await
+        .expect("create session");
+    let tenant = tenant_id("pg-embed-mismatch");
+    let now = Utc::now();
+    let exp = seed_experience_with_summary(&store, session_id, tenant, 0, "converge me", now).await;
+
+    // Embed under the previous model.
+    store
+        .set_experience_task_embeddings(
+            &[(exp, "converge me".to_string(), one_hot_embedding(0))],
+            "old-model",
+            1,
+        )
+        .await
+        .expect("set old-model embedding");
+
+    // Under the same model it is not stale...
+    let same_model = store
+        .list_experience_records_missing_task_embedding(
+            now - chrono::Duration::days(30),
+            "old-model",
+            1,
+            10,
+        )
+        .await
+        .expect("list under same model");
+    assert!(
+        same_model.is_empty(),
+        "a row already in the active space is not re-selected",
+    );
+
+    // ...but under a switched model (or version) it re-selects as needing re-embed.
+    let switched_model = store
+        .list_experience_records_missing_task_embedding(
+            now - chrono::Duration::days(30),
+            "new-model",
+            1,
+            10,
+        )
+        .await
+        .expect("list under switched model");
+    assert_eq!(
+        switched_model.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![exp],
+        "a model-mismatched row re-selects under the active model",
+    );
+    let switched_version = store
+        .list_experience_records_missing_task_embedding(
+            now - chrono::Duration::days(30),
+            "old-model",
+            2,
+            10,
+        )
+        .await
+        .expect("list under switched version");
+    assert_eq!(
+        switched_version
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        vec![exp],
+        "a version-mismatched row re-selects under the active model",
+    );
+
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn nearest_task_embeddings_for_experience_excludes_other_model_vectors() {
+    // Pins: the recurrence-clustering neighbor lookup scopes to the
+    // representative's own vector space, so a neighbor embedded by a different
+    // model — even one whose bytes would rank identically — is never returned.
+    // Mutation guard: dropping the model scope from the scoped NN query makes the
+    // other-model row appear and fails the exclusion assertion.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let session_id = store
+        .create_session(test_session_meta("pg-embed-scope", "test-model"))
+        .await
+        .expect("create session");
+    let tenant = tenant_id("pg-embed-scope");
+    let now = Utc::now();
+    let representative =
+        seed_experience_with_summary(&store, session_id, tenant, 0, "repr", now).await;
+    let same_space = seed_experience_with_summary(&store, session_id, tenant, 1, "same", now).await;
+    let other_space =
+        seed_experience_with_summary(&store, session_id, tenant, 2, "other", now).await;
+
+    // Representative and same-space neighbor share model-x; the other-space row
+    // has the identical direction but a different model.
+    store
+        .set_experience_task_embeddings(
+            &[
+                (representative, "repr".to_string(), one_hot_embedding(0)),
+                (same_space, "same".to_string(), one_hot_embedding(0)),
+            ],
+            "model-x",
+            1,
+        )
+        .await
+        .expect("embed model-x rows");
+    store
+        .set_experience_task_embeddings(
+            &[(other_space, "other".to_string(), one_hot_embedding(0))],
+            "model-y",
+            1,
+        )
+        .await
+        .expect("embed model-y row");
+
+    let neighbors = store
+        .nearest_task_embeddings_for_experience(&tenant, representative, 10)
+        .await
+        .expect("neighbor lookup")
+        .expect("representative is embedded");
+    assert_eq!(
+        neighbors.iter().map(|n| n.id).collect::<Vec<_>>(),
+        vec![same_space],
+        "only the same-model neighbor is returned; the other-model row is excluded",
+    );
+
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn nearest_experience_task_embeddings_scoped_filters_by_model() {
+    // Pins: the public scoped primitive returns only rows in the requested vector
+    // space when given Some(model), and every embedded row when given None — the
+    // contract filing-time callers rely on to keep an active-model probe from
+    // ranking against previous-space vectors.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let session_id = store
+        .create_session(test_session_meta("pg-embed-scoped-api", "test-model"))
+        .await
+        .expect("create session");
+    let tenant = tenant_id("pg-embed-scoped-api");
+    let now = Utc::now();
+    let x = seed_experience_with_summary(&store, session_id, tenant, 0, "x", now).await;
+    let y = seed_experience_with_summary(&store, session_id, tenant, 1, "y", now).await;
+    store
+        .set_experience_task_embeddings(&[(x, "x".to_string(), one_hot_embedding(0))], "model-x", 1)
+        .await
+        .expect("embed model-x row");
+    store
+        .set_experience_task_embeddings(&[(y, "y".to_string(), one_hot_embedding(0))], "model-y", 1)
+        .await
+        .expect("embed model-y row");
+
+    let scoped = store
+        .nearest_experience_task_embeddings_scoped(
+            &tenant,
+            &one_hot_embedding(0),
+            10,
+            None,
+            Some(("model-x", 1)),
+        )
+        .await
+        .expect("scoped neighbors");
+    assert_eq!(
+        scoped.iter().map(|n| n.id).collect::<Vec<_>>(),
+        vec![x],
+        "Some(model) returns only rows in that vector space",
+    );
+
+    let unscoped = store
+        .nearest_experience_task_embeddings_scoped(&tenant, &one_hot_embedding(0), 10, None, None)
+        .await
+        .expect("unscoped neighbors");
+    assert_eq!(
+        unscoped.len(),
+        2,
+        "None compares against every embedded row regardless of model",
+    );
+
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn experience_embedding_write_refuses_summary_changed_under_it() {
+    // Pins: a task summary that changed between the backfill's read and its write
+    // does not get a vector of the stale text; and a re-assessment that rewrites
+    // the summary clears any existing embedding so the new text is re-embedded.
+    // Mutation guard: dropping `AND task_summary = $5` from the write persists the
+    // stale vector and fails the "still missing" assertion.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let session_id = store
+        .create_session(test_session_meta("pg-embed-race", "test-model"))
+        .await
+        .expect("create session");
+    let tenant = tenant_id("pg-embed-race");
+    let now = Utc::now();
+
+    let segment_id = deterministic_segment_id(session_id, 7);
+    store
+        .create_segment(&TaskSegment {
+            id: segment_id,
+            session_id,
+            tenant_id: tenant.to_string(),
+            segment_index: 7,
+            task_summary: Some("assess me".to_string()),
+            started_at: now,
+            ended_at: Some(now),
+            turn_count: 2,
+            tools_used: vec!["bash".to_string()],
+            skills_activated: Vec::new(),
+            skills_used: Vec::new(),
+            token_cost: 10,
+            previous_segment_id: None,
+            outcome: Some("resolved".to_string()),
+            assessment: None,
+            outcome_confidence: Some(0.9),
+        })
+        .await
+        .expect("create segment");
+    let make_experience = |summary: &str| ExperienceRecord {
+        id: Uuid::now_v7(),
+        segment_id,
+        session_id,
+        tenant_id: tenant,
+        user_id: UserId::new("user"),
+        task_summary: Some(summary.to_string()),
+        task_fingerprint: TaskFingerprint {
+            hash: "race-hash".to_string(),
+            normalized_summary: summary.to_string(),
+            policy_version: "experience_v1".to_string(),
+        },
+        task_facets: TaskFacetSet::default(),
+        actions: Vec::new(),
+        resources: Vec::new(),
+        outcome: SegmentOutcome::Resolved,
+        confidence: 0.9,
+        evidence: Vec::new(),
+        tools_used: vec!["bash".to_string()],
+        skills_activated: Vec::new(),
+        skills_used: Vec::new(),
+        turn_count: 2,
+        token_cost: 10,
+        duration_ms: Some(100),
+        assessment_policy_version: "assessment_v1".to_string(),
+        extraction_policy_version: "experience_v1".to_string(),
+        created_at: now,
+    };
+
+    // Persist with the original summary, then re-assess (same segment + policy)
+    // with a changed summary: the upsert keeps one row whose id is stable.
+    let original = make_experience("old summary");
+    let exp_id = original.id;
+    store
+        .append_experience_record(&original)
+        .await
+        .expect("persist original");
+    let mut reassessed = make_experience("new summary");
+    reassessed.id = exp_id;
+    store
+        .append_experience_record(&reassessed)
+        .await
+        .expect("re-assess with new summary");
+
+    // The backfill "read" observed "old summary"; its write must be refused now
+    // that the row holds "new summary".
+    store
+        .set_experience_task_embeddings(
+            &[(exp_id, "old summary".to_string(), one_hot_embedding(0))],
+            "test-model",
+            1,
+        )
+        .await
+        .expect("stale-summary write");
+    let still_missing = store
+        .list_experience_records_missing_task_embedding(
+            now - chrono::Duration::days(30),
+            "test-model",
+            1,
+            10,
+        )
+        .await
+        .expect("list after stale write");
+    assert!(
+        still_missing.iter().any(|row| row.id == exp_id),
+        "a write carrying the stale summary is refused; the row stays re-selectable",
+    );
+
+    // A write carrying the current summary applies and clears the row.
+    store
+        .set_experience_task_embeddings(
+            &[(exp_id, "new summary".to_string(), one_hot_embedding(0))],
+            "test-model",
+            1,
+        )
+        .await
+        .expect("current-summary write");
+    let after_write = store
+        .list_experience_records_missing_task_embedding(
+            now - chrono::Duration::days(30),
+            "test-model",
+            1,
+            10,
+        )
+        .await
+        .expect("list after current write");
+    assert!(
+        !after_write.iter().any(|row| row.id == exp_id),
+        "a write carrying the current summary embeds the row",
+    );
+
+    // Re-assessing with yet another summary clears the embedding so the new text
+    // is re-embedded rather than stranding a vector of the old text.
+    let mut reassessed_again = make_experience("newest summary");
+    reassessed_again.id = exp_id;
+    store
+        .append_experience_record(&reassessed_again)
+        .await
+        .expect("re-assess again");
+    let after_reassess = store
+        .list_experience_records_missing_task_embedding(
+            now - chrono::Duration::days(30),
+            "test-model",
+            1,
+            10,
+        )
+        .await
+        .expect("list after re-assess");
+    assert!(
+        after_reassess.iter().any(|row| row.id == exp_id),
+        "a summary change on re-assessment clears the embedding for re-embed",
     );
 
     cleanup_schema(&database_url, &schema_name).await;

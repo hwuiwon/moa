@@ -211,6 +211,7 @@ pub(crate) fn task_segment_from_row(row: &PgRow) -> Result<TaskSegment> {
         outcome_confidence: row.col::<Option<f64>>("outcome_confidence")?,
         tools_used: row.col::<Vec<String>>("tools_used")?,
         skills_activated: row.col::<Vec<String>>("skills_activated")?,
+        skills_used: row.col::<Vec<String>>("skills_used")?,
         turn_count: row.col::<i32>("turn_count")? as u32,
         token_cost: row.col::<i64>("token_cost")? as u64,
         previous_segment_id: row
@@ -259,6 +260,7 @@ pub(crate) fn experience_record_from_row(row: &PgRow) -> Result<ExperienceRecord
         evidence: json_column(row, "evidence")?,
         tools_used: row.col::<Vec<String>>("tools_used")?,
         skills_activated: row.col::<Vec<String>>("skills_activated")?,
+        skills_used: row.col::<Vec<String>>("skills_used")?,
         turn_count: row.col::<i32>("turn_count")? as u32,
         token_cost: row.col::<i64>("token_cost")? as u64,
         duration_ms: row
@@ -283,6 +285,7 @@ pub(crate) fn experience_attribution_from_row(row: &PgRow) -> Result<ExperienceA
         )?,
         subject_id: row.col::<String>("subject_id")?,
         effect: from_db("attribution effect", &row.col::<String>("effect")?)?,
+        kind: from_db("attribution kind", &row.col::<String>("kind")?)?,
         confidence: row.col::<f64>("confidence")?,
         evidence: json_column(row, "evidence")?,
         created_at: row.col::<DateTime<Utc>>("created_at")?,
@@ -346,6 +349,8 @@ pub(crate) fn task_strategy_success_rate_from_row(row: &PgRow) -> Result<TaskStr
         avg_confidence: row.col::<f64>("avg_confidence")?,
         avg_token_cost: row.col::<f64>("avg_token_cost")?,
         avg_turn_count: row.col::<f64>("avg_turn_count")?,
+        effect_score: row.col::<f64>("effect_score")?,
+        unused_injections: row.col::<i64>("unused_injections")? as u64,
     })
 }
 

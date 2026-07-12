@@ -3,6 +3,8 @@
 #[path = "support/skill_graph.rs"]
 mod skill_graph;
 
+#[path = "skills_db_memory/embedding_backfill_db_memory.rs"]
+mod embedding_backfill_db_memory;
 #[path = "skills_db_memory/lessons_db_memory.rs"]
 mod lessons_db_memory;
 #[path = "skills_db_memory/mining_db_memory.rs"]

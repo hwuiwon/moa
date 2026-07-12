@@ -580,6 +580,37 @@ async fn append_synthetic_tool_result(
     .map(|_| ())
 }
 
+/// Appends the tool-call and a successful tool-result event for a tool served from
+/// the per-turn cache without re-dispatching it.
+///
+/// Mirrors the synthetic-result path used for disallowed/denied calls but records
+/// `success: true`, because the output is a corrective notice pointing at a valid
+/// earlier result rather than a policy rejection. The cached output carries only the
+/// notice (the file body is not repeated, since it is already in context from the
+/// first read), and the dispatch itself is skipped, so no `ToolExecutor` round-trip or
+/// sandbox work occurs.
+pub(crate) async fn append_cached_tool_result(
+    ctx: &WorkflowContext<'_>,
+    request: &GovernedInvocationRequest<'_>,
+    output: &ToolOutput,
+) -> Result<(), HandlerError> {
+    append_tool_call_event(ctx, request).await?;
+    append_session_event(
+        ctx,
+        request.session_id,
+        Event::ToolResult {
+            tool_id: request.tool_id,
+            provider_tool_use_id: request.tool_call.invocation.id.clone(),
+            output: output.clone(),
+            original_output_tokens: output.original_output_tokens,
+            success: true,
+            duration_ms: 0,
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
 async fn append_procedure_tool_result(
     ctx: &WorkflowContext<'_>,
     request: &GovernedInvocationRequest<'_>,

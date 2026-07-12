@@ -16,8 +16,20 @@ pub struct QueryRewriteResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<RewriteReason>,
     /// Whether this message starts a new task segment.
+    ///
+    /// Only authoritative when [`Self::has_boundary_signal`] is `true`. When the
+    /// rewrite LLM did not run, this is a hardcoded `false` that carries no task
+    /// boundary judgment.
     #[serde(default)]
     pub is_new_task: bool,
+    /// Whether the rewrite LLM actually produced a task-boundary judgment.
+    ///
+    /// `true` only on the LLM-rewrite success path, where [`Self::is_new_task`]
+    /// reflects the model's decision. `false` on every skip, disable, and
+    /// fail-open path, signalling that segment-boundary detection must fall back
+    /// to deterministic heuristics instead of trusting `is_new_task`.
+    #[serde(default)]
+    pub has_boundary_signal: bool,
     /// Short summary of the new task when a segment transition is detected.
     #[serde(default)]
     pub task_summary: Option<String>,
@@ -35,6 +47,7 @@ impl QueryRewriteResult {
             source: RewriteSource::Original,
             reason: None,
             is_new_task: false,
+            has_boundary_signal: false,
             task_summary: None,
             task_facets: None,
         }
@@ -48,6 +61,7 @@ impl QueryRewriteResult {
             source: RewriteSource::Rewritten,
             reason: Some(reason),
             is_new_task: false,
+            has_boundary_signal: false,
             task_summary: None,
             task_facets: None,
         }

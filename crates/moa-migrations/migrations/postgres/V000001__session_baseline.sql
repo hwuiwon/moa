@@ -768,6 +768,7 @@ CREATE TABLE IF NOT EXISTS task_segments (
     outcome_confidence NUMERIC(4,3),
     tools_used TEXT[] NOT NULL DEFAULT '{}',
     skills_activated TEXT[] NOT NULL DEFAULT '{}',
+    skills_used TEXT[] NOT NULL DEFAULT '{}',
     turn_count INT NOT NULL DEFAULT 0,
     token_cost BIGINT NOT NULL DEFAULT 0,
     previous_segment_id UUID,
@@ -790,7 +791,7 @@ DROP MATERIALIZED VIEW IF EXISTS skill_resolution_rates;
 CREATE MATERIALIZED VIEW skill_resolution_rates AS
 SELECT
     t.tenant_id,
-    unnest(t.skills_activated) AS skill_name,
+    unnest(t.skills_used) AS skill_name,
     COUNT(*)::BIGINT AS uses,
     AVG(CASE WHEN t.outcome = 'resolved' THEN 1.0
              WHEN t.outcome = 'partial' THEN 0.5
@@ -799,7 +800,7 @@ SELECT
     AVG(t.turn_count)::DOUBLE PRECISION AS avg_turn_count
 FROM task_segments t
 WHERE t.outcome IS NOT NULL
-  AND array_length(t.skills_activated, 1) IS NOT NULL
+  AND array_length(t.skills_used, 1) IS NOT NULL
 GROUP BY t.tenant_id, skill_name;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_resolution_rates_unique
@@ -2007,7 +2008,7 @@ CREATE INDEX IF NOT EXISTS idx_task_segments_tenant_outcome
 CREATE MATERIALIZED VIEW skill_resolution_rates AS
 SELECT
     t.tenant_id,
-    unnest(t.skills_activated) AS skill_name,
+    unnest(t.skills_used) AS skill_name,
     COUNT(*)::BIGINT AS uses,
     AVG(CASE WHEN t.outcome = 'resolved' THEN 1.0
              WHEN t.outcome = 'partial' THEN 0.5
@@ -2016,7 +2017,7 @@ SELECT
     AVG(t.turn_count)::DOUBLE PRECISION AS avg_turn_count
 FROM task_segments t
 WHERE t.outcome IS NOT NULL
-  AND array_length(t.skills_activated, 1) IS NOT NULL
+  AND array_length(t.skills_used, 1) IS NOT NULL
 GROUP BY t.tenant_id, skill_name;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_resolution_rates_unique
@@ -2060,9 +2061,19 @@ CREATE TABLE IF NOT EXISTS experience_records (
     evidence JSONB NOT NULL DEFAULT '[]'::JSONB,
     tools_used TEXT[] NOT NULL DEFAULT '{}',
     skills_activated TEXT[] NOT NULL DEFAULT '{}',
+    skills_used TEXT[] NOT NULL DEFAULT '{}',
     turn_count INT NOT NULL DEFAULT 0,
     token_cost BIGINT NOT NULL DEFAULT 0,
     duration_ms BIGINT,
+    -- Semantic embedding of `task_summary`, populated out-of-band by the
+    -- learning-embeddings backfill cron (never on the turn/persist path). NULL
+    -- until the cron reaches the row: downstream consumers (recurrence
+    -- clustering, filing-time dedup) must tolerate NULL and treat it as
+    -- "not yet embedded" rather than "no match". The model id/version record
+    -- which vector space the bytes belong to so a model switch is detectable.
+    task_embedding public.halfvec(1024),
+    task_embedding_model TEXT,
+    task_embedding_model_version INT,
     assessment_policy_version TEXT NOT NULL,
     extraction_policy_version TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -2075,6 +2086,12 @@ CREATE INDEX IF NOT EXISTS idx_experience_records_tenant_task
     ON experience_records (tenant_id, task_fingerprint, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_experience_records_scope
     ON experience_records (storage_partition_id, scope, user_id);
+-- Cosine HNSW index for the tenant nearest-neighbor primitive R2 uses to cluster
+-- recurring task summaries. NULL embeddings are simply not indexed, so the index
+-- stays proportional to embedded rows.
+CREATE INDEX IF NOT EXISTS experience_records_task_embedding_hnsw_idx
+    ON experience_records USING hnsw (task_embedding public.halfvec_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
 
 CREATE TABLE IF NOT EXISTS experience_attributions (
     id UUID PRIMARY KEY,
@@ -2086,6 +2103,7 @@ CREATE TABLE IF NOT EXISTS experience_attributions (
     subject_type TEXT NOT NULL,
     subject_id TEXT NOT NULL,
     effect TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'standard',
     confidence NUMERIC(4,3) NOT NULL,
     evidence JSONB NOT NULL DEFAULT '[]'::JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -2141,13 +2159,27 @@ SELECT
     e.task_fingerprint,
     a.subject_type,
     a.subject_id,
-    COUNT(*)::BIGINT AS uses,
-    AVG(CASE WHEN e.outcome = 'resolved' THEN 1.0
-             WHEN e.outcome = 'partial' THEN 0.5
-             ELSE 0.0 END)::DOUBLE PRECISION AS success_rate,
-    AVG(e.confidence)::DOUBLE PRECISION AS avg_confidence,
-    AVG(e.token_cost)::DOUBLE PRECISION AS avg_token_cost,
-    AVG(e.turn_count)::DOUBLE PRECISION AS avg_turn_count
+    -- Outcome aggregates count only engaged (non-unused-injection) rows exactly as
+    -- before; unused injections are counted separately below rather than excluded so
+    -- both signals come from one view.
+    (COUNT(*) FILTER (WHERE a.kind <> 'unused_injection'))::BIGINT AS uses,
+    COALESCE(AVG(CASE WHEN e.outcome = 'resolved' THEN 1.0
+                      WHEN e.outcome = 'partial' THEN 0.5
+                      ELSE 0.0 END)
+             FILTER (WHERE a.kind <> 'unused_injection'), 0.0)::DOUBLE PRECISION AS success_rate,
+    COALESCE(AVG(e.confidence) FILTER (WHERE a.kind <> 'unused_injection'), 0.0)::DOUBLE PRECISION AS avg_confidence,
+    COALESCE(AVG(e.token_cost) FILTER (WHERE a.kind <> 'unused_injection'), 0.0)::DOUBLE PRECISION AS avg_token_cost,
+    COALESCE(AVG(e.turn_count) FILTER (WHERE a.kind <> 'unused_injection'), 0.0)::DOUBLE PRECISION AS avg_turn_count,
+    -- Mean attribution effect over the same engaged rows: Helpful=1.0, Mixed=0.5,
+    -- Neutral=0.5, Harmful=0.0. Independent of success_rate because a used skill's
+    -- effect is downgraded when its own tool call failed. Defaults to the 0.5 neutral
+    -- prior when a subject has only unused-injection rows.
+    COALESCE(AVG(CASE a.effect WHEN 'helpful' THEN 1.0
+                               WHEN 'mixed' THEN 0.5
+                               WHEN 'neutral' THEN 0.5
+                               ELSE 0.0 END)
+             FILTER (WHERE a.kind <> 'unused_injection'), 0.5)::DOUBLE PRECISION AS effect_score,
+    (COUNT(*) FILTER (WHERE a.kind = 'unused_injection'))::BIGINT AS unused_injections
 FROM experience_records e
 JOIN experience_attributions a ON a.experience_id = e.id
 WHERE a.subject_type IN ('skill', 'tool', 'memory', 'verification', 'policy')
@@ -2181,9 +2213,19 @@ CREATE TABLE IF NOT EXISTS experience_records (
     evidence JSONB NOT NULL DEFAULT '[]'::JSONB,
     tools_used TEXT[] NOT NULL DEFAULT '{}',
     skills_activated TEXT[] NOT NULL DEFAULT '{}',
+    skills_used TEXT[] NOT NULL DEFAULT '{}',
     turn_count INT NOT NULL DEFAULT 0,
     token_cost BIGINT NOT NULL DEFAULT 0,
     duration_ms BIGINT,
+    -- Semantic embedding of `task_summary`, populated out-of-band by the
+    -- learning-embeddings backfill cron (never on the turn/persist path). NULL
+    -- until the cron reaches the row: downstream consumers (recurrence
+    -- clustering, filing-time dedup) must tolerate NULL and treat it as
+    -- "not yet embedded" rather than "no match". The model id/version record
+    -- which vector space the bytes belong to so a model switch is detectable.
+    task_embedding public.halfvec(1024),
+    task_embedding_model TEXT,
+    task_embedding_model_version INT,
     assessment_policy_version TEXT NOT NULL,
     extraction_policy_version TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -2196,6 +2238,12 @@ CREATE INDEX IF NOT EXISTS idx_experience_records_tenant_task
     ON experience_records (tenant_id, task_fingerprint, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_experience_records_scope
     ON experience_records (storage_partition_id, scope, user_id);
+-- Cosine HNSW index for the tenant nearest-neighbor primitive R2 uses to cluster
+-- recurring task summaries. NULL embeddings are simply not indexed, so the index
+-- stays proportional to embedded rows.
+CREATE INDEX IF NOT EXISTS experience_records_task_embedding_hnsw_idx
+    ON experience_records USING hnsw (task_embedding public.halfvec_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
 
 CREATE TABLE IF NOT EXISTS experience_attributions (
     id UUID PRIMARY KEY,
@@ -2207,6 +2255,7 @@ CREATE TABLE IF NOT EXISTS experience_attributions (
     subject_type TEXT NOT NULL,
     subject_id TEXT NOT NULL,
     effect TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'standard',
     confidence NUMERIC(4,3) NOT NULL,
     evidence JSONB NOT NULL DEFAULT '[]'::JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -2272,13 +2321,27 @@ SELECT
     e.task_fingerprint,
     a.subject_type,
     a.subject_id,
-    COUNT(*)::BIGINT AS uses,
-    AVG(CASE WHEN e.outcome = 'resolved' THEN 1.0
-             WHEN e.outcome = 'partial' THEN 0.5
-             ELSE 0.0 END)::DOUBLE PRECISION AS success_rate,
-    AVG(e.confidence)::DOUBLE PRECISION AS avg_confidence,
-    AVG(e.token_cost)::DOUBLE PRECISION AS avg_token_cost,
-    AVG(e.turn_count)::DOUBLE PRECISION AS avg_turn_count
+    -- Outcome aggregates count only engaged (non-unused-injection) rows exactly as
+    -- before; unused injections are counted separately below rather than excluded so
+    -- both signals come from one view.
+    (COUNT(*) FILTER (WHERE a.kind <> 'unused_injection'))::BIGINT AS uses,
+    COALESCE(AVG(CASE WHEN e.outcome = 'resolved' THEN 1.0
+                      WHEN e.outcome = 'partial' THEN 0.5
+                      ELSE 0.0 END)
+             FILTER (WHERE a.kind <> 'unused_injection'), 0.0)::DOUBLE PRECISION AS success_rate,
+    COALESCE(AVG(e.confidence) FILTER (WHERE a.kind <> 'unused_injection'), 0.0)::DOUBLE PRECISION AS avg_confidence,
+    COALESCE(AVG(e.token_cost) FILTER (WHERE a.kind <> 'unused_injection'), 0.0)::DOUBLE PRECISION AS avg_token_cost,
+    COALESCE(AVG(e.turn_count) FILTER (WHERE a.kind <> 'unused_injection'), 0.0)::DOUBLE PRECISION AS avg_turn_count,
+    -- Mean attribution effect over the same engaged rows: Helpful=1.0, Mixed=0.5,
+    -- Neutral=0.5, Harmful=0.0. Independent of success_rate because a used skill's
+    -- effect is downgraded when its own tool call failed. Defaults to the 0.5 neutral
+    -- prior when a subject has only unused-injection rows.
+    COALESCE(AVG(CASE a.effect WHEN 'helpful' THEN 1.0
+                               WHEN 'mixed' THEN 0.5
+                               WHEN 'neutral' THEN 0.5
+                               ELSE 0.0 END)
+             FILTER (WHERE a.kind <> 'unused_injection'), 0.5)::DOUBLE PRECISION AS effect_score,
+    (COUNT(*) FILTER (WHERE a.kind = 'unused_injection'))::BIGINT AS unused_injections
 FROM experience_records e
 JOIN experience_attributions a ON a.experience_id = e.id
 WHERE a.subject_type IN ('skill', 'tool', 'memory', 'verification', 'policy')
@@ -2489,6 +2552,48 @@ CREATE POLICY rd_auditor ON moa.artifact_file
 GRANT SELECT ON moa.artifact TO moa_auditor;
 GRANT SELECT ON moa.artifact_revision TO moa_auditor;
 GRANT SELECT ON moa.artifact_file TO moa_auditor;
+
+-- Semantic embedding of a published Skill artifact's identity text
+-- (name + description + tags), keyed by `artifact_uid` rather than by revision.
+--
+-- Keyed by the artifact, not the revision, because: (1) name/description/tags
+-- live on `moa.artifact`, not on the per-revision row, so the artifact is the
+-- natural subject of the embedding; (2) the R2 filing-time dedup and recurrence
+-- clustering want exactly one vector per currently-serving skill, which a
+-- per-artifact row gives directly without filtering archived revisions; and
+-- (3) keeping the embedding bytes out of `moa.artifact_revision` keeps the
+-- hot skill-resolution serving path (which loads revisions on every turn) free
+-- of vector columns, mirroring how `moa.embeddings` is separate from
+-- `moa.node_index`.
+--
+-- `revision_uid` records which published revision was current when the identity
+-- was embedded (provenance), and `source_hash` is the digest of the exact
+-- identity text embedded so the backfill cron can skip re-embedding when a
+-- republish did not change the identity. Populated out-of-band by the
+-- learning-embeddings backfill cron; absence of a row means "not yet embedded".
+CREATE TABLE IF NOT EXISTS moa.skill_embedding (
+    artifact_uid UUID PRIMARY KEY REFERENCES moa.artifact(artifact_uid) ON DELETE CASCADE,
+    storage_partition_id TEXT,
+    user_id TEXT,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
+    revision_uid UUID NOT NULL REFERENCES moa.artifact_revision(revision_uid) ON DELETE CASCADE,
+    embedding public.halfvec(1024) NOT NULL,
+    embedding_model TEXT NOT NULL,
+    embedding_model_version INT NOT NULL,
+    source_hash BYTEA NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (scope IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS skill_embedding_scope_idx
+    ON moa.skill_embedding (storage_partition_id, scope, user_id);
+CREATE INDEX IF NOT EXISTS skill_embedding_embedding_hnsw_idx
+    ON moa.skill_embedding USING hnsw (embedding public.halfvec_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+GRANT USAGE ON SCHEMA moa TO moa_app, moa_promoter;
+SELECT moa.apply_three_tier_rls('moa.skill_embedding'::REGCLASS);
 
 -- Source: V000039__session_behavior_experiments.sql
 
@@ -2754,3 +2859,10 @@ CREATE INDEX IF NOT EXISTS idx_events_storage_partition_type_timestamp
 CREATE INDEX IF NOT EXISTS idx_events_tool_id
     ON events(storage_partition_id, event_type, ((payload -> 'data' ->> 'tool_id')), timestamp DESC)
     WHERE payload -> 'data' ? 'tool_id';
+
+-- Post-promotion regression monitor: skill-scoped, time-bounded resolution
+-- lookups match `skills_used @> ARRAY[skill]` against `task_segments`. A GIN
+-- index over `skills_used` makes the containment probe index-backed instead of a
+-- per-tenant sequential scan.
+CREATE INDEX IF NOT EXISTS idx_task_segments_skills_used_gin
+    ON task_segments USING GIN (skills_used);

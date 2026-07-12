@@ -16,11 +16,13 @@ use moa_core::{
     types::channel::Channel, types::completion::CompletionContent,
     types::completion::CompletionRequest, types::completion::CompletionResponse,
     types::completion::CompletionStream, types::completion::StopReason,
-    types::completion::TokenUsage, types::contact::SessionActorRef, types::identifiers::ModelId,
-    types::identifiers::SegmentId, types::identifiers::SessionId,
-    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
-    types::identifiers::ToolCallId, types::model::ModelCapabilities, types::model::TokenPricing,
-    types::model::ToolCallFormat, types::provider::ModelTier,
+    types::completion::TokenUsage, types::contact::SessionActorRef,
+    types::experience::LearningCandidate, types::experience::LearningCandidateStatus,
+    types::experience::LearningCandidateType, types::experience::LearningRiskClass,
+    types::experience::TaskFingerprint, types::identifiers::ModelId, types::identifiers::SegmentId,
+    types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::identifiers::ToolCallId, types::model::ModelCapabilities,
+    types::model::TokenPricing, types::model::ToolCallFormat, types::provider::ModelTier,
     types::segment_assessment::AssessmentPhase, types::segment_assessment::SegmentAssessment,
     types::segment_assessment::SegmentEvidence, types::segment_assessment::SegmentEvidenceKind,
     types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
@@ -28,9 +30,13 @@ use moa_core::{
     types::tools::ToolOutput,
 };
 use moa_orchestrator::workflows::skill_learning::{
-    RunSkillLearningRequest, record_skill_learning_failure, run_skill_learning_for_experience,
+    RecurrenceDispatch, RecurrenceSiblingRef, RunSkillLearningRequest,
+    record_skill_learning_failure, run_skill_learning_for_experience,
 };
 use moa_providers::ModelRouter;
+use moa_skills::recurrence::{
+    MergedRecurrenceCluster, RecurrenceThresholds, qualify_recurrence_cluster,
+};
 use moa_skills::registry::SkillRegistry;
 use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::bootstrap_test_db;
@@ -59,6 +65,7 @@ mod skill_learning {
             &config,
             Arc::new(test_db.store().clone()),
             scripted_router([proposed]),
+            None,
             request.clone(),
         )
         .await
@@ -138,6 +145,292 @@ mod skill_learning {
             .expect("load session after warning");
         assert_eq!(session.status, SessionStatus::Completed);
     }
+
+    #[tokio::test]
+    async fn recurrence_dispatch_files_below_floor_with_evidence_and_siblings() {
+        // Pins: three sub-floor sessions sharing a fingerprint qualify as recurrence
+        // through the real store grouping, dispatch distillation on the strongest
+        // exemplar with the relaxed floor, file exactly one proposal carrying
+        // recurrence evidence, and pool the other members as held-out siblings; a
+        // second tick observes the open proposal and files nothing.
+        let test_db = bootstrap_test_db().await.expect("bootstrap recurrence db");
+        let mut config = MoaConfig::default();
+        config.database.url = test_db.database_url().to_string();
+        config.query_rewrite.enabled = false;
+        let tenant_id = TenantId::new();
+        let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
+        let task = "Rotate the tenant deploy token";
+        let now = Utc::now();
+
+        // Each session holds 4 tool calls — below the single-session floor of 8, at
+        // or above the relaxed recurrence floor of 3. Confidence orders the exemplar.
+        let strong = seed_recurrence_member(
+            &test_db,
+            tenant_id,
+            &storage_partition_id,
+            task,
+            4,
+            0.95,
+            now - chrono::Duration::days(2),
+        )
+        .await;
+        let mid = seed_recurrence_member(
+            &test_db,
+            tenant_id,
+            &storage_partition_id,
+            task,
+            4,
+            0.90,
+            now - chrono::Duration::days(1),
+        )
+        .await;
+        let weak = seed_recurrence_member(
+            &test_db,
+            tenant_id,
+            &storage_partition_id,
+            task,
+            4,
+            0.85,
+            now,
+        )
+        .await;
+        assert_eq!(strong.fingerprint_hash, mid.fingerprint_hash);
+        assert_eq!(strong.fingerprint_hash, weak.fingerprint_hash);
+
+        // Real cron discovery: the store grouping query plus the pure qualifier.
+        let thresholds = RecurrenceThresholds::from_config(&config.learning.recurrence);
+        let since = now - chrono::Duration::days(config.learning.recurrence.lookback_days);
+        let clusters = test_db
+            .store()
+            .list_candidate_experience_groups(
+                &tenant_id,
+                since,
+                config.learning.recurrence.max_candidate_groups,
+            )
+            .await
+            .expect("group recurring clusters");
+        assert_eq!(clusters.len(), 1, "the three members form one cluster");
+        assert_eq!(clusters[0].members.len(), 3);
+        let decisions = test_db
+            .store()
+            .list_skill_candidate_decisions_for_fingerprint(&tenant_id, &strong.fingerprint_hash)
+            .await
+            .expect("candidate decisions");
+        assert!(
+            decisions.is_empty(),
+            "no prior candidate for this fingerprint"
+        );
+        let plan = qualify_recurrence_cluster(
+            &MergedRecurrenceCluster::single(&clusters[0]),
+            &decisions,
+            &thresholds,
+            now,
+        )
+        .expect("cluster qualifies for dispatch");
+        assert_eq!(
+            plan.exemplar.experience_id, strong.experience_id,
+            "the highest-confidence member is the exemplar"
+        );
+        assert_eq!(plan.siblings.len(), 2);
+
+        // Build the request the cron would send and run the workflow body directly.
+        let request = RunSkillLearningRequest {
+            session_id: plan.exemplar.session_id,
+            experience_id: plan.exemplar.experience_id,
+            recurrence: Some(RecurrenceDispatch {
+                occurrences: plan.occurrences,
+                merged_fingerprints: plan.merged_fingerprints.clone(),
+                first_seen: plan.first_seen,
+                last_seen: plan.last_seen,
+                siblings: plan
+                    .siblings
+                    .iter()
+                    .map(|sibling| RecurrenceSiblingRef {
+                        session_id: sibling.session_id,
+                        experience_id: sibling.experience_id,
+                    })
+                    .collect(),
+            }),
+        };
+        let skill_name = unique_name("recurrence-skill");
+        let skill = skill_markdown(
+            &skill_name,
+            "Rotate the tenant deploy token safely",
+            "Follow the recurring rotation steps and verify the new token.",
+        );
+        // One create response for the exemplar, then one re-synthesis response per
+        // sibling (kept UNCHANGED so the suite still accumulates as held-out).
+        let report = run_skill_learning_for_experience(
+            &config,
+            Arc::new(test_db.store().clone()),
+            scripted_router([skill, "UNCHANGED".to_string(), "UNCHANGED".to_string()]),
+            None,
+            request,
+        )
+        .await
+        .expect("run recurrence learning");
+
+        assert_eq!(report.outcome, "proposed");
+        let candidate_id = report.candidate_id.expect("recurrence candidate id");
+        let candidate = test_db
+            .store()
+            .get_learning_candidate(&tenant_id, candidate_id)
+            .await
+            .expect("load recurrence candidate")
+            .expect("candidate exists");
+        let recurrence_evidence = &candidate.payload["evidence"]["recurrence"];
+        assert_eq!(recurrence_evidence["source"], "recurrence_mined");
+        assert_eq!(recurrence_evidence["occurrences"], 3);
+        assert_eq!(
+            recurrence_evidence["member_experience_ids"]
+                .as_array()
+                .expect("member ids")
+                .len(),
+            3,
+            "exemplar plus two siblings are recorded for the reviewer"
+        );
+        let sibling_suites = candidate.payload["accumulated_regression_suites"]
+            .as_array()
+            .expect("accumulated sibling suites");
+        assert_eq!(
+            sibling_suites.len(),
+            2,
+            "both cluster siblings pooled as held-out material"
+        );
+
+        // Second cron tick: the open proposal now suppresses re-dispatch.
+        let decisions_after = test_db
+            .store()
+            .list_skill_candidate_decisions_for_fingerprint(&tenant_id, &strong.fingerprint_hash)
+            .await
+            .expect("candidate decisions after filing");
+        assert!(
+            decisions_after
+                .iter()
+                .any(|decision| decision.status == LearningCandidateStatus::Proposed),
+            "the filed proposal is now visible to the next tick"
+        );
+        assert!(
+            qualify_recurrence_cluster(
+                &MergedRecurrenceCluster::single(&clusters[0]),
+                &decisions_after,
+                &thresholds,
+                now
+            )
+            .is_none(),
+            "an open proposal suppresses the next recurrence tick"
+        );
+    }
+
+    #[tokio::test]
+    async fn recurrence_recently_rejected_fingerprint_is_suppressed() {
+        // Pins: a fingerprint whose candidate a reviewer rejected within the
+        // cooldown is not re-dispatched even though it keeps recurring, so recurring
+        // rejection cannot spam the review queue.
+        let test_db = bootstrap_test_db()
+            .await
+            .expect("bootstrap recurrence rejection db");
+        let config = MoaConfig::default();
+        let tenant_id = TenantId::new();
+        let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
+        let task = "Reconcile the billing ledger";
+        let now = Utc::now();
+        let member = seed_recurrence_member(
+            &test_db,
+            tenant_id,
+            &storage_partition_id,
+            task,
+            4,
+            0.95,
+            now - chrono::Duration::days(2),
+        )
+        .await;
+        seed_recurrence_member(
+            &test_db,
+            tenant_id,
+            &storage_partition_id,
+            task,
+            4,
+            0.92,
+            now - chrono::Duration::days(1),
+        )
+        .await;
+        seed_recurrence_member(
+            &test_db,
+            tenant_id,
+            &storage_partition_id,
+            task,
+            4,
+            0.90,
+            now,
+        )
+        .await;
+
+        // A reviewer rejected this fingerprint's candidate today.
+        let rejected = LearningCandidate {
+            id: Uuid::now_v7(),
+            tenant_id,
+            user_id: None,
+            candidate_type: LearningCandidateType::Skill,
+            status: LearningCandidateStatus::Rejected,
+            target_id: None,
+            target_label: Some("reconcile-ledger".to_string()),
+            task_fingerprint: Some(TaskFingerprint {
+                hash: member.fingerprint_hash.clone(),
+                normalized_summary: task.to_ascii_lowercase(),
+                policy_version: "experience_v1".to_string(),
+            }),
+            task_facets: None,
+            payload: json!({ "kind": "skill_draft_proposal" }),
+            evaluation_payload: None,
+            source_experience_ids: Vec::new(),
+            confidence: None,
+            risk_class: LearningRiskClass::Medium,
+            promotion_requirements: vec!["human_review".to_string()],
+            status_reason: Some("reviewer declined".to_string()),
+            batch_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        test_db
+            .store()
+            .append_learning_candidate(&rejected)
+            .await
+            .expect("append rejected candidate");
+
+        let thresholds = RecurrenceThresholds::from_config(&config.learning.recurrence);
+        let since = now - chrono::Duration::days(config.learning.recurrence.lookback_days);
+        let clusters = test_db
+            .store()
+            .list_candidate_experience_groups(
+                &tenant_id,
+                since,
+                config.learning.recurrence.max_candidate_groups,
+            )
+            .await
+            .expect("group recurring clusters");
+        assert_eq!(clusters.len(), 1);
+        let decisions = test_db
+            .store()
+            .list_skill_candidate_decisions_for_fingerprint(&tenant_id, &member.fingerprint_hash)
+            .await
+            .expect("candidate decisions");
+        assert!(
+            decisions
+                .iter()
+                .any(|decision| decision.status == LearningCandidateStatus::Rejected)
+        );
+        assert!(
+            qualify_recurrence_cluster(
+                &MergedRecurrenceCluster::single(&clusters[0]),
+                &decisions,
+                &thresholds,
+                now
+            )
+            .is_none(),
+            "a recently rejected fingerprint is suppressed within the cooldown"
+        );
+    }
 }
 
 async fn seed_experience_fixture(
@@ -149,11 +442,51 @@ async fn seed_experience_fixture(
     config.query_rewrite.enabled = false;
     let tenant_id = TenantId::new();
     let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
+    let member = seed_recurrence_member(
+        test_db,
+        tenant_id,
+        &storage_partition_id,
+        "Distill a reusable Rust workflow",
+        config.learning.skills.min_tool_calls,
+        0.95,
+        Utc::now(),
+    )
+    .await;
+    (
+        config,
+        RunSkillLearningRequest {
+            session_id: member.session_id,
+            experience_id: member.experience_id,
+            recurrence: None,
+        },
+        storage_partition_id,
+    )
+}
+
+/// One seeded recurrence cluster member: the identifiers the cron threads on.
+struct SeededMember {
+    session_id: SessionId,
+    experience_id: Uuid,
+    fingerprint_hash: String,
+}
+
+/// Seeds one assessed, resolved experience with a controllable tool-call count,
+/// confidence, and creation time, sharing a fingerprint with any other member
+/// seeded from the same task summary and tool set.
+async fn seed_recurrence_member(
+    test_db: &moa_test_support::postgres::TestDb,
+    tenant_id: TenantId,
+    storage_partition_id: &StoragePartitionId,
+    task_summary: &str,
+    tool_calls: usize,
+    confidence: f64,
+    created_at: chrono::DateTime<Utc>,
+) -> SeededMember {
     let creator_id = Uuid::now_v7();
     let session = SessionMeta {
         id: SessionId::new(),
         tenant_id,
-        title: Some("Distill a reusable Rust workflow".to_string()),
+        title: Some(task_summary.to_string()),
         status: SessionStatus::Completed,
         channel: Channel::Chat,
         model: ModelId::new("scripted-skill-model"),
@@ -175,7 +508,7 @@ async fn seed_experience_fixture(
                 Event::SegmentStarted {
                     segment_id,
                     segment_index: 0,
-                    task_summary: Some("Implement a reusable Rust workflow".to_string()),
+                    task_summary: Some(task_summary.to_string()),
                     previous_segment_id: None,
                 },
                 None,
@@ -198,7 +531,7 @@ async fn seed_experience_fixture(
             .expect("append user message"),
     );
     let mut tools_used = Vec::new();
-    for index in 0..config.learning.skills.min_tool_calls {
+    for index in 0..tool_calls {
         let tool_name = format!("bash-{index}");
         let tool_id = ToolCallId::new();
         tools_used.push(tool_name.clone());
@@ -269,10 +602,11 @@ async fn seed_experience_fixture(
                 Event::SegmentCompleted {
                     segment_id,
                     segment_index: 0,
-                    task_summary: Some("Implement a reusable Rust workflow".to_string()),
+                    task_summary: Some(task_summary.to_string()),
                     turn_count: 1,
                     tools_used: tools_used.clone(),
                     skills_activated: Vec::new(),
+                    skills_used: Vec::new(),
                     token_cost: 256,
                     duration_ms: 1_000,
                 },
@@ -283,7 +617,7 @@ async fn seed_experience_fixture(
     );
     let assessment = SegmentAssessment {
         outcome: SegmentOutcome::Resolved,
-        confidence: 0.95,
+        confidence,
         phase: AssessmentPhase::Immediate,
         evidence: vec![SegmentEvidence {
             kind: SegmentEvidenceKind::Verification,
@@ -305,6 +639,7 @@ async fn seed_experience_fixture(
         turn_count: 1,
         tools_used,
         skills_activated: Vec::new(),
+        skills_used: Vec::new(),
         token_cost: 256,
         previous_segment_id: None,
         outcome: Some(SegmentOutcome::Resolved.as_str().to_string()),
@@ -323,9 +658,9 @@ async fn seed_experience_fixture(
         &events,
         None,
         Some(1_000),
-        Utc::now(),
+        created_at,
     );
-    let attributions = attributions_for_experience(&experience, &events, Utc::now());
+    let attributions = attributions_for_experience(&experience, &events, created_at);
     test_db
         .store()
         .append_experience_record(&experience)
@@ -337,14 +672,11 @@ async fn seed_experience_fixture(
         .await
         .expect("append attributions");
 
-    (
-        config,
-        RunSkillLearningRequest {
-            session_id: session.id,
-            experience_id: experience.id,
-        },
-        storage_partition_id,
-    )
+    SeededMember {
+        session_id: session.id,
+        experience_id: experience.id,
+        fingerprint_hash: experience.task_fingerprint.hash,
+    }
 }
 
 fn scripted_router(responses: impl IntoIterator<Item = impl Into<String>>) -> Arc<ModelRouter> {

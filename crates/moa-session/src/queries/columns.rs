@@ -35,7 +35,7 @@ pub(crate) const SESSION_SUMMARY_COLUMNS: &str = concat!(
 pub(crate) const TASK_SEGMENT_COLUMNS: &str = concat!(
     "id, session_id, tenant_id, segment_index, task_summary, started_at, ended_at, outcome, assessment, ",
     "outcome_confidence::DOUBLE PRECISION AS outcome_confidence, ",
-    "tools_used, skills_activated, turn_count, token_cost, previous_segment_id"
+    "tools_used, skills_activated, skills_used, turn_count, token_cost, previous_segment_id"
 );
 
 /// Canonical column list for selecting learning-log rows.
@@ -49,14 +49,14 @@ pub(crate) const LEARNING_ENTRY_COLUMNS: &str = concat!(
 pub(crate) const EXPERIENCE_RECORD_COLUMNS: &str = concat!(
     "id, segment_id, session_id, tenant_id, storage_partition_id, user_id, task_summary, ",
     "task_fingerprint, task_fingerprint_payload, task_facets, actions, resources, outcome, ",
-    "confidence::DOUBLE PRECISION AS confidence, evidence, tools_used, skills_activated, ",
+    "confidence::DOUBLE PRECISION AS confidence, evidence, tools_used, skills_activated, skills_used, ",
     "turn_count, token_cost, duration_ms, assessment_policy_version, extraction_policy_version, ",
     "created_at"
 );
 
 /// Canonical column list for selecting experience attributions.
 pub(crate) const EXPERIENCE_ATTRIBUTION_COLUMNS: &str = concat!(
-    "id, experience_id, tenant_id, storage_partition_id, user_id, subject_type, subject_id, effect, ",
+    "id, experience_id, tenant_id, storage_partition_id, user_id, subject_type, subject_id, effect, kind, ",
     "confidence::DOUBLE PRECISION AS confidence, evidence, created_at"
 );
 
@@ -74,5 +74,6 @@ pub(crate) const TASK_STRATEGY_SUCCESS_RATE_COLUMNS: &str = concat!(
     "success_rate::DOUBLE PRECISION AS success_rate, ",
     "avg_confidence::DOUBLE PRECISION AS avg_confidence, ",
     "avg_token_cost::DOUBLE PRECISION AS avg_token_cost, ",
-    "avg_turn_count::DOUBLE PRECISION AS avg_turn_count"
+    "avg_turn_count::DOUBLE PRECISION AS avg_turn_count, ",
+    "effect_score::DOUBLE PRECISION AS effect_score, unused_injections"
 );

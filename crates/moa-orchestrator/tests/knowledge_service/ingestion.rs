@@ -284,8 +284,14 @@ async fn mock_connector_end_to_end_db_memory() {
         })
         .await
         .expect("nango status should render");
-    assert_sync_status_counters(&merge_status, 3, 20, 17);
-    assert_sync_status_counters(&nango_status, 3, 18, 15);
+    // The deterministic generic proper-noun fallback (semantic.generic_entities,
+    // default on) emits one extra Entity node + link edge for each chunk whose
+    // text concatenates a bare heading with its body, producing a capitalized
+    // span: merge's "PTO Policy PTO" (+1 node/+1 edge), and nango's
+    // "Finance Controls Finance" and "Support Guide Support" (+2 nodes/+2 edges).
+    // The reducto/warehouse chunk carries no heading line so it stays unchanged.
+    assert_sync_status_counters(&merge_status, 3, 21, 18);
+    assert_sync_status_counters(&nango_status, 3, 20, 17);
     assert_eq!(
         merge_status
             .steps
@@ -606,7 +612,10 @@ async fn mock_connector_end_to_end_db_memory() {
     assert_eq!(label_counts.get("Document"), Some(&6));
     assert_eq!(label_counts.get("Chunk"), Some(&6));
     assert_eq!(label_counts.get("Fact"), Some(&6));
-    assert_eq!(label_counts.get("Entity"), Some(&14));
+    // 14 curated title/heading/domain entities plus 3 generic proper-noun spans
+    // from the heading-into-body fallback ("PTO Policy PTO", "Finance Controls
+    // Finance", "Support Guide Support").
+    assert_eq!(label_counts.get("Entity"), Some(&17));
     assert_eq!(label_counts.get("ContactGroup"), Some(&1));
     assert_eq!(chunk_vector_row_count(&pool, tenant_id).await, 6);
 

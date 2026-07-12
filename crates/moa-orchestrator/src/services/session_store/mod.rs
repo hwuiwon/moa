@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use moa_core::traits::EmbeddingProvider;
 use moa_core::wire::session_store::{
     AppendEventRequest, AppendExperienceAttributionsRequest, AppendExperienceRecordRequest,
     AppendLearningCandidateRequest, CompleteSegmentRequest, CreateAgentSessionRequest,
@@ -13,7 +14,7 @@ use moa_core::wire::session_store::{
     GetLearningCandidateRequest, GetSegmentBaselineRequest, InitSessionVoRequest,
     ListExperienceAttributionsRequest, ListExperienceRecordsRequest, ListLearningCandidatesRequest,
     ListSessionsRequest, ListSkillResolutionRatesRequest, ListTaskStrategySuccessRatesRequest,
-    RecordSegmentSkillActivationRequest, RecordSegmentToolUseRequest,
+    RecordSegmentSkillActivationRequest, RecordSegmentSkillUseRequest, RecordSegmentToolUseRequest,
     RecordSegmentTurnUsageRequest, SearchEventsRequest, TenantCostSinceRequest,
     UpdateLearningCandidateStatusRequest, UpdateSegmentAssessmentRequest, UpdateStatusRequest,
 };
@@ -168,14 +169,32 @@ pub trait RestateSessionStore {
         request: Json<serde_json::Value>,
     ) -> Result<(), HandlerError>;
 
+    /// Files rollback proposals for skills that regressed after promotion.
+    async fn monitor_skill_regressions(
+        request: Json<serde_json::Value>,
+    ) -> Result<(), HandlerError>;
+
+    /// Backfills learning embeddings (task summaries and skill identities).
+    async fn backfill_learning_embeddings(
+        request: Json<serde_json::Value>,
+    ) -> Result<(), HandlerError>;
+
+    /// Dispatches skill learning for task fingerprints that recur across sessions.
+    async fn mine_task_recurrences(request: Json<serde_json::Value>) -> Result<(), HandlerError>;
+
     /// Records a tool name on a session's active segment.
     async fn record_segment_tool_use(
         request: Json<RecordSegmentToolUseRequest>,
     ) -> Result<(), HandlerError>;
 
-    /// Records a skill activation on a session's active segment.
+    /// Records a skill activation (injection) on a session's active segment.
     async fn record_segment_skill_activation(
         request: Json<RecordSegmentSkillActivationRequest>,
+    ) -> Result<(), HandlerError>;
+
+    /// Records that the model engaged a skill on a session's active segment.
+    async fn record_segment_skill_use(
+        request: Json<RecordSegmentSkillUseRequest>,
     ) -> Result<(), HandlerError>;
 
     /// Records one turn and token usage on a session's active segment.
@@ -189,11 +208,53 @@ pub trait RestateSessionStore {
 pub struct SessionStoreImpl {
     store: Arc<PostgresSessionStore>,
     pool: PgPool,
+    config: Arc<moa_core::config::MoaConfig>,
+    /// Tenant embedder reused for the learning-embeddings backfill cron. `None`
+    /// when the configured vector embedder is disabled or its credential is
+    /// missing; the backfill handler then no-ops so a deployment without
+    /// embeddings still runs. Built once so the provider's pacer and concurrency
+    /// limiter are shared across ticks.
+    embedder: Option<Arc<dyn EmbeddingProvider>>,
 }
 
 impl SessionStoreImpl {
     /// Creates a new Restate service wrapper around the shared session-store backend.
-    pub fn new(store: Arc<PostgresSessionStore>, pool: PgPool) -> Self {
-        Self { store, pool }
+    pub fn new(
+        store: Arc<PostgresSessionStore>,
+        pool: PgPool,
+        config: Arc<moa_core::config::MoaConfig>,
+    ) -> Self {
+        let embedder = build_learning_embedder(&config);
+        Self {
+            store,
+            pool,
+            config,
+            embedder,
+        }
+    }
+}
+
+/// Builds the tenant embedder used by the learning-embeddings backfill.
+///
+/// Reuses the same `memory.vector.embedder` selector and 1024-dim output the
+/// graph-memory vector index uses, so learning embeddings share one vector
+/// space with memory. A disabled selector or a missing credential is not a
+/// startup error here: it disables the backfill and logs a warning, matching how
+/// semantic memory search degrades when the embedder is unavailable.
+fn build_learning_embedder(
+    config: &moa_core::config::MoaConfig,
+) -> Option<Arc<dyn EmbeddingProvider>> {
+    match moa_providers::embedding::build_embedder_from_config(
+        config,
+        moa_providers::EmbedderConstructionRole::Ingestion,
+    ) {
+        Ok(embedder) => Some(embedder),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "learning-embeddings backfill disabled: tenant embedder unavailable"
+            );
+            None
+        }
     }
 }

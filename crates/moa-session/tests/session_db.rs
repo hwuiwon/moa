@@ -10,6 +10,8 @@ mod events_concurrent_monotonicity_db;
 mod events_partitioning_db;
 #[path = "session_db/postgres_store_db.rs"]
 mod postgres_store_db;
+#[path = "session_db/recurrence_db.rs"]
+mod recurrence_db;
 #[path = "session_db/session_blobs_db.rs"]
 mod session_blobs_db;
 #[path = "session_db/tenant_rls_db.rs"]

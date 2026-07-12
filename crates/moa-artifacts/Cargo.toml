@@ -8,6 +8,7 @@ license.workspace = true
 chrono.workspace = true
 moa-core.workspace = true
 moa-db.workspace = true
+pgvector = { version = "0.4.1", features = ["sqlx", "halfvec"] }
 serde.workspace = true
 serde_canonical_json.workspace = true
 serde_json.workspace = true

@@ -15,7 +15,9 @@ pub(super) const MANIFEST_PREAMBLE: &str = "\
 Use this compact manifest for skill selection. Activate a skill only when its description,
 tags, or trigger conditions match the current task. When multiple skills apply, prefer the
 most specific match; compose skills only when the task genuinely requires multiple workflows.
-Do not invent skills not listed here.
+Do not invent skills not listed here. To activate a skill, read the exact file named in its
+[activate: <path>] tag; do not guess a different path. Read it once — the content stays in your
+context; do not re-read it during the turn.
 
 ";
 pub(super) const MANIFEST_FOOTER: &str = "</available_skills>";
@@ -64,15 +66,10 @@ pub(super) fn rank_skills(
                 .copied()
                 .unwrap_or(0.5)
                 .clamp(0.0, 1.0);
-            let task_rate = task_strategy_rates
-                .get(&metadata.name)
-                .map(smoothed_task_rate)
-                .unwrap_or(0.0);
-            let task_weight = task_strategy_rates
-                .get(&metadata.name)
-                .map(task_rate_weight)
-                .unwrap_or(0.0);
-            let score = if task_weight > 0.0 {
+            let rate = task_strategy_rates.get(&metadata.name);
+            let task_rate = rate.map(smoothed_task_rate).unwrap_or(0.0);
+            let task_weight = rate.map(task_rate_weight).unwrap_or(0.0);
+            let base_score = if task_weight > 0.0 {
                 (0.45 * keyword_overlap) + (0.45 * task_rate * task_weight) + (0.10 * global_rate)
             } else if !task_strategy_rates.is_empty() {
                 (0.60 * keyword_overlap) + (0.15 * global_rate)
@@ -81,6 +78,11 @@ pub(super) fn rank_skills(
             } else {
                 keyword_overlap
             };
+            // A skill injected often under this fingerprint but rarely engaged is weak
+            // negative-relevance evidence; subtract a small capped penalty so it can
+            // demote a skill without ever overpowering keyword relevance.
+            let penalty = rate.map(unused_injection_penalty).unwrap_or(0.0);
+            let score = (base_score - penalty).max(0.0);
 
             RankedSkill {
                 metadata,
@@ -94,14 +96,50 @@ pub(super) fn rank_skills(
     ranked
 }
 
+/// Weight of the attribution `effect_score` when blended with `success_rate`.
+///
+/// The two coincide except when a used skill's tool call failed (effect
+/// downgraded) or the outcome was `Unknown`, so a minority weight lets the
+/// effect signal nudge ranking without overriding the outcome rate.
+const EFFECT_SCORE_WEIGHT: f64 = 0.25;
+
+/// Maximum score subtracted for an all-unused-injection skill under a fingerprint.
+///
+/// Bounded well below the keyword-overlap term so a strongly relevant skill can
+/// never be buried by injection history alone.
+const UNUSED_INJECTION_PENALTY_CAP: f64 = 0.15;
+
+/// Laplace-smoothed success rate blended with the attribution effect score.
+///
+/// The base rate blends the outcome-derived `success_rate` with the effect-derived
+/// `effect_score` (which carries independent signal from failed skill engagements),
+/// then applies add-one smoothing over `uses` so a low-evidence skill is pulled
+/// toward the 0.5 prior.
 fn smoothed_task_rate(rate: &TaskStrategySuccessRate) -> f64 {
-    let successes = rate.success_rate.clamp(0.0, 1.0) * rate.uses as f64;
+    let base_rate = ((1.0 - EFFECT_SCORE_WEIGHT) * rate.success_rate.clamp(0.0, 1.0)
+        + EFFECT_SCORE_WEIGHT * rate.effect_score.clamp(0.0, 1.0))
+    .clamp(0.0, 1.0);
+    let successes = base_rate * rate.uses as f64;
     ((1.0 + successes) / (2.0 + rate.uses as f64)).clamp(0.0, 1.0)
 }
 
 fn task_rate_weight(rate: &TaskStrategySuccessRate) -> f64 {
     let sample_weight = (rate.uses as f64 / 5.0).clamp(0.0, 1.0);
     sample_weight * rate.avg_confidence.clamp(0.0, 1.0)
+}
+
+/// Capped penalty for skills injected but rarely engaged under the fingerprint.
+///
+/// The penalty scales with the fraction of this subject's rows that are
+/// unused injections and is capped at [`UNUSED_INJECTION_PENALTY_CAP`]. Returns
+/// zero when the subject has no attribution rows at all.
+fn unused_injection_penalty(rate: &TaskStrategySuccessRate) -> f64 {
+    let total = rate.uses + rate.unused_injections;
+    if total == 0 {
+        return 0.0;
+    }
+    let unused_ratio = rate.unused_injections as f64 / total as f64;
+    (UNUSED_INJECTION_PENALTY_CAP * unused_ratio).clamp(0.0, UNUSED_INJECTION_PENALTY_CAP)
 }
 
 #[cfg(test)]
@@ -211,7 +249,12 @@ fn format_manifest_entry(metadata: &SkillMetadata, budget: &ResolvedSkillBudget)
         tags.join(", ")
     };
 
-    let mut entry = format!("- {name}: {description} [tags: {tags}]");
+    // The activation path is the exact materialized package file the model must
+    // read to load the skill (`.moa/skills/<slug>/SKILL.md`). It comes straight
+    // from `SkillMetadata::path`, which the skill materializer already slugified,
+    // so the manifest never forks a second slug convention or lets the model guess.
+    let activate = normalize_inline_text(&metadata.path);
+    let mut entry = format!("- {name}: {description} [activate: {activate}] [tags: {tags}]");
     let actions = normalized_action_names(&metadata.actions);
     if !actions.is_empty() {
         entry.push_str(&format!(" [actions: {}]", actions.join(", ")));
@@ -326,6 +369,8 @@ mod tests {
         //   2. task data exists for others only: 0.60*kw + 0.15*global
         //   3. tenant resolution rate only:      0.45*kw + 0.55*global
         //   4. no outcome data at all:           kw
+        // The smoothed task rate blends success_rate with effect_score at
+        // EFFECT_SCORE_WEIGHT before add-one smoothing.
         let skill = test_skill("branch-skill", "Branch formula pin");
         let skills = vec![skill];
         let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
@@ -339,14 +384,18 @@ mod tests {
             avg_confidence: 1.0,
             avg_token_cost: 100.0,
             avg_turn_count: 2.0,
+            // Distinct from success_rate so the blend is exercised, not a no-op.
+            effect_score: 0.4,
+            unused_injections: 0,
         };
 
-        // Branch 1: smoothed = (1 + 0.8*10)/(2 + 10) = 0.75; weight = min(10/5,1)*1.0 = 1.0;
-        // global defaults to the 0.5 prior when the skill has no resolution row.
+        // Branch 1: base_rate = 0.75*0.8 + 0.25*0.4 = 0.7; smoothed = (1 + 0.7*10)/(2 + 10)
+        // = 8/12; weight = min(10/5,1)*1.0 = 1.0; global defaults to the 0.5 prior when the
+        // skill has no resolution row; no unused injections so the penalty is zero.
         let task_rates = HashMap::from([("branch-skill".to_string(), task_rate.clone())]);
         let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &task_rates);
         assert!(
-            (ranked[0].score - (0.45 * 0.75 + 0.10 * 0.5)).abs() < 1e-9,
+            (ranked[0].score - (0.45 * (8.0 / 12.0) + 0.10 * 0.5)).abs() < 1e-9,
             "task-conditioned branch: {}",
             ranked[0].score
         );
@@ -379,6 +428,87 @@ mod tests {
         // Branch 4: no outcome data anywhere falls back to pure keyword overlap.
         let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &HashMap::new());
         assert_eq!(ranked[0].score, 0.0, "keyword-only branch");
+    }
+
+    #[test]
+    fn low_effect_score_demotes_a_skill_with_a_high_success_rate() {
+        // Pins: effect_score carries signal beyond success_rate. Two skills with the same
+        // success_rate/uses/confidence but different effect_score rank by effect_score,
+        // which diverges from the outcome rate when a used skill's tool call failed.
+        let skills = vec![
+            test_skill("clean-skill", "General workflow"),
+            test_skill("erroring-skill", "General workflow"),
+        ];
+        let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
+        let base = TaskStrategySuccessRate {
+            tenant_id: TenantId::new(),
+            task_fingerprint: "task-hash".to_string(),
+            subject_type: AttributionSubjectType::Skill,
+            subject_id: String::new(),
+            uses: 5,
+            success_rate: 1.0,
+            avg_confidence: 1.0,
+            avg_token_cost: 100.0,
+            avg_turn_count: 2.0,
+            effect_score: 1.0,
+            unused_injections: 0,
+        };
+        let task_rates = HashMap::from([
+            (
+                "clean-skill".to_string(),
+                TaskStrategySuccessRate {
+                    subject_id: "clean-skill".to_string(),
+                    effect_score: 1.0,
+                    ..base.clone()
+                },
+            ),
+            (
+                "erroring-skill".to_string(),
+                TaskStrategySuccessRate {
+                    subject_id: "erroring-skill".to_string(),
+                    effect_score: 0.0,
+                    ..base
+                },
+            ),
+        ]);
+
+        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &task_rates);
+        assert_eq!(ranked[0].metadata.name, "clean-skill");
+        assert_eq!(ranked[1].metadata.name, "erroring-skill");
+    }
+
+    #[test]
+    fn unused_injection_ratio_applies_a_bounded_penalty() {
+        // Pins: a skill injected but half the time never engaged loses a penalty equal to
+        // UNUSED_INJECTION_PENALTY_CAP * unused_ratio, subtracted after the branch score.
+        // Branch 1 base: smoothed = (1 + (0.75*1 + 0.25*1)*2)/(2 + 2) = 0.75;
+        // weight = min(2/5,1)*1.0 = 0.4; global default 0.5;
+        // base = 0.45*0 + 0.45*0.75*0.4 + 0.10*0.5 = 0.185; penalty = 0.15*0.5 = 0.075.
+        let skills = vec![test_skill("branch-skill", "Branch formula pin")];
+        let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
+        let task_rates = HashMap::from([(
+            "branch-skill".to_string(),
+            TaskStrategySuccessRate {
+                tenant_id: TenantId::new(),
+                task_fingerprint: "task-hash".to_string(),
+                subject_type: AttributionSubjectType::Skill,
+                subject_id: "branch-skill".to_string(),
+                uses: 2,
+                success_rate: 1.0,
+                avg_confidence: 1.0,
+                avg_token_cost: 100.0,
+                avg_turn_count: 2.0,
+                effect_score: 1.0,
+                unused_injections: 2,
+            },
+        )]);
+
+        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &task_rates);
+        assert!(
+            (ranked[0].score - (0.45 * 0.75 * 0.4 + 0.10 * 0.5 - 0.15 * 0.5)).abs() < 1e-9,
+            "penalized score: {}",
+            ranked[0].score
+        );
     }
 
     #[test]
@@ -453,6 +583,33 @@ mod tests {
     }
 
     #[test]
+    fn manifest_entry_includes_the_exact_materialized_activation_path() {
+        // Pins: the compact manifest carries each skill's exact activation file so the
+        // model reads `.moa/skills/<slug>/SKILL.md` instead of guessing a bare
+        // `.moa/skills/<name>.md` (the live S085/S090 tool-loop failure). The rendered
+        // path is `SkillMetadata::path` verbatim, i.e. the materializer's slug, and a
+        // name with spaces/uppercase still shows the slugified directory.
+        let mut skill = test_skill("Memory Privacy Check", "Check stored facts for PII");
+        skill.path = ".moa/skills/memory-privacy-check/SKILL.md".to_string();
+        let budget = ResolvedSkillBudget {
+            max_manifest_chars: DEFAULT_MIN_MANIFEST_CHARS,
+            max_per_skill_chars: 512,
+            show_token_estimates: false,
+        };
+
+        let entry = format_manifest_entry(&skill, &budget);
+
+        assert!(
+            entry.contains("[activate: .moa/skills/memory-privacy-check/SKILL.md]"),
+            "entry must name the exact activation path: {entry}"
+        );
+        assert!(
+            !entry.contains(".moa/skills/memory-privacy-check.md"),
+            "entry must not present the bare guessed path: {entry}"
+        );
+    }
+
+    #[test]
     fn manifest_entry_marks_procedure_skills_deterministically() {
         // Pins: a skill carrying a procedure is tagged [procedure] so the model
         // knows deterministic execution via run_procedure is available; a skill
@@ -481,8 +638,19 @@ mod tests {
             test_skill("beta", "Beta workflow"),
             test_skill("gamma", "Gamma workflow"),
         ];
+        // Size the budget to fit exactly one ranked entry (plus its newline) so the
+        // remaining two are excluded, independent of the exact entry length.
+        let sizing_budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
+        let sized = rank_skills(
+            &skills,
+            &[],
+            &sizing_budget,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        let one_entry_cost = sized[0].manifest_entry.chars().count() + 1;
         let budget = resolved_budget(
-            MANIFEST_PREAMBLE.chars().count() + MANIFEST_FOOTER.chars().count() + 60,
+            MANIFEST_PREAMBLE.chars().count() + MANIFEST_FOOTER.chars().count() + one_entry_cost,
         );
         let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &HashMap::new());
         let selection = select_skills_within_budget(&ranked, budget.max_manifest_chars);
@@ -558,6 +726,8 @@ mod tests {
                 avg_confidence: 0.95,
                 avg_token_cost: 100.0,
                 avg_turn_count: 2.0,
+                effect_score: 1.0,
+                unused_injections: 0,
             },
         )]);
 
@@ -599,5 +769,12 @@ mod tests {
         assert!(MANIFEST_PREAMBLE.contains("Activate a skill only when"));
         assert!(MANIFEST_PREAMBLE.contains("most specific match"));
         assert!(MANIFEST_PREAMBLE.contains("Do not invent skills not listed here"));
+        // Pins: the preamble tells the model to read the exact [activate: <path>] file
+        // rather than guess a path, complementing the per-entry activation path.
+        assert!(MANIFEST_PREAMBLE.contains("[activate: <path>]"));
+        assert!(MANIFEST_PREAMBLE.contains("do not guess a different path"));
+        // Pins: the preamble tells the model an activated skill's content persists in
+        // context, so it does not re-read the same file during the turn.
+        assert!(MANIFEST_PREAMBLE.contains("do not re-read it during the turn"));
     }
 }

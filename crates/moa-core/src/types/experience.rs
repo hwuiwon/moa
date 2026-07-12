@@ -97,9 +97,12 @@ pub struct ExperienceRecord {
     /// Tool names used by the segment.
     #[serde(default)]
     pub tools_used: Vec<String>,
-    /// Skill names activated by the segment.
+    /// Skill names injected into the segment's turn manifest (candidates offered to the model).
     #[serde(default)]
     pub skills_activated: Vec<String>,
+    /// Skill names the model actually engaged during the segment (subset of `skills_activated`).
+    #[serde(default)]
+    pub skills_used: Vec<String>,
     /// Number of turns attributed to the segment.
     pub turn_count: u32,
     /// Token cost attributed to the segment.
@@ -183,6 +186,42 @@ impl AttributionEffect {
     }
 }
 
+/// Distinguishes normal outcome attributions from weak negative-relevance markers.
+///
+/// A skill injected into a turn manifest but never engaged by the model is not
+/// evidence that the skill helped or hurt the outcome. Such rows are recorded as
+/// [`AttributionKind::UnusedInjection`] so ranking can exclude them from success
+/// rates while still surfacing that the skill was offered and ignored.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumString,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum AttributionKind {
+    /// A normal outcome-mapped attribution for a subject the segment engaged.
+    #[default]
+    Standard,
+    /// A skill that was injected into the turn manifest but never engaged by the model.
+    UnusedInjection,
+}
+
+impl AttributionKind {
+    /// Returns the stable database representation.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
+}
+
 /// Attribution explaining why a strategy component helped or hurt an experience.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperienceAttribution {
@@ -200,6 +239,9 @@ pub struct ExperienceAttribution {
     pub subject_id: String,
     /// Directional effect attributed to the subject.
     pub effect: AttributionEffect,
+    /// Whether this is a normal attribution or an unused-injection marker.
+    #[serde(default)]
+    pub kind: AttributionKind,
     /// Confidence in this attribution.
     pub confidence: f64,
     /// Concise evidence summaries that justify the attribution.
@@ -402,4 +444,15 @@ pub struct TaskStrategySuccessRate {
     pub avg_token_cost: f64,
     /// Average turn count for matching experiences.
     pub avg_turn_count: f64,
+    /// Mean attribution-effect score over the same non-unused rows as
+    /// [`Self::success_rate`], mapping Helpful=1.0, Mixed=0.5, Neutral=0.5,
+    /// Harmful=0.0. Diverges from `success_rate` when a used skill's engaging
+    /// tool call failed (effect downgraded) or the outcome was `Unknown`, so it
+    /// carries signal beyond the raw outcome. Defaults to the 0.5 neutral prior
+    /// when no non-unused rows exist for the subject.
+    pub effect_score: f64,
+    /// Count of `unused_injection` attribution rows for this subject under the
+    /// fingerprint: skills injected into the manifest but never engaged. High
+    /// values relative to [`Self::uses`] are weak negative-relevance evidence.
+    pub unused_injections: u64,
 }

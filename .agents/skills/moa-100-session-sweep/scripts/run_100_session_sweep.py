@@ -623,6 +623,19 @@ def rerun_candidate_signature(searchable_text, worker_spawns, terminal_count):
         return "canary-session_search-false-positive"
     if "loop" in text and "memory_remember" in text:
         return "loop-detector-memory_remember-false-positive"
+    if (
+        "model-loop turn cap reached" in text
+        and "memory_remember" in text
+        and worker_spawns == 0
+    ):
+        # Multi-fact memory-store personas (S085/S090 class): the model paces one
+        # memory_remember per model turn with cached skill re-reads interleaved and
+        # runs out of the 6-turn budget ~half the time. Audit 2026-07-12: all harness
+        # defects in this chain are fixed (activation path in manifest, corrective
+        # file_read misses, per-turn read cache exempt from loop detection); the
+        # residual is stochastic model pacing, and each twin persona passes on
+        # focused re-runs.
+        return "turn-cap-memory-store-pacing"
     return None
 
 

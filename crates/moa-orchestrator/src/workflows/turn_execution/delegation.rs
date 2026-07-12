@@ -136,8 +136,9 @@ pub(super) async fn maybe_schedule_auto_delegation(
             node,
             &spawn_input,
         )?;
+        // Auto-delegation spawns are real dispatches, never cache-served file_reads.
         if let Some(exhaustion) =
-            record_tool_budget(ctx, tool_budget, &tool_call.invocation).await?
+            record_tool_budget(ctx, tool_budget, &tool_call.invocation, false).await?
         {
             return Ok(AutoDelegationOutcome::ToolBudgetExceeded(exhaustion));
         }

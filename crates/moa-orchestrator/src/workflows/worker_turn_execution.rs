@@ -61,8 +61,8 @@ use crate::turn_driver::{
 use crate::workflows::durable_utc_now;
 use crate::workflows::turn_events::{
     append_session_event, append_tool_call_event, append_tool_result_event,
-    append_zero_cost_assistant_response, emit_tool_budget_exceeded, record_segment_tool_use,
-    turn_outcome_kind_label,
+    append_zero_cost_assistant_response, emit_tool_budget_exceeded,
+    record_segment_skill_use_for_tool_call, record_segment_tool_use, turn_outcome_kind_label,
 };
 use crate::workflows::turn_execution::selected_procedure_skill_refs;
 use crate::workflows::turn_progress::{self, SUMMARY_CALLING_MODEL};
@@ -342,8 +342,12 @@ async fn run_worker_iteration(
     ctx: &WorkflowContext<'_>,
     mut input: WorkerIterationInput<'_>,
 ) -> Result<WorkerIterationOutcome, HandlerError> {
-    attach_active_segment_metadata(ctx, input.parent_session, &mut input.completion_request)
-        .await?;
+    // The root segment's activated skills; a worker tool call that engages one of them
+    // credits the root segment's `skills_used` (workers contribute to the root learning
+    // unit), mirroring the root turn's skill-use recording.
+    let selected_skills =
+        attach_active_segment_metadata(ctx, input.parent_session, &mut input.completion_request)
+            .await?;
     let allowed_tools = allowed_tool_names(&input.completion_request);
     // Captured before the completion request is moved into the model call below, so a
     // worker `run_procedure` call is gated by the same selected-skill set as the root.
@@ -444,6 +448,7 @@ async fn run_worker_iteration(
             active_canary: input.active_canary.as_deref(),
             trusted_sandbox_manifest: input.request.trusted_sandbox_manifest.as_ref(),
             selected_procedure_skills: &selected_procedure_skills,
+            selected_skills: &selected_skills,
         };
         handle_tool_call(
             workflow,
@@ -486,11 +491,20 @@ async fn record_worker_heartbeat(
     Ok(())
 }
 
+/// Attaches the active segment's metadata to a worker completion request and returns the
+/// skills the root turn activated on that segment.
+///
+/// A worker inherits the root's trusted sandbox manifest (delegation copies it), so a
+/// worker tool call can engage a root-injected skill by reading its materialized
+/// `.moa/skills/<slug>/` package. The returned names are the same `skills_activated` set
+/// attribution compares against `skills_used`, so the caller runs skill-use detection
+/// against them to credit the root segment for skills a worker actually engaged. Returns an
+/// empty vector when the session has no active segment.
 async fn attach_active_segment_metadata(
     ctx: &WorkflowContext<'_>,
     parent_session: SessionId,
     request: &mut CompletionRequest,
-) -> Result<(), HandlerError> {
+) -> Result<Vec<String>, HandlerError> {
     let Some(segment) = ctx
         .service_client::<RestateSessionStoreClient>()
         .get_active_segment(Json(parent_session))
@@ -499,10 +513,10 @@ async fn attach_active_segment_metadata(
         .into_inner()
         .map(|segment| segment.active_view())
     else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     driver_segments::insert_active_segment_metadata(request, &segment);
-    Ok(())
+    Ok(segment.skills_activated)
 }
 
 struct WorkerToolContext<'a> {
@@ -513,6 +527,9 @@ struct WorkerToolContext<'a> {
     active_canary: Option<&'a str>,
     trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
     selected_procedure_skills: &'a BTreeSet<String>,
+    /// Skills the root turn activated on the active segment, used to detect which a worker
+    /// tool call engaged so worker skill use is credited to the root segment.
+    selected_skills: &'a [String],
 }
 
 async fn handle_tool_call(
@@ -528,6 +545,7 @@ async fn handle_tool_call(
     let worker_id = tool_context.worker_id;
     let meta = tool_context.meta;
     let session_id = tool_context.session_id;
+    let selected_skills = tool_context.selected_skills;
     let tool_id = stable_tool_call_id(session_id, index, tool_call);
 
     // Child-only report/request-input tools are handled in the child's own turn loop, not
@@ -602,6 +620,18 @@ async fn handle_tool_call(
             if result.should_record_segment_tool_use() {
                 record_governed_segment_tool_use(ctx, session_id, &result.invocation.name).await?;
             }
+            // Credit the root segment for any root-activated skill this worker tool call
+            // engaged. Worker tool use already aggregates into the root segment above, so
+            // recording skill use here keeps `skills_used` in the same scope as `tools_used`;
+            // otherwise a skill a worker read/ran is misclassified as an unused injection.
+            record_segment_skill_use_for_tool_call(
+                ctx,
+                session_id,
+                &result.invocation.name,
+                &result.invocation.input,
+                selected_skills,
+            )
+            .await?;
         }
         GovernedInvocationOutcome::Delegation { tool_id, .. } => {
             handle_delegation_tool(

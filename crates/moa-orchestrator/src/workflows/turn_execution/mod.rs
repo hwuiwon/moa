@@ -69,7 +69,9 @@ use self::segments::{
     PostOutcomeAssessment, capture_current_active_segment_assessment, ensure_current_segment,
     run_post_outcome_assessment,
 };
-use self::tools::{RootToolContext, ToolDispatchOutcome, dispatch_response_tool_calls};
+use self::tools::{
+    FileReadTurnCache, RootToolContext, ToolDispatchOutcome, dispatch_response_tool_calls,
+};
 
 use crate::objects::session::SessionClient;
 use crate::restate_identity::with_identity_headers;
@@ -238,6 +240,9 @@ async fn execute_turn_inside_workflow(
 
     let mut last_summary = None;
     let mut turn_evidence = TurnEvidence::default();
+    // Per-turn file_read result memory, shared across every model-loop iteration of
+    // this turn so a repeated identical read is served from context with a notice.
+    let mut file_read_cache = FileReadTurnCache::default();
 
     for turn_number in 1..=max_turns {
         driver_progress::set_iteration(ctx, turn_number);
@@ -278,6 +283,7 @@ async fn execute_turn_inside_workflow(
                             &mut last_summary,
                             &mut turn_evidence,
                             &mut tool_budget,
+                            &mut file_read_cache,
                         )
                         .instrument(turn_root_span.clone())
                         .await
@@ -487,6 +493,7 @@ async fn run_once_inside_workflow(
     last_summary: &mut Option<String>,
     turn_evidence: &mut TurnEvidence,
     tool_budget: &mut ToolBudgetState,
+    file_read_cache: &mut FileReadTurnCache,
 ) -> Result<TurnIterationOutcome, HandlerError> {
     let session_id = turn_context.session_id;
     let turn_id = turn_context.turn_id;
@@ -665,6 +672,7 @@ async fn run_once_inside_workflow(
 
     let tool_calls = response_tool_calls(&visible_response);
     let selected_procedure_skills = selected_procedure_skill_refs(&request.metadata);
+    let selected_skills = selected_skill_names(&request.metadata);
     match dispatch_response_tool_calls(
         workflow,
         ctx,
@@ -674,7 +682,9 @@ async fn run_once_inside_workflow(
             active_canary: active_canary.as_deref(),
             trusted_sandbox_manifest: trusted_sandbox_manifest.as_ref(),
             selected_procedure_skills: &selected_procedure_skills,
+            selected_skills: &selected_skills,
             turn_evidence,
+            file_read_cache,
         },
         &allowed_tools,
         tool_budget,

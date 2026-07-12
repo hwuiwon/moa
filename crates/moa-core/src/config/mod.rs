@@ -50,7 +50,10 @@ pub use knowledge::{
     MergeKnowledgeProviderConfig, NangoKnowledgeProviderConfig, ReductoKnowledgeParserConfig,
     UnstructuredKnowledgeParserConfig,
 };
-pub use learning::{LearningConfig, SkillLearningConfig};
+pub use learning::{
+    EmbeddingBackfillConfig, LearningConfig, RecurrenceConfig, RegressionMonitorConfig,
+    SegmentBoundaryConfig, SkillLearningConfig,
+};
 pub use lineage::LineageConfig;
 pub use memory::{
     MemoryConfig, MemoryDigestConfig, MemoryExtractionConfig, MemoryRankingConfig,
@@ -309,6 +312,7 @@ mod tests {
         "MOA_MEMORY_EXTRACTION_MAX_FACTS_PER_CHUNK",
         "MOA_MEMORY_EXTRACTION_TIMEOUT_MS",
         "MOA_LEARNING_SKILLS_MIN_TOOL_CALLS",
+        "MOA_LEARNING_SEGMENTS_IDLE_GAP_MINUTES",
         "MOA_ORCHESTRATOR_ENDPOINT",
     ];
 
@@ -527,6 +531,24 @@ mod tests {
         let config = MoaConfig::load_from_env().expect("load config from env");
 
         assert_eq!(config.learning.skills.min_tool_calls, 7);
+    }
+
+    #[test]
+    fn env_only_overrides_segment_boundary_idle_gap() {
+        // Pins: the deterministic segment-boundary idle-gap threshold is
+        // overridable via a flat MOA env name, defaulting to 30 minutes.
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let _env = EnvRestore::clear(CONFIG_ENV_KEYS);
+
+        let default_config = MoaConfig::load_from_env().expect("load default config from env");
+        assert_eq!(default_config.learning.segments.idle_gap_minutes, 30);
+
+        unsafe {
+            std::env::set_var("MOA_LEARNING_SEGMENTS_IDLE_GAP_MINUTES", "45");
+        }
+        let config = MoaConfig::load_from_env().expect("load config from env");
+
+        assert_eq!(config.learning.segments.idle_gap_minutes, 45);
     }
 
     #[test]

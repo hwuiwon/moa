@@ -391,11 +391,22 @@ async fn memory_stage_includes_top_k_hits_with_lineage_uids_and_excludes_invalid
 
     // GraphMemoryRetriever injects the top three active lexical hits, excludes invalidated nodes,
     // and does not retrieve vector-only rows from another tenant when no real query embedding exists.
-    let output = GraphMemoryRetriever::new(store.pool().clone(), None)
-        .with_assume_app_role(true)
-        .with_result_limit(3)
-        .process(&mut ctx)
-        .await?;
+    //
+    // Whole-window abstention is disabled for this stage: its 0.68 threshold is
+    // calibrated for the production embed-v4.0 cosine floor, but this test drives
+    // the lexical admission path with no embedder, so evidence is lexical-only and
+    // cannot reach a cosine-scaled threshold. Abstention itself is pinned directly
+    // in the retrieval::hybrid unit tests; here the invariant under test is top-k
+    // admission plus invalidated-node exclusion.
+    let output = GraphMemoryRetriever::new_with_config(
+        abstention_disabled_config(),
+        store.pool().clone(),
+        None,
+    )
+    .with_assume_app_role(true)
+    .with_result_limit(3)
+    .process(&mut ctx)
+    .await?;
 
     let expected_hits = fixture.memory_hits[2..5].iter().rev().collect::<Vec<_>>();
     let expected_items = expected_hits
@@ -743,4 +754,23 @@ fn invalidated_uids_in_content(content: &str, hits: &[MemoryHit]) -> Vec<String>
         .map(|hit| hit.uid.to_string())
         .filter(|uid| content.contains(uid))
         .collect()
+}
+
+/// Runtime config with memory-stage whole-window abstention disabled.
+///
+/// The production `abstain_below_window_evidence` default (0.68) is calibrated
+/// for the embed-v4.0 cosine floor. Hermetic pipeline tests drive retrieval with
+/// a mock or absent embedder, where per-hit evidence is lexical-only and cannot
+/// reach a cosine-scaled threshold, so leaving abstention on would clear every
+/// hit regardless of admission. Abstention is pinned directly in the
+/// `moa_brain::retrieval::hybrid` unit tests; disabling it here keeps these
+/// tests focused on admission, scope boundaries, and lineage.
+fn abstention_disabled_config() -> MoaConfig {
+    let mut config = MoaConfig::default();
+    config
+        .memory
+        .retrieval
+        .ranking
+        .abstain_below_window_evidence = 0.0;
+    config
 }

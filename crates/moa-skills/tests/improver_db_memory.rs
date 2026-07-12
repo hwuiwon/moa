@@ -211,9 +211,12 @@ async fn improver_concurrent_attempts_on_same_skill_reuse_draft_proposal() {
 
     let results = tokio::join!(result_1, result_2, result_3, result_4, result_5);
     for result in [results.0, results.1, results.2, results.3, results.4] {
+        // The winner files the draft (`Improved`); a loser that observed the open
+        // proposal in its preflight dedupes onto it (`Deduped`), and one that raced
+        // past the preflight dedupes in-transaction (`Improved`). Both are correct.
         assert!(matches!(
             result.expect("concurrent improvement completes"),
-            ImprovementResult::Improved { .. }
+            ImprovementResult::Improved { .. } | ImprovementResult::Deduped { .. }
         ));
     }
     assert_eq!(
