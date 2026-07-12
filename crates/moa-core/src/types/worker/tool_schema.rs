@@ -128,7 +128,7 @@ impl DelegationTool {
 }
 
 /// Stable `spawn_worker` tool schema.
-pub fn spawn_worker_tool_schema() -> serde_json::Value {
+pub(crate) fn spawn_worker_tool_schema() -> serde_json::Value {
     serde_json::json!({
         "name": "spawn_worker",
         "description": "Delegate bounded, general-purpose work to a child agent when the coordinator can give it enough context to run independently and return evidence for synthesis. Good fits include research, reports, comparisons, audits, incident investigations, option checks, or named workstreams that can run in parallel. Spawn ready work before final synthesis, and wait only when another step depends on a worker result.",
@@ -162,7 +162,7 @@ pub fn spawn_worker_tool_schema() -> serde_json::Value {
 }
 
 /// Stable `wait_worker` tool schema.
-pub fn wait_worker_tool_schema() -> serde_json::Value {
+pub(crate) fn wait_worker_tool_schema() -> serde_json::Value {
     serde_json::json!({
         "name": "wait_worker",
         "description": "Wait briefly for a previously spawned worker to finish and return its current status or terminal result.",
@@ -187,7 +187,7 @@ pub fn wait_worker_tool_schema() -> serde_json::Value {
 }
 
 /// Stable `message_worker` tool schema.
-pub fn message_worker_tool_schema() -> serde_json::Value {
+pub(crate) fn message_worker_tool_schema() -> serde_json::Value {
     serde_json::json!({
         "name": "message_worker",
         "description": "Send a follow-up instruction to a running or resident worker.",
@@ -210,7 +210,7 @@ pub fn message_worker_tool_schema() -> serde_json::Value {
 }
 
 /// Stable `list_workers` tool schema.
-pub fn list_workers_tool_schema() -> serde_json::Value {
+pub(crate) fn list_workers_tool_schema() -> serde_json::Value {
     serde_json::json!({
         "name": "list_workers",
         "description": "List child workers owned by the current agent and their current statuses.",
@@ -223,7 +223,7 @@ pub fn list_workers_tool_schema() -> serde_json::Value {
 }
 
 /// Stable `cancel_worker` tool schema.
-pub fn cancel_worker_tool_schema() -> serde_json::Value {
+pub(crate) fn cancel_worker_tool_schema() -> serde_json::Value {
     serde_json::json!({
         "name": "cancel_worker",
         "description": "Cancel a previously spawned child worker.",
@@ -246,7 +246,7 @@ pub fn cancel_worker_tool_schema() -> serde_json::Value {
 }
 
 /// Stable `provide_worker_input` tool schema (coordinator/parent side).
-pub fn provide_worker_input_tool_schema() -> serde_json::Value {
+pub(crate) fn provide_worker_input_tool_schema() -> serde_json::Value {
     serde_json::json!({
         "name": "provide_worker_input",
         "description": "Answer a worker that requested input (a needs_input signal), unblocking it.",
@@ -363,7 +363,7 @@ impl ChildReportTool {
 }
 
 /// Stable `report_to_parent` tool schema (child-only).
-pub fn report_to_parent_tool_schema() -> serde_json::Value {
+pub(crate) fn report_to_parent_tool_schema() -> serde_json::Value {
     serde_json::json!({
         "name": "report_to_parent",
         "description": "Report a finding (non-blocking) or a blocking condition to the coordinator. Use sparingly for attention-worthy events, not routine progress.",
@@ -387,7 +387,7 @@ pub fn report_to_parent_tool_schema() -> serde_json::Value {
 }
 
 /// Stable `request_input` tool schema (child-only).
-pub fn request_input_tool_schema() -> serde_json::Value {
+pub(crate) fn request_input_tool_schema() -> serde_json::Value {
     serde_json::json!({
         "name": "request_input",
         "description": "Ask the coordinator (or, via it, the user) a question and block until an answer arrives or the request times out.",
@@ -434,7 +434,7 @@ pub fn is_delegation_tool_name(name: &str) -> bool {
 }
 
 /// Parses a delegation tool invocation input while preserving the tool name in errors.
-pub fn parse_delegation_tool_input<T>(invocation: &ToolInvocation) -> Result<T>
+pub(crate) fn parse_delegation_tool_input<T>(invocation: &ToolInvocation) -> Result<T>
 where
     T: DeserializeOwned,
 {

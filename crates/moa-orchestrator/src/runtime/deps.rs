@@ -28,8 +28,8 @@ use sqlx::PgPool;
 use crate::{
     config::ProvidersOverride,
     ctx::{
-        AuthDeps, LineageDeps, MemoryDeps, MessagingDeps, OrchestratorCtx, OrchestratorDeps,
-        PersistenceDeps, ProviderDeps, ToolDeps,
+        AuthDeps, LineageDeps, MemoryDeps, OrchestratorCtx, OrchestratorDeps, PersistenceDeps,
+        ProviderDeps, ToolDeps,
     },
     lineage::{LineageSinkRuntime, build_lineage_sink},
     runtime::jobs::{restate_ingress_base_url, start_authz_outbox_poller},
@@ -128,7 +128,8 @@ impl RuntimeDeps {
                         pool.clone(),
                         config.clone(),
                     ),
-                )),
+                ))
+                .with_memory_tool_executor(Arc::new(moa_memory_ingest::FastMemoryToolExecutor)),
         );
         validate_lineage_journal_startup(config.as_ref())?;
         let lineage = build_lineage_sink(config.as_ref(), background_pool.clone()).await?;
@@ -205,8 +206,7 @@ impl RuntimeDeps {
                     self.graph_memory_retriever.clone(),
                     self.skill_injector.clone(),
                 ),
-                lineage: LineageDeps::new(self.lineage.handle.clone(), self.lineage.writer.clone()),
-                messaging: MessagingDeps::new(self.channel_adapters.clone()),
+                lineage: LineageDeps::new(self.lineage.handle.clone()),
             },
         )
     }

@@ -18,8 +18,8 @@ use moa_brain::retrieval::{
 };
 use moa_core::types::memory::RlsContext;
 use moa_core::{
-    config::MemoryDigestConfig, config::MoaConfig, traits::EmbeddingProvider,
-    types::contact::ContactId, types::identifiers::UserId,
+    config::MemoryDigestConfig, config::MemoryRankingConfig, config::MoaConfig,
+    traits::EmbeddingProvider, types::contact::ContactId, types::identifiers::UserId,
 };
 use moa_db::ScopedConn;
 use moa_memory_graph::{GraphStore, NodeIndexRow, PiiClass, PostgresGraphStore};
@@ -44,10 +44,6 @@ use sqlx::{PgPool, Row};
 use tokio::time::{Instant as TokioInstant, sleep_until};
 use uuid::Uuid;
 
-use super::scope::{
-    stable_uuid_from_label, tenant_id_from_label, tenant_id_from_storage_partition,
-    tenant_id_from_storage_partition_id,
-};
 use super::{
     BootstrapConfig, CachedEmbeddingFixture, CachedEmbeddingProvider, CorpusManifest,
     DEFAULT_BOOTSTRAP_RESAMPLES, EmbeddingInput, ExtractionPrecisionCounts, GoldPiiStatus,
@@ -56,6 +52,10 @@ use super::{
     candidates_from_retrieval_hits, embedding_text_hash, read_embedding_inputs_jsonl,
     read_embeddings_jsonl, read_ledger_jsonl, read_manifest_json, read_probes_jsonl,
     read_sessions_jsonl, resolve_gold_nodes, validate_corpus,
+};
+use super::{
+    stable_uuid_from_label, tenant_id_from_label, tenant_id_from_storage_partition,
+    tenant_id_from_storage_partition_id,
 };
 use crate::kernel::{
     CostLedger, CountingEmbedder, CountingExtractor, CountingMergeVerifier, CountingReranker,
@@ -303,26 +303,25 @@ impl MemoryRetrievalEvalOptions {
         &self.ranking_config
     }
 
-    /// Returns the ranking config adjusted for the eval lane's embedding realism.
-    ///
-    /// This config supplies both the retriever's ranking weights and the source
-    /// values for each probe's request-scoped evidence-window policy
-    /// (`rerank_window`, `abstain_below_window_evidence`).
+    /// Returns the request-scoped evidence-window policy for this eval lane.
     ///
     /// Hermetic lanes use pseudo-embeddings whose cosine values are
     /// uninformative (measured 2026-07-11: p50 0.000, max 0.26 across all
-    /// window hits), so both window knobs are zeroed outside the live lane: a
+    /// window hits), so both window knobs stay off outside the live lane: a
     /// deterministic lane cannot exercise absolute-evidence abstention or a
-    /// reranked-window trim, it can only distort them. The live lane keeps the
-    /// production defaults and is the lane that gates this behavior.
+    /// reranked-window trim, it can only distort them. The live lane rides the
+    /// production `MemoryRankingConfig` defaults and is the lane that gates
+    /// this behavior.
     #[must_use]
-    pub fn lane_ranking_config(&self) -> RankingConfig {
-        let mut config = self.ranking_config.clone();
+    pub fn lane_window_policy(&self) -> EvidenceWindowPolicy {
         if self.lane != EvalLane::Live {
-            config.abstain_below_window_evidence = 0.0;
-            config.rerank_window = 0;
+            return EvidenceWindowPolicy::default();
         }
-        config
+        let ranking = MemoryRankingConfig::default();
+        EvidenceWindowPolicy {
+            rerank_window: ranking.rerank_window,
+            abstain_below_window_evidence: ranking.abstain_below_window_evidence,
+        }
     }
 
     /// Returns the configured query rewrite policy.

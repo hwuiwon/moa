@@ -17,7 +17,6 @@ use moa_core::{
     types::tools::TrustedSandboxFileManifestPayload, types::tools::TrustedSandboxFileManifestRef,
 };
 use moa_hands::ToolRouter;
-use moa_memory_ingest::{execute_memory_tool, is_fast_memory_tool};
 use moa_observability::record_tool_idempotency_scan;
 use moa_security::{ToolInputCanaryScreening, screen_tool_input_for_canary};
 use restate_sdk::prelude::*;
@@ -125,10 +124,6 @@ impl ToolExecutorImpl {
         session: &SessionMeta,
         request: &ToolCallRequest,
     ) -> moa_core::error::Result<ToolOutput> {
-        if is_fast_memory_tool(&request.tool_name) {
-            return execute_memory_tool(session, &request.tool_name, &request.input).await;
-        }
-
         let trusted_sandbox_files = self.trusted_sandbox_files_for_request(request).await?;
         if request.worker_id.is_none() && request.tool_name == "file_read" {
             return Ok(
@@ -401,6 +396,8 @@ pub fn build_tool_run_plan(
 }
 
 /// Returns whether the given event slice already contains a terminal tool result for the call id.
+///
+/// `pub` as a test seam: exercised by the cross-crate `orchestrator_offline` integration harness.
 pub fn has_prior_non_idempotent_result(events: &[EventRecord], tool_call_id: ToolCallId) -> bool {
     events.iter().any(|record| {
         matches!(
@@ -1158,6 +1155,60 @@ mod tests {
 
         assert!(!output.is_error);
         assert_eq!(provider.installed_files(), files);
+    }
+
+    #[derive(Default)]
+    struct RecordingMemoryToolExecutor {
+        calls: Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    #[async_trait]
+    impl moa_core::traits::MemoryToolExecutor for RecordingMemoryToolExecutor {
+        async fn execute_memory_tool(
+            &self,
+            _session: &SessionMeta,
+            tool_name: &str,
+            input: &serde_json::Value,
+        ) -> moa_core::error::Result<ToolOutput> {
+            self.calls
+                .lock()
+                .expect("lock recording memory calls")
+                .push((tool_name.to_string(), input.clone()));
+            Ok(ToolOutput::text("remembered", Duration::from_millis(1)))
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_write_dispatches_through_router_executor() {
+        // Pins: memory-write tools execute through the ToolRouter's built-in dispatch and the
+        // wired MemoryToolExecutor, not a pre-router short-circuit in the tool executor.
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(moa_hands::tools::memory::MemoryRememberTool));
+        let recorder = Arc::new(RecordingMemoryToolExecutor::default());
+        let router = Arc::new(
+            ToolRouter::new(registry, HashMap::new()).with_memory_tool_executor(recorder.clone()),
+        );
+        let executor = ToolExecutorImpl::new(router);
+
+        let mut request = tool_request("memory_remember");
+        request.input = serde_json::json!({ "text": "the sky is blue" });
+
+        let output = executor
+            .execute_buffered(&SessionMeta::default(), &request)
+            .await
+            .expect("memory write should dispatch through the router");
+
+        assert!(!output.is_error, "router memory dispatch should succeed");
+        assert_eq!(output.to_text(), "remembered");
+        let calls = recorder.calls.lock().expect("lock recording memory calls");
+        assert_eq!(
+            calls.as_slice(),
+            &[(
+                "memory_remember".to_string(),
+                serde_json::json!({ "text": "the sky is blue" })
+            )],
+            "the wired executor must receive the memory-write call via router dispatch"
+        );
     }
 
     #[tokio::test]

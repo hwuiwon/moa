@@ -98,8 +98,3 @@ pub async fn bootstrap_test_db() -> Result<TestDb> {
         schema_name,
     })
 }
-
-/// Drops one isolated Postgres schema created by [`bootstrap_test_db`].
-pub async fn cleanup_test_schema(database_url: &str, schema_name: &str) -> Result<()> {
-    testing::cleanup_test_schema(database_url, schema_name).await
-}

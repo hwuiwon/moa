@@ -58,16 +58,6 @@ pub struct GraphEdgeUpsert {
     pub properties: Value,
 }
 
-/// Builds a compact document and chunk graph delta.
-#[must_use]
-pub fn document_chunk_delta(
-    object: &KnowledgeObject,
-    version: &DocumentVersion,
-    chunks: &[KnowledgeChunk],
-) -> KnowledgeGraphDelta {
-    document_chunk_delta_with_semantics(object, version, chunks, &[])
-}
-
 /// Builds a compact document and chunk graph delta with semantic graph facts.
 #[must_use]
 pub fn document_chunk_delta_with_semantics(

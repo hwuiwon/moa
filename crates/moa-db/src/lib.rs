@@ -100,11 +100,6 @@ impl<'p> ScopedConn<'p> {
         Ok(Self { tx })
     }
 
-    /// Applies MOA scope GUCs to an existing transaction.
-    pub async fn apply_gucs(tx: &mut Transaction<'_, Postgres>, ctx: &RlsContext) -> Result<()> {
-        Self::apply_guc_values(tx, &Self::scope_gucs(ctx)).await
-    }
-
     /// Builds the request-scope GUC values from an [`RlsContext`].
     fn scope_gucs(ctx: &RlsContext) -> DbScopeGucs {
         DbScopeGucs {

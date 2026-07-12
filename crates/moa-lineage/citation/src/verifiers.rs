@@ -1,7 +1,6 @@
 //! Citation verifier stages.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_lineage_core::VerifierResult;
@@ -76,24 +75,14 @@ impl CitationVerifier for Bm25Verifier {
 /// step and construct this verifier with the loaded runtime. Until that runtime
 /// is attached, this verifier records its deterministic lexical-overlap
 /// fallback honestly so durable lineage does not claim an NLI model ran.
-#[derive(Clone)]
-pub struct NliVerifier {
-    model_name: Arc<str>,
-}
+#[derive(Clone, Default)]
+pub struct NliVerifier;
 
 impl NliVerifier {
     /// Creates a deterministic NLI verifier facade.
     #[must_use]
-    pub fn new(model_name: impl Into<String>) -> Self {
-        Self {
-            model_name: Arc::from(model_name.into()),
-        }
-    }
-
-    /// Returns the configured model name.
-    #[must_use]
-    pub fn model_name(&self) -> &str {
-        &self.model_name
+    pub fn new() -> Self {
+        Self
     }
 }
 

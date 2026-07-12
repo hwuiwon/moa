@@ -92,15 +92,6 @@ file references and concrete next steps only when they help.
     };
 }
 
-/// Stable identity contract promptlet.
-pub const IDENTITY_CORE_PROMPT: &str = identity_core_prompt!();
-
-/// Stable code-workflow promptlet used by the default identity prompt.
-pub const CODE_WORKFLOW_PROMPTLET: &str = code_workflow_promptlet!();
-
-/// Stable response-contract promptlet used by the default identity prompt.
-pub const ANSWER_CONTRACT_PROMPTLET: &str = answer_contract_promptlet!();
-
 /// Default identity prompt used by the MOA brain.
 pub const DEFAULT_IDENTITY_PROMPT: &str = concat!(
     identity_core_prompt!(),

@@ -73,7 +73,5 @@ pub(crate) const TASK_STRATEGY_SUCCESS_RATE_COLUMNS: &str = concat!(
     "tenant_id, task_fingerprint, subject_type, subject_id, uses, ",
     "success_rate::DOUBLE PRECISION AS success_rate, ",
     "avg_confidence::DOUBLE PRECISION AS avg_confidence, ",
-    "avg_token_cost::DOUBLE PRECISION AS avg_token_cost, ",
-    "avg_turn_count::DOUBLE PRECISION AS avg_turn_count, ",
     "effect_score::DOUBLE PRECISION AS effect_score, unused_injections"
 );

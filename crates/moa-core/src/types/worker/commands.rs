@@ -276,15 +276,6 @@ pub struct ReservedWorker {
     pub budget_tokens: u64,
 }
 
-/// Request to remove a completed child from a parent worker registry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompleteWorkerChildInput {
-    /// Child worker id to remove.
-    pub worker_id: WorkerId,
-    /// Tokens consumed by the child so unused budget can be refunded.
-    pub tokens_used: u64,
-}
-
 impl WorkerChildRequest {
     /// Converts the child request into the initial child message payload.
     #[allow(clippy::too_many_arguments)]

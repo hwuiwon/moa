@@ -243,7 +243,7 @@ const OCSF_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[SchemaMigration {
 const REFINERY_MIGRATION_LOCK_ID: i64 = 0x4d4f_415f_5246_4e59;
 
 /// Advisory lock used by schema-isolated migration helpers.
-pub const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x4d4f_415f_5343_4845;
+pub(crate) const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x4d4f_415f_5343_4845;
 
 /// Idempotent schema DDL for the engineering-tier lineage tables.
 pub const LINEAGE_SCHEMA_DDL: &str = include_str!("../sql/lineage_schema.sql");

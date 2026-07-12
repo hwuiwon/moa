@@ -269,6 +269,8 @@ impl ProviderDeliverySink {
     }
 
     /// Adds a Postmark email client.
+    ///
+    /// `pub` as a test seam: the `messaging_offline` integration harness injects clients here.
     #[cfg(feature = "postmark")]
     #[must_use]
     pub fn with_email_client(mut self, client: PostmarkEmailClient) -> Self {
@@ -277,6 +279,8 @@ impl ProviderDeliverySink {
     }
 
     /// Adds a Twilio SMS client.
+    ///
+    /// `pub` as a test seam: the `messaging_offline` integration harness injects clients here.
     #[cfg(feature = "twilio")]
     #[must_use]
     pub fn with_sms_client(mut self, client: TwilioSmsClient) -> Self {

@@ -120,7 +120,7 @@ pub struct AcceptanceChecks {
 impl AcceptanceChecks {
     /// Returns the first failing check's description, or `None` when both checks passed.
     #[must_use]
-    pub fn failing_check(&self) -> Option<&str> {
+    pub(crate) fn failing_check(&self) -> Option<&str> {
         if !self.held_in_pass {
             Some(self.held_in_description.as_str())
         } else if !self.held_out_pass {

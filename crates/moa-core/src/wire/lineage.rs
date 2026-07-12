@@ -110,28 +110,6 @@ fn default_lineage_query_limit() -> u32 {
     100
 }
 
-/// Request payload for exporting a lineage DSAR bundle.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LineageExportRequest {
-    /// Tenant whose lineage records should be exported.
-    pub tenant_id: TenantId,
-    /// Subject pseudonym or natural identifier to search for.
-    pub subject: String,
-}
-
-/// Response payload describing an exported lineage DSAR bundle.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LineageExportResponse {
-    /// URI where the exported bundle can be fetched.
-    pub bundle_uri: String,
-    /// Number of lineage records included in the bundle.
-    pub record_count: u64,
-    /// Hash of the exported subject pseudonym.
-    pub subject_hash: String,
-    /// Optional base64-encoded archive for transports that inline small bundles.
-    pub archive_base64: Option<String>,
-}
-
 /// Request payload for verifying lineage integrity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LineageVerifyRequest {
@@ -156,24 +134,4 @@ pub struct LineageVerifyResponse {
     pub status: String,
     /// Audit root identifier when one was checked.
     pub root_id: Option<Uuid>,
-}
-
-/// Request payload for erasing lineage subject keys.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LineageEraseRequest {
-    /// Tenant containing the subject pseudonym.
-    pub tenant_id: TenantId,
-    /// Hex-encoded subject pseudonym.
-    pub subject: String,
-}
-
-/// Response payload for a lineage erase request.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LineageEraseResponse {
-    /// Tenant containing the erased subject pseudonym.
-    pub tenant_id: TenantId,
-    /// Number of matching subjects scheduled for erasure.
-    pub subjects: u64,
-    /// Erasure status label.
-    pub status: String,
 }

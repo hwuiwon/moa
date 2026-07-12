@@ -1,6 +1,5 @@
 //! Shared runtime context for the Restate-backed orchestrator binary.
 
-use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use moa_authz::FgaClient;
@@ -8,11 +7,7 @@ use moa_brain::pipeline::{memory::GraphMemoryRetriever, skills::SkillInjector};
 use moa_core::{
     config::MoaConfig,
     traits::LineageHandle,
-    traits::{
-        ChannelAdapter, EmbeddingProvider, Identity, IdentityType, LearningCandidateStore,
-        RuntimeCacheStore, SessionRepository,
-    },
-    types::channel::Channel,
+    traits::{EmbeddingProvider, Identity, IdentityType, RuntimeCacheStore, SessionRepository},
 };
 use moa_hands::ToolRouter;
 use moa_providers::ProviderRegistry;
@@ -186,55 +181,23 @@ impl MemoryDeps {
     }
 }
 
-/// Lineage capture and durable sink dependencies.
+/// Lineage capture dependencies.
 #[derive(Clone)]
 pub struct LineageDeps {
     handle: Arc<dyn LineageHandle>,
-    writer: Option<Arc<moa_lineage_sink::WriterHandle>>,
 }
 
 impl LineageDeps {
     /// Creates a lineage dependency group.
     #[must_use]
-    pub fn new(
-        handle: Arc<dyn LineageHandle>,
-        writer: Option<Arc<moa_lineage_sink::WriterHandle>>,
-    ) -> Self {
-        Self { handle, writer }
+    pub fn new(handle: Arc<dyn LineageHandle>) -> Self {
+        Self { handle }
     }
 
     /// Returns the hot-path lineage capture handle.
     #[must_use]
     pub fn handle(&self) -> Arc<dyn LineageHandle> {
         self.handle.clone()
-    }
-
-    /// Returns the durable lineage writer, when configured.
-    #[must_use]
-    pub fn writer(&self) -> Option<Arc<moa_lineage_sink::WriterHandle>> {
-        self.writer.clone()
-    }
-}
-
-/// Messaging adapter dependencies used for live channel updates.
-#[derive(Clone, Default)]
-pub struct MessagingDeps {
-    adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
-}
-
-impl MessagingDeps {
-    /// Creates a messaging dependency group from channel adapters.
-    #[must_use]
-    pub fn new(adapters: HashMap<Channel, Arc<dyn ChannelAdapter>>) -> Self {
-        Self {
-            adapters: Arc::new(adapters),
-        }
-    }
-
-    /// Returns the adapter for a channel, when live outbound delivery is configured.
-    #[must_use]
-    pub fn adapter(&self, channel: Channel) -> Option<Arc<dyn ChannelAdapter>> {
-        self.adapters.get(&channel).cloned()
     }
 }
 
@@ -252,10 +215,8 @@ pub struct OrchestratorDeps {
     pub tools: ToolDeps,
     /// Memory retrieval dependencies for context compilation and memory APIs.
     pub memory: MemoryDeps,
-    /// Lineage capture and durable sink dependencies.
+    /// Lineage capture dependencies.
     pub lineage: LineageDeps,
-    /// Messaging adapter dependencies used for live channel updates.
-    pub messaging: MessagingDeps,
 }
 
 /// Runtime dependencies shared by every Restate handler in this binary.
@@ -272,7 +233,6 @@ pub struct OrchestratorCtx {
     tools: ToolDeps,
     memory: MemoryDeps,
     lineage: LineageDeps,
-    messaging: MessagingDeps,
 }
 
 impl OrchestratorCtx {
@@ -288,7 +248,6 @@ impl OrchestratorCtx {
             tools: deps.tools,
             memory: deps.memory,
             lineage: deps.lineage,
-            messaging: deps.messaging,
         }
     }
 
@@ -314,12 +273,6 @@ impl OrchestratorCtx {
         Self::current().config()
     }
 
-    /// Returns the current session store.
-    #[must_use]
-    pub fn current_session_store() -> Arc<dyn SessionRepository> {
-        Self::current().session_store()
-    }
-
     /// Returns the current graph/application Postgres pool.
     #[must_use]
     pub fn current_graph_pool() -> sqlx::PgPool {
@@ -332,34 +285,10 @@ impl OrchestratorCtx {
         Self::current().provider_registry()
     }
 
-    /// Returns the current tool router.
-    #[must_use]
-    pub fn current_tool_router() -> Arc<ToolRouter> {
-        Self::current().tool_router()
-    }
-
-    /// Returns the current precompiled tool schemas.
-    #[must_use]
-    pub fn current_tool_schemas() -> Arc<Vec<Value>> {
-        Self::current().tool_schemas()
-    }
-
     /// Returns the current lineage handle.
     #[must_use]
     pub fn current_lineage() -> Arc<dyn LineageHandle> {
         Self::current().lineage()
-    }
-
-    /// Returns the configured live messaging adapter for a channel, when available.
-    #[must_use]
-    pub fn current_channel_adapter(channel: Channel) -> Option<Arc<dyn ChannelAdapter>> {
-        Self::current().channel_adapter(channel)
-    }
-
-    /// Returns the current runtime cache.
-    #[must_use]
-    pub fn current_runtime_cache() -> Arc<dyn RuntimeCacheStore> {
-        Self::current().runtime_cache()
     }
 
     /// Returns the current runtime configuration.
@@ -368,58 +297,16 @@ impl OrchestratorCtx {
         self.config.clone()
     }
 
-    /// Returns the authentication dependency group.
-    #[must_use]
-    pub fn auth_deps(&self) -> AuthDeps {
-        self.auth.clone()
-    }
-
     /// Returns the runtime cache used for ephemeral coordination state.
     #[must_use]
     pub fn runtime_cache(&self) -> Arc<dyn RuntimeCacheStore> {
         self.runtime_cache.clone()
     }
 
-    /// Returns the provider dependency group.
-    #[must_use]
-    pub fn provider_deps(&self) -> ProviderDeps {
-        self.providers.clone()
-    }
-
-    /// Returns the tool dependency group.
-    #[must_use]
-    pub fn tool_deps(&self) -> ToolDeps {
-        self.tools.clone()
-    }
-
-    /// Returns the memory dependency group.
-    #[must_use]
-    pub fn memory_deps(&self) -> MemoryDeps {
-        self.memory.clone()
-    }
-
-    /// Returns the lineage dependency group.
-    #[must_use]
-    pub fn lineage_deps(&self) -> LineageDeps {
-        self.lineage.clone()
-    }
-
-    /// Returns the messaging dependency group.
-    #[must_use]
-    pub fn messaging_deps(&self) -> MessagingDeps {
-        self.messaging.clone()
-    }
-
     /// Returns the session store from persistence dependencies.
     #[must_use]
     pub fn session_store(&self) -> Arc<dyn SessionRepository> {
         self.persistence.session_store()
-    }
-
-    /// Returns the learning-candidate store contract.
-    #[must_use]
-    pub fn learning_candidate_store(&self) -> Arc<dyn LearningCandidateStore> {
-        self.persistence.session_store_backend()
     }
 
     /// Returns the concrete session-store backend for composition-only surfaces.
@@ -486,18 +373,6 @@ impl OrchestratorCtx {
     #[must_use]
     pub fn lineage(&self) -> Arc<dyn LineageHandle> {
         self.lineage.handle()
-    }
-
-    /// Returns the configured live messaging adapter for a channel, when available.
-    #[must_use]
-    pub fn channel_adapter(&self, channel: Channel) -> Option<Arc<dyn ChannelAdapter>> {
-        self.messaging.adapter(channel)
-    }
-
-    /// Returns the durable lineage writer from lineage dependencies, when configured.
-    #[must_use]
-    pub fn lineage_writer(&self) -> Option<Arc<moa_lineage_sink::WriterHandle>> {
-        self.lineage.writer()
     }
 }
 

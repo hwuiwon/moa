@@ -182,16 +182,6 @@ impl AnthropicProvider {
         self.pacer = RatePacer::new(config);
         self
     }
-
-    /// Caps the number of in-flight completions this provider keeps open at once.
-    ///
-    /// Unbounded by default; a configured ceiling makes queued generations wait
-    /// for a slot before dispatching.
-    #[must_use]
-    pub fn with_max_concurrent_requests(mut self, max_in_flight: usize) -> Self {
-        self.limiter = ConcurrencyLimiter::new(max_in_flight);
-        self
-    }
 }
 
 #[async_trait::async_trait]

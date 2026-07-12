@@ -216,14 +216,7 @@ fn contact_id_from_user_id(user_id: &UserId) -> ContactId {
         .unwrap_or_else(|_| ContactId(stable_uuid_from_label(user_id.as_str())))
 }
 
-fn stable_uuid_from_label(label: &str) -> uuid::Uuid {
-    let hash = blake3::hash(label.as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    uuid::Uuid::from_bytes(bytes)
-}
+use moa_test_support::fixtures::stable_uuid_from_label;
 
 fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
     ContactRef {

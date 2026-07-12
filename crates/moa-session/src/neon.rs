@@ -88,15 +88,6 @@ impl NeonBranchManager {
         })
     }
 
-    /// Returns `Some(manager)` when Neon checkpointing is enabled in config.
-    pub fn maybe_from_config(config: &MoaConfig) -> Result<Option<Self>> {
-        if config.database.neon.enabled {
-            return Self::from_config(config).map(Some);
-        }
-
-        Ok(None)
-    }
-
     fn new_with_options(options: NeonBranchManagerOptions) -> Result<Self> {
         let http_client = Client::builder()
             .timeout(Duration::from_secs(10))

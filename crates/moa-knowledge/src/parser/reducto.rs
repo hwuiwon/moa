@@ -204,7 +204,7 @@ impl ReductoParser {
 
 /// Maps a Reducto parse result into a parsed document.
 #[must_use]
-pub fn map_reducto_result(value: Value) -> ParsedDocument {
+pub(crate) fn map_reducto_result(value: Value) -> ParsedDocument {
     let job_id = string_field(&value, &["job_id", "id"]);
     let chunks = value
         .get("chunks")

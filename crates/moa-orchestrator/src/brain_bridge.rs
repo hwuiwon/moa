@@ -114,7 +114,7 @@ pub(crate) async fn prepare_turn_request(
     // The root coordinator turn is sandbox-free: hard-exclude sandbox/compute
     // (hand-routed) tools so the coordinator never provisions a hand. Manifest-backed
     // `file_read` is kept so selected skill packages can be read without a sandbox.
-    // The worker tool subsets (built from the unfiltered `current_tool_schemas`)
+    // The worker tool subsets (built from the unfiltered `tool_schemas`)
     // keep the hand tools, so all compute is delegated.
     let root_tool_schemas = {
         let tool_router = ctx.tool_router();
@@ -288,7 +288,7 @@ fn active_user_turn_text(
 /// `name` are retained defensively: they cannot be classified as sandbox tools
 /// and are never the hand-routed compute tools this filter targets. The input
 /// slice is left untouched (a new `Vec` is returned), so the shared
-/// `current_tool_schemas` source that worker subsets read stays complete.
+/// `tool_schemas` source that worker subsets read stays complete.
 pub(crate) fn coordinator_tool_schemas(
     schemas: &[serde_json::Value],
     requires_sandbox: impl Fn(&str) -> bool,

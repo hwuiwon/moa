@@ -19,7 +19,6 @@ pub mod judge;
 pub mod metrics;
 pub mod recording;
 pub mod runner;
-pub mod scope;
 
 pub use crate::kernel::{
     BinaryProbeOutcome, BootstrapConfig, ClusterBootstrapReport, ClusterObservation,
@@ -58,6 +57,10 @@ pub use metrics::{
     aggregate_retrieval_eval_with_extraction_precision, candidates_from_retrieval_hits,
 };
 pub use moa_brain::retrieval::RankingConfig;
+pub use moa_test_support::fixtures::{
+    stable_uuid_from_label, tenant_id_from_label, tenant_id_from_storage_partition,
+    tenant_id_from_storage_partition_id,
+};
 pub use recording::{
     MemoryExtractionRecordingOptions, MemoryExtractionRecordingReport, MemoryMergeRecordingOptions,
     MemoryMergeRecordingReport, missing_extraction_chunk_hashes, record_memory_extractions,
@@ -67,10 +70,6 @@ pub use runner::{
     EvalLane, GraphExpansionEvalPolicy, MemoryEvalExtractorMode, MemoryGraphDiagnostics,
     MemoryRetrievalEvalOptions, MemoryRetrievalEvalReport, QueryRewritePolicy,
     RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K, run_memory_retrieval_eval,
-};
-pub use scope::{
-    stable_uuid_from_label, tenant_id_from_label, tenant_id_from_storage_partition,
-    tenant_id_from_storage_partition_id,
 };
 
 impl crate::kernel::FixtureRecord for moa_memory_ingest::ExtractionFixtureRecord {

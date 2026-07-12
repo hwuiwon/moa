@@ -63,8 +63,6 @@ struct MigrationOwnership {
     owner: String,
     #[serde(default)]
     readers: Vec<String>,
-    #[serde(default)]
-    notes: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -226,7 +224,6 @@ fn validate_migration_ownership(
             validate_owner_identifier(reader)
                 .with_context(|| format!("invalid reader for {}", table.display()))?;
         }
-        let _ = &entry.notes;
     }
 
     let owned_tables = owned.keys().cloned().collect::<BTreeSet<_>>();
@@ -326,56 +323,64 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn collect_named_files(root: &Path, name: &str, out: &mut Vec<PathBuf>) -> Result<()> {
+/// Recursively walks `root`, pushing every entry the `matches` predicate accepts.
+///
+/// A missing `root` yields no entries. Directories are always descended into, so
+/// each predicate only decides whether the current path is collected; the
+/// per-walk predicates below carry the byte-for-byte matching rules that the
+/// previous dedicated walkers used.
+fn collect_matching<F>(root: &Path, matches: &F, out: &mut Vec<PathBuf>) -> Result<()>
+where
+    F: Fn(&Path) -> bool,
+{
+    if !root.exists() {
+        return Ok(());
+    }
     for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
-        let path = entry?.path();
+        let entry = entry.with_context(|| format!("read entry under {}", root.display()))?;
+        let path = entry.path();
+        if matches(&path) {
+            out.push(path.clone());
+        }
         if path.is_dir() {
-            collect_named_files(&path, name, out)?;
-        } else if path.file_name().and_then(|value| value.to_str()) == Some(name) {
-            out.push(path);
+            collect_matching(&path, matches, out)?;
         }
     }
     Ok(())
+}
+
+fn collect_named_files(root: &Path, name: &str, out: &mut Vec<PathBuf>) -> Result<()> {
+    collect_matching(
+        root,
+        &|path: &Path| {
+            !path.is_dir() && path.file_name().and_then(|value| value.to_str()) == Some(name)
+        },
+        out,
+    )
 }
 
 fn collect_migration_dirs(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !root.exists() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
-        let entry = entry.with_context(|| format!("read entry under {}", root.display()))?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        if path.file_name().and_then(|name| name.to_str()) == Some("migrations") {
-            out.push(path.clone());
-        }
-        collect_migration_dirs(&path, out)?;
-    }
-    Ok(())
+    collect_matching(
+        root,
+        &|path: &Path| {
+            path.is_dir() && path.file_name().and_then(|name| name.to_str()) == Some("migrations")
+        },
+        out,
+    )
 }
 
 fn collect_migration_sql_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !root.exists() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
-        let entry = entry.with_context(|| format!("read entry under {}", root.display()))?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_migration_sql_files(&path, out)?;
-            continue;
-        }
-        if path.extension().and_then(|extension| extension.to_str()) == Some("sql")
-            && path
-                .components()
-                .any(|component| component.as_os_str() == "migrations")
-        {
-            out.push(path);
-        }
-    }
-    Ok(())
+    collect_matching(
+        root,
+        &|path: &Path| {
+            !path.is_dir()
+                && path.extension().and_then(|extension| extension.to_str()) == Some("sql")
+                && path
+                    .components()
+                    .any(|component| component.as_os_str() == "migrations")
+        },
+        out,
+    )
 }
 
 fn extract_create_tables(sql: &str) -> Vec<TableIdentity> {
@@ -661,7 +666,6 @@ mod check_migrations_tests {
             schema: schema.to_string(),
             owner: owner.to_string(),
             readers: Vec::new(),
-            notes: None,
         }
     }
 

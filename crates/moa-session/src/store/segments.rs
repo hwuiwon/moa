@@ -202,7 +202,7 @@ impl PostgresSessionStore {
     ) -> Result<Vec<SkillResolutionRate>> {
         let skill_resolution_rates = self.table_name("skill_resolution_rates");
         let rows = sqlx::query(&format!(
-            "SELECT skill_name, uses, resolution_rate, avg_token_cost, avg_turn_count \
+            "SELECT skill_name, uses, resolution_rate \
              FROM {skill_resolution_rates} \
              WHERE tenant_id = $1 \
              ORDER BY resolution_rate DESC, uses DESC, skill_name ASC"
@@ -218,8 +218,6 @@ impl PostgresSessionStore {
                     skill_name: row.col::<String>("skill_name")?,
                     uses: row.col::<i64>("uses")? as u64,
                     resolution_rate: row.col::<f64>("resolution_rate")?,
-                    avg_token_cost: row.col::<f64>("avg_token_cost")?,
-                    avg_turn_count: row.col::<f64>("avg_turn_count")?,
                 })
             })
             .collect()

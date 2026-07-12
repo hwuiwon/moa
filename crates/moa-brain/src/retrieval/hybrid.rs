@@ -160,13 +160,6 @@ impl HybridRetriever {
         self
     }
 
-    /// Overrides the reranker model while preserving the configured backend.
-    #[must_use]
-    pub fn with_rerank_model(mut self, model: impl Into<String>) -> Self {
-        self.rerank_model = model.into();
-        self
-    }
-
     /// Overrides the deterministic post-hydration ranking configuration.
     #[must_use]
     pub fn with_ranking_config(mut self, ranking_config: RankingConfig) -> Self {
@@ -833,13 +826,10 @@ enum LegOutcome<T> {
     Fatal(RetrievalError),
 }
 
-/// One leg reduced to its usable value plus degradation signals.
+/// One leg reduced to its usable value plus a timeout signal.
 struct LegDegradation<T> {
     /// Usable hits (empty when the leg degraded or genuinely returned nothing).
     value: T,
-    /// Whether the leg degraded (a timeout or transient error, not a real empty).
-    #[allow(dead_code)]
-    degraded: bool,
     /// Whether the leg specifically timed out; gates the bounded vector retry.
     timed_out: bool,
 }
@@ -853,7 +843,6 @@ fn reduce_leg<T: Default>(name: &'static str, outcome: LegOutcome<T>) -> Result<
     match outcome {
         LegOutcome::Completed(value) => Ok(LegDegradation {
             value,
-            degraded: false,
             timed_out: false,
         }),
         LegOutcome::Timeout => {
@@ -864,7 +853,6 @@ fn reduce_leg<T: Default>(name: &'static str, outcome: LegOutcome<T>) -> Result<
             );
             Ok(LegDegradation {
                 value: T::default(),
-                degraded: true,
                 timed_out: true,
             })
         }
@@ -877,7 +865,6 @@ fn reduce_leg<T: Default>(name: &'static str, outcome: LegOutcome<T>) -> Result<
             );
             Ok(LegDegradation {
                 value: T::default(),
-                degraded: true,
                 timed_out: false,
             })
         }

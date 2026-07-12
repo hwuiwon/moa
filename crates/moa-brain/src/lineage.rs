@@ -336,7 +336,7 @@ fn context_citation_verifier() -> CascadeVerifier {
             bm25_min_candidates: 1,
             ..CascadeConfig::default()
         },
-        Some(NliVerifier::new("lexical-overlap-fallback")),
+        Some(NliVerifier::new()),
     )
 }
 

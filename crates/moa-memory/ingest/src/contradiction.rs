@@ -117,7 +117,7 @@ pub trait ContradictionDetector: Send + Sync {
 /// Verdict returned by the final fact-comparison judge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum JudgeVerdict {
+pub(crate) enum JudgeVerdict {
     /// The new fact makes the candidate false.
     Contradicts,
     /// The new fact says the same thing as the candidate.
@@ -130,7 +130,7 @@ pub enum JudgeVerdict {
 
 /// Structured response from the fact-comparison judge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct JudgeResponse {
+pub(crate) struct JudgeResponse {
     /// Judge verdict.
     pub verdict: JudgeVerdict,
     /// Candidate uid selected by the judge, if any.
@@ -141,7 +141,7 @@ pub struct JudgeResponse {
 
 /// LLM judge abstraction used after reranking.
 #[async_trait]
-pub trait JudgeModel: Send + Sync {
+pub(crate) trait JudgeModel: Send + Sync {
     /// Judges one new fact against a small candidate set.
     async fn judge(
         &self,
@@ -153,7 +153,7 @@ pub trait JudgeModel: Send + Sync {
 
 /// Deterministic local judge used when no low-latency LLM judge is configured.
 #[derive(Debug, Clone, Default)]
-pub struct HeuristicJudge;
+pub(crate) struct HeuristicJudge;
 
 #[async_trait]
 impl JudgeModel for HeuristicJudge {
@@ -276,7 +276,7 @@ impl RrfPlusJudgeDetector {
     }
 
     /// Reranks candidates to the top five using the configured reranker.
-    pub async fn rerank_top5(
+    pub(crate) async fn rerank_top5(
         &self,
         fact_text: &str,
         candidates: &[NodeIndexRow],
@@ -460,7 +460,7 @@ pub fn rrf_fuse(vector_hits: &[Uuid], lexical_hits: &[Uuid], limit: usize) -> Ve
 
 /// Builds the fixed fact-comparison prompt for the judge.
 #[must_use]
-pub fn build_judge_prompt(fact_text: &str, candidates: &[NodeIndexRow]) -> String {
+pub(crate) fn build_judge_prompt(fact_text: &str, candidates: &[NodeIndexRow]) -> String {
     let candidates_list = candidates
         .iter()
         .map(|candidate| format!("{} -> {}", candidate.uid, candidate.name))

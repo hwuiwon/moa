@@ -3,12 +3,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use chrono::Utc;
-use moa_core::types::identifiers::StoragePartitionId;
-use moa_lineage_core::{
-    Citation, LineageEvent, LineageSink, ScoreRecord, ScoreSource, ScoreTarget, ScoreValue, TurnId,
-    VerifierResult,
-};
+use moa_lineage_core::{Citation, VerifierResult};
 use uuid::Uuid;
 
 use crate::adapters::ChunkRef;
@@ -23,8 +18,6 @@ pub struct CascadeConfig {
     pub bm25_min_candidates: usize,
     /// Minimum entailment score for verified citations.
     pub nli_threshold: f32,
-    /// Maximum NLI concurrency. Reserved for the ONNX-backed verifier.
-    pub max_concurrent_nli: usize,
 }
 
 impl Default for CascadeConfig {
@@ -33,7 +26,6 @@ impl Default for CascadeConfig {
             bm25_top_k: 3,
             bm25_min_candidates: 2,
             nli_threshold: 0.5,
-            max_concurrent_nli: 4,
         }
     }
 }
@@ -250,50 +242,5 @@ fn sentence_for<'a>(answer_text: &'a str, offsets: &[(u32, u32)], idx: u32) -> &
         &answer_text[start..end]
     } else {
         answer_text
-    }
-}
-
-/// Emits normalized verifier scores for one citation through the lineage sink.
-pub fn emit_verifier_scores(
-    sink: &dyn LineageSink,
-    citation: &Citation,
-    turn_id: TurnId,
-    storage_partition_id: &StoragePartitionId,
-) {
-    sink.record(LineageEvent::Eval(ScoreRecord {
-        score_id: Uuid::now_v7(),
-        ts: Utc::now(),
-        target: ScoreTarget::Turn { turn_id },
-        storage_partition_id: storage_partition_id.clone(),
-        user_id: None,
-        name: "citation_verified".to_string(),
-        value: ScoreValue::Boolean(citation.verifier.verified),
-        source: ScoreSource::OnlineJudge,
-        model_or_evaluator: citation.verifier.method.clone(),
-        run_id: None,
-        dataset_id: None,
-        comment: None,
-    }));
-    metrics::gauge!(
-        "moa_grounding_verified_rate",
-        "tenant_id" => storage_partition_id.to_string()
-    )
-    .set(if citation.verifier.verified { 1.0 } else { 0.0 });
-
-    if let Some(entailment) = citation.verifier.nli_entailment {
-        sink.record(LineageEvent::Eval(ScoreRecord {
-            score_id: Uuid::now_v7(),
-            ts: Utc::now(),
-            target: ScoreTarget::Turn { turn_id },
-            storage_partition_id: storage_partition_id.clone(),
-            user_id: None,
-            name: "lexical_overlap".to_string(),
-            value: ScoreValue::Numeric(f64::from(entailment)),
-            source: ScoreSource::OnlineJudge,
-            model_or_evaluator: citation.verifier.method.clone(),
-            run_id: None,
-            dataset_id: None,
-            comment: None,
-        }));
     }
 }

@@ -12,7 +12,6 @@ pub mod pentest;
 pub mod plan;
 pub mod setup;
 
-pub use collector::TrajectoryCollector;
 pub use engine::EvalEngine;
 pub use plan::build_eval_plan;
 pub use setup::{AgentEnvironment, EvalLineageHandle, build_agent_environment};

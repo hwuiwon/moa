@@ -99,13 +99,6 @@ impl PostmarkEmailMessage {
         self
     }
 
-    /// Adds a blind-carbon-copy recipient.
-    #[must_use]
-    pub fn with_bcc(mut self, recipient: impl Into<String>) -> Self {
-        self.bcc.push(recipient.into());
-        self
-    }
-
     /// Adds a reply-to address.
     #[must_use]
     pub fn with_reply_to(mut self, recipient: impl Into<String>) -> Self {
@@ -117,13 +110,6 @@ impl PostmarkEmailMessage {
     #[must_use]
     pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
         self.tag = Some(tag.into());
-        self
-    }
-
-    /// Sets the Postmark message stream for this message.
-    #[must_use]
-    pub fn with_message_stream(mut self, stream: impl Into<String>) -> Self {
-        self.message_stream = Some(stream.into());
         self
     }
 

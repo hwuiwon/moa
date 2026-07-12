@@ -183,7 +183,7 @@ fn option_text(value: &Value) -> Option<String> {
 
 /// Maps Unstructured partition elements into a parsed document.
 #[must_use]
-pub fn map_unstructured_elements(value: Value) -> ParsedDocument {
+pub(crate) fn map_unstructured_elements(value: Value) -> ParsedDocument {
     let array = value
         .as_array()
         .cloned()

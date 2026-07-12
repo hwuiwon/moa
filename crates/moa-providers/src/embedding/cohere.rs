@@ -85,11 +85,6 @@ impl CohereEmbedding {
         self
     }
 
-    pub fn with_max_concurrent_requests(mut self, max_in_flight: usize) -> Self {
-        self.limiter = ConcurrencyLimiter::new(max_in_flight);
-        self
-    }
-
     /// Overrides the fixed output dimensionality expected from Cohere.
     pub fn with_dimensions(mut self, dimensions: usize) -> Result<Self> {
         if dimensions == 0 {
@@ -201,13 +196,6 @@ impl CohereV4Embedder {
     #[must_use]
     pub fn with_rate_limits(mut self, config: PacerConfig) -> Self {
         self.inner = self.inner.with_rate_limits(config);
-        self
-    }
-
-    /// Overrides the in-flight concurrency ceiling for embedding requests.
-    #[must_use]
-    pub fn with_max_concurrent_requests(mut self, max_in_flight: usize) -> Self {
-        self.inner = self.inner.with_max_concurrent_requests(max_in_flight);
         self
     }
 }

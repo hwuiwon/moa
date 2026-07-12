@@ -227,7 +227,7 @@ impl SkillRegistry {
     }
 
     /// Loads a visible package by skill artifact revision id.
-    pub async fn load_package_by_uid(
+    pub(crate) async fn load_package_by_uid(
         &self,
         scope: &ActionRuleScope,
         skill_uid: Uuid,

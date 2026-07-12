@@ -2,7 +2,6 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::types::identifiers::TenantId;
-use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -294,13 +293,4 @@ pub struct WebhookEvent {
     /// Safe metadata.
     #[serde(default)]
     pub metadata: Value,
-}
-
-/// Provider webhook verification input.
-#[derive(Debug, Clone)]
-pub struct WebhookVerification {
-    /// Webhook headers.
-    pub headers: HeaderMap,
-    /// Webhook body bytes.
-    pub body: bytes::Bytes,
 }

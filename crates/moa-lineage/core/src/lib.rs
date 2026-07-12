@@ -9,7 +9,7 @@ pub mod ids;
 pub mod records;
 pub mod sink;
 
-pub use ids::{LineageRecordId, TurnId};
+pub use ids::TurnId;
 pub use records::{
     AclFilterDecision, BackendIntrospection, Citation, CitationLineage, ContextChunk,
     ContextLineage, DecisionKind, DecisionRecord, FusedHit, GenerationLineage,

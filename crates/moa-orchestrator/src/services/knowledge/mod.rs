@@ -833,47 +833,6 @@ impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
     }
 }
 
-/// Credential store used by tests that do not exercise provider credential resolution.
-#[derive(Debug, Clone, Default)]
-pub struct DeterministicKnowledgeCredentialStore;
-
-#[async_trait]
-impl KnowledgeCredentialStore for DeterministicKnowledgeCredentialStore {
-    async fn store_linked_account(
-        &self,
-        tenant_id: TenantId,
-        account: &LinkedAccount,
-    ) -> Result<String, KnowledgeServiceError> {
-        Ok(format!(
-            "vault://knowledge/{}/{tenant_id}/{}",
-            account.provider, account.provider_account_id
-        ))
-    }
-
-    async fn resolve_linked_account(
-        &self,
-        _tenant_id: TenantId,
-        connection: &KnowledgeConnection,
-    ) -> Result<String, KnowledgeServiceError> {
-        Ok(connection.credential_ref.clone())
-    }
-
-    async fn delete_linked_account(
-        &self,
-        _tenant_id: TenantId,
-        _connection: &KnowledgeConnection,
-    ) -> Result<bool, KnowledgeServiceError> {
-        Ok(false)
-    }
-
-    async fn list_linked_account_refs(
-        &self,
-        _tenant_id: TenantId,
-    ) -> Result<BTreeSet<String>, KnowledgeServiceError> {
-        Ok(BTreeSet::new())
-    }
-}
-
 fn credential_service(provider: &str) -> String {
     format!("knowledge:{provider}")
 }

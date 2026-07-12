@@ -82,21 +82,11 @@ fn format_history(history: &[ContextMessage]) -> String {
             };
             format!(
                 "{role}: {}",
-                truncate_for_prompt(message.content.trim(), MAX_PROMPT_MESSAGE_CHARS)
+                crate::text::truncate_chars(message.content.trim(), MAX_PROMPT_MESSAGE_CHARS)
             )
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn truncate_for_prompt(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-
-    let mut truncated = text.chars().take(max_chars).collect::<String>();
-    truncated.push_str("...");
-    truncated
 }
 
 #[cfg(test)]

@@ -152,15 +152,6 @@ pub struct IngestApplyReport {
     pub failed: usize,
 }
 
-/// Chunks a finalized turn transcript without splitting fenced code blocks.
-pub fn chunk_turn(
-    turn: &SessionTurn,
-    target_tokens: usize,
-    overlap_tokens: usize,
-) -> Result<Vec<TurnChunk>> {
-    crate::chunking::chunk_turn(turn, target_tokens, overlap_tokens)
-}
-
 /// Extracts deterministic fact candidates from chunks after validating chunk size.
 ///
 /// This is the local deterministic scaffold for M10. Production LLM extraction can replace this
@@ -383,6 +374,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::chunking::chunk_turn;
 
     fn turn(transcript: &str) -> SessionTurn {
         SessionTurn {

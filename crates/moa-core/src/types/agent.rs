@@ -6,9 +6,6 @@ use uuid::Uuid;
 
 use super::guardrails::AgentGuardrailPolicy;
 
-/// Built-in global default agent artifact identifier.
-pub const SYSTEM_DEFAULT_AGENT_ARTIFACT_UID: Uuid =
-    Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0a01);
 /// Built-in global default agent revision identifier.
 pub const SYSTEM_DEFAULT_AGENT_REVISION_UID: Uuid =
     Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0a02);

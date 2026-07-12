@@ -17,7 +17,7 @@ use crate::model::{
 };
 
 /// Default target-agent turn cap for plan-expanded simulator trials.
-pub const DEFAULT_PLAN_TRIAL_MAX_TURNS: u32 = 8;
+pub(crate) const DEFAULT_PLAN_TRIAL_MAX_TURNS: u32 = 8;
 
 /// Errors returned while projecting an experiment plan into executable inputs.
 #[derive(Debug, Error)]
@@ -288,7 +288,7 @@ pub fn select_simulation(
 }
 
 /// Projects one plan target variant into an executable target payload.
-pub fn target_for_plan_variant(
+pub(crate) fn target_for_plan_variant(
     definition: &ExperimentPlanDefinition,
     variant: &ExperimentTargetVariant,
 ) -> Result<ExperimentTarget, PlanExpansionError> {

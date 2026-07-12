@@ -276,6 +276,10 @@ impl ContextMessage {
     }
 
     /// Creates an assistant tool-call message with both text fallback and structured invocation.
+    ///
+    /// `pub` as a test seam: production builds messages via
+    /// [`Self::assistant_tool_call_with_thought_signature`]; this thought-signature-free shorthand
+    /// exists for cross-crate provider tests.
     pub fn assistant_tool_call(invocation: ToolInvocation, content: impl Into<String>) -> Self {
         Self::assistant_tool_call_with_thought_signature(invocation, content, None::<String>)
     }

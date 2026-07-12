@@ -174,14 +174,13 @@ updates the session to the verified contact and records the prior contact in
 
 | Group | Events |
 |---|---|
-| Session lifecycle | `SessionCreated`, `SessionStatusChanged`, `SessionCompleted` |
+| Session lifecycle | `SessionCreated`, `SessionStatusChanged` |
 | Task segmentation | `SegmentStarted`, `SegmentCompleted` |
 | User input | `UserMessage`, `QueuedMessage` |
 | Brain output | `BrainThinking`, `BrainResponse`, `CacheReport` |
 | Tools | `ToolCall`, `ToolResult`, `ToolError` |
 | Action review | `ActionReviewRequested`, `ActionReviewDecided` |
 | Memory | `MemoryRead`, `MemoryWrite`, `MemoryIngest` |
-| Hands | `HandProvisioned`, `HandDestroyed`, `HandError` |
 | Worker coordination | `WorkerSpawned`, `WorkerMessageSent`, `WorkerStatusChanged`, `WorkerNotificationDelivered`, `WorkerSignalReceived`, `WorkerParentResumeRequested`, `WorkerHeartbeatStale`, `ProgressNarrated` |
 | Compaction | `Checkpoint` |
 | Diagnostics | `Error`, `Warning` |

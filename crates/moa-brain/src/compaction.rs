@@ -1,7 +1,5 @@
 //! Reversible session-history compaction helpers.
 
-use std::borrow::Cow;
-
 use moa_core::types::context::estimate_text_tokens;
 use moa_core::{
     config::CompactionConfig, error::Result, events::Event, traits::LLMProvider,
@@ -243,47 +241,49 @@ fn compaction_request(
 
 fn event_summary_line(record: &EventRecord) -> Option<String> {
     match &record.event {
-        Event::UserMessage { text, .. } | Event::QueuedMessage { text, .. } => {
-            Some(format!("#{} user: {}", record.sequence_num, truncate(text)))
-        }
+        Event::UserMessage { text, .. } | Event::QueuedMessage { text, .. } => Some(format!(
+            "#{} user: {}",
+            record.sequence_num,
+            crate::text::truncate_chars(text, 240)
+        )),
         Event::BrainResponse { text, .. } => Some(format!(
             "#{} assistant: {}",
             record.sequence_num,
-            truncate(text)
+            crate::text::truncate_chars(text, 240)
         )),
         Event::ProgressUpdate { phase, summary, .. } => Some(format!(
             "#{} progress {phase}: {}",
             record.sequence_num,
-            truncate(summary)
+            crate::text::truncate_chars(summary, 240)
         )),
         Event::ToolCall {
             tool_name, input, ..
         } => Some(format!(
             "#{} tool_call {tool_name}: {}",
             record.sequence_num,
-            truncate(&input.to_string())
+            crate::text::truncate_chars(&input.to_string(), 240)
         )),
         Event::ToolResult {
             output, success, ..
         } => Some(format!(
             "#{} tool_result success={success}: {}",
             record.sequence_num,
-            truncate(&output.to_text())
+            crate::text::truncate_chars(&output.to_text(), 240)
         )),
         Event::ToolError { error, .. } => Some(format!(
             "#{} tool_error: {}",
             record.sequence_num,
-            truncate(error)
+            crate::text::truncate_chars(error, 240)
         )),
         Event::Error { message, .. } => Some(format!(
             "#{} error: {}",
             record.sequence_num,
-            truncate(message)
+            crate::text::truncate_chars(message, 240)
         )),
         Event::Warning { message } => Some(format!(
             "#{} warning: {}",
             record.sequence_num,
-            truncate(message)
+            crate::text::truncate_chars(message, 240)
         )),
         Event::GuardrailCheck { .. } => None,
         // Per-turn telemetry (coordination/replay/latency) is never part of a compaction summary.
@@ -292,7 +292,7 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
             "#{} action_review_requested {}: {}",
             record.sequence_num,
             envelope.tool_name,
-            truncate(&envelope.input_summary)
+            crate::text::truncate_chars(&envelope.input_summary, 240)
         )),
         Event::ActionReviewDecided { decision, .. } => Some(format!(
             "#{} action_review_decided: {decision:?}",
@@ -306,14 +306,14 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
         } => Some(format!(
             "#{} worker_spawned {worker_id} path={path}: {}",
             record.sequence_num,
-            truncate(task)
+            crate::text::truncate_chars(task, 240)
         )),
         Event::WorkerMessageSent {
             worker_id, text, ..
         } => Some(format!(
             "#{} worker_message {worker_id}: {}",
             record.sequence_num,
-            truncate(text)
+            crate::text::truncate_chars(text, 240)
         )),
         Event::WorkerStatusChanged {
             worker_id,
@@ -323,7 +323,7 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
         } => Some(format!(
             "#{} worker_status {worker_id} -> {to:?}: {}",
             record.sequence_num,
-            truncate(summary.as_deref().unwrap_or(""))
+            crate::text::truncate_chars(summary.as_deref().unwrap_or(""), 240)
         )),
         Event::WorkerNotificationDelivered {
             worker_id,
@@ -332,7 +332,7 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
         } => Some(format!(
             "#{} worker_notification {worker_id} state={state:?}: {}",
             record.sequence_num,
-            truncate(summary)
+            crate::text::truncate_chars(summary, 240)
         )),
         Event::WorkerResultBundle {
             results,
@@ -349,7 +349,7 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
         } => Some(format!(
             "#{} worker_result_synthesis user_sequence_num={user_sequence_num}: {}",
             record.sequence_num,
-            truncate(reason)
+            crate::text::truncate_chars(reason, 240)
         )),
         Event::WorkerSignalReceived {
             worker_id,
@@ -359,14 +359,14 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
         } => Some(format!(
             "#{} worker_signal {worker_id} {kind:?}: {}",
             record.sequence_num,
-            truncate(summary)
+            crate::text::truncate_chars(summary, 240)
         )),
         Event::WorkerParentResumeRequested {
             worker_id, reason, ..
         } => Some(format!(
             "#{} worker_resume {worker_id}: {}",
             record.sequence_num,
-            truncate(reason)
+            crate::text::truncate_chars(reason, 240)
         )),
         Event::WorkerHeartbeatStale {
             worker_id,
@@ -379,7 +379,7 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
         Event::ProgressNarrated { text, .. } => Some(format!(
             "#{} progress_narration: {}",
             record.sequence_num,
-            truncate(text)
+            crate::text::truncate_chars(text, 240)
         )),
         Event::MemoryRead { path, scope } => Some(format!(
             "#{} memory read {scope}:{path}",
@@ -388,7 +388,7 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
         Event::MemoryWrite { path, summary, .. } => Some(format!(
             "#{} memory_write {path}: {}",
             record.sequence_num,
-            truncate(summary)
+            crate::text::truncate_chars(summary, 240)
         )),
         Event::MemoryIngest {
             source_name,
@@ -397,23 +397,7 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
         } => Some(format!(
             "#{} memory_ingest {source_name}: {}",
             record.sequence_num,
-            truncate(source_path)
-        )),
-        Event::HandProvisioned {
-            hand_id, provider, ..
-        } => Some(format!(
-            "#{} hand_provisioned {provider}:{hand_id}",
-            record.sequence_num
-        )),
-        Event::HandDestroyed { hand_id, reason } => Some(format!(
-            "#{} hand_destroyed {hand_id}: {}",
-            record.sequence_num,
-            truncate(reason)
-        )),
-        Event::HandError { hand_id, error } => Some(format!(
-            "#{} hand_error {hand_id}: {}",
-            record.sequence_num,
-            truncate(error)
+            crate::text::truncate_chars(source_path, 240)
         )),
         Event::SessionCreated {
             tenant_id,
@@ -441,12 +425,7 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
         } => Some(format!(
             "#{} session_channel {from} -> {to}: {}",
             record.sequence_num,
-            truncate(reason.as_deref().unwrap_or(""))
-        )),
-        Event::SessionCompleted { summary, .. } => Some(format!(
-            "#{} session_completed: {}",
-            record.sequence_num,
-            truncate(summary)
+            crate::text::truncate_chars(reason.as_deref().unwrap_or(""), 240)
         )),
         Event::SegmentStarted {
             segment_index,
@@ -455,7 +434,7 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
         } => Some(format!(
             "#{} segment_started index={segment_index}: {}",
             record.sequence_num,
-            truncate(task_summary.as_deref().unwrap_or("undefined"))
+            crate::text::truncate_chars(task_summary.as_deref().unwrap_or("undefined"), 240)
         )),
         Event::SegmentCompleted {
             segment_index,
@@ -464,37 +443,22 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
         } => Some(format!(
             "#{} segment_completed index={segment_index}: {}",
             record.sequence_num,
-            truncate(task_summary.as_deref().unwrap_or("undefined"))
+            crate::text::truncate_chars(task_summary.as_deref().unwrap_or("undefined"), 240)
         )),
         Event::BrainThinking { summary, .. } => Some(format!(
             "#{} brain_thinking: {}",
             record.sequence_num,
-            truncate(summary)
+            crate::text::truncate_chars(summary, 240)
         )),
         Event::Checkpoint { summary, .. } => Some(format!(
             "#{} checkpoint: {}",
             record.sequence_num,
-            truncate(summary)
+            crate::text::truncate_chars(summary, 240)
         )),
         Event::CacheReport { report } => Some(format!(
             "#{} cache_report provider={} model={} cached_input_tokens={}",
             record.sequence_num, report.provider, report.model, report.cached_input_tokens
         )),
-    }
-}
-
-fn truncate(text: &str) -> Cow<'_, str> {
-    const LIMIT: usize = 240;
-    // Collect up to LIMIT+1 chars to detect overflow in one pass.
-    let mut iter = text.chars();
-    let head: String = iter.by_ref().take(LIMIT + 1).collect();
-    if head.chars().count() <= LIMIT {
-        // Original text fits; return a borrow.
-        Cow::Borrowed(text)
-    } else {
-        // Trim to LIMIT-3 and append ellipsis.
-        let prefix: String = head.chars().take(LIMIT - 3).collect();
-        Cow::Owned(format!("{prefix}..."))
     }
 }
 

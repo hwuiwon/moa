@@ -18,16 +18,3 @@ impl TurnId {
         Self(Uuid::now_v7())
     }
 }
-
-/// Stable identifier for one lineage record payload.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct LineageRecordId(pub Uuid);
-
-impl LineageRecordId {
-    /// Creates a UUIDv7 lineage record identifier.
-    #[must_use]
-    pub fn new_v7() -> Self {
-        Self(Uuid::now_v7())
-    }
-}

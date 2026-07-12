@@ -163,19 +163,6 @@ impl ActionRuleScope {
     }
 }
 
-/// Result of evaluating action policy for one tool invocation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActionPolicyDecision {
-    /// Effect to apply.
-    pub effect: ActionPolicyEffect,
-    /// Optional human-readable reason for the decision.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// Optional policy rule that matched.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matched_rule_id: Option<Uuid>,
-}
-
 /// Persistent action-policy rule matched by tool and normalized input pattern.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionPolicyRule {

@@ -95,32 +95,10 @@ impl OpenAiPrivacyFilterClassifier {
         }
     }
 
-    /// Overrides the model-version string returned in classifier results.
-    pub fn with_model_version(mut self, model_version: impl Into<String>) -> Self {
-        self.model_version = model_version.into();
-        self
-    }
-
     /// Overrides fail-closed behavior for callers that need hard error propagation.
     pub fn with_fail_closed_on_error(mut self, fail_closed_on_error: bool) -> Self {
         self.fail_closed_on_error = fail_closed_on_error;
         self
-    }
-
-    /// Overrides confidence thresholds used to aggregate spans.
-    pub fn with_thresholds(mut self, thresholds: PrivacyFilterThresholds) -> Self {
-        self.thresholds = thresholds;
-        self
-    }
-
-    /// Returns the currently configured model-version string.
-    pub fn model_version(&self) -> &str {
-        &self.model_version
-    }
-
-    /// Returns the currently configured aggregation thresholds.
-    pub fn thresholds(&self) -> PrivacyFilterThresholds {
-        self.thresholds
     }
 }
 

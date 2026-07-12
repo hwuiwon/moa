@@ -9,6 +9,7 @@ pub mod pipeline;
 pub mod planning;
 pub mod retrieval;
 pub mod segment_assessment;
+mod text;
 pub mod turn;
 pub mod turn_learning;
 pub mod turn_segments;

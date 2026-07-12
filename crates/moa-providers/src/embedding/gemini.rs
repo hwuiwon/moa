@@ -96,11 +96,6 @@ impl GeminiEmbeddingEmbedder {
         self
     }
 
-    pub fn with_max_concurrent_requests(mut self, max_in_flight: usize) -> Self {
-        self.limiter = ConcurrencyLimiter::new(max_in_flight);
-        self
-    }
-
     /// Embeds one chunk of inputs in a single `:batchEmbedContents` round trip.
     ///
     /// Callers must keep `texts` within [`GEMINI_MAX_BATCH_SIZE`]; the returned

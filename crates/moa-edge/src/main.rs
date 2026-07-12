@@ -63,10 +63,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let _telemetry_guard = moa_observability::init_observability(
         &telemetry_config,
-        &moa_observability::TelemetryConfig {
-            json_stdout: true,
-            ..moa_observability::TelemetryConfig::default()
-        },
+        &moa_observability::TelemetryConfig { json_stdout: true },
     )
     .context("initialize edge observability")?;
 

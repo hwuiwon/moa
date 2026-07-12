@@ -12,17 +12,17 @@ use crate::catalog::find_dataset;
 use crate::error::{AnalyticsError, Result};
 
 /// Default number of rows returned when a query omits an explicit limit.
-pub const DEFAULT_QUERY_LIMIT: u32 = 100;
+pub(crate) const DEFAULT_QUERY_LIMIT: u32 = 100;
 /// Maximum number of rows returned by the analytics service.
-pub const MAX_QUERY_LIMIT: u32 = 1_000;
+pub(crate) const MAX_QUERY_LIMIT: u32 = 1_000;
 /// Maximum grouping dimensions per request.
-pub const MAX_DIMENSIONS: usize = 6;
+pub(crate) const MAX_DIMENSIONS: usize = 6;
 /// Maximum measures per request.
-pub const MAX_MEASURES: usize = 12;
+pub(crate) const MAX_MEASURES: usize = 12;
 /// Maximum filters per request.
-pub const MAX_FILTERS: usize = 20;
+pub(crate) const MAX_FILTERS: usize = 20;
 /// Maximum supported timestamp `between` filter span.
-pub const MAX_TIME_WINDOW_DAYS: i64 = 366;
+pub(crate) const MAX_TIME_WINDOW_DAYS: i64 = 366;
 
 /// Query request after catalog and limit validation.
 #[derive(Debug, Clone, PartialEq)]
@@ -45,7 +45,7 @@ pub fn validate_query(
 
 /// Validates a query against a caller-supplied `now`, used by tests to pin the
 /// time-window bound against a fixed clock.
-pub fn validate_query_at(
+pub(crate) fn validate_query_at(
     catalog: &AnalyticsCatalogResponse,
     request: AnalyticsQueryRequest,
     now: DateTime<Utc>,

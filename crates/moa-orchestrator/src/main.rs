@@ -85,13 +85,8 @@ async fn async_main() -> anyhow::Result<()> {
     let moa_config = load_moa_config_from_env()?;
     let skip_fga = skip_fga_from_env();
     let moa_config = Arc::new(moa_config);
-    let _telemetry = init_observability(
-        moa_config.as_ref(),
-        &TelemetryConfig {
-            json_stdout: true,
-            ..TelemetryConfig::default()
-        },
-    )?;
+    let _telemetry =
+        init_observability(moa_config.as_ref(), &TelemetryConfig { json_stdout: true })?;
     let database_search_path = database_search_path(moa_config.as_ref());
     let migration_pool = build_database_pool(
         moa_config.database.admin_url(),

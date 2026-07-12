@@ -180,14 +180,6 @@ impl ToolRouter {
         self
     }
 
-    /// Installs or replaces the graph-memory executor used by built-in memory tools.
-    pub async fn set_memory_tool_executor(
-        &self,
-        executor: Arc<dyn moa_core::traits::MemoryToolExecutor>,
-    ) {
-        *self.memory_tool_executor.write().await = Some(executor);
-    }
-
     /// Attaches the read-only retrieval executor backing the agentic memory tools.
     #[must_use]
     pub fn with_memory_retrieval_executor(

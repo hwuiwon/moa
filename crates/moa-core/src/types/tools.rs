@@ -201,6 +201,8 @@ pub fn read_tool_policy(input_shape: ToolInputShape) -> ToolPolicySpec {
 }
 
 /// Creates a write-capable tool policy.
+///
+/// `pub` as a test seam: paired with [`read_tool_policy`] for cross-crate tool-registry tests.
 pub fn write_tool_policy(
     input_shape: ToolInputShape,
     diff_strategy: ToolDiffStrategy,

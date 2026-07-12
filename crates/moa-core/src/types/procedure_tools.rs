@@ -155,7 +155,7 @@ pub fn procedure_tool_schemas() -> Vec<Value> {
 
 /// Stable `run_procedure` tool schema.
 #[must_use]
-pub fn run_procedure_tool_schema() -> Value {
+pub(crate) fn run_procedure_tool_schema() -> Value {
     serde_json::json!({
         "name": "run_procedure",
         "description": "Deterministically execute a selected skill's procedure instead of improvising the steps. Use this when a selected skill is marked [procedure] and the task matches it. Provide the skill and an input object that satisfies the procedure's required inputs. If required inputs are missing, the result reports exactly which fields to collect from the user before retrying, so ask for those fields and call again. The run is durable and may pause for review; use procedure_status with the returned run_id to poll it rather than waiting.",
@@ -183,7 +183,7 @@ pub fn run_procedure_tool_schema() -> Value {
 
 /// Stable `procedure_status` tool schema.
 #[must_use]
-pub fn procedure_status_tool_schema() -> Value {
+pub(crate) fn procedure_status_tool_schema() -> Value {
     serde_json::json!({
         "name": "procedure_status",
         "description": "Poll a previously started procedure run and report its current status, node progress, terminal output, or error. Use the run_id returned by run_procedure.",

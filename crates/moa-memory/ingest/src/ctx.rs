@@ -215,7 +215,6 @@ pub struct IngestRuntime {
     entity_resolver_name: &'static str,
     entity_blocking_enabled: bool,
     contradiction_detector: Arc<dyn ContradictionDetector>,
-    contradiction_detector_name: &'static str,
     vector_store_factory: VectorStoreFactory,
     fact_extraction_enabled: bool,
     fingerprint: IngestRuntimeFingerprint,
@@ -281,7 +280,6 @@ impl IngestRuntime {
             contradiction_detector: Arc::new(RrfPlusJudgeDetector::from_config_or_heuristic(
                 config,
             )),
-            contradiction_detector_name,
             vector_store_factory: VectorStoreFactory::from_config(config),
             fact_extraction_enabled: config.memory.extraction.enabled,
             fingerprint,
@@ -318,15 +316,6 @@ impl IngestRuntime {
     #[must_use]
     pub fn with_entity_merge_verifier(self, verifier: Arc<dyn EntityMergeVerifier>) -> Self {
         self.with_entity_resolver(Arc::new(EntityResolver::for_app_role(verifier)))
-    }
-
-    /// Returns a copy of this runtime that uses the provided contradiction detector.
-    #[must_use]
-    pub fn with_contradiction_detector(mut self, detector: Arc<dyn ContradictionDetector>) -> Self {
-        self.contradiction_detector = detector;
-        self.contradiction_detector_name = "custom";
-        self.fingerprint.contradiction_detector_name = "custom";
-        self
     }
 
     /// Returns the Postgres pool used by ingestion handlers.

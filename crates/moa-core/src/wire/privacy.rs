@@ -68,12 +68,6 @@ pub fn contact_privacy_subject_string(contact_id: ContactId) -> String {
     format!("{CONTACT_PRIVACY_SUBJECT_PREFIX}{}", contact_id.0)
 }
 
-/// Formats a contact id as a privacy subject user id.
-#[must_use]
-pub fn contact_privacy_subject_user_id(contact_id: ContactId) -> UserId {
-    UserId::new(contact_privacy_subject_string(contact_id))
-}
-
 /// Error returned when a privacy subject id cannot be parsed.
 #[derive(Debug, thiserror::Error)]
 #[error("subject_user_id must be a UUID-backed user id: {0}")]

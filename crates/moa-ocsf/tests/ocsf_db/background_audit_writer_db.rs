@@ -7,7 +7,7 @@ use moa_core::{
     traits::{Identity, IdentityType},
     types::identifiers::TenantId,
 };
-use moa_ocsf::{dropped_audit_count, init_background_audit, signing, spawn_authn_success};
+use moa_ocsf::{init_background_audit, signing, spawn_authn_success};
 use uuid::Uuid;
 
 use super::support;
@@ -52,7 +52,6 @@ async fn background_audit_writer_persists_signed_events_off_the_request_path_db(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert_eq!(count, expected, "all enqueued events are persisted");
-    assert_eq!(dropped_audit_count(), 0, "no events dropped with headroom");
 
     // The background-signed rows verify against the tenant's signing key.
     let (signing_key_id, signature_hex, event_jcs): (Uuid, String, Vec<u8>) = sqlx::query_as(

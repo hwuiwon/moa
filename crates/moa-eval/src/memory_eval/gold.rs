@@ -19,8 +19,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::io::{read_jsonl, write_jsonl};
-use super::scope::{stable_uuid_from_label, tenant_id_from_storage_partition_id};
 use super::{LedgerFact, SyntheticSession, SyntheticTurn, validate_ledger, validate_sessions};
+use super::{stable_uuid_from_label, tenant_id_from_storage_partition_id};
 use moa_eval_core::{EvalError, Result};
 
 const CHUNK_TARGET_TOKENS: usize = 700;

@@ -91,11 +91,6 @@ impl ZeroEntropyReranker {
         self
     }
 
-    pub fn with_max_concurrent_requests(mut self, max_in_flight: usize) -> Self {
-        self.limiter = ConcurrencyLimiter::new(max_in_flight);
-        self
-    }
-
     /// Sets the optional ZeroEntropy latency mode.
     #[must_use]
     pub fn with_latency(mut self, latency: Option<ZeroEntropyRerankLatency>) -> Self {

@@ -529,6 +529,8 @@ impl From<moa_eval_core::EvalError> for EvalServiceError {
 }
 
 /// Verifies that a workflow status response is scoped to the requested tenant.
+///
+/// `pub` as a test seam: asserted directly by the cross-crate `eval_service` integration test.
 pub fn verify_run_status_tenant(
     request_tenant_id: TenantId,
     response: &EvalRunStatusResponse,

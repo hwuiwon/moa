@@ -2,6 +2,9 @@
 
 use serde::Deserialize;
 
+use super::ScimResponseError;
+use super::schema::SCHEMA_PATCH;
+
 /// SCIM PatchOp request.
 #[derive(Debug, Deserialize)]
 pub struct PatchOp {
@@ -10,6 +13,26 @@ pub struct PatchOp {
     /// Patch operations.
     #[serde(rename = "Operations")]
     pub operations: Vec<Operation>,
+}
+
+impl PatchOp {
+    /// Rejects PATCH bodies that omit the SCIM PatchOp schema URN.
+    ///
+    /// RFC 7644 §3.5.2 requires every PATCH request to declare
+    /// [`SCHEMA_PATCH`](super::schema::SCHEMA_PATCH) in its `schemas` array.
+    /// Handlers call this before interpreting operations so a malformed envelope
+    /// is refused with a `400` rather than silently applying whichever
+    /// operations happen to parse.
+    pub fn validate_schema(&self) -> Result<(), ScimResponseError> {
+        if self.schemas.iter().any(|schema| schema == SCHEMA_PATCH) {
+            Ok(())
+        } else {
+            Err(ScimResponseError::bad_request(
+                "invalidValue",
+                format!("PatchOp requests must declare the `{SCHEMA_PATCH}` schema"),
+            ))
+        }
+    }
 }
 
 /// One SCIM PATCH operation.
@@ -204,4 +227,48 @@ fn member_value(value: &serde_json::Value) -> Option<&str> {
         .get("value")
         .and_then(serde_json::Value::as_str)
         .or_else(|| value.as_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Operation, PatchOp};
+    use crate::services::scim::schema::SCHEMA_PATCH;
+    use axum::http::StatusCode;
+
+    // Pins: SCIM PATCH bodies that omit the PatchOp schema URN are rejected with a
+    // 400 invalidValue SCIM error before any operation is interpreted, while a body
+    // that declares the URN passes schema validation.
+    #[test]
+    fn validate_schema_requires_patchop_urn() {
+        let wrong = PatchOp {
+            schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:User".to_string()],
+            operations: vec![Operation {
+                op: "replace".to_string(),
+                path: Some("active".to_string()),
+                value: Some(serde_json::Value::Bool(false)),
+            }],
+        };
+        let error = wrong
+            .validate_schema()
+            .expect_err("PATCH body without the PatchOp schema URN must be rejected");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.scim_type.as_deref(), Some("invalidValue"));
+
+        let missing = PatchOp {
+            schemas: Vec::new(),
+            operations: Vec::new(),
+        };
+        assert!(
+            missing.validate_schema().is_err(),
+            "PATCH body with no declared schemas must be rejected"
+        );
+
+        let valid = PatchOp {
+            schemas: vec![SCHEMA_PATCH.to_string()],
+            operations: Vec::new(),
+        };
+        valid
+            .validate_schema()
+            .expect("PATCH body declaring the PatchOp schema URN must validate");
+    }
 }

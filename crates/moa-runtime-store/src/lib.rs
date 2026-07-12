@@ -14,7 +14,7 @@ use moa_core::config::{RuntimeCacheBackend, RuntimeCacheConfig};
 use moa_core::error::{MoaError, Result};
 
 /// Environment flag that explicitly allows the process-local memory backend for `auto`.
-pub const MEMORY_BACKEND_OPT_IN_ENV: &str = "MOA_RUNTIME_CACHE_ALLOW_MEMORY";
+pub(crate) const MEMORY_BACKEND_OPT_IN_ENV: &str = "MOA_RUNTIME_CACHE_ALLOW_MEMORY";
 
 /// Runtime cache backend after `auto` selection has been resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

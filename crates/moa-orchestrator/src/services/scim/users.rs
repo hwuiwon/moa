@@ -144,6 +144,7 @@ pub async fn patch_user(
     Json(patch): Json<PatchOp>,
 ) -> Result<Json<ScimUser>, ScimResponseError> {
     let identity = authenticate_scim(&state, &headers).await?;
+    patch.validate_schema()?;
     let mutation = interpret_user(&patch)
         .map_err(|error| ScimResponseError::bad_request("invalidSyntax", error))?;
     user_admin::patch_user(

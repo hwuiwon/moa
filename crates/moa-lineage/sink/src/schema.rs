@@ -3,9 +3,6 @@
 use crate::Result;
 use crate::error::Error;
 
-/// Idempotent schema DDL for the engineering-tier lineage tables.
-pub const SCHEMA_DDL: &str = moa_migrations::LINEAGE_SCHEMA_DDL;
-
 /// Ensures the lineage schema exists.
 pub async fn ensure_schema(pool: &sqlx::PgPool) -> Result<()> {
     moa_migrations::ensure_lineage_schema(pool)

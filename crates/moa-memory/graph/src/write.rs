@@ -397,7 +397,7 @@ pub async fn invalidate_node(store: &PostgresGraphStore, uid: Uuid, reason: &str
 }
 
 /// Closes one active graph node into an already-existing replacement node atomically.
-pub async fn close_existing_node_with_supersession(
+pub(crate) async fn close_existing_node_with_supersession(
     store: &PostgresGraphStore,
     intent: ExistingSupersessionIntent,
 ) -> Result<()> {
@@ -488,7 +488,10 @@ pub async fn close_existing_node_with_supersession(
 /// are closed or removed, and a changelog record is written — history and as-of
 /// reads keep working. Returns `false` without writing when the node is already
 /// closed, so scheduled passes rerun idempotently at the same `now`.
-pub async fn expire_node(store: &PostgresGraphStore, intent: NodeExpiryIntent) -> Result<bool> {
+pub(crate) async fn expire_node(
+    store: &PostgresGraphStore,
+    intent: NodeExpiryIntent,
+) -> Result<bool> {
     let mut conn = store.begin_required().await?;
     let old = fetch_stored_node(conn.as_mut(), intent.uid)
         .await?
@@ -540,7 +543,7 @@ pub async fn expire_node(store: &PostgresGraphStore, intent: NodeExpiryIntent) -
 }
 
 /// Updates one active graph node's mutable properties atomically.
-pub async fn update_node_properties(
+pub(crate) async fn update_node_properties(
     store: &PostgresGraphStore,
     intent: NodePropertyUpdateIntent,
 ) -> Result<()> {
@@ -654,7 +657,7 @@ pub async fn reinforce_node_in_conn(
 }
 
 /// Attaches a vector embedding to one active graph node atomically.
-pub async fn upsert_node_embedding(
+pub(crate) async fn upsert_node_embedding(
     store: &PostgresGraphStore,
     intent: NodeEmbeddingIntent,
 ) -> Result<()> {
@@ -921,64 +924,6 @@ async fn close_incident_edges(
     .bind(uid)
     .execute(conn)
     .await?;
-    Ok(())
-}
-
-/// Soft-invalidates one graph edge by closing its validity window.
-pub async fn invalidate_edge(store: &PostgresGraphStore, uid: Uuid, reason: &str) -> Result<()> {
-    let mut conn = store.begin_required().await?;
-    let row = sqlx::query(
-        r#"
-        SELECT label, storage_partition_id, user_id, scope, valid_to
-        FROM moa.edge_index
-        WHERE uid = $1
-        FOR UPDATE
-        "#,
-    )
-    .bind(uid)
-    .fetch_optional(conn.as_mut())
-    .await?
-    .ok_or(GraphError::NotFound(uid))?;
-    let valid_to: Option<DateTime<Utc>> = row.try_get("valid_to")?;
-    if valid_to.is_some() {
-        return Err(GraphError::BiTemporal(format!(
-            "{uid} is already invalidated"
-        )));
-    }
-
-    let now = Utc::now();
-    sqlx::query("UPDATE moa.edge_index SET valid_to = $1 WHERE uid = $2 AND valid_to IS NULL")
-        .bind(now)
-        .bind(uid)
-        .execute(conn.as_mut())
-        .await?;
-    let (actor_id, actor_kind) = mutation_actor(store);
-    let label: String = row.try_get("label")?;
-    write_and_bump(
-        conn.as_mut(),
-        ChangelogRecord {
-            storage_partition_id: row.try_get("storage_partition_id")?,
-            contact_id: row.try_get("user_id")?,
-            scope: row.try_get("scope")?,
-            actor_id,
-            actor_kind,
-            op: "invalidate".to_string(),
-            target_kind: "edge".to_string(),
-            target_label: label,
-            target_uid: uid,
-            payload: json!({
-                "reason": reason,
-                "valid_to": now.to_rfc3339(),
-            }),
-            redaction_marker: None,
-            pii_class: "none".to_string(),
-            audit_metadata: None,
-            cause_change_id: None,
-        },
-    )
-    .await?;
-
-    conn.commit().await?;
     Ok(())
 }
 

@@ -3,7 +3,7 @@
 use moa_core::{
     types::contact::ContactId, types::contact::ContactRef, types::contact::ContactVerificationState, types::identifiers::StoragePartitionId, types::identifiers::TenantId, types::completion::TokenUsage,
 };
-use moa_test_support::fixtures::contact_ref_fixture;
+use moa_test_support::fixtures::{contact_ref_fixture, stable_uuid_from_label};
 use uuid::Uuid;
 
 fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
@@ -37,15 +37,6 @@ fn contact_id_from_label(label: &str) -> ContactId {
     Uuid::parse_str(label)
         .map(ContactId)
         .unwrap_or_else(|_| ContactId(stable_uuid_from_label(label)))
-}
-
-fn stable_uuid_from_label(label: &str) -> Uuid {
-    let hash = blake3::hash(label.as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Uuid::from_bytes(bytes)
 }
 
 fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {

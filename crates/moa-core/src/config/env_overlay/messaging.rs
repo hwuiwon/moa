@@ -21,10 +21,6 @@ pub(super) fn validate_urls(overlay: &MoaEnvOverlay) -> Result<()> {
     )?;
     validate_url("MOA_ORCHESTRATOR_ENDPOINT", &overlay.orchestrator_endpoint)?;
     validate_url(
-        "MOA_ORCHESTRATOR_HEALTH_URL",
-        &overlay.orchestrator_health_url,
-    )?;
-    validate_url(
         "MOA_RUNTIME_CACHE_REDIS_URL",
         &overlay.runtime_cache_redis_url,
     )?;

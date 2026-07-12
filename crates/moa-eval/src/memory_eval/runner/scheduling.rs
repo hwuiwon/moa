@@ -101,7 +101,8 @@ pub(super) async fn run_memory_retrieval_eval_in_store(
             store.pool().clone(),
             providers.embedder.clone(),
             providers.reranker.clone(),
-            options.lane_ranking_config(),
+            options.ranking_config().clone(),
+            options.lane_window_policy(),
             providers.deterministic_replay,
         )
     });
@@ -146,7 +147,8 @@ pub(super) async fn run_memory_retrieval_eval_in_store(
                 &retrieval_probe,
                 ProbeRetrieveOptions {
                     use_reranker: options.reranker_enabled(),
-                    ranking_config: options.lane_ranking_config(),
+                    ranking_config: options.ranking_config().clone(),
+                    window_policy: options.lane_window_policy(),
                     ranking_reference_time: Some(ranking_reference_time),
                     deterministic_replay: providers.deterministic_replay,
                     graph_expansion_policy: options.graph_expansion_policy,

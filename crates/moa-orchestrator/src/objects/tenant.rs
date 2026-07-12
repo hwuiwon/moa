@@ -136,9 +136,6 @@ pub trait TenantObject {
     /// Initializes the tenant object with its persisted config and schedules the first run.
     async fn init(config: Json<TenantConfig>) -> Result<(), HandlerError>;
 
-    /// Schedules the next daily consolidation workflow.
-    async fn schedule_consolidation() -> Result<(), HandlerError>;
-
     /// Marks the tenant as actively consolidating.
     async fn mark_consolidation_started(
         target_date: Json<chrono::NaiveDate>,
@@ -181,15 +178,6 @@ impl TenantObject for TenantImpl {
         state.config = Some(config.clone());
         state.persist_into(&ctx);
 
-        schedule_consolidation_inner(&ctx, &mut state).await?;
-        state.persist_into(&ctx);
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self, ctx))]
-    async fn schedule_consolidation(&self, ctx: ObjectContext<'_>) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("Tenant", "schedule_consolidation");
-        let mut state = TenantVoState::load_from(&ctx).await?;
         schedule_consolidation_inner(&ctx, &mut state).await?;
         state.persist_into(&ctx);
         Ok(())

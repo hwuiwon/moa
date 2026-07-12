@@ -27,10 +27,6 @@ pub use node::{
 };
 pub use store::PostgresGraphStore;
 pub use validity::push_validity_filter;
-pub use write::{
-    close_existing_node_with_supersession, invalidate_edge, update_node_properties,
-    upsert_node_embedding,
-};
 
 /// Result type returned by graph-memory helpers.
 pub type Result<T> = std::result::Result<T, GraphError>;

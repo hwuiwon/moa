@@ -12,7 +12,7 @@ use uuid::Uuid;
 pub const SCORE_RUN_SOURCE_EVAL_REPLAY: &str = "eval_replay";
 
 /// Tenant-scoped score summary SQL used by score-reader services.
-pub const SCORES_BY_RUN_SQL: &str = r#"
+pub(crate) const SCORES_BY_RUN_SQL: &str = r#"
 SELECT name,
        value_type,
        COUNT(*)::BIGINT AS n,
@@ -25,7 +25,7 @@ ORDER BY name, value_type
 "#;
 
 /// Tenant-scoped numeric score comparison SQL used by score-reader services.
-pub const COMPARE_NUMERIC_RUNS_SQL: &str = r#"
+pub(crate) const COMPARE_NUMERIC_RUNS_SQL: &str = r#"
 WITH base AS (
     SELECT name, AVG(value_numeric) AS mean
     FROM analytics.scores

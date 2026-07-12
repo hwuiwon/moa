@@ -172,14 +172,6 @@ impl TurbopufferStore {
         store
     }
 
-    /// Returns a clone that targets a specific Turbopuffer vector element type.
-    #[must_use]
-    pub fn with_vector_type(&self, vector_type: TurbopufferVectorType) -> Self {
-        let mut store = self.clone();
-        store.vector_type = vector_type;
-        store
-    }
-
     /// Returns the Turbopuffer namespace for one storage partition.
     pub fn namespace_for_storage_partition(&self, storage_partition_id: &str) -> Result<String> {
         let storage_partition_segment = namespace_segment(storage_partition_id);

@@ -47,7 +47,6 @@ mod memory;
 mod session;
 mod session_stream;
 mod tenant_accounts;
-mod tools;
 mod webhook_verification;
 mod whoami;
 
@@ -1140,7 +1139,6 @@ fn translate_public_route(
         memory::translate,
         knowledge::translate,
         artifacts::translate,
-        tools::translate,
     ] {
         if let Some(translation) = translate(method, uri, body, tenant_id) {
             return translation;

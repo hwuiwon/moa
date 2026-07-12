@@ -23,7 +23,7 @@ use crate::error::{AnalyticsError, Result};
 /// calls the matching `query` / `query_clickhouse` entrypoint.
 /// Default Postgres `statement_timeout` applied to each analytics query when
 /// the caller does not override it from config.
-pub const DEFAULT_STATEMENT_TIMEOUT_MS: u64 = 10_000;
+pub(crate) const DEFAULT_STATEMENT_TIMEOUT_MS: u64 = 10_000;
 
 #[derive(Debug, Clone)]
 pub struct AnalyticsService {

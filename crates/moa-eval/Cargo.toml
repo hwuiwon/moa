@@ -27,6 +27,7 @@ moa-memory-vector = { workspace = true }
 moa-providers = { workspace = true, features = ["test-util"] }
 moa-security = { workspace = true }
 moa-session = { workspace = true }
+moa-test-support = { workspace = true }
 opentelemetry.workspace = true
 regex.workspace = true
 serde.workspace = true
@@ -46,5 +47,4 @@ workspace-hack = { workspace = true }
 
 [dev-dependencies]
 moa-skills = { workspace = true }
-moa-test-support = { workspace = true }
 tempfile.workspace = true

@@ -1,8 +1,5 @@
 //! Tracing and OpenTelemetry bootstrap helpers for MOA binaries.
 
-use std::fs::OpenOptions;
-use std::path::PathBuf;
-
 use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::tonic_types::metadata::MetadataMap;
@@ -28,16 +25,12 @@ use moa_core::{
 #[derive(Debug, Default)]
 pub struct TelemetryGuard {
     provider: Option<SdkTracerProvider>,
-    _log_writer_guard: Option<tracing_appender::non_blocking::WorkerGuard>,
 }
 
 impl TelemetryGuard {
     /// Creates an empty telemetry guard when OTLP export is disabled.
     pub fn disabled() -> Self {
-        Self {
-            provider: None,
-            _log_writer_guard: None,
-        }
+        Self { provider: None }
     }
 }
 
@@ -52,20 +45,8 @@ impl Drop for TelemetryGuard {
 /// API-controlled telemetry settings layered on top of config-driven observability.
 #[derive(Debug, Clone, Default)]
 pub struct TelemetryConfig {
-    /// Enables debug-level file logging.
-    pub debug: bool,
-    /// Optional explicit log file path.
-    pub log_file: Option<PathBuf>,
     /// Emits structured JSON logs to stdout instead of the human-readable console formatter.
     pub json_stdout: bool,
-}
-
-/// Returns the default MOA operator log file path.
-pub fn default_log_path() -> PathBuf {
-    match std::env::var_os("HOME") {
-        Some(home) => PathBuf::from(home).join(".moa").join("moa.log"),
-        None => PathBuf::from(".moa").join("moa.log"),
-    }
 }
 
 /// Initializes tracing with optional OTLP export and returns a guard that owns active writers.
@@ -95,48 +76,13 @@ pub fn init_observability(
             .unwrap_or_else(|_| EnvFilter::new(default_env_filter_directive())),
     );
 
-    let (file_layer, log_writer_guard) = if telemetry.debug || telemetry.log_file.is_some() {
-        let path = telemetry.log_file.clone().unwrap_or_else(default_log_path);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| MoaError::ConfigError(error.to_string()))?;
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?;
-        let (writer, guard) = tracing_appender::non_blocking(file);
-        let file_filter = if telemetry.debug {
-            LevelFilter::DEBUG
-        } else {
-            LevelFilter::INFO
-        };
-        (
-            Some(
-                tracing_subscriber::fmt::layer()
-                    .with_ansi(false)
-                    .with_target(true)
-                    .with_writer(writer)
-                    .with_filter(file_filter),
-            ),
-            Some(guard),
-        )
-    } else {
-        (None, None)
-    };
-
     if !config.observability.enabled {
         let _ = tracing_subscriber::registry()
             .with(env_filter)
             .with(console_layer)
-            .with(file_layer)
             .try_init();
         init_metrics(&config.metrics)?;
-        return Ok(TelemetryGuard {
-            provider: None,
-            _log_writer_guard: log_writer_guard,
-        });
+        return Ok(TelemetryGuard { provider: None });
     }
 
     let exporter = build_span_exporter(&config.observability)?;
@@ -151,14 +97,12 @@ pub fn init_observability(
     let _ = tracing_subscriber::registry()
         .with(env_filter)
         .with(console_layer)
-        .with(file_layer)
         .with(otel_layer)
         .try_init();
     init_metrics(&config.metrics)?;
 
     Ok(TelemetryGuard {
         provider: Some(provider),
-        _log_writer_guard: log_writer_guard,
     })
 }
 

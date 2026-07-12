@@ -472,15 +472,6 @@ pub fn record_tool_output_truncated_metric(tool_name: &str) {
     .increment(1);
 }
 
-/// Records one applied compaction tier.
-pub fn record_compaction_tier_applied(tier: u8) {
-    counter!(
-        "moa_compaction_tier_applied_total",
-        "tier" => tier.to_string()
-    )
-    .increment(1);
-}
-
 /// Records one end-to-end turn latency sample.
 pub fn record_turn_latency(duration: Duration) {
     histogram!("moa_turn_latency_seconds").record(duration.as_secs_f64());
@@ -523,11 +514,6 @@ pub fn record_turn_workflow_outcome(
     .record(duration.as_secs_f64());
 }
 
-/// Records one pipeline compilation duration sample.
-pub fn record_pipeline_compile_duration_metric(duration: Duration) {
-    histogram!("moa_pipeline_compile_seconds").record(duration.as_secs_f64());
-}
-
 /// Records one query-rewrite gate outcome.
 pub fn record_query_rewrite_decision(
     decision: &str,
@@ -559,16 +545,6 @@ pub fn record_sandbox_provision_duration(provider: &str, tier: &str, duration: D
         "tier" => tier.to_string()
     )
     .record(duration.as_secs_f64());
-}
-
-/// Records the time spent beginning a scoped Postgres transaction.
-pub fn record_scoped_transaction_begin_duration(duration: Duration) {
-    histogram!("moa_scoped_transaction_begin_seconds").record(duration.as_secs_f64());
-}
-
-/// Records the time spent applying scoped Postgres GUC values.
-pub fn record_scoped_guc_application_duration(duration: Duration) {
-    histogram!("moa_scoped_guc_application_seconds").record(duration.as_secs_f64());
 }
 
 /// Records one appended session event, labeled by event type.
@@ -673,88 +649,6 @@ pub fn record_knowledge_sync_run(provider: &str, status: &str) {
     .increment(1);
 }
 
-/// Records provider record actions observed during tenant knowledge sync.
-pub fn record_knowledge_records(provider: &str, action: &str, count: u64) {
-    if count == 0 {
-        return;
-    }
-
-    counter!(
-        "moa_knowledge_records_total",
-        "provider" => knowledge_metric_label(provider),
-        "action" => knowledge_metric_label(action)
-    )
-    .increment(count);
-}
-
-/// Records tenant knowledge ingestion stage duration.
-pub fn record_knowledge_ingestion_step_duration(
-    provider: &str,
-    parser: &str,
-    stage: &str,
-    status: &str,
-    duration: Duration,
-) {
-    histogram!(
-        "moa_knowledge_ingestion_step_duration_seconds",
-        "provider" => knowledge_metric_label(provider),
-        "parser" => knowledge_metric_label(parser),
-        "stage" => knowledge_metric_label(stage),
-        "status" => knowledge_metric_label(status)
-    )
-    .record(duration.as_secs_f64());
-}
-
-/// Records parser job outcomes for tenant knowledge ingestion.
-pub fn record_knowledge_parse_job(parser: &str, status: &str) {
-    counter!(
-        "moa_knowledge_parse_jobs_total",
-        "parser" => knowledge_metric_label(parser),
-        "status" => knowledge_metric_label(status)
-    )
-    .increment(1);
-}
-
-/// Records tenant knowledge chunk actions.
-pub fn record_knowledge_chunks(action: &str, count: u64) {
-    if count == 0 {
-        return;
-    }
-
-    counter!(
-        "moa_knowledge_chunks_total",
-        "action" => knowledge_metric_label(action)
-    )
-    .increment(count);
-}
-
-/// Records tenant knowledge embedding outcomes.
-pub fn record_knowledge_embeddings(status: &str, count: u64) {
-    if count == 0 {
-        return;
-    }
-
-    counter!(
-        "moa_knowledge_embeddings_total",
-        "status" => knowledge_metric_label(status)
-    )
-    .increment(count);
-}
-
-/// Records tenant knowledge graph write outcomes.
-pub fn record_knowledge_graph_write(kind: &str, status: &str, count: u64) {
-    if count == 0 {
-        return;
-    }
-
-    counter!(
-        "moa_knowledge_graph_writes_total",
-        "kind" => knowledge_metric_label(kind),
-        "status" => knowledge_metric_label(status)
-    )
-    .increment(count);
-}
-
 /// Records tenant knowledge retrieval stage duration.
 pub fn record_knowledge_retrieval_duration(stage: &str, status: &str, duration: Duration) {
     histogram!(
@@ -777,20 +671,6 @@ pub fn record_knowledge_retrieval_hits(source_tier: &str, leg: &str, count: u64)
         "leg" => knowledge_metric_label(leg)
     )
     .increment(count);
-}
-
-/// Records live broadcast events dropped because a receiver lagged.
-pub fn record_broadcast_lag(channel: &str, policy: &str, dropped_events: u64) {
-    if dropped_events == 0 {
-        return;
-    }
-
-    counter!(
-        "moa_broadcast_lag_events_dropped_total",
-        "channel" => channel.to_string(),
-        "policy" => policy.to_string()
-    )
-    .increment(dropped_events);
 }
 
 /// Records the time spent validating an API key.
@@ -1497,8 +1377,6 @@ mod tests {
         record_cache_hit_rate("mock", "gpt-5.4", 0.5);
         record_turn_latency(Duration::from_millis(25));
         record_turn_step_duration(TurnLatencyStep::PipelineCompile, Duration::from_millis(10));
-        record_scoped_transaction_begin_duration(Duration::from_millis(1));
-        record_scoped_guc_application_duration(Duration::from_millis(2));
         record_session_event_append("ToolCall");
         record_session_event_append_phase_duration(
             SessionEventAppendPhase::AcquireConnection,
@@ -1557,8 +1435,6 @@ mod tests {
         assert!(scrape.contains("moa_cache_hit_rate"));
         assert!(scrape.contains("moa_turn_latency_seconds"));
         assert!(scrape.contains("moa_turn_step_duration_seconds"));
-        assert!(scrape.contains("moa_scoped_transaction_begin_seconds"));
-        assert!(scrape.contains("moa_scoped_guc_application_seconds"));
         assert!(scrape.contains("moa_session_events_appended_total"));
         assert!(scrape.contains("moa_session_event_append_phase_seconds"));
         assert!(scrape.contains("phase=\"acquire_connection\""));
@@ -1803,18 +1679,6 @@ mod tests {
         metrics::with_local_recorder(&recorder, || {
             register_metric_descriptions();
             record_knowledge_sync_run("github", "succeeded");
-            record_knowledge_records("github", "upserted", 5);
-            record_knowledge_ingestion_step_duration(
-                "github",
-                "pdf",
-                "parse",
-                "ok",
-                Duration::from_millis(3),
-            );
-            record_knowledge_parse_job("pdf", "ok");
-            record_knowledge_chunks("created", 7);
-            record_knowledge_embeddings("ok", 7);
-            record_knowledge_graph_write("node", "ok", 4);
             record_knowledge_retrieval_duration("vector", "ok", Duration::from_millis(2));
             record_knowledge_retrieval_hits("graph", "dense", 2);
         });
@@ -1837,16 +1701,7 @@ mod tests {
             !knowledge_series.is_empty(),
             "knowledge metric series should be exported:\n{rendered}"
         );
-        for required_label in [
-            "provider=",
-            "status=",
-            "action=",
-            "parser=",
-            "stage=",
-            "kind=",
-            "source_tier=",
-            "leg=",
-        ] {
+        for required_label in ["provider=", "status=", "stage=", "source_tier=", "leg="] {
             assert!(
                 knowledge_series.contains(required_label),
                 "knowledge series should include bounded label `{required_label}`:\n{knowledge_series}"

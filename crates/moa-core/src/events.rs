@@ -82,13 +82,6 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
-    /// Session completed successfully.
-    SessionCompleted {
-        /// Human-readable summary.
-        summary: String,
-        /// Number of turns completed.
-        total_turns: u32,
-    },
     /// A new task segment started within the session.
     SegmentStarted {
         /// Segment identifier.
@@ -476,29 +469,6 @@ pub enum Event {
         /// Contradictions detected in the source text.
         contradictions: Vec<String>,
     },
-    /// Hand was provisioned.
-    HandProvisioned {
-        /// Hand identifier.
-        hand_id: String,
-        /// Provider name.
-        provider: String,
-        /// Sandbox tier name.
-        tier: String,
-    },
-    /// Hand was destroyed.
-    HandDestroyed {
-        /// Hand identifier.
-        hand_id: String,
-        /// Reason for destruction.
-        reason: String,
-    },
-    /// Hand encountered an error.
-    HandError {
-        /// Hand identifier.
-        hand_id: String,
-        /// Error message.
-        error: String,
-    },
     /// Checkpoint event used for compaction.
     Checkpoint {
         /// Summary text.
@@ -549,7 +519,7 @@ pub enum Event {
 /// `ProgressNarrated` or a watchdog `WorkerHeartbeatStale` landing just after a
 /// `ToolResult`) silently masked pending work and stalled the turn loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ProcessingEffect {
+pub(crate) enum ProcessingEffect {
     /// The event carries unaddressed work: if it is the newest meaningful event
     /// in the tail, a model turn must be compiled. Tool call/result/error
     /// events, fresh user messages, and system-seeded coordinator
@@ -574,7 +544,7 @@ impl Event {
     /// See [`ProcessingEffect`] for the meaning of each effect. The match is
     /// deliberately exhaustive with no wildcard arm so that a newly added
     /// [`Event`] variant forces an explicit scheduling decision at compile time.
-    pub fn processing_effect(&self) -> ProcessingEffect {
+    pub(crate) fn processing_effect(&self) -> ProcessingEffect {
         match self {
             // Triggers: unaddressed work that a model turn must consume.
             Self::UserMessage { .. }
@@ -591,7 +561,6 @@ impl Event {
             // Terminals: the turn loop has concluded or is suspended awaiting an
             // out-of-band decision; the tail alone implies no pending model turn.
             Self::BrainResponse { .. }
-            | Self::SessionCompleted { .. }
             // An error halts the turn; recovery is driven by durable Restate retry,
             // not by re-scanning and re-triggering the tail.
             | Self::Error { .. }
@@ -627,9 +596,6 @@ impl Event {
             | Self::MemoryRead { .. }
             | Self::MemoryWrite { .. }
             | Self::MemoryIngest { .. }
-            | Self::HandProvisioned { .. }
-            | Self::HandDestroyed { .. }
-            | Self::HandError { .. }
             | Self::Checkpoint { .. }
             | Self::CacheReport { .. }
             | Self::Warning { .. } => ProcessingEffect::Neutral,
@@ -1191,10 +1157,6 @@ mod tests {
                 output_tokens: 1,
                 cost_cents: 0,
                 duration_ms: 1,
-            },
-            Event::SessionCompleted {
-                summary: "wrapped".to_string(),
-                total_turns: 1,
             },
             Event::Error {
                 message: "boom".to_string(),

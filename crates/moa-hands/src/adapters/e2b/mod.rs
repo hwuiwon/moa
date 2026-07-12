@@ -126,6 +126,7 @@ impl E2BHandProvider {
     }
 
     /// Explicitly configures E2B sandbox internet access.
+    #[cfg(test)]
     #[must_use]
     pub fn with_allow_internet_access(mut self, allow_internet_access: bool) -> Self {
         self.allow_internet_access = allow_internet_access;
@@ -133,6 +134,7 @@ impl E2BHandProvider {
     }
 
     /// Overrides the computed envd sandbox base URL. Intended for tests and local proxies.
+    #[cfg(test)]
     pub fn with_sandbox_base_url(mut self, sandbox_base_url: impl Into<String>) -> Self {
         self.sandbox_base_url_override =
             Some(sandbox_base_url.into().trim_end_matches('/').to_string());

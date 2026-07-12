@@ -1348,7 +1348,6 @@ fn reduce_leg_degrades_transient_and_timeout_but_aborts_fatal() {
     )
     .expect("a transient leg error must degrade, not abort");
     assert!(transient.value.is_empty());
-    assert!(transient.degraded);
     assert!(!transient.timed_out);
 
     let timeout = reduce_leg::<Vec<LegCandidate>>("vector", LegOutcome::Timeout)
@@ -1362,7 +1361,7 @@ fn reduce_leg_degrades_transient_and_timeout_but_aborts_fatal() {
     )
     .expect("a completed leg passes through");
     assert_eq!(completed.value.len(), 1);
-    assert!(!completed.degraded);
+    assert!(!completed.timed_out);
 
     let fatal = reduce_leg::<Vec<LegCandidate>>(
         "vector",
@@ -2114,7 +2113,6 @@ fn evidence_floor_drops_lexically_unsupported_hits_but_keeps_graph_hits() {
     )];
     let disabled = RankingConfig {
         min_hit_evidence: 0.0,
-        abstain_below_window_evidence: 0.0,
         ..RankingConfig::default()
     };
     apply_injection_evidence_floor(&mut noise, &disabled, &query);
@@ -2206,12 +2204,10 @@ fn window_abstention_clears_low_evidence_windows_but_spares_supported_and_graph_
 }
 
 #[test]
-fn default_window_policy_ignores_nonzero_ranking_config_window_knobs() {
+fn default_window_policy_never_abstains() {
     // Pins: the evidence window is request-scoped. A request carrying the
-    // default (off) EvidenceWindowPolicy is never abstained, even when the
-    // retriever's RankingConfig still holds non-zero window knobs (retained
-    // only for cache-fingerprint stability). This is the guard against the
-    // 2026-07-11 clamp where a retriever-global window policy cut a
+    // default (off) EvidenceWindowPolicy is never abstained. This is the guard
+    // against the 2026-07-11 clamp where a retriever-global window policy cut a
     // knowledge-lane retrieval down to the memory-lane window.
     let query = RetrievalRequest {
         seeds: Vec::new(),
@@ -2230,13 +2226,9 @@ fn default_window_policy_ignores_nonzero_ranking_config_window_knobs() {
         disable_graph_expansion: false,
         window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
     };
-    // The config still carries the production non-zero window knobs; they must
-    // not drive abstention now that the policy rides the request.
-    let config = RankingConfig {
-        abstain_below_window_evidence: 0.68,
-        rerank_window: 3,
-        ..RankingConfig::default()
-    };
+    // The window policy rides the request; the ranking config no longer carries
+    // any window knob that could drive abstention.
+    let config = RankingConfig::default();
     let mut noise = vec![fact_hit_with_spo(
         Uuid::from_u128(1),
         0.9,
@@ -2247,9 +2239,5 @@ fn default_window_policy_ignores_nonzero_ranking_config_window_knobs() {
 
     apply_injection_evidence_floor(&mut noise, &config, &query);
 
-    assert_eq!(
-        noise.len(),
-        1,
-        "a default request policy must not abstain even with non-zero config window knobs"
-    );
+    assert_eq!(noise.len(), 1, "a default request policy must not abstain");
 }

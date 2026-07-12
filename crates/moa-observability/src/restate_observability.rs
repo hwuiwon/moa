@@ -30,7 +30,7 @@ pub fn current_trace_id() -> Option<String> {
 
 /// Returns the OpenTelemetry trace ID for a tracing span when it has a sampled context.
 #[must_use]
-pub fn trace_id_for_span(span: &tracing::Span) -> Option<String> {
+pub(crate) fn trace_id_for_span(span: &tracing::Span) -> Option<String> {
     let trace_id = span.context().span().span_context().trace_id();
     let value = trace_id.to_string();
     if value.chars().all(|character| character == '0') {
@@ -41,7 +41,7 @@ pub fn trace_id_for_span(span: &tracing::Span) -> Option<String> {
 }
 
 /// Applies stable session, tenant, and contact tracing attributes to the provided span.
-pub fn apply_session_trace(
+pub(crate) fn apply_session_trace(
     span: &tracing::Span,
     meta: &SessionMeta,
     prompt: Option<&str>,
@@ -53,7 +53,7 @@ pub fn apply_session_trace(
 }
 
 /// Adds a deterministic session-root link so all turns can be grouped by session in Tempo.
-pub fn add_session_trace_link(span: &tracing::Span, session_id: SessionId) {
+pub(crate) fn add_session_trace_link(span: &tracing::Span, session_id: SessionId) {
     span.add_link(synthetic_session_span_context(session_id));
 }
 

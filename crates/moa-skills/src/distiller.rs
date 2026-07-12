@@ -36,7 +36,7 @@ use crate::regression::{
 };
 
 /// Similarity score at or above which distillation routes to existing-skill improvement.
-pub const SIMILARITY_THRESHOLD: f32 = 0.5;
+pub(crate) const SIMILARITY_THRESHOLD: f32 = 0.5;
 
 /// Why one distillation pass was dispatched, and the evidence bar it carries.
 ///

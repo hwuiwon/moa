@@ -14,6 +14,7 @@ pub mod model_fact_extractor;
 pub mod recorded;
 pub mod slow_path;
 
+pub use chunking::chunk_turn;
 pub use contradiction::{
     Conflict, ContradictionContext, ContradictionDetector, RrfPlusJudgeDetector,
 };
@@ -28,8 +29,8 @@ pub use entity_resolution::{
 pub use error::{IngestError, Result};
 pub use extract::{
     ClassifiedFact, EmbeddedFact, ExtractedFact, ExtractedFactScopeHint, IngestApplyReport,
-    IngestDecision, SessionTurn, TurnChunk, chunk_turn, extract_facts, extraction_confidence_hint,
-    fact_hash, fact_uid_from_hash, scoped_fact_uid, should_ingest_degraded,
+    IngestDecision, SessionTurn, TurnChunk, extract_facts, extraction_confidence_hint, fact_hash,
+    fact_uid_from_hash, scoped_fact_uid, should_ingest_degraded,
 };
 #[cfg(any(test, feature = "test-util"))]
 pub use extractor::ScriptedFactExtractor;
@@ -37,7 +38,7 @@ pub use extractor::{FactExtractor, HeuristicFactExtractor};
 pub use fast_path::{
     FastError, FastMemoryToolExecutor, FastPathCtx, FastRememberRequest, ForgetPattern,
     IncidentRecord, execute_memory_tool, fast_forget, fast_remember, fast_supersede,
-    is_fast_memory_tool, record_incident, record_incident_with_ctx,
+    record_incident, record_incident_with_ctx,
 };
 pub use model_client::ModelCallObserver;
 pub use model_entity_merge::{

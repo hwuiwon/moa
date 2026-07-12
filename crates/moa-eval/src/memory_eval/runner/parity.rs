@@ -106,6 +106,7 @@ impl ParityProbeRetriever {
         embedder: Arc<dyn EmbeddingProvider>,
         reranker: Arc<dyn Reranker>,
         ranking_config: RankingConfig,
+        window_policy: EvidenceWindowPolicy,
         deterministic_replay: bool,
     ) -> Self {
         let factory = Arc::new(EvalScopedRetrievalRuntimeFactory {
@@ -116,15 +117,15 @@ impl ParityProbeRetriever {
         });
         // Stage 7 populates each request's `EvidenceWindowPolicy` from the
         // retriever's `MoaConfig` memory ranking knobs, so the lane's window
-        // knobs must ride in through the same config path the production
-        // retriever reads (the direct probe path sets them per request).
+        // policy must ride in through the same config path the production
+        // retriever reads (the direct probe path sets it per request).
         let mut config = MoaConfig::default();
-        config.memory.retrieval.ranking.rerank_window = ranking_config.rerank_window;
+        config.memory.retrieval.ranking.rerank_window = window_policy.rerank_window;
         config
             .memory
             .retrieval
             .ranking
-            .abstain_below_window_evidence = ranking_config.abstain_below_window_evidence;
+            .abstain_below_window_evidence = window_policy.abstain_below_window_evidence;
         let retriever = GraphMemoryRetriever::new_with_config(config, pool, Some(embedder))
             .with_assume_app_role(true)
             .with_scoped_runtime_factory(factory);

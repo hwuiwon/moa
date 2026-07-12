@@ -25,7 +25,7 @@ async fn sign_verify_roundtrip_detects_tamper_and_wrong_key() {
         "time": "2026-05-11T00:00:00Z"
     });
 
-    let (signing_key_id, signature_hex, event_jcs) = signing::sign(&pool, tenant_id, &event)
+    let (signing_key_id, signature_hex, event_jcs) = signing::sign_cached(&pool, tenant_id, &event)
         .await
         .expect("sign event");
 

@@ -440,10 +440,6 @@ pub struct TaskStrategySuccessRate {
     pub success_rate: f64,
     /// Mean assessment confidence for matching experiences.
     pub avg_confidence: f64,
-    /// Average token cost for matching experiences.
-    pub avg_token_cost: f64,
-    /// Average turn count for matching experiences.
-    pub avg_turn_count: f64,
     /// Mean attribution-effect score over the same non-unused rows as
     /// [`Self::success_rate`], mapping Helpful=1.0, Mixed=0.5, Neutral=0.5,
     /// Harmful=0.0. Diverges from `success_rate` when a used skill's engaging

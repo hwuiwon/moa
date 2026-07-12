@@ -92,21 +92,6 @@ impl PostgresSessionStore {
             .map_err(map_sqlx_error)?;
         rows.iter().map(learning_entry_from_row).collect()
     }
-
-    /// Invalidates every current learning-log entry in a batch.
-    pub async fn rollback_batch(&self, batch_id: Uuid) -> Result<u64> {
-        let learning_log = self.table_name("learning_log");
-        let affected = sqlx::query(&format!(
-            "UPDATE {learning_log} SET valid_to = NOW() \
-             WHERE batch_id = $1 AND valid_to IS NULL"
-        ))
-        .bind(batch_id)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?
-        .rows_affected();
-        Ok(affected)
-    }
 }
 
 #[async_trait]
@@ -122,9 +107,5 @@ impl SessionLearningLogStore for PostgresSessionStore {
         limit: usize,
     ) -> Result<Vec<LearningEntry>> {
         PostgresSessionStore::list_learnings(self, tenant_id, learning_type, limit).await
-    }
-
-    async fn rollback_batch(&self, batch_id: Uuid) -> Result<u64> {
-        PostgresSessionStore::rollback_batch(self, batch_id).await
     }
 }

@@ -51,7 +51,7 @@ pub enum SigningError {
 
 /// Active tenant signing key.
 #[derive(Debug, Clone)]
-pub struct ActiveKey {
+pub(crate) struct ActiveKey {
     /// Signing key row id.
     pub key_id: Uuid,
     /// Base64-encoded HMAC key material.
@@ -106,7 +106,7 @@ pub async fn rotate_key(pool: &PgPool, tenant_id: Uuid) -> Result<Uuid, SigningE
 }
 
 /// Generate a fresh active signing key inside an existing transaction.
-pub async fn rotate_key_tx(
+pub(crate) async fn rotate_key_tx(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
 ) -> Result<Uuid, SigningError> {
@@ -139,18 +139,6 @@ pub async fn rotate_key_tx(
     .await?;
 
     Ok(key_id)
-}
-
-/// Sign a JSON event using the tenant's active key.
-pub async fn sign(
-    pool: &PgPool,
-    tenant_id: Uuid,
-    event_json: &Value,
-) -> Result<(Uuid, String, Vec<u8>), SigningError> {
-    let mut tx = pool.begin().await?;
-    let signed = sign_tx(&mut tx, tenant_id, event_json).await?;
-    tx.commit().await?;
-    Ok(signed)
 }
 
 /// Sign a JSON event using the tenant's active key, reusing a cached key.
@@ -211,7 +199,7 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 }
 
 /// Sign a JSON event inside an existing transaction.
-pub async fn sign_tx(
+pub(crate) async fn sign_tx(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
     event_json: &Value,

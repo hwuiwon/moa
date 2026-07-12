@@ -3,9 +3,8 @@
 use moa_core::{
     error::MoaError, error::Result, types::action_policy::ActionClass,
     types::action_policy::ActionEnvelope, types::action_policy::ActionPolicyEffect,
-    types::action_policy::ActionPolicyRule, types::action_policy::ActionReviewField,
-    types::action_policy::ActionReviewFileDiff, types::action_policy::ActionReviewPreview,
-    types::action_policy::ActionRuleScope, types::action_policy::RiskLevel,
+    types::action_policy::ActionReviewField, types::action_policy::ActionReviewFileDiff,
+    types::action_policy::ActionReviewPreview, types::action_policy::RiskLevel,
     types::completion::ToolInvocation, types::contact::SessionActorRef,
     types::identifiers::ToolCallId, types::identifiers::UserId,
     types::procedure_tools::ProcedureToolKind, types::procedure_tools::is_procedure_tool_name,
@@ -213,38 +212,6 @@ impl ToolRouter {
             policy_input,
             policy,
         })
-    }
-
-    /// Persists an action-policy rule for the current workspace.
-    pub async fn store_action_policy_rule(
-        &self,
-        session: &SessionMeta,
-        tool: &str,
-        pattern: &str,
-        effect: ActionPolicyEffect,
-        created_by: UserId,
-    ) -> Result<()> {
-        let Some(rule_store) = &self.rule_store else {
-            return Err(MoaError::Unsupported(
-                "tool router does not have an action-policy rule store".to_string(),
-            ));
-        };
-
-        let rule = ActionPolicyRule {
-            id: Uuid::now_v7(),
-            tool: tool.to_string(),
-            pattern: pattern.to_string(),
-            effect,
-            scope: ActionRuleScope::Tenant {
-                tenant_id: session.tenant_id,
-            },
-            reason: None,
-            created_by,
-            created_at: chrono::Utc::now(),
-        };
-        moa_security::validate_action_policy_rule(&rule)?;
-
-        rule_store.upsert_action_policy_rule(rule).await
     }
 
     fn describe_invocation(

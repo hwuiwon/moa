@@ -111,7 +111,7 @@ pub struct ProviderModel {
 impl ProviderModel {
     /// Builds `moa-core` model capabilities from this catalog entry.
     #[must_use]
-    pub fn capabilities_with_native_tools(
+    fn capabilities_with_native_tools(
         &self,
         native_tools: Vec<ProviderNativeTool>,
     ) -> ModelCapabilities {

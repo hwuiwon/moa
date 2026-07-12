@@ -393,9 +393,6 @@ fn redacted_event_summary(event: &Event) -> String {
         Event::SessionChannelChanged { from, to, .. } => {
             format!("channel changed from {} to {}", from.as_str(), to.as_str())
         }
-        Event::SessionCompleted { total_turns, .. } => {
-            format!("session completed after {total_turns} turns")
-        }
         Event::SegmentStarted { segment_index, .. } => {
             format!("segment {segment_index} started")
         }
@@ -502,13 +499,6 @@ fn redacted_event_summary(event: &Event) -> String {
         Event::MemoryIngest { affected_pages, .. } => {
             format!("memory ingest affected {} pages", affected_pages.len())
         }
-        Event::HandProvisioned {
-            hand_id,
-            provider,
-            tier,
-        } => format!("hand {hand_id} provisioned provider={provider} tier={tier}"),
-        Event::HandDestroyed { hand_id, .. } => format!("hand {hand_id} destroyed"),
-        Event::HandError { hand_id, .. } => format!("hand {hand_id} error"),
         Event::Checkpoint {
             events_summarized,
             token_count,

@@ -466,9 +466,7 @@ pub async fn record_skill_learning_failure(
     store
         .emit_event_record(
             session_id,
-            Event::Warning {
-                message: skill_learning_failure_message(experience_id, error),
-            },
+            skill_learning_failure_event(experience_id, error),
             None,
         )
         .await
@@ -484,9 +482,7 @@ async fn record_skill_learning_failure_from_workflow(
         .service_client::<RestateSessionStoreClient>()
         .append_event(Json(AppendEventRequest {
             session_id,
-            event: Event::Warning {
-                message: skill_learning_failure_message(experience_id, error),
-            },
+            event: skill_learning_failure_event(experience_id, error),
             dedupe_key: None,
         }))
         .call()
@@ -501,8 +497,15 @@ async fn record_skill_learning_failure_from_workflow(
     }
 }
 
-fn skill_learning_failure_message(experience_id: Uuid, error: &str) -> String {
-    format!("skill learning proposal generation failed for experience {experience_id}: {error}")
+/// Builds the warning event emitted when detached skill-learning generation
+/// fails. Both the production Restate append path and the direct-store test
+/// helper construct their event here so the payload shape stays identical.
+fn skill_learning_failure_event(experience_id: Uuid, error: &str) -> Event {
+    Event::Warning {
+        message: format!(
+            "skill learning proposal generation failed for experience {experience_id}: {error}"
+        ),
+    }
 }
 
 async fn load_experience_record(

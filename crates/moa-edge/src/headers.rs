@@ -15,19 +15,11 @@ pub const H_API_KEY_ID: &str = "x-moa-api-key-id";
 /// Delegating user UUID header.
 pub const H_ACTING_ON_BEHALF_OF: &str = "x-moa-acting-on-behalf-of";
 
-/// Identity headers written by `moa-edge`.
-pub const ALL: &[&str] = &[
-    H_IDENTITY_TYPE,
-    H_IDENTITY_ID,
-    H_TENANT_ID,
-    H_API_KEY_ID,
-    H_ACTING_ON_BEHALF_OF,
-];
-
 /// Returns true when a header name belongs to the MOA identity namespace.
 ///
 /// Matched case-insensitively against the `x-moa-` prefix (which covers every
-/// name in [`ALL`]) so callers need not allocate a lowercased copy per header.
+/// identity header written by `moa-edge`) so callers need not allocate a
+/// lowercased copy per header.
 #[must_use]
 pub fn is_moa_header(name: &str) -> bool {
     const PREFIX: &[u8] = b"x-moa-";

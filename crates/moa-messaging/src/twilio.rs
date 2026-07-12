@@ -81,20 +81,6 @@ impl TwilioSmsMessage {
         self.from = Some(from.into());
         self
     }
-
-    /// Sets the Twilio Messaging Service SID for this message.
-    #[must_use]
-    pub fn with_messaging_service_sid(mut self, sid: impl Into<String>) -> Self {
-        self.messaging_service_sid = Some(sid.into());
-        self
-    }
-
-    /// Sets a Twilio status callback URL for this message.
-    #[must_use]
-    pub fn with_status_callback(mut self, url: impl Into<String>) -> Self {
-        self.status_callback = Some(url.into());
-        self
-    }
 }
 
 /// Result returned by Twilio after accepting an SMS send request.

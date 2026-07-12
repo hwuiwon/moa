@@ -9,9 +9,7 @@ use moa_memory_types::MemoryScope;
 use uuid::Uuid;
 
 use crate::planning::ner::{NerExtractor, NerSpan};
-use crate::retrieval::{
-    LineageContext, PlannedRetriever, RetrievalError, RetrievalHit, RetrievalRequest,
-};
+use crate::retrieval::{PlannedRetriever, RetrievalError, RetrievalHit, RetrievalRequest};
 
 const DEFAULT_SEED_LIMIT_PER_SPAN: i64 = 5;
 
@@ -200,8 +198,6 @@ pub struct QueryRetrievalCtx<'a> {
     pub use_reranker: bool,
     /// Optional deterministic reference time for ranking features.
     pub ranking_reference_time: Option<DateTime<Utc>>,
-    /// Optional turn context for fire-and-forget retrieval lineage capture.
-    pub lineage: Option<LineageContext>,
     /// Whether retrieval leg timeout budgets are disabled.
     pub disable_leg_timeouts: bool,
     /// Whether graph expansion should be skipped.
@@ -227,7 +223,6 @@ impl<'a> QueryRetrievalCtx<'a> {
             k_final: 5,
             use_reranker: false,
             ranking_reference_time: None,
-            lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
         }
@@ -251,20 +246,6 @@ impl<'a> QueryRetrievalCtx<'a> {
     #[must_use]
     pub fn with_ranking_reference_time(mut self, reference_time: DateTime<Utc>) -> Self {
         self.ranking_reference_time = Some(reference_time);
-        self
-    }
-
-    /// Attaches turn context for retrieval lineage capture.
-    #[must_use]
-    pub fn with_lineage_context(mut self, lineage: LineageContext) -> Self {
-        self.lineage = Some(lineage);
-        self
-    }
-
-    /// Disables retrieval leg timeout budgets for deterministic offline evaluation.
-    #[must_use]
-    pub fn with_leg_timeouts_disabled(mut self) -> Self {
-        self.disable_leg_timeouts = true;
         self
     }
 }
@@ -292,7 +273,6 @@ pub async fn retrieve_for_query(
         ctx.use_reranker,
     );
     request.ranking_reference_time = ctx.ranking_reference_time;
-    request.lineage = ctx.lineage;
     request.disable_leg_timeouts = ctx.disable_leg_timeouts;
     request.disable_graph_expansion = ctx.disable_graph_expansion
         || should_skip_graph_expansion_for_direct_lookup(&planned, &request.query_text);

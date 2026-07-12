@@ -144,8 +144,4 @@ pub struct SkillResolutionRate {
     pub uses: u64,
     /// Resolution-rate value in `[0.0, 1.0]`.
     pub resolution_rate: f64,
-    /// Average token cost for matching segments.
-    pub avg_token_cost: f64,
-    /// Average turn count for matching segments.
-    pub avg_turn_count: f64,
 }

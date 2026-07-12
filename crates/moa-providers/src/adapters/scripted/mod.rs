@@ -352,26 +352,6 @@ impl ScriptedProvider {
         self.push_response(ScriptedResponse::text(text))
     }
 
-    /// Appends one tool-call response.
-    pub fn push_tool_call(
-        self,
-        name: impl Into<String>,
-        input: Value,
-        id: impl Into<String>,
-    ) -> Self {
-        self.push_response(ScriptedResponse::tool_call(name, input, id))
-    }
-
-    /// Appends one response composed from multiple scripted blocks.
-    pub fn push_multi_block(self, blocks: Vec<ScriptedBlock>) -> Self {
-        self.push_response(ScriptedResponse::from_blocks(blocks))
-    }
-
-    /// Appends one final end-turn response.
-    pub fn push_end_turn(self, text: impl Into<String>) -> Self {
-        self.push_text(text)
-    }
-
     /// Returns all completion requests recorded so far.
     pub fn recorded_requests(&self) -> Vec<CompletionRequest> {
         self.recorded_requests

@@ -16,7 +16,7 @@ pub mod enums;
 pub mod jcs;
 pub mod signing;
 
-pub use audit_sink::{dropped_audit_count, init_background_audit};
+pub use audit_sink::init_background_audit;
 pub use emit::{
     ActorInput, EmitError, emit_agent_deactivated_tx, emit_agent_registered_tx,
     emit_api_key_created_tx, emit_api_key_revoked_tx, emit_approval_decided_tx, emit_authn_failure,

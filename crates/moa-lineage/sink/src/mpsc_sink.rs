@@ -57,53 +57,6 @@ fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// Builder for `MpscSink`.
-#[derive(Debug, Default)]
-pub struct MpscSinkBuilder {
-    config: MpscSinkConfig,
-}
-
-impl MpscSinkBuilder {
-    /// Creates a builder with default configuration.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Overrides the channel capacity.
-    #[must_use]
-    pub fn channel_capacity(mut self, channel_capacity: usize) -> Self {
-        self.config.channel_capacity = channel_capacity;
-        self
-    }
-
-    /// Overrides the worker batch size.
-    #[must_use]
-    pub fn batch_size(mut self, batch_size: usize) -> Self {
-        self.config.batch_size = batch_size;
-        self
-    }
-
-    /// Overrides the worker batch max age.
-    #[must_use]
-    pub fn batch_max_age(mut self, batch_max_age: Duration) -> Self {
-        self.config.batch_max_age = batch_max_age;
-        self
-    }
-
-    /// Overrides the fjall journal path.
-    #[must_use]
-    pub fn journal_path(mut self, journal_path: PathBuf) -> Self {
-        self.config.journal_path = journal_path;
-        self
-    }
-
-    /// Spawns a sink and writer against the provided lineage store.
-    pub async fn spawn(self, store: LineageStore) -> Result<(MpscSink, WriterHandle)> {
-        MpscSink::spawn(self.config, store).await
-    }
-}
-
 /// Production hot-path lineage sink.
 #[derive(Clone)]
 pub struct MpscSink {

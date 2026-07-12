@@ -174,7 +174,7 @@ pub fn require_contact_agent_permission(
 }
 
 /// Returns the single selected agent id from a contact session request.
-pub fn validate_contact_agent_selection(agent: &AgentSessionSelection) -> Result<String> {
+pub(crate) fn validate_contact_agent_selection(agent: &AgentSessionSelection) -> Result<String> {
     match (agent.installation_uid, agent.revision_uid) {
         (Some(installation_uid), None) => Ok(installation_uid.to_string()),
         (None, Some(revision_uid)) => Ok(revision_uid.to_string()),

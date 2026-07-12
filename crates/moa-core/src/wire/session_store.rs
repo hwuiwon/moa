@@ -6,7 +6,7 @@ use crate::{
     types::events_stream::EventRange,
     types::experience::{
         ExperienceAttribution, ExperienceRecord, LearningCandidate, LearningCandidateStatus,
-        LearningCandidateStatusUpdate, TaskStrategySuccessRate,
+        LearningCandidateStatusUpdate,
     },
     types::identifiers::{SegmentId, SessionId, TenantId},
     types::segment_assessment::SegmentAssessment,
@@ -132,14 +132,6 @@ pub struct ListTaskStrategySuccessRatesRequest {
     pub tenant_id: TenantId,
     /// Task fingerprint hash to aggregate against.
     pub task_fingerprint: String,
-}
-
-/// Response payload for task-conditioned strategy aggregates.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ListTaskStrategySuccessRatesResponse {
-    /// Matching task-conditioned strategy rows.
-    #[serde(default)]
-    pub rates: Vec<TaskStrategySuccessRate>,
 }
 
 /// Request payload for `SessionStore/append_experience_record`.

@@ -63,11 +63,6 @@ impl CohereReranker {
         self.limiter = limiter;
         self
     }
-
-    pub fn with_max_concurrent_requests(mut self, max_in_flight: usize) -> Self {
-        self.limiter = ConcurrencyLimiter::new(max_in_flight);
-        self
-    }
 }
 
 #[async_trait]

@@ -316,9 +316,6 @@ pub trait SessionLearningLogStore: Send + Sync {
         learning_type: Option<&str>,
         limit: usize,
     ) -> Result<Vec<LearningEntry>>;
-
-    /// Invalidates every current learning-log entry in a batch.
-    async fn rollback_batch(&self, batch_id: uuid::Uuid) -> Result<u64>;
 }
 
 /// Focused contract for task-segment persistence and segment-derived aggregates.

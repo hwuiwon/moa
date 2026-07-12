@@ -398,8 +398,6 @@ pub struct MoaEnvOverlay {
     pub restate_llm_gateway_url: Option<String>,
     /// `MOA_ORCHESTRATOR_ENDPOINT`.
     pub orchestrator_endpoint: Option<String>,
-    /// `MOA_ORCHESTRATOR_HEALTH_URL`.
-    pub orchestrator_health_url: Option<String>,
     /// `MOA_OBSERVABILITY_ENABLED`.
     pub observability_enabled: Option<bool>,
     /// `MOA_OBSERVABILITY_SERVICE_NAME`.
@@ -989,7 +987,7 @@ impl MoaEnvOverlay {
     /// `MOA_*` name that is neither a typed overlay field nor an approved special
     /// key: in strict mode it fails startup listing the offenders (with a
     /// nearest-match suggestion); otherwise it logs a warning.
-    pub fn audit_env_registry<I>(names: I, strict: bool) -> Result<()>
+    pub(crate) fn audit_env_registry<I>(names: I, strict: bool) -> Result<()>
     where
         I: IntoIterator<Item = String>,
     {
@@ -1021,7 +1019,7 @@ impl MoaEnvOverlay {
 
     /// Reads [`CONFIG_ENV_STRICT_VAR`] as a boolean strictness flag.
     #[must_use]
-    pub fn env_registry_strict_from_env() -> bool {
+    pub(crate) fn env_registry_strict_from_env() -> bool {
         std::env::var(CONFIG_ENV_STRICT_VAR)
             .ok()
             .is_some_and(|value| {

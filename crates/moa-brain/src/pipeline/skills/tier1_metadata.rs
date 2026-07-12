@@ -237,11 +237,14 @@ pub(super) fn format_skill_manifest(selected: &[RankedSkill]) -> String {
 }
 
 fn format_manifest_entry(metadata: &SkillMetadata, budget: &ResolvedSkillBudget) -> String {
-    let name = truncate_with_ellipsis(&normalize_inline_text(&metadata.name), MAX_SKILL_NAME_CHARS);
-    let description = truncate_with_ellipsis(
+    let name =
+        crate::text::truncate_chars(&normalize_inline_text(&metadata.name), MAX_SKILL_NAME_CHARS)
+            .into_owned();
+    let description = crate::text::truncate_chars(
         &normalize_inline_text(&metadata.description),
         MAX_SKILL_DESCRIPTION_CHARS,
-    );
+    )
+    .into_owned();
     let tags = normalized_tags(&metadata.tags);
     let tags = if tags.is_empty() {
         "none".to_string()
@@ -267,7 +270,7 @@ fn format_manifest_entry(metadata: &SkillMetadata, budget: &ResolvedSkillBudget)
         entry.push_str(&format!(" (est. {} tok)", metadata.estimated_tokens));
     }
 
-    truncate_with_ellipsis(&entry, budget.max_per_skill_chars)
+    crate::text::truncate_chars(&entry, budget.max_per_skill_chars).into_owned()
 }
 
 fn normalized_tags(tags: &[String]) -> Vec<String> {
@@ -330,20 +333,6 @@ fn normalize_inline_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
-    let char_count = value.chars().count();
-    if char_count <= max_chars {
-        return value.to_string();
-    }
-
-    if max_chars <= 3 {
-        return ".".repeat(max_chars);
-    }
-
-    let truncated = value.chars().take(max_chars - 3).collect::<String>();
-    format!("{truncated}...")
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -382,8 +371,6 @@ mod tests {
             uses: 10,
             success_rate: 0.8,
             avg_confidence: 1.0,
-            avg_token_cost: 100.0,
-            avg_turn_count: 2.0,
             // Distinct from success_rate so the blend is exercised, not a no-op.
             effect_score: 0.4,
             unused_injections: 0,
@@ -448,8 +435,6 @@ mod tests {
             uses: 5,
             success_rate: 1.0,
             avg_confidence: 1.0,
-            avg_token_cost: 100.0,
-            avg_turn_count: 2.0,
             effect_score: 1.0,
             unused_injections: 0,
         };
@@ -496,8 +481,6 @@ mod tests {
                 uses: 2,
                 success_rate: 1.0,
                 avg_confidence: 1.0,
-                avg_token_cost: 100.0,
-                avg_turn_count: 2.0,
                 effect_score: 1.0,
                 unused_injections: 2,
             },
@@ -724,8 +707,6 @@ mod tests {
                 uses: 8,
                 success_rate: 1.0,
                 avg_confidence: 0.95,
-                avg_token_cost: 100.0,
-                avg_turn_count: 2.0,
                 effect_score: 1.0,
                 unused_injections: 0,
             },

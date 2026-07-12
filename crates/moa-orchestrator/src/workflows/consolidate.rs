@@ -94,39 +94,6 @@ pub struct ConsolidateReport {
 }
 
 impl ConsolidateReport {
-    /// Builds a successful no-op report for graph memory.
-    #[must_use]
-    pub fn graph_noop(
-        tenant_id: TenantId,
-        target_date: NaiveDate,
-        ran_at: DateTime<Utc>,
-        duration_ms: u64,
-    ) -> Self {
-        Self {
-            tenant_id,
-            target_date,
-            ran_at,
-            records_updated: 0,
-            records_deleted: 0,
-            relative_dates_normalized: 0,
-            contradictions_resolved: 0,
-            confidence_decayed: 0,
-            duplicates_merged: 0,
-            duplicates_remaining: 0,
-            confidence_at_floor: 0,
-            facts_expired: 0,
-            entity_embeddings_backfilled: 0,
-            aliases_promoted: 0,
-            digests_rebuilt: 0,
-            digests_skipped_fresh: 0,
-            orphaned_records: Vec::new(),
-            summary_records_before: 0,
-            summary_records_after: 0,
-            duration_ms,
-            errors: Vec::new(),
-        }
-    }
-
     /// Builds a failure report that still lets the tenant reschedule future runs.
     #[must_use]
     pub fn failed(

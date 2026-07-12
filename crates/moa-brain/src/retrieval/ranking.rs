@@ -9,7 +9,11 @@ use moa_memory_types::MemoryScope;
 use serde::{Deserialize, Serialize};
 
 /// Ranking pipeline version included in cache fingerprints.
-pub const RANKING_PIPELINE_VERSION: u32 = 14;
+///
+/// Bumped to 15 when the vestigial `abstain_below_window_evidence` and
+/// `rerank_window` fields were dropped from [`RankingConfig`]; rotating the
+/// version invalidates cache fingerprints computed against the old shape.
+pub const RANKING_PIPELINE_VERSION: u32 = 15;
 
 /// Weights used by the FeatureV1 deterministic scorer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,17 +76,6 @@ pub struct RankingConfig {
     /// Minimum absolute lexical evidence a non-graph hit needs to enter the
     /// final injected window. `0.0` disables the floor.
     pub min_hit_evidence: f64,
-    /// Retained for cache-fingerprint stability only; no longer read by the
-    /// retriever. The whole-window abstain threshold now rides the request as
-    /// [`crate::retrieval::EvidenceWindowPolicy::abstain_below_window_evidence`],
-    /// calibrated per retrieval path. See
-    /// `MemoryRankingConfig::abstain_below_window_evidence`.
-    pub abstain_below_window_evidence: f64,
-    /// Retained for cache-fingerprint stability only; no longer read by the
-    /// retriever. The reranked-window size now rides the request as
-    /// [`crate::retrieval::EvidenceWindowPolicy::rerank_window`], calibrated per
-    /// retrieval path. See `MemoryRankingConfig::rerank_window`.
-    pub rerank_window: usize,
 }
 
 impl Default for RankingConfig {
@@ -93,8 +86,6 @@ impl Default for RankingConfig {
             graph_walk_prune_below: 0.05,
             graph_rescue_evidence_floor: 0.10,
             min_hit_evidence: 0.0,
-            abstain_below_window_evidence: 0.68,
-            rerank_window: 3,
         }
     }
 }
@@ -107,8 +98,6 @@ impl From<&MemoryRankingConfig> for RankingConfig {
             graph_walk_prune_below: value.graph_walk_prune_below,
             graph_rescue_evidence_floor: value.graph_rescue_evidence_floor,
             min_hit_evidence: value.min_hit_evidence,
-            abstain_below_window_evidence: value.abstain_below_window_evidence,
-            rerank_window: value.rerank_window,
         }
     }
 }

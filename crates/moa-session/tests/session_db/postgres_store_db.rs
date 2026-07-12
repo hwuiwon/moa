@@ -253,7 +253,7 @@ async fn learning_candidate_summaries_project_contact_scope_and_redact_payload_d
 
 #[tokio::test]
 #[ignore]
-async fn learning_log_round_trips_skill_entry_and_rollback_invalidates_batch() {
+async fn learning_log_round_trips_skill_entry() {
     with_test_store(|store| async move {
         let batch_id = Uuid::now_v7();
         let tenant_id = tenant_id("tenant-learning");
@@ -287,19 +287,6 @@ async fn learning_log_round_trips_skill_entry_and_rollback_invalidates_batch() {
         assert_eq!(
             learnings[0].payload,
             serde_json::json!({ "version": 1, "source": "distillation" })
-        );
-
-        let invalidated = store
-            .rollback_batch(batch_id)
-            .await
-            .expect("rollback batch");
-        assert_eq!(invalidated, 1);
-        assert!(
-            store
-                .list_learnings(&tenant_id.to_string(), Some("skill_created"), 10)
-                .await
-                .expect("list current learnings")
-                .is_empty()
         );
     })
     .await;
@@ -1375,8 +1362,6 @@ async fn postgres_task_segment_assessments_and_views_refresh() {
     assert_eq!(rates[0].skill_name, "moa-rust");
     assert_eq!(rates[0].uses, 20);
     assert!((rates[0].resolution_rate - 1.0_f64).abs() < f64::EPSILON);
-    assert!((rates[0].avg_token_cost - 500.0_f64).abs() < f64::EPSILON);
-    assert!((rates[0].avg_turn_count - 2.0_f64).abs() < f64::EPSILON);
 
     let baseline = store
         .get_segment_baseline("pg-outcome")

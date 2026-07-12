@@ -188,7 +188,7 @@ impl LlamaParseParser {
 
 /// Maps a LlamaParse result payload into a parsed document.
 #[must_use]
-pub fn map_llamaparse_result(job_id: String, value: Value) -> ParsedDocument {
+pub(crate) fn map_llamaparse_result(job_id: String, value: Value) -> ParsedDocument {
     let markdown = llamaparse_markdown(&value);
     let items = llamaparse_items(&value);
     let mut elements = Vec::new();

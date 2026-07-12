@@ -239,15 +239,6 @@ pub enum FastError {
     Ingest(#[from] IngestError),
 }
 
-/// Returns whether a tool name is handled by the graph-backed fast memory path.
-#[must_use]
-pub fn is_fast_memory_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "memory_remember" | "memory_forget" | "memory_supersede"
-    )
-}
-
 /// Remembers one fact through the graph write protocol.
 pub async fn fast_remember(req: FastRememberRequest, ctx: &FastPathCtx) -> Result<Uuid, FastError> {
     let started = Instant::now();

@@ -43,6 +43,13 @@ pub fn tenant_id_from_label(label: &str) -> TenantId {
 }
 
 /// Maps an arbitrary fixture label to a deterministic UUID.
+///
+/// This is THE workspace-wide stable-UUID-from-label helper for tests and eval
+/// tooling: given the same label it always returns the same UUID, and every
+/// caller that needs a deterministic UUID from a fixture label must route
+/// through this function so derived tenant/contact IDs stay identical across
+/// crates and lanes. Do not fork this logic (previous copies used a different
+/// hash and produced divergent UUIDs); import it here instead.
 #[must_use]
 pub fn stable_uuid_from_label(label: &str) -> Uuid {
     let digest = Sha256::digest(label.as_bytes());
@@ -87,5 +94,47 @@ pub fn session_meta_fixture(tenant_id: TenantId) -> SessionMeta {
         }),
         model: ModelId::new("test-model"),
         ..SessionMeta::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{stable_uuid_from_label, tenant_id_from_storage_partition};
+    use moa_core::types::identifiers::{StoragePartitionId, TenantId};
+    use uuid::Uuid;
+
+    #[test]
+    fn uuid_storage_partition_round_trips_to_tenant_id() {
+        // Pins: a UUID storage partition is treated as the canonical tenant UUID.
+        let tenant_uuid = Uuid::parse_str("018f8f1f-36a6-7c90-a7f8-2f2f57f5c222")
+            .expect("fixture tenant UUID should parse");
+        let tenant_id = TenantId::from(tenant_uuid);
+        let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
+
+        assert_eq!(
+            super::tenant_id_from_storage_partition_id(&storage_partition_id),
+            tenant_id
+        );
+    }
+
+    #[test]
+    fn label_storage_partition_maps_to_stable_tenant_id() {
+        // Pins: non-UUID storage labels derive a stable tenant ID from the label hash.
+        let tenant_id = tenant_id_from_storage_partition("tenant-payments");
+        let expected = TenantId::from(
+            Uuid::parse_str("6bccab23-77b2-8396-94ed-1bb14eb4ee59")
+                .expect("fixture deterministic tenant UUID should parse"),
+        );
+
+        assert_eq!(tenant_id, expected);
+    }
+
+    #[test]
+    fn stable_uuid_is_deterministic_for_label() {
+        // Pins: the same label always derives the same UUID.
+        assert_eq!(
+            stable_uuid_from_label("tenant-payments"),
+            stable_uuid_from_label("tenant-payments")
+        );
     }
 }

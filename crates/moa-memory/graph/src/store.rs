@@ -120,11 +120,6 @@ impl PostgresGraphStore {
         crate::write::upsert_node_embedding(self, intent).await
     }
 
-    /// Soft-invalidates one graph edge by closing its validity window.
-    pub async fn invalidate_edge(&self, uid: uuid::Uuid, reason: &str) -> Result<(), GraphError> {
-        crate::write::invalidate_edge(self, uid, reason).await
-    }
-
     /// Begins a scoped transaction when this store has an RLS context.
     pub(crate) async fn begin(&self) -> Result<Option<ScopedConn<'_>>, GraphError> {
         let Some(scope) = &self.scope else {

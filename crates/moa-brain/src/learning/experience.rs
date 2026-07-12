@@ -118,28 +118,6 @@ fn deterministic_experience_id(
     Uuid::from_bytes(bytes)
 }
 
-/// Builds an experience record from a segment when the segment already carries an assessment.
-#[must_use]
-pub fn experience_from_segment(
-    session: &SessionMeta,
-    segment: &TaskSegment,
-    events: &[EventRecord],
-    rewrite: Option<&QueryRewriteResult>,
-    duration_ms: Option<u64>,
-    now: DateTime<Utc>,
-) -> Option<ExperienceRecord> {
-    let assessment = segment.assessment.as_ref()?;
-    Some(experience_from_assessment(
-        session,
-        segment,
-        assessment,
-        events,
-        rewrite,
-        duration_ms,
-        now,
-    ))
-}
-
 /// Computes a stable fingerprint for a task summary and deterministic facets.
 #[must_use]
 pub fn fingerprint_for_task(summary: &str, facets: &TaskFacetSet) -> TaskFingerprint {
@@ -525,8 +503,9 @@ mod tests {
     }
 
     #[test]
-    fn experience_extracts_facets_and_resources() {
-        // Pins: assessed segments become bounded experience records with task facets and resources.
+    fn experience_from_assessment_extracts_facets_and_resources() {
+        // Pins: an assessed segment becomes a bounded experience record with
+        // deterministic task facets and deduplicated resources.
         let session_id = SessionId::new();
         let segment_id = SegmentId::new();
         let now = Utc
@@ -583,8 +562,15 @@ mod tests {
             token_count: None,
         }];
 
-        let experience = experience_from_segment(&session, &segment, &events, None, Some(100), now)
-            .expect("assessed segment should produce experience");
+        let experience = experience_from_assessment(
+            &session,
+            &segment,
+            &assessment,
+            &events,
+            None,
+            Some(100),
+            now,
+        );
 
         assert_eq!(
             experience.outcome,

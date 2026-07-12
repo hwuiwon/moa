@@ -330,7 +330,7 @@ pub fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
 }
 
 /// Normalizes an environment label for trace attributes.
-pub fn normalize_environment(value: &str) -> String {
+pub(crate) fn normalize_environment(value: &str) -> String {
     let normalized = value
         .chars()
         .map(|ch| match ch {

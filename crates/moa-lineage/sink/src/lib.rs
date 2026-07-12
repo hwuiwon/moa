@@ -12,7 +12,7 @@ mod writer;
 
 pub use clickhouse::{ClickHouseStore, LineageQueryFilters, LineageQueryRecord};
 pub use error::{Error, Result};
-pub use mpsc_sink::{MpscSink, MpscSinkBuilder, MpscSinkConfig, NullSink, OtelSink};
-pub use schema::{SCHEMA_DDL, ensure_schema};
+pub use mpsc_sink::{MpscSink, MpscSinkConfig, NullSink, OtelSink};
+pub use schema::ensure_schema;
 pub use store::LineageStore;
-pub use writer::{LineageWriter, WriterHandle, WriterStats, spawn_writer};
+pub use writer::{WriterHandle, WriterStats, spawn_writer};

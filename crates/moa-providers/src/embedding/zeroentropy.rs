@@ -73,11 +73,6 @@ impl ZeroEntropyEmbedding {
         self
     }
 
-    pub fn with_max_concurrent_requests(mut self, max_in_flight: usize) -> Self {
-        self.limiter = ConcurrencyLimiter::new(max_in_flight);
-        self
-    }
-
     /// Overrides the fixed output dimensionality expected from ZeroEntropy.
     pub fn with_dimensions(mut self, dimensions: usize) -> Result<Self> {
         if !ZEROENTROPY_SUPPORTED_DIMENSIONS.contains(&dimensions) {

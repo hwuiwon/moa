@@ -55,11 +55,9 @@ impl AuditSink {
     }
 }
 
-/// Emits the alertable audit-drop counter alongside the in-process atomic.
-///
-/// The `DROPPED` atomic still backs the synchronous [`dropped_audit_count`]
-/// accessor; this counter makes the same loss visible to metrics/alerting,
-/// labeled by the reason the event was dropped.
+/// Emits the alertable audit-drop counter, labeled by the reason the event was
+/// dropped. The `DROPPED` atomic still backs the process-lifetime totals folded
+/// into the drop-warning logs.
 fn record_dropped_metric(reason: &'static str, count: u64) {
     metrics::counter!("moa_ocsf_audit_events_dropped_total", "reason" => reason).increment(count);
 }
@@ -69,12 +67,6 @@ fn record_dropped_metric(reason: &'static str, count: u64) {
 /// A non-zero value means the audit trail is incomplete because the queue was
 /// saturated or a batch write failed.
 static DROPPED: AtomicU64 = AtomicU64::new(0);
-
-/// Number of audit events dropped since process start (queue-full + write failures).
-#[must_use]
-pub fn dropped_audit_count() -> u64 {
-    DROPPED.load(Ordering::Relaxed)
-}
 
 /// Initialize the background audit writer against `pool`.
 ///

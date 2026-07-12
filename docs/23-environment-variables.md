@@ -241,7 +241,6 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | Variable | Config path | Default | Description |
 |---|---|---|---|
 | `MOA_ORCHESTRATOR_ENDPOINT` | `orchestrator.endpoint` | http://localhost:10010 | Restate ingress URL fronting the `moa-orchestrator` deployment |
-| `MOA_ORCHESTRATOR_HEALTH_URL` | `orchestrator.health_url` | _none_ | Direct health URL for the orchestrator process |
 | `MOA_RESTATE_ADMIN_URL` | `orchestrator.restate_admin_url` | http://localhost:10011 | Restate admin API base URL used for deployment registration and probes |
 | `MOA_RESTATE_INGRESS_URL` | `orchestrator.restate_ingress_url` | http://localhost:10010 | Restate ingress URL used by hosted runtime clients and tests |
 | `MOA_RESTATE_LLM_GATEWAY_URL` | `orchestrator.llm_gateway_url` | _none_ | Optional LLM gateway URL for direct service calls |

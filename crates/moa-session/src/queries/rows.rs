@@ -347,8 +347,6 @@ pub(crate) fn task_strategy_success_rate_from_row(row: &PgRow) -> Result<TaskStr
         uses: row.col::<i64>("uses")? as u64,
         success_rate: row.col::<f64>("success_rate")?,
         avg_confidence: row.col::<f64>("avg_confidence")?,
-        avg_token_cost: row.col::<f64>("avg_token_cost")?,
-        avg_turn_count: row.col::<f64>("avg_turn_count")?,
         effect_score: row.col::<f64>("effect_score")?,
         unused_injections: row.col::<i64>("unused_injections")? as u64,
     })

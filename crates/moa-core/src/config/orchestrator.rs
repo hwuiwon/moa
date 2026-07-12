@@ -14,8 +14,6 @@ pub struct OrchestratorConfig {
     pub restate_admin_url: Option<String>,
     /// Optional LLM gateway URL for direct service calls.
     pub llm_gateway_url: Option<String>,
-    /// Direct health URL for the orchestrator process.
-    pub health_url: Option<String>,
 }
 
 impl Default for OrchestratorConfig {
@@ -25,7 +23,6 @@ impl Default for OrchestratorConfig {
             restate_ingress_url: Some("http://localhost:10010".to_string()),
             restate_admin_url: Some("http://localhost:10011".to_string()),
             llm_gateway_url: None,
-            health_url: None,
         }
     }
 }

@@ -73,8 +73,5 @@ impl WriterHandle {
     }
 }
 
-/// Spawned lineage writer marker.
-pub struct LineageWriter;
-
 #[cfg(test)]
 mod tests;

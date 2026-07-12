@@ -79,9 +79,6 @@ impl PostgresSessionStore {
 pub(super) fn event_hand_id(event: &Event) -> Option<String> {
     match event {
         Event::ToolCall { hand_id, .. } => hand_id.clone(),
-        Event::HandProvisioned { hand_id, .. }
-        | Event::HandDestroyed { hand_id, .. }
-        | Event::HandError { hand_id, .. } => Some(hand_id.clone()),
         _ => None,
     }
 }

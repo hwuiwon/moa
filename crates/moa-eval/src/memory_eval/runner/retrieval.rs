@@ -13,17 +13,12 @@ pub(super) async fn retrieve_probe(
     let ProbeRetrieveOptions {
         use_reranker,
         ranking_config,
+        window_policy,
         ranking_reference_time,
         deterministic_replay,
         graph_expansion_policy,
     } = options;
     let started = Instant::now();
-    // The lane's ranking config is the source of the request window policy;
-    // the retriever no longer imposes these knobs globally.
-    let window_policy = EvidenceWindowPolicy {
-        rerank_window: ranking_config.rerank_window,
-        abstain_below_window_evidence: ranking_config.abstain_below_window_evidence,
-    };
     let scope = MemoryScope::Contact {
         tenant_id: tenant_id_from_storage_partition_id(&probe.storage_partition_id),
         contact_id: contact_id_from_user_id(&probe.user_id),
@@ -137,6 +132,7 @@ pub(super) async fn retrieve_probe(
 pub(super) struct ProbeRetrieveOptions {
     pub(super) use_reranker: bool,
     pub(super) ranking_config: RankingConfig,
+    pub(super) window_policy: EvidenceWindowPolicy,
     pub(super) ranking_reference_time: Option<DateTime<Utc>>,
     pub(super) deterministic_replay: bool,
     pub(super) graph_expansion_policy: GraphExpansionEvalPolicy,

@@ -4,7 +4,6 @@ pub mod budgets;
 pub mod cache_metrics;
 pub mod memory_metrics;
 pub mod provider_recorded;
-pub mod rubric;
 pub mod score_card;
 pub mod scripted_user;
 pub mod transcript_runner;
@@ -18,7 +17,6 @@ pub use memory_metrics::{
     count_consolidation_outcomes, count_pages_written,
 };
 pub use provider_recorded::{RecordedProviderError, RecordedScriptedProvider};
-pub use rubric::{DeclaredSuccessWithoutEvidence, declared_success_without_evidence};
 pub use score_card::{
     CacheScores, ContextScores, CoordinationScores, CostScores, FunctionalScores, LatencyScores,
     MemoryScores, MetricRow, SafetyScores, ScoreCard, ToolScores,

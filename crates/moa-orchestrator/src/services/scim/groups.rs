@@ -129,6 +129,7 @@ pub async fn patch_group(
     Json(patch): Json<PatchOp>,
 ) -> Result<Json<ScimGroup>, ScimResponseError> {
     let identity = authenticate_scim(&state, &headers).await?;
+    patch.validate_schema()?;
     let mutation = interpret_group(&patch);
     if let Some(display_name) = mutation.display_name.as_deref() {
         validate_display_name(display_name)?;
