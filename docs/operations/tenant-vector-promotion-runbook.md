@@ -34,9 +34,12 @@ Required environment:
    at least `0.95` average top-K overlap.
 4. The tenant vector backend flips to `vector_backend='turbopuffer'` and
    `vector_backend_state='dual_read'`.
-5. During dual-read, the retriever queries both backends, records
-   `moa_vector_dualread_overlap`, returns Turbopuffer results, and falls back to
-   pgvector on Turbopuffer failure.
+5. During dual-read, the retriever queries both backends, returns Turbopuffer
+   results, and falls back to pgvector on Turbopuffer failure. Backend agreement
+   is gated before this step by the promotion sample in step 3 (≥ `0.95` average
+   top-K overlap); a Turbopuffer failure that triggers the pgvector fallback logs
+   a `Turbopuffer vector dual-read leg failed; using pgvector result` warning to
+   watch during the window.
 
 Every state flip increments the storage-local
 `storage_partition_state.changelog_version`, which invalidates retrieval caches tied to
